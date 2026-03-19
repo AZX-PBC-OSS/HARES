@@ -1,0 +1,19 @@
+[package]
+name = "hares-python"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "_hares"
+crate-type = ["cdylib"]
+
+[dependencies]
+hares-core = { workspace = true }
+hares-fleet = { workspace = true }
+hares-control = { workspace = true }
+hares-equipment = { workspace = true }
+hares-io = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module"] }
+numpy = { workspace = true }

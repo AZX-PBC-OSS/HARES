@@ -1,0 +1,1 @@
+//! Photovoltaic panel equipment model.

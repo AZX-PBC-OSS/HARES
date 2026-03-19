@@ -1,0 +1,1 @@
+//! Central air conditioner model.

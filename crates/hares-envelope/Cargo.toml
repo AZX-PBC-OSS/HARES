@@ -1,0 +1,12 @@
+[package]
+name = "hares-envelope"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hares-types = { workspace = true }
+hares-physics = { workspace = true }
+nalgebra = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,1 @@
+//! HPXML equipment specification parsing.

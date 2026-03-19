@@ -1,0 +1,19 @@
+[package]
+name = "hares-io"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hares-physics = { workspace = true }
+hares-envelope = { workspace = true }
+hares-control = { workspace = true }
+hares-equipment = { workspace = true }
+quick-xml = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

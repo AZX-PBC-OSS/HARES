@@ -1,0 +1,1 @@
+//! Gas water heater model.

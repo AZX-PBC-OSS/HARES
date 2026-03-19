@@ -1,0 +1,58 @@
+[workspace]
+members = [
+    "crates/hares-types",
+    "crates/hares-physics",
+    "crates/hares-envelope",
+    "crates/hares-control",
+    "crates/hares-equipment",
+    "crates/hares-io",
+    "crates/hares-core",
+    "crates/hares-fleet",
+    "crates/hares-python",
+]
+default-members = [
+    "crates/hares-types",
+    "crates/hares-physics",
+    "crates/hares-envelope",
+    "crates/hares-control",
+    "crates/hares-equipment",
+    "crates/hares-io",
+    "crates/hares-core",
+    "crates/hares-fleet",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.87"
+license = "BSD-3-Clause"
+repository = "https://github.com/NREL/HARES"
+
+[workspace.dependencies]
+# Internal crates
+hares-types = { path = "crates/hares-types" }
+hares-physics = { path = "crates/hares-physics" }
+hares-envelope = { path = "crates/hares-envelope" }
+hares-control = { path = "crates/hares-control" }
+hares-equipment = { path = "crates/hares-equipment" }
+hares-io = { path = "crates/hares-io" }
+hares-core = { path = "crates/hares-core" }
+hares-fleet = { path = "crates/hares-fleet" }
+
+# External dependencies
+nalgebra = "0.34"
+arrow = "58"
+parquet = "58"
+pyo3 = "0.28"
+uom = "0.38"
+rayon = "1.11"
+serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
+quick-xml = "0.39"
+rand = "0.10"
+rand_chacha = "0.10"
+tracing = "0.1"
+thiserror = "2"
+bitflags = "2"
+toml = "1"
+numpy = "0.28"

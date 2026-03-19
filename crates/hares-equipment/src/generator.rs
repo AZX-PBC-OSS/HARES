@@ -1,0 +1,1 @@
+//! Backup generator equipment model.

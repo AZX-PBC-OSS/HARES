@@ -1,0 +1,1 @@
+//! Stratified tank thermal model.

@@ -1,0 +1,1 @@
+//! Electric baseboard heater model.

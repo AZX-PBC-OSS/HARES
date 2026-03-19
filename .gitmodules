@@ -1,0 +1,4 @@
+[submodule "vendors/OCHRE"]
+	path = vendors/OCHRE
+	url = https://github.com/AZX-PBC-OSS/OCHRE.git
+	branch = perf/tier1-numba-optimizations
