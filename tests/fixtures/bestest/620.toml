@@ -1,0 +1,34 @@
+building_id = 620
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 172800
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 25.0
+
+[weather]
+outdoor_temp_c = 8.0
+dew_point_c = 4.0
+rel_humidity_pct = 55.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[output]
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0

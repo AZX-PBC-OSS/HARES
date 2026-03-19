@@ -1,0 +1,9 @@
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+time_res = 60
+output_verbosity = 3
+output_chunk_size = 1000
+master_seed = 0
+
+bldg_id = 1
