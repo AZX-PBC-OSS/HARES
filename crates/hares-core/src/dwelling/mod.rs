@@ -29,7 +29,7 @@ use hares_physics::constants::{
 };
 use hares_types::{
     ControlSignal, DomainSolver, DomainUpdate, EndUse, EnvironmentState, ExecutionStage, GridState,
-    HaresError, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, THERMAL, ZoneId,
+    HaresError, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, THERMAL, ThermalCategory, ZoneId,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -791,7 +791,7 @@ impl Dwelling {
         let latent_w = n_occupants * OCCUPANT_LATENT_GAIN_W;
 
         for thermal in &mut self.ports.thermal {
-            thermal.add(sensible_w, latent_w);
+            thermal.add(sensible_w, latent_w, ThermalCategory::InternalGain);
         }
     }
 
@@ -892,7 +892,7 @@ impl Dwelling {
             #[cfg(feature = "observe")]
             let pre_ports = pre_snapshot
                 .as_ref()
-                .map(|s| observer_capture::capture_ports(s));
+                .map(observer_capture::capture_ports);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
@@ -908,7 +908,7 @@ impl Dwelling {
                 nonthermal_obs.push(observer_capture::capture_single_equipment(
                     self.equipment[idx].as_ref(),
                     contribution,
-                    pre_ports.unwrap(),
+                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
                 ));
                 *snapshot = self.ports.clone();
             }
@@ -945,7 +945,7 @@ impl Dwelling {
             #[cfg(feature = "observe")]
             let pre_ports = pre_snapshot
                 .as_ref()
-                .map(|s| observer_capture::capture_ports(s));
+                .map(observer_capture::capture_ports);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
@@ -961,7 +961,7 @@ impl Dwelling {
                 thermal_obs.push(observer_capture::capture_single_equipment(
                     self.equipment[idx].as_ref(),
                     contribution,
-                    pre_ports.unwrap(),
+                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
                 ));
                 *snapshot = self.ports.clone();
             }

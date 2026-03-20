@@ -6,7 +6,7 @@
 
 use hares_types::{
     DomainId, FluidType, FuelType, LoopId, PortContribution, PortDeclaration, PortSlots,
-    ThermalAccumulator, ZoneId,
+    ThermalAccumulator, ThermalCategory, ZoneId,
 };
 
 fn approx_eq(left: f64, right: f64) {
@@ -38,6 +38,7 @@ fn thermal(zone: ZoneId, sensible_w: f64, latent_w: f64) -> PortContribution {
         zone,
         sensible_gain_w: sensible_w,
         latent_gain_w: latent_w,
+        category: ThermalCategory::InternalGain,
     }
 }
 
@@ -389,8 +390,8 @@ fn thermal_accumulator_new_starts_zeroed() {
 #[test]
 fn thermal_accumulator_add_is_additive() {
     let mut acc = ThermalAccumulator::new(ZoneId(1));
-    acc.add(100.0, 50.0);
-    acc.add(-30.0, 10.0);
+    acc.add(100.0, 50.0, ThermalCategory::InternalGain);
+    acc.add(-30.0, 10.0, ThermalCategory::InternalGain);
     approx_eq(acc.sensible_gain_w, 70.0);
     approx_eq(acc.latent_gain_w, 60.0);
 }
@@ -398,7 +399,7 @@ fn thermal_accumulator_add_is_additive() {
 #[test]
 fn thermal_accumulator_zero_resets() {
     let mut acc = ThermalAccumulator::new(ZoneId(1));
-    acc.add(500.0, 200.0);
+    acc.add(500.0, 200.0, ThermalCategory::HvacHeating);
     acc.zero();
     approx_eq(acc.sensible_gain_w, 0.0);
     approx_eq(acc.latent_gain_w, 0.0);

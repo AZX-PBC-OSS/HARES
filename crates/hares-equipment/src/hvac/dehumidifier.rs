@@ -7,7 +7,7 @@ use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -425,6 +425,7 @@ impl Equipment for Dehumidifier {
                 zone: self.zone_id,
                 sensible_gain_w: snapshot.sensible_gain_w,
                 latent_gain_w: -snapshot.latent_removal_w,
+                category: ThermalCategory::InternalGain,
             })?;
         }
 

@@ -23,7 +23,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -677,6 +677,7 @@ impl Equipment for Generator {
                     zone,
                     sensible_gain_w: zone_heat_w,
                     latent_gain_w: 0.0,
+                    category: ThermalCategory::InternalGain,
                 })?;
             }
         }

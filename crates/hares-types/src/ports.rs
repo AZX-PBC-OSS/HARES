@@ -9,6 +9,43 @@ use crate::{DomainId, FluidType, FuelType, HaresError, LoopId, ZoneId};
 
 pub const CUSTOM_PAYLOAD_LEN: usize = 16;
 
+/// Classification of a thermal contribution's physical origin.
+///
+/// Used to partition `ThermalAccumulator::sensible_by_category` without
+/// allocating. The ordinal of each variant must match its index in that array.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ThermalCategory {
+    /// Intentional zone heating (HVAC systems).
+    HvacHeating,
+    /// Intentional zone cooling (HVAC systems).
+    HvacCooling,
+    /// Waste heat from appliances, lighting, occupancy.
+    #[default]
+    InternalGain,
+    /// Equipment shell/jacket losses (water heaters, boilers).
+    JacketLoss,
+    /// Distribution system inefficiency (duct losses).
+    DuctLoss,
+}
+
+impl ThermalCategory {
+    /// Array index for per-category storage. Must be kept in sync with the
+    /// variant ordering and `THERMAL_CATEGORY_COUNT`.
+    #[inline]
+    pub fn index(self) -> usize {
+        match self {
+            ThermalCategory::HvacHeating => 0,
+            ThermalCategory::HvacCooling => 1,
+            ThermalCategory::InternalGain => 2,
+            ThermalCategory::JacketLoss => 3,
+            ThermalCategory::DuctLoss => 4,
+        }
+    }
+}
+
+/// Number of `ThermalCategory` variants — size of the per-category array.
+pub const THERMAL_CATEGORY_COUNT: usize = 5;
+
 /// Per-step equipment contribution into a typed simulation port.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PortContribution {
@@ -16,6 +53,7 @@ pub enum PortContribution {
         zone: ZoneId,
         sensible_gain_w: f64,
         latent_gain_w: f64,
+        category: ThermalCategory,
     },
     Electrical {
         active_power_kw: f64,
@@ -111,11 +149,17 @@ impl PortDeclaration {
 }
 
 /// Thermal contribution totals for one zone.
+///
+/// `sensible_gain_w` and `latent_gain_w` are the zone totals (sum across all
+/// categories). `sensible_by_category` holds per-category subtotals indexed by
+/// `ThermalCategory::index()` — use a fixed-size array to avoid HashMap
+/// allocation in the hot timestep loop.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThermalAccumulator {
     pub zone: ZoneId,
     pub sensible_gain_w: f64,
     pub latent_gain_w: f64,
+    pub sensible_by_category: [f64; THERMAL_CATEGORY_COUNT],
 }
 
 impl ThermalAccumulator {
@@ -124,17 +168,25 @@ impl ThermalAccumulator {
             zone,
             sensible_gain_w: 0.0,
             latent_gain_w: 0.0,
+            sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
         }
     }
 
-    pub fn add(&mut self, sensible_gain_w: f64, latent_gain_w: f64) {
+    pub fn add(&mut self, sensible_gain_w: f64, latent_gain_w: f64, category: ThermalCategory) {
         self.sensible_gain_w += sensible_gain_w;
         self.latent_gain_w += latent_gain_w;
+        self.sensible_by_category[category.index()] += sensible_gain_w;
     }
 
     pub fn zero(&mut self) {
         self.sensible_gain_w = 0.0;
         self.latent_gain_w = 0.0;
+        self.sensible_by_category = [0.0; THERMAL_CATEGORY_COUNT];
+    }
+
+    /// Sensible gain total for a specific category.
+    pub fn sensible_for_category(&self, cat: ThermalCategory) -> f64 {
+        self.sensible_by_category[cat.index()]
     }
 }
 
@@ -359,9 +411,10 @@ impl PortSlots {
                 zone,
                 sensible_gain_w,
                 latent_gain_w,
+                category,
             } => {
                 if let Some(total) = self.thermal.iter_mut().find(|entry| entry.zone == *zone) {
-                    total.add(*sensible_gain_w, *latent_gain_w);
+                    total.add(*sensible_gain_w, *latent_gain_w, *category);
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared thermal zone: {zone:?}"
@@ -443,6 +496,7 @@ mod tests {
                 zone,
                 sensible_gain_w: 100.0,
                 latent_gain_w: 20.0,
+                category: ThermalCategory::InternalGain,
             })
             .unwrap();
         slots
@@ -450,6 +504,7 @@ mod tests {
                 zone,
                 sensible_gain_w: -10.0,
                 latent_gain_w: 5.0,
+                category: ThermalCategory::InternalGain,
             })
             .unwrap();
         slots
@@ -457,6 +512,7 @@ mod tests {
                 zone,
                 sensible_gain_w: 25.5,
                 latent_gain_w: -2.5,
+                category: ThermalCategory::InternalGain,
             })
             .unwrap();
 
@@ -471,6 +527,7 @@ mod tests {
                 zone: ZoneId(1),
                 sensible_gain_w: 10.0,
                 latent_gain_w: 5.0,
+                sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
             }],
             electrical: ElectricalAccumulator {
                 reactive_power_kvar: 1.0,
@@ -621,6 +678,7 @@ mod tests {
             zone: ZoneId(99),
             sensible_gain_w: 50.0,
             latent_gain_w: 10.0,
+            category: ThermalCategory::InternalGain,
         });
         assert!(result.is_err());
     }
@@ -725,6 +783,7 @@ mod tests {
                 zone: ZoneId(1),
                 sensible_gain_w: 100.0,
                 latent_gain_w: 10.0,
+                category: ThermalCategory::HvacHeating,
             })
             .unwrap();
         approx_eq(slots.thermal[0].sensible_gain_w, 100.0);
@@ -746,6 +805,7 @@ mod tests {
             zone: ZoneId(99),
             sensible_gain_w: 50.0,
             latent_gain_w: 5.0,
+            category: ThermalCategory::InternalGain,
         });
         assert!(err.is_err());
     }

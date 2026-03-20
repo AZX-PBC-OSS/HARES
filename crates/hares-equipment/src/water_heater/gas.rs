@@ -7,7 +7,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ZoneId,
+    TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -497,6 +497,7 @@ impl Equipment for GasWH {
                     zone,
                     sensible_gain_w: skin_loss_to_zone_w,
                     latent_gain_w: 0.0,
+                    category: ThermalCategory::JacketLoss,
                 })?;
             }
         }

@@ -55,40 +55,39 @@ pub(crate) fn capture_single_equipment(
 
 /// Computes the per-equipment contribution by diffing port accumulators before and after a step.
 pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentContribution {
+    // Match by ZoneId rather than positional index for robustness.
     let thermal: Vec<(ZoneId, f64, f64)> = after
         .thermal
         .iter()
-        .zip(before.thermal.iter())
-        .map(|(a, b)| {
-            (
-                a.zone,
-                a.sensible_gain_w - b.sensible_gain_w,
-                a.latent_gain_w - b.latent_gain_w,
-            )
+        .filter_map(|a| {
+            let b = before.thermal.iter().find(|b| b.zone == a.zone)?;
+            let ds = a.sensible_gain_w - b.sensible_gain_w;
+            let dl = a.latent_gain_w - b.latent_gain_w;
+            (ds.abs() > f64::EPSILON || dl.abs() > f64::EPSILON).then_some((a.zone, ds, dl))
         })
-        .filter(|(_, s, l)| s.abs() > f64::EPSILON || l.abs() > f64::EPSILON)
         .collect();
 
-    let fuel_types = [
-        FuelType::Electric,
-        FuelType::Gas,
-        FuelType::Propane,
-        FuelType::Oil,
-    ];
+    let fuel_types = [FuelType::Gas, FuelType::Propane, FuelType::Oil];
     let fuel_consumption_w: Vec<(FuelType, f64)> = fuel_types
         .iter()
         .map(|&ft| (ft, after.fuel.get(ft) - before.fuel.get(ft)))
         .filter(|(_, v)| v.abs() > f64::EPSILON)
         .collect();
 
-    const MIN_FLOW_KG_S: f64 = 1e-9;
+    // Threshold raised to avoid catastrophic cancellation when back-calculating
+    // temperatures from the flow-weighted mean formula with large prior flows.
+    const MIN_DELTA_FLOW_KG_S: f64 = 1e-6;
+    // Match by (loop_id, fluid_type) rather than positional index.
     let fluid: Vec<FluidContributionCapture> = after
         .fluid
         .iter()
-        .zip(before.fluid.iter())
-        .filter_map(|(a, b)| {
+        .filter_map(|a| {
+            let b = before
+                .fluid
+                .iter()
+                .find(|b| b.loop_id == a.loop_id && b.fluid_type == a.fluid_type)?;
             let delta_flow = a.total_flow_kg_s - b.total_flow_kg_s;
-            if delta_flow.abs() <= MIN_FLOW_KG_S {
+            if delta_flow.abs() <= MIN_DELTA_FLOW_KG_S {
                 return None;
             }
             // Back-calculate this equipment's supply/return temps from flow-weighted means.
@@ -183,5 +182,189 @@ pub(crate) fn capture_zone_update(env: &EnvironmentState) -> ZoneUpdateCapture {
     ZoneUpdateCapture {
         zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
         zone_humidity_ratios: env.zones.iter().map(|z| (z.id, z.humidity_ratio)).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hares_types::{
+        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType, LoopId,
+        PortSlots, ThermalAccumulator, ZoneId,
+    };
+
+    fn approx_eq(left: f64, right: f64) {
+        assert!(
+            (left - right).abs() < 1e-9,
+            "left={left}, right={right}"
+        );
+    }
+
+    #[test]
+    fn diff_ports_thermal_contributions() {
+        let zone_a = ZoneId(1);
+        let zone_b = ZoneId(2);
+        let before = PortSlots {
+            thermal: vec![
+                ThermalAccumulator {
+                    zone: zone_a,
+                    sensible_gain_w: 100.0,
+                    latent_gain_w: 10.0,
+                    ..ThermalAccumulator::new(zone_a)
+                },
+                ThermalAccumulator {
+                    zone: zone_b,
+                    sensible_gain_w: 0.0,
+                    latent_gain_w: 0.0,
+                    ..ThermalAccumulator::new(zone_b)
+                },
+            ],
+            ..Default::default()
+        };
+        let after = PortSlots {
+            thermal: vec![
+                ThermalAccumulator {
+                    zone: zone_a,
+                    sensible_gain_w: 350.0,
+                    latent_gain_w: 10.0,
+                    ..ThermalAccumulator::new(zone_a)
+                },
+                ThermalAccumulator {
+                    zone: zone_b,
+                    sensible_gain_w: -50.0,
+                    latent_gain_w: 5.0,
+                    ..ThermalAccumulator::new(zone_b)
+                },
+            ],
+            ..Default::default()
+        };
+
+        let contrib = diff_ports(&before, &after);
+        // zone_a: +250 sensible, 0 latent (filtered)
+        // zone_b: -50 sensible, +5 latent
+        assert_eq!(contrib.thermal.len(), 2);
+        assert_eq!(contrib.thermal[0].0, zone_a);
+        approx_eq(contrib.thermal[0].1, 250.0);
+        assert_eq!(contrib.thermal[1].0, zone_b);
+        approx_eq(contrib.thermal[1].1, -50.0);
+        approx_eq(contrib.thermal[1].2, 5.0);
+    }
+
+    #[test]
+    fn diff_ports_zero_delta_thermal_filtered() {
+        let zone = ZoneId(1);
+        let slots = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone,
+                sensible_gain_w: 42.0,
+                latent_gain_w: 7.0,
+                ..ThermalAccumulator::new(zone)
+            }],
+            ..Default::default()
+        };
+        let contrib = diff_ports(&slots, &slots);
+        assert!(contrib.thermal.is_empty());
+    }
+
+    #[test]
+    fn diff_ports_electrical() {
+        let before = PortSlots {
+            electrical: ElectricalAccumulator {
+                load_power_kw: 1.0,
+                generation_power_kw: -2.0,
+                reactive_power_kvar: 0.5,
+            },
+            ..Default::default()
+        };
+        let after = PortSlots {
+            electrical: ElectricalAccumulator {
+                load_power_kw: 4.0,
+                generation_power_kw: -2.0,
+                reactive_power_kvar: 1.0,
+            },
+            ..Default::default()
+        };
+        let contrib = diff_ports(&before, &after);
+        approx_eq(contrib.electrical_load_kw, 3.0);
+        approx_eq(contrib.electrical_gen_kw, 0.0);
+        approx_eq(contrib.electrical_reactive_kvar, 0.5);
+    }
+
+    #[test]
+    fn diff_ports_fuel() {
+        let mut before_fuel = FuelAccumulator::default();
+        before_fuel.add(FuelType::Gas, 100.0).unwrap();
+        let mut after_fuel = FuelAccumulator::default();
+        after_fuel.add(FuelType::Gas, 350.0).unwrap();
+        after_fuel.add(FuelType::Propane, 50.0).unwrap();
+
+        let before = PortSlots {
+            fuel: before_fuel,
+            ..Default::default()
+        };
+        let after = PortSlots {
+            fuel: after_fuel,
+            ..Default::default()
+        };
+        let contrib = diff_ports(&before, &after);
+        assert_eq!(contrib.fuel_consumption_w.len(), 2);
+        let gas = contrib.fuel_consumption_w.iter().find(|(ft, _)| *ft == FuelType::Gas);
+        approx_eq(gas.unwrap().1, 250.0);
+        let propane = contrib.fuel_consumption_w.iter().find(|(ft, _)| *ft == FuelType::Propane);
+        approx_eq(propane.unwrap().1, 50.0);
+    }
+
+    #[test]
+    fn diff_ports_fluid_back_calculates_temps() {
+        let loop_id = LoopId(1);
+        let ft = FluidType::Water;
+        // Before: 1.0 kg/s at supply=40, return=30
+        let before = PortSlots {
+            fluid: vec![FluidAccumulator {
+                loop_id,
+                fluid_type: ft,
+                total_flow_kg_s: 1.0,
+                mean_supply_temp_c: 40.0,
+                mean_return_temp_c: 30.0,
+            }],
+            ..Default::default()
+        };
+        // After: 3.0 kg/s at supply=45, return=35
+        // Equipment added 2.0 kg/s. Its supply = (45*3 - 40*1)/2 = 47.5
+        // Its return = (35*3 - 30*1)/2 = 37.5
+        let after = PortSlots {
+            fluid: vec![FluidAccumulator {
+                loop_id,
+                fluid_type: ft,
+                total_flow_kg_s: 3.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 35.0,
+            }],
+            ..Default::default()
+        };
+
+        let contrib = diff_ports(&before, &after);
+        assert_eq!(contrib.fluid.len(), 1);
+        approx_eq(contrib.fluid[0].delta_flow_kg_s, 2.0);
+        approx_eq(contrib.fluid[0].supply_temp_c, 47.5);
+        approx_eq(contrib.fluid[0].return_temp_c, 37.5);
+    }
+
+    #[test]
+    fn diff_ports_fluid_tiny_delta_filtered() {
+        let loop_id = LoopId(1);
+        let ft = FluidType::Water;
+        let slots = PortSlots {
+            fluid: vec![FluidAccumulator {
+                loop_id,
+                fluid_type: ft,
+                total_flow_kg_s: 10.0,
+                mean_supply_temp_c: 50.0,
+                mean_return_temp_c: 40.0,
+            }],
+            ..Default::default()
+        };
+        let contrib = diff_ports(&slots, &slots);
+        assert!(contrib.fluid.is_empty());
     }
 }

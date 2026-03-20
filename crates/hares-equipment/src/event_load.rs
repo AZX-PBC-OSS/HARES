@@ -7,7 +7,7 @@ use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
-    Telemetry, TelemetryField, ZoneId,
+    Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -316,6 +316,7 @@ impl EventBasedLoad {
                 zone,
                 sensible_gain_w,
                 latent_gain_w,
+                category: ThermalCategory::InternalGain,
             })?;
         }
 
@@ -659,6 +660,7 @@ impl WetAppliance {
                 zone,
                 sensible_gain_w,
                 latent_gain_w,
+                category: ThermalCategory::InternalGain,
             })?;
         }
 

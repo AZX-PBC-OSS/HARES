@@ -8,7 +8,7 @@ use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -761,6 +761,7 @@ impl Equipment for HeatPumpWH {
                     zone,
                     sensible_gain_w, // full sensible gain (zone + wall) to preserve energy balance
                     latent_gain_w,
+                    category: ThermalCategory::JacketLoss,
                 })?;
             }
         }

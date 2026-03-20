@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -154,7 +154,7 @@ impl Equipment for ElectricFurnace {
 
         if gross_capacity_w > 0.0 {
             self.hvac
-                .write_zone_thermal_contributions(ports, gross_capacity_w, 0.0)?;
+                .write_zone_thermal_contributions(ports, gross_capacity_w, 0.0, ThermalCategory::HvacHeating)?;
         }
 
         if self.operating_mode == OperatingMode::Heating {
@@ -340,7 +340,7 @@ impl Equipment for GasFurnace {
 
         if gross_capacity_w > 0.0 {
             self.hvac
-                .write_zone_thermal_contributions(ports, gross_capacity_w, 0.0)?;
+                .write_zone_thermal_contributions(ports, gross_capacity_w, 0.0, ThermalCategory::HvacHeating)?;
         }
 
         if self.operating_mode == OperatingMode::Heating {

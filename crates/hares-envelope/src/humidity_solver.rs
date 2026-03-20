@@ -252,6 +252,7 @@ mod tests {
                 zone: ZoneId(1),
                 sensible_gain_w: 0.0,
                 latent_gain_w: 100.0,
+                ..ThermalAccumulator::new(ZoneId(1))
             }],
             ..Default::default()
         };
@@ -288,6 +289,7 @@ mod tests {
                 zone: ZoneId(1),
                 sensible_gain_w: 0.0,
                 latent_gain_w: 50.0,
+                ..ThermalAccumulator::new(ZoneId(1))
             }],
             ..Default::default()
         };
@@ -309,6 +311,7 @@ mod tests {
                 zone: ZoneId(1),
                 sensible_gain_w: 0.0,
                 latent_gain_w: 1.0e9,
+                ..ThermalAccumulator::new(ZoneId(1))
             }],
             ..Default::default()
         };
@@ -323,6 +326,7 @@ mod tests {
                 zone: ZoneId(1),
                 sensible_gain_w: 0.0,
                 latent_gain_w: -1.0e9,
+                ..ThermalAccumulator::new(ZoneId(1))
             }],
             ..Default::default()
         };
@@ -444,6 +448,7 @@ mod tests {
                 zone: ZoneId(1),
                 sensible_gain_w: 0.0,
                 latent_gain_w: 100.0,
+                ..ThermalAccumulator::new(ZoneId(1))
             }],
             ..Default::default()
         };
@@ -535,6 +540,7 @@ mod tests {
                 zone: ZoneId(1),
                 sensible_gain_w: 0.0,
                 latent_gain_w: 200.0,
+                ..ThermalAccumulator::new(ZoneId(1))
             }],
             ..Default::default()
         };

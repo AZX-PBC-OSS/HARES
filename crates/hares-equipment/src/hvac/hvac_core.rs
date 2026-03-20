@@ -5,7 +5,7 @@ use hares_physics::biquadratic::{BiquadraticCurve, quadratic};
 use hares_physics::constants::{CFM_PER_M3_S, CFM_TO_M3_S, W_PER_TON};
 use hares_types::{
     ControlSignal, EnvironmentState, PortContribution, PortSlots,
-    ScheduleSource, ZoneId,
+    ScheduleSource, ThermalCategory, ZoneId,
 };
 
 use crate::EquipmentConfig;
@@ -1189,6 +1189,7 @@ impl HvacEquipment {
         ports: &mut PortSlots,
         sensible_gain_w: f64,
         latent_gain_w: f64,
+        category: ThermalCategory,
     ) -> crate::Result<()> {
         let fractions: &[(ZoneId, f64)] = if self.zone_heat_fractions.is_empty() {
             &[(self.zone_id, 1.0)]
@@ -1203,6 +1204,7 @@ impl HvacEquipment {
                 zone: fractions[0].0,
                 sensible_gain_w: sensible_gain_w * f,
                 latent_gain_w: latent_gain_w * f,
+                category,
             });
         }
 
@@ -1213,6 +1215,7 @@ impl HvacEquipment {
                     zone,
                     sensible_gain_w: sensible_gain_w * fraction,
                     latent_gain_w: latent_gain_w * fraction,
+                    category,
                 })?;
             }
         }
@@ -1565,10 +1568,10 @@ mod tests {
         let hvac_b = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
 
         hvac_a
-            .write_zone_thermal_contributions(&mut ports, 1000.0, 0.0)
+            .write_zone_thermal_contributions(&mut ports, 1000.0, 0.0, ThermalCategory::HvacHeating)
             .expect("write a");
         hvac_b
-            .write_zone_thermal_contributions(&mut ports, 1500.0, 0.0)
+            .write_zone_thermal_contributions(&mut ports, 1500.0, 0.0, ThermalCategory::HvacHeating)
             .expect("write b");
 
         assert_eq!(ports.thermal[0].sensible_gain_w, 2500.0);
@@ -2331,7 +2334,7 @@ mod tests {
             ],
             ..PortSlots::default()
         };
-        hvac.write_zone_thermal_contributions(&mut ports, 10_000.0, 0.0)
+        hvac.write_zone_thermal_contributions(&mut ports, 10_000.0, 0.0, ThermalCategory::HvacHeating)
             .expect("write ok");
 
         assert!(
@@ -2357,7 +2360,7 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hvac.write_zone_thermal_contributions(&mut ports, 10_000.0, 0.0)
+        hvac.write_zone_thermal_contributions(&mut ports, 10_000.0, 0.0, ThermalCategory::HvacHeating)
             .expect("write ok");
 
         assert!(

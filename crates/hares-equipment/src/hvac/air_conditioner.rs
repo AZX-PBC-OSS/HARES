@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, ZoneId,
+    PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -597,6 +597,7 @@ impl CoolingCore {
                 ports,
                 -sensible_cooling_w,
                 -latent_cooling_w,
+                ThermalCategory::HvacCooling,
             )?;
 
             self.hvac.advance_speed_timer(dt.as_secs_f64());

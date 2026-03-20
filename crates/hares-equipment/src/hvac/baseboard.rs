@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -119,7 +119,7 @@ impl Equipment for ElectricBaseboard {
                 reactive_power_kvar: 0.0,
             })?;
             self.hvac
-                .write_zone_thermal_contributions(ports, thermal_output_w, 0.0)?;
+                .write_zone_thermal_contributions(ports, thermal_output_w, 0.0, ThermalCategory::HvacHeating)?;
             self.run_time_s += dt.as_secs_f64();
         }
 

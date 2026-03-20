@@ -13,7 +13,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -795,6 +795,7 @@ impl Equipment for Battery {
                     zone,
                     sensible_gain_w: ohmic_loss_w,
                     latent_gain_w: 0.0,
+                    category: ThermalCategory::InternalGain,
                 })?;
             }
         }

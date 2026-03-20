@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, ZoneId,
+    PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -576,7 +576,7 @@ impl HeatPumpHeaterCore {
 
         if step.thermal_output_w > 0.0 {
             self.hvac
-                .write_zone_thermal_contributions(ports, step.thermal_output_w, 0.0)?;
+                .write_zone_thermal_contributions(ports, step.thermal_output_w, 0.0, ThermalCategory::HvacHeating)?;
         }
         let scaled_electric_kw = step.electric_kw * self.hvac.space_fraction;
         if scaled_electric_kw > 0.0 {
@@ -1104,7 +1104,6 @@ mod tests {
         ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
-    use super::super::heater_config::parse_mshp_speed_map;
     use super::{ASHPHeater, MinisplitHeater};
     use crate::{Equipment, EquipmentConfig};
 

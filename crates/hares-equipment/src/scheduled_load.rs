@@ -10,7 +10,7 @@ use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ZoneId,
+    TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -431,6 +431,7 @@ impl Equipment for ScheduledLoad {
                     zone,
                     sensible_gain_w,
                     latent_gain_w,
+                    category: ThermalCategory::InternalGain,
                 })?;
             }
         }
