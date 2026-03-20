@@ -59,6 +59,12 @@ pub struct LayerInput {
     pub area_m2: f64,
 }
 
+impl LayerInput {
+    fn effective_area(&self, fallback: f64) -> f64 {
+        if self.area_m2 > 0.0 { self.area_m2 } else { fallback }
+    }
+}
+
 /// Where the exterior side of a boundary connects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExteriorTarget {
@@ -187,20 +193,18 @@ pub fn assemble_building_rc(
             .sum::<usize>();
     let est_edges = est_nodes + boundaries.len();
 
-    let mut capacitances: HashMap<NodeId, f64> = HashMap::with_capacity(est_nodes);
-    let mut resistances: HashMap<(NodeId, NodeId), f64> = HashMap::with_capacity(est_edges);
+    let mut initial_capacitances: HashMap<NodeId, f64> = HashMap::with_capacity(est_nodes);
 
     // Insert zone air nodes (IDs 1..=n_zones).
     for (zone_idx, cap) in zone_capacitances.iter().enumerate().take(n_zones) {
         let node = NodeId((zone_idx + 1) as u32);
-        capacitances.insert(node, cap.max(MIN_CAPACITANCE_J_K));
+        initial_capacitances.insert(node, cap.max(MIN_CAPACITANCE_J_K));
     }
 
+    let mut graph = RcGraphState::with_capacity(initial_capacitances, est_edges);
     let mut layer_info: HashMap<usize, SurfaceLayerInfo> = HashMap::new();
     let mut outdoor_connected = false;
     let mut ground_connected = false;
-    // Monotonically increasing counter for layer node IDs, starting above zone range.
-    let mut next_layer_id: u32 = LAYER_NODE_BASE;
 
     for (bd_idx, bd) in boundaries.iter().enumerate() {
         if bd.area_m2 <= 0.0 {
@@ -222,21 +226,18 @@ pub fn assemble_building_rc(
             ExteriorTarget::Zone(_) => {}
         }
 
+        let bp = BoundaryParams {
+            boundary_area: bd.area_m2,
+            interior_node,
+            exterior_node,
+            same_zone,
+            r_film_interior: bd.r_film_interior_m2_k_w,
+            r_film_exterior: bd.r_film_exterior_m2_k_w,
+        };
+
         // Precomputed RC path (OCHRE LUT) takes priority over raw material layers.
         if !bd.precomputed_rc.is_empty() {
-            let outer_node = build_precomputed_boundary(
-                &bd.precomputed_rc,
-                bd.area_m2,
-                interior_node,
-                exterior_node,
-                same_zone,
-                &mut next_layer_id,
-                &mut capacitances,
-                &mut resistances,
-                bd.r_film_interior_m2_k_w,
-                bd.r_film_exterior_m2_k_w,
-            );
-            if let Some(outer) = outer_node {
+            if let Some(outer) = graph.build_precomputed_boundary(&bd.precomputed_rc, &bp) {
                 layer_info.insert(
                     bd_idx,
                     SurfaceLayerInfo {
@@ -255,19 +256,7 @@ pub fn assemble_building_rc(
             .collect();
 
         if !valid_layers.is_empty() {
-            let outer_node = build_layered_boundary(
-                &valid_layers,
-                bd.area_m2,
-                interior_node,
-                exterior_node,
-                same_zone,
-                &mut next_layer_id,
-                &mut capacitances,
-                &mut resistances,
-                bd.r_film_interior_m2_k_w,
-                bd.r_film_exterior_m2_k_w,
-            );
-            if let Some(outer) = outer_node {
+            if let Some(outer) = graph.build_layered_boundary(&valid_layers, &bp) {
                 layer_info.insert(
                     bd_idx,
                     SurfaceLayerInfo {
@@ -277,22 +266,24 @@ pub fn assemble_building_rc(
                 );
             }
         } else if !same_zone {
-            // No valid material layers: single-resistance connection.
-            // Same-zone pure-resistance boundaries have no thermal mass — skip.
             let r_ohm = bd.fallback_r_m2_k_w.max(1e-6) / bd.area_m2;
-            add_resistance(&mut resistances, interior_node, exterior_node, r_ohm);
+            graph.add_resistance(interior_node, exterior_node, r_ohm);
         }
     }
 
     // Build set of connected nodes for O(1) membership checks.
-    let connected: HashSet<NodeId> = resistances.keys().flat_map(|&(a, b)| [a, b]).collect();
+    let connected: HashSet<NodeId> = graph
+        .resistances
+        .keys()
+        .flat_map(|&(a, b)| [a, b])
+        .collect();
 
     // Ensure every zone air node participates in at least one resistance.
     for zone_idx in 0..n_zones {
         let zone_node = NodeId((zone_idx + 1) as u32);
         if !connected.contains(&zone_node) {
             let fallback_r = DEFAULT_R_M2_K_W * 100.0;
-            add_resistance(&mut resistances, zone_node, outdoor_node, fallback_r);
+            graph.add_resistance(zone_node, outdoor_node, fallback_r);
             outdoor_connected = true;
         }
     }
@@ -303,7 +294,7 @@ pub fn assemble_building_rc(
         for (i, &ua) in zone_uas.iter().enumerate() {
             let zone_node = NodeId((i + 1) as u32);
             let r = 1.0 / ua.max(1e-6);
-            add_resistance(&mut resistances, zone_node, outdoor_node, r);
+            graph.add_resistance(zone_node, outdoor_node, r);
         }
         outdoor_connected = true;
     }
@@ -317,6 +308,8 @@ pub fn assemble_building_rc(
         external_nodes.push(ground_node);
     }
     // OUTDOOR_NODE_ID < GROUND_NODE_ID, so already sorted.
+
+    let (capacitances, resistances) = graph.into_elements();
 
     let rc = RCNetwork::from_elements(capacitances, resistances, external_nodes)
         .map_err(|err| format!("RC network build failed: {err}"))?;
@@ -371,252 +364,244 @@ pub fn assemble_building_rc(
 
 // ── Private helpers ─────────────────────────────────────────────────────────
 
-/// Build RC nodes and resistances for a boundary with valid material layers.
-///
-/// When `same_zone` is true (adjacent/party wall), keep only the inner half
-/// of layers as a dead-end "fin" of thermal mass (matches OCHRE's halving).
-/// For odd layer counts, the middle layer is kept with halved capacitance.
-/// Returns `None` if no capacitor nodes remain.
-fn build_layered_boundary(
-    layers: &[&LayerInput],
-    boundary_area: f64,
-    interior_node: NodeId,
-    exterior_node: NodeId,
-    same_zone: bool,
-    next_layer_id: &mut u32,
-    capacitances: &mut HashMap<NodeId, f64>,
-    resistances: &mut HashMap<(NodeId, NodeId), f64>,
-    r_film_interior: f64,
-    r_film_exterior: f64,
-) -> Option<NodeId> {
-    let mut effective_layers: Vec<&LayerInput> = layers.to_vec();
-    // Track whether the outermost retained layer needs halved capacitance (odd count).
-    let mut halve_last_cap = false;
-
-    // Same-zone: keep only the inner half of layers (matching OCHRE halving).
-    // Odd counts keep n/2+1 layers with the middle layer's capacitance halved.
-    if same_zone {
-        let n = effective_layers.len();
-        let even = n.is_multiple_of(2);
-        let keep = if even { n / 2 } else { n / 2 + 1 };
-        halve_last_cap = !even;
-        effective_layers.truncate(keep);
-        if effective_layers.is_empty() {
-            return None;
-        }
-    }
-
-    let n_layers = effective_layers.len();
-    let mut layer_nodes: Vec<NodeId> = Vec::with_capacity(n_layers);
-
-    for (i, layer) in effective_layers.iter().enumerate() {
-        let node = NodeId(*next_layer_id);
-        *next_layer_id += 1;
-        let layer_area = if layer.area_m2 > 0.0 {
-            layer.area_m2
-        } else {
-            boundary_area
-        };
-        let raw_cap =
-            layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m * layer_area;
-        let halved = if halve_last_cap && i == n_layers - 1 { raw_cap / 2.0 } else { raw_cap };
-        let cap = halved.max(MIN_CAPACITANCE_J_K);
-        capacitances.insert(node, cap);
-        layer_nodes.push(node);
-    }
-
-    // Interior zone → innermost layer.
-    let inner = effective_layers[0];
-    let inner_area = if inner.area_m2 > 0.0 {
-        inner.area_m2
-    } else {
-        boundary_area
-    };
-    let r_int = inner.thickness_m / (2.0 * inner.conductivity_w_m_k * inner_area)
-        + r_film_interior / inner_area;
-    add_resistance(resistances, interior_node, layer_nodes[0], r_int);
-
-    // Adjacent layer connections.
-    for i in 0..(n_layers - 1) {
-        let li = effective_layers[i];
-        let lj = effective_layers[i + 1];
-        let ai = if li.area_m2 > 0.0 {
-            li.area_m2
-        } else {
-            boundary_area
-        };
-        let aj = if lj.area_m2 > 0.0 {
-            lj.area_m2
-        } else {
-            boundary_area
-        };
-        let r = li.thickness_m / (2.0 * li.conductivity_w_m_k * ai)
-            + lj.thickness_m / (2.0 * lj.conductivity_w_m_k * aj);
-        add_resistance(resistances, layer_nodes[i], layer_nodes[i + 1], r);
-    }
-
-    // Outermost layer → exterior node (skip for same-zone dead-end fin).
-    if !same_zone {
-        let outer = effective_layers[n_layers - 1];
-        let outer_area = if outer.area_m2 > 0.0 {
-            outer.area_m2
-        } else {
-            boundary_area
-        };
-        let r_ext = outer.thickness_m / (2.0 * outer.conductivity_w_m_k * outer_area)
-            + r_film_exterior / outer_area;
-        add_resistance(resistances, layer_nodes[n_layers - 1], exterior_node, r_ext);
-    }
-
-    Some(layer_nodes[n_layers - 1])
+/// Mutable graph-building state shared across boundary construction calls.
+struct RcGraphState {
+    next_layer_id: u32,
+    capacitances: HashMap<NodeId, f64>,
+    resistances: HashMap<(NodeId, NodeId), f64>,
 }
 
-/// Build RC nodes from pre-computed OCHRE layer data.
-///
-/// Implements OCHRE's `create_rc_data` algorithm:
-/// 1. If same-zone boundary, cut in half
-/// 2. Split resistances: pad with 0 at start/end, average adjacent pairs
-/// 3. Remove zero-capacitance layers by merging R into next resistor
-/// 4. Scale to absolute values using boundary area
-/// 5. Add film resistances, create nodes, wire resistances
-///
-/// Returns the outermost layer NodeId, or None if no capacitor nodes remain.
-#[allow(clippy::too_many_arguments)]
-fn build_precomputed_boundary(
-    layers: &[PrecomputedRCLayer],
-    boundary_area: f64,
-    interior_node: NodeId,
-    exterior_node: NodeId,
-    same_zone: bool,
-    next_layer_id: &mut u32,
-    capacitances: &mut HashMap<NodeId, f64>,
-    resistances: &mut HashMap<(NodeId, NodeId), f64>,
-    r_film_interior: f64,
-    r_film_exterior: f64,
-) -> Option<NodeId> {
-    if layers.is_empty() {
-        return None;
-    }
-
-    let mut cap_list: Vec<f64> = layers.iter().map(|l| l.capacitance_kj_m2_k).collect();
-    let mut res_list: Vec<f64> = layers.iter().map(|l| l.resistance_m2_k_w).collect();
-    let mut nodes = cap_list.len();
-
-    // Step 1: same-zone boundaries — cut in half
-    if same_zone {
-        let new_nodes = nodes / 2;
-        if nodes.is_multiple_of(2) {
-            cap_list.truncate(new_nodes);
-            res_list.truncate(new_nodes);
-        } else {
-            cap_list[new_nodes] /= 2.0;
-            cap_list.truncate(new_nodes + 1);
-            res_list.truncate(new_nodes + 1);
+impl RcGraphState {
+    fn with_capacity(initial_capacitances: HashMap<NodeId, f64>, est_edges: usize) -> Self {
+        Self {
+            next_layer_id: LAYER_NODE_BASE,
+            capacitances: initial_capacitances,
+            resistances: HashMap::with_capacity(est_edges),
         }
-        nodes = cap_list.len();
     }
 
-    if nodes == 0 {
-        return None;
+    /// Add a resistance edge, combining in parallel if one already exists.
+    fn add_resistance(&mut self, a: NodeId, b: NodeId, r: f64) {
+        let r = r.max(1e-6);
+        let edge = if a <= b { (a, b) } else { (b, a) };
+        if let Some(existing) = self.resistances.get_mut(&edge) {
+            *existing = parallel_resistance(*existing, r);
+        } else {
+            self.resistances.insert(edge, r);
+        }
     }
 
-    // Step 2: split resistances — pad [0, r0, ..., rN, 0], average adjacent pairs → N+1 resistors
-    let mut padded = Vec::with_capacity(nodes + 2);
-    padded.push(0.0);
-    padded.extend_from_slice(&res_list);
-    padded.push(0.0);
-    res_list = (0..=nodes)
-        .map(|i| (padded[i] + padded[i + 1]) / 2.0)
-        .collect();
+    /// Allocate a new layer node with the given capacitance.
+    fn alloc_node(&mut self, capacitance: f64) -> NodeId {
+        let node = NodeId(self.next_layer_id);
+        self.next_layer_id += 1;
+        self.capacitances.insert(node, capacitance);
+        node
+    }
 
-    // Step 3: remove zero-capacitance nodes by merging R into next resistor
-    {
-        let mut i = 0;
-        while i < cap_list.len() {
-            if cap_list[i] == 0.0 {
-                cap_list.remove(i);
-                let r_to_move = res_list.remove(i);
-                if i < res_list.len() {
-                    res_list[i] += r_to_move;
-                }
-                nodes -= 1;
-            } else {
-                i += 1;
+    /// Consume the builder, returning capacitances and resistances.
+    fn into_elements(self) -> (HashMap<NodeId, f64>, HashMap<(NodeId, NodeId), f64>) {
+        (self.capacitances, self.resistances)
+    }
+
+    /// Build RC nodes and resistances for a boundary with valid material layers.
+    ///
+    /// When `same_zone` is true (adjacent/party wall), keep only the inner half
+    /// of layers as a dead-end "fin" of thermal mass (matches OCHRE's halving).
+    /// For odd layer counts, the middle layer is kept with halved capacitance.
+    /// Returns `None` if no capacitor nodes remain.
+    fn build_layered_boundary(
+        &mut self,
+        layers: &[&LayerInput],
+        params: &BoundaryParams,
+    ) -> Option<NodeId> {
+        let mut effective_layers: Vec<&LayerInput> = layers.to_vec();
+        let mut halve_last_cap = false;
+
+        if params.same_zone {
+            let n = effective_layers.len();
+            let even = n.is_multiple_of(2);
+            let keep = if even { n / 2 } else { n / 2 + 1 };
+            halve_last_cap = !even;
+            effective_layers.truncate(keep);
+            if effective_layers.is_empty() {
+                return None;
             }
         }
-    }
 
-    // Step 4: remove last resistor if same zones
-    if same_zone && !res_list.is_empty() {
-        res_list.pop();
-    }
+        let n_layers = effective_layers.len();
+        let mut layer_nodes: Vec<NodeId> = Vec::with_capacity(n_layers);
 
-    if nodes == 0 {
-        let total_r: f64 = res_list.iter().sum();
-        let r_abs = total_r.max(1e-6) / boundary_area;
-        add_resistance(resistances, interior_node, exterior_node, r_abs);
-        return None;
-    }
-
-    // Step 5: scale to absolute values
-    let cap_abs: Vec<f64> = cap_list
-        .iter()
-        .map(|c| (c * 1000.0 * boundary_area).max(MIN_CAPACITANCE_J_K))
-        .collect();
-    let mut res_abs: Vec<f64> = res_list
-        .iter()
-        .map(|r| (r / boundary_area).max(1e-6))
-        .collect();
-
-    // Step 6: add film resistances
-    if !res_abs.is_empty() {
-        res_abs[0] += r_film_interior / boundary_area;
-    }
-    if !same_zone && !res_abs.is_empty() {
-        let last = res_abs.len() - 1;
-        res_abs[last] += r_film_exterior / boundary_area;
-    }
-
-    // Step 7: create nodes and wire
-    let n_caps = cap_abs.len();
-    let mut layer_nodes: Vec<NodeId> = Vec::with_capacity(n_caps);
-    for cap in &cap_abs {
-        let node = NodeId(*next_layer_id);
-        *next_layer_id += 1;
-        capacitances.insert(node, *cap);
-        layer_nodes.push(node);
-    }
-
-    // Wire: interior_node --R[0]--> layer[0] --R[1]--> ... --R[n]--> exterior_node
-    if !res_abs.is_empty() {
-        add_resistance(resistances, interior_node, layer_nodes[0], res_abs[0]);
-    }
-    for i in 1..n_caps {
-        if i < res_abs.len() {
-            add_resistance(resistances, layer_nodes[i - 1], layer_nodes[i], res_abs[i]);
+        for (i, layer) in effective_layers.iter().enumerate() {
+            let layer_area = layer.effective_area(params.boundary_area);
+            let raw_cap =
+                layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m * layer_area;
+            let halved =
+                if halve_last_cap && i == n_layers - 1 { raw_cap / 2.0 } else { raw_cap };
+            let cap = halved.max(MIN_CAPACITANCE_J_K);
+            layer_nodes.push(self.alloc_node(cap));
         }
-    }
-    if !same_zone && res_abs.len() > n_caps {
-        add_resistance(
-            resistances,
-            layer_nodes[n_caps - 1],
-            exterior_node,
-            res_abs[n_caps],
-        );
+
+        // Interior zone → innermost layer.
+        let inner = effective_layers[0];
+        let inner_area = inner.effective_area(params.boundary_area);
+        let r_int = inner.thickness_m / (2.0 * inner.conductivity_w_m_k * inner_area)
+            + params.r_film_interior / inner_area;
+        self.add_resistance(params.interior_node, layer_nodes[0], r_int);
+
+        // Adjacent layer connections.
+        for i in 0..(n_layers - 1) {
+            let li = effective_layers[i];
+            let lj = effective_layers[i + 1];
+            let ai = li.effective_area(params.boundary_area);
+            let aj = lj.effective_area(params.boundary_area);
+            let r = li.thickness_m / (2.0 * li.conductivity_w_m_k * ai)
+                + lj.thickness_m / (2.0 * lj.conductivity_w_m_k * aj);
+            self.add_resistance(layer_nodes[i], layer_nodes[i + 1], r);
+        }
+
+        // Outermost layer → exterior node (skip for same-zone dead-end fin).
+        if !params.same_zone {
+            let outer = effective_layers[n_layers - 1];
+            let outer_area = outer.effective_area(params.boundary_area);
+            let r_ext = outer.thickness_m / (2.0 * outer.conductivity_w_m_k * outer_area)
+                + params.r_film_exterior / outer_area;
+            self.add_resistance(layer_nodes[n_layers - 1], params.exterior_node, r_ext);
+        }
+
+        Some(layer_nodes[n_layers - 1])
     }
 
-    Some(layer_nodes[n_caps - 1])
+    /// Build RC nodes from pre-computed OCHRE layer data.
+    ///
+    /// Implements OCHRE's `create_rc_data` algorithm:
+    /// 1. If same-zone boundary, cut in half
+    /// 2. Split resistances: pad with 0 at start/end, average adjacent pairs
+    /// 3. Remove zero-capacitance layers by merging R into next resistor
+    /// 4. Scale to absolute values using boundary area
+    /// 5. Add film resistances, create nodes, wire resistances
+    ///
+    /// Returns the outermost layer NodeId, or None if no capacitor nodes remain.
+    fn build_precomputed_boundary(
+        &mut self,
+        layers: &[PrecomputedRCLayer],
+        params: &BoundaryParams,
+    ) -> Option<NodeId> {
+        if layers.is_empty() {
+            return None;
+        }
+
+        let mut cap_list: Vec<f64> = layers.iter().map(|l| l.capacitance_kj_m2_k).collect();
+        let mut res_list: Vec<f64> = layers.iter().map(|l| l.resistance_m2_k_w).collect();
+        let mut nodes = cap_list.len();
+
+        // Step 1: same-zone boundaries — cut in half
+        if params.same_zone {
+            let new_nodes = nodes / 2;
+            if nodes.is_multiple_of(2) {
+                cap_list.truncate(new_nodes);
+                res_list.truncate(new_nodes);
+            } else {
+                cap_list[new_nodes] /= 2.0;
+                cap_list.truncate(new_nodes + 1);
+                res_list.truncate(new_nodes + 1);
+            }
+            nodes = cap_list.len();
+        }
+
+        if nodes == 0 {
+            return None;
+        }
+
+        // Step 2: split resistances — pad [0, r0, ..., rN, 0], average adjacent pairs → N+1 resistors
+        let mut padded = Vec::with_capacity(nodes + 2);
+        padded.push(0.0);
+        padded.extend_from_slice(&res_list);
+        padded.push(0.0);
+        res_list = (0..=nodes)
+            .map(|i| (padded[i] + padded[i + 1]) / 2.0)
+            .collect();
+
+        // Step 3: remove zero-capacitance nodes by merging R into next resistor
+        {
+            let mut i = 0;
+            while i < cap_list.len() {
+                if cap_list[i] == 0.0 {
+                    cap_list.remove(i);
+                    let r_to_move = res_list.remove(i);
+                    if i < res_list.len() {
+                        res_list[i] += r_to_move;
+                    }
+                    nodes -= 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        // Step 4: remove last resistor if same zones
+        if params.same_zone && !res_list.is_empty() {
+            res_list.pop();
+        }
+
+        if nodes == 0 {
+            let total_r: f64 = res_list.iter().sum();
+            let r_abs = total_r.max(1e-6) / params.boundary_area;
+            self.add_resistance(params.interior_node, params.exterior_node, r_abs);
+            return None;
+        }
+
+        // Step 5: scale to absolute values
+        let cap_abs: Vec<f64> = cap_list
+            .iter()
+            .map(|c| (c * 1000.0 * params.boundary_area).max(MIN_CAPACITANCE_J_K))
+            .collect();
+        let mut res_abs: Vec<f64> = res_list
+            .iter()
+            .map(|r| (r / params.boundary_area).max(1e-6))
+            .collect();
+
+        // Step 6: add film resistances
+        if !res_abs.is_empty() {
+            res_abs[0] += params.r_film_interior / params.boundary_area;
+        }
+        if !params.same_zone && !res_abs.is_empty() {
+            let last = res_abs.len() - 1;
+            res_abs[last] += params.r_film_exterior / params.boundary_area;
+        }
+
+        // Step 7: create nodes and wire
+        let n_caps = cap_abs.len();
+        let mut layer_nodes: Vec<NodeId> = Vec::with_capacity(n_caps);
+        for &cap in &cap_abs {
+            layer_nodes.push(self.alloc_node(cap));
+        }
+
+        // Wire: interior_node --R[0]--> layer[0] --R[1]--> ... --R[n]--> exterior_node
+        if !res_abs.is_empty() {
+            self.add_resistance(params.interior_node, layer_nodes[0], res_abs[0]);
+        }
+        for i in 1..n_caps {
+            if i < res_abs.len() {
+                self.add_resistance(layer_nodes[i - 1], layer_nodes[i], res_abs[i]);
+            }
+        }
+        if !params.same_zone && res_abs.len() > n_caps {
+            self.add_resistance(layer_nodes[n_caps - 1], params.exterior_node, res_abs[n_caps]);
+        }
+
+        Some(layer_nodes[n_caps - 1])
+    }
 }
 
-/// Add a resistance edge, combining in parallel if one already exists.
-fn add_resistance(resistances: &mut HashMap<(NodeId, NodeId), f64>, a: NodeId, b: NodeId, r: f64) {
-    let r = r.max(1e-6);
-    let edge = if a <= b { (a, b) } else { (b, a) };
-    if let Some(existing) = resistances.get_mut(&edge) {
-        *existing = parallel_resistance(*existing, r);
-    } else {
-        resistances.insert(edge, r);
-    }
+/// Immutable parameters for a single boundary build call.
+struct BoundaryParams {
+    boundary_area: f64,
+    interior_node: NodeId,
+    exterior_node: NodeId,
+    same_zone: bool,
+    r_film_interior: f64,
+    r_film_exterior: f64,
 }
 
 #[cfg(test)]
