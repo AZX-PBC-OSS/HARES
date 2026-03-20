@@ -75,6 +75,7 @@ fn empty_weather_ts() -> WeatherTimeSeries {
         horizontal_infrared_w_m2: vec![300.0],
         sky_temp_c: vec![5.0],
         ground_temp_c: vec![10.0],
+        liquid_precip_m: vec![0.0],
     }
 }
 

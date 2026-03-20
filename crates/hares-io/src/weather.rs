@@ -28,6 +28,7 @@ pub enum WeatherField {
     HorizontalInfrared,
     SkyTempC,
     GroundTempC,
+    LiquidPrecipM,
 }
 
 /// Error type for weather I/O and time-series operations.
@@ -64,6 +65,9 @@ pub struct WeatherTimeSeries {
     pub horizontal_infrared_w_m2: Vec<f64>,
     pub sky_temp_c: Vec<f64>,
     pub ground_temp_c: Vec<f64>,
+    /// Liquid precipitation depth per timestep [m].
+    /// Parsed from EPW field 33; zero when data is unavailable.
+    pub liquid_precip_m: Vec<f64>,
 }
 
 impl WeatherTimeSeries {
@@ -99,6 +103,7 @@ impl WeatherTimeSeries {
             WeatherField::HorizontalInfrared => self.horizontal_infrared_w_m2[timestep_index],
             WeatherField::SkyTempC => self.sky_temp_c[timestep_index],
             WeatherField::GroundTempC => self.ground_temp_c[timestep_index],
+            WeatherField::LiquidPrecipM => self.liquid_precip_m[timestep_index],
         }
     }
 
@@ -131,6 +136,7 @@ impl WeatherTimeSeries {
             horizontal_infrared_w_m2: replicate_zoh(&self.horizontal_infrared_w_m2, factor),
             sky_temp_c: replicate_zoh(&self.sky_temp_c, factor),
             ground_temp_c: replicate_zoh(&self.ground_temp_c, factor),
+            liquid_precip_m: replicate_zoh(&self.liquid_precip_m, factor),
         })
     }
 }
@@ -169,6 +175,7 @@ mod tests {
             horizontal_infrared_w_m2: vec![300.0, 310.0],
             sky_temp_c: vec![2.0, 3.0],
             ground_temp_c: vec![10.0, 10.1],
+            liquid_precip_m: vec![0.0, 0.0],
         }
     }
 

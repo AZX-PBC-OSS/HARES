@@ -19,7 +19,6 @@ use thiserror::Error;
 
 use crate::SimClock;
 
-const DEFAULT_INDOOR_TEMP_C: f64 = 20.0;
 const DEFAULT_ZONE_VOLUME_M3: f64 = 200.0;
 const DEFAULT_GRID_VOLTAGE_PU: f64 = 1.0;
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
@@ -107,7 +106,12 @@ impl EnvironmentManager {
             Hemisphere::Northern
         };
         let surfaces = build_surface_geometry(building);
-        let zones = initial_zones(building);
+        let initial_outdoor_temp_c = weather
+            .dry_bulb_c
+            .get(weather_start_offset)
+            .copied()
+            .unwrap_or(DEFAULT_SETPOINT_C);
+        let zones = initial_zones(building, initial_outdoor_temp_c);
 
         Ok(Self {
             weather,
@@ -176,8 +180,12 @@ impl EnvironmentManager {
     #[must_use]
     pub fn update(&mut self, clock: &SimClock, zone_states: &[ZoneState]) -> EnvironmentState {
         let step = usize::try_from(clock.current_step()).unwrap_or(usize::MAX);
-        let weather_idx =
-            (step + self.weather_start_offset).min(self.weather.len().saturating_sub(1));
+        let weather_len = self.weather.len();
+        let weather_idx = if weather_len == 0 {
+            0
+        } else {
+            (step + self.weather_start_offset) % weather_len
+        };
         let schedule_idx = if self.schedule.is_empty() {
             0
         } else {
@@ -269,6 +277,7 @@ impl EnvironmentManager {
                 dhi_w_m2: dhi,
                 solar_altitude_deg: pos.altitude_deg,
                 mains_temp_c,
+                rainfall_m: self.weather.get(WeatherField::LiquidPrecipM, weather_idx),
             },
             grid,
             custom_domains: vec![
@@ -485,6 +494,7 @@ mod tests {
             horizontal_infrared_w_m2: vec![300.0, 310.0],
             sky_temp_c: vec![5.0, 6.0],
             ground_temp_c: vec![8.0, 9.0],
+            liquid_precip_m: vec![0.0, 0.0],
         }
     }
 
@@ -858,6 +868,7 @@ mod tests {
         weather.horizontal_infrared_w_m2 = vec![300.0; 4];
         weather.sky_temp_c = vec![5.0; 4];
         weather.ground_temp_c = vec![8.0; 4];
+        weather.liquid_precip_m = vec![0.0; 4];
 
         // Simulation starts at hour 2 (row index 2, temp = 20°C)
         let start = Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap();
@@ -980,6 +991,7 @@ mod tests {
         weather.horizontal_infrared_w_m2 = vec![300.0; n];
         weather.sky_temp_c = vec![5.0; n];
         weather.ground_temp_c = vec![8.0; n];
+        weather.liquid_precip_m = vec![0.0; n];
 
         // Start Jan 1 00:00 → offset 0 → temp ≈ -20°C
         let jan_start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -1073,6 +1085,7 @@ mod tests {
         weather.horizontal_infrared_w_m2 = vec![300.0; n];
         weather.sky_temp_c = vec![5.0; n];
         weather.ground_temp_c = vec![8.0; n];
+        weather.liquid_precip_m = vec![0.0; n];
 
         let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let mut mgr = EnvironmentManager::new(
@@ -1127,6 +1140,7 @@ mod tests {
         weather.horizontal_infrared_w_m2 = vec![300.0; n];
         weather.sky_temp_c = vec![5.0; n];
         weather.ground_temp_c = vec![8.0; n];
+        weather.liquid_precip_m = vec![0.0; n];
 
         // Day 1 of year (Jan 1, winter).
         let winter_start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

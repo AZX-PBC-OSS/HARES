@@ -34,6 +34,7 @@ const IDX_DHI_W_M2: usize = 15;
 const IDX_WIND_DIR_DEG: usize = 20;
 const IDX_WIND_SPEED_M_S: usize = 21;
 const IDX_OPAQUE_SKY_COVER: usize = 23;
+const IDX_LIQUID_PRECIP_DEPTH_MM: usize = 33;
 
 /// One parsed EPW weather row.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +52,8 @@ pub struct EpwRecord {
     pub horizontal_infrared_w_m2: f64,
     pub sky_temp_c: f64,
     pub ground_temp_c: f64,
+    /// Liquid precipitation depth [m]. Zero when EPW field 33 is absent or invalid.
+    pub liquid_precip_m: f64,
 }
 
 /// Parse an EPW file into an hourly weather time series.
@@ -183,6 +186,15 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
 
         let sky_temp_c = compute_sky_temp_c(horizontal_infrared_w_m2, dry_bulb_c, dew_point_c);
 
+        let liquid_precip_m = if fields.len() > IDX_LIQUID_PRECIP_DEPTH_MM {
+            parse_f64(fields[IDX_LIQUID_PRECIP_DEPTH_MM], row, "liquid_precip_mm")
+                .unwrap_or(0.0)
+                .max(0.0)
+                / 1000.0
+        } else {
+            0.0
+        };
+
         records.push(EpwRecord {
             dry_bulb_c,
             dew_point_c,
@@ -197,6 +209,7 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
             horizontal_infrared_w_m2,
             sky_temp_c,
             ground_temp_c: DEFAULT_GROUND_TEMP_C,
+            liquid_precip_m,
         });
         record_datetimes.push((date, hour));
     }
@@ -576,6 +589,7 @@ fn records_to_series(meta: WeatherMeta, records: &[EpwRecord]) -> WeatherTimeSer
     let mut horizontal_infrared_w_m2 = Vec::with_capacity(len);
     let mut sky_temp_c = Vec::with_capacity(len);
     let mut ground_temp_c = Vec::with_capacity(len);
+    let mut liquid_precip_m = Vec::with_capacity(len);
 
     for record in records {
         dry_bulb_c.push(record.dry_bulb_c);
@@ -591,6 +605,7 @@ fn records_to_series(meta: WeatherMeta, records: &[EpwRecord]) -> WeatherTimeSer
         horizontal_infrared_w_m2.push(record.horizontal_infrared_w_m2);
         sky_temp_c.push(record.sky_temp_c);
         ground_temp_c.push(record.ground_temp_c);
+        liquid_precip_m.push(record.liquid_precip_m);
     }
 
     WeatherTimeSeries {
@@ -608,6 +623,7 @@ fn records_to_series(meta: WeatherMeta, records: &[EpwRecord]) -> WeatherTimeSer
         horizontal_infrared_w_m2,
         sky_temp_c,
         ground_temp_c,
+        liquid_precip_m,
     }
 }
 

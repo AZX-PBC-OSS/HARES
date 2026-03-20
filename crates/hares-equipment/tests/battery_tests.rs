@@ -42,6 +42,7 @@ fn base_env() -> EnvironmentState {
             dhi_w_m2: 0.0,
             solar_altitude_deg: 0.0,
             mains_temp_c: 15.0,
+            rainfall_m: 0.0,
         },
         grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
         custom_domains: vec![],

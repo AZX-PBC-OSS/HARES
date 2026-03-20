@@ -49,6 +49,7 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
             dhi_w_m2: 0.0,
             solar_altitude_deg: 0.0,
             mains_temp_c: 15.0,
+            rainfall_m: 0.0,
         },
         grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
         custom_domains: vec![],
@@ -115,7 +116,8 @@ fn standby_loss_over_24h() {
     wh.init(&cfg, &env).unwrap();
     let mut ports = PortSlots::from_declarations(wh.ports());
 
-    let initial_temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(51.7);
+    // Telemetry is populated after the first step, so use the known initial temp from config.
+    let initial_temp = 51.7_f64;
 
     // 24 hours = 1440 steps at 60 s each
     for _ in 0..1440 {
@@ -239,7 +241,8 @@ fn draw_cools_tank_toward_mains_temperature() {
     wh.init(&cfg, &env).unwrap();
     let mut ports = PortSlots::from_declarations(wh.ports());
 
-    let initial_temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(55.0);
+    // Telemetry is populated after the first step; use the known initial temp from config.
+    let initial_temp = 55.0_f64;
 
     // 10 minutes of draw
     for _ in 0..10 {

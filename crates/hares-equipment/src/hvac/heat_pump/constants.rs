@@ -13,7 +13,11 @@ pub const DEFROST_POWER_MULTIPLIER_NUMERATOR: f64 = 0.954;
 pub const DEFROST_Q_MULTIPLIER: f64 = 0.01;
 pub const DEFROST_REFERENCE_TEMP_C: f64 = 7.222;
 pub const DEFROST_CAPACITY_UNIT_FACTOR: f64 = 1.01667;
-pub const DEFROST_EIR_TEMP_MODIFIER_KW: f64 = 0.1528;
+/// Dimensionless defrost EIR modifier applied to (capacity_w / DEFROST_CAPACITY_UNIT_FACTOR).
+/// Sourced from EnergyPlus OnDemand defrost formula. Despite the legacy OCHRE comment
+/// "# in kW", dimensional analysis of OCHRE's update_eir (line 1172 of HVAC.py) confirms
+/// the result is in watts: `(eir * capacity_W * mult + power_defrost) / capacity_W`.
+pub const DEFROST_EIR_TEMP_MODIFIER: f64 = 0.1528;
 
 pub const DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR: f64 = 0.75;
 pub const DEFAULT_DEFROST_POWER_W: f64 = 0.0;

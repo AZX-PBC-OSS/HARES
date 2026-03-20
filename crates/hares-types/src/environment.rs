@@ -95,6 +95,11 @@ pub struct WeatherState {
     /// Defaults to 15.0 when environment data is unavailable.
     #[serde(default = "default_mains_temp_c")]
     pub mains_temp_c: f64,
+    /// Liquid precipitation depth for this timestep [m].
+    /// Parsed from EPW field 33 (Liquid Precipitation Depth).
+    /// Zero when data is unavailable.
+    #[serde(default)]
+    pub rainfall_m: f64,
 }
 
 fn default_mains_temp_c() -> f64 {
@@ -207,6 +212,7 @@ mod tests {
                 dhi_w_m2: 100.0,
                 solar_altitude_deg: 30.0,
                 mains_temp_c: 15.0,
+                rainfall_m: 0.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
