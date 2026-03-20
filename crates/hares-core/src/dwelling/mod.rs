@@ -323,10 +323,14 @@ impl Dwelling {
         weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
     ) -> Result<Self> {
+        let init_chrono = config
+            .initialization_duration
+            .map(|d| Duration::seconds(d.as_secs() as i64))
+            .unwrap_or(Duration::zero());
         let mut clock = SimClock::new(
             config.sim_config.start_time,
             config.sim_config.time_res,
-            config.sim_config.duration,
+            config.sim_config.duration + init_chrono,
         );
 
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
@@ -1031,29 +1035,6 @@ impl Dwelling {
                 .custom_domains
                 .retain(|u| u.domain_id != update.domain_id);
             self.latest_env.custom_domains.push(update);
-        }
-
-        // Split HVAC sensible from internal gains.
-        // Only zone-conditioning HVAC (HvacHeating/HvacCooling) is subtracted.
-        // Water heaters are Thermal stage but heat water, not the zone.
-        {
-            let hvac_sensible_w: f64 = self
-                .equipment
-                .iter()
-                .filter(|eq| matches!(
-                    eq.descriptor().end_use,
-                    EndUse::HvacHeating | EndUse::HvacCooling
-                ))
-                .map(|eq| {
-                    let t = eq.telemetry();
-                    // Heaters: thermal_output_w (positive = heating zone)
-                    // Coolers: sensible_cooling_w (positive magnitude, port gets negative)
-                    t.get("thermal_output_w").unwrap_or(0.0)
-                        - t.get("sensible_cooling_w").unwrap_or(0.0)
-                })
-                .sum();
-            let gains = self.thermal_solver.component_gains_mut();
-            gains.internal_gain_w = gains.port_sensible_w - hvac_sensible_w;
         }
 
         #[cfg(feature = "observe")]

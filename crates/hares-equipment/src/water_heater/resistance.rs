@@ -6,7 +6,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, ThermalCategory,
     TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
@@ -149,6 +149,7 @@ impl ResistanceWH {
             },
             ports: vec![
                 PortDeclaration::electrical(),
+                PortDeclaration::thermal(zone),
                 PortDeclaration::fluid(loop_id, FluidType::Water),
                 PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
             ],
@@ -331,7 +332,7 @@ impl Equipment for ResistanceWH {
 
         self.loop_id =
             loop_id_from_config(config, &["loop_id", "dhw_loop_id"]).unwrap_or(self.loop_id);
-        self.ports[1].loop_id = Some(self.loop_id);
+        self.ports[2].loop_id = Some(self.loop_id);
         self.mains_temp_c =
             first_f64(config, &["mains_temp_c", "inlet_temp_c"]).unwrap_or(self.mains_temp_c);
         self.draw_flow_rate_kg_s = resolve_draw_rate_kg_s(config);
@@ -472,6 +473,19 @@ impl Equipment for ResistanceWH {
             })?;
         }
 
+        // Jacket loss: tank skin heat flows into the conditioned zone.
+        let skin_loss_w = self.tank.skin_loss_w();
+        if let Some(zone) = self.descriptor.zone {
+            if skin_loss_w.abs() > f64::EPSILON {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone,
+                    sensible_gain_w: skin_loss_w,
+                    latent_gain_w: 0.0,
+                    category: ThermalCategory::JacketLoss,
+                })?;
+            }
+        }
+
         let avg_temp_c =
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3());
         self.telemetry.set("tank_avg_temp_c", avg_temp_c);
@@ -480,6 +494,7 @@ impl Equipment for ResistanceWH {
         self.telemetry.set("electric_power_w", electric_power_w);
         self.telemetry
             .set("draw_flow_rate_kg_s", total_draw_kg_s);
+        self.telemetry.set("skin_loss_w", skin_loss_w);
         self.telemetry.set(
             "operating_mode",
             if mode == OperatingMode::Heating {
@@ -654,12 +669,13 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(6);
+    let mut telemetry = Telemetry::with_capacity(7);
     telemetry.insert("tank_avg_temp_c", 0.0);
     telemetry.insert("upper_element_power_w", 0.0);
     telemetry.insert("lower_element_power_w", 0.0);
     telemetry.insert("electric_power_w", 0.0);
     telemetry.insert("draw_flow_rate_kg_s", 0.0);
+    telemetry.insert("skin_loss_w", 0.0);
     telemetry.insert("operating_mode", 0.0);
     telemetry
 }
@@ -690,6 +706,11 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: "draw_flow_rate_kg_s".to_string(),
             unit: "kg/s".to_string(),
             description: "Domestic hot water draw flow rate".to_string(),
+        },
+        TelemetryField {
+            name: "skin_loss_w".to_string(),
+            unit: "W".to_string(),
+            description: "Tank jacket (skin) heat loss to zone".to_string(),
         },
         TelemetryField {
             name: "operating_mode".to_string(),

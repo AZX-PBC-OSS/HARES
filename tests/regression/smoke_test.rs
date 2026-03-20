@@ -41,7 +41,7 @@ mod tests {
             },
             overrides: None,
             bldg_id: 1,
-            initialization_duration: None,
+            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
         }
     }
 

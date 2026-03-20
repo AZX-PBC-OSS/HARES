@@ -30,3 +30,22 @@ thiserror = { workspace = true }
 [dev-dependencies]
 parquet = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+criterion = { workspace = true }
+hares-fleet = { workspace = true }
+rayon = { workspace = true }
+
+[[bench]]
+name = "single_building"
+path = "../../benches/single_building.rs"
+harness = false
+
+[[bench]]
+name = "fleet"
+path = "../../benches/fleet.rs"
+harness = false
+
+[[bench]]
+name = "rl_step"
+path = "../../benches/rl_step.rs"
+harness = false
+

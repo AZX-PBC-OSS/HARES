@@ -83,6 +83,9 @@ pub struct StratifiedTank {
     element_nodes: [Option<usize>; 2],
     /// Per-node UA (W/K). Boundary nodes include end-cap contribution.
     ua_per_node: Vec<f64>,
+    /// Total skin (jacket) heat loss from the most recent conduction step [W].
+    /// Positive means heat flowing OUT of the tank (warming the ambient zone).
+    last_skin_loss_w: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +168,7 @@ impl StratifiedTank {
             node_height_m,
             element_nodes: config.element_nodes,
             ua_per_node,
+            last_skin_loss_w: 0.0,
         })
     }
 
@@ -190,6 +194,12 @@ impl StratifiedTank {
 
     pub fn ua_per_node(&self) -> &[f64] {
         &self.ua_per_node
+    }
+
+    /// Total skin (jacket) heat loss from the most recent conduction step [W].
+    /// Positive means heat flowing OUT of the tank into the ambient zone.
+    pub fn skin_loss_w(&self) -> f64 {
+        self.last_skin_loss_w
     }
 
     pub fn node_temps(&self) -> &[f64] {
@@ -460,6 +470,7 @@ impl StratifiedTank {
         let seconds = dt.as_secs_f64();
         validate_nonnegative("dt_seconds", seconds)?;
         if seconds == 0.0 {
+            self.last_skin_loss_w = 0.0;
             return Ok(());
         }
 
@@ -475,10 +486,13 @@ impl StratifiedTank {
             delta_energy_j[idx + 1] -= transfer_j;
         }
 
+        let mut total_skin_loss_w = 0.0_f64;
         for idx in 0..self.n_nodes() {
             let loss_w = self.ua_per_node[idx] * (old_temps_c[idx] - ambient_temp_c);
             delta_energy_j[idx] -= loss_w * seconds;
+            total_skin_loss_w += loss_w;
         }
+        self.last_skin_loss_w = total_skin_loss_w;
 
         for (idx, node_temp_c) in self.node_temps_c.iter_mut().enumerate() {
             let thermal_mass_j_per_k = WATER_DENSITY_KG_PER_M3

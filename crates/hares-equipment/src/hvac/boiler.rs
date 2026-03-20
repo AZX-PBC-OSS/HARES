@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FLUID, FluidDomainPayload, FluidType, FuelType, HaresError, LoopId,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
     TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
@@ -314,6 +314,7 @@ impl GasBoiler {
             ports: vec![
                 PortDeclaration::fuel(),
                 PortDeclaration::electrical(),
+                PortDeclaration::thermal(zone),
                 PortDeclaration::fluid(loop_id, FluidType::Water),
             ],
             telemetry: gas_boiler_default_telemetry(),
@@ -427,7 +428,7 @@ impl Equipment for GasBoiler {
             .unwrap_or(0.0);
 
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
-        self.ports[2].loop_id = Some(self.loop_id);
+        self.ports[3].loop_id = Some(self.loop_id);
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = gas_boiler_default_telemetry();
@@ -501,9 +502,23 @@ impl Equipment for GasBoiler {
             self.run_time_s += dt.as_secs_f64();
         }
 
+        // Jacket loss: inefficiency fraction warms the equipment room.
+        let jacket_loss_w = (fuel_input_w - thermal_output_w).max(0.0);
+        if let Some(zone) = self.descriptor.zone {
+            if jacket_loss_w > f64::EPSILON {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone,
+                    sensible_gain_w: jacket_loss_w,
+                    latent_gain_w: 0.0,
+                    category: ThermalCategory::JacketLoss,
+                })?;
+            }
+        }
+
         self.telemetry.set("electric_kw", electric_kw);
         self.telemetry.set("fuel_input_w", fuel_input_w);
         self.telemetry.set("thermal_output_w", thermal_output_w);
+        self.telemetry.set("jacket_loss_w", jacket_loss_w);
         self.telemetry.set("eir", eir);
         self.telemetry.set("supply_temp_c", supply_temp_c);
         self.telemetry.set("return_temp_c", return_temp_c);
@@ -600,10 +615,11 @@ fn electric_boiler_default_telemetry() -> Telemetry {
 }
 
 fn gas_boiler_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(7);
+    let mut telemetry = Telemetry::with_capacity(8);
     telemetry.insert("electric_kw", 0.0);
     telemetry.insert("fuel_input_w", 0.0);
     telemetry.insert("thermal_output_w", 0.0);
+    telemetry.insert("jacket_loss_w", 0.0);
     telemetry.insert("eir", 0.0);
     telemetry.insert("supply_temp_c", 0.0);
     telemetry.insert("return_temp_c", 0.0);
@@ -657,6 +673,11 @@ fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
             name: "thermal_output_w".to_string(),
             unit: "W".to_string(),
             description: "Thermal output transferred to hydronic loop".to_string(),
+        },
+        TelemetryField {
+            name: "jacket_loss_w".to_string(),
+            unit: "W".to_string(),
+            description: "Jacket heat loss to zone (fuel_input - thermal_output)".to_string(),
         },
         TelemetryField {
             name: "eir".to_string(),
@@ -738,7 +759,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use hares_types::{
         DomainUpdate, EnvironmentState, ExecutionStage, FLUID, FluidDomainPayload, FluidLoopState,
-        FluidType, GridState, LoopId, PortSlots, WeatherState, ZoneId, ZoneState,
+        FluidType, GridState, LoopId, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
     use super::{
@@ -813,6 +834,7 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             fluid: vec![hares_types::FluidAccumulator::new(
                 LoopId(1),
                 FluidType::Water,
@@ -874,6 +896,7 @@ mod tests {
         });
 
         let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             fluid: vec![hares_types::FluidAccumulator::new(
                 LoopId(1),
                 FluidType::Water,
@@ -952,6 +975,7 @@ mod tests {
         non_boiler.hvac.mode = super::ThermostatMode::Heating;
 
         let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             fluid: vec![hares_types::FluidAccumulator::new(
                 LoopId(1),
                 FluidType::Water,
@@ -991,6 +1015,7 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             fluid: vec![hares_types::FluidAccumulator::new(
                 LoopId(1),
                 FluidType::Water,
@@ -1036,6 +1061,7 @@ mod tests {
         eq.hvac.mode = super::ThermostatMode::Heating;
 
         let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             fluid: vec![hares_types::FluidAccumulator::new(
                 LoopId(1),
                 FluidType::Water,

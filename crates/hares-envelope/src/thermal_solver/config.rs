@@ -281,7 +281,18 @@ pub struct EnvelopeComponentGains {
     pub natural_ventilation_w: f64,
     /// Total sensible gains from all equipment ports (HVAC + appliances) [W].
     pub port_sensible_w: f64,
-    /// Non-HVAC internal gains only (appliances, lighting, occupancy) [W].
-    /// Set by the dwelling after subtracting known HVAC contributions.
+    /// HVAC heating contribution to the indoor zone [W].
+    pub hvac_heating_w: f64,
+    /// HVAC cooling contribution to the indoor zone [W].
+    pub hvac_cooling_w: f64,
+    /// Non-HVAC internal gains (appliances, lighting, occupancy, jacket losses) [W].
+    /// Equals `InternalGain + JacketLoss` category totals.
     pub internal_gain_w: f64,
+    /// Duct distribution losses to the indoor zone [W].
+    pub duct_loss_w: f64,
+    /// Per-zone infiltration sensible heat gains [W].
+    /// `infiltration_w` is the indoor-zone alias for backward compatibility.
+    pub infiltration_by_zone: Vec<(ZoneId, f64)>,
+    /// Per-zone interior LWR net heat gains [W].
+    pub interior_lwr_by_zone: Vec<(ZoneId, f64)>,
 }

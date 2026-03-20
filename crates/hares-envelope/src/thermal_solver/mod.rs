@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
 use hares_types::{
-    DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ZoneId,
+    DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ThermalCategory,
+    ZoneId,
 };
 use nalgebra::{DMatrix, DVector};
 
@@ -58,12 +59,6 @@ impl ThermalSolver {
     /// Per-component envelope gains from the most recent `resolve()` call.
     pub fn component_gains(&self) -> &EnvelopeComponentGains {
         &self.component_gains
-    }
-
-    /// Mutable access to component gains for the dwelling to finalize
-    /// (e.g., splitting HVAC from internal gains after equipment runs).
-    pub fn component_gains_mut(&mut self) -> &mut EnvelopeComponentGains {
-        &mut self.component_gains
     }
 
     pub fn model_dims(&self) -> (usize, usize, usize) {
@@ -255,6 +250,24 @@ impl ThermalSolver {
             .copied()
             .unwrap_or(0.0);
 
+        // Read per-category subtotals from the indoor zone thermal accumulator.
+        let indoor_acc = ports.thermal.iter().find(|t| t.zone == ZoneId(1));
+        let hvac_heating_w = indoor_acc
+            .map(|a| a.sensible_for_category(ThermalCategory::HvacHeating))
+            .unwrap_or(0.0);
+        let hvac_cooling_w = indoor_acc
+            .map(|a| a.sensible_for_category(ThermalCategory::HvacCooling))
+            .unwrap_or(0.0);
+        let internal_gain_cat_w = indoor_acc
+            .map(|a| a.sensible_for_category(ThermalCategory::InternalGain))
+            .unwrap_or(0.0);
+        let jacket_loss_w = indoor_acc
+            .map(|a| a.sensible_for_category(ThermalCategory::JacketLoss))
+            .unwrap_or(0.0);
+        let duct_loss_w = indoor_acc
+            .map(|a| a.sensible_for_category(ThermalCategory::DuctLoss))
+            .unwrap_or(0.0);
+
         self.component_gains = EnvelopeComponentGains {
             window_solar_w,
             opaque_solar_lwr_w,
@@ -263,7 +276,10 @@ impl ThermalSolver {
             ventilation_w: 0.0,
             natural_ventilation_w: 0.0,
             port_sensible_w: port_sensible_indoor_w,
-            internal_gain_w: 0.0, // set by dwelling after HVAC subtraction
+            hvac_heating_w,
+            hvac_cooling_w,
+            internal_gain_w: internal_gain_cat_w + jacket_loss_w,
+            duct_loss_w,
         };
 
         for &zone in ideal_hvac_zones {

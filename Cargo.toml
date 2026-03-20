@@ -58,3 +58,4 @@ bitflags = "2"
 toml = "1"
 numpy = "0.28"
 postcard = { version = "1", features = ["alloc"] }
+criterion = { version = "0.5", features = ["html_reports"] }

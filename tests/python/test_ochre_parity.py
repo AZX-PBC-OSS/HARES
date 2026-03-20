@@ -82,6 +82,7 @@ def _run_hares() -> dict[str, float]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        initialization_duration=24 * 3600,
     )
 
     # Step through and accumulate per-column power sums
@@ -118,6 +119,7 @@ def _run_hares_simulate() -> dict[str, float]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        initialization_duration=24 * 3600,
     )
     df = dwelling.simulate()
 
