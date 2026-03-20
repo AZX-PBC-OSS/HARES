@@ -25,3 +25,7 @@ arrow = { workspace = true }
 nalgebra = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+parquet = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

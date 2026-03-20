@@ -87,10 +87,11 @@ pub struct BoundaryInput {
     pub fallback_r_m2_k_w: f64,
 }
 
-/// Zone input: just the floor area for capacitance derivation.
+/// Zone input: floor area and volume for capacitance derivation.
 #[derive(Debug, Clone)]
 pub struct ZoneInput {
     pub floor_area_m2: Option<f64>,
+    pub volume_m3: Option<f64>,
 }
 
 // ── Output ──────────────────────────────────────────────────────────────────
@@ -122,6 +123,8 @@ pub struct BuildingRC {
     pub outdoor_col: Option<usize>,
     /// Number of external driving columns in B_ext.
     pub n_ext: usize,
+    /// NodeId → thermal capacitance [J/K] for all internal nodes.
+    pub node_capacitances: HashMap<NodeId, f64>,
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -132,8 +135,8 @@ pub fn derive_zone_capacitances(zones: &[ZoneInput]) -> Vec<f64> {
         .iter()
         .map(|z| {
             let volume = z
-                .floor_area_m2
-                .map(|a| a * DEFAULT_HEIGHT_M)
+                .volume_m3
+                .or_else(|| z.floor_area_m2.map(|a| a * DEFAULT_HEIGHT_M))
                 .unwrap_or(DEFAULT_VOLUME_M3);
             (AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * volume * INTERIOR_MASS_MULTIPLIER)
                 .max(MIN_CAPACITANCE_J_K)
@@ -344,6 +347,8 @@ pub fn assemble_building_rc(
 
     let n_ext = b_ext.ncols();
 
+    let node_capacitances = rc.capacitances.clone();
+
     Ok(BuildingRC {
         a_c,
         b_ext,
@@ -353,6 +358,7 @@ pub fn assemble_building_rc(
         layer_info,
         outdoor_col,
         n_ext,
+        node_capacitances,
     })
 }
 
@@ -621,6 +627,7 @@ mod tests {
     fn zone_capacitance_with_known_area() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         assert_eq!(caps.len(), 1);
@@ -632,9 +639,23 @@ mod tests {
     }
 
     #[test]
+    fn zone_capacitance_prefers_explicit_volume() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(300.0),
+        }];
+        let caps = derive_zone_capacitances(&zones);
+        // Should use 300 m³ (explicit), not 100 × 2.5 = 250 m³ (derived from area)
+        let expected =
+            AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 300.0 * INTERIOR_MASS_MULTIPLIER;
+        assert!((caps[0] - expected).abs() < 1e-6);
+    }
+
+    #[test]
     fn zone_capacitance_defaults_when_area_unknown() {
         let zones = vec![ZoneInput {
             floor_area_m2: None,
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         let expected =
@@ -647,6 +668,7 @@ mod tests {
         // Tiny area → capacitance should be clamped to MIN_CAPACITANCE_J_K.
         let zones = vec![ZoneInput {
             floor_area_m2: Some(1e-12),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         assert!((caps[0] - MIN_CAPACITANCE_J_K).abs() < 1e-6);
@@ -658,6 +680,7 @@ mod tests {
     fn single_zone_no_layers_produces_valid_network() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
@@ -677,6 +700,7 @@ mod tests {
     fn single_zone_with_layers_creates_layer_nodes() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         let layers = vec![
@@ -704,9 +728,11 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
+                volume_m3: None,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
+                volume_m3: None,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -727,6 +753,7 @@ mod tests {
     fn ground_only_has_no_outdoor_col() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Only a slab boundary connecting zone 0 to ground.
@@ -744,6 +771,7 @@ mod tests {
     fn self_loop_boundary_is_skipped() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Boundary where interior == exterior zone.
@@ -759,6 +787,7 @@ mod tests {
     fn many_boundaries_no_node_id_collision() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
 
@@ -789,9 +818,11 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
+                volume_m3: None,
             },
             ZoneInput {
                 floor_area_m2: Some(50.0),
+                volume_m3: None,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -811,6 +842,7 @@ mod tests {
     fn no_boundaries_triggers_ua_fallback() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         let rc = assemble_building_rc(&[], 1, &caps).unwrap();
@@ -826,9 +858,11 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
+                volume_m3: None,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
+                volume_m3: None,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -849,9 +883,11 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
+                volume_m3: None,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
+                volume_m3: None,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -872,6 +908,7 @@ mod tests {
     fn a_c_diagonal_is_negative() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 50.0)];
@@ -893,6 +930,7 @@ mod tests {
     fn zero_area_boundary_is_skipped() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         let boundaries = vec![make_boundary(0.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
@@ -924,6 +962,7 @@ mod tests {
     fn precomputed_single_layer_creates_one_node() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         let precomputed = vec![PrecomputedRCLayer {
@@ -953,6 +992,7 @@ mod tests {
     fn precomputed_multi_layer_creates_correct_node_count() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         let precomputed = vec![
@@ -987,6 +1027,7 @@ mod tests {
     fn precomputed_zero_capacitance_layer_is_pruned() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Middle layer has zero capacitance — should be merged out.
@@ -1021,6 +1062,7 @@ mod tests {
     fn precomputed_outdoor_boundary_keeps_all_layers() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         // 4 layers, outdoor exterior → not same-zone, all layers kept.
@@ -1059,9 +1101,11 @@ mod tests {
         let zones = vec![
             ZoneInput {
                 floor_area_m2: Some(100.0),
+                volume_m3: None,
             },
             ZoneInput {
                 floor_area_m2: Some(100.0),
+                volume_m3: None,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -1100,6 +1144,7 @@ mod tests {
     fn precomputed_all_zero_capacitance_falls_back_to_resistance() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         // All layers have zero capacitance → no layer nodes, just a single resistance.
@@ -1131,6 +1176,7 @@ mod tests {
     fn precomputed_takes_priority_over_material_layers() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
+            volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Boundary has both material layers AND precomputed — precomputed wins.

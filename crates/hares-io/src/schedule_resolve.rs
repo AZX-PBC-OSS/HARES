@@ -562,29 +562,33 @@ fn inject_power_schedule(
                 "power_schedule_kw_{}",
                 normalize_schedule_col_name(spec.name.as_str())
             ),
-            kw_series.clone(),
+            kw_series,
             ColumnAggregation::Mean,
         ) {
             inject_compact_column_power(spec, derived_col_idx);
         } else {
+            tracing::warn!(
+                equipment = %spec.name,
+                "failed to append derived kW column; falling back to constant 0.0 kW"
+            );
             inject_compact_constant_power(spec, 0.0);
         }
     } else if schedule_len > 0 {
-        // No CSV column — use default profile first, then HPXML profile.
-        if let Some(profile) = profiles.get(mapping.equipment_name) {
-            warn!(
-                "schedule_resolve: no CSV column '{}' for '{}'; using default profile",
-                col_name, mapping.equipment_name
-            );
-            let max_kw = determine_max_kw(spec, annual_mean_fraction(profile)).unwrap_or(0.0);
-            inject_compact_profile_power(spec, profile, max_kw);
-        } else if let Some(profile) = resolve_hpxml_profile(spec) {
+        // No CSV column — prefer building-specific HPXML profile, then generic defaults.
+        if let Some(profile) = resolve_hpxml_profile(spec) {
             warn!(
                 "schedule_resolve: no CSV column '{}' for '{}'; using HPXML profile fractions",
                 col_name, mapping.equipment_name
             );
             let max_kw = determine_max_kw(spec, annual_mean_fraction(&profile)).unwrap_or(0.0);
             inject_compact_profile_power(spec, &profile, max_kw);
+        } else if let Some(profile) = profiles.get(mapping.equipment_name) {
+            warn!(
+                "schedule_resolve: no CSV column '{}' for '{}'; using default profile",
+                col_name, mapping.equipment_name
+            );
+            let max_kw = determine_max_kw(spec, annual_mean_fraction(profile)).unwrap_or(0.0);
+            inject_compact_profile_power(spec, profile, max_kw);
         } else {
             let constant_kw = determine_constant_kw(spec).unwrap_or(0.0);
             warn!(

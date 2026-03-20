@@ -16,7 +16,10 @@ pub enum SpeedControlMode {
     /// Time-based two-speed alternating (OCHRE "Time2"): always runs at high speed
     /// when on. Equivalent to cycling high/low each on-event.
     TwoSpeedAlternating,
-    FourSpeed,
+    /// Multi-speed with continuous inter-speed interpolation (EnergyPlus VariableSpeed SpeedRatio model).
+    /// Capacity and EIR are linearly interpolated between the bracketing speed stages.
+    /// Cycling (PLR < 1) only occurs at the lowest speed when load is below stage-0 capacity.
+    MultiSpeedInterpolated,
     VariableSpeedIdeal,
 }
 
@@ -96,9 +99,14 @@ impl StartupConfig {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpeedSelection {
+    /// Lower bracket index (0-based). For inter-speed interpolation, capacity/EIR
+    /// are interpolated between `speed_index` and `speed_index + 1`.
     pub speed_index: usize,
+    /// Interpolation weight for the upper bracket stage `[0.0, 1.0]`.
+    /// 0.0 = fully at `speed_index`; 1.0 = fully at `speed_index + 1`.
+    pub speed_frac: f64,
+    /// Part-load ratio. Only < 1.0 when at the lowest speed and cycling.
     pub part_load_ratio: f64,
-    pub speed_fraction: f64,
 }
 
 #[cfg(test)]

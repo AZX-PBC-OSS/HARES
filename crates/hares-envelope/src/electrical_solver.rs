@@ -113,6 +113,8 @@ impl DomainSolver for ElectricalSolver {
         let p_gen = ports.electrical.generation_power_kw;
         // ZIP correction uses voltage_pu directly per spec (nominal_voltage_pu
         // defaults to 1.0; non-unity nominal documented as a v2 extension).
+        // ZIP correction uses voltage_pu directly per spec (nominal_voltage_pu
+        // defaults to 1.0; non-unity nominal documented as a v2 extension).
         let v = env.grid.voltage_pu / self.config.nominal_voltage_pu;
         let load_scale = self.config.zip.z * v * v + self.config.zip.i * v + self.config.zip.p;
 
@@ -154,12 +156,19 @@ mod tests {
             weather: WeatherState {
                 outdoor_temp_c: 10.0,
                 outdoor_humidity_ratio: 0.005,
+                outdoor_wet_bulb_c: 7.0,
+                outdoor_enthalpy_j_kg: 22_800.0,
                 wind_speed_m_s: 2.0,
                 wind_dir_deg: 0.0,
                 ground_temp_c: 12.0,
                 sky_temp_c: 8.0,
                 pressure_kpa: 101.325,
                 solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                mains_temp_c: 15.0,
             },
             grid: GridState {
                 voltage_pu: v,

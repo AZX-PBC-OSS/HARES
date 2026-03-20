@@ -399,8 +399,8 @@ fn initial_zones(building: &Building) -> Vec<ZoneState> {
         return vec![ZoneState {
             id: ZoneId(1),
             temperature_c: default_temp,
-            humidity_ratio: 0.0,
-            relative_humidity: 0.0,
+            humidity_ratio: 0.008,
+            relative_humidity: 0.45,
             wet_bulb_c: default_temp,
             volume_m3: DEFAULT_ZONE_VOLUME_M3,
         }];
@@ -410,13 +410,13 @@ fn initial_zones(building: &Building) -> Vec<ZoneState> {
         .zones
         .iter()
         .enumerate()
-        .map(|(idx, _)| ZoneState {
+        .map(|(idx, zone)| ZoneState {
             id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
             temperature_c: default_temp,
-            humidity_ratio: 0.0,
-            relative_humidity: 0.0,
+            humidity_ratio: 0.008,
+            relative_humidity: 0.45,
             wet_bulb_c: default_temp,
-            volume_m3: DEFAULT_ZONE_VOLUME_M3,
+            volume_m3: zone.volume_m3.unwrap_or(DEFAULT_ZONE_VOLUME_M3),
         })
         .collect()
 }
@@ -525,8 +525,12 @@ mod tests {
             zones: vec![Zone {
                 zone_type: ZoneType::Conditioned,
                 floor_area_m2: Some(100.0),
+                volume_m3: None,
                 attached_wall_ids: vec![],
                 duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
             }],
             boundaries: vec![
                 Boundary {
@@ -543,6 +547,8 @@ mod tests {
                     finish_type: None,
                     insulation_details: None,
                     has_radiant_barrier: false,
+                    solar_absorptance: None,
+                    emittance: None,
                 },
                 Boundary {
                     id: "north-wall".to_string(),
@@ -558,6 +564,8 @@ mod tests {
                     finish_type: None,
                     insulation_details: None,
                     has_radiant_barrier: false,
+                    solar_absorptance: None,
+                    emittance: None,
                 },
             ],
             windows: Vec::<Window>::new(),
@@ -572,6 +580,8 @@ mod tests {
             cooling_weekend_setpoints_c: None,
             battery_round_trip_efficiency: None,
             pv_tilt_deg: None,
+            conditioned_volume_m3: None,
+            ceiling_height_m: None,
             details_xml,
         }
     }
@@ -705,8 +715,8 @@ mod tests {
         let feedback = vec![ZoneState {
             id: ZoneId(1),
             temperature_c: 22.0,
-            humidity_ratio: 0.0,
-            relative_humidity: 0.0,
+            humidity_ratio: 0.008,
+            relative_humidity: 0.45,
             wet_bulb_c: 22.0,
             volume_m3: 200.0,
         }];

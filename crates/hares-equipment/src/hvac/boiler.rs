@@ -137,12 +137,14 @@ impl ElectricBoiler {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Fluid,
                     zone: None,
                     loop_id: Some(loop_id),
                     domain_id: None,
+                    fluid_type: Some(FluidType::Water),
                 },
             ],
             telemetry: electric_boiler_default_telemetry(),
@@ -212,8 +214,9 @@ impl Equipment for ElectricBoiler {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
+        let sf = self.hvac.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty;
-        let electric_kw = (thermal_output_w / self.efficiency) / 1_000.0;
+        let electric_kw = (thermal_output_w / self.efficiency) / 1_000.0 * sf;
 
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
@@ -326,18 +329,21 @@ impl GasBoiler {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Electrical,
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Fluid,
                     zone: None,
                     loop_id: Some(loop_id),
                     domain_id: None,
+                    fluid_type: Some(FluidType::Water),
                 },
             ],
             telemetry: gas_boiler_default_telemetry(),
@@ -487,7 +493,8 @@ impl Equipment for GasBoiler {
         } else {
             self.eir_max
         };
-        let fuel_input_w = thermal_output_w * eir;
+        let sf = self.hvac.space_fraction;
+        let fuel_input_w = thermal_output_w * eir * sf;
 
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * CP_LIQUID_WATER_J_KG_K)
@@ -496,7 +503,7 @@ impl Equipment for GasBoiler {
         };
 
         let electric_kw = if thermal_output_w > 0.0 {
-            self.pump_kw
+            self.pump_kw * sf
         } else {
             0.0
         };

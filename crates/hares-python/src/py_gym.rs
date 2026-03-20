@@ -82,7 +82,24 @@ fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Ve
         .map_err(|err| err.to_string())
 }
 
+/// Thin wrapper around a raw pointer to [`PyDwelling`] that is `Send + Sync`.
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// 1. The underlying `PyDwelling` outlives all uses of this wrapper (guaranteed
+///    by the `Py<PyDwelling>` handles kept alive in the calling scope).
+/// 2. All methods called through this pointer are internally synchronised
+///    (`step_core` and `observation` both lock `Mutex<Dwelling>`).
+struct SendDwellingPtr(*const PyDwelling);
+unsafe impl Send for SendDwellingPtr {}
+unsafe impl Sync for SendDwellingPtr {}
+
 /// Python-exposed batched step entrypoint.
+///
+/// Binds all dwelling handles while holding the GIL, extracts raw pointers,
+/// then releases the GIL so Rayon threads can step dwellings in true parallel.
+/// The GIL is only re-acquired afterwards for Python dict construction.
 #[pyfunction(name = "batch_step")]
 #[pyo3(signature = (dwellings, actions, observation_fields))]
 pub fn batch_step_py(
@@ -91,46 +108,59 @@ pub fn batch_step_py(
     actions: Vec<Vec<f64>>,
     observation_fields: Vec<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    let results = py.detach(|| {
-        dwellings
-            .par_iter()
-            .enumerate()
-            .map(|(idx, dwelling_obj)| {
-                Python::attach(|py| {
-                    let dwelling_ref = dwelling_obj.bind(py).borrow();
-                    let _ = actions.get(idx);
+    // Bind handles and extract raw pointers while we still hold the GIL.
+    // The Py<PyDwelling> vec keeps every object alive for the entire function.
+    let ptrs: Vec<SendDwellingPtr> = dwellings
+        .iter()
+        .map(|d| {
+            let bound = d.bind(py).borrow();
+            SendDwellingPtr(&*bound as *const PyDwelling)
+        })
+        .collect();
 
-                    let mut info = HashMap::new();
-                    match dwelling_ref.step_core() {
-                        Ok(step) => {
-                            let obs = observation_for_fields(&dwelling_ref, &observation_fields)
-                                .unwrap_or_else(|_| dwelling_ref.observation().unwrap_or_default());
-                            let reward = -step.net_electric_power_kw;
-                            info.insert(
-                                "net_electric_power_kw".to_string(),
-                                step.net_electric_power_kw,
-                            );
-                            StepResult {
-                                obs,
-                                reward,
-                                terminated: false,
-                                truncated: false,
-                                info,
-                            }
-                        }
-                        Err(_) => StepResult {
-                            obs: Vec::new(),
-                            reward: 0.0,
-                            terminated: true,
+    // Release GIL — Rayon threads run step_core()/observation() without
+    // touching Python. Both methods use only Mutex<Dwelling> internally.
+    let results: Vec<StepResult> = py.detach(|| {
+        ptrs.par_iter()
+            .enumerate()
+            .map(|(idx, SendDwellingPtr(ptr))| {
+                // SAFETY: the Py<PyDwelling> handles in `dwellings` keep the
+                // objects alive. step_core() and observation() are GIL-free
+                // (they only lock the internal Mutex<Dwelling>).
+                let dwelling = unsafe { &**ptr };
+                let _ = actions.get(idx);
+
+                let mut info = HashMap::new();
+                match dwelling.step_core() {
+                    Ok(step) => {
+                        let obs = observation_for_fields(dwelling, &observation_fields)
+                            .unwrap_or_else(|_| dwelling.observation().unwrap_or_default());
+                        let reward = -step.net_electric_power_kw;
+                        info.insert(
+                            "net_electric_power_kw".to_string(),
+                            step.net_electric_power_kw,
+                        );
+                        StepResult {
+                            obs,
+                            reward,
+                            terminated: false,
                             truncated: false,
                             info,
-                        },
+                        }
                     }
-                })
+                    Err(_) => StepResult {
+                        obs: Vec::new(),
+                        reward: 0.0,
+                        terminated: true,
+                        truncated: false,
+                        info,
+                    },
+                }
             })
-            .collect::<Vec<_>>()
+            .collect()
     });
 
+    // GIL re-acquired here — convert results to Python dicts.
     let mut out = Vec::with_capacity(results.len());
     for item in results {
         let d = PyDict::new(py);

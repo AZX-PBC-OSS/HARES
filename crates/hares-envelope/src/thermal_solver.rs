@@ -12,7 +12,7 @@ use hares_physics::solar::{GlazingCurve, window_iam};
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ZoneId,
 };
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
 
 use crate::longwave_radiation::{
@@ -57,8 +57,19 @@ impl Default for InfiltrationMethod {
 #[derive(Debug, Clone, Default)]
 pub struct VentilationConfig {
     pub zone_flow_m3_s: HashMap<ZoneId, f64>,
-    pub supply_temp_c: Option<f64>,
-    pub supply_humidity_ratio: Option<f64>,
+    /// Whether the ventilation system is balanced (ERV, HRV, or balanced fan).
+    /// Recovery efficiencies are only applied for balanced systems.
+    /// Unbalanced fans use quadrature combination with infiltration.
+    /// OCHRE Envelope.py:59-87 and hpxml.py:556.
+    pub balanced: bool,
+    /// Sensible heat recovery efficiency [0.0–1.0].
+    /// Reduces the sensible ventilation load for balanced systems.
+    /// Parsed from HPXML `SensibleRecoveryEfficiency`.
+    pub sensible_recovery_efficiency: f64,
+    /// Latent heat recovery efficiency [0.0–1.0].
+    /// Reduces the latent ventilation load for balanced systems.
+    /// Derived as `TotalRecoveryEfficiency - SensibleRecoveryEfficiency` (OCHRE hpxml.py:560).
+    pub latent_recovery_efficiency: f64,
 }
 
 /// Configuration for natural ventilation through operable windows.
@@ -112,6 +123,9 @@ impl NaturalVentilationConfig {
 /// Used by the thermal solver to apply angle-of-incidence (IAM) corrections to
 /// window solar gains, following the EnergyPlus angular transmittance model.
 /// Construct the matching [`GlazingCurve`] via [`GlazingCurve::from_u_shgc`].
+///
+/// Pre-computed `transmittance` and `radiation_frac` decompose SHGC into
+/// transmitted and absorbed fractions per EnergyPlus Steps 4–5.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowSolarProperties {
     /// Solar heat gain coefficient at normal incidence [dimensionless].
@@ -120,6 +134,13 @@ pub struct WindowSolarProperties {
     pub u_factor_w_m2_k: f64,
     /// Glazing area [m²].
     pub area_m2: f64,
+    /// Solar transmittance at normal incidence [dimensionless].
+    /// Fraction of incident solar that passes directly through the glass.
+    pub transmittance: f64,
+    /// Inward-flowing fraction of absorbed solar [dimensionless].
+    /// Fraction of glass-absorbed heat that reaches the interior zone;
+    /// `(1 - radiation_frac)` is lost to the exterior.
+    pub radiation_frac: f64,
 }
 
 /// One interior surface participating in intra-zone longwave radiation exchange.
@@ -139,6 +160,21 @@ pub struct InteriorSurfaceInfo {
     pub area_m2: f64,
     /// Longwave emissivity [-].
     pub emissivity: f64,
+    /// Fraction of the true surface temperature attributable to the RC node [-].
+    ///
+    /// Defined as `R_film / (R_film + R_material)` where `R_film` is the interior
+    /// convective film resistance and `R_material` is the resistance from the film
+    /// to the capacitor node.  The true interior surface temperature is then:
+    ///
+    ///   `T_surf = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
+    ///
+    /// A value of `1.0` means the node temperature *is* the surface temperature
+    /// (no film resistance, or film resistance already lumped into the node).
+    /// For lightweight boundaries with significant film resistance the correction
+    /// can be several degrees.
+    ///
+    /// Range: `[0, 1]`.  Default: `1.0`.
+    pub radiation_frac: f64,
 }
 
 /// Interior longwave radiation configuration for one zone.
@@ -157,8 +193,10 @@ pub struct InteriorLwrZoneConfig {
 /// Metadata for one exterior surface used to compute longwave radiation at runtime.
 ///
 /// The sky view factor is derived from `tilt_deg` on each call via [`sky_view_factor`];
-/// it is not cached here so that the struct remains `Copy` and free of init ordering.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// it is not cached here so that the struct remains free of init ordering.
+///
+/// `t_prev_c` is mutable persistent state updated each timestep, so `Copy` is not derived.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExteriorSurfaceInfo {
     /// Unique surface identifier matching [`SurfaceIrradiance::surface_id`] in weather data.
     pub surface_id: u32,
@@ -172,6 +210,26 @@ pub struct ExteriorSurfaceInfo {
     pub emissivity: f64,
     /// Surface tilt from horizontal [°]; 0° = horizontal roof, 90° = vertical wall.
     pub tilt_deg: f64,
+    /// Radiation fraction: `R_film / (R_film + R_outermost_half)` — dimensionless [0,1].
+    ///
+    /// Controls how much the true surface temperature deviates from the RC node
+    /// temperature. A value of 0.0 means use the node temperature directly (no
+    /// exterior film resistance in the conduction path).
+    pub rad_frac: f64,
+    /// Radiation resistance: `R_film / area_m2` — K/W.
+    ///
+    /// Converts net surface heat flux [W] to a temperature perturbation on the
+    /// exterior surface.
+    pub rad_res_k_w: f64,
+    /// Number of sub-iterations per timestep: `ceil(dt_s / 300.0).max(1)`.
+    pub n_iter: u32,
+    /// Previous-timestep converged exterior surface temperature [°C].
+    ///
+    /// Persistent state updated each timestep for heavy-ball damping.
+    pub t_prev_c: f64,
+    /// Solar absorptance [-] (0–1). Default 0.60 for opaque surfaces, 0.05 for
+    /// radiant barriers. Ref: OCHRE `Envelope.py:222`.
+    pub absorptance: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -189,10 +247,10 @@ pub struct ThermalSolverConfig {
     /// modifier) to beam radiation and a hemispherical average IAM to diffuse and
     /// reflected radiation before multiplying by SHGC and area.
     ///
-    /// Surfaces absent from this map are treated as opaque and receive raw POA
-    /// irradiance with no SHGC or IAM correction (backward-compatible behaviour).
+    /// Surfaces absent from this map are treated as opaque; opaque solar gain
+    /// is delivered via [`ExteriorSurfaceInfo::absorptance`] in `exterior_surfaces`.
     pub window_properties: HashMap<u32, WindowSolarProperties>,
-    /// Exterior surfaces for longwave radiation; empty = no LW correction (backward compatible).
+    /// Exterior surfaces for LWR and opaque solar gain.
     pub exterior_surfaces: Vec<ExteriorSurfaceInfo>,
     /// Per-zone interior surface configurations for intra-zone LW radiation.
     ///
@@ -203,7 +261,9 @@ pub struct ThermalSolverConfig {
     pub interior_lwr_zones: Vec<InteriorLwrZoneConfig>,
     pub ideal_setpoints_c: HashMap<ZoneId, f64>,
     pub ideal_hvac_zones: Vec<ZoneId>,
-    pub infiltration: InfiltrationMethod,
+    /// Per-zone infiltration methods. Zones not listed default to zero ACH.
+    /// Uses a `Vec` instead of `HashMap` for cache-friendly hot-loop iteration.
+    pub infiltration: Vec<(ZoneId, InfiltrationMethod)>,
     pub ventilation_flow_m3_s: f64,
     pub ventilation: VentilationConfig,
     /// Natural ventilation through operable windows. `None` disables the feature (default).
@@ -293,16 +353,29 @@ impl ThermalSolver {
     }
 
     /// Returns checkpointable thermal state vectors.
+    ///
+    /// Returns `(x, last_u, lwr_t_prev_c)` where `lwr_t_prev_c` contains the
+    /// per-exterior-surface converged surface temperatures for LWR continuity.
     #[must_use]
-    pub fn snapshot_state(&self) -> (Vec<f64>, Vec<f64>) {
+    pub fn snapshot_state(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         (
             self.x.iter().copied().collect(),
             self.last_u.iter().copied().collect(),
+            self.config
+                .exterior_surfaces
+                .iter()
+                .map(|s| s.t_prev_c)
+                .collect(),
         )
     }
 
     /// Restores thermal state vectors from checkpoint payloads.
-    pub fn restore_state(&mut self, x_state: &[f64], last_u_state: &[f64]) -> Result<()> {
+    pub fn restore_state(
+        &mut self,
+        x_state: &[f64],
+        last_u_state: &[f64],
+        lwr_t_prev_c: &[f64],
+    ) -> Result<()> {
         if x_state.len() != self.x.len() {
             return Err(ThermalSolverError::Initialization(format!(
                 "invalid x state length: got {}, expected {}",
@@ -323,6 +396,17 @@ impl ThermalSolver {
             self.last_u.fill(0.0);
         } else {
             self.last_u = DVector::from_column_slice(last_u_state);
+        }
+
+        if lwr_t_prev_c.len() != self.config.exterior_surfaces.len() {
+            return Err(ThermalSolverError::Initialization(format!(
+                "invalid lwr_t_prev_c length: got {}, expected {}",
+                lwr_t_prev_c.len(),
+                self.config.exterior_surfaces.len()
+            )));
+        }
+        for (info, &t) in self.config.exterior_surfaces.iter_mut().zip(lwr_t_prev_c) {
+            info.t_prev_c = t;
         }
         Ok(())
     }
@@ -374,10 +458,24 @@ impl ThermalSolver {
         }
 
         self.apply_outdoor_inputs(&mut u, env);
+        let u_after_outdoor = u.iter().sum::<f64>();
         self.apply_solar_inputs(&mut u, env);
-        self.apply_exterior_longwave_inputs(&mut u, env);
+        let u_after_window_solar = u.iter().sum::<f64>() - u_after_outdoor;
+        self.apply_exterior_solar_inputs(&mut u, env);
+        let u_after_opaque_solar = u.iter().sum::<f64>() - u_after_outdoor - u_after_window_solar;
+        self.apply_exterior_longwave_inputs_iterative(&mut u, env);
+        let u_after_lwr = u.iter().sum::<f64>() - u_after_outdoor - u_after_window_solar - u_after_opaque_solar;
         self.apply_interior_longwave_inputs(&mut u, env);
         self.apply_port_sensible_inputs(&mut u, ports);
+        let u_total = u.iter().sum::<f64>();
+
+        static SOLVER_STEP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ss = SOLVER_STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if ss < 5 || ss.is_multiple_of(10) {
+            eprintln!(
+                "[solver s={ss}] u_total={u_total:.0}W outdoor={u_after_outdoor:.0} win_solar={u_after_window_solar:.0} opaque_solar={u_after_opaque_solar:.0} lwr={u_after_lwr:.0}",
+            );
+        }
 
         // Swap out the latent buffer so we can call &self methods on the rest of the struct.
         let mut latent_by_zone = std::mem::take(&mut self.latent_buf);
@@ -455,42 +553,177 @@ impl ThermalSolver {
             }
 
             if let Some(win) = self.config.window_properties.get(&irr.surface_id) {
-                // Window surface: apply EnergyPlus IAM correction.
-                // Beam is reduced by the angle-dependent IAM; diffuse and reflected
-                // use the pre-integrated hemispherical IAM constant.
+                // Window: EnergyPlus IAM correction with decomposed solar gain.
                 let curve = GlazingCurve::from_u_shgc(win.u_factor_w_m2_k, win.shgc);
                 let iam_beam = window_iam(irr.angle_of_incidence_rad, curve);
                 let iam_diffuse = curve.diffuse_iam();
-                let transmitted_w = win.area_m2
-                    * win.shgc
-                    * (irr.direct_w_m2 * iam_beam
-                        + (irr.diffuse_w_m2 + irr.reflected_w_m2) * iam_diffuse);
-                u[idx] = transmitted_w;
-            } else {
-                // Opaque surface: raw POA irradiance, no SHGC or IAM.
-                u[idx] = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
+
+                // IAM-corrected plane-of-array irradiance [W/m²].
+                let poa_beam = irr.direct_w_m2 * iam_beam;
+                let poa_diffuse = (irr.diffuse_w_m2 + irr.reflected_w_m2) * iam_diffuse;
+                let poa_w_m2 = poa_beam + poa_diffuse;
+
+                // Transmitted solar: passes directly through glass to zone.
+                let transmitted_w = win.area_m2 * win.transmittance * poa_w_m2;
+
+                // Absorbed glass heat decomposition per ASHRAE Ch. 15:
+                //   SHGC = T_sol + A_sol × N_i
+                //   A_sol = (SHGC - T_sol) / N_i
+                // Zone receives the inward-flowing fraction of absorbed solar:
+                //   absorbed_zone = A_sol × N_i × POA × area = (SHGC - T_sol) × POA × area
+                // Exterior receives the rest: A_sol × (1 - N_i) — lost to outdoor convection.
+                let absorbed_inward = (win.shgc - win.transmittance).max(0.0);
+                let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
+
+                u[idx] += transmitted_w + absorbed_zone_w;
             }
+            // Opaque solar is handled by apply_exterior_solar_inputs via ExteriorSurfaceInfo.
         }
     }
 
-    fn apply_exterior_longwave_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
+    /// Delivers opaque solar gain to exterior surfaces via [`ExteriorSurfaceInfo`].
+    ///
+    /// `u[input_index] += (direct + diffuse + reflected) × absorptance × area_m2`
+    fn apply_exterior_solar_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
         for info in &self.config.exterior_surfaces {
+            if info.input_index >= u.len() {
+                continue;
+            }
+            // Surfaces with rad_frac > 0 get solar via the iterative LWR path
+            // which applies the combined (solar + LWR) × rad_frac correctly.
+            if info.rad_frac > 0.0 {
+                continue;
+            }
+            let Some(irr) = env
+                .weather
+                .solar_irradiance
+                .iter()
+                .find(|s| s.surface_id == info.surface_id)
+            else {
+                continue;
+            };
+            let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
+            u[info.input_index] += info.absorptance * info.area_m2 * poa_w_m2;
+        }
+    }
+
+    /// Iterative exterior longwave radiation solver.
+    ///
+    /// For each exterior surface, converges on the true exterior surface temperature
+    /// by coupling the RC node temperature with an iterative LWR balance, then
+    /// injects the fraction of the net flux that reaches the RC node.
+    ///
+    /// Matches OCHRE `_solve_exterior_radiation` with heavy-ball damping.
+    fn apply_exterior_longwave_inputs_iterative(
+        &mut self,
+        u: &mut DVector<f64>,
+        env: &EnvironmentState,
+    ) {
+        use crate::longwave_radiation::{CELSIUS_TO_KELVIN, STEFAN_BOLTZMANN};
+
+        let t_ext = env.weather.outdoor_temp_c;
+        let t_sky_raw = env.weather.sky_temp_c;
+        let t_gnd = env.weather.ground_temp_c;
+        let t_sky_valid = !t_sky_raw.is_nan();
+
+        for info in &mut self.config.exterior_surfaces {
             if info.input_index >= u.len() || info.state_index >= self.x.len() {
                 continue;
             }
-            let t_surface_c = self.x[info.state_index];
-            let surface = ExteriorSurface {
-                area_m2: info.area_m2,
-                emissivity: info.emissivity,
-                sky_view_factor: sky_view_factor(info.tilt_deg),
+
+            // For surfaces with no film resistance in the conduction path (rad_frac == 0),
+            // fall back to the simple (non-iterative) calculation.
+            if info.rad_frac <= 0.0 {
+                let t_node_c = self.x[info.state_index];
+                let surface = ExteriorSurface {
+                    area_m2: info.area_m2,
+                    emissivity: info.emissivity,
+                    sky_view_factor: sky_view_factor(info.tilt_deg),
+                };
+                let q_lw = exterior_longwave_w(
+                    &surface,
+                    t_sky_raw,
+                    t_gnd,
+                    t_node_c,
+                );
+                u[info.input_index] += q_lw;
+                continue;
+            }
+
+            let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
+            let svf = sky_view_factor(info.tilt_deg);
+            let t_node_c = self.x[info.state_index];
+
+            // Per-surface solar gain [W] for the iteration (no allocation).
+            // OCHRE _solve_exterior_radiation line 154 includes solar in T_surf.
+            let solar_w = env
+                .weather
+                .solar_irradiance
+                .iter()
+                .find(|s| s.surface_id == info.surface_id)
+                .map(|irr| {
+                    info.absorptance
+                        * info.area_m2
+                        * (irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2)
+                })
+                .unwrap_or(0.0);
+
+            // Incoming LWR (environment → surface), independent of surface temp.
+            let h_lwr_inj = if !t_sky_valid {
+                e_factor * (t_ext + CELSIUS_TO_KELVIN).powi(4)
+            } else {
+                let t_sky_k4 = (t_sky_raw + CELSIUS_TO_KELVIN).powi(4);
+                let t_gnd_k4 = (t_gnd + CELSIUS_TO_KELVIN).powi(4);
+                e_factor * ((1.0 - svf) * t_gnd_k4 + svf * t_sky_k4)
             };
-            let q_lw = exterior_longwave_w(
-                &surface,
-                env.weather.sky_temp_c,
-                env.weather.ground_temp_c,
-                t_surface_c,
-            );
-            u[info.input_index] += q_lw;
+
+            // Initial surface temperature estimate from linear interpolation.
+            let t_surf_init =
+                info.rad_frac * t_node_c + (1.0 - info.rad_frac) * t_ext;
+
+            // Iterative solve with heavy-ball damping (matches OCHRE).
+            let mut t_surf = info.t_prev_c;
+            let mut t_prev_iter = info.t_prev_c;
+
+            for _ in 0..info.n_iter {
+                let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
+                let t_new = t_surf_init + (solar_w + lwr) * info.rad_res_k_w;
+                // Clamp step to ±2 °C per sub-iteration for stability.
+                let t_new = t_new.clamp(t_surf - 2.0, t_surf + 2.0);
+                // Heavy-ball momentum: 0.5 relaxation + 0.1 momentum.
+                let t_next =
+                    t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_prev_iter);
+                t_prev_iter = t_surf;
+                t_surf = t_next;
+                if (t_surf - t_prev_iter).abs() < 0.01 {
+                    break;
+                }
+            }
+
+            // Persist converged surface temp for next timestep.
+            info.t_prev_c = t_surf;
+
+            // Compute final LWR at the converged surface temperature.
+            let q_lw = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
+
+            // Inject the fraction that conducts through the exterior film to the
+            // outer RC node.  rad_frac = R_film / (R_film + R_half_layer) is a
+            // voltage-divider: only this share of the surface flux reaches the
+            // nearest capacitive node; the remainder conducts outward to ambient
+            // (already modelled by the RC film resistance).
+            let injected = (solar_w + q_lw) * info.rad_frac;
+            u[info.input_index] += injected;
+
+            static LWR_DBG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let lwr_step = LWR_DBG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if lwr_step < 20 {
+                eprintln!(
+                    "[LWR sid={} tilt={:.0} area={:.1}m²] t_node={t_node_c:.1} t_surf={t_surf:.1} \
+                     solar={solar_w:.0}W q_lw={q_lw:.0}W injected={injected:.0}W \
+                     h_inj={h_lwr_inj:.0} e_fac={e_factor:.4} svf={svf:.2} input_col={}",
+                    info.surface_id, info.tilt_deg, info.area_m2, info.input_index,
+                );
+            }
         }
     }
 
@@ -533,11 +766,14 @@ impl ThermalSolver {
                 .surfaces
                 .iter()
                 .map(|s| {
-                    if s.state_index < self.x.len() {
+                    let t_node = if s.state_index < self.x.len() {
                         self.x[s.state_index]
                     } else {
                         t_zone_c
-                    }
+                    };
+                    // True interior surface temp per OCHRE: interpolate between
+                    // node temp and zone air temp using the radiation fraction.
+                    s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone_c
                 })
                 .collect();
 
@@ -604,7 +840,15 @@ fn apply_infiltration_and_ventilation(
     let rho = moist_air_density_kg_m3(p_pa, t_out, w_out);
 
     for zone in &env.zones {
-        let q_inf_m3_s = match config.infiltration {
+        // Look up per-zone infiltration; default to zero ACH if not configured.
+        let method = config
+            .infiltration
+            .iter()
+            .find(|(id, _)| *id == zone.id)
+            .map(|(_, m)| *m)
+            .unwrap_or_default();
+
+        let q_inf_m3_s = match method {
             InfiltrationMethod::AshraeWindStack {
                 c_s,
                 c_w,
@@ -632,64 +876,70 @@ fn apply_infiltration_and_ventilation(
             InfiltrationMethod::Ach { ach } => ach_infiltration(ach, zone.volume_m3),
         };
 
-        let m_dot_inf = rho * q_inf_m3_s;
-        let q_inf_sensible = m_dot_inf * CP_DRY_AIR_J_KG_K * (t_out - zone.temperature_c);
-        let q_inf_latent = m_dot_inf * H_FG_J_PER_KG * (w_out - zone.humidity_ratio);
+        // Natural ventilation flow (operable windows).
+        let q_nat_m3_s = config
+            .natural_ventilation
+            .as_ref()
+            .map(|nv| {
+                natural_ventilation_flow_m3_s(
+                    nv.open_area_m2,
+                    zone.temperature_c,
+                    t_out,
+                    nv.t_base_c,
+                    w_out,
+                    nv.max_outdoor_humidity_ratio,
+                    env.weather.wind_speed_m_s,
+                    nv.stack_coeff,
+                    nv.wind_coeff,
+                    zone.volume_m3,
+                )
+            })
+            .unwrap_or(0.0);
 
-        if let Some(&idx) = config.zone_sensible_input_indices.get(&zone.id)
-            && idx < u.len()
-        {
-            u[idx] += q_inf_sensible;
-        }
-        *latent_out.entry(zone.id).or_insert(0.0) += q_inf_latent;
-
-        let vent_flow = config
+        // Forced mechanical ventilation flow.
+        let forced_flow_m3_s = config
             .ventilation
             .zone_flow_m3_s
             .get(&zone.id)
             .copied()
             .unwrap_or(config.ventilation_flow_m3_s);
-        if vent_flow > 0.0 {
-            let t_supply = config.ventilation.supply_temp_c.unwrap_or(t_out);
-            let w_supply = config.ventilation.supply_humidity_ratio.unwrap_or(w_out);
-            let m_dot_vent = rho * vent_flow;
-            let q_vent_sensible = m_dot_vent * CP_DRY_AIR_J_KG_K * (t_supply - zone.temperature_c);
-            let q_vent_latent = m_dot_vent * H_FG_J_PER_KG * (w_supply - zone.humidity_ratio);
 
-            if let Some(&idx) = config.zone_sensible_input_indices.get(&zone.id)
-                && idx < u.len()
-            {
-                u[idx] += q_vent_sensible;
-            }
-            *latent_out.entry(zone.id).or_insert(0.0) += q_vent_latent;
+        // Combine infiltration + natural ventilation + forced ventilation.
+        // OCHRE Envelope.py:59-87:
+        //   total_nat_flow = infiltration + natural_ventilation
+        //   balanced:   sensible_flow = total_nat + forced * (1 - sens_recovery_eff)
+        //               latent_flow   = total_nat + forced * (1 - lat_recovery_eff)
+        //   unbalanced: flow = sqrt(total_nat² + forced²)  (quadrature combination)
+        let total_nat_flow = q_inf_m3_s + q_nat_m3_s;
+        let (sensible_flow_m3_s, latent_flow_m3_s) = if config.ventilation.balanced {
+            (
+                total_nat_flow
+                    + forced_flow_m3_s
+                        * (1.0 - config.ventilation.sensible_recovery_efficiency),
+                total_nat_flow
+                    + forced_flow_m3_s
+                        * (1.0 - config.ventilation.latent_recovery_efficiency),
+            )
+        } else {
+            let combined =
+                (total_nat_flow * total_nat_flow + forced_flow_m3_s * forced_flow_m3_s).sqrt();
+            (combined, combined)
+        };
+
+        // Combined flow drives sensible/latent loads against outdoor conditions.
+        // Recovery efficiency already accounts for HRV/ERV heat exchange by
+        // reducing the effective flow rate (OCHRE model).
+        let m_dot_sens = rho * sensible_flow_m3_s;
+        let m_dot_lat = rho * latent_flow_m3_s;
+        let q_sensible = m_dot_sens * CP_DRY_AIR_J_KG_K * (t_out - zone.temperature_c);
+        let q_latent = m_dot_lat * H_FG_J_PER_KG * (w_out - zone.humidity_ratio);
+
+        if let Some(&idx) = config.zone_sensible_input_indices.get(&zone.id)
+            && idx < u.len()
+        {
+            u[idx] += q_sensible;
         }
-
-        if let Some(nv) = &config.natural_ventilation {
-            let q_nat_m3_s = natural_ventilation_flow_m3_s(
-                nv.open_area_m2,
-                zone.temperature_c,
-                t_out,
-                nv.t_base_c,
-                w_out,
-                nv.max_outdoor_humidity_ratio,
-                env.weather.wind_speed_m_s,
-                nv.stack_coeff,
-                nv.wind_coeff,
-                zone.volume_m3,
-            );
-            if q_nat_m3_s > 0.0 {
-                let m_dot_nat = rho * q_nat_m3_s;
-                let q_nat_sensible = m_dot_nat * CP_DRY_AIR_J_KG_K * (t_out - zone.temperature_c);
-                let q_nat_latent = m_dot_nat * H_FG_J_PER_KG * (w_out - zone.humidity_ratio);
-
-                if let Some(&idx) = config.zone_sensible_input_indices.get(&zone.id)
-                    && idx < u.len()
-                {
-                    u[idx] += q_nat_sensible;
-                }
-                *latent_out.entry(zone.id).or_insert(0.0) += q_nat_latent;
-            }
-        }
+        *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
 }
 
@@ -730,31 +980,116 @@ fn solve_for_output_input(
     Ok((y_target - y_fixed) / effective_gain)
 }
 
+/// Solves for the true conditioned steady-state temperature profile.
+///
+/// Treats each conditioned zone as a fixed boundary condition (held at
+/// `indoor_temp_c`), then solves `(I - A_d_reduced) * x = B_d_reduced * u`
+/// for the remaining RC nodes. This yields the correct temperature gradient
+/// across walls/roofs — outer nodes near outdoor temp, inner nodes near
+/// indoor temp — avoiding the first-step discontinuity that occurs when all
+/// nodes start at indoor temp.
+///
+/// Falls back to uniform indoor-temp initialization if the reduced system
+/// is singular (e.g., a floating thermal node with no resistive path).
+///
+/// Ref: OCHRE `Envelope.py:1013–1033`.
 fn initialize_steady_state(
     model: &StateSpaceModel,
     config: &ThermalSolverConfig,
     env: &EnvironmentState,
     indoor_temp_c: f64,
 ) -> Result<DVector<f64>> {
-    let mut u = DVector::<f64>::zeros(model.b_d.ncols());
+    let n = model.a_d.nrows();
+    let m = model.b_d.ncols();
+
+    // Build u_initial: outdoor temps + indoor temps (no HVAC heat, no solar).
+    let mut u = DVector::<f64>::zeros(m);
     for &idx in &config.outdoor_temp_input_indices {
-        if idx < u.len() {
+        if idx < m {
             u[idx] = env.weather.outdoor_temp_c;
         }
     }
     for &idx in &config.indoor_temp_input_indices {
-        if idx < u.len() {
+        if idx < m {
             u[idx] = indoor_temp_c;
         }
     }
 
-    // Initialize all RC nodes to the indoor temperature. The physical
-    // assumption is that the building was conditioned before the simulation
-    // begins. The previous approach solved for unconditioned steady state
-    // (I - A_d)⁻¹ · B_d · u, which yielded outdoor temp when no HVAC input
-    // was included — causing a 38°C discontinuity on the first step.
-    let x = DVector::from_element(model.a_d.nrows(), indoor_temp_c);
-    Ok(x)
+    // Collect zone state indices to fix as boundary conditions.
+    // Sort descending so we can remove rows/cols without invalidating earlier indices.
+    let mut zone_fixes: Vec<(usize, f64)> = config
+        .zone_state_indices
+        .values()
+        .filter(|&&idx| idx < n)
+        .map(|&idx| (idx, indoor_temp_c))
+        .collect();
+    zone_fixes.sort_by(|a, b| b.0.cmp(&a.0));
+    zone_fixes.dedup_by_key(|f| f.0);
+
+    if zone_fixes.is_empty() {
+        // No zone states to fix — just solve the full system.
+        let eye = DMatrix::<f64>::identity(n, n);
+        let lhs = eye - &model.a_d;
+        let rhs = &model.b_d * &u;
+        return match lhs.try_inverse() {
+            Some(inv) => Ok(inv * rhs),
+            None => Ok(DVector::from_element(n, indoor_temp_c)),
+        };
+    }
+
+    // Partition the system: remove zone states from the state vector and
+    // move their coupling columns from A_d into B_d as fixed-value inputs.
+    //
+    // For each zone state j at temperature T_j:
+    //   Original: x[k+1] = A_d * x[k] + B_d * u[k]
+    //   Column j of A_d couples x_j into all other states.
+    //   Since x_j = T_j (fixed), move A_d[:,j] * T_j into the input side.
+    let mut a_reduced = model.a_d.clone();
+    let mut b_rhs = &model.b_d * &u; // RHS contribution from original inputs
+
+    // Add coupling from fixed zone states to RHS, then remove those rows/cols.
+    for &(j, t_fixed) in &zone_fixes {
+        // Accumulate the coupling: A_d[:,j] * t_fixed contributes to all states.
+        let col_j = a_reduced.column(j).into_owned();
+        b_rhs += &col_j * t_fixed;
+    }
+
+    // Remove rows and columns for fixed states (indices are sorted descending).
+    for &(j, _) in &zone_fixes {
+        a_reduced = a_reduced.remove_row(j).remove_column(j);
+        b_rhs = b_rhs.remove_row(j);
+    }
+
+    let n_reduced = a_reduced.nrows();
+    if n_reduced == 0 {
+        // All states are zone states — nothing to solve.
+        let mut x_full = DVector::zeros(0);
+        for &(j, t_fixed) in zone_fixes.iter().rev() {
+            x_full = x_full.insert_row(j, t_fixed);
+        }
+        return Ok(x_full);
+    }
+
+    let eye = DMatrix::<f64>::identity(n_reduced, n_reduced);
+    let lhs = eye - a_reduced;
+
+    // Use try_inverse instead of LU solve — nalgebra's LU can panic on
+    // certain matrix configurations in both debug and release builds.
+    let x_reduced = match lhs.try_inverse() {
+        Some(inv) => inv * b_rhs,
+        None => {
+            return Ok(DVector::from_element(n, indoor_temp_c));
+        }
+    };
+
+    // Re-insert zone temperatures at their fixed values.
+    // zone_fixes is sorted descending, so insert in ascending order.
+    let mut x_full = x_reduced;
+    for &(j, t_fixed) in zone_fixes.iter().rev() {
+        x_full = x_full.insert_row(j, t_fixed);
+    }
+
+    Ok(x_full)
 }
 
 #[cfg(test)]
@@ -764,15 +1099,17 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use hares_types::{
-        DomainSolver, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
+        DomainSolver, DomainUpdate, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
         ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
-    use nalgebra::DMatrix;
+    use nalgebra::{DMatrix, DVector};
 
     use crate::state_space::{OutputMapping, StateSpaceModel};
+    use crate::longwave_radiation::SOLAR_ABSORPTANCE_DEFAULT;
     use crate::thermal_solver::{
-        ExteriorSurfaceInfo, InfiltrationMethod, NaturalVentilationConfig, ThermalSolver,
-        ThermalSolverConfig, VentilationConfig, WindowSolarProperties,
+        ExteriorSurfaceInfo, InfiltrationMethod, InteriorSurfaceInfo,
+        NaturalVentilationConfig, ThermalSolver, ThermalSolverConfig, VentilationConfig,
+        WindowSolarProperties,
     };
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
@@ -841,11 +1178,12 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             window_properties: HashMap::new(),
+
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),
             ideal_hvac_zones: vec![],
-            infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+            infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
@@ -934,11 +1272,18 @@ mod tests {
         assert_eq!(update.domain_id, hares_types::THERMAL);
     }
 
+    /// Steady-state initialization solves the true conditioned equilibrium:
+    /// zone air stays at indoor_temp (fixed boundary), wall nodes sit at the
+    /// correct gradient between indoor and outdoor temperatures.
     #[test]
-    fn steady_state_initialization_sets_all_nodes_to_indoor_temp() {
-        let env = env_for_temp(20.0, 0.0);
+    fn steady_state_initialization_produces_temperature_gradient() {
+        let indoor = 20.0;
+        let outdoor = 0.0;
+        let env = env_for_temp(indoor, outdoor);
+        // 2-state model: state 0 = zone air, state 1 = wall node.
+        // Wall node couples to both zone air and outdoor temp.
         let a_c = DMatrix::from_row_slice(2, 2, &[-0.75, 0.5, 0.25, -0.28125]);
-        let b_c = DMatrix::from_row_slice(2, 2, &[0.25, 0.0, 0.0, 0.03125]); // [T_out, T_in]
+        let b_c = DMatrix::from_row_slice(2, 2, &[0.25, 0.0, 0.0, 0.03125]);
         let mapping = OutputMapping {
             output_count: 1,
             node_to_output: vec![(0, 0, 1.0)],
@@ -957,20 +1302,38 @@ mod tests {
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),
             ideal_hvac_zones: vec![],
-            infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+            infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
         };
-        let indoor_temp = 20.0;
-        let solver = ThermalSolver::new(model, config, 60.0, &env, indoor_temp).unwrap();
-        // All RC nodes initialize to the indoor temperature (conditioned assumption).
-        for &val in solver.state().iter() {
-            assert!(
-                (val - indoor_temp).abs() <= 1e-6,
-                "expected {indoor_temp}, got {val}"
-            );
-        }
+        let solver = ThermalSolver::new(model, config, 60.0, &env, indoor).unwrap();
+        let state = solver.state();
+
+        // Zone air (state 0) should be at indoor temp (fixed boundary).
+        assert!(
+            (state[0] - indoor).abs() < 1e-6,
+            "zone air should be {indoor}°C, got {}",
+            state[0]
+        );
+        // Wall node (state 1) should be between indoor and outdoor.
+        assert!(
+            state[1] > outdoor && state[1] < indoor,
+            "wall node should be between {outdoor}°C and {indoor}°C, got {}",
+            state[1]
+        );
+        // First-step discontinuity: with the same boundary inputs used for
+        // initialization, the non-zone nodes should barely move (< 1°C).
+        let mut u = DVector::zeros(2);
+        u[0] = outdoor;
+        u[1] = indoor; // indoor temp as input (matching initialization)
+        let x_next = solver.model.step(state, &u);
+        // Wall node should stay near its steady-state value.
+        assert!(
+            (x_next[1] - state[1]).abs() < 1.0,
+            "first-step wall node discontinuity should be < 1°C, got {}",
+            (x_next[1] - state[1]).abs()
+        );
     }
 
     /// Regression: latent heat constant was inconsistent across modules (2450 vs 2501 kJ/kg).
@@ -1016,11 +1379,12 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             window_properties: HashMap::new(),
+
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),
             ideal_hvac_zones: vec![],
-            infiltration: InfiltrationMethod::Ach { ach },
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
@@ -1365,11 +1729,12 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             window_properties: HashMap::new(),
+
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),
             ideal_hvac_zones: vec![],
-            infiltration: method,
+            infiltration: vec![(ZoneId(1), method)],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
@@ -1498,11 +1863,12 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             window_properties: HashMap::new(),
+
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::from([(ZoneId(1), setpoint_c)]),
             ideal_hvac_zones: vec![],
-            infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+            infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
@@ -1605,13 +1971,25 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 indoor_temp_input_indices: vec![],
-                solar_input_indices: HashMap::from([(42u32, 2usize)]),
+                solar_input_indices: HashMap::new(),
                 window_properties: HashMap::new(),
-                exterior_surfaces: vec![],
+                exterior_surfaces: vec![ExteriorSurfaceInfo {
+                    surface_id: 42,
+                    state_index: 0,
+                    input_index: 2,
+                    area_m2: 1.0,
+                    emissivity: 0.90,
+                    tilt_deg: 90.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 1,
+                    t_prev_c: zone_temp,
+                    absorptance: 1.0,
+                }],
                 interior_lwr_zones: vec![],
                 ideal_setpoints_c: HashMap::new(),
                 ideal_hvac_zones: vec![],
-                infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+                infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
@@ -1649,6 +2027,277 @@ mod tests {
         assert!(
             delta > 1e-3,
             "solar warming effect too small: delta={delta:.6} C"
+        );
+    }
+
+    /// Opaque surface solar gain must be scaled by absorptance.
+    /// A surface with absorptance=0.60 should produce ~60% of the warming
+    /// compared to absorptance=1.0.
+    #[test]
+    fn opaque_solar_gain_scales_by_absorptance() {
+        let zone_temp = 18.0;
+        let outdoor_temp = 18.0; // neutral outdoor so only solar matters
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 3, &[1.0 / (r * c), 1.0 / c, 1.0 / c]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let env = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: zone_temp - 5.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: outdoor_temp,
+                outdoor_humidity_ratio: 0.004,
+                wind_speed_m_s: 0.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: outdoor_temp,
+                sky_temp_c: outdoor_temp,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![SurfaceIrradiance {
+                    surface_id: 1,
+                    direct_w_m2: 500.0,
+                    diffuse_w_m2: 100.0,
+                    reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
+                }],
+                outdoor_wet_bulb_c: 0.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                mains_temp_c: 15.0,
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+                .single()
+                .unwrap(),
+            time_res: chrono::Duration::seconds(60),
+        };
+
+        let make_solver = |absorptance: f64| -> ThermalSolver {
+            let cfg = ThermalSolverConfig {
+                zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+                outdoor_temp_input_indices: vec![0],
+                indoor_temp_input_indices: vec![],
+                solar_input_indices: HashMap::new(),
+                window_properties: HashMap::new(),
+                exterior_surfaces: vec![ExteriorSurfaceInfo {
+                    surface_id: 1,
+                    state_index: 0,
+                    input_index: 2,
+                    area_m2: 1.0,
+                    emissivity: 0.90,
+                    tilt_deg: 90.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 1,
+                    t_prev_c: zone_temp,
+                    absorptance,
+                }],
+                interior_lwr_zones: vec![],
+                ideal_setpoints_c: HashMap::new(),
+                ideal_hvac_zones: vec![],
+                infiltration: vec![],
+                ventilation_flow_m3_s: 0.0,
+                ventilation: VentilationConfig::default(),
+                natural_ventilation: None,
+            };
+            let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, &env, zone_temp).unwrap();
+            s.x[0] = zone_temp;
+            s
+        };
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let mut solver_full = make_solver(1.0);
+        let t_full = solver_full
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        let mut solver_060 = make_solver(0.60);
+        let t_060 = solver_060
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        let mut solver_005 = make_solver(0.05);
+        let t_005 = solver_005
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        // Higher absorptance → more warming
+        assert!(
+            t_full > t_060,
+            "absorptance=1.0 must warm more than 0.60: {t_full:.6} vs {t_060:.6}"
+        );
+        assert!(
+            t_060 > t_005,
+            "absorptance=0.60 must warm more than 0.05: {t_060:.6} vs {t_005:.6}"
+        );
+
+        // Warming should scale roughly proportionally to absorptance
+        let gain_full = t_full - zone_temp;
+        let gain_060 = t_060 - zone_temp;
+        let ratio = gain_060 / gain_full;
+        assert!(
+            (ratio - 0.60).abs() < 0.05,
+            "warming ratio should be ~0.60, got {ratio:.4}"
+        );
+    }
+
+    /// Exterior solar gain via `apply_exterior_solar_inputs` scales proportionally
+    /// with absorptance. Two surfaces sharing a zone input but differing in
+    /// absorptance should produce proportional temperature rises.
+    #[test]
+    fn exterior_solar_via_surfaces_scales_by_absorptance() {
+        let zone_temp = 18.0;
+        let outdoor_temp = 18.0;
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-0.01]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[0.01, 0.001]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let make_env = || EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: zone_temp - 5.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: outdoor_temp,
+                outdoor_humidity_ratio: 0.004,
+                wind_speed_m_s: 0.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: outdoor_temp,
+                sky_temp_c: outdoor_temp,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![SurfaceIrradiance {
+                    surface_id: 0,
+                    direct_w_m2: 500.0,
+                    diffuse_w_m2: 100.0,
+                    reflected_w_m2: 50.0,
+                    angle_of_incidence_rad: 0.0,
+                }],
+                outdoor_wet_bulb_c: 0.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                mains_temp_c: 15.0,
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+                .single()
+                .unwrap(),
+            time_res: chrono::Duration::seconds(60),
+        };
+
+        let make_solver = |absorptance: f64| -> ThermalSolver {
+            let cfg = ThermalSolverConfig {
+                zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+                outdoor_temp_input_indices: vec![0],
+                indoor_temp_input_indices: vec![],
+                solar_input_indices: HashMap::new(),
+                window_properties: HashMap::new(),
+
+                exterior_surfaces: vec![ExteriorSurfaceInfo {
+                    surface_id: 0,
+                    state_index: 0,
+                    input_index: 1,
+                    area_m2: 10.0,
+                    emissivity: 0.90,
+                    tilt_deg: 90.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 1,
+                    t_prev_c: outdoor_temp,
+                    absorptance,
+                }],
+                interior_lwr_zones: vec![],
+                ideal_setpoints_c: HashMap::new(),
+                ideal_hvac_zones: vec![],
+                infiltration: vec![],
+                ventilation_flow_m3_s: 0.0,
+                ventilation: VentilationConfig::default(),
+                natural_ventilation: None,
+            };
+            let env = make_env();
+            let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, &env, zone_temp).unwrap();
+            s.x[0] = zone_temp;
+            s
+        };
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let env = make_env();
+
+        let t_dark = make_solver(0.25)
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+        let t_light = make_solver(0.60)
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        // Higher absorptance → more warming
+        assert!(
+            t_light > t_dark,
+            "absorptance=0.60 must warm more than 0.25: {t_light:.6} vs {t_dark:.6}"
+        );
+
+        // Warming should be proportional: ratio of gains ≈ ratio of absorptances
+        let gain_dark = t_dark - zone_temp;
+        let gain_light = t_light - zone_temp;
+        let ratio = gain_dark / gain_light;
+        let expected_ratio = 0.25 / 0.60;
+        assert!(
+            (ratio - expected_ratio).abs() < 0.05,
+            "gain ratio should be ~{expected_ratio:.3}, got {ratio:.4}"
         );
     }
 
@@ -1916,13 +2565,25 @@ mod tests {
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 indoor_temp_input_indices: vec![],
-                solar_input_indices: HashMap::from([(7u32, 2usize)]),
+                solar_input_indices: HashMap::new(),
                 window_properties: HashMap::new(),
-                exterior_surfaces: vec![],
+                exterior_surfaces: vec![ExteriorSurfaceInfo {
+                    surface_id: 7,
+                    state_index: 0,
+                    input_index: 2,
+                    area_m2: 1.0,
+                    emissivity: 0.90,
+                    tilt_deg: 90.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 1,
+                    t_prev_c: zone_temp,
+                    absorptance: 1.0,
+                }],
                 interior_lwr_zones: vec![],
                 ideal_setpoints_c: HashMap::new(),
                 ideal_hvac_zones: vec![],
-                infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+                infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
@@ -2016,11 +2677,12 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             window_properties: HashMap::new(),
+
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),
             ideal_hvac_zones: vec![],
-            infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+            infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: Some(NaturalVentilationConfig::from_window_area(
@@ -2089,11 +2751,12 @@ mod tests {
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
             window_properties: HashMap::new(),
+
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),
             ideal_hvac_zones: vec![],
-            infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+            infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: Some(NaturalVentilationConfig::from_window_area(
@@ -2156,6 +2819,11 @@ mod tests {
                     area_m2: 20.0,
                     emissivity: 0.90,
                     tilt_deg: 90.0, // vertical wall
+                    rad_frac: 0.0,  // no film resistance → use node temp directly
+                    rad_res_k_w: 0.0,
+                    n_iter: 1,
+                    t_prev_c: outdoor_temp,
+                    absorptance: SOLAR_ABSORPTANCE_DEFAULT,
                 }]
             } else {
                 vec![]
@@ -2168,11 +2836,12 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
                 window_properties: HashMap::new(),
+
                 exterior_surfaces,
                 interior_lwr_zones: vec![],
                 ideal_setpoints_c: HashMap::new(),
                 ideal_hvac_zones: vec![],
-                infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+                infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
@@ -2228,10 +2897,14 @@ mod tests {
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
 
         let window_surface_id: u32 = 55;
+        let (transmittance, radiation_frac) =
+            hares_physics::solar::calculate_window_parameters(0.4, 1.8, 0.01);
         let win_props = WindowSolarProperties {
             shgc: 0.4,
             u_factor_w_m2_k: 1.8,
             area_m2: 2.0,
+            transmittance,
+            radiation_frac,
         };
 
         // 500 W/m² direct irradiance, no diffuse or reflected.
@@ -2290,11 +2963,12 @@ mod tests {
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
                 window_properties: HashMap::from([(window_surface_id, win_props)]),
+
                 exterior_surfaces: vec![],
                 interior_lwr_zones: vec![],
                 ideal_setpoints_c: HashMap::new(),
                 ideal_hvac_zones: vec![],
-                infiltration: InfiltrationMethod::Ach { ach: 0.0 },
+                infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
@@ -2339,6 +3013,495 @@ mod tests {
         assert!(
             delta_oblique < delta_normal * 0.95,
             "oblique gain must be less than 95% of normal gain: delta_oblique={delta_oblique:.6}, delta_normal={delta_normal:.6}"
+        );
+    }
+
+    /// Iterative LWR solver with rad_frac produces a different zone temperature
+    /// than the simple node-temp-only approach, and the t_prev_c state is updated.
+    #[test]
+    fn iterative_lwr_updates_surface_state_and_differs_from_simple() {
+        let zone_temp = 25.0;
+        let outdoor_temp = 10.0;
+
+        // Build a simple 1R1C model: zone ←→ outdoor.
+        // Input columns: [0]=outdoor, [1]=LWR injection, [2]=zone sensible
+        let a_c = nalgebra::DMatrix::from_element(1, 1, -0.01);
+        let b_c = nalgebra::DMatrix::from_row_slice(1, 3, &[0.01, 0.0, 0.001]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: Vec::new(),
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let env = {
+            let mut e = env_for_temp(zone_temp, outdoor_temp);
+            e.weather.sky_temp_c = -20.0;
+            e.weather.ground_temp_c = 5.0;
+            e
+        };
+
+        let make_solver =
+            |rad_frac: f64, rad_res_k_w: f64, env: &EnvironmentState| -> ThermalSolver {
+                let exterior_surfaces = vec![ExteriorSurfaceInfo {
+                    surface_id: 0,
+                    state_index: 0,
+                    input_index: 1,
+                    area_m2: 20.0,
+                    emissivity: 0.90,
+                    tilt_deg: 0.0, // horizontal roof: SVF=1, maximum sky exposure
+                    rad_frac,
+                    rad_res_k_w,
+                    n_iter: 4,
+                    t_prev_c: outdoor_temp,
+                    absorptance: SOLAR_ABSORPTANCE_DEFAULT,
+                }];
+                let cfg = ThermalSolverConfig {
+                    zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                    zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                    zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
+                    outdoor_temp_input_indices: vec![0],
+                    indoor_temp_input_indices: vec![],
+                    solar_input_indices: HashMap::new(),
+                    window_properties: HashMap::new(),
+    
+                    exterior_surfaces,
+                    interior_lwr_zones: vec![],
+                    ideal_setpoints_c: HashMap::new(),
+                    ideal_hvac_zones: vec![],
+                    infiltration: vec![],
+                    ventilation_flow_m3_s: 0.0,
+                    ventilation: VentilationConfig::default(),
+                    natural_ventilation: None,
+                };
+                let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, env, zone_temp).unwrap();
+                s.x[0] = zone_temp;
+                s
+            };
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        // rad_frac > 0: iterative solver estimates true surface temp
+        let mut solver = make_solver(0.375, 0.0015, &env);
+        let initial_t_prev = solver.config.exterior_surfaces[0].t_prev_c;
+        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let updated_t_prev = solver.config.exterior_surfaces[0].t_prev_c;
+
+        // t_prev_c must be updated from its initial value (outdoor temp)
+        assert!(
+            (updated_t_prev - initial_t_prev).abs() > 0.01,
+            "t_prev_c should be updated by iteration: initial={initial_t_prev:.4}, after={updated_t_prev:.4}"
+        );
+
+        // Converged surface temp should be physically reasonable
+        assert!(
+            updated_t_prev > outdoor_temp - 30.0 && updated_t_prev < zone_temp + 30.0,
+            "converged t_prev_c={updated_t_prev:.2} out of physical range"
+        );
+    }
+
+    /// Converged surface temperature should be between outdoor temp and node temp.
+    #[test]
+    fn iterative_lwr_surface_temp_is_bounded() {
+        use crate::longwave_radiation::{
+            CELSIUS_TO_KELVIN, STEFAN_BOLTZMANN, sky_view_factor,
+        };
+
+        let t_node = 25.0;
+        let t_ext = 10.0;
+        let t_sky = -20.0;
+        let area = 20.0;
+        let emissivity = 0.90;
+        let rad_frac = 0.375;
+        let rad_res_k_w = 0.0015; // R_film / area
+
+        let e_factor = emissivity * STEFAN_BOLTZMANN * area;
+        let svf = sky_view_factor(0.0); // horizontal roof
+
+        let t_sky_k4 = (t_sky + CELSIUS_TO_KELVIN).powi(4);
+        let t_ext_k4 = (t_ext + CELSIUS_TO_KELVIN).powi(4);
+        let h_lwr_inj = e_factor * ((1.0 - svf) * t_ext_k4 + svf * t_sky_k4);
+
+        let t_surf_init = rad_frac * t_node + (1.0 - rad_frac) * t_ext;
+
+        let mut t_surf = t_ext; // init like OCHRE
+        let mut t_prev = t_ext;
+
+        for _ in 0..20 {
+            let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
+            let t_new = t_surf_init + lwr * rad_res_k_w;
+            let t_new = t_new.clamp(t_surf - 2.0, t_surf + 2.0);
+            let t_next = t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_prev);
+            t_prev = t_surf;
+            t_surf = t_next;
+            if (t_surf - t_prev).abs() < 0.01 {
+                break;
+            }
+        }
+
+        // Surface temp should be between outdoor and node temp, and below t_surf_init
+        // because LWR cools the surface.
+        assert!(
+            t_surf > t_ext - 10.0 && t_surf < t_node + 10.0,
+            "converged surface temp {t_surf:.2} should be near [{t_ext}, {t_node}]"
+        );
+        assert!(
+            t_surf < t_surf_init,
+            "LWR should cool surface below no-radiation init: \
+             t_surf={t_surf:.4}, t_surf_init={t_surf_init:.4}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Interior surface temperature interpolation (radiation_frac)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn radiation_frac_interpolates_surface_temp() {
+        // Lightweight wall: node at 30 °C, zone at 22 °C, radiation_frac = 0.6
+        // True surface temp = 0.6 × 30 + 0.4 × 22 = 26.8 °C
+        let t_node = 30.0_f64;
+        let t_zone = 22.0_f64;
+        let rad_frac = 0.6_f64;
+        let t_surf = rad_frac * t_node + (1.0 - rad_frac) * t_zone;
+        assert!(
+            (t_surf - 26.8).abs() < 1e-10,
+            "interpolated surface temp should be 26.8, got {t_surf}"
+        );
+    }
+
+    #[test]
+    fn radiation_frac_one_returns_node_temp() {
+        let t_node = 35.0_f64;
+        let t_zone = 20.0_f64;
+        let t_surf = 1.0 * t_node + (1.0 - 1.0) * t_zone;
+        assert!(
+            (t_surf - t_node).abs() < 1e-10,
+            "radiation_frac=1.0 should yield node temp"
+        );
+    }
+
+    #[test]
+    fn radiation_frac_zero_returns_zone_temp() {
+        let t_node = 35.0_f64;
+        let t_zone = 20.0_f64;
+        let t_surf = 0.0 * t_node + (1.0 - 0.0) * t_zone;
+        assert!(
+            (t_surf - t_zone).abs() < 1e-10,
+            "radiation_frac=0.0 should yield zone temp"
+        );
+    }
+
+    #[test]
+    fn radiation_frac_correction_magnitude_for_lightweight_boundary() {
+        // Lightweight wall: R_film = 0.12 m²K/W, R_material = 0.05 m²K/W
+        // radiation_frac = 0.12 / (0.12 + 0.05) ≈ 0.706
+        // Node at 28 °C, zone at 22 °C → true surface ≈ 26.24 °C (1.76 °C correction)
+        let r_film = 0.12_f64;
+        let r_material = 0.05_f64;
+        let rad_frac = r_film / (r_film + r_material);
+        let t_node = 28.0_f64;
+        let t_zone = 22.0_f64;
+        let t_surf = rad_frac * t_node + (1.0 - rad_frac) * t_zone;
+        let correction = (t_node - t_surf).abs();
+
+        assert!(
+            correction > 1.0,
+            "lightweight boundary correction should be > 1 °C, got {correction:.3}"
+        );
+        assert!(
+            t_surf > t_zone && t_surf < t_node,
+            "surface temp {t_surf:.3} should be between zone {t_zone} and node {t_node}"
+        );
+    }
+
+    #[test]
+    fn interior_lwr_with_radiation_frac_conserves_energy() {
+        // Two surfaces with different radiation_frac values: the LWR exchange
+        // using interpolated surface temps must still conserve energy.
+        use crate::longwave_radiation::{InteriorSurface, interior_longwave_linearised_w};
+
+        let t_zone = 22.0;
+        let infos = [
+            InteriorSurfaceInfo {
+                state_index: 0,
+                input_index: 0,
+                area_m2: 40.0,
+                emissivity: 0.90,
+                radiation_frac: 0.7, // lightweight wall
+            },
+            InteriorSurfaceInfo {
+                state_index: 1,
+                input_index: 1,
+                area_m2: 40.0,
+                emissivity: 0.90,
+                radiation_frac: 1.0, // massive floor (node ≈ surface)
+            },
+            InteriorSurfaceInfo {
+                state_index: 2,
+                input_index: 2,
+                area_m2: 60.0,
+                emissivity: 0.90,
+                radiation_frac: 0.85,
+            },
+        ];
+        let t_nodes = [28.0, 19.0, 24.0];
+
+        let surfaces: Vec<InteriorSurface> = infos
+            .iter()
+            .map(|s| InteriorSurface {
+                area_m2: s.area_m2,
+                emissivity: s.emissivity,
+            })
+            .collect();
+        let t_surfaces: Vec<f64> = infos
+            .iter()
+            .zip(t_nodes.iter())
+            .map(|(s, &t_node)| s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone)
+            .collect();
+
+        let net = interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone);
+        let total: f64 = net.iter().sum();
+        assert!(
+            total.abs() < 1e-8,
+            "LWR with radiation_frac must conserve energy: sum={total:.10} W"
+        );
+    }
+
+    fn solver_with_ventilation(
+        env: &EnvironmentState,
+        vent: VentilationConfig,
+        vent_flow_m3_s: f64,
+    ) -> ThermalSolver {
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let config = ThermalSolverConfig {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            window_properties: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            ideal_setpoints_c: HashMap::new(),
+            ideal_hvac_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: vent_flow_m3_s,
+            ventilation: vent,
+            natural_ventilation: None,
+        };
+        let mut solver =
+            ThermalSolver::new(model, config, 60.0, env, env.zones[0].temperature_c).unwrap();
+        solver.x[0] = env.zones[0].temperature_c;
+        solver
+    }
+
+    /// HRV with 70% sensible recovery should reduce ventilation sensible load
+    /// by ~70% compared to no recovery, verified by zone temperature drift.
+    #[test]
+    fn hrv_sensible_recovery_reduces_ventilation_load() {
+        let zone_temp = 22.0;
+        let outdoor_temp = 0.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let vent_flow = 0.05; // m³/s
+
+        // No recovery
+        let mut solver_no_recovery = solver_with_ventilation(
+            &env,
+            VentilationConfig {
+                balanced: false,
+                ..Default::default()
+            },
+            vent_flow,
+        );
+        let t_no_recovery = solver_no_recovery
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        // HRV with 70% sensible recovery
+        let mut solver_hrv = solver_with_ventilation(
+            &env,
+            VentilationConfig {
+                balanced: true,
+                sensible_recovery_efficiency: 0.70,
+                latent_recovery_efficiency: 0.0,
+                ..Default::default()
+            },
+            vent_flow,
+        );
+        let t_hrv = solver_hrv
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        // Both should cool below zone_temp (outdoor is colder).
+        assert!(t_no_recovery < zone_temp, "ventilation should cool the zone");
+        assert!(t_hrv < zone_temp, "HRV should still cool the zone");
+
+        // HRV should be significantly warmer (less cooling).
+        let cooling_no_recovery = zone_temp - t_no_recovery;
+        let cooling_hrv = zone_temp - t_hrv;
+        assert!(
+            cooling_hrv < cooling_no_recovery * 0.5,
+            "HRV at 70% recovery should reduce cooling by more than 50%: \
+             no_recovery cooling={cooling_no_recovery:.4}, hrv cooling={cooling_hrv:.4}"
+        );
+    }
+
+    /// ERV with latent recovery: latent gains are packed into
+    /// `custom_payload`. Verify that ERV reduces latent load magnitude
+    /// by extracting the latent gain from the payload.
+    #[test]
+    fn erv_latent_recovery_reduces_latent_load() {
+        let zone_temp = 22.0;
+        let outdoor_temp = 0.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let vent_flow = 0.05;
+
+        // Extract latent gain for zone 1 from custom_payload [zone_id, value, ...]
+        let extract_latent = |update: &DomainUpdate| -> f64 {
+            let payload = update.custom_payload.as_ref().expect("must have latent");
+            payload
+                .chunks(2)
+                .find(|chunk| chunk[0] as u16 == 1)
+                .map(|chunk| chunk[1])
+                .unwrap_or(0.0)
+        };
+
+        // No recovery
+        let mut solver_no = solver_with_ventilation(
+            &env,
+            VentilationConfig::default(),
+            vent_flow,
+        );
+        let update_no = solver_no.resolve(&ports, &env, Duration::from_secs(60));
+        let latent_no = extract_latent(&update_no);
+
+        // ERV: 70% sensible, 30% latent recovery
+        let mut solver_erv = solver_with_ventilation(
+            &env,
+            VentilationConfig {
+                balanced: true,
+                sensible_recovery_efficiency: 0.70,
+                latent_recovery_efficiency: 0.30,
+                ..Default::default()
+            },
+            vent_flow,
+        );
+        let update_erv = solver_erv.resolve(&ports, &env, Duration::from_secs(60));
+        let latent_erv = extract_latent(&update_erv);
+
+        // Outdoor humidity (0.004) < indoor (0.008) → latent gain is negative.
+        // ERV 30% latent recovery should reduce the magnitude.
+        assert!(latent_no.abs() > 0.0, "must have non-zero latent load");
+        assert!(
+            latent_erv.abs() < latent_no.abs() * 0.80,
+            "ERV latent recovery should reduce latent load by >20%: \
+             no_recovery={latent_no:.2}, erv={latent_erv:.2}"
+        );
+    }
+
+    /// Unbalanced fan uses quadrature (Pythagorean) combination of infiltration
+    /// and forced ventilation flows. With equal infiltration and forced flows,
+    /// the combined flow should be sqrt(2) × individual, not 2× (linear).
+    /// This means less cooling than simple linear addition.
+    #[test]
+    fn unbalanced_fan_uses_quadrature_not_linear_addition() {
+        let zone_temp = 22.0;
+        let outdoor_temp = 0.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        // Solver with infiltration only (0.5 ACH)
+        let mut solver_inf_only =
+            solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 });
+        let t_inf_only = solver_inf_only
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        // Solver with infiltration + unbalanced forced vent (same magnitude)
+        // ACH 0.5 on 200 m³ zone = 200 * 0.5 / 3600 ≈ 0.0278 m³/s
+        let forced_flow = 200.0 * 0.5 / 3600.0;
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let config = ThermalSolverConfig {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            window_properties: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            ideal_setpoints_c: HashMap::new(),
+            ideal_hvac_zones: vec![],
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })],
+            ventilation_flow_m3_s: forced_flow,
+            ventilation: VentilationConfig {
+                balanced: false,
+                ..Default::default()
+            },
+            natural_ventilation: None,
+        };
+        let mut solver_combined =
+            ThermalSolver::new(model, config, 60.0, &env, env.zones[0].temperature_c).unwrap();
+        solver_combined.x[0] = env.zones[0].temperature_c;
+        let t_combined = solver_combined
+            .resolve(&ports, &env, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        let cooling_inf = zone_temp - t_inf_only;
+        let cooling_combined = zone_temp - t_combined;
+
+        // Quadrature: combined = sqrt(inf² + forced²) = sqrt(2) * inf ≈ 1.414× inf.
+        // Linear would give 2× inf. So combined cooling should be < 1.6× inf cooling.
+        assert!(
+            cooling_combined > cooling_inf,
+            "adding forced vent must increase cooling"
+        );
+        assert!(
+            cooling_combined < cooling_inf * 1.6,
+            "quadrature should give ~1.414× not 2×: inf={cooling_inf:.6}, combined={cooling_combined:.6}"
+        );
+        assert!(
+            cooling_combined > cooling_inf * 1.3,
+            "quadrature should give ~1.414×: inf={cooling_inf:.6}, combined={cooling_combined:.6}"
         );
     }
 }

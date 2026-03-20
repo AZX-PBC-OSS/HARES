@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use chrono::{Datelike, Timelike};
-use rand::{RngExt, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use rand_distr::{Distribution, StandardNormal};
 
 use crate::{DomainId, EnvironmentState, HaresError};
 
@@ -220,11 +221,9 @@ impl ScheduleSource {
                 draw_count,
                 rng,
             } => {
-                // Single-draw centered unit-variance noise:
-                // (U[0,1) - 0.5) * sqrt(12) has mean 0 and variance 1.
-                let centered_unit_variance = (rng.random::<f64>() - 0.5) * 12.0_f64.sqrt();
+                let z: f64 = StandardNormal.sample(rng);
                 *draw_count = draw_count.checked_add(1).expect("draw_count overflow");
-                Ok(*base + *std_dev * centered_unit_variance)
+                Ok(*base + *std_dev * z)
             }
             Self::Shared {
                 data,
@@ -323,6 +322,7 @@ mod tests {
         weekend[14] = 0.75;
         let mut month = [1.0; 12];
         month[0] = 2.0;
+        month[1] = 0.5;
 
         let mut source = ScheduleSource::DailyProfile {
             weekday,
@@ -343,8 +343,9 @@ mod tests {
             .expect("valid timestamp");
         assert_eq!(source.value_at(&env).expect("weekend value"), 15.0);
 
+        // 2026-02-10 is a Tuesday — exercises the weekday+month_multiplier path.
         env.current_time = Utc
-            .with_ymd_and_hms(2026, 2, 14, 14, 0, 0)
+            .with_ymd_and_hms(2026, 2, 10, 14, 0, 0)
             .single()
             .expect("valid timestamp");
         assert_eq!(source.value_at(&env).expect("month value"), 7.5);
@@ -419,18 +420,20 @@ mod tests {
             rng: ChaCha8Rng::from_seed(seed),
         };
 
+        let mut values = Vec::with_capacity(8);
         for _ in 0..8 {
-            assert_eq!(
-                a.value_at(&env).expect("value a"),
-                b.value_at(&env).expect("value b")
-            );
+            let va = a.value_at(&env).expect("value a");
+            let vb = b.value_at(&env).expect("value b");
+            assert_eq!(va, vb);
+            values.push(va);
         }
 
+        // reset() must rewind the RNG to the beginning of the sequence.
         a.reset();
-        b.reset();
         assert_eq!(
             a.value_at(&env).expect("value a after reset"),
-            b.value_at(&env).expect("value b after reset")
+            values[0],
+            "reset() did not rewind to the first draw"
         );
     }
 

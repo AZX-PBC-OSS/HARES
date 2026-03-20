@@ -127,12 +127,14 @@ impl Dehumidifier {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Thermal,
                     zone: Some(zone),
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
             ],
             telemetry: default_telemetry(),
@@ -288,12 +290,14 @@ impl Equipment for Dehumidifier {
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
             PortDeclaration {
                 port_type: PortType::Thermal,
                 zone: Some(self.zone_id),
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
         ];
 

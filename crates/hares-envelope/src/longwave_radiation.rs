@@ -38,7 +38,7 @@
 pub const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
 
 /// Celsius-to-Kelvin offset.
-const CELSIUS_TO_KELVIN: f64 = 273.15;
+pub(crate) const CELSIUS_TO_KELVIN: f64 = 273.15;
 
 /// Default emissivity for opaque building surfaces (walls, roof, floor).
 /// EnergyPlus default; typical range 0.85–0.95.
@@ -54,6 +54,18 @@ pub const EMISSIVITY_WINDOW: f64 = 0.84;
 /// attic zone when a radiant barrier is present. This matches reflective foil
 /// products (aluminium facing), which have measured emissivities of 0.03–0.07.
 pub const EMISSIVITY_RADIANT_BARRIER: f64 = 0.05;
+
+/// Default solar absorptance for opaque building surfaces.
+///
+/// OCHRE `Envelope.py:222` uses 0.60. EnergyPlus default is 0.70.
+/// We match OCHRE here.
+pub const SOLAR_ABSORPTANCE_DEFAULT: f64 = 0.60;
+
+/// Solar absorptance for attic radiant barriers.
+///
+/// Reflective foil has very low absorptance (high reflectivity).
+/// Matches OCHRE `Envelope.py:222` for `radiant_barrier=True` in attic.
+pub const SOLAR_ABSORPTANCE_RADIANT_BARRIER: f64 = 0.05;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sky view factor

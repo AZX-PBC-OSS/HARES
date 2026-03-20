@@ -366,12 +366,14 @@ impl Generator {
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
             PortDeclaration {
                 port_type: PortType::Fuel,
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
         ];
         if let Some(z) = zone {
@@ -381,6 +383,7 @@ impl Generator {
                 zone: Some(z),
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             });
         }
         if let Some(lid) = chp_loop_id {
@@ -389,6 +392,7 @@ impl Generator {
                 zone: None,
                 loop_id: Some(lid),
                 domain_id: None,
+                fluid_type: Some(FluidType::Water),
             });
         }
 
@@ -956,6 +960,8 @@ mod tests {
             weather: WeatherState {
                 outdoor_temp_c: 10.0,
                 outdoor_humidity_ratio: 0.005,
+                outdoor_wet_bulb_c: 7.0,
+                outdoor_enthalpy_j_kg: 22_800.0,
                 wind_speed_m_s: 2.0,
                 wind_dir_deg: 0.0,
                 ground_temp_c: 12.0,
@@ -964,6 +970,8 @@ mod tests {
                 ghi_w_m2: 400.0,
                 dni_w_m2: 300.0,
                 dhi_w_m2: 100.0,
+                solar_altitude_deg: 0.0,
+                mains_temp_c: 15.0,
                 solar_irradiance: vec![],
             },
             grid: GridState {
@@ -1558,6 +1566,7 @@ mod tests {
         assert_eq!(generator.mode, OperatingMode::Off);
     }
 
+
     // =======================================================================
     // CHP thermal output
     // =======================================================================
@@ -1621,6 +1630,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
+        // fuel_input_w, thermal_output_w, flue_loss_w are in W; electric_output_kw is in kW
         // fuel_input_w, thermal_output_w, flue_loss_w are in W; electric_output_kw is in kW
         let fuel_w = generator.telemetry().get("fuel_input_w").unwrap();
         let electric_w = generator.telemetry().get("electric_output_kw").unwrap() * 1000.0;
@@ -2027,6 +2037,7 @@ mod tests {
         );
     }
 
+
     #[test]
     fn apply_control_rejects_unsupported_signal() {
         let mut generator = Generator::new(gen_config(&[]), GeneratorKind::GasGenerator);
@@ -2218,6 +2229,11 @@ mod tests {
             "flue_loss_w={flue_w}, expected={expected_flue_w} (watts)"
         );
     }
+
+    // =======================================================================
+    // Telemetry field names are in watts (regression tests)
+    // =======================================================================
+
 
     #[test]
     fn fuel_cell_defaults_to_curve_efficiency() {

@@ -55,6 +55,7 @@ pub struct PortDeclaration {
     pub zone: Option<ZoneId>,
     pub loop_id: Option<LoopId>,
     pub domain_id: Option<DomainId>,
+    pub fluid_type: Option<FluidType>,
 }
 
 /// Thermal contribution totals for one zone.
@@ -240,6 +241,7 @@ impl PortSlots {
     /// match declared ports and rejects undeclared contributions at runtime.
     pub fn from_declarations(decls: &[PortDeclaration]) -> Self {
         let mut thermal = Vec::new();
+        let mut fluid = Vec::new();
         let mut custom = Vec::new();
 
         for decl in decls {
@@ -248,6 +250,16 @@ impl PortSlots {
                     if let Some(zone) = decl.zone {
                         if !thermal.iter().any(|t: &ThermalAccumulator| t.zone == zone) {
                             thermal.push(ThermalAccumulator::new(zone));
+                        }
+                    }
+                }
+                PortType::Fluid => {
+                    if let (Some(loop_id), Some(fluid_type)) = (decl.loop_id, decl.fluid_type) {
+                        if !fluid
+                            .iter()
+                            .any(|f: &FluidAccumulator| f.loop_id == loop_id && f.fluid_type == fluid_type)
+                        {
+                            fluid.push(FluidAccumulator::new(loop_id, fluid_type));
                         }
                     }
                 }
@@ -262,8 +274,6 @@ impl PortSlots {
                     }
                 }
                 // Electrical and Fuel are singletons, handled by defaults.
-                // Fluid requires FluidType which is not part of PortDeclaration;
-                // fluid accumulators must be added separately.
                 _ => {}
             }
         }
@@ -272,7 +282,7 @@ impl PortSlots {
             thermal,
             electrical: ElectricalAccumulator::default(),
             fuel: FuelAccumulator::default(),
-            fluid: Vec::new(),
+            fluid,
             custom,
         }
     }
@@ -638,12 +648,14 @@ mod tests {
                 zone: Some(ZoneId(1)),
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
             PortDeclaration {
                 port_type: PortType::Thermal,
                 zone: Some(ZoneId(2)),
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
             // Duplicate zone should be deduplicated
             PortDeclaration {
@@ -651,18 +663,37 @@ mod tests {
                 zone: Some(ZoneId(1)),
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
             PortDeclaration {
                 port_type: PortType::Electrical,
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
             PortDeclaration {
                 port_type: PortType::Custom,
                 zone: None,
                 loop_id: None,
                 domain_id: Some(DomainId(5)),
+                fluid_type: None,
+            },
+            // Fluid port with loop_id and fluid_type should create accumulator
+            PortDeclaration {
+                port_type: PortType::Fluid,
+                zone: None,
+                loop_id: Some(LoopId(10)),
+                domain_id: None,
+                fluid_type: Some(FluidType::Water),
+            },
+            // Duplicate (loop_id, fluid_type) should be deduplicated
+            PortDeclaration {
+                port_type: PortType::Fluid,
+                zone: None,
+                loop_id: Some(LoopId(10)),
+                domain_id: None,
+                fluid_type: Some(FluidType::Water),
             },
         ];
 
@@ -672,8 +703,10 @@ mod tests {
         assert_eq!(slots.thermal[1].zone, ZoneId(2));
         assert_eq!(slots.custom.len(), 1);
         assert_eq!(slots.custom[0].domain_id, DomainId(5));
-        // Fluid is empty since PortDeclaration lacks FluidType
-        assert!(slots.fluid.is_empty());
+        // Fluid accumulator should be created from Fluid PortDeclaration
+        assert_eq!(slots.fluid.len(), 1);
+        assert_eq!(slots.fluid[0].loop_id, LoopId(10));
+        assert_eq!(slots.fluid[0].fluid_type, FluidType::Water);
 
         // Verify accumulation works on the built slots
         let mut slots = slots;
@@ -685,6 +718,18 @@ mod tests {
             })
             .unwrap();
         approx_eq(slots.thermal[0].sensible_gain_w, 100.0);
+
+        // Fluid accumulation should work
+        slots
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(10),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 50.0,
+                return_temp_c: 30.0,
+                fluid_type: FluidType::Water,
+            })
+            .unwrap();
+        approx_eq(slots.fluid[0].total_flow_kg_s, 0.5);
 
         // Undeclared zone should fail
         let err = slots.accumulate(&PortContribution::Thermal {

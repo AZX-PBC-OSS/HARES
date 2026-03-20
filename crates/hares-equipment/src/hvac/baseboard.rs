@@ -67,12 +67,14 @@ impl ElectricBaseboard {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Thermal,
                     zone: Some(zone),
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
             ],
             telemetry: default_telemetry(),
@@ -121,7 +123,7 @@ impl Equipment for ElectricBaseboard {
     ) -> std::result::Result<(), HaresError> {
         let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
         let thermal_output_w = self.rated_capacity_w * duty;
-        let electric_kw = thermal_output_w / 1_000.0;
+        let electric_kw = thermal_output_w / 1_000.0 * self.hvac.space_fraction;
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {

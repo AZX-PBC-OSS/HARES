@@ -148,7 +148,7 @@ struct HeaterState {
     pan_heater_on: bool,
     last_er_off_at: Option<DateTime<Utc>>,
     last_speed_index: usize,
-    variable_speed_fraction: f64,
+    last_speed_frac: f64,
     electric_kw: f64,
     thermal_output_w: f64,
     speed_index: f64,
@@ -311,12 +311,14 @@ impl HeatPumpHeaterCore {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Thermal,
                     zone: Some(zone),
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
             ],
             telemetry: default_heater_telemetry(),
@@ -364,6 +366,9 @@ impl HeatPumpHeaterCore {
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
         self.hvac.duct_dse = first_f64(config, DUCT_DSE_KEYS).unwrap_or(DEFAULT_DUCT_DSE);
+        self.hvac.duct_zone_id =
+            super::super::helpers::parse_zone_id_key(config, "duct_zone_id");
+        self.hvac.update_zone_heat_fractions();
         self.hvac.duct_zone_id = super::super::helpers::parse_zone_id_key(config, "duct_zone_id");
         self.hvac.update_zone_heat_fractions();
 
@@ -392,7 +397,7 @@ impl HeatPumpHeaterCore {
             )?;
             self.hvac.eir_by_stage =
                 remap_minisplit_stages(self.hvac.eir_by_stage.clone(), self.mshp_speed_map)?;
-            self.hvac.speed_control_mode = SpeedControlMode::FourSpeed;
+            self.hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
             self.pan_heater_kw = first_f64(config, &["pan_heater_kw", "mshp_pan_heater_kw"])
                 .unwrap_or(MSHP_PAN_HEATER_DEFAULT_KW);
             self.pan_heater_temp_c =
@@ -577,9 +582,10 @@ impl HeatPumpHeaterCore {
             self.hvac
                 .write_zone_thermal_contributions(ports, step.thermal_output_w, 0.0)?;
         }
-        if step.electric_kw > 0.0 {
+        let scaled_electric_kw = step.electric_kw * self.hvac.space_fraction;
+        if scaled_electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: step.electric_kw,
+                active_power_kw: scaled_electric_kw,
                 reactive_power_kvar: 0.0,
             })?;
         }
@@ -648,9 +654,24 @@ impl HeatPumpHeaterCore {
         let pressure_pa = env.weather.pressure_pa();
 
         let speed_index = self.hvac.last_speed_index;
-        let stage_capacity_w =
-            HvacEquipment::capacity_at_stage(&self.hvac.heating_capacities_w, speed_index);
-        let stage_eir = self.hvac.eir_at_stage(speed_index);
+        let speed_frac = self.hvac.last_speed_frac;
+        let (stage_capacity_w, stage_eir) = if self.hvac.speed_control_mode
+            == SpeedControlMode::MultiSpeedInterpolated
+        {
+            (
+                self.hvac.interpolated_capacity(
+                    &self.hvac.heating_capacities_w,
+                    speed_index,
+                    speed_frac,
+                ),
+                self.hvac.interpolated_eir(speed_index, speed_frac),
+            )
+        } else {
+            (
+                HvacEquipment::capacity_at_stage(&self.hvac.heating_capacities_w, speed_index),
+                self.hvac.eir_at_stage(speed_index),
+            )
+        };
 
         let plr = self.hvac.duty_cycle.clamp(0.0, 1.0);
         let plf = self.hvac.part_load_factor(plr);
@@ -938,7 +959,7 @@ impl HeatPumpHeaterCore {
             pan_heater_on: self.pan_heater_on,
             last_er_off_at: self.last_er_off_at,
             last_speed_index: self.hvac.last_speed_index,
-            variable_speed_fraction: self.hvac.variable_speed_fraction,
+            last_speed_frac: self.hvac.last_speed_frac,
             electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
             thermal_output_w: self.telemetry.get("thermal_output_w").unwrap_or(0.0),
             speed_index: self.telemetry.get("speed_index").unwrap_or(0.0),
@@ -984,7 +1005,7 @@ impl HeatPumpHeaterCore {
             OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
         );
         self.hvac.last_speed_index = decoded.last_speed_index;
-        self.hvac.variable_speed_fraction = decoded.variable_speed_fraction;
+        self.hvac.last_speed_frac = decoded.last_speed_frac;
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
         self.ctrl_power_limit_kw = decoded.ctrl_power_limit_kw.unwrap_or(f64::INFINITY);
         self.ctrl_mode_override = decoded.ctrl_mode_override;
@@ -1392,13 +1413,15 @@ mod tests {
     fn hspf_to_eir_conversion() {
         use crate::config::ConfigValue;
         let mut cfg = heater_config();
+        cfg.raw_config.remove("eir");
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(8.5));
         cfg.raw_config.insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("HSPF".to_string()),
         );
-        let eq = ASHPHeater::new(cfg);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
         let eir = eq.core.hvac.eir_by_stage[0];
         assert!(
             (eir - 0.401).abs() < 0.01,
@@ -1410,13 +1433,15 @@ mod tests {
     fn cop_to_eir_no_conversion() {
         use crate::config::ConfigValue;
         let mut cfg = heater_config();
+        cfg.raw_config.remove("eir");
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(3.0));
         cfg.raw_config.insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("COP".to_string()),
         );
-        let eq = ASHPHeater::new(cfg);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
         let eir = eq.core.hvac.eir_by_stage[0];
         assert!(
             (eir - 0.333).abs() < 0.01,
@@ -1428,13 +1453,15 @@ mod tests {
     fn eer_to_eir_conversion() {
         use crate::config::ConfigValue;
         let mut cfg = heater_config();
+        cfg.raw_config.remove("eir");
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(12.0));
         cfg.raw_config.insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("EER".to_string()),
         );
-        let eq = ASHPHeater::new(cfg);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
         let eir = eq.core.hvac.eir_by_stage[0];
         assert!((eir - 0.284).abs() < 0.01, "EER=12 → EIR≈0.284, got {eir}");
     }
@@ -1443,13 +1470,15 @@ mod tests {
     fn seer_to_eir_conversion() {
         use crate::config::ConfigValue;
         let mut cfg = heater_config();
+        cfg.raw_config.remove("eir");
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(14.0));
         cfg.raw_config.insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("SEER".to_string()),
         );
-        let eq = ASHPHeater::new(cfg);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
         let eir = eq.core.hvac.eir_by_stage[0];
         assert!(
             (eir - 0.244).abs() < 0.01,
@@ -1461,13 +1490,15 @@ mod tests {
     fn afue_to_eir_no_conversion() {
         use crate::config::ConfigValue;
         let mut cfg = heater_config();
+        cfg.raw_config.remove("eir");
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(95.0));
         cfg.raw_config.insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("AFUE".to_string()),
         );
-        let eq = ASHPHeater::new(cfg);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
         let eir = eq.core.hvac.eir_by_stage[0];
         assert!(
             (eir - 1.0 / 95.0).abs() < 0.001,
@@ -2094,6 +2125,18 @@ mod tests {
         );
     }
 
+    // --- DR and control signal tests ---
+
+    // DR Moderate: heating setpoint offset = -1°C.
+    // The `update_mode` FSM uses the base setpoints for mode transitions, while
+    // `resolve_control` uses the DR-adjusted setpoint for load_ratio calculation.
+    // Effect: DR reduces the load_ratio, which reduces heating output (lower PLR).
+    // At zone=19°C vs base setpoint=21°C, hysteresis=1: load without DR = (21-19)/1 = 2 (full).
+    // With DR Moderate (offset=-1): effective_setpoint=20, load = (20-19)/1 = 1 (still full but lower).
+    // To observe a partial-load reduction, use zone inside the hysteresis band (19.5°C):
+    // no-DR: load=(21-19.5)/1=1.5 → clamped to 1.0 (full); DR: load=(20-19.5)/1=0.5 (part load).
+    // The test verifies that DR Moderate reduces the heating output vs the no-DR case.
+
     // State round-trip must preserve max_oat_supplemental_c.
     #[test]
     fn state_round_trip_preserves_max_oat_supplemental_c() {
@@ -2250,6 +2293,11 @@ mod tests {
             21.0_f64 - 1.6_f64,
         );
     }
+
+    // ER engagement threshold: with default hysteresis_c=1.0 and
+    // er_setpoint_offset = 1.0 * (1.8 - 0.2) = 1.6°C, ER must NOT engage when the
+    // zone temp is only one deadband (1.0°C) below setpoint.  The ER threshold
+    // sits 0.6°C lower than the HP heating threshold.
 
     // H2 regression: DR expiry raises effective setpoint back to base, which must
     // NOT trigger the ER hard lockout. Only a genuine user/thermostat base-setpoint

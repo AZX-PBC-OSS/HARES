@@ -286,8 +286,7 @@ fn ev_plug_load_emits_ev_equipment_spec_with_correct_parameters() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-        .expect("resolve equipment");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
     let ev = specs
         .iter()
@@ -320,8 +319,7 @@ fn ev_plug_load_large_kwh_emits_250_mile_range() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-        .expect("resolve equipment");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
     let ev = specs
         .iter()
@@ -352,8 +350,7 @@ fn ev_plug_load_not_emitted_as_scheduled_load() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-        .expect("resolve equipment");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
     // Should NOT produce a ScheduledLoad/MELs entry
     assert!(
@@ -378,8 +375,7 @@ fn whole_building_ventilation_fan_is_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-        .expect("resolve equipment");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
     let fan = specs
         .iter()
@@ -400,8 +396,7 @@ fn exhaust_fan_without_whole_building_flag_is_not_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-        .expect("resolve equipment");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
     assert!(
         !specs.iter().any(|s| s.name == "Ventilation Fan"),
@@ -421,8 +416,7 @@ fn seasonal_cooling_fan_is_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-        .expect("resolve equipment");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
     assert!(
         specs.iter().any(|s| s.name == "Ventilation Fan"),
@@ -770,8 +764,7 @@ fn hvac_capacity_equipment_resolution_stores_kbtu_h() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-        .expect("resolve equipment");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
     let furnace = specs
         .iter()
@@ -800,8 +793,7 @@ fn water_heater_setpoint_equipment_resolution_stores_celsius() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
-        .expect("resolve equipment");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
     let wh = specs
         .iter()

@@ -331,6 +331,7 @@ impl Ev {
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             }],
             telemetry: default_telemetry(charging_level),
             battery_capacity_kwh,
@@ -567,6 +568,35 @@ impl Ev {
         {
             return Err(HaresError::Equipment(
                 "EV randomness parameters are invalid".to_string(),
+            ));
+        }
+
+        self.plug_in_policy = PlugInPolicy::from_config(config);
+        self.plug_in_soc_threshold = config
+            .get_f64(KEY_PLUG_IN_SOC_THRESHOLD)
+            .unwrap_or(DEFAULT_PLUG_IN_SOC_THRESHOLD);
+        if !self.plug_in_soc_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.plug_in_soc_threshold)
+        {
+            return Err(HaresError::Equipment(
+                "EV plug_in_soc_threshold must be finite and within [0, 1]".to_string(),
+            ));
+        }
+        self.v2l_enabled = config.get_bool(KEY_V2L_ENABLED).unwrap_or(false);
+        self.v2l_soc_reserve = config
+            .get_f64(KEY_V2L_SOC_RESERVE)
+            .unwrap_or(DEFAULT_V2L_SOC_RESERVE);
+        if !self.v2l_soc_reserve.is_finite() || !(0.0..=1.0).contains(&self.v2l_soc_reserve) {
+            return Err(HaresError::Equipment(
+                "EV v2l_soc_reserve must be finite and within [0, 1]".to_string(),
+            ));
+        }
+        self.v2l_max_discharge_kw = config
+            .get_f64(KEY_V2L_MAX_DISCHARGE_KW)
+            .unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW);
+        if !self.v2l_max_discharge_kw.is_finite() || self.v2l_max_discharge_kw < 0.0 {
+            return Err(HaresError::Equipment(
+                "EV v2l_max_discharge_kw must be finite and >= 0".to_string(),
             ));
         }
 
@@ -1876,6 +1906,8 @@ mod tests {
                 ghi_w_m2: 0.0,
                 dni_w_m2: 0.0,
                 dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                mains_temp_c: 15.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -2608,6 +2640,7 @@ mod tests {
             "heater should be active"
         );
     }
+
 
     #[test]
     fn deterministic_fuzzing_replays_same_event_sequence_for_same_seed() {

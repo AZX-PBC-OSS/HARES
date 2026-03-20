@@ -608,14 +608,18 @@ fn discover_hvac_capacity_pairs(schema: &Schema) -> Result<Vec<(usize, usize)>, 
 
 /// Relative tolerance for HVAC capacity comparison. Avoids false negatives
 /// at high wattages where the absolute difference may exceed a tiny epsilon.
+/// The `max(1.0)` denominator clamp means this transitions to a near-absolute
+/// tolerance (~1e-6 W) below 1 W capacity, which is acceptable since sub-1W
+/// HVAC capacities are unphysical.
 const HVAC_CAPACITY_REL_TOL: f64 = 1e-6;
 
 fn is_hvac_at_capacity(pairs: &[(&Float64Array, &Float64Array)], row: usize) -> bool {
+    // Column units are watts (e.g. "HVAC Heating Delivered (W)").
     pairs.iter().any(
         |(output, capacity)| match (value_at(output, row), value_at(capacity, row)) {
-            (Some(output_kw), Some(capacity_kw)) if capacity_kw.abs() > EPSILON => {
-                let diff = (output_kw.abs() - capacity_kw.abs()).abs();
-                diff / capacity_kw.abs().max(1.0) < HVAC_CAPACITY_REL_TOL
+            (Some(output_w), Some(capacity_w)) if capacity_w.abs() > EPSILON => {
+                let diff = (output_w.abs() - capacity_w.abs()).abs();
+                diff / capacity_w.abs().max(1.0) < HVAC_CAPACITY_REL_TOL
             }
             _ => false,
         },
@@ -969,7 +973,7 @@ mod tests {
         let mut calc =
             MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
 
-        // Row with output nearly equal to capacity at high wattage (50 kW).
+        // Row with output nearly equal to capacity at high wattage (50,000 W = 50 kW).
         // Difference = 0.00005 W → relative = 0.00005 / 50000 = 1e-9, well within 1e-6.
         let capacity = 50_000.0;
         let output = capacity - 0.00005;

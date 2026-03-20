@@ -290,6 +290,128 @@ pub fn terrain_wind_speed_for_class_typed(
     )
 }
 
+// ---------------------------------------------------------------------------
+// ELA coefficient calculation
+//
+// Walker & Wilson (1998) "Field Validation of Algebraic Equations for Stack
+// and Wind Driven Air Infiltration Calculations", HVAC&R Research.
+// ASHRAE Handbook of Fundamentals 2021, Chapter 16.
+// ---------------------------------------------------------------------------
+
+/// Calculates ELA stack and wind coefficients for a zone, entirely in SI.
+///
+/// Derives `Cs` and `Cw` from the Walker-Wilson (1998) stack and wind shape
+/// factors using the full ASHRAE two-parameter terrain power law.
+///
+/// # Parameters
+/// - `hor_lk_frac`: horizontal leakage fraction (fraction of total leakage in
+///   horizontal surfaces). Walker-Wilson (1998) Table 2:
+///   - 0.0  for conditioned zones (vertical-dominated leakage)
+///   - 0.4  for garages (mixed)
+///   - 0.75 for vented attics (ceiling-dominated leakage)
+/// - `zone_height_m`: zone height [m]
+/// - `zone_height_above_ground_m`: height of zone bottom above ground [m]
+/// - `terrain`: site terrain class for wind speed correction
+/// - `shielding`: shielding coefficient from Walker-Wilson (1998) Table 3:
+///   - 0.10 (well-shielded: dense trees/buildings on all sides)
+///   - 1/6 ≈ 0.167 (normal: typical suburban, default)
+///   - 0.30 (exposed: flat terrain, few obstructions)
+///
+/// # Returns
+/// `(stack_coeff, wind_coeff)` in units compatible with [`ela_infiltration`]:
+/// - stack_coeff: [(L/s)²/(cm⁴·K)]
+/// - wind_coeff: [(L/s)²/(cm⁴·(m/s)²)]
+///
+/// # Derivation
+/// The ELA flow equation is `Q = (ELA_cm²/1000) × √(Cs·|ΔT| + Cw·v²)` [m³/s].
+///
+/// **Stack coefficient:**
+/// `Cs = f_s² × g × H / T_in × 1e-2`
+/// where `f_s = (2/3)(1 + R/2) × √(2·nl·(1-nl)) / (√nl + √(1-nl))` is the
+/// Walker-Wilson stack shape factor, `g = 9.80665 m/s²`, `H` is zone height,
+/// `T_in` is indoor temperature [K], and `1e-2` converts m²/(s²·K) →
+/// (L/s)²/(cm⁴·K) since `1 m² = 1e4 cm²` and `1 L²/cm⁴ = 1e6 cm²`.
+///
+/// **Wind coefficient:**
+/// `Cw = f_w² / 100`
+/// where `f_w = s_g × (1-R)^(1/3) × f_t` is the wind shape factor,
+/// `f_t` is the ASHRAE terrain correction from `terrain_wind_speed()`,
+/// and `/100` converts dimensionless f_w² to (L/s)²/(cm⁴·(m/s)²) units
+/// (proven from the ELA geometry: `Q = ELA_m² × f_w × v` must equal
+/// `(ELA_cm²/1000) × √(Cw × v²)`, requiring `Cw = f_w²/100`).
+pub fn calculate_ela_coefficients(
+    hor_lk_frac: f64,
+    zone_height_m: f64,
+    zone_height_above_ground_m: f64,
+    terrain: TerrainClass,
+    shielding: f64,
+) -> (f64, f64) {
+    /// Standard gravity [m/s²].
+    const G_M_S2: f64 = 9.80665;
+    /// Default assumed indoor temperature [K] (≈ 23 °C / 73.5 °F).
+    const T_IN_K: f64 = 296.15;
+    /// Neutral pressure level fraction [-]. 0.5 is standard for all
+    /// simplified residential models (Walker-Wilson 1998, §3.1).
+    const NL: f64 = 0.5;
+
+    // Stack shape factor f_s (Walker-Wilson 1998, Eq. 12).
+    let f_s = (2.0 / 3.0)
+        * (1.0 + hor_lk_frac / 2.0)
+        * (2.0 * NL * (1.0 - NL)).sqrt()
+        / (NL.sqrt() + (1.0 - NL).sqrt());
+
+    // Stack coefficient [m²/(s²·K)], then ×1e-2 → [(L/s)²/(cm⁴·K)].
+    // Derivation: 1 m² = 1e4 cm²; 1 L²/cm⁴ = 1e6 cm²; so 1 m² = 1e-2 L²/cm⁴.
+    let cs_m2 = f_s * f_s * G_M_S2 * zone_height_m / T_IN_K;
+    let stack_coeff = cs_m2 * 1e-2;
+
+    // Terrain wind speed correction f_t using the full ASHRAE HOF Chapter 16
+    // two-parameter power law — the same model as terrain_wind_speed().
+    // f_t = (δ_met / h_met)^α_met × (H_total / δ_site)^α_site
+    let h_total = (zone_height_m + zone_height_above_ground_m).max(0.1);
+    let f_t = (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
+        * (h_total / terrain.delta_m()).powf(terrain.alpha());
+
+    // Wind shape factor f_w (Walker-Wilson 1998, Eq. 13).
+    let f_w = shielding * (1.0 - hor_lk_frac).powf(1.0 / 3.0) * f_t;
+
+    // Wind coefficient: Cw = f_w² / 100 [(L/s)²/(cm⁴·(m/s)²)].
+    let wind_coeff = f_w * f_w / 100.0;
+
+    (stack_coeff, wind_coeff)
+}
+
+/// Default shielding coefficient for "normal" suburban exposure.
+/// Walker-Wilson (1998) Table 3: s_g = 0.5/3 for "normal" shielding.
+pub const SHIELDING_NORMAL: f64 = 0.5 / 3.0;
+
+/// ELA coefficients for a vented attic zone.
+///
+/// Uses `hor_lk_frac = 0.75` (Walker-Wilson 1998 Table 2: ceiling-dominated
+/// leakage). Terrain and shielding use suburban/normal defaults.
+pub fn attic_ela_coefficients(attic_height_m: f64, building_height_m: f64) -> (f64, f64) {
+    calculate_ela_coefficients(
+        0.75,
+        attic_height_m,
+        building_height_m,
+        TerrainClass::Suburban,
+        SHIELDING_NORMAL,
+    )
+}
+
+/// ELA coefficients for a garage zone at ground level.
+///
+/// Uses `hor_lk_frac = 0.4` (Walker-Wilson 1998 Table 2: mixed leakage).
+pub fn garage_ela_coefficients(garage_height_m: f64) -> (f64, f64) {
+    calculate_ela_coefficients(
+        0.4,
+        garage_height_m,
+        0.0,
+        TerrainClass::Suburban,
+        SHIELDING_NORMAL,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,5 +752,97 @@ mod tests {
             q_large > q_small,
             "larger zone-outdoor delta must increase nat vent: q_small={q_small:.6}, q_large={q_large:.6}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ELA coefficient calculation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ela_coefficients_attic_produces_positive_values() {
+        let (stack, wind) = super::calculate_ela_coefficients(
+            0.75, 1.5, 5.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        assert!(stack > 0.0, "attic stack_coeff must be positive: {stack}");
+        assert!(wind > 0.0, "attic wind_coeff must be positive: {wind}");
+    }
+
+    #[test]
+    fn ela_coefficients_garage_produces_positive_values() {
+        let (stack, wind) = super::garage_ela_coefficients(2.5);
+        assert!(stack > 0.0, "garage stack_coeff must be positive: {stack}");
+        assert!(wind > 0.0, "garage wind_coeff must be positive: {wind}");
+    }
+
+    #[test]
+    fn ela_coefficients_conditioned_zero_hor_lk_frac() {
+        let (stack, wind) = super::calculate_ela_coefficients(
+            0.0, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        assert!(stack > 0.0, "conditioned stack_coeff must be positive: {stack}");
+        assert!(wind > 0.0, "conditioned wind_coeff must be positive: {wind}");
+    }
+
+    #[test]
+    fn ela_coefficients_higher_hor_lk_frac_increases_stack() {
+        let (stack_low, _) = super::calculate_ela_coefficients(
+            0.0, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        let (stack_high, _) = super::calculate_ela_coefficients(
+            0.75, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        assert!(
+            stack_high > stack_low,
+            "higher hor_lk_frac should increase stack_coeff: low={stack_low}, high={stack_high}"
+        );
+    }
+
+    #[test]
+    fn ela_coefficients_higher_hor_lk_frac_decreases_wind() {
+        let (_, wind_low) = super::calculate_ela_coefficients(
+            0.75, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        let (_, wind_high) = super::calculate_ela_coefficients(
+            0.0, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        assert!(
+            wind_high > wind_low,
+            "lower hor_lk_frac should increase wind_coeff: hor0={wind_high}, hor075={wind_low}"
+        );
+    }
+
+    #[test]
+    fn attic_ela_convenience_matches_raw() {
+        let (s1, w1) = super::attic_ela_coefficients(1.5, 5.0);
+        let (s2, w2) = super::calculate_ela_coefficients(
+            0.75, 1.5, 5.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        approx_eq(s1, s2, 1e-15);
+        approx_eq(w1, w2, 1e-15);
+    }
+
+    #[test]
+    fn garage_ela_convenience_matches_raw() {
+        let (s1, w1) = super::garage_ela_coefficients(2.5);
+        let (s2, w2) = super::calculate_ela_coefficients(
+            0.4, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        approx_eq(s1, s2, 1e-15);
+        approx_eq(w1, w2, 1e-15);
+    }
+
+    #[test]
+    fn ela_stack_coeff_matches_ashrae_hof_derivation() {
+        // For nl=0.5, hor_lk_frac=0.0, H=2.5m:
+        // f_s = (2/3)(1+0/2) × √(2×0.5×0.5) / (√0.5 + √0.5)
+        //     = (2/3) × √0.5 / (2×√0.5) = (2/3) × 0.5 = 1/3
+        // Cs_m2 = (1/3)² × 9.80665 × 2.5 / 296.15 = 0.009199...
+        // stack_coeff = 0.009199... × 1e-2 = 9.199e-5
+        let (stack, _) = super::calculate_ela_coefficients(
+            0.0, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+        );
+        let f_s = 1.0 / 3.0;
+        let expected = f_s * f_s * 9.80665 * 2.5 / 296.15 * 1e-2;
+        approx_eq(stack, expected, 1e-10);
     }
 }

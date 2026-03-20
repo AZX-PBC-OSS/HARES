@@ -181,7 +181,13 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
                 continue;
             }
         };
-        let equipment = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))?;
+        let equipment = match resolve_equipment(&building, &DefaultsStore::empty(), &json!({})) {
+            Ok(specs) => specs,
+            Err(err) => {
+                failures.push(format!("fixture={} equipment resolution failed: {err}", fixture_id));
+                continue;
+            }
+        };
         let equipment_names: Vec<String> = equipment.iter().map(|spec| spec.name.clone()).collect();
 
         if let Some(expected_count) = expectations.equipment_count

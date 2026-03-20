@@ -2,6 +2,7 @@
 
 pub mod checkpoint;
 pub mod clock;
+pub mod diagnostics;
 pub mod dwelling;
 pub mod engine;
 pub mod environment;

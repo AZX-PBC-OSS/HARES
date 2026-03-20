@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use hares_types::FuelType;
 use serde_json::{Map, Value, json};
 
-use super::building::{Building, XmlNode};
+use super::HpxmlError;
+use super::building::{Building, DuctLocation, XmlNode, ZoneType};
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
 use crate::defaults::{DefaultsStore, ZipParameters};
 use crate::draw_profile::{DistributionSystem, FixtureEfficiency, combined_daily_hot_water_l};
@@ -29,11 +30,11 @@ pub fn resolve_equipment(
     building: &Building,
     defaults: &DefaultsStore,
     overrides: &Value,
-) -> Vec<EquipmentSpec> {
+) -> std::result::Result<Vec<EquipmentSpec>, HpxmlError> {
     let mut specs = Vec::new();
     let details = &building.details_xml;
 
-    resolve_hvac(building, defaults, &mut specs);
+    resolve_hvac(building, defaults, &mut specs)?;
     resolve_water_heaters(details, defaults, &mut specs);
     resolve_pv(details, defaults, &mut specs);
     resolve_batteries(details, defaults, &mut specs);
@@ -42,7 +43,7 @@ pub fn resolve_equipment(
     resolve_ventilation(details, defaults, &mut specs);
 
     apply_overrides(&mut specs, overrides);
-    specs
+    Ok(specs)
 }
 
 pub fn nested_update(base: &mut Map<String, Value>, overrides: &Map<String, Value>) {
@@ -79,15 +80,81 @@ fn apply_overrides(specs: &mut [EquipmentSpec], overrides: &Value) {
     }
 }
 
-fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
+/// Compute simplified ASHRAE 152 Distribution System Efficiency from parsed duct data.
+///
+/// Scans `building.zones` for the first non-conditioned zone containing duct systems
+/// and returns `(duct_dse, duct_zone_index)` params for injection into HVAC equipment
+/// configs. The zone index is 1-based (matching `ZoneId(u16)`).
+///
+/// Simplified DSE per OCHRE:
+///   DSE = 1 - leakage_loss - conduction_loss
+///
+/// - leakage_loss: `leakage_fraction * 0.5` (half supply, half return averaging)
+/// - conduction_loss: `surface_area_m2 / (r_value_m2_k_w * conditioned_volume_m3)`
+///   scaled by an assumed delta-T ratio of 0.1 (10% of conditioned-to-duct temp difference).
+///   Only applied when both surface area and R-value are available.
+fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
+    let mut params = Map::new();
+
+    let conditioned_volume_m3 = building.conditioned_volume_m3.unwrap_or(0.0);
+
+    for (zone_idx, zone) in building.zones.iter().enumerate() {
+        if matches!(zone.zone_type, ZoneType::Conditioned) {
+            continue;
+        }
+
+        for duct in &zone.duct_systems {
+            if matches!(duct.location, DuctLocation::InsideConditionedSpace) {
+                continue;
+            }
+
+            let mut dse = 1.0_f64;
+
+            // Leakage loss: half-split between supply and return
+            if let Some(leak) = duct.leakage_fraction {
+                dse -= leak * 0.5;
+            }
+
+            // Conduction loss from duct surface area and R-value
+            if let Some(area_m2) = duct.surface_area_m2 {
+                if let Some(r_val) = duct.insulation_r_value_m2_k_w {
+                    if r_val > 0.0 && conditioned_volume_m3 > 0.0 {
+                        // UA = area / R-value [W/K]. Normalize by a reference capacity
+                        // derived from house volume (rough proxy for system size).
+                        // Factor 0.1 accounts for seasonal avg delta-T fraction.
+                        let ua_w_k = area_m2 / r_val;
+                        let ref_capacity_w = conditioned_volume_m3 * 40.0; // ~40 W/m3 sizing rule
+                        let conduction_loss = (ua_w_k * 10.0) / ref_capacity_w; // delta-T ~10K
+                        dse -= conduction_loss;
+                    }
+                }
+            }
+
+            dse = dse.clamp(0.3, 1.0);
+
+            if dse < 1.0 {
+                params.insert("duct_dse".to_string(), json!(dse));
+                // zone_idx is 0-based; ZoneId is 1-based
+                let zone_id = (zone_idx as u16) + 1;
+                params.insert("duct_zone_id".to_string(), json!(zone_id));
+                return params;
+            }
+        }
+    }
+
+    params
+}
+
+fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) -> std::result::Result<(), HpxmlError> {
     let details = &building.details_xml;
     let Some(hvac) = details.path(&["Systems", "HVAC"]) else {
-        return;
+        return Ok(());
     };
 
     // Parse thermostat setpoints from HVACControl for injection into HVAC equipment configs.
     // Each HVAC equipment self-manages its setpoint schedule using these 24h arrays.
     let setpoint_params = parse_hvac_setpoint_params(details);
+    let duct_params = compute_duct_dse_params(building);
 
     for heating in descendants_named(hvac, "HeatingSystem") {
         let fuel = parse_fuel(
@@ -95,7 +162,10 @@ fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<E
                 .as_deref()
                 .or(child_text(heating, "FuelType").as_deref()),
         );
-        let system_type = parse_named_type(heating, "HeatingSystemType").unwrap_or_default();
+        let system_type = parse_named_type(heating, "HeatingSystemType")
+            .ok_or_else(|| HpxmlError::Parse(
+                "HeatingSystem is missing required HeatingSystemType element".into(),
+            ))?;
         let name = canonical_hvac_heating_name(&system_type, fuel);
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, heating, "HeatingCapacity");
@@ -124,6 +194,9 @@ fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<E
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
+        for (k, v) in &duct_params {
+            params.insert(k.clone(), v.clone());
+        }
         specs.push(build_spec(name, fuel, params, defaults));
     }
 
@@ -133,7 +206,10 @@ fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<E
                 .as_deref()
                 .or(Some("electricity")),
         );
-        let system_type = child_text(cooling, "CoolingSystemType").unwrap_or_default();
+        let system_type = child_text(cooling, "CoolingSystemType")
+            .ok_or_else(|| HpxmlError::Parse(
+                "CoolingSystem is missing required CoolingSystemType element".into(),
+            ))?;
         let name = canonical_hvac_cooling_name(&system_type, fuel);
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, cooling, "CoolingCapacity");
@@ -170,12 +246,19 @@ fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<E
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
+        if name != "Room Air Conditioner" {
+            for (k, v) in &duct_params {
+                params.insert(k.clone(), v.clone());
+            }
+        }
         specs.push(build_spec(name, fuel, params, defaults));
     }
 
     for heat_pump in descendants_named(hvac, "HeatPump") {
         let heat_pump_type = child_text(heat_pump, "HeatPumpType")
-            .unwrap_or_default()
+            .ok_or_else(|| HpxmlError::Parse(
+                "HeatPump is missing required HeatPumpType element".into(),
+            ))?
             .to_ascii_lowercase();
 
         let split = match heat_pump_type.as_str() {
@@ -273,6 +356,11 @@ fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<E
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
+        if heat_pump_type != "mini-split" {
+            for (k, v) in &duct_params {
+                params.insert(k.clone(), v.clone());
+            }
+        }
 
         if let Some((heater_name, cooler_name)) = split {
             let mut heater_params = params.clone();
@@ -296,6 +384,7 @@ fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<E
     }
 
     inject_setpoint_profiles(building, specs);
+    Ok(())
 }
 
 fn is_heating_equipment(name: &str) -> bool {
@@ -790,6 +879,7 @@ fn resolve_scheduled_loads(
                         if let Some(imef) = child_f64(node, "IntegratedModifiedEnergyFactor") {
                             params.insert("imef".to_string(), json!(imef));
                         }
+                        params.insert("hot_water_draw_volume_l".to_string(), json!(15.0));
                     }
                     "ClothesDryer" => {
                         if let Some(cef) = child_f64(node, "CombinedEnergyFactor") {
@@ -809,6 +899,7 @@ fn resolve_scheduled_loads(
                         if let Some(usage) = child_f64(node, "LabelUsage") {
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
                         }
+                        params.insert("hot_water_draw_volume_l".to_string(), json!(6.0));
                     }
                     _ => {}
                 }
@@ -1084,13 +1175,25 @@ fn resolve_ventilation(
             params.insert("power_w".to_string(), json!(power_w));
         }
         if let Some(fan_type) = child_text(fan, "FanType") {
+            // OCHRE hpxml.py:556: balanced = fan_type in ["energy recovery ventilator",
+            // "heat recovery ventilator", "balanced"]
+            let ft_lower = fan_type.to_ascii_lowercase();
+            let balanced = matches!(
+                ft_lower.as_str(),
+                "energy recovery ventilator" | "heat recovery ventilator" | "balanced"
+            );
             params.insert("fan_type".to_string(), Value::String(fan_type));
+            params.insert("balanced".to_string(), json!(balanced));
         }
-        if let Some(eff) = child_f64(fan, "SensibleRecoveryEfficiency") {
-            params.insert("sensible_recovery_efficiency".to_string(), json!(eff));
+        let sensible_re = child_f64(fan, "SensibleRecoveryEfficiency").unwrap_or(0.0);
+        let total_re = child_f64(fan, "TotalRecoveryEfficiency").unwrap_or(0.0);
+        if sensible_re > 0.0 {
+            params.insert("sensible_recovery_efficiency".to_string(), json!(sensible_re));
         }
-        if let Some(eff) = child_f64(fan, "TotalRecoveryEfficiency") {
-            params.insert("total_recovery_efficiency".to_string(), json!(eff));
+        // OCHRE hpxml.py:560: latent_recovery = total_recovery - sensible_recovery
+        let latent_re = (total_re - sensible_re).max(0.0);
+        if latent_re > 0.0 {
+            params.insert("latent_recovery_efficiency".to_string(), json!(latent_re));
         }
         if !params.is_empty() {
             specs.push(build_spec(
@@ -1100,6 +1203,31 @@ fn resolve_ventilation(
                 defaults,
             ));
         }
+    }
+}
+
+/// Default sensible and latent gain fractions per equipment name, matching OCHRE defaults.
+/// Returns `(sensible, latent)`.
+fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<(f64, f64)> {
+    match name {
+        // OCHRE hpxml.py:1461-1472: gas range sensible ~0.64 (0.80 × 0.7942),
+        // electric range sensible ~0.72 (0.80 × 0.90). Latent ~0.16.
+        "Cooking Range" => {
+            if fuel_type == FuelType::Gas {
+                Some((0.64, 0.16))
+            } else {
+                Some((0.72, 0.08))
+            }
+        }
+        "Clothes Dryer" => Some((0.15, 0.05)),
+        "Clothes Washer" => Some((0.80, 0.00)),
+        "Dishwasher" => Some((0.60, 0.15)),
+        "Refrigerator" | "Freezer" => Some((1.00, 0.00)),
+        "MELs" | "Plug Loads" | "TV" => Some((0.73, 0.02)),
+        "Indoor Lighting" | "Exterior Lighting" | "Basement Lighting" | "Garage Lighting"
+        | "Lighting" | "Gas Lighting" => Some((0.70, 0.00)),
+        "Ceiling Fan" | "Ventilation Fan" => Some((1.00, 0.00)),
+        _ => None,
     }
 }
 
@@ -1113,6 +1241,21 @@ fn build_spec(
         "fuel_type".to_string(),
         Value::String(format!("{fuel_type:?}")),
     );
+
+    // Inject OCHRE-compatible default gain fractions when HPXML did not provide them.
+    if !parameters.contains_key("frac_sensible")
+        && !parameters.contains_key("sensible_gain_fraction")
+    {
+        if let Some((sensible, latent)) = default_gain_fractions(&name, fuel_type) {
+            parameters.insert("sensible_gain_fraction".to_string(), json!(sensible));
+            if !parameters.contains_key("frac_latent")
+                && !parameters.contains_key("latent_gain_fraction")
+            {
+                parameters.insert("latent_gain_fraction".to_string(), json!(latent));
+            }
+        }
+    }
+
     let zip_params = defaults.zip_params(&name).cloned();
 
     EquipmentSpec {
@@ -1892,7 +2035,7 @@ mod tests {
 "#;
 
         let building = parse_building(xml).expect("building should parse");
-        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
         assert!(resolved.iter().any(|s| s.name == "ASHP Heater"));
         assert!(resolved.iter().any(|s| s.name == "ASHP Cooler"));
@@ -1924,7 +2067,7 @@ mod tests {
 "#;
 
         let building = parse_building(xml).expect("building should parse");
-        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let resolved = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
 
         assert!(resolved.iter().any(|s| s.name == "MSHP Heater"));
         assert!(resolved.iter().any(|s| s.name == "MSHP Cooler"));
@@ -1970,7 +2113,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}));
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -1991,7 +2134,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}));
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -2012,7 +2155,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}));
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -2035,7 +2178,7 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}));
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -2053,7 +2196,7 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}));
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -2071,7 +2214,7 @@ mod tests {
         </CoolingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}));
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
         let ac = specs
             .iter()
             .find(|s| s.name == "Air Conditioner")
@@ -2092,7 +2235,7 @@ mod tests {
         </HeatPump>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &repo_defaults(), &json!({}));
+        let specs = resolve_equipment(&building, &repo_defaults(), &json!({})).expect("resolve_equipment");
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
@@ -2145,7 +2288,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
         let wh = specs
             .iter()
             .find(|s| s.name == "Electric Resistance Water Heater")
@@ -2180,7 +2323,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
         let wh = specs
             .iter()
             .find(|s| s.name == "Gas Water Heater")
@@ -2213,7 +2356,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
         let wh = specs
             .iter()
             .find(|s| s.name == "Heat Pump Water Heater")
@@ -2245,7 +2388,7 @@ mod tests {
         </Batteries>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
         let battery = specs
             .iter()
             .find(|s| s.name == "Battery")
@@ -2285,7 +2428,7 @@ mod tests {
         </Batteries>"#
         ));
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
         let battery = specs
             .iter()
             .find(|s| s.name == "Battery")
@@ -2317,7 +2460,7 @@ mod tests {
         </ElectricVehicles>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
         let ev = specs
             .iter()
             .find(|s| s.name == "Electric Vehicle")
@@ -2363,7 +2506,7 @@ mod tests {
         </WaterHeating>"#,
         );
         let building = parse_building(&xml).expect("should parse");
-        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}));
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
         let wh = specs
             .iter()
             .find(|s| s.name == "Gas Water Heater")
@@ -2374,6 +2517,149 @@ mod tests {
         assert!(
             !wh.parameters.contains_key("ua_w_per_k"),
             "gas WH without capacity must not produce ua_w_per_k"
+        );
+    }
+
+    fn hvac_with_ducts_xml(hvac_inner: &str) -> String {
+        format!(
+            r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea>1500</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">12000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Attics><Attic><FloorArea units="ft2">500</FloorArea></Attic></Attics>
+      </Enclosure>
+      <Systems>
+        <HVAC>
+          <HVACDistribution>
+            <DuctSystem>
+              <SystemIdentifier id="Duct1"/>
+              <LeakageFraction>0.10</LeakageFraction>
+              <DuctInsulationRValue units="hr-ft2-F/BTU">6</DuctInsulationRValue>
+              <DuctSurfaceArea units="ft2">150</DuctSurfaceArea>
+              <DuctLocation>attic vented</DuctLocation>
+            </DuctSystem>
+          </HVACDistribution>
+          {hvac_inner}
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#
+        )
+    }
+
+    #[test]
+    fn duct_dse_injected_into_furnace_from_attic_ducts() {
+        let xml = hvac_with_ducts_xml(
+            r#"<HeatingSystem>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <HeatingCapacity>60000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>0.92</Value></AnnualHeatingEfficiency>
+            </HeatingSystem>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
+        let furnace = specs
+            .iter()
+            .find(|s| s.name == "Gas Furnace")
+            .expect("Gas Furnace spec must be present");
+
+        let dse = furnace
+            .parameters
+            .get("duct_dse")
+            .and_then(Value::as_f64)
+            .expect("duct_dse must be set");
+        assert!(dse < 1.0, "DSE must be less than 1.0 with attic ducts, got {dse}");
+        assert!(dse > 0.3, "DSE must be reasonable, got {dse}");
+
+        assert!(
+            furnace.parameters.contains_key("duct_zone_id"),
+            "duct_zone_id must be set for non-conditioned duct location"
+        );
+    }
+
+    #[test]
+    fn duct_dse_injected_into_ashp_from_attic_ducts() {
+        let xml = hvac_with_ducts_xml(
+            r#"<HeatPump>
+              <HeatPumpType>air-to-air</HeatPumpType>
+              <HeatingCapacity>36000</HeatingCapacity>
+              <CoolingCapacity>36000</CoolingCapacity>
+            </HeatPump>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
+
+        let heater = specs
+            .iter()
+            .find(|s| s.name == "ASHP Heater")
+            .expect("ASHP Heater");
+        let dse = heater
+            .parameters
+            .get("duct_dse")
+            .and_then(Value::as_f64)
+            .expect("duct_dse must be set on ASHP Heater");
+        assert!(dse < 1.0 && dse > 0.3, "DSE {dse} out of expected range");
+
+        let cooler = specs
+            .iter()
+            .find(|s| s.name == "ASHP Cooler")
+            .expect("ASHP Cooler");
+        assert!(
+            cooler.parameters.contains_key("duct_dse"),
+            "ASHP Cooler must also have duct_dse"
+        );
+    }
+
+    #[test]
+    fn mshp_does_not_get_duct_dse() {
+        let xml = hvac_with_ducts_xml(
+            r#"<HeatPump>
+              <HeatPumpType>mini-split</HeatPumpType>
+              <HeatingCapacity>24000</HeatingCapacity>
+              <CoolingCapacity>24000</CoolingCapacity>
+            </HeatPump>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
+
+        let heater = specs
+            .iter()
+            .find(|s| s.name == "MSHP Heater")
+            .expect("MSHP Heater");
+        assert!(
+            !heater.parameters.contains_key("duct_dse"),
+            "mini-split must not have duct_dse"
+        );
+    }
+
+    #[test]
+    fn no_duct_data_means_no_duct_dse_in_params() {
+        let xml = minimal_hvac_xml(
+            r#"<HeatingSystem>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <HeatingCapacity>60000</HeatingCapacity>
+            </HeatingSystem>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
+        let furnace = specs
+            .iter()
+            .find(|s| s.name == "Gas Furnace")
+            .expect("Gas Furnace");
+        assert!(
+            !furnace.parameters.contains_key("duct_dse"),
+            "without duct data, duct_dse must not be injected"
         );
     }
 }

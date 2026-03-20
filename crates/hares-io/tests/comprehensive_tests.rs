@@ -295,10 +295,10 @@ fn gas_annual_energy_therms_is_non_none_with_gas_column() {
     let metrics = calc.finish();
 
     assert!(
-        metrics.annual_energy_kwh.total_gas_therms.is_some(),
-        "gas_annual_energy_therms must be Some when gas column is present"
+        metrics.gas_energy.is_some(),
+        "gas_energy must be Some when gas column is present"
     );
-    let gas_therms = metrics.annual_energy_kwh.total_gas_therms.unwrap();
+    let gas_therms = metrics.gas_energy.as_ref().unwrap().total_therms;
     assert!(
         (gas_therms - 2.0).abs() < 1e-9,
         "gas energy should be 2.0 therms (0.5 + 1.5) * 1h, got {gas_therms}"
@@ -318,9 +318,10 @@ fn total_energy_includes_both_electric_and_gas() {
     ]));
     let metrics = calc.finish();
 
-    let electric_kwh = metrics.annual_energy_kwh.total_electric_kwh;
-    let gas_therms = metrics.annual_energy_kwh.total_gas_therms.unwrap();
-    let combined = metrics.annual_energy_kwh.combined_total_kwh;
+    let electric_kwh = metrics.annual_energy_kwh.total;
+    let gas = metrics.gas_energy.as_ref().unwrap();
+    let gas_therms = gas.total_therms;
+    let combined = electric_kwh + gas.total_kwh_equivalent;
 
     // combined = electric_kwh + gas_therms * 29.3001
     let expected_combined = electric_kwh + gas_therms * 29.3001;

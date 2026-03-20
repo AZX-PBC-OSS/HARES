@@ -89,6 +89,18 @@ pub struct Boundary {
     /// When true, longwave emissivity should be set to [`EMISSIVITY_RADIANT_BARRIER`]
     /// (0.05) rather than the default 0.90.  Applies to roof/attic boundary types.
     pub has_radiant_barrier: bool,
+    /// Solar absorptance [-] from HPXML `<SolarAbsorptance>`.
+    ///
+    /// `None` means use the default: 0.60 for most surfaces, 0.05 for attic
+    /// radiant barriers.  Ref: OCHRE `Envelope.py:222`.
+    /// Valid range: 0.0–1.0.
+    pub solar_absorptance: Option<f64>,
+    /// Longwave emittance [-] from HPXML `<Emittance>`.
+    ///
+    /// `None` means use the default: 0.90 for most surfaces, 0.05 for attic
+    /// radiant barriers.  Ref: OCHRE `Envelope.py:222`.
+    /// Valid range: 0.0–1.0.
+    pub emittance: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +110,10 @@ pub struct Window {
     pub azimuth_deg: Option<f64>,
     pub u_factor_w_m2_k: Option<f64>,
     pub shgc: Option<f64>,
+    /// Interior shading transmittance multiplier applied to SHGC.
+    /// Per ANSI/RESNET/ICC 301: `effective_shgc = shgc * interior_shading_fraction`.
+    /// A value of 0.70 means 70% of solar passes through (30% blocked).
+    pub interior_shading_fraction: f64,
     pub frame_type: Option<String>,
     pub attached_to_wall_id: Option<String>,
 }
@@ -122,8 +138,12 @@ pub struct DuctSystem {
 pub struct Zone {
     pub zone_type: ZoneType,
     pub floor_area_m2: Option<f64>,
+    pub volume_m3: Option<f64>,
     pub attached_wall_ids: Vec<String>,
     pub duct_systems: Vec<DuctSystem>,
+    pub vented: bool,
+    pub ventilation_ach: Option<f64>,
+    pub ventilation_sla: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +164,8 @@ pub struct Building {
     pub cooling_weekend_setpoints_c: Option<Vec<f64>>,
     pub battery_round_trip_efficiency: Option<f64>,
     pub pv_tilt_deg: Option<f64>,
+    pub conditioned_volume_m3: Option<f64>,
+    pub ceiling_height_m: Option<f64>,
     pub details_xml: XmlNode,
 }
 
@@ -325,6 +347,15 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
         .path(&["BuildingConstruction", "ConditionedFloorArea"])
         .and_then(|node| parse_value_with_units(Some(node), ValueKind::Area));
 
+    let conditioned_volume_m3 = summary
+        .path(&["BuildingConstruction", "ConditionedBuildingVolume"])
+        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Volume));
+
+    let ceiling_height_m = match (conditioned_volume_m3, conditioned_floor_area_m2) {
+        (Some(vol), Some(area)) if area > 0.0 => Some(vol / area),
+        _ => None,
+    };
+
     let mut boundaries = parse_boundaries(details)?;
     let windows = parse_windows(details, &mut boundaries)?;
 
@@ -334,6 +365,15 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
 
     let mut zones_vec: Vec<Zone> = zones.into_values().collect();
     zones_vec.sort_by_key(|zone| zone_sort_key(&zone.zone_type));
+
+    // Assign volume to conditioned zones only; unconditioned zones (attic, garage,
+    // foundation) have distinct geometry that requires separate resolution.
+    let default_height_m = ceiling_height_m.unwrap_or(2.5);
+    for zone in &mut zones_vec {
+        if zone.zone_type == ZoneType::Conditioned {
+            zone.volume_m3 = zone.floor_area_m2.map(|a| a * default_height_m);
+        }
+    }
 
     Ok(Building {
         site: Site {
@@ -385,6 +425,8 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
             ValueKind::Raw,
         ),
         pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw),
+        conditioned_volume_m3,
+        ceiling_height_m,
         details_xml: details.clone(),
     })
 }
@@ -438,6 +480,7 @@ fn parse_boundaries(details: &XmlNode) -> Result<Vec<Boundary>, HpxmlError> {
         ("Walls", "Wall", BoundaryType::Wall),
         ("Roofs", "Roof", BoundaryType::Roof),
         ("Floors", "Floor", BoundaryType::Floor),
+        ("FrameFloors", "FrameFloor", BoundaryType::Floor),
         ("Doors", "Door", BoundaryType::Door),
         ("RimJoists", "RimJoist", BoundaryType::RimJoist),
         (
@@ -491,6 +534,19 @@ fn parse_windows(
         let azimuth_deg = parse_value_with_units(window.child("Azimuth"), ValueKind::Raw);
         let u_factor_w_m2_k = parse_value_with_units(window.child("UFactor"), ValueKind::UValue);
         let shgc = window.child("SHGC").and_then(XmlNode::text_as_f64);
+
+        // InteriorShading/SummerShadingCoefficient is a transmittance multiplier
+        // per ANSI/RESNET/ICC 301-2019 Table 4.2.2(1). Default 0.70 when
+        // InteriorShading present but coefficient absent; 1.0 when absent entirely.
+        let interior_shading_fraction = match window.child("InteriorShading") {
+            Some(shading) => shading
+                .child("SummerShadingCoefficient")
+                .and_then(XmlNode::text_as_f64)
+                .unwrap_or(0.70)
+                .clamp(0.0, 1.0),
+            None => 1.0,
+        };
+
         let frame_type = window.child("FrameType").map(|n| n.text.trim().to_string());
         let attached_to_wall_id = window
             .child("AttachedToWall")
@@ -502,6 +558,7 @@ fn parse_windows(
             azimuth_deg,
             u_factor_w_m2_k,
             shgc,
+            interior_shading_fraction,
             frame_type,
             attached_to_wall_id,
         });
@@ -514,12 +571,15 @@ fn parse_windows(
             assembly_r_value_m2_k_w: None,
             r_value_layers_m2_k_w: Vec::new(),
             interior_zone: parse_zone_ref(window.child("InteriorAdjacentTo")),
-            exterior_zone: parse_zone_ref(window.child("ExteriorAdjacentTo")),
+            exterior_zone: parse_zone_ref(window.child("ExteriorAdjacentTo"))
+                .or_else(|| infer_exterior_zone(&BoundaryType::Window)),
             material_layers: Vec::new(),
             construction_type: None,
             finish_type: None,
             insulation_details: None,
             has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
         });
     }
 
@@ -538,6 +598,19 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         .first_descendant("RadiantBarrier")
         .map(|n| n.text.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+
+    // Solar absorptance and emittance from HPXML, validated to [0, 1].
+    // Ref: OCHRE hpxml.py:155-158, OCHRE Envelope.py:222.
+    let solar_absorptance = parse_value_with_units(
+        node.child("SolarAbsorptance"),
+        ValueKind::Raw,
+    )
+    .map(|v| v.clamp(0.0, 1.0));
+    let emittance = parse_value_with_units(
+        node.child("Emittance"),
+        ValueKind::Raw,
+    )
+    .map(|v| v.clamp(0.0, 1.0));
 
     // Extract construction metadata for OCHRE LUT matching.
     let (construction_type, finish_type) = extract_construction_metadata(node, &boundary_type);
@@ -561,6 +634,8 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         finish_type,
         insulation_details,
         has_radiant_barrier,
+        solar_absorptance,
+        emittance,
     })
 }
 
@@ -613,8 +688,12 @@ fn boundary_type_label(boundary_type: &BoundaryType) -> &str {
 /// exterior adjacency (e.g. Roof → outdoor, Slab → ground).
 fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
     match boundary_type {
-        BoundaryType::Roof | BoundaryType::RimJoist => Some(ZoneType::Outdoor),
+        BoundaryType::Roof | BoundaryType::RimJoist | BoundaryType::Window => {
+            Some(ZoneType::Outdoor)
+        }
         BoundaryType::Slab => Some(ZoneType::Outdoor), // ground handled later by resolve_exterior
+        // Floor/FrameFloor: HPXML requires <ExteriorAdjacentTo>, so exterior
+        // zone is always parsed from the element rather than inferred here.
         _ => None,
     }
 }
@@ -727,6 +806,37 @@ fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Vec<MaterialLayer> {
     layers
 }
 
+/// Parse `<VentilationRate>` from an attic or foundation HPXML node.
+///
+/// Returns `(ventilation_ach, ventilation_sla)` based on the `UnitofMeasure` attribute.
+fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
+    let Some(vr) = node.child("VentilationRate") else {
+        return (None, None);
+    };
+    let value = vr.text_as_f64();
+    let unit = vr
+        .attrs
+        .get("UnitofMeasure")
+        .or_else(|| vr.attrs.get("unitofmeasure"))
+        .map(|s| s.trim().to_ascii_lowercase());
+    match (value, unit.as_deref()) {
+        (Some(v), Some("achnatural")) => (Some(v), None),
+        (Some(v), Some("sla")) => (None, Some(v)),
+        _ => {
+            // If there's a Value child element, try that path too
+            let value_node = vr.child("Value").and_then(|n| n.text_as_f64());
+            let unit_node = vr
+                .child("UnitofMeasure")
+                .map(|n| n.text.trim().to_ascii_lowercase());
+            match (value_node, unit_node.as_deref()) {
+                (Some(v), Some("achnatural")) => (Some(v), None),
+                (Some(v), Some("sla")) => (None, Some(v)),
+                _ => (None, None),
+            }
+        }
+    }
+}
+
 fn build_zone_map(
     details: &XmlNode,
     conditioned_floor_area_m2: Option<f64>,
@@ -738,8 +848,12 @@ fn build_zone_map(
         Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: conditioned_floor_area_m2,
+            volume_m3: None,
             attached_wall_ids: Vec::new(),
             duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
         },
     );
 
@@ -748,35 +862,91 @@ fn build_zone_map(
         Zone {
             zone_type: ZoneType::Outdoor,
             floor_area_m2: None,
+            volume_m3: None,
             attached_wall_ids: Vec::new(),
             duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
         },
     );
 
-    let candidates = [
-        ("Attics", "Attic", ZoneType::Attic, "attic"),
-        ("Garages", "Garage", ZoneType::Garage, "garage"),
-        (
-            "Foundations",
-            "Foundation",
-            ZoneType::Foundation,
-            "foundation",
-        ),
-    ];
-
     if let Some(enclosure) = details.child("Enclosure") {
-        for (container, item_name, zone_type, key) in candidates {
-            if let Some(group) = enclosure.child(container) {
-                for node in group.children_named(item_name) {
-                    let floor_area_m2 =
-                        parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
-                    zones.entry(key.to_string()).or_insert(Zone {
-                        zone_type: zone_type.clone(),
-                        floor_area_m2,
-                        attached_wall_ids: Vec::new(),
-                        duct_systems: Vec::new(),
-                    });
-                }
+        // Attics
+        if let Some(group) = enclosure.child("Attics") {
+            for node in group.children_named("Attic") {
+                let floor_area_m2 =
+                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
+
+                // Parse vented status from <AtticType><Attic><Vented>
+                let vented = node
+                    .child("AtticType")
+                    .and_then(|at| at.children.first())
+                    .and_then(|child| child.child("Vented"))
+                    .map(|v| v.text.trim().eq_ignore_ascii_case("true"))
+                    .unwrap_or(true); // default vented for attics
+
+                let (ventilation_ach, ventilation_sla) = parse_ventilation_rate(node);
+
+                zones.entry("attic".to_string()).or_insert(Zone {
+                    zone_type: ZoneType::Attic,
+                    floor_area_m2,
+                    volume_m3: None,
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented,
+                    ventilation_ach,
+                    ventilation_sla,
+                });
+            }
+        }
+
+        // Garages
+        if let Some(group) = enclosure.child("Garages") {
+            for node in group.children_named("Garage") {
+                let floor_area_m2 =
+                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
+                zones.entry("garage".to_string()).or_insert(Zone {
+                    zone_type: ZoneType::Garage,
+                    floor_area_m2,
+                    volume_m3: None,
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                });
+            }
+        }
+
+        // Foundations
+        if let Some(group) = enclosure.child("Foundations") {
+            for node in group.children_named("Foundation") {
+                let floor_area_m2 =
+                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area);
+
+                // Determine vented status from <FoundationType> child tag name
+                let vented = node
+                    .child("FoundationType")
+                    .and_then(|ft| ft.children.first())
+                    .map(|child| {
+                        let name = child.name.to_ascii_lowercase();
+                        name.contains("vented") && !name.contains("unvented")
+                    })
+                    .unwrap_or(false);
+
+                let (ventilation_ach, ventilation_sla) = parse_ventilation_rate(node);
+
+                zones.entry("foundation".to_string()).or_insert(Zone {
+                    zone_type: ZoneType::Foundation,
+                    floor_area_m2,
+                    volume_m3: None,
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented,
+                    ventilation_ach,
+                    ventilation_sla,
+                });
             }
         }
     }
@@ -914,6 +1084,7 @@ enum ValueKind {
     Density,
     SpecificHeat,
     Temperature,
+    Volume,
 }
 
 fn parse_value_with_units(node: Option<&XmlNode>, kind: ValueKind) -> Option<f64> {
@@ -935,6 +1106,7 @@ fn parse_value_with_units(node: Option<&XmlNode>, kind: ValueKind) -> Option<f64
         ValueKind::Density => Some(convert_density_to_kg_m3(value, units.as_deref())),
         ValueKind::SpecificHeat => Some(convert_specific_heat_to_j_kg_k(value, units.as_deref())),
         ValueKind::Temperature => Some(convert_temperature_to_c(value, units.as_deref())),
+        ValueKind::Volume => Some(convert_volume_to_m3(value, units.as_deref())),
     }
 }
 
@@ -951,6 +1123,19 @@ fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
             );
             value * AREA_FT2_TO_M2
         }
+    }
+}
+
+fn convert_volume_to_m3(value: f64, units: Option<&str>) -> f64 {
+    use uom::si::f64::Volume;
+    use uom::si::volume::{cubic_foot, cubic_meter};
+
+    match units {
+        Some("ft3") | Some("ft^3") | Some("cubic feet") | None => {
+            // HPXML specifies ft³ as the implicit unit for volume elements
+            Volume::new::<cubic_foot>(value).get::<cubic_meter>()
+        }
+        Some(_) => value,
     }
 }
 
@@ -1144,6 +1329,7 @@ mod tests {
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2152</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="ft3">17216</ConditionedBuildingVolume>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure>
@@ -1303,6 +1489,38 @@ mod tests {
         assert!((building.windows[0].area_m2 - 1.393_545_6).abs() < 1e-6);
         assert!(building.windows[0].area_m2 > 0.0);
         assert!((building.windows[0].u_factor_w_m2_k.unwrap_or_default() - 1.760_18).abs() < 1e-3);
+
+        // Volume: 17216 ft³ × 0.028316846592 ≈ 487.49 m³
+        let expected_volume_m3 = 17_216.0 * 0.028_316_846_592;
+        assert!(
+            (building.conditioned_volume_m3.unwrap() - expected_volume_m3).abs() < 0.01,
+            "conditioned_volume_m3: got {}, expected {}",
+            building.conditioned_volume_m3.unwrap(),
+            expected_volume_m3,
+        );
+
+        // Ceiling height: volume / floor_area
+        let expected_floor_area_m2 = 2152.0 * 0.092_903_04;
+        let expected_ceiling_height = expected_volume_m3 / expected_floor_area_m2;
+        assert!(
+            (building.ceiling_height_m.unwrap() - expected_ceiling_height).abs() < 1e-6,
+        );
+
+        // Conditioned zone should have volume derived from ceiling height × floor area
+        let conditioned = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Conditioned))
+            .expect("conditioned zone");
+        assert!(conditioned.volume_m3.is_some());
+
+        // Non-conditioned zones should have no volume assigned
+        let attic_vol = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Attic))
+            .expect("attic zone");
+        assert!(attic_vol.volume_m3.is_none());
     }
 
     #[test]
@@ -1333,5 +1551,169 @@ mod tests {
         assert!(matches!(err, HpxmlError::Parse(_)));
         let msg = err.to_string();
         assert!(msg.contains("wall 'Wall1' is missing required Area element"));
+    }
+
+    /// FrameFloor elements (pier-and-beam / raised-floor homes) must parse as
+    /// `BoundaryType::Floor`, matching OCHRE's treatment of FrameFloors.
+    #[test]
+    fn frame_floor_raised_floor_parses_as_floor() {
+        let xml = SAMPLE_XML.replace(
+            "</Enclosure>",
+            r#"<FrameFloors>
+              <FrameFloor>
+                <SystemIdentifier id="FrameFloor1"/>
+                <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+                <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+                <Area units="ft2">200</Area>
+                <Insulation>
+                  <Layer>
+                    <NominalRValue>19</NominalRValue>
+                  </Layer>
+                </Insulation>
+              </FrameFloor>
+            </FrameFloors>
+            </Enclosure>"#,
+        );
+        let building = parse_building(&xml).expect("should parse FrameFloor XML");
+        let ff = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "FrameFloor1")
+            .expect("FrameFloor1 boundary should exist");
+
+        assert!(matches!(ff.boundary_type, BoundaryType::Floor));
+        // 200 ft² → 18.580608 m²
+        assert!((ff.area_m2 - 18.580_608).abs() < 1e-4);
+        // R-19 (IP) → 3.3450 m²·K/W
+        assert!(!ff.r_value_layers_m2_k_w.is_empty());
+        let total_r: f64 = ff.r_value_layers_m2_k_w.iter().sum();
+        assert!((total_r - 3.345).abs() < 0.01, "R-value: got {total_r}");
+    }
+
+    /// FrameFloor over a crawlspace (ExteriorAdjacentTo = crawlspace) parses
+    /// correctly as a Floor boundary with foundation exterior.
+    #[test]
+    fn frame_floor_crawlspace_ceiling_parses_as_floor() {
+        let xml = SAMPLE_XML.replace(
+            "</Enclosure>",
+            r#"<FrameFloors>
+              <FrameFloor>
+                <SystemIdentifier id="FrameFloor2"/>
+                <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+                <ExteriorAdjacentTo>crawlspace - vented</ExteriorAdjacentTo>
+                <Area units="ft2">150</Area>
+                <Insulation>
+                  <Layer>
+                    <NominalRValue>30</NominalRValue>
+                  </Layer>
+                </Insulation>
+              </FrameFloor>
+            </FrameFloors>
+            </Enclosure>"#,
+        );
+        let building = parse_building(&xml).expect("should parse crawlspace FrameFloor");
+        let ff = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "FrameFloor2")
+            .expect("FrameFloor2 boundary should exist");
+
+        assert!(matches!(ff.boundary_type, BoundaryType::Floor));
+        // 150 ft² → 13.935456 m²
+        assert!((ff.area_m2 - 13.935_456).abs() < 1e-4);
+        // R-30 (IP) → 5.2834 m²·K/W
+        assert!(!ff.r_value_layers_m2_k_w.is_empty());
+        let total_r: f64 = ff.r_value_layers_m2_k_w.iter().sum();
+        assert!((total_r - 5.283).abs() < 0.01, "R-value: got {total_r}");
+
+    }
+
+    fn xml_with_window(window_xml: &str) -> String {
+        format!(
+            r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Windows>
+          {window_xml}
+        </Windows>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#
+        )
+    }
+
+    #[test]
+    fn window_no_interior_shading_fraction_is_1() {
+        let xml = xml_with_window(
+            r#"<Window>
+                <SystemIdentifier id="W1"/>
+                <Area>10</Area>
+                <SHGC>0.40</SHGC>
+            </Window>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        assert_eq!(building.windows.len(), 1);
+        let w = &building.windows[0];
+        assert!((w.interior_shading_fraction - 1.0).abs() < f64::EPSILON);
+        // effective SHGC unmodified: 0.40 * 1.0 = 0.40
+        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+        assert!((effective - 0.40).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn window_with_summer_shading_coefficient() {
+        let xml = xml_with_window(
+            r#"<Window>
+                <SystemIdentifier id="W1"/>
+                <Area>10</Area>
+                <SHGC>0.40</SHGC>
+                <InteriorShading>
+                    <SystemIdentifier id="W1Shade"/>
+                    <SummerShadingCoefficient>0.70</SummerShadingCoefficient>
+                    <WinterShadingCoefficient>0.85</WinterShadingCoefficient>
+                </InteriorShading>
+            </Window>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let w = &building.windows[0];
+        assert!((w.interior_shading_fraction - 0.70).abs() < f64::EPSILON);
+        // effective SHGC: 0.40 * 0.70 = 0.28
+        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+        assert!((effective - 0.28).abs() < 1e-10);
+    }
+
+    #[test]
+    fn window_interior_shading_without_summer_coefficient_defaults_070() {
+        let xml = xml_with_window(
+            r#"<Window>
+                <SystemIdentifier id="W1"/>
+                <Area>10</Area>
+                <SHGC>0.40</SHGC>
+                <InteriorShading>
+                    <SystemIdentifier id="W1Shade"/>
+                </InteriorShading>
+            </Window>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let w = &building.windows[0];
+        assert!(
+            (w.interior_shading_fraction - 0.70).abs() < f64::EPSILON,
+            "should default to 0.70 per RESNET 301, got {}",
+            w.interior_shading_fraction,
+        );
+        // effective SHGC: 0.40 * 0.70 = 0.28
+        let effective = w.shgc.unwrap() * w.interior_shading_fraction;
+        assert!((effective - 0.28).abs() < 1e-10);
     }
 }

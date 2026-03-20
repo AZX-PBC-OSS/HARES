@@ -323,7 +323,6 @@ pub(super) fn coil_bypass_factor(
     let h_out = h_in - d_h;
     let t_out = t_dry_bulb_from_enthalpy_and_humidity_ratio(h_out, w_out);
     let p_pa = p_kpa * 1000.0;
-    let rh_out = rel_hum_from_humidity_ratio(t_out, w_out, p_pa);
 
     let mut t_adp = dew_point(w_out.max(SHR_MIN_HUMIDITY_RATIO), p_pa);
 
@@ -334,11 +333,14 @@ pub(super) fn coil_bypass_factor(
         return Ok(bf.max(BYPASS_FACTOR_FLOOR));
     }
 
-    if rh_out > 1.0 {
-        return Err(HaresError::Equipment(
-            "coil bypass factor received outlet RH > 100%".to_string(),
-        ));
-    }
+    // Outlet RH > 100% is physically infeasible but can occur at low airflow
+    // rates (e.g. 312 CFM/ton with SHR=0.75 at AHRI rated conditions).
+    // OCHRE prints a warning but continues rather than aborting; we match
+    // that error-recovery choice. The ADP iteration below still converges
+    // and the bypass factor is clamped to >= 0.01.
+    // Note: the iteration algorithm differs from OCHRE's (secant vs bisection).
+    // Ref: vendors/OCHRE/ochre/utils/equipment.py:839
+    // Ref: EnergyPlus issue #10738 (DX coil negative bypass factor)
 
     let d_t = db_in_c - t_out;
     if d_t.abs() < EPSILON {
@@ -386,11 +388,6 @@ fn humidity_ratio_from_rel_hum(t_db_c: f64, rel_hum: f64, p_pa: f64) -> f64 {
     let rel_hum = rel_hum.clamp(0.0, 1.0);
     let vap = rel_hum * saturation_pressure_pa(t_db_c);
     PSYCHROMETRIC_PRESSURE_RATIO * vap / (p_pa - vap)
-}
-
-fn rel_hum_from_humidity_ratio(t_db_c: f64, w: f64, p_pa: f64) -> f64 {
-    let vap = p_pa * w / (PSYCHROMETRIC_PRESSURE_RATIO + w);
-    vap / saturation_pressure_pa(t_db_c)
 }
 
 fn humidity_ratio_from_enthalpy_and_t_dry_bulb(h_j_kg: f64, t_db_c: f64) -> f64 {

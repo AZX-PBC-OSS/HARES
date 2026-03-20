@@ -10,9 +10,10 @@ use chrono::{DateTime, Duration, Utc};
 use hares_control::{DispatchRequest, DispatchTarget, PriceSignal};
 use hares_envelope::{
     BoundaryInput, BuildingRC, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, ElectricalSolver,
+    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
     ElectricalSolverConfig, ExteriorSurfaceInfo, ExteriorTarget, FluidSolver, FluidSolverConfig,
     HumiditySolver, HumiditySolverConfig, LayerInput, ThermalSolver, ThermalSolverConfig,
-    ZoneInput, assemble_building_rc, derive_zone_capacitances,
+    WindowSolarProperties, ZoneInput, assemble_building_rc, derive_zone_capacitances,
 };
 use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_io::{
@@ -26,7 +27,7 @@ use hares_physics::constants::{
 };
 use hares_types::{
     ControlSignal, DomainSolver, DomainUpdate, EndUse, EnvironmentState, ExecutionStage, GridState,
-    HaresError, PortDeclaration, PortSlots, THERMAL, ZoneId,
+    HaresError, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, THERMAL, ZoneId,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -39,7 +40,7 @@ use crate::{EnvironmentManager, SimClock, derive_dwelling_rng};
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 const DEFAULT_TEMP_SANITY_LOW_C: f64 = -80.0;
-const DEFAULT_TEMP_SANITY_HIGH_C: f64 = 80.0;
+const DEFAULT_TEMP_SANITY_HIGH_C: f64 = 90.0;
 
 /// Core result type for dwelling operations.
 pub type Result<T> = std::result::Result<T, HaresError>;
@@ -171,6 +172,10 @@ pub struct Dwelling {
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
+    /// Per-zone thermal capacitances [J/K] for lightweight gain-preview between
+    /// non-thermal and thermal equipment passes (FIX-003).
+    #[expect(dead_code, reason = "reserved for FIX-003 gain-preview")]
+    zone_capacitances_j_k: Vec<(ZoneId, f64)>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
 }
@@ -326,11 +331,12 @@ impl Dwelling {
             }
         };
 
-        let (thermal_solver, humidity_solver, electrical_solver, fluid_solver) =
+        let (thermal_solver, humidity_solver, electrical_solver, fluid_solver, zone_capacitances_j_k) =
             build_default_solvers(&initial_env, &config.sim_config, &building, &defaults)?;
 
         let empty_overrides = Value::Object(Map::new());
-        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides);
+        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
+            .map_err(|e| HaresError::Io(e.to_string()))?;
         hares_io::inject_schedule_into_specs(&mut equipment_specs, environment.schedule_mut(), Some(&defaults_dir));
         let override_root = config
             .overrides
@@ -371,6 +377,15 @@ impl Dwelling {
             }
         }
 
+        // Dump equipment config after init for debugging.
+        for eq in &equipment {
+            let d = eq.descriptor();
+            eprintln!(
+                "[init] equip='{}' class='{}' stage={:?}",
+                d.name, d.equipment_type, d.stage,
+            );
+        }
+
         let mut declarations: Vec<PortDeclaration> = Vec::new();
         for eq in &equipment {
             declarations.extend_from_slice(eq.ports());
@@ -381,6 +396,7 @@ impl Dwelling {
                 zone: Some(zone.id),
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             });
         }
         let ports = PortSlots::from_declarations(&declarations);
@@ -423,6 +439,7 @@ impl Dwelling {
             stage_snapshot: None,
             output_column_index,
             occupancy_column_idx,
+            zone_capacitances_j_k,
             #[cfg(feature = "profiling")]
             profiling: DwellingProfilingSummary::default(),
         };
@@ -612,17 +629,14 @@ impl Dwelling {
     /// Snapshot current simulation state to an in-memory checkpoint struct.
     #[must_use]
     pub fn save_checkpoint(&self) -> DwellingCheckpoint {
-        let (envelope_state, thermal_last_u) = self.thermal_solver.snapshot_state();
-        let mut humidity_values: Vec<f64> = self
+        let (envelope_state, thermal_last_u, lwr_t_prev_c) =
+            self.thermal_solver.snapshot_state();
+        let humidity_states: Vec<(ZoneId, f64)> = self
             .humidity_solver
             .humidity_ratios
             .iter()
-            .map(|(zone, value)| (f64::from(zone.0), *value))
-            .flat_map(|(zone, value)| [zone, value])
+            .map(|(zone, value)| (*zone, *value))
             .collect();
-        if humidity_values.is_empty() {
-            humidity_values.push(0.0);
-        }
         let fluid_states = self.fluid_solver.snapshot_payload();
 
         DwellingCheckpoint {
@@ -636,11 +650,12 @@ impl Dwelling {
                 .collect(),
             rng_state: self.rng.get_seed(),
             envelope_state,
-            humidity_state: humidity_values[1.min(humidity_values.len() - 1)],
+            humidity_states,
             fluid_states,
             rng_stream: self.rng.get_stream(),
             rng_word_pos: self.rng.get_word_pos(),
             thermal_last_u,
+            lwr_t_prev_c,
         }
     }
 
@@ -671,13 +686,20 @@ impl Dwelling {
         }
 
         self.thermal_solver
-            .restore_state(&cp.envelope_state, &cp.thermal_last_u)
+            .restore_state(&cp.envelope_state, &cp.thermal_last_u, &cp.lwr_t_prev_c)
             .map_err(|err| HaresError::Envelope(format!("restore thermal state failed: {err}")))?;
 
+        let checkpoint_zones: HashMap<ZoneId, f64> = cp.humidity_states.into_iter().collect();
         for zone in &self.latest_env.zones {
+            let humidity = checkpoint_zones.get(&zone.id).ok_or_else(|| {
+                HaresError::Io(format!(
+                    "checkpoint missing humidity state for zone {:?}",
+                    zone.id
+                ))
+            })?;
             self.humidity_solver
                 .humidity_ratios
-                .insert(zone.id, cp.humidity_state);
+                .insert(zone.id, *humidity);
         }
         self.fluid_solver
             .restore_from_payload(&cp.fluid_states)
@@ -707,8 +729,6 @@ impl Dwelling {
             return;
         };
 
-        // The schedule domain is always DomainId(u16::MAX) (see environment.rs).
-        const SCHEDULE_DOMAIN_ID: hares_types::DomainId = hares_types::DomainId(u16::MAX);
         let n_occupants = self
             .latest_env
             .custom_domains
@@ -767,11 +787,14 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         let mut step_io: Option<StdDuration> = None;
 
+        let step_num = self.clock.current_step();
+
         // Step 1: update environment at current clock state.
         #[cfg(feature = "profiling")]
         let schedule_started = Instant::now();
         let env = self.environment.update(&self.clock, &self.latest_env.zones);
         self.latest_env = env;
+
 
         // Step 2: dispatch queued controls.
         self.control_dispatcher
@@ -788,6 +811,7 @@ impl Dwelling {
         }
 
         let dt = chrono_to_std_duration(self.clock.time_res)?;
+
 
         // Step 2b: apply occupancy-driven internal heat gains.
         // OCHRE Envelope.py:904-908: 400 BTU/h total; sensible=66 W, latent=51 W.
@@ -886,6 +910,7 @@ impl Dwelling {
         apply_thermal_update_to_zones(&mut self.latest_env, &thermal_update);
         apply_humidity_update_to_zones(&mut self.latest_env, &humidity_update);
 
+
         #[cfg(feature = "profiling")]
         {
             let elapsed = envelope_started.elapsed();
@@ -895,6 +920,62 @@ impl Dwelling {
                 .profiling
                 .memory_high_water_kb
                 .max(current_process_hwm_kb());
+        }
+
+        // Diagnostic output for thermal debugging.
+        if step_num < 5 || step_num.is_multiple_of(10) {
+            let diag = crate::diagnostics::capture(step_num, &self.latest_env, &self.ports);
+            let zone_str: String = diag.zone_temps_c.iter()
+                .map(|(z, t)| format!("z{}={t:.2}", z.0))
+                .collect::<Vec<_>>().join(" ");
+            let gain_str: String = diag.thermal_gains_w.iter()
+                .map(|(z, g)| format!("z{}={g:.0}W", z.0))
+                .collect::<Vec<_>>().join(" ");
+
+            // Per-equipment dump
+            let mut eq_lines = Vec::new();
+            for eq in &self.equipment {
+                let d = eq.descriptor();
+                let t = eq.telemetry();
+                let mode = t.get("operating_mode").unwrap_or(f64::NAN);
+                let elec = t.get("electric_kw").unwrap_or(0.0);
+                let therm = t.get("thermal_output_w")
+                    .or_else(|| t.get("sensible_cooling_w"))
+                    .unwrap_or(0.0);
+                let cop = t.get("cop").unwrap_or(f64::NAN);
+                if elec.abs() > 0.01 || therm.abs() > 0.01 || mode > 0.5 {
+                    eq_lines.push(format!(
+                        "    {} mode={mode:.0} elec={elec:.2}kW sens={therm:.0}W cop={cop:.2}",
+                        d.name,
+                    ));
+                }
+            }
+
+            eprintln!(
+                "[diag s={step_num}] out={:.1}C {zone_str} | gains: {gain_str} | elec={:.2}kW",
+                diag.outdoor_temp_c, diag.electrical_net_kw,
+            );
+            eprintln!(
+                "  weather: ghi={:.0} dni={:.0} dhi={:.0} wind={:.1}m/s",
+                self.latest_env.weather.ghi_w_m2,
+                self.latest_env.weather.dni_w_m2,
+                self.latest_env.weather.dhi_w_m2,
+                self.latest_env.weather.wind_speed_m_s,
+            );
+            eprintln!(
+                "  zones: {}",
+                self.latest_env.zones.iter()
+                    .map(|z| format!("z{}(T={:.1} wb={:.1} w={:.5} rh={:.2} vol={:.0}m3)",
+                        z.id.0, z.temperature_c, z.wet_bulb_c, z.humidity_ratio, z.relative_humidity, z.volume_m3))
+                    .collect::<Vec<_>>().join(" "),
+            );
+            eprintln!(
+                "  thermal_update: {:?}",
+                thermal_update.zone_temperatures_c,
+            );
+            for line in &eq_lines {
+                eprintln!("{line}");
+            }
         }
 
         self.debug_assert_invariants(&thermal_update, dt);
@@ -1059,12 +1140,15 @@ impl Dwelling {
     }
 }
 
+/// Solvers plus per-zone thermal capacitances [J/K] for gain preview.
+type SolverBundle = (ThermalSolver, HumiditySolver, ElectricalSolver, FluidSolver, Vec<(ZoneId, f64)>);
+
 fn build_default_solvers(
     env: &EnvironmentState,
     sim_config: &SimulationConfig,
     building: &Building,
     defaults: &DefaultsStore,
-) -> Result<(ThermalSolver, HumiditySolver, ElectricalSolver, FluidSolver)> {
+) -> Result<SolverBundle> {
     use hares_envelope::state_space::{OutputMapping, StateSpaceModel};
     use nalgebra::DMatrix;
 
@@ -1089,21 +1173,70 @@ fn build_default_solvers(
         layer_info,
         outdoor_col,
         n_ext,
+        node_capacitances,
         ..
     } = rc;
     let n_states = a_c.nrows();
 
-    // Augment B_c: [B_ext | heat-injection columns for zone air nodes only].
-    // Heat-injection column i for zone air node at state row r: B[r, n_ext + i] = 1 / C_zone_i.
-    let n_heat_cols = n_zones;
-    let mut b_c = DMatrix::<f64>::zeros(n_states, n_ext + n_heat_cols);
+    // Pre-scan: identify exterior surfaces with RC layers that need per-surface
+    // B-matrix input columns for solar/LWR injection at the outer node.
+    let mut ext_surface_columns: Vec<(usize, hares_envelope::NodeId, usize)> = Vec::new();
+    for (surface_idx, boundary) in building.boundaries.iter().enumerate() {
+        let is_exterior = boundary
+            .exterior_zone
+            .as_ref()
+            .map(|z| *z == hares_io::hpxml::ZoneType::Outdoor)
+            .unwrap_or(false);
+        if !is_exterior {
+            continue;
+        }
+        if let Some(info) = layer_info.get(&surface_idx) {
+            if let Some(&state_row) = node_index.get(&info.outer_node) {
+                let col_offset = ext_surface_columns.len();
+                ext_surface_columns.push((surface_idx, info.outer_node, state_row));
+                let _ = col_offset; // used below when building B_c
+            }
+        }
+    }
+    let n_ext_surface_inputs = ext_surface_columns.len();
+
+    // Build surface_idx → B-matrix column index map.
+    let ext_surface_col_map: std::collections::HashMap<usize, usize> = ext_surface_columns
+        .iter()
+        .enumerate()
+        .map(|(i, &(surface_idx, _, _))| (surface_idx, n_ext + i))
+        .collect();
+
+    // Augment B_c: [B_ext | per-surface solar/LWR columns | zone sensible heat columns].
+    //
+    // Column layout:
+    //   [0..n_ext)                                         External driving (outdoor, ground temps)
+    //   [n_ext..n_ext+n_ext_surface_inputs)                Per-exterior-surface solar/LWR injection
+    //   [n_ext+n_ext_surface_inputs..n_ext+n_ext_surface_inputs+n_zones)  Zone sensible heat
+    let n_total_inputs = n_ext + n_ext_surface_inputs + n_zones;
+    let mut b_c = DMatrix::<f64>::zeros(n_states, n_total_inputs);
+
+    // Copy B_ext columns.
     for row in 0..n_states {
         for col in 0..n_ext {
             b_c[(row, col)] = b_ext[(row, col)];
         }
     }
+
+    // Per-surface injection columns: gain = 1/C_outer_node.
+    for (i, &(_, outer_node, state_row)) in ext_surface_columns.iter().enumerate() {
+        let c_node = node_capacitances
+            .get(&outer_node)
+            .copied()
+            .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K)
+            .max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
+        b_c[(state_row, n_ext + i)] = 1.0 / c_node;
+    }
+
+    // Zone sensible heat columns (shifted by n_ext_surface_inputs).
+    let zone_input_offset = n_ext + n_ext_surface_inputs;
     for (zone_idx, &state_row) in zone_state_rows.iter().enumerate() {
-        b_c[(state_row, n_ext + zone_idx)] =
+        b_c[(state_row, zone_input_offset + zone_idx)] =
             1.0 / zone_capacitances[zone_idx].max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
     }
 
@@ -1135,7 +1268,7 @@ fn build_default_solvers(
         thermal_cfg.zone_output_indices.insert(zone.id, zone_idx);
         thermal_cfg
             .zone_sensible_input_indices
-            .insert(zone.id, n_ext + zone_idx);
+            .insert(zone.id, zone_input_offset + zone_idx);
         thermal_cfg
             .ideal_setpoints_c
             .insert(zone.id, zone.temperature_c);
@@ -1145,6 +1278,15 @@ fn build_default_solvers(
     } else {
         thermal_cfg.outdoor_temp_input_indices = vec![];
     }
+
+    // Build window lookup: boundary id → Window, for matching windows to their
+    // boundary entries when populating solar properties.
+    let window_by_id: std::collections::HashMap<&str, &hares_io::hpxml::building::Window> =
+        building
+            .windows
+            .iter()
+            .map(|w| (w.id.as_str(), w))
+            .collect();
 
     // Populate exterior surfaces for longwave radiation; use outermost layer node
     // (or zone air node for boundaries without material layers) as the surface node.
@@ -1164,45 +1306,203 @@ fn build_default_solvers(
             .map(|z| z.id)
             .unwrap_or(hares_types::ZoneId(1));
 
-        // Use the outermost layer node if this boundary has material layers,
-        // otherwise fall back to the zone air node.
-        // LWR/solar injection always goes to the zone's sensible heat column
-        // (which has correct 1/C gain), regardless of whether the surface
-        // temperature is read from a layer node or zone air node.
-        let (state_index, input_index) = if let Some(info) = layer_info.get(&surface_idx) {
+        // Use the outermost layer node if this boundary has material layers.
+        // Surfaces with RC layers get a dedicated B-matrix input column that
+        // injects heat at the exterior node (gain = 1/C_outer_node), so solar/LWR
+        // conducts inward through the wall resistance chain.
+        // Surfaces without layers fall back to the zone air node + zone column.
+        let (state_index, input_index) = if let Some(&col) = ext_surface_col_map.get(&surface_idx)
+        {
+            let info = &layer_info[&surface_idx];
             let state_row = node_index.get(&info.outer_node).copied().unwrap_or(0);
-            let ii = *thermal_cfg
-                .zone_sensible_input_indices
-                .get(&zone_id)
-                .unwrap_or(&(n_ext + zone_idx));
-            (state_row, ii)
+            (state_row, col)
         } else {
             let si = *thermal_cfg.zone_state_indices.get(&zone_id).unwrap_or(&0);
             let ii = *thermal_cfg
                 .zone_sensible_input_indices
                 .get(&zone_id)
-                .unwrap_or(&(n_ext + zone_idx));
+                .unwrap_or(&(zone_input_offset + zone_idx));
             (si, ii)
         };
 
-        let emissivity = if boundary.has_radiant_barrier {
-            EMISSIVITY_RADIANT_BARRIER
-        } else {
-            EMISSIVITY_DEFAULT
-        };
+        // OCHRE Envelope.py:221-222 gates radiant-barrier defaults on attic zone.
+        let is_attic_radiant_barrier = boundary.has_radiant_barrier
+            && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic);
+        let emissivity = boundary.emittance.unwrap_or(
+            if is_attic_radiant_barrier {
+                EMISSIVITY_RADIANT_BARRIER
+            } else {
+                EMISSIVITY_DEFAULT
+            },
+        );
+        let solar_absorptance = boundary.solar_absorptance.unwrap_or(
+            if is_attic_radiant_barrier {
+                SOLAR_ABSORPTANCE_RADIANT_BARRIER
+            } else {
+                SOLAR_ABSORPTANCE_DEFAULT
+            },
+        );
         let tilt_deg = match boundary.boundary_type {
             hares_io::hpxml::BoundaryType::Roof => 0.0,
             hares_io::hpxml::BoundaryType::Slab | hares_io::hpxml::BoundaryType::Floor => 180.0,
             _ => 90.0,
         };
+        // Compute radiation fraction and resistance for iterative LWR solver.
+        // rad_frac = R_film / (R_film + R_outermost_half) [m²·K/W]
+        // rad_res  = R_film / area [K/W]
+        let r_film = hares_envelope::boundary_rc::R_FILM_EXTERIOR_M2_K_W;
+        let bd_input = &boundary_inputs[surface_idx];
+        let r_outermost_half = if !bd_input.precomputed_rc.is_empty() {
+            bd_input.precomputed_rc.last().unwrap().resistance_m2_k_w / 2.0
+        } else {
+            let valid_layers: Vec<&hares_envelope::LayerInput> = bd_input
+                .material_layers
+                .iter()
+                .filter(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
+                .collect();
+            if let Some(outer) = valid_layers.last() {
+                outer.thickness_m / (2.0 * outer.conductivity_w_m_k)
+            } else {
+                // No material layers: single-resistance boundary, skip iteration.
+                0.0
+            }
+        };
+        let (rad_frac, rad_res_k_w) = if r_outermost_half > 0.0 {
+            (
+                r_film / (r_film + r_outermost_half),
+                r_film / boundary.area_m2,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        // OCHRE Envelope.py:207: iterations = time_res // timedelta(minutes=5) + 1
+        let n_iter = (dt_s / 300.0).floor() as u32 + 1;
+        let outdoor_temp_c = env.weather.outdoor_temp_c;
+
+        let surface_id = u32::try_from(surface_idx).unwrap_or(u32::MAX);
         thermal_cfg.exterior_surfaces.push(ExteriorSurfaceInfo {
-            surface_id: u32::try_from(surface_idx).unwrap_or(u32::MAX),
+            surface_id,
             state_index,
             input_index,
             area_m2: boundary.area_m2,
             emissivity,
             tilt_deg,
+            rad_frac,
+            rad_res_k_w,
+            n_iter,
+            t_prev_c: outdoor_temp_c,
+            absorptance: solar_absorptance,
         });
+        // Route solar irradiance to the zone's sensible heat input column.
+        thermal_cfg.solar_input_indices.insert(surface_id, input_index);
+
+        // Windows use the IAM-corrected path via solar_input_indices + window_properties.
+        // Opaque surfaces receive solar gain via apply_exterior_solar_inputs (ExteriorSurfaceInfo.absorptance).
+        if let Some(win) = window_by_id.get(boundary.id.as_str()) {
+            let u_factor = win.u_factor_w_m2_k.unwrap_or(5.0);
+            let effective_shgc = win.shgc.unwrap_or(0.4) * win.interior_shading_fraction;
+            // Window glass material resistance: total R minus film resistances.
+            // For simple glazing, approximate from U-factor:
+            //   R_total = 1/U, R_glass ≈ R_total - R_film_int - R_film_ext
+            let r_total = 1.0 / u_factor.max(0.01);
+            let r_glass = (r_total
+                - hares_envelope::boundary_rc::R_FILM_INTERIOR_M2_K_W
+                - hares_envelope::boundary_rc::R_FILM_EXTERIOR_M2_K_W)
+                .max(0.0);
+            let (transmittance, radiation_frac) =
+                hares_physics::solar::calculate_window_parameters(
+                    effective_shgc,
+                    u_factor,
+                    r_glass,
+                );
+            thermal_cfg.window_properties.insert(
+                surface_id,
+                WindowSolarProperties {
+                    shgc: effective_shgc,
+                    u_factor_w_m2_k: u_factor,
+                    area_m2: boundary.area_m2,
+                    transmittance,
+                    radiation_frac,
+                },
+            );
+        }
+    }
+
+    // --- Per-zone infiltration (Walker-Wilson 1998 / ASHRAE HOF Ch. 16) ---
+    // Each unconditioned zone gets a physics-appropriate infiltration method.
+    // Conditioned zone infiltration is a separate ticket (ASHRAE wind-stack from ACH50).
+    {
+        use hares_envelope::InfiltrationMethod;
+        use hares_io::hpxml::ZoneType;
+        use hares_physics::infiltration::attic_ela_coefficients;
+
+        let default_ceiling_height_m = building.ceiling_height_m.unwrap_or(2.5);
+        let building_height_m = default_ceiling_height_m
+            * building
+                .zones
+                .iter()
+                .filter(|z| z.zone_type == ZoneType::Conditioned)
+                .count()
+                .max(1) as f64;
+
+        for (zone_idx, bz) in building.zones.iter().enumerate() {
+            let zone_id = env
+                .zones
+                .get(zone_idx)
+                .map(|z| z.id)
+                .unwrap_or(hares_types::ZoneId(zone_idx as u16));
+
+            let method = match bz.zone_type {
+                ZoneType::Conditioned => {
+                    // Separate ticket for ASHRAE wind-stack from ACH50.
+                    InfiltrationMethod::Ach { ach: 0.0 }
+                }
+                ZoneType::Attic => {
+                    if let Some(ach) = bz.ventilation_ach {
+                        InfiltrationMethod::Ach { ach }
+                    } else if let Some(sla) = bz.ventilation_sla {
+                        let floor_area_m2 = bz.floor_area_m2.unwrap_or(100.0);
+                        let ela_m2 = sla * floor_area_m2;
+                        let attic_height_m = 1.5; // default triangular attic
+                        let (stack_coeff, wind_coeff) =
+                            attic_ela_coefficients(attic_height_m, building_height_m);
+                        InfiltrationMethod::Ela {
+                            ela_m2,
+                            stack_coeff,
+                            wind_coeff,
+                        }
+                    } else if bz.vented {
+                        // Vented attic with no HPXML data: default 2.0 ACH
+                        // (ASHRAE 62.2 typical for vented attics).
+                        InfiltrationMethod::Ach { ach: 2.0 }
+                    } else {
+                        // Unvented attic: minimal air exchange.
+                        InfiltrationMethod::Ach { ach: 0.1 }
+                    }
+                }
+                ZoneType::Garage => {
+                    // Garage: use building ACH50 if available, else default 0.5 ACH.
+                    let garage_ach = building
+                        .infiltration_ach50
+                        .map(|ach50| ach50 / 20.0) // rough conversion ACH50→natural ACH
+                        .unwrap_or(0.5);
+                    InfiltrationMethod::Ach { ach: garage_ach }
+                }
+                ZoneType::Foundation => {
+                    if bz.vented {
+                        // Vented crawlspace: high air exchange.
+                        let ach = bz.ventilation_ach.unwrap_or(2.0);
+                        InfiltrationMethod::Ach { ach }
+                    } else {
+                        // Unvented crawlspace/basement: conduction only.
+                        InfiltrationMethod::Ach { ach: 0.0 }
+                    }
+                }
+                ZoneType::Outdoor | ZoneType::Other(_) => continue,
+            };
+
+            thermal_cfg.infiltration.push((zone_id, method));
+        }
     }
 
     let initial_temp = env.zones.first().map(|z| z.temperature_c).unwrap_or(21.0);
@@ -1215,11 +1515,25 @@ fn build_default_solvers(
     let fluid_solver = FluidSolver::new(FluidSolverConfig::default(), &[])
         .map_err(|err| HaresError::Envelope(format!("fluid solver init failed: {err}")))?;
 
+    let zone_caps: Vec<(ZoneId, f64)> = env
+        .zones
+        .iter()
+        .enumerate()
+        .map(|(i, z)| {
+            let cap = zone_capacitances
+                .get(i)
+                .copied()
+                .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
+            (z.id, cap.max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K))
+        })
+        .collect();
+
     Ok((
         thermal_solver,
         humidity_solver,
         electrical_solver,
         fluid_solver,
+        zone_caps,
     ))
 }
 
@@ -1231,6 +1545,7 @@ fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput
     (0..n_zones)
         .map(|idx| ZoneInput {
             floor_area_m2: building.zones.get(idx).and_then(|z| z.floor_area_m2),
+            volume_m3: building.zones.get(idx).and_then(|z| z.volume_m3),
         })
         .collect()
 }
@@ -1782,8 +2097,12 @@ fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
         zones: vec![Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(floor_area),
+            volume_m3: Some(config.geometry.zone_volume_m3),
             attached_wall_ids: vec!["wall-1".to_string()],
             duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
         }],
         boundaries: vec![Boundary {
             id: "wall-1".to_string(),
@@ -1799,6 +2118,8 @@ fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
             finish_type: None,
             insulation_details: None,
             has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
         }],
         windows: Vec::new(),
         infiltration_ach50: None,
@@ -1812,6 +2133,8 @@ fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
         cooling_weekend_setpoints_c: None,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
+        conditioned_volume_m3: Some(config.geometry.zone_volume_m3),
+        ceiling_height_m: None,
         details_xml,
     }
 }

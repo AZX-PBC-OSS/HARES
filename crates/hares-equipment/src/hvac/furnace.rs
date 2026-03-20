@@ -89,12 +89,14 @@ impl ElectricFurnace {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Thermal,
                     zone: Some(zone),
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
             ],
             telemetry: electric_furnace_default_telemetry(),
@@ -147,8 +149,9 @@ impl Equipment for ElectricFurnace {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
+        let sf = self.hvac.space_fraction;
         let gross_capacity_w = self.rated_capacity_w * duty;
-        let electric_kw = (self.rated_capacity_w * self.eir * duty) / 1_000.0;
+        let electric_kw = (self.rated_capacity_w * self.eir * duty) / 1_000.0 * sf;
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -246,18 +249,21 @@ impl GasFurnace {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Electrical,
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Thermal,
                     zone: Some(zone),
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
             ],
             telemetry: gas_furnace_default_telemetry(),
@@ -328,12 +334,13 @@ impl Equipment for GasFurnace {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
+        let sf = self.hvac.space_fraction;
         // Fuel is computed from gross capacity: the furnace burns fuel regardless
         // of duct losses. zone_heat_fractions distributes gross output by DSE.
         let gross_capacity_w = self.rated_capacity_w * duty;
-        let fan_kw = (self.fan_power_w * duty) / 1_000.0;
+        let fan_kw = (self.fan_power_w * duty) / 1_000.0 * sf;
         let fuel_input_w = if gross_capacity_w > 0.0 {
-            gross_capacity_w / self.fuel_efficiency
+            gross_capacity_w / self.fuel_efficiency * sf
         } else {
             0.0
         };

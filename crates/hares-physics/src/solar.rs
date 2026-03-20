@@ -553,6 +553,97 @@ pub fn window_iam(theta_rad: f64, curve: GlazingCurve) -> f64 {
     (raw / curve.normal_incidence_raw()).clamp(0.0, 1.0)
 }
 
+/// Pre-computed window optical parameters from EnergyPlus Simple Window Model.
+///
+/// Decomposes SHGC into transmittance and absorbed fractions using the
+/// EnergyPlus Steps 4–5 polynomial correlations.
+///
+/// # Returns
+/// `(transmittance, radiation_frac)` where:
+/// - `transmittance`: solar transmittance at normal incidence [0, 1]
+/// - `radiation_frac`: inward-flowing fraction of absorbed solar [0, 1]
+///
+/// The absorbed fraction is `SHGC - transmittance`. Of that, `radiation_frac`
+/// flows to the interior zone; the remainder is lost to the exterior.
+///
+/// # References
+/// - EnergyPlus Engineering Reference, Window Calculation Module, Steps 4–5.
+/// - OCHRE `ochre/utils/envelope.py:405–431`.
+/// - ASHRAE Fundamentals Ch. 15: `SHGC = T_sol + A_sol × N_i`.
+#[must_use]
+pub fn calculate_window_parameters(
+    shgc: f64,
+    u_w_m2_k: f64,
+    res_material_m2_k_w: f64,
+) -> (f64, f64) {
+    // Step 4: Transmittance at normal incidence.
+    // Piecewise polynomial in SHGC, branched on U-factor.
+    // OCHRE uses 3.95 threshold; EnergyPlus specifies interpolation band 3.4–4.5.
+    // We use EnergyPlus interpolation for better accuracy.
+    let t_high_u = if shgc < 0.7206 {
+        0.939_998 * shgc * shgc + 0.203_32 * shgc
+    } else {
+        1.304_15 * shgc - 0.305_15
+    };
+    let t_low_u = if shgc < 0.15 {
+        0.410_40 * shgc
+    } else {
+        0.085_775 * shgc * shgc + 0.963_954 * shgc - 0.084_958
+    };
+    let transmittance = if u_w_m2_k > 4.5 {
+        t_high_u
+    } else if u_w_m2_k < 3.4 {
+        t_low_u
+    } else {
+        // Linear interpolation between 3.4 and 4.5 W/m²·K.
+        let frac = (u_w_m2_k - 3.4) / (4.5 - 3.4);
+        t_low_u + frac * (t_high_u - t_low_u)
+    }
+    .clamp(0.0, shgc);
+
+    // Step 5: Interior/exterior film resistances for absorbed solar split.
+    let x = (shgc - transmittance).max(0.0);
+    let (res_int_s, res_ext_s) = if u_w_m2_k > 4.5 {
+        let x2 = x * x;
+        let x3 = x2 * x;
+        (
+            1.0 / (29.436_546 * x3 - 21.943_415 * x2 + 9.945_872 * x + 7.426_151),
+            1.0 / (2.225_824 * x + 20.577_08),
+        )
+    } else if u_w_m2_k < 3.4 {
+        let x2 = x * x;
+        let x3 = x2 * x;
+        (
+            1.0 / (199.820_812_8 * x3 - 90.639_733 * x2 + 19.737_055 * x + 6.766_575),
+            1.0 / (5.763_355 * x + 20.541_528),
+        )
+    } else {
+        // Interpolation band: blend high-U and low-U resistances.
+        let x2 = x * x;
+        let x3 = x2 * x;
+        let ri_high = 1.0 / (29.436_546 * x3 - 21.943_415 * x2 + 9.945_872 * x + 7.426_151);
+        let re_high = 1.0 / (2.225_824 * x + 20.577_08);
+        let ri_low = 1.0 / (199.820_812_8 * x3 - 90.639_733 * x2 + 19.737_055 * x + 6.766_575);
+        let re_low = 1.0 / (5.763_355 * x + 20.541_528);
+        let frac = (u_w_m2_k - 3.4) / (4.5 - 3.4);
+        (
+            ri_low + frac * (ri_high - ri_low),
+            re_low + frac * (re_high - re_low),
+        )
+    };
+
+    // Inward-flowing fraction: fraction of absorbed solar that reaches the zone.
+    // N_i = (R_ext + R_glass/2) / (R_ext + R_glass + R_int)
+    let denom = res_ext_s + res_material_m2_k_w + res_int_s;
+    let radiation_frac = if denom > 0.0 {
+        ((res_ext_s + res_material_m2_k_w / 2.0) / denom).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+
+    (transmittance, radiation_frac)
+}
+
 /// Window transmitted solar with angle-of-incidence dependent transmittance [W].
 ///
 /// Applies the EnergyPlus IAM polynomial to beam radiation and a
@@ -1663,5 +1754,52 @@ mod tests {
             angular < flat * 0.85,
             "at θ=75°, angular ({angular:.1} W) should be <85% of flat ({flat:.1} W)"
         );
+    }
+
+    /// Verify calculate_window_parameters energy accounting:
+    /// transmitted + absorbed_zone + absorbed_exterior + reflected ≈ incident.
+    #[test]
+    fn window_parameters_energy_balance() {
+        // Low-e double-pane: U=1.8, SHGC=0.30.
+        let (t, n_i) = calculate_window_parameters(0.30, 1.8, 0.01);
+        let shgc = 0.30;
+        let x = shgc - t; // inward component of absorbed
+        let absorptivity = if n_i > 0.0 { x / n_i } else { 0.0 };
+        let reflectance = 1.0 - t - absorptivity;
+
+        // Energy balance: T + A + R = 1.0
+        let total = t + absorptivity + reflectance;
+        assert!(
+            (total - 1.0).abs() < 1e-10,
+            "energy balance: T={t:.4} + A={absorptivity:.4} + R={reflectance:.4} = {total:.6}"
+        );
+
+        // Absorbed component should be 25–35% of SHGC for low-e windows.
+        let absorbed_frac = x / shgc;
+        assert!(
+            (0.20..=0.50).contains(&absorbed_frac),
+            "absorbed fraction of SHGC: {absorbed_frac:.3} (expected 0.20–0.50)"
+        );
+
+        // Transmittance < SHGC (some solar is absorbed, not transmitted).
+        assert!(t < shgc, "transmittance ({t:.4}) should be < SHGC ({shgc})");
+        assert!(t > 0.0, "transmittance should be positive");
+
+        // radiation_frac in reasonable range. Low-e windows with minimal glass
+        // resistance can have N_i < 0.3 since most absorbed heat is re-radiated outward.
+        assert!(
+            (0.1..=0.9).contains(&n_i),
+            "radiation_frac={n_i:.4} should be in [0.1, 0.9]"
+        );
+    }
+
+    /// High-U single-pane window parameters.
+    #[test]
+    fn window_parameters_single_pane() {
+        let (t, n_i) = calculate_window_parameters(0.60, 5.5, 0.005);
+        assert!(t > 0.0 && t < 0.60, "transmittance {t:.4}");
+        assert!(n_i > 0.0 && n_i < 1.0, "radiation_frac {n_i:.4}");
+        // Single-pane: transmittance should be majority of SHGC.
+        assert!(t > 0.60 * 0.5, "single-pane transmittance should be >50% of SHGC");
     }
 }

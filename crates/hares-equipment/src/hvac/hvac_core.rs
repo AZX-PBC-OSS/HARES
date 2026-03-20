@@ -17,13 +17,11 @@ use super::thermostat::{
 };
 
 const IDEAL_CAPACITY_TIME_RES_THRESHOLD_S: i64 = 300;
-const AIRFLOW_DEFAULT_CFM_PER_TON: f64 = 375.0;
 pub(super) const DEFAULT_BIQUADRATIC_COEFFS: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
 /// Default fan power [W/CFM]. ACCA Manual D residential air handler.
 const DEFAULT_FAN_POWER_W_PER_CFM: f64 = 0.365;
 const DEFAULT_FAN_POWER_W_PER_M3_S: f64 = DEFAULT_FAN_POWER_W_PER_CFM * CFM_PER_M3_S;
-const AIRFLOW_DEFAULT_M3_S_PER_W: f64 = AIRFLOW_DEFAULT_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
 
 /// Default outdoor temperature for supply-air initialization [C] (47 F).
 /// AHRI 210/240 H1 heating test condition.
@@ -56,9 +54,22 @@ pub enum HvacEquipmentType {
     AshpHeatPumpOnly,
     AshpHeatPumpAux,
     MiniSplitHeat,
+    /// Central AC or ASHP cooling coil. Uses 312 CFM/ton airflow default.
+    AcCooler,
+    /// MSHP cooling coil. Uses 312 CFM/ton airflow default; Cd=0 (no cycling penalty).
+    MiniSplitCool,
     Baseboard,
     Other,
 }
+
+/// Default airflow [CFM/ton] by equipment category.
+///
+/// Source chain: ResStock `hvac.rb:2623` → OCHRE `HVAC.py:142`.
+/// OCHRE selects 350 for heaters (`is_heater=True`) and 312 for coolers.
+/// EnergyPlus valid range: 300–450 CFM/ton (0.00004027–0.00006041 m³/s/W).
+/// Ref: EnergyPlus I/O Reference, Coil:Cooling:DX:SingleSpeed.
+const AIRFLOW_HEATING_CFM_PER_TON: f64 = 350.0;
+const AIRFLOW_COOLING_CFM_PER_TON: f64 = 312.0;
 
 impl HvacEquipmentType {
     pub fn default_supply_air_temp_c(self, outdoor_temp_c: f64) -> f64 {
@@ -68,9 +79,40 @@ impl HvacEquipmentType {
             Self::AshpHeatPumpOnly => 32.2 + 0.15 * (outdoor_temp_c - 8.3),
             Self::AshpHeatPumpAux => 40.6,
             Self::MiniSplitHeat => 43.3,
+            Self::AcCooler | Self::MiniSplitCool => 40.6,
             Self::Baseboard => 0.0,
             Self::Other => 40.6,
         }
+    }
+
+    /// Default airflow rate [CFM/ton] for this equipment category.
+    ///
+    /// Coolers (central AC, ASHP cooling coil, MSHP cooling coil) use 312;
+    /// all heating equipment uses 350. Ref: OCHRE `HVAC.py:142`.
+    pub fn default_airflow_cfm_per_ton(self) -> f64 {
+        match self {
+            Self::AcCooler | Self::MiniSplitCool => AIRFLOW_COOLING_CFM_PER_TON,
+            Self::GasFurnace
+            | Self::ElectricFurnace
+            | Self::AshpHeatPumpOnly
+            | Self::AshpHeatPumpAux
+            | Self::MiniSplitHeat
+            | Self::Baseboard
+            | Self::Other => AIRFLOW_HEATING_CFM_PER_TON,
+        }
+    }
+
+    /// True for heating-side equipment types.
+    pub fn is_heating(self) -> bool {
+        matches!(
+            self,
+            Self::GasFurnace
+                | Self::ElectricFurnace
+                | Self::AshpHeatPumpOnly
+                | Self::AshpHeatPumpAux
+                | Self::MiniSplitHeat
+                | Self::Baseboard
+        )
     }
 }
 
@@ -160,7 +202,7 @@ pub struct HvacEquipment {
     pub plf_state: f64,
     pub startup: StartupConfig,
     pub last_speed_index: usize,
-    pub variable_speed_fraction: f64,
+    pub last_speed_frac: f64,
     /// Seconds the unit has been running at the current speed stage.
     /// OCHRE HVAC.py: min_time_in_speed prevents rapid speed hunting by
     /// locking the current stage for at least `min_time_per_speed_s` seconds.
@@ -193,6 +235,10 @@ pub struct HvacEquipment {
     /// whether the temperature is still moving away from setpoint.
     /// Updated each timestep by `update_prev_zone_temp`.
     pub prev_zone_temp_c: Option<f64>,
+    /// Fraction of conditioned space served by this equipment [0, 1].
+    /// Scales electrical/fuel output but NOT thermal zone contributions.
+    /// OCHRE HVAC.py:104: `self.space_fraction`.
+    pub space_fraction: f64,
 }
 
 impl HvacEquipment {
@@ -226,7 +272,8 @@ impl HvacEquipment {
             basement_zone_id: None,
             supply_air_temp_c: equipment_type
                 .default_supply_air_temp_c(DEFAULT_INIT_OUTDOOR_TEMP_C),
-            airflow_m3_s_per_w: AIRFLOW_DEFAULT_M3_S_PER_W,
+            airflow_m3_s_per_w: equipment_type.default_airflow_cfm_per_ton() * CFM_TO_M3_S
+                / W_PER_TON,
             zone_heat_fractions: vec![(zone_id, 1.0)],
             biquadratic_coeffs: vec![DEFAULT_BIQUADRATIC_COEFFS],
             // OCHRE HVAC.py: biquadratic curve inputs clamped to calibrated range.
@@ -240,19 +287,20 @@ impl HvacEquipment {
             // AHRI 210/240 cycling-degradation penalty (Cd) does not apply.
             // Config init() can still override this via the "cooling_cd" key.
             plf_cooling_degradation_coeff: match equipment_type {
-                HvacEquipmentType::MiniSplitHeat => 0.0,
+                HvacEquipmentType::MiniSplitHeat | HvacEquipmentType::MiniSplitCool => 0.0,
                 _ => DEFAULT_PLF_DEGRADATION_COEFF,
             },
             plf_state: 1.0,
             startup: StartupConfig::default(),
             last_speed_index: 0,
-            variable_speed_fraction: 0.0,
+            last_speed_frac: 0.0,
             time_at_current_speed_s: 0.0,
             min_time_per_speed_s: 300.0,
             eir_plr_coefficients: None,
             disabled_speeds: vec![],
             max_enabled_speed: 0,
             prev_zone_temp_c: None,
+            space_fraction: 1.0,
         }
     }
 
@@ -291,7 +339,8 @@ impl HvacEquipment {
             .validate_for_deadband(self.thermostat.hysteresis_c)?;
 
         let mut airflow_cfm_per_ton =
-            extract_numeric(config, "airflow_cfm_per_ton").unwrap_or(AIRFLOW_DEFAULT_CFM_PER_TON);
+            extract_numeric(config, "airflow_cfm_per_ton")
+                .unwrap_or_else(|| self.equipment_type.default_airflow_cfm_per_ton());
         let airflow_defect_ratio = extract_numeric(config, "AirflowDefectRatio")
             .or_else(|| extract_numeric(config, "airflow_defect_ratio"))
             .unwrap_or(1.0);
@@ -368,7 +417,7 @@ impl HvacEquipment {
                     let from_hspf = rated_hspf.map(|h| if h < 7.0 { 0.20 } else { 0.11 });
                     from_seer.or(from_hspf)
                 }
-                SpeedControlMode::FourSpeed => None,
+                SpeedControlMode::MultiSpeedInterpolated => None,
             };
             if let Some(cd) = derived_cd {
                 self.plf_cooling_degradation_coeff = cd;
@@ -377,6 +426,25 @@ impl HvacEquipment {
         }
 
         self.eir_plr_coefficients = load_plr_coefficients(config, "eir_plr_coefficients")?;
+
+        // space_fraction: OCHRE HVAC.py:104. Heating/cooling each reads their
+        // specific fraction key, falling back to the generic key.
+        let frac = if self.equipment_type.is_heating() {
+            extract_numeric(config, "fraction_heating_load_served")
+                .or_else(|| extract_numeric(config, "fraction_load_served"))
+        } else {
+            extract_numeric(config, "fraction_cooling_load_served")
+                .or_else(|| extract_numeric(config, "fraction_load_served"))
+        };
+        if let Some(f) = frac {
+            if !(0.0..=1.0).contains(&f) {
+                eprintln!(
+                    "[WARN] space_fraction {f} out of range [0,1] for {:?}, clamping",
+                    self.equipment_type
+                );
+            }
+            self.space_fraction = f.clamp(0.0, 1.0);
+        }
 
         Ok(())
     }
@@ -413,7 +481,10 @@ impl HvacEquipment {
             SpeedControlMode::TwoSpeedSetpoint
             | SpeedControlMode::TwoSpeedTime
             | SpeedControlMode::TwoSpeedAlternating => 2,
-            SpeedControlMode::FourSpeed => 4,
+            SpeedControlMode::MultiSpeedInterpolated => {
+                let caps = self.heating_capacities_w.len().max(self.cooling_capacities_w.len());
+                caps.max(1)
+            }
             SpeedControlMode::VariableSpeedIdeal => 1,
         }
     }
@@ -786,7 +857,7 @@ impl HvacEquipment {
             SpeedControlMode::SingleSpeed => SpeedSelection {
                 speed_index: 0,
                 part_load_ratio: load_fraction,
-                speed_fraction: load_fraction,
+                speed_frac: load_fraction,
             },
             SpeedControlMode::TwoSpeedSetpoint => {
                 let low_cap = self.low_speed_capacity_fraction.clamp(0.01, 0.999);
@@ -808,13 +879,13 @@ impl HvacEquipment {
                     SpeedSelection {
                         speed_index: 1,
                         part_load_ratio: load_fraction,
-                        speed_fraction: 1.0,
+                        speed_frac: 1.0,
                     }
                 } else {
                     SpeedSelection {
                         speed_index: 0,
                         part_load_ratio: (load_fraction / low_cap).clamp(0.0, 1.0),
-                        speed_fraction: low_cap,
+                        speed_frac: low_cap,
                     }
                 }
             }
@@ -867,13 +938,13 @@ impl HvacEquipment {
                     SpeedSelection {
                         speed_index: 1,
                         part_load_ratio: load_fraction,
-                        speed_fraction: 1.0,
+                        speed_frac: 1.0,
                     }
                 } else {
                     SpeedSelection {
                         speed_index: 0,
                         part_load_ratio: (load_fraction / low_cap).clamp(0.0, 1.0),
-                        speed_fraction: low_cap,
+                        speed_frac: low_cap,
                     }
                 }
             }
@@ -887,33 +958,56 @@ impl HvacEquipment {
                 SpeedSelection {
                     speed_index: desired_index,
                     part_load_ratio: load_fraction,
-                    speed_fraction: 1.0,
+                    speed_frac: 1.0,
                 }
             }
-            SpeedControlMode::FourSpeed => {
-                let thresholds = [0.25, 0.50, 0.75, 1.0];
-                let mut index = 0usize;
-                for (i, threshold) in thresholds.iter().enumerate() {
-                    if load_fraction <= *threshold {
-                        index = i;
-                        break;
+            SpeedControlMode::MultiSpeedInterpolated => {
+                let cap_fracs = self.capacity_fractions();
+                if cap_fracs.is_empty() || load_fraction <= 0.0 {
+                    SpeedSelection {
+                        speed_index: 0,
+                        speed_frac: 0.0,
+                        part_load_ratio: 0.0,
                     }
-                }
-                let stage_capacity_fraction = thresholds[index];
-                SpeedSelection {
-                    speed_index: index,
-                    part_load_ratio: (load_fraction / stage_capacity_fraction).clamp(0.0, 1.0),
-                    speed_fraction: stage_capacity_fraction,
+                } else if load_fraction <= cap_fracs[0] {
+                    // Below lowest stage capacity: cycle at speed 0.
+                    SpeedSelection {
+                        speed_index: 0,
+                        speed_frac: 0.0,
+                        part_load_ratio: load_fraction / cap_fracs[0],
+                    }
+                } else if load_fraction >= *cap_fracs.last().unwrap() {
+                    // At or above max capacity: full output at top stage.
+                    SpeedSelection {
+                        speed_index: cap_fracs.len() - 1,
+                        speed_frac: 0.0,
+                        part_load_ratio: 1.0,
+                    }
+                } else {
+                    // Inter-speed interpolation: find bracketing stages.
+                    let hi = cap_fracs.partition_point(|&f| f < load_fraction);
+                    let lo = hi - 1;
+                    let span = cap_fracs[hi] - cap_fracs[lo];
+                    let frac = if span > f64::EPSILON {
+                        (load_fraction - cap_fracs[lo]) / span
+                    } else {
+                        0.0
+                    };
+                    SpeedSelection {
+                        speed_index: lo,
+                        speed_frac: frac,
+                        part_load_ratio: 1.0,
+                    }
                 }
             }
             SpeedControlMode::VariableSpeedIdeal => SpeedSelection {
                 speed_index: 0,
                 part_load_ratio: 1.0,
-                speed_fraction: load_fraction,
+                speed_frac: load_fraction,
             },
         };
         self.last_speed_index = selection.speed_index;
-        self.variable_speed_fraction = selection.speed_fraction;
+        self.last_speed_frac = selection.speed_frac;
         selection
     }
 
@@ -985,6 +1079,44 @@ impl HvacEquipment {
             return 1.0;
         }
         self.eir_by_stage[stage_index.min(self.eir_by_stage.len() - 1)]
+    }
+
+    /// Normalized capacity fractions `cap[i] / cap[last]` for the populated capacities array.
+    /// Uses whichever of heating/cooling has more stages (they should not both be populated
+    /// for a single equipment instance, but if they are, the longer one wins).
+    pub fn capacity_fractions(&self) -> Vec<f64> {
+        let caps = if self.heating_capacities_w.len() >= self.cooling_capacities_w.len() {
+            &self.heating_capacities_w
+        } else {
+            &self.cooling_capacities_w
+        };
+        let max_cap = caps.last().copied().unwrap_or(0.0);
+        if max_cap <= 0.0 {
+            return vec![];
+        }
+        caps.iter().map(|&c| c / max_cap).collect()
+    }
+
+    /// Interpolate capacity between two bracket stages using `speed_frac`.
+    pub fn interpolated_capacity(&self, capacities: &[f64], speed_index: usize, speed_frac: f64) -> f64 {
+        let cap_lo = Self::capacity_at_stage(capacities, speed_index);
+        if speed_frac > 0.0 {
+            let cap_hi = Self::capacity_at_stage(capacities, speed_index + 1);
+            cap_lo * (1.0 - speed_frac) + cap_hi * speed_frac
+        } else {
+            cap_lo
+        }
+    }
+
+    /// Interpolate EIR between two bracket stages using `speed_frac`.
+    pub fn interpolated_eir(&self, speed_index: usize, speed_frac: f64) -> f64 {
+        let eir_lo = self.eir_at_stage(speed_index);
+        if speed_frac > 0.0 {
+            let eir_hi = self.eir_at_stage(speed_index + 1);
+            eir_lo * (1.0 - speed_frac) + eir_hi * speed_frac
+        } else {
+            eir_lo
+        }
     }
 
     pub fn airflow_m3_s_for_capacity_w(&self, capacity_w: f64) -> f64 {
@@ -1260,7 +1392,8 @@ fn parse_speed_control_mode(config: &EquipmentConfig) -> SpeedControlMode {
             "two_speed_alternating" | "two-speed-alternating" | "time2" | "alternating" => {
                 SpeedControlMode::TwoSpeedAlternating
             }
-            "four" | "four_speed" | "four-speed" => SpeedControlMode::FourSpeed,
+            "four" | "four_speed" | "four-speed" | "multi_speed" | "multi-speed"
+            | "multi_speed_interpolated" => SpeedControlMode::MultiSpeedInterpolated,
             "variable" | "variable_speed" | "variable-speed" | "ideal" => {
                 SpeedControlMode::VariableSpeedIdeal
             }
@@ -1269,7 +1402,7 @@ fn parse_speed_control_mode(config: &EquipmentConfig) -> SpeedControlMode {
     }
     match config.get_f64("speed_control_mode") {
         Some(2.0) => SpeedControlMode::TwoSpeedSetpoint,
-        Some(4.0) => SpeedControlMode::FourSpeed,
+        Some(4.0) => SpeedControlMode::MultiSpeedInterpolated,
         Some(3.0) | Some(0.0) => SpeedControlMode::VariableSpeedIdeal,
         _ => SpeedControlMode::SingleSpeed,
     }
@@ -1667,17 +1800,39 @@ mod tests {
         assert!(
             (HvacEquipmentType::MiniSplitHeat.default_supply_air_temp_c(8.3) - 43.3).abs() < 1e-9
         );
+        // Cooling variants use 40.6 as a construction-time placeholder;
+        // overwritten by step() before any real use.
+        assert!(
+            (HvacEquipmentType::AcCooler.default_supply_air_temp_c(8.3) - 40.6).abs() < 1e-9
+        );
+        assert!(
+            (HvacEquipmentType::MiniSplitCool.default_supply_air_temp_c(8.3) - 40.6).abs() < 1e-9
+        );
     }
 
     #[test]
-    fn airflow_defaults_to_375_and_scales_by_defect_ratio() {
+    fn airflow_heating_defaults_to_350_and_scales_by_defect_ratio() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
             .raw_config
             .insert("AirflowDefectRatio".to_string(), 0.8.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
-        let expected = 300.0 * CFM_TO_M3_S / W_PER_TON;
+        // 350 CFM/ton * 0.8 defect ratio = 280 CFM/ton
+        let expected = 280.0 * CFM_TO_M3_S / W_PER_TON;
+        assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn airflow_cooling_defaults_to_312_and_scales_by_defect_ratio() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .raw_config
+            .insert("AirflowDefectRatio".to_string(), 0.8.into());
+        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+        // 312 CFM/ton * 0.8 defect ratio = 249.6 CFM/ton
+        let expected = 249.6 * CFM_TO_M3_S / W_PER_TON;
         assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
     }
 
@@ -1799,43 +1954,56 @@ mod tests {
         );
     }
 
-    #[test]
-    fn four_speed_control_picks_expected_indices() {
+    /// Helper: create an HvacEquipment in MultiSpeedInterpolated mode with 4 heating stages.
+    fn make_msi_hvac() -> HvacEquipment {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::FourSpeed;
-        assert_eq!(hvac.select_speed(0.25).speed_index, 0);
-        assert_eq!(hvac.select_speed(0.50).speed_index, 1);
-        assert_eq!(hvac.select_speed(0.75).speed_index, 2);
-        assert_eq!(hvac.select_speed(1.00).speed_index, 3);
+        hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        // Capacities: [4000, 6000, 8000, 10000] W → fractions [0.4, 0.6, 0.8, 1.0]
+        hvac.heating_capacities_w = vec![4000.0, 6000.0, 8000.0, 10000.0];
+        hvac
     }
 
-    /// Regression: FourSpeed loop must break on the first matching threshold.
-    /// Without break, any load_fraction <= 1.0 would always end up at index 3.
     #[test]
-    fn four_speed_selects_correct_stage_at_intermediate_fractions() {
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::FourSpeed;
-        // Each of these must route to the minimum stage that can handle the load.
-        assert_eq!(
-            hvac.select_speed(0.20).speed_index,
-            0,
-            "0.20 <= 0.25 → stage 0"
-        );
-        assert_eq!(
-            hvac.select_speed(0.40).speed_index,
-            1,
-            "0.40 <= 0.50 → stage 1"
-        );
-        assert_eq!(
-            hvac.select_speed(0.60).speed_index,
-            2,
-            "0.60 <= 0.75 → stage 2"
-        );
-        assert_eq!(
-            hvac.select_speed(0.90).speed_index,
-            3,
-            "0.90 <= 1.00 → stage 3"
-        );
+    fn multi_speed_bracket_selection() {
+        // load_fraction=0.5 is between cap_frac[0]=0.4 and cap_frac[1]=0.6
+        // → speed_index=0, speed_frac = (0.5 - 0.4) / (0.6 - 0.4) = 0.5
+        let mut hvac = make_msi_hvac();
+        let sel = hvac.select_speed(0.5);
+        assert_eq!(sel.speed_index, 0, "lower bracket index");
+        assert!((sel.speed_frac - 0.5).abs() < 1e-12, "speed_frac={}", sel.speed_frac);
+        assert_eq!(sel.part_load_ratio, 1.0, "PLR=1 when interpolating between stages");
+    }
+
+    #[test]
+    fn multi_speed_plr_below_lowest_stage() {
+        // load_fraction=0.30 < cap_frac[0]=0.40 → cycling at speed 0
+        // PLR = 0.30 / 0.40 = 0.75
+        let mut hvac = make_msi_hvac();
+        let sel = hvac.select_speed(0.30);
+        assert_eq!(sel.speed_index, 0);
+        assert_eq!(sel.speed_frac, 0.0, "no interpolation at lowest stage");
+        assert!((sel.part_load_ratio - 0.75).abs() < 1e-12, "PLR={}", sel.part_load_ratio);
+    }
+
+    #[test]
+    fn multi_speed_midpoint_interpolation() {
+        // load_fraction=0.7 is between cap_frac[1]=0.6 and cap_frac[2]=0.8
+        // → speed_index=1, speed_frac = (0.7 - 0.6) / (0.8 - 0.6) = 0.5
+        let mut hvac = make_msi_hvac();
+        let sel = hvac.select_speed(0.7);
+        assert_eq!(sel.speed_index, 1);
+        assert!((sel.speed_frac - 0.5).abs() < 1e-12, "speed_frac={}", sel.speed_frac);
+        assert_eq!(sel.part_load_ratio, 1.0);
+    }
+
+    #[test]
+    fn multi_speed_full_capacity_clamp() {
+        // load_fraction >= 1.0 → last stage, speed_frac=0, PLR=1
+        let mut hvac = make_msi_hvac();
+        let sel = hvac.select_speed(1.0);
+        assert_eq!(sel.speed_index, 3, "top stage index");
+        assert_eq!(sel.speed_frac, 0.0);
+        assert_eq!(sel.part_load_ratio, 1.0);
     }
 
     #[test]
@@ -1843,7 +2011,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
         let sel = hvac.select_speed(0.63);
-        assert!((sel.speed_fraction - 0.63).abs() < 1e-12);
+        assert!((sel.speed_frac - 0.63).abs() < 1e-12);
         assert_eq!(sel.part_load_ratio, 1.0);
     }
 
@@ -1910,11 +2078,16 @@ mod tests {
     fn mshp_plf_degradation_coeff_defaults_to_zero() {
         // MSHP selects discrete compressor stages rather than cycling, so the
         // AHRI cycling-degradation penalty (Cd) must be zero by default.
-        let hvac = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
-        assert_eq!(
-            hvac.plf_cooling_degradation_coeff, 0.0,
-            "MSHP must default to Cd=0 (no cycling penalty)"
-        );
+        for eq_type in [
+            HvacEquipmentType::MiniSplitHeat,
+            HvacEquipmentType::MiniSplitCool,
+        ] {
+            let hvac = HvacEquipment::new(eq_type, ZoneId(1));
+            assert_eq!(
+                hvac.plf_cooling_degradation_coeff, 0.0,
+                "{eq_type:?} must default to Cd=0 (no cycling penalty)"
+            );
+        }
     }
 
     #[test]
@@ -1924,6 +2097,7 @@ mod tests {
             HvacEquipmentType::ElectricFurnace,
             HvacEquipmentType::AshpHeatPumpOnly,
             HvacEquipmentType::AshpHeatPumpAux,
+            HvacEquipmentType::AcCooler,
             HvacEquipmentType::Baseboard,
             HvacEquipmentType::Other,
         ] {
@@ -1951,41 +2125,25 @@ mod tests {
     }
 
     #[test]
-    fn four_speed_boundary_values_map_to_correct_stages() {
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::FourSpeed;
-        assert_eq!(hvac.select_speed(0.0).speed_index, 0, "0.0 → stage 0");
-        assert_eq!(hvac.select_speed(0.25).speed_index, 0, "0.25 → stage 0");
-        assert_eq!(hvac.select_speed(0.26).speed_index, 1, "0.26 → stage 1");
-        assert_eq!(hvac.select_speed(0.50).speed_index, 1, "0.50 → stage 1");
-        assert_eq!(hvac.select_speed(0.75).speed_index, 2, "0.75 → stage 2");
-        assert_eq!(hvac.select_speed(1.0).speed_index, 3, "1.0 → stage 3");
+    fn multi_speed_zero_load_returns_zero_plr() {
+        let mut hvac = make_msi_hvac();
+        let sel = hvac.select_speed(0.0);
+        assert_eq!(sel.speed_index, 0);
+        assert_eq!(sel.speed_frac, 0.0);
+        assert_eq!(sel.part_load_ratio, 0.0, "zero load → zero PLR");
     }
 
     #[test]
-    fn four_speed_just_above_thresholds_advance_to_next_stage() {
-        // Values just above each 0.25-boundary must select the next stage, not
-        // remain at the lower stage. Validates the FourSpeed loop break condition.
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        hvac.speed_control_mode = SpeedControlMode::FourSpeed;
-        // 0.251 > 0.25 threshold → stage 1 (not stage 0)
-        assert_eq!(
-            hvac.select_speed(0.251).speed_index,
-            1,
-            "0.251 > 0.25 threshold → stage 1"
-        );
-        // 0.501 > 0.50 threshold → stage 2 (not stage 1)
-        assert_eq!(
-            hvac.select_speed(0.501).speed_index,
-            2,
-            "0.501 > 0.50 threshold → stage 2"
-        );
-        // 0.751 > 0.75 threshold → stage 3 (not stage 2)
-        assert_eq!(
-            hvac.select_speed(0.751).speed_index,
-            3,
-            "0.751 > 0.75 threshold → stage 3"
-        );
+    fn multi_speed_at_exact_stage_boundary() {
+        // load_fraction = cap_frac[1] = 0.6 exactly.
+        // partition_point(|&f| f < 0.6): cap_fracs[0]=0.4 < 0.6 (true), cap_fracs[1]=0.6 < 0.6 (false)
+        // → hi=1, lo=0, frac = (0.6 - 0.4) / (0.6 - 0.4) = 1.0
+        // This means "fully at the upper bracket" — equivalent to being at speed_index=1.
+        let mut hvac = make_msi_hvac();
+        let sel = hvac.select_speed(0.6);
+        assert_eq!(sel.speed_index, 0, "lower bracket index is 0");
+        assert!((sel.speed_frac - 1.0).abs() < 1e-12, "speed_frac=1.0 at exact upper boundary");
+        assert_eq!(sel.part_load_ratio, 1.0);
     }
 
     #[test]
@@ -2718,7 +2876,6 @@ mod tests {
             (SpeedControlMode::TwoSpeedSetpoint, 2),
             (SpeedControlMode::TwoSpeedTime, 2),
             (SpeedControlMode::TwoSpeedAlternating, 2),
-            (SpeedControlMode::FourSpeed, 4),
             (SpeedControlMode::VariableSpeedIdeal, 1),
         ] {
             let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
@@ -2729,6 +2886,11 @@ mod tests {
                 "{mode:?} must have {expected} speed stages"
             );
         }
+        // MultiSpeedInterpolated derives stage count from capacities.
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        hvac.heating_capacities_w = vec![4000.0, 6000.0, 8000.0, 10000.0];
+        assert_eq!(hvac.n_speed_stages(), 4, "MultiSpeedInterpolated with 4 stages");
     }
 
     // --- Change 4: Deadband offset (asymmetric setpoint bands) ---

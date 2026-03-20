@@ -26,9 +26,8 @@ use super::{
         operating_mode_code, zone_id_from_config,
     },
 };
-use super::common::parse_biquadratic_list;
+use super::hvac_core::parse_biquadratic_list;
 
-const CFM_TO_M3_S: f64 = 0.000_471_947_45;
 const CRANKCASE_HEATER_KW: f64 = 0.05;
 const CRANKCASE_HEATER_THRESHOLD_C: f64 = 12.8;
 const MIN_LOAD_FRACTION_DEADBAND_C: f64 = 0.5;
@@ -36,6 +35,12 @@ const DEFAULT_CENTRAL_AC_CAPACITY_W: f64 = 12_000.0;
 const DEFAULT_ROOM_AC_CAPACITY_W: f64 = 3_500.0;
 const DEFAULT_EIR_FALLBACK: f64 = 0.35;
 const BTU_PER_HR_PER_W: f64 = 3.412_141_633;
+
+/// Henderson-Rengarajan latent degradation defaults (EnergyPlus/ASHRAE RP-1120).
+const DEFAULT_TWET_RATED_S: f64 = 1000.0;
+const DEFAULT_GAMMA_RATED: f64 = 1.5;
+const DEFAULT_MAX_CYCLING_RATE: f64 = 3.0;
+const DEFAULT_LATENT_TIME_CONSTANT_S: f64 = 45.0;
 
 const AHRI_RATED_INDOOR_DB_C: f64 = 26.666_666_666_7;
 const AHRI_RATED_INDOOR_WB_C: f64 = 19.444_444_444_4;
@@ -61,7 +66,7 @@ pub(super) struct CoolingCore {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
-    hvac: HvacEquipment,
+    pub(super) hvac: HvacEquipment,
     operating_mode: OperatingMode,
     run_time_s: f64,
     cycle_on_steps: u64,
@@ -119,7 +124,7 @@ struct AirConditionerState {
     startup_time_since_start_min: f64,
     plf_state: f64,
     last_speed_index: usize,
-    variable_speed_fraction: f64,
+    last_speed_frac: f64,
     electric_kw: f64,
     sensible_cooling_w: f64,
     latent_cooling_w: f64,
@@ -162,23 +167,16 @@ impl AirConditioner {
     /// Calculate crankcase heater power accounting for companion coil operation.
     ///
     /// For heat pump systems, the crankcase heater only draws power when neither
-    /// the cooling nor the heating coil is running. EnergyPlus models this via
-    /// `max(HeatingRTF, CoolingRTF)`.
-    ///
-    /// `companion_heating_rtf` — pass `Some(rtf)` when this AC is the cooling
-    /// side of a heat pump; `None` for a standalone AC.
+    /// the cooling nor the heating coil is running.
     #[cfg(test)]
-    pub fn crankcase_heater_power(
+    pub(super) fn crankcase_heater_power(
         &self,
         outdoor_temp_c: f64,
         cooling_rtf: f64,
         companion_heating_rtf: Option<f64>,
     ) -> f64 {
-        self.core.crankcase_heater_power_internal(
-            outdoor_temp_c,
-            cooling_rtf,
-            companion_heating_rtf,
-        )
+        self.core
+            .crankcase_heater_power_internal(outdoor_temp_c, cooling_rtf, companion_heating_rtf)
     }
 
     /// Override crankcase heater parameters after `init()`.
@@ -326,16 +324,18 @@ impl CoolingCore {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Thermal,
                     zone: Some(zone),
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
             ],
             telemetry: default_telemetry(),
-            hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
+            hvac: HvacEquipment::new(HvacEquipmentType::AcCooler, zone),
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             cycle_on_steps: 0,
@@ -458,18 +458,23 @@ impl CoolingCore {
         self.crankcase_capacity_curve =
             parse_crankcase_capacity_curve(config.get_str("crankcase_capacity_curve_coeffs"))?;
 
+        // Latent degradation defaults moved to module scope.
+
         self.latent_degradation = LatentDegradationParams {
             twet_rated_s: first_f64(config, &["twet_rated_s", "latent_twet_rated_s"])
-                .unwrap_or(0.0),
-            gamma_rated: first_f64(config, &["gamma_rated", "latent_gamma_rated"]).unwrap_or(0.0),
+                .unwrap_or(DEFAULT_TWET_RATED_S),
+            gamma_rated: first_f64(config, &["gamma_rated", "latent_gamma_rated"])
+                .unwrap_or(DEFAULT_GAMMA_RATED),
             max_cycling_rate: first_f64(config, &["max_cycling_rate", "latent_max_cycling_rate"])
-                .unwrap_or(0.0),
+                .unwrap_or(DEFAULT_MAX_CYCLING_RATE),
             latent_time_constant_s: first_f64(
                 config,
                 &["latent_time_constant_s", "latent_capacity_time_constant_s"],
             )
-            .unwrap_or(0.0),
+            .unwrap_or(DEFAULT_LATENT_TIME_CONSTANT_S),
         };
+
+        // fan_power_w_per_cfm → fan_power_w_per_m3_s conversion handled by hvac.init()
 
         // fan_power_w_per_cfm → fan_power_w_per_m3_s conversion handled by hvac.init()
 
@@ -527,7 +532,7 @@ impl CoolingCore {
             let selection = self.hvac.select_speed(load_fraction);
             self.hvac.duty_cycle = match self.hvac.speed_control_mode {
                 SpeedControlMode::VariableSpeedIdeal => {
-                    if selection.speed_fraction > 0.0 {
+                    if selection.speed_frac > 0.0 {
                         1.0
                     } else {
                         0.0
@@ -630,7 +635,8 @@ impl CoolingCore {
             self.crankcase_heater_kw = crankcase_kw;
         }
 
-        let electric_kw = compressor_kw + fan_kw + self.crankcase_heater_kw;
+        let electric_kw = (compressor_kw + fan_kw + self.crankcase_heater_kw)
+            * self.hvac.space_fraction;
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_kw: electric_kw,
@@ -646,11 +652,11 @@ impl CoolingCore {
         self.telemetry.set("shr", self.hvac.shr);
         self.telemetry
             .set("operating_mode", operating_mode_code(self.operating_mode));
-        // COP = total cooling delivered / compressor electric (excludes crankcase).
-        let compressor_electric_w = (compressor_kw + fan_kw) * 1000.0;
+        // COP per AHRI/SEER convention: excludes fan power from denominator.
+        let compressor_only_w = compressor_kw * 1000.0;
         let total_cooling_w = sensible_cooling_w + latent_cooling_w;
-        let cop = if compressor_electric_w > 1e-6 {
-            total_cooling_w / compressor_electric_w
+        let cop = if compressor_only_w > 1e-6 {
+            total_cooling_w / compressor_only_w
         } else {
             0.0
         };
@@ -703,7 +709,8 @@ impl CoolingCore {
         }
 
         let speed_index = self.hvac.last_speed_index;
-        let stage_cap_w = match self.hvac.speed_control_mode {
+        let speed_frac = self.hvac.last_speed_frac;
+        let (stage_cap_w, stage_eir) = match self.hvac.speed_control_mode {
             SpeedControlMode::VariableSpeedIdeal => {
                 let max_cap = self
                     .hvac
@@ -711,11 +718,24 @@ impl CoolingCore {
                     .last()
                     .copied()
                     .unwrap_or_default();
-                max_cap * self.hvac.variable_speed_fraction.clamp(0.0, 1.0)
+                (
+                    max_cap * speed_frac.clamp(0.0, 1.0),
+                    self.hvac.eir_at_stage(speed_index),
+                )
             }
-            _ => HvacEquipment::capacity_at_stage(&self.hvac.cooling_capacities_w, speed_index),
+            SpeedControlMode::MultiSpeedInterpolated => (
+                self.hvac.interpolated_capacity(
+                    &self.hvac.cooling_capacities_w,
+                    speed_index,
+                    speed_frac,
+                ),
+                self.hvac.interpolated_eir(speed_index, speed_frac),
+            ),
+            _ => (
+                HvacEquipment::capacity_at_stage(&self.hvac.cooling_capacities_w, speed_index),
+                self.hvac.eir_at_stage(speed_index),
+            ),
         };
-        let stage_eir = self.hvac.eir_at_stage(speed_index);
 
         let plr = if self.hvac.speed_control_mode == SpeedControlMode::VariableSpeedIdeal {
             1.0
@@ -783,7 +803,6 @@ impl CoolingCore {
         let total_capacity_w = (staged_capacity_w * plr).max(0.0);
 
         let flow_m3_s = flow_m3_s_for_fan;
-        let airflow_cfm = flow_m3_s / CFM_TO_M3_S;
 
         let ao = self.ao_for_speed(speed_index);
         let CoilResult {
@@ -844,7 +863,7 @@ impl CoolingCore {
             self.hvac.sensible_latent_from_shr(total_capacity_w);
 
         let compressor_kw = (total_capacity_w * stage_eir * eir_ratio).max(0.0) / 1000.0;
-        let fan_kw = self.hvac.fan_power_w(airflow_cfm) * plr / 1000.0;
+        let fan_kw = self.hvac.fan_power_w(flow_m3_s) * plr / 1000.0;
 
         Ok(PerformanceResult {
             sensible_cooling_w,
@@ -921,7 +940,7 @@ impl CoolingCore {
             startup_time_since_start_min: self.hvac.startup.time_since_start_min,
             plf_state: self.hvac.plf_state,
             last_speed_index: self.hvac.last_speed_index,
-            variable_speed_fraction: self.hvac.variable_speed_fraction,
+            last_speed_frac: self.hvac.last_speed_frac,
             electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
             sensible_cooling_w: self.telemetry.get("sensible_cooling_w").unwrap_or(0.0),
             latent_cooling_w: self.telemetry.get("latent_cooling_w").unwrap_or(0.0),
@@ -958,7 +977,7 @@ impl CoolingCore {
         self.hvac.startup.time_since_start_min = decoded.startup_time_since_start_min;
         self.hvac.plf_state = decoded.plf_state;
         self.hvac.last_speed_index = decoded.last_speed_index;
-        self.hvac.variable_speed_fraction = decoded.variable_speed_fraction;
+        self.hvac.last_speed_frac = decoded.last_speed_frac;
         self.hvac.shr = decoded.shr;
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
         self.ctrl_power_limit_kw = decoded.ctrl_power_limit_kw.unwrap_or(f64::INFINITY);
@@ -1248,6 +1267,8 @@ mod tests {
         raw_config.insert("eir".to_string(), 0.33.into());
         raw_config.insert("cooling_setpoint_c".to_string(), 24.0.into());
         raw_config.insert("heating_setpoint_c".to_string(), 18.0.into());
+        // Explicit airflow so coil bypass-factor init stays stable across
+        // equipment-type default changes; airflow defaults are tested in hvac_core.
         raw_config.insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -1380,6 +1401,7 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         eq.update_control(&env);
+        eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         assert!((ports.electrical.net_active_kw() - 0.05).abs() < 1e-9);
         assert_eq!(ports.thermal[0].sensible_gain_w, 0.0);
@@ -1396,6 +1418,7 @@ mod tests {
         let env = env(28.0, 0.012, 20.0, 35.0);
         eq.init(&cfg, &env).unwrap();
 
+        eq.update_control(&env);
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
@@ -1465,6 +1488,36 @@ mod tests {
 
         assert_eq!(restored.telemetry().get("operating_mode"), Some(2.0));
         assert!(restored.telemetry().get("electric_kw").unwrap_or(0.0) > 0.0);
+    }
+
+    #[test]
+    fn ac_uses_ac_cooler_equipment_type_with_312_cfm_per_ton_default() {
+        use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+        let cfg = ac_config();
+        let eq = AirConditioner::new(cfg.clone());
+        assert_eq!(
+            eq.core.hvac.equipment_type,
+            super::super::hvac_core::HvacEquipmentType::AcCooler,
+            "AirConditioner must use AcCooler equipment type"
+        );
+        // Construction-time airflow default is 312 CFM/ton.
+        let expected = 312.0 * CFM_TO_M3_S / W_PER_TON;
+        assert!(
+            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
+            "AcCooler default airflow must be 312 CFM/ton, got {} m3/s/W",
+            eq.core.hvac.airflow_m3_s_per_w
+        );
+
+        // init() preserves the 312 default when no explicit airflow configured.
+        let mut eq = AirConditioner::new(cfg.clone());
+        let environment = env(27.0, 0.010, 19.0, 35.0);
+        eq.init(&cfg, &environment)
+            .expect("init must succeed with 312 CFM/ton default");
+        assert!(
+            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
+            "init() must preserve 312 CFM/ton default, got {} m3/s/W",
+            eq.core.hvac.airflow_m3_s_per_w
+        );
     }
 
     #[test]
@@ -1679,6 +1732,7 @@ mod dr_tests {
         raw.insert("cooling_setpoint_c".to_string(), 24.0.into());
         raw.insert("heating_setpoint_c".to_string(), 18.0.into());
         raw.insert("hysteresis_c".to_string(), 0.0.into());
+        raw.insert("airflow_cfm_per_ton".to_string(), 375.0.into());
         raw.insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -1983,6 +2037,67 @@ mod crankcase_tests {
     use super::AirConditioner;
     use crate::{Equipment, EquipmentConfig};
 
+    fn env(
+        zone_temp_c: f64,
+        humidity_ratio: f64,
+        wet_bulb_c: f64,
+        outdoor_c: f64,
+    ) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio,
+                relative_humidity: 0.45,
+                wet_bulb_c,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: outdoor_c,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::minutes(1),
+        }
+    }
+
+    fn ac_config() -> EquipmentConfig {
+        let mut raw_config = HashMap::new();
+        raw_config.insert("zone_id".to_string(), 1.0.into());
+        raw_config.insert("cooling_capacity_w".to_string(), 8_000.0.into());
+        raw_config.insert("eir".to_string(), 0.33.into());
+        raw_config.insert("cooling_setpoint_c".to_string(), 24.0.into());
+        raw_config.insert("heating_setpoint_c".to_string(), 18.0.into());
+        raw_config.insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[1,0,0,0,0,0]".into(),
+        );
+        raw_config.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        EquipmentConfig {
+            name: "AC".to_string(),
+            ochre_class: "Air Conditioner".to_string(),
+            raw_config,
+        }
+    }
+
     fn cold_env(outdoor_c: f64, zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
             zones: vec![ZoneState {
@@ -2027,13 +2142,17 @@ mod crankcase_tests {
         raw.insert("eir".to_string(), 0.33.into());
         raw.insert("cooling_setpoint_c".to_string(), 26.0.into());
         raw.insert("heating_setpoint_c".to_string(), 18.0.into());
+        raw.insert("airflow_cfm_per_ton".to_string(), 375.0.into());
         raw.insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
         raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         raw.insert("crankcase_heater_kw".to_string(), 0.10.into()); // 100 W rated
-        raw.insert("crankcase_heater_threshold_c".to_string(), 12.8_f64.into());
+        raw.insert(
+            "crankcase_heater_threshold_c".to_string(),
+            12.8_f64.into(),
+        );
         EquipmentConfig {
             name: "AC".to_string(),
             ochre_class: "Air Conditioner".to_string(),

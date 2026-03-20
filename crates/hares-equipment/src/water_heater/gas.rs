@@ -155,24 +155,35 @@ impl GasWH {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Electrical,
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Thermal,
                     zone: Some(zone),
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Fluid,
                     zone: None,
                     loop_id: Some(loop_id),
                     domain_id: None,
+                    fluid_type: Some(FluidType::Water),
+                },
+                PortDeclaration {
+                    port_type: PortType::Fluid,
+                    zone: None,
+                    loop_id: Some(super::DHW_DEMAND_LOOP),
+                    domain_id: None,
+                    fluid_type: Some(FluidType::Water),
                 },
             ],
             telemetry: default_telemetry(),
@@ -398,9 +409,13 @@ impl Equipment for GasWH {
             }
         }
 
-        // Safety clamp: force off if upper node exceeds max tank temperature.
-        let upper_node_temp = self.tank.node_temps()[0];
-        if upper_node_temp > self.max_tank_temp_c {
+        // Safety cutout: force off if ANY node exceeds max tank temperature.
+        // A high-limit aquastat/thermal fuse responds to the hottest point in the tank.
+        let max_node_temp = self.tank.node_temps().iter()
+            .copied()
+            .reduce(f64::max)
+            .expect("node_temps is never empty");
+        if !max_node_temp.is_finite() || max_node_temp > self.max_tank_temp_c {
             self.burner_on = false;
             return OperatingMode::Off;
         }
@@ -438,9 +453,11 @@ impl Equipment for GasWH {
         let flue_loss_w = gross_heat_w * self.flue_loss_fraction;
         let tank_heat_w = (gross_heat_w - flue_loss_w).max(0.0);
 
-        if tank_heat_w > 0.0 {
-            self.tank.heat_node(self.burner_node, tank_heat_w, dt)?;
-        }
+        let heat_injections: Vec<(usize, f64)> = if tank_heat_w > 0.0 {
+            vec![(self.burner_node, tank_heat_w)]
+        } else {
+            vec![]
+        };
 
         // Compute standby skin loss to zone before tank.step() updates temperatures.
         // OCHRE WaterHeater.py:712-723: fraction of tank UA losses that enter the zone.
@@ -458,10 +475,16 @@ impl Equipment for GasWH {
             draw_l_per_min_source,
             mains_temp_c_source,
         );
-        let draw_volume_m3 = draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
-        let draw = self
-            .tank
-            .step(ambient_c, draw_volume_m3, mains_temp_c, dt)?;
+        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
+        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
+        let draw_volume_m3 = total_draw_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
+        let draw = self.tank.step(
+            ambient_c,
+            draw_volume_m3,
+            mains_temp_c,
+            &heat_injections,
+            dt,
+        )?;
 
         let gas_consumption_w = burner_input_w + self.pilot_power_w;
         if gas_consumption_w > 0.0 {
@@ -485,10 +508,10 @@ impl Equipment for GasWH {
             })?;
         }
 
-        if draw_flow_rate_kg_s > 0.0 {
+        if total_draw_kg_s > 0.0 {
             ports.accumulate(&PortContribution::Fluid {
                 loop_id: self.loop_id,
-                flow_rate_kg_s: draw_flow_rate_kg_s,
+                flow_rate_kg_s: total_draw_kg_s,
                 supply_temp_c: draw.outlet_temp_c,
                 return_temp_c: mains_temp_c,
                 fluid_type: self.fluid_type,
@@ -516,7 +539,7 @@ impl Equipment for GasWH {
         self.telemetry.set("flue_loss_w", flue_loss_w);
         self.telemetry.set("fan_electric_w", fan_electric_w);
         self.telemetry
-            .set("draw_flow_rate_kg_s", draw_flow_rate_kg_s);
+            .set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry.set(
             "operating_mode",
             if mode == OperatingMode::Heating {
@@ -932,6 +955,61 @@ mod tests {
             "Expected Off when tank exceeds max_tank_temp_c"
         );
         assert!(!eq.burner_on);
+    }
+
+    /// Stratified tank where top node (0) is below max_tank_temp_c but the
+    /// burner node (bottom) exceeds it. The safety cutout must still trigger
+    /// because the aquastat responds to the hottest point in the tank.
+    #[test]
+    fn max_tank_temp_safety_triggers_on_stratified_hot_bottom() {
+        let mut cfg = config();
+        cfg.raw_config
+            .insert("initial_tank_temp_c".to_string(), 30.0.into());
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 55.0.into());
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        // Manually stratify: top node cool (30°C), burner node hot (60°C > 55°C limit).
+        let n = eq.tank.node_temps().len();
+        eq.tank.node_temps_mut()[0] = 30.0; // top — below limit
+        eq.tank.node_temps_mut()[n - 1] = 60.0; // burner node — above limit
+
+        let mode = eq.update_control(&env(21.0));
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::Off,
+            "Safety cutout must trigger when ANY node exceeds max_tank_temp_c, \
+             even if the top node is cool"
+        );
+        assert!(!eq.burner_on);
+    }
+
+    /// Stratified tank where the hottest node is still below max_tank_temp_c.
+    /// The safety cutout must NOT fire and the burner must be allowed to operate.
+    #[test]
+    fn safety_cutout_does_not_fire_when_all_nodes_below_limit() {
+        let mut cfg = config();
+        cfg.raw_config
+            .insert("initial_tank_temp_c".to_string(), 30.0.into());
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 55.0.into());
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        // Stratify: bottom node warm but below the 55°C limit.
+        // Keep burner node cold (below setpoint) so thermostat calls for heat.
+        let n = eq.tank.node_temps().len();
+        eq.tank.node_temps_mut()[0] = 54.0; // hottest node, below 55°C limit
+        eq.tank.node_temps_mut()[n - 1] = 30.0; // burner node, cold → calls for heat
+
+        let mode = eq.update_control(&env(21.0));
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::Heating,
+            "Burner must fire when all nodes are below max_tank_temp_c"
+        );
+        assert!(eq.burner_on);
     }
 
     #[test]

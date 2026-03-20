@@ -155,12 +155,21 @@ impl ResistanceWH {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Fluid,
                     zone: None,
                     loop_id: Some(loop_id),
                     domain_id: None,
+                    fluid_type: Some(FluidType::Water),
+                },
+                PortDeclaration {
+                    port_type: PortType::Fluid,
+                    zone: None,
+                    loop_id: Some(super::DHW_DEMAND_LOOP),
+                    domain_id: None,
+                    fluid_type: Some(FluidType::Water),
                 },
             ],
             telemetry: default_telemetry(),
@@ -371,9 +380,13 @@ impl Equipment for ResistanceWH {
             }
         }
 
-        // Safety clamp: force off if upper node exceeds max tank temperature.
-        let upper_node_temp = self.tank.node_temps()[self.upper_node];
-        if upper_node_temp > self.max_tank_temp_c {
+        // Safety cutout: force off if ANY node exceeds max tank temperature.
+        // A high-limit aquastat/thermal fuse responds to the hottest point in the tank.
+        let max_node_temp = self.tank.node_temps().iter()
+            .copied()
+            .reduce(f64::max)
+            .expect("node_temps is never empty");
+        if !max_node_temp.is_finite() || max_node_temp > self.max_tank_temp_c {
             self.upper_element_on = false;
             self.lower_element_on = false;
             return OperatingMode::Off;
@@ -430,11 +443,12 @@ impl Equipment for ResistanceWH {
             0.0
         };
 
+        let mut heat_injections = Vec::with_capacity(2);
         if upper_power_w > 0.0 {
-            self.tank.heat_node(self.upper_node, upper_power_w, dt)?;
+            heat_injections.push((self.upper_node, upper_power_w));
         }
         if lower_power_w > 0.0 {
-            self.tank.heat_node(self.lower_node, lower_power_w, dt)?;
+            heat_injections.push((self.lower_node, lower_power_w));
         }
 
         let draw_l_per_min_source = self.draw_l_per_min_source.as_mut();
@@ -446,10 +460,16 @@ impl Equipment for ResistanceWH {
             draw_l_per_min_source,
             mains_temp_c_source,
         );
-        let draw_volume_m3 = draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
-        let draw = self
-            .tank
-            .step(self.ambient_temp_c(env), draw_volume_m3, mains_temp_c, dt)?;
+        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
+        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
+        let draw_volume_m3 = total_draw_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
+        let draw = self.tank.step(
+            self.ambient_temp_c(env),
+            draw_volume_m3,
+            mains_temp_c,
+            &heat_injections,
+            dt,
+        )?;
 
         let rated_electric_power_w = upper_power_w + lower_power_w;
         let (electric_power_w, reactive_power_kvar) =
@@ -461,10 +481,10 @@ impl Equipment for ResistanceWH {
             })?;
         }
 
-        if draw_flow_rate_kg_s > 0.0 {
+        if total_draw_kg_s > 0.0 {
             ports.accumulate(&PortContribution::Fluid {
                 loop_id: self.loop_id,
-                flow_rate_kg_s: draw_flow_rate_kg_s,
+                flow_rate_kg_s: total_draw_kg_s,
                 supply_temp_c: draw.outlet_temp_c,
                 return_temp_c: mains_temp_c,
                 fluid_type: self.fluid_type,
@@ -478,7 +498,7 @@ impl Equipment for ResistanceWH {
         self.telemetry.set("lower_element_power_w", lower_power_w);
         self.telemetry.set("electric_power_w", electric_power_w);
         self.telemetry
-            .set("draw_flow_rate_kg_s", draw_flow_rate_kg_s);
+            .set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry.set(
             "operating_mode",
             if mode == OperatingMode::Heating {
@@ -1052,6 +1072,69 @@ mod tests {
         );
         assert!(!eq.upper_element_on);
         assert!(!eq.lower_element_on);
+    }
+
+    /// Stratified tank: lower node exceeds max_tank_temp_c but upper node is cool.
+    /// Safety cutout must still trigger (checks max of all nodes).
+    #[test]
+    fn max_tank_temp_safety_triggers_on_stratified_hot_bottom() {
+        let mut cfg_map = std::collections::HashMap::new();
+        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
+        cfg_map.insert("deadband_c".to_string(), 2.0.into());
+        cfg_map.insert("initial_tank_temp_c".to_string(), 30.0.into());
+        cfg_map.insert("max_tank_temp_c".to_string(), 55.0.into());
+        let cfg = crate::EquipmentConfig {
+            name: "WH".to_string(),
+            ochre_class: "Resistance Water Heater".to_string(),
+            raw_config: cfg_map,
+        };
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        let n = eq.tank.node_temps().len();
+        eq.tank.node_temps_mut()[0] = 30.0;
+        eq.tank.node_temps_mut()[n - 1] = 60.0;
+
+        let mode = eq.update_control(&env(21.0));
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::Off,
+            "Safety cutout must trigger when ANY node exceeds max_tank_temp_c"
+        );
+        assert!(!eq.upper_element_on);
+        assert!(!eq.lower_element_on);
+    }
+
+    /// Stratified tank where all nodes are below max_tank_temp_c.
+    /// Safety cutout must NOT fire; element must be allowed to operate.
+    #[test]
+    fn safety_cutout_does_not_fire_when_all_nodes_below_limit() {
+        let mut cfg_map = std::collections::HashMap::new();
+        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
+        cfg_map.insert("deadband_c".to_string(), 2.0.into());
+        cfg_map.insert("initial_tank_temp_c".to_string(), 30.0.into());
+        cfg_map.insert("max_tank_temp_c".to_string(), 55.0.into());
+        let cfg = crate::EquipmentConfig {
+            name: "WH".to_string(),
+            ochre_class: "Resistance Water Heater".to_string(),
+            raw_config: cfg_map,
+        };
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        // Hottest node below limit; upper node cold so thermostat calls for heat.
+        let n = eq.tank.node_temps().len();
+        eq.tank.node_temps_mut()[0] = 30.0;
+        eq.tank.node_temps_mut()[n - 1] = 54.0;
+
+        let mode = eq.update_control(&env(21.0));
+        assert_ne!(
+            mode,
+            hares_types::OperatingMode::Off,
+            "Elements must be allowed to fire when all nodes are below max_tank_temp_c"
+        );
     }
 
     /// M4: LoadFraction must not corrupt dr_load_fraction.

@@ -34,6 +34,8 @@ impl HpCooler {
     fn build(config: EquipmentConfig, equipment_type: &'static str, is_mshp: bool) -> Self {
         let mut inner = AirConditioner::new(config.clone());
         if is_mshp {
+            inner.core.hvac.equipment_type =
+                crate::hvac::hvac_core::HvacEquipmentType::MiniSplitCool;
             // Apply MSHP crankcase defaults at construction so that step() uses
             // correct values (15 W / 0 °C) even if init() has not been called yet.
             // init() re-applies these after re-reading config, so there is no
@@ -268,6 +270,24 @@ mod tests {
             eq.ports().len() >= 2,
             "expected at least 2 ports, got {}",
             eq.ports().len()
+        );
+    }
+
+    /// MSHP cooler must use MiniSplitCool equipment type with 312 CFM/ton.
+    #[test]
+    fn mshp_cooler_uses_mini_split_cool_with_312_cfm_per_ton() {
+        use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+        let cfg = base_config();
+        let eq = HpCooler::mshp_cooler(cfg);
+        assert_eq!(
+            eq.inner.core.hvac.equipment_type,
+            crate::hvac::hvac_core::HvacEquipmentType::MiniSplitCool,
+        );
+        let expected = 312.0 * CFM_TO_M3_S / W_PER_TON;
+        assert!(
+            (eq.inner.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
+            "MSHP cooler must default to 312 CFM/ton, got {} m3/s/W",
+            eq.inner.core.hvac.airflow_m3_s_per_w
         );
     }
 

@@ -179,6 +179,39 @@ mod tests {
                 );
             }
 
+            // Debug: dump heater stats from CSV
+            let contents = fs::read_to_string(&csv_path).unwrap();
+            let mut csv_lines = contents.lines();
+            let hdr = csv_lines.next().unwrap();
+            let cols: Vec<&str> = hdr.split(',').collect();
+            // Find column indices for heater debug
+            let find_col = |name: &str| cols.iter().position(|c| c.trim() == name);
+            let heater_kw_idx = find_col("ASHP Heater Electric Power (kW)");
+            let zone_temp_idx = find_col("Temperature - Indoor (C)");
+            let outdoor_idx = find_col("Temperature - Outdoor (C)");
+            let heater_mode_idx = find_col("ASHP Heater Mode (-)");
+            let heater_setpoint_idx = find_col("ASHP Heater Setpoint (C)");
+            eprintln!("\n  === Heater debug (first 10 + last 5 timesteps) ===");
+            eprintln!("    heater_kw_col={heater_kw_idx:?} zone_temp_col={zone_temp_idx:?} outdoor_col={outdoor_idx:?} mode_col={heater_mode_idx:?} setpoint_col={heater_setpoint_idx:?}");
+            let data_lines: Vec<&str> = csv_lines.filter(|l| !l.trim().is_empty()).collect();
+            let get = |line: &str, idx: Option<usize>| -> String {
+                idx.and_then(|i| line.split(',').nth(i))
+                    .unwrap_or("N/A")
+                    .trim()
+                    .to_string()
+            };
+            for (i, line) in data_lines.iter().enumerate() {
+                if i < 10 || i >= data_lines.len().saturating_sub(5) {
+                    eprintln!(
+                        "    t={i:>3} heater_kw={:>8} zone_C={:>8} outdoor_C={:>8} mode={:>4} setpoint_C={:>8}",
+                        get(line, heater_kw_idx),
+                        get(line, zone_temp_idx),
+                        get(line, outdoor_idx),
+                        get(line, heater_mode_idx),
+                        get(line, heater_setpoint_idx),
+                    );
+                }
+            }
             let _ = fs::remove_file(&csv_path);
         } else {
             eprintln!(

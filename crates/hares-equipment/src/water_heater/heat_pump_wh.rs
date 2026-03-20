@@ -38,7 +38,7 @@ pub enum ElementHpControlMode {
 const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
 const GALLON_TO_M3: f64 = 0.003_785_411_784;
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
-const DEFAULT_DEADBAND_C: f64 = 2.0;
+const DEFAULT_DEADBAND_C: f64 = 8.166_666_667; // 14.7°F (OCHRE HPWH-specific default)
 const DEFAULT_UA_W_PER_K: f64 = 2.0;
 const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;
 const DEFAULT_TANK_DIAMETER_M: f64 = 0.5;
@@ -247,18 +247,28 @@ impl HeatPumpWH {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Thermal,
                     zone: Some(zone),
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 },
                 PortDeclaration {
                     port_type: PortType::Fluid,
                     zone: None,
                     loop_id: Some(loop_id),
                     domain_id: None,
+                    fluid_type: Some(FluidType::Water),
+                },
+                PortDeclaration {
+                    port_type: PortType::Fluid,
+                    zone: None,
+                    loop_id: Some(super::DHW_DEMAND_LOOP),
+                    domain_id: None,
+                    fluid_type: Some(FluidType::Water),
                 },
             ],
             telemetry: default_telemetry(),
@@ -589,9 +599,13 @@ impl Equipment for HeatPumpWH {
             }
         }
 
-        // Safety clamp: force off if upper node exceeds max tank temperature.
-        let upper_node_temp = self.tank.node_temps()[self.thermostat_upper_node];
-        if upper_node_temp > self.max_tank_temp_c {
+        // Safety cutout: force off if ANY node exceeds max tank temperature.
+        // A high-limit aquastat/thermal fuse responds to the hottest point in the tank.
+        let max_node_temp = self.tank.node_temps().iter()
+            .copied()
+            .reduce(f64::max)
+            .expect("node_temps is never empty");
+        if !max_node_temp.is_finite() || max_node_temp > self.max_tank_temp_c {
             self.compressor_on = false;
             self.backup_on = false;
             return OperatingMode::Off;
@@ -747,21 +761,20 @@ impl Equipment for HeatPumpWH {
         let delivered_er_w = backup_power_w; // backup_efficiency is 1.0 for electric
         let q_tank_delivered_w = delivered_hp_w + delivered_er_w;
 
-        if q_tank_delivered_w > 0.0 {
-            // Distribute heat across nodes using OCHRE-compatible condenser weights.
-            distribute_heat_to_nodes(
-                &mut self.tank,
-                &self.condenser_node_weights,
-                q_tank_delivered_w,
-                dt,
-            )?;
-        }
+        let heat_injections = build_heat_injections(
+            &self.condenser_node_weights,
+            q_tank_delivered_w,
+            self.tank.n_nodes(),
+        );
 
-        let draw_volume_m3 = self.draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
+        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
+        let total_draw_kg_s = self.draw_flow_rate_kg_s + appliance_demand_kg_s;
+        let draw_volume_m3 = total_draw_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
         let draw = self.tank.step(
             self.ambient_temp_c(env),
             draw_volume_m3,
             self.mains_temp_c,
+            &heat_injections,
             dt,
         )?;
 
@@ -820,7 +833,7 @@ impl Equipment for HeatPumpWH {
             }
         }
 
-        if self.draw_flow_rate_kg_s > 0.0 {
+        if total_draw_kg_s > 0.0 {
             // Apply tempering valve: cold mains water is mixed with hot tank water to cap
             // delivery temperature at tempering_valve_setpoint_c. The mixed outlet never
             // exceeds the valve setpoint, and never drops below it when tank is cooler.
@@ -830,7 +843,7 @@ impl Equipment for HeatPumpWH {
             };
             ports.accumulate(&PortContribution::Fluid {
                 loop_id: self.loop_id,
-                flow_rate_kg_s: self.draw_flow_rate_kg_s,
+                flow_rate_kg_s: total_draw_kg_s,
                 supply_temp_c: delivery_temp_c,
                 return_temp_c: self.mains_temp_c,
                 fluid_type: self.fluid_type,
@@ -848,7 +861,7 @@ impl Equipment for HeatPumpWH {
         self.telemetry
             .set("zone_heat_extraction_w", zone_heat_extraction_w);
         self.telemetry
-            .set("draw_flow_rate_kg_s", self.draw_flow_rate_kg_s);
+            .set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry
             .set("wall_sensible_gain_w", sensible_to_wall_w);
         self.telemetry.set("unmet_load_w", draw.unmet_load_w);
@@ -1109,26 +1122,24 @@ fn telemetry_fields() -> Vec<TelemetryField> {
     ]
 }
 
-/// Distribute `q_w` watts of heat across tank nodes for duration `dt` using `weights`.
+/// Build a `(node, power_w)` injection list from condenser weights and total heat.
 ///
 /// Weights need not be pre-normalized; they are normalized internally. If the
 /// weight sum is zero the heat is concentrated at the bottom (last) node.
-fn distribute_heat_to_nodes(
-    tank: &mut StratifiedTank,
-    weights: &[f64],
-    q_w: f64,
-    dt: Duration,
-) -> crate::Result<()> {
+fn build_heat_injections(weights: &[f64], q_w: f64, n_nodes: usize) -> Vec<(usize, f64)> {
+    if q_w == 0.0 {
+        return vec![];
+    }
     let weight_sum: f64 = weights.iter().sum();
     if weight_sum <= 0.0 {
-        return tank.heat_node(tank.n_nodes().saturating_sub(1), q_w, dt);
+        return vec![(n_nodes.saturating_sub(1), q_w)];
     }
-    for (node, &w) in weights.iter().enumerate() {
-        if w > 0.0 && node < tank.n_nodes() {
-            tank.heat_node(node, q_w * w / weight_sum, dt)?;
-        }
-    }
-    Ok(())
+    weights
+        .iter()
+        .enumerate()
+        .filter(|&(node, &w)| w > 0.0 && node < n_nodes)
+        .map(|(node, &w)| (node, q_w * w / weight_sum))
+        .collect()
 }
 
 /// Default condenser heat distribution weights for a tank with `n_nodes` nodes.
@@ -2455,78 +2466,66 @@ mod dr_tests {
         );
     }
 
-    /// The safety check for max_tank_temp_c must use thermostat_upper_node, not a
-    /// hardcoded node 0. With thermostat_upper_node=1 and a hot node 1, safety fires.
-    /// With thermostat_upper_node=0 and only node 1 hot (node 0 cold), safety must not fire.
+    /// Safety cutout checks max of ALL nodes, not just a single thermostat node.
+    /// Any node exceeding max_tank_temp_c must trigger the cutout regardless of
+    /// thermostat_upper_node configuration.
     #[test]
-    fn safety_temp_check_uses_thermostat_upper_node_not_hardcoded_zero() {
-        // Build a 6-node tank with thermostat_upper_node=1 (not default 0).
-        // Set max_tank_temp_c=30°C. The tank starts at 40°C at all nodes,
-        // but we specifically want the upper_node check at index 1.
-        // Since all nodes are 40°C > 30°C, safety fires in both cases.
-        // The real regression test: verify that when *only* node 1 is hot,
-        // a WH configured with thermostat_upper_node=1 fires safety but
-        // one configured with thermostat_upper_node=0 does not.
-
-        // Case A: thermostat_upper_node=1, node 1 is hot → safety fires.
-        let mut raw_a = HashMap::new();
-        raw_a.insert("setpoint_c".to_string(), 52.0.into());
-        raw_a.insert("deadband_c".to_string(), 2.0.into());
-        raw_a.insert("initial_tank_temp_c".to_string(), 20.0.into()); // all nodes cold
-        raw_a.insert("max_tank_temp_c".to_string(), 60.0.into());
-        raw_a.insert("thermostat_upper_node".to_string(), 1.0.into());
-        raw_a.insert("min_on_time_s".to_string(), 0.0.into());
-        let cfg_a = EquipmentConfig {
-            name: "HPWH_A".to_string(),
+    fn safety_cutout_fires_when_any_node_exceeds_limit() {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 60.0.into());
+        raw.insert("thermostat_upper_node".to_string(), 0.0.into());
+        raw.insert("min_on_time_s".to_string(), 0.0.into());
+        let cfg = EquipmentConfig {
+            name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw_a,
+            raw_config: raw,
         };
 
         let e = env_state();
 
-        let mut eq_a = HeatPumpWH::new(cfg_a.clone());
-        eq_a.init(&cfg_a, &e).unwrap();
-        // Heat only node 1 above max_tank_temp_c (60°C).
-        // Default 50-gal tank: ~189.3 L across 6 nodes ≈ 31.55 kg per node.
-        // ΔT needed = 65 - 20 = 45°C → energy = 31.55 * 4183 * 45 ≈ 5.94 MJ.
-        // Use 10 MW for 1 s to far exceed that.
-        eq_a.tank
-            .heat_node(1, 10_000_000.0, Duration::from_secs(1))
-            .unwrap();
-        let mode_a = eq_a.update_control(&e);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+        // Set node 1 above max_tank_temp_c (60°C); node 0 (thermostat) stays cold.
+        eq.tank.node_temps_mut()[1] = 70.0;
+        let mode = eq.update_control(&e);
         assert_eq!(
-            mode_a,
+            mode,
             OperatingMode::Off,
-            "Safety must fire when thermostat_upper_node=1 and node 1 is above max_tank_temp_c"
+            "Safety must fire when ANY node exceeds max_tank_temp_c, even if thermostat node is cool"
         );
+    }
 
-        // Case B: thermostat_upper_node=0, only node 1 is hot (node 0 stays cold) → safety must NOT fire.
-        let mut raw_b = HashMap::new();
-        raw_b.insert("setpoint_c".to_string(), 52.0.into());
-        raw_b.insert("deadband_c".to_string(), 2.0.into());
-        raw_b.insert("initial_tank_temp_c".to_string(), 20.0.into()); // all nodes cold
-        raw_b.insert("max_tank_temp_c".to_string(), 60.0.into());
-        raw_b.insert("thermostat_upper_node".to_string(), 0.0.into());
-        raw_b.insert("min_on_time_s".to_string(), 0.0.into());
-        let cfg_b = EquipmentConfig {
-            name: "HPWH_B".to_string(),
+    /// All nodes below max_tank_temp_c — safety cutout must NOT fire.
+    #[test]
+    fn safety_cutout_does_not_fire_when_all_nodes_below_limit() {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 30.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 55.0.into());
+        raw.insert("min_on_time_s".to_string(), 0.0.into());
+        raw.insert("backup_enable_offset_c".to_string(), 30.0.into());
+        let cfg = EquipmentConfig {
+            name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw_b,
+            raw_config: raw,
         };
 
-        let mut eq_b = HeatPumpWH::new(cfg_b.clone());
-        eq_b.init(&cfg_b, &e).unwrap();
-        // Heat only node 1 far above max_tank_temp_c; node 0 remains at 20°C.
-        eq_b.tank
-            .heat_node(1, 10_000_000.0, Duration::from_secs(1))
-            .unwrap();
-        let mode_b = eq_b.update_control(&e);
-        // Node 0 is 20°C < 60°C max → safety must NOT trigger.
-        // The equipment should be heating (tank is cold at node 0, call for heat).
+        let e = env_state();
+
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+        // Hottest node below limit; tank cold so compressor should run.
+        eq.tank.node_temps_mut()[0] = 54.0;
+
+        let mode = eq.update_control(&e);
         assert_ne!(
-            mode_b,
+            mode,
             OperatingMode::Off,
-            "Safety must NOT fire when thermostat_upper_node=0 and node 0 is below max_tank_temp_c"
+            "Compressor must be allowed to run when all nodes are below max_tank_temp_c"
         );
     }
 }

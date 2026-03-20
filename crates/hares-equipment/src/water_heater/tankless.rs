@@ -464,6 +464,7 @@ fn build_ports(fuel_type: FuelType) -> Vec<PortDeclaration> {
             zone: None,
             loop_id: None,
             domain_id: None,
+            fluid_type: None,
         }]
     } else {
         vec![
@@ -472,12 +473,14 @@ fn build_ports(fuel_type: FuelType) -> Vec<PortDeclaration> {
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
             PortDeclaration {
                 port_type: PortType::Electrical,
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             },
         ]
     }

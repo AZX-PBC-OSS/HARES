@@ -204,6 +204,8 @@ mod tests {
             weather: WeatherState {
                 outdoor_temp_c: 10.0,
                 outdoor_humidity_ratio: 0.005,
+                outdoor_wet_bulb_c: 7.0,
+                outdoor_enthalpy_j_kg: 22_800.0,
                 wind_speed_m_s: 2.0,
                 wind_dir_deg: 0.0,
                 ground_temp_c: 12.0,
@@ -214,7 +216,13 @@ mod tests {
                     direct_w_m2: 0.0,
                     diffuse_w_m2: 0.0,
                     reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
                 }],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                mains_temp_c: 15.0,
             },
             grid: GridState {
                 voltage_pu: 1.0,

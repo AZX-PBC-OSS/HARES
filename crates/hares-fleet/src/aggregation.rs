@@ -60,6 +60,32 @@ impl ColumnAggregation {
     }
 }
 
+/// Phase 2 (cross-dwelling fleet) aggregation rule.
+///
+/// Distinct from `ColumnAggregation` which governs Phase 1 (temporal resampling).
+/// Matches OCHRE `agg_by="House"` semantics: temperature and dimensionless
+/// ratios use weighted mean; everything else uses weighted sum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetAggregation {
+    WeightedSum,
+    WeightedMean,
+}
+
+impl FleetAggregation {
+    fn for_column(name: &str) -> Self {
+        let normalized = name.trim();
+
+        if normalized.ends_with("(C)")
+            || normalized.ends_with("(\u{b0}C)")
+            || normalized.ends_with("(-)")
+        {
+            return Self::WeightedMean;
+        }
+
+        Self::WeightedSum
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Accumulator {
     sum: f64,
@@ -287,6 +313,10 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
     };
 
     let column_count = first_columns.len();
+    let fleet_aggs: Vec<FleetAggregation> = first_columns
+        .iter()
+        .map(|name| FleetAggregation::for_column(name))
+        .collect();
 
     let mut bucket_intersection: BTreeSet<i64> = first_buckets.keys().copied().collect();
     for (_, columns, buckets) in successful.iter().skip(1) {
@@ -312,6 +342,7 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
         }
 
         let mut weighted_values = vec![0.0; column_count];
+        let mut total_weight = vec![0.0; column_count];
         let mut has_null = vec![false; column_count];
 
         for (sample_weight, _cols, buckets) in &successful {
@@ -322,7 +353,10 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
 
             for (idx, value) in values.iter().enumerate() {
                 match value {
-                    Some(v) => weighted_values[idx] += *v * *sample_weight,
+                    Some(v) => {
+                        weighted_values[idx] += *v * *sample_weight;
+                        total_weight[idx] += *sample_weight;
+                    }
                     None => has_null[idx] = true,
                 }
             }
@@ -332,7 +366,17 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
             if has_null[idx] {
                 builder.append_null();
             } else {
-                builder.append_value(weighted_values[idx]);
+                let value = match fleet_aggs[idx] {
+                    FleetAggregation::WeightedSum => weighted_values[idx],
+                    FleetAggregation::WeightedMean if total_weight[idx] > 0.0 => {
+                        weighted_values[idx] / total_weight[idx]
+                    }
+                    FleetAggregation::WeightedMean => {
+                        builder.append_null();
+                        continue;
+                    }
+                };
+                builder.append_value(value);
             }
         }
     }
@@ -621,9 +665,63 @@ mod tests {
         assert!((power - 14.0).abs() < 1e-9);
         // Energy uses sum then weighted sum: (0.8*1) + (2.0*2) = 4.8
         assert!((energy - 4.8).abs() < 1e-9);
-        // Temperature uses mean then weighted sum: (23*1) + (13*2) = 49
-        assert!((temp - 49.0).abs() < 1e-9);
-        // Fraction uses mean then weighted sum: (0.4*1) + (0.5*2) = 1.4
-        assert!((frac - 1.4).abs() < 1e-9);
+        // Temperature uses weighted mean: (23*1 + 13*2) / (1+2) = 49/3
+        assert!((temp - 49.0 / 3.0).abs() < 1e-9);
+        // Fraction uses weighted mean: (0.4*1 + 0.5*2) / (1+2) = 1.4/3
+        assert!((frac - 1.4 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fleet_weighted_mean_vs_sum_with_unequal_weights() {
+        let t0 = "2021-01-01T00:00:00Z";
+
+        // Three dwellings with weights 1, 2, 3
+        let make_dwelling = |weight: f64, power: f64, temp: f64, soc: f64| {
+            outcome(
+                weight,
+                SimStatus::Ok,
+                sample_metrics(10.0, 1.0),
+                Some(batch(
+                    &[t0],
+                    vec![
+                        ("Total Electric Power (kW)", vec![Some(power)]),
+                        ("Temperature - Indoor (C)", vec![Some(temp)]),
+                        ("Battery SOC (-)", vec![Some(soc)]),
+                    ],
+                )),
+            )
+        };
+
+        let d1 = make_dwelling(1.0, 10.0, 20.0, 0.8);
+        let d2 = make_dwelling(2.0, 20.0, 30.0, 0.5);
+        let d3 = make_dwelling(3.0, 30.0, 25.0, 0.2);
+
+        let fleet = aggregate(&[d1, d2, d3], AggregationResolution::Hourly);
+        assert_eq!(fleet.aggregate_timeseries.num_rows(), 1);
+
+        let col = |idx: usize| -> f64 {
+            fleet
+                .aggregate_timeseries
+                .column(idx)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0)
+        };
+
+        let power = col(1);
+        let temp = col(2);
+        let soc = col(3);
+
+        // Power (kW): weighted sum = 10*1 + 20*2 + 30*3 = 140
+        assert!((power - 140.0).abs() < 1e-9);
+
+        // Temperature (C): weighted mean = (20*1 + 30*2 + 25*3) / (1+2+3) = 155/6
+        let expected_temp = (20.0 + 30.0 * 2.0 + 25.0 * 3.0) / 6.0;
+        assert!((temp - expected_temp).abs() < 1e-9);
+
+        // SOC (-): weighted mean = (0.8*1 + 0.5*2 + 0.2*3) / (1+2+3) = 2.4/6 = 0.4
+        let expected_soc = (0.8 + 0.5 * 2.0 + 0.2 * 3.0) / 6.0;
+        assert!((soc - expected_soc).abs() < 1e-9);
     }
 }

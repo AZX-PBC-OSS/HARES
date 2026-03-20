@@ -12,14 +12,15 @@ use hares_types::{
     PortContribution, PortDeclaration, PortSlots, PortType, ScheduleSource, Telemetry,
     TelemetryField, ZoneId,
 };
-use rand::{RngExt, SeedableRng};
-use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::schedule_helpers::{
+    ScheduleSourceState, capture_schedule_source_state, parse_u32, parse_usize, parse_zone_id,
+    restore_schedule_source_state,
+};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
-const KEY_ZONE_ID: &str = "zone_id";
 const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
 // Reserved for future radiant/convective split (OCHRE ScheduledLoad heat gain decomposition).
 #[allow(dead_code)]
@@ -140,13 +141,6 @@ struct ScheduledLoadState {
     gas_source_state: Option<ScheduleSourceState>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-enum ScheduleSourceState {
-    Stateless,
-    SeededNoise { draw_count: u64 },
-    Shared { cursor: usize },
-}
-
 /// Deterministic load driven by a time-indexed schedule.
 pub struct ScheduledLoad {
     descriptor: EquipmentDescriptor,
@@ -210,6 +204,7 @@ impl ScheduledLoad {
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             }],
             telemetry: default_telemetry(),
             gas_source: None,
@@ -234,6 +229,7 @@ impl ScheduledLoad {
             zone: None,
             loop_id: None,
             domain_id: None,
+            fluid_type: None,
         });
         if let Some(zone) = self.descriptor.zone {
             self.ports.push(PortDeclaration {
@@ -241,6 +237,7 @@ impl ScheduledLoad {
                 zone: Some(zone),
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             });
         }
         if self.gas_source.is_some() {
@@ -249,6 +246,7 @@ impl ScheduledLoad {
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             });
         }
     }
@@ -497,7 +495,20 @@ impl Equipment for ScheduledLoad {
                         .to_string(),
                 ));
             }
-            (Some(_), None) | (None, None) => {}
+            (Some(source), None) => {
+                match source {
+                    ScheduleSource::Constant(_)
+                    | ScheduleSource::DailyProfile { .. }
+                    | ScheduleSource::ColumnRef { .. }
+                    | ScheduleSource::SolarAware { .. } => {}
+                    _ => {
+                        return Err(HaresError::Equipment(
+                            "checkpoint is missing gas schedule state for a stateful gas schedule source".to_string(),
+                        ));
+                    }
+                }
+            }
+            (None, None) => {}
         }
         self.telemetry
             .insert("electric_kw", self.last_non_zero_power_kw);
@@ -883,7 +894,7 @@ fn parse_optional_gas_schedule_source(
                 .map(slice_to_24)
                 .ok_or_else(|| {
                     HaresError::Equipment(format!(
-                        "missing required key `{KEY_GAS_PROFILE_WEEKDAY}` for daily_profile gas schedule"
+                        "missing required key `{KEY_GAS_PROFILE_WEEKEND}` for daily_profile gas schedule"
                     ))
                 })?;
             let month_multipliers = config
@@ -937,6 +948,8 @@ fn scale_schedule_source(source: &mut ScheduleSource, scale: f64) {
             *data = Arc::from(scaled);
         }
         ScheduleSource::ColumnRef { .. } | ScheduleSource::SolarAware { .. } => {}
+        // Wildcard required: ScheduleSource is #[non_exhaustive].
+        // New variants must be handled explicitly here.
         _ => {}
     }
 }
@@ -949,115 +962,10 @@ fn is_schedule_source_zero(source: &ScheduleSource) -> bool {
         ScheduleSource::ColumnRef { .. }
         | ScheduleSource::SolarAware { .. }
         | ScheduleSource::SeededNoise { .. } => false,
+        // Wildcard required: ScheduleSource is #[non_exhaustive].
+        // New variants must be handled explicitly here.
         _ => false,
     }
-}
-
-fn capture_schedule_source_state(source: &ScheduleSource) -> ScheduleSourceState {
-    match source {
-        ScheduleSource::Shared { cursor, .. } => ScheduleSourceState::Shared { cursor: *cursor },
-        ScheduleSource::SeededNoise { draw_count, .. } => ScheduleSourceState::SeededNoise {
-            draw_count: *draw_count,
-        },
-        ScheduleSource::Constant(_)
-        | ScheduleSource::DailyProfile { .. }
-        | ScheduleSource::ColumnRef { .. }
-        | ScheduleSource::SolarAware { .. } => ScheduleSourceState::Stateless,
-        _ => ScheduleSourceState::Stateless,
-    }
-}
-
-fn restore_schedule_source_state(
-    source: &mut ScheduleSource,
-    saved: &ScheduleSourceState,
-) -> crate::Result<()> {
-    match (source, saved) {
-        (ScheduleSource::Shared { cursor, .. }, ScheduleSourceState::Shared { cursor: saved }) => {
-            *cursor = *saved;
-            Ok(())
-        }
-        (
-            ScheduleSource::SeededNoise {
-                seed,
-                draw_count,
-                rng,
-                ..
-            },
-            ScheduleSourceState::SeededNoise {
-                draw_count: target_draw_count,
-            },
-        ) => {
-            *rng = ChaCha8Rng::from_seed(*seed);
-            for _ in 0..*target_draw_count {
-                let _ = rng.random::<f64>();
-            }
-            *draw_count = *target_draw_count;
-            Ok(())
-        }
-        (
-            ScheduleSource::Constant(_)
-            | ScheduleSource::DailyProfile { .. }
-            | ScheduleSource::ColumnRef { .. }
-            | ScheduleSource::SolarAware { .. },
-            ScheduleSourceState::Stateless,
-        ) => Ok(()),
-        _ => Err(HaresError::Equipment(
-            "checkpoint schedule source state does not match current schedule source variant"
-                .to_string(),
-        )),
-    }
-}
-
-fn parse_zone_id(
-    raw: &std::collections::HashMap<String, crate::config::ConfigValue>,
-) -> Option<ZoneId> {
-    let zone = parse_u16(raw, KEY_ZONE_ID).ok()??;
-    Some(ZoneId(zone))
-}
-
-fn parse_u16(
-    raw: &std::collections::HashMap<String, crate::config::ConfigValue>,
-    key: &str,
-) -> crate::Result<Option<u16>> {
-    let value = match raw.get(key).and_then(|v| v.as_f64()) {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u16::MAX as f64 {
-        return Err(HaresError::Equipment(format!(
-            "invalid integer value for key {key}: {value}"
-        )));
-    }
-    Ok(Some(value as u16))
-}
-
-fn parse_u32(
-    raw: &std::collections::HashMap<String, crate::config::ConfigValue>,
-    key: &str,
-) -> crate::Result<u32> {
-    let value = raw.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
-        return Err(HaresError::Equipment(format!(
-            "invalid integer value for key {key}: {value}"
-        )));
-    }
-    Ok(value as u32)
-}
-
-fn parse_usize(
-    raw: &std::collections::HashMap<String, crate::config::ConfigValue>,
-    key: &str,
-) -> crate::Result<Option<usize>> {
-    let value = match raw.get(key).and_then(|v| v.as_f64()) {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
-        return Err(HaresError::Equipment(format!(
-            "invalid usize value for key {key}: {value}"
-        )));
-    }
-    Ok(Some(value as usize))
 }
 
 /// Parse per-month scale factors from config keys `month_multiplier_0` through

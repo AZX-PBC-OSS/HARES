@@ -316,6 +316,27 @@ fn build_config(
         .transpose()?
         .unwrap_or(0);
 
+    let initialization_duration = kwargs
+        .as_ref()
+        .and_then(|k| k.get_item("initialization_duration").ok().flatten())
+        .map(|obj| {
+            let secs = extract_seconds(&obj)?;
+            if secs < 0 {
+                return Err(PyValueError::new_err(
+                    "initialization_duration must be non-negative",
+                ));
+            }
+            Ok(secs)
+        })
+        .transpose()?
+        .and_then(|secs| {
+            if secs == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(secs as u64))
+            }
+        });
+
     let sim_config = SimulationConfig {
         start_time,
         duration,
@@ -340,7 +361,7 @@ fn build_config(
         sim_config,
         overrides: None,
         bldg_id,
-        initialization_duration: None,
+        initialization_duration,
     })
 }
 

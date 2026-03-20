@@ -11,6 +11,7 @@ pub mod generator;
 pub mod hvac;
 pub mod pv;
 pub mod registry;
+pub(crate) mod schedule_helpers;
 pub mod scheduled_load;
 pub mod water_heater;
 
@@ -24,6 +25,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 pub use config::EquipmentConfig;
 pub use hares_types::Telemetry;
+pub use water_heater::DHW_DEMAND_LOOP;
 pub use hvac::{
     EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride,
 };
@@ -139,6 +141,7 @@ mod tests {
                     zone: None,
                     loop_id: None,
                     domain_id: None,
+                    fluid_type: None,
                 }],
                 telemetry: Telemetry::with_capacity(2),
                 mode: OperatingMode::Off,

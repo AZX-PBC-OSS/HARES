@@ -20,6 +20,7 @@ pub use fluid_solver::{FluidSolver, FluidSolverConfig};
 pub use humidity_solver::{HumiditySolver, HumiditySolverConfig};
 pub use longwave_radiation::{
     EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW, ExteriorSurface,
+    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
     InteriorSurface, STEFAN_BOLTZMANN, exterior_longwave_w, exterior_longwave_w_m2,
     interior_longwave_linearised_w, interior_longwave_net_w, linearised_h_r, sky_view_factor,
 };
@@ -30,6 +31,6 @@ pub use state_space::{
 };
 pub use thermal_solver::{
     ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo,
-    NaturalVentilationConfig, ThermalSolver, ThermalSolverConfig, ThermalSolverError,
-    VentilationConfig, WindowSolarProperties,
+    NaturalVentilationConfig, ThermalSolver, ThermalSolverConfig,
+    ThermalSolverError, VentilationConfig, WindowSolarProperties,
 };

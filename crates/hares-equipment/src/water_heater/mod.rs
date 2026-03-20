@@ -8,9 +8,24 @@ pub mod tankless;
 
 pub use tank::{DrawResult, StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 
-use hares_types::{BoundaryPolicy, DomainId, EnvironmentState, ScheduleSource};
+use hares_types::{BoundaryPolicy, DomainId, EnvironmentState, LoopId, PortSlots, ScheduleSource};
 
 use crate::EquipmentRegistry;
+
+/// Well-known LoopId for domestic hot-water demand from wet appliances.
+/// Wet appliances write demand flow rate here; water heaters read and add
+/// to their schedule-based draw.
+pub const DHW_DEMAND_LOOP: LoopId = LoopId(u16::MAX - 1);
+
+/// Read accumulated DHW demand [kg/s] from wet appliance fluid contributions.
+pub(crate) fn read_dhw_demand_kg_s(ports: &PortSlots) -> f64 {
+    ports
+        .fluid
+        .iter()
+        .find(|acc| acc.loop_id == DHW_DEMAND_LOOP)
+        .map(|acc| acc.total_flow_kg_s.max(0.0))
+        .unwrap_or(0.0)
+}
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     resistance::register_with_registry(registry);

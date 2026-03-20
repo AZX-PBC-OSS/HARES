@@ -1,23 +1,25 @@
 //! Event-driven (stochastic) load equipment model.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::time::Duration;
 
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, PortType, ScheduleSource, Telemetry,
-    TelemetryField, ZoneId,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, PortType, ScheduleSource,
+    Telemetry, TelemetryField, ZoneId,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::schedule_helpers::{
+    ScheduleSourceState, capture_schedule_source_state, parse_u32, parse_usize, parse_zone_id,
+    restore_schedule_source_state,
+};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
-const KEY_ZONE_ID: &str = "zone_id";
 const KEY_BUILDING_ID: &str = "building_id";
 const KEY_MASTER_SEED: &str = "master_seed";
 const KEY_N_UNITS: &str = "n_units";
@@ -32,6 +34,8 @@ const KEY_EVENT_WINDOW_SCHEDULE_COL: &str = "event_window_schedule_col";
 const KEY_EVENT_PROBABILITY_SOURCE: &str = "event_probability_source";
 const KEY_EVENT_PROBABILITY_SCHEDULE_COL: &str = "event_probability_schedule_col";
 const KEY_EVENT_PROBABILITY_CONSTANT: &str = "event_probability_constant";
+
+const KEY_HOT_WATER_DRAW_VOLUME_L: &str = "hot_water_draw_volume_l";
 
 const PHASE_POWER_PREFIX_A: &str = "phase_";
 const PHASE_POWER_SUFFIX_A: &str = "_power_kw";
@@ -75,17 +79,11 @@ struct WetApplianceState {
     elapsed_in_phase_s: f64,
     load_fraction: f64,
     forced_mode: Option<ForcedMode>,
+    hot_water_draw_rate_kg_s: f64,
     rng_seed: [u8; 32],
     rng_draws: u64,
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-enum ScheduleSourceState {
-    Stateless,
-    SeededNoise { draw_count: u64 },
-    Shared { cursor: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -140,6 +138,8 @@ pub struct WetAppliance {
     elapsed_in_phase_s: f64,
     load_fraction: f64,
     forced_mode: Option<ForcedMode>,
+
+    hot_water_draw_rate_kg_s: f64,
 
     rng_seed: [u8; 32],
     rng_draws: u64,
@@ -499,6 +499,7 @@ impl WetAppliance {
             elapsed_in_phase_s: 0.0,
             load_fraction: 1.0,
             forced_mode: None,
+            hot_water_draw_rate_kg_s: 0.0,
             rng_seed,
             rng_draws: 0,
             rng: ChaCha8Rng::from_seed(rng_seed),
@@ -607,6 +608,16 @@ impl WetAppliance {
             })?;
         }
 
+        if self.active && self.hot_water_draw_rate_kg_s > 0.0 {
+            ports.accumulate(&PortContribution::Fluid {
+                loop_id: crate::water_heater::DHW_DEMAND_LOOP,
+                flow_rate_kg_s: self.hot_water_draw_rate_kg_s * self.load_fraction.max(0.0),
+                supply_temp_c: 0.0,
+                return_temp_c: 0.0,
+                fluid_type: FluidType::Water,
+            })?;
+        }
+
         self.telemetry.set("active_power_kw", active_power_kw);
         self.telemetry.set("sensible_gain_w", sensible_gain_w);
         self.telemetry.set("latent_gain_w", latent_gain_w);
@@ -642,6 +653,28 @@ impl Equipment for WetAppliance {
             .get_f64(KEY_LATENT_GAIN_FRACTION)
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
+
+        let total_cycle_duration_s: f64 = self.phases.iter().map(|p| p.duration_s).sum();
+        self.hot_water_draw_rate_kg_s = if total_cycle_duration_s > 0.0 {
+            config
+                .get_f64(KEY_HOT_WATER_DRAW_VOLUME_L)
+                .unwrap_or(0.0)
+                .max(0.0)
+                / total_cycle_duration_s
+        } else {
+            0.0
+        };
+
+        self.ports = ports_for_zone(self.descriptor.zone);
+        if self.hot_water_draw_rate_kg_s > 0.0 {
+            self.ports.push(PortDeclaration {
+                port_type: PortType::Fluid,
+                zone: None,
+                loop_id: Some(crate::water_heater::DHW_DEMAND_LOOP),
+                domain_id: None,
+                fluid_type: Some(FluidType::Water),
+            });
+        }
 
         self.active = false;
         self.phase_index = 0;
@@ -690,6 +723,7 @@ impl Equipment for WetAppliance {
             elapsed_in_phase_s: self.elapsed_in_phase_s,
             load_fraction: self.load_fraction,
             forced_mode: self.forced_mode,
+            hot_water_draw_rate_kg_s: self.hot_water_draw_rate_kg_s,
             rng_seed: self.rng_seed,
             rng_draws: self.rng_draws,
             event_window_source_state: capture_schedule_source_state(&self.event_window_source),
@@ -713,6 +747,20 @@ impl Equipment for WetAppliance {
         self.elapsed_in_phase_s = decoded.elapsed_in_phase_s;
         self.load_fraction = decoded.load_fraction;
         self.forced_mode = decoded.forced_mode;
+        self.hot_water_draw_rate_kg_s = decoded.hot_water_draw_rate_kg_s;
+
+        // Regenerate ports to reflect restored DHW demand state.
+        self.ports = ports_for_zone(self.descriptor.zone);
+        if self.hot_water_draw_rate_kg_s > 0.0 {
+            self.ports.push(PortDeclaration {
+                port_type: PortType::Fluid,
+                zone: None,
+                loop_id: Some(crate::water_heater::DHW_DEMAND_LOOP),
+                domain_id: None,
+                fluid_type: Some(FluidType::Water),
+            });
+        }
+
         self.rng_seed = decoded.rng_seed;
         self.rng_draws = decoded.rng_draws;
 
@@ -858,21 +906,9 @@ fn parse_event_schedule_sources(
         })?;
         match source.to_ascii_lowercase().as_str() {
             "constant" => ScheduleSource::Constant(1.0),
-            "column" => {
-                let Some(col_idx) = parse_usize(&config.raw_config, KEY_EVENT_WINDOW_SCHEDULE_COL)?
-                else {
-                    return Err(HaresError::Equipment(format!(
-                        "missing required key `{KEY_EVENT_WINDOW_SCHEDULE_COL}` for column event window schedule"
-                    )));
-                };
-                ScheduleSource::ColumnRef {
-                    col_idx,
-                    boundary: BoundaryPolicy::Wrap,
-                }
-            }
-            _ => {
+            other => {
                 return Err(HaresError::Equipment(format!(
-                    "unsupported {KEY_EVENT_WINDOW_SOURCE} value `{source}` (expected `column` or `constant`)"
+                    "unsupported {KEY_EVENT_WINDOW_SOURCE} value `{other}` (expected `constant`)"
                 )));
             }
         }
@@ -985,104 +1021,6 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
     Ok(phases)
 }
 
-fn capture_schedule_source_state(source: &ScheduleSource) -> ScheduleSourceState {
-    match source {
-        ScheduleSource::Shared { cursor, .. } => ScheduleSourceState::Shared { cursor: *cursor },
-        ScheduleSource::SeededNoise { draw_count, .. } => ScheduleSourceState::SeededNoise {
-            draw_count: *draw_count,
-        },
-        ScheduleSource::Constant(_)
-        | ScheduleSource::DailyProfile { .. }
-        | ScheduleSource::ColumnRef { .. }
-        | ScheduleSource::SolarAware { .. } => ScheduleSourceState::Stateless,
-        _ => ScheduleSourceState::Stateless,
-    }
-}
-
-fn restore_schedule_source_state(
-    source: &mut ScheduleSource,
-    saved: &ScheduleSourceState,
-) -> crate::Result<()> {
-    match (source, saved) {
-        (ScheduleSource::Shared { cursor, .. }, ScheduleSourceState::Shared { cursor: saved }) => {
-            *cursor = *saved;
-            Ok(())
-        }
-        (
-            ScheduleSource::SeededNoise {
-                seed,
-                draw_count,
-                rng,
-                ..
-            },
-            ScheduleSourceState::SeededNoise { draw_count: saved },
-        ) => {
-            *draw_count = *saved;
-            *rng = ChaCha8Rng::from_seed(*seed);
-            rng.set_word_pos((*saved as u128) * 2);
-            Ok(())
-        }
-        (
-            ScheduleSource::Constant(_)
-            | ScheduleSource::DailyProfile { .. }
-            | ScheduleSource::ColumnRef { .. }
-            | ScheduleSource::SolarAware { .. },
-            ScheduleSourceState::Stateless,
-        ) => Ok(()),
-        _ => Err(HaresError::Equipment(
-            "checkpoint schedule source state type does not match configured schedule source"
-                .to_string(),
-        )),
-    }
-}
-
-fn parse_zone_id(raw: &HashMap<String, crate::config::ConfigValue>) -> Option<ZoneId> {
-    let zone = parse_u16(raw, KEY_ZONE_ID).ok()??;
-    Some(ZoneId(zone))
-}
-
-fn parse_u16(
-    raw: &HashMap<String, crate::config::ConfigValue>,
-    key: &str,
-) -> crate::Result<Option<u16>> {
-    let value = match raw.get(key).and_then(|v| v.as_f64()) {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u16::MAX as f64 {
-        return Err(HaresError::Equipment(format!(
-            "invalid integer value for key {key}: {value}"
-        )));
-    }
-    Ok(Some(value as u16))
-}
-
-fn parse_u32(raw: &HashMap<String, crate::config::ConfigValue>, key: &str) -> crate::Result<u32> {
-    let value = raw.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
-        return Err(HaresError::Equipment(format!(
-            "invalid integer value for key {key}: {value}"
-        )));
-    }
-    Ok(value as u32)
-}
-
-fn parse_usize(
-    raw: &HashMap<String, crate::config::ConfigValue>,
-    key: &str,
-) -> crate::Result<Option<usize>> {
-    let value = match raw.get(key).and_then(|v| v.as_f64()) {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
-        return Err(HaresError::Equipment(format!(
-            "invalid usize value for key {key}: {value}"
-        )));
-    }
-    Ok(Some(value as usize))
-}
-
 fn parse_non_negative(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f64>> {
     let Some(value) = config.get_f64(key) else {
         return Ok(None);
@@ -1160,6 +1098,7 @@ fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
         zone: None,
         loop_id: None,
         domain_id: None,
+        fluid_type: None,
     }];
     if let Some(zone) = zone {
         ports.push(PortDeclaration {
@@ -1167,6 +1106,7 @@ fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
             zone: Some(zone),
             loop_id: None,
             domain_id: None,
+            fluid_type: None,
         });
     }
     ports

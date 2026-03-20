@@ -610,6 +610,7 @@ impl Battery {
             zone: None,
             loop_id: None,
             domain_id: None,
+            fluid_type: None,
         }];
         if let Some(z) = zone {
             ports.push(PortDeclaration {
@@ -617,6 +618,7 @@ impl Battery {
                 zone: Some(z),
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             });
         }
 

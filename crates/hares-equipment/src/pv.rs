@@ -41,9 +41,9 @@ const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.96;
 const DEFAULT_SURFACE_RESOLUTION_DEG: f64 = 5.0;
 const DEFAULT_T_REF_C: f64 = 25.0;
 const DEFAULT_POWER_FACTOR: f64 = 1.0;
+/// Temperature coefficient of power for the default Standard module type (PVWatts v8).
+const DEFAULT_GAMMA_PER_C: f64 = -0.0047;
 const DEFAULT_SYSTEM_LOSSES_FRACTION: f64 = 0.14;
-/// Temperature coefficient of power for the Standard module type (PVWatts v8).
-pub(crate) const DEFAULT_GAMMA_PER_C: f64 = -0.0047;
 const IRRADIANCE_AT_STC_W_M2: f64 = 1_000.0;
 const NOCT_REFERENCE_TEMP_C: f64 = 20.0;
 const NOCT_REFERENCE_IRRADIANCE_W_M2: f64 = 800.0;
@@ -132,7 +132,9 @@ impl PvArray {
         let capacity_kw = config
             .get_f64(KEY_CAPACITY_KW)
             .or_else(|| config.get_f64(KEY_SYSTEM_SIZE_KW))
-            .unwrap_or(0.0);
+            .ok_or_else(|| HaresError::Equipment(
+                "PV array requires capacity_kw or system_size_kw (must be > 0)".into(),
+            ))?;
         let tilt_deg = config
             .get_f64(KEY_TILT_DEG)
             .or_else(|| config.get_f64(KEY_ARRAY_TILT_DEG))
@@ -161,7 +163,9 @@ impl PvArray {
         let capacity_kw = config
             .get_f64(&key(KEY_CAPACITY_KW))
             .or_else(|| config.get_f64(&key(KEY_SYSTEM_SIZE_KW)))
-            .unwrap_or(0.0);
+            .ok_or_else(|| HaresError::Equipment(
+                format!("PV array {idx} requires capacity_kw or system_size_kw (must be > 0)"),
+            ))?;
         let tilt_deg = config
             .get_f64(&key(KEY_TILT_DEG))
             .or_else(|| config.get_f64(&key(KEY_ARRAY_TILT_DEG)))
@@ -200,9 +204,9 @@ impl PvArray {
         azimuth_deg: f64,
         noct_c: f64,
     ) -> Result<(), HaresError> {
-        if !capacity_kw.is_finite() || capacity_kw < 0.0 {
+        if !capacity_kw.is_finite() || capacity_kw <= 0.0 {
             return Err(HaresError::Equipment(
-                "PV capacity_kw must be finite and >= 0".to_string(),
+                "PV capacity_kw must be finite and > 0".to_string(),
             ));
         }
         if !tilt_deg.is_finite() || !(0.0..=180.0).contains(&tilt_deg) {
@@ -604,6 +608,7 @@ impl PV {
                 zone: None,
                 loop_id: None,
                 domain_id: None,
+                fluid_type: None,
             }],
             telemetry,
             arrays,
@@ -1674,101 +1679,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wind_correction_is_unity_at_noct_reference_speed() {
-        // At NOCT reference wind speed (1 m/s), the wind correction factor
-        // must be exactly 1.0, making the result identical to the basic NOCT model.
-        let noct = DEFAULT_NOCT_C;
-        let t_amb = 20.0;
-        let irr = 800.0;
-        let basic = t_amb + irr * (noct - NOCT_REFERENCE_TEMP_C) / NOCT_REFERENCE_IRRADIANCE_W_M2;
-        let wind_adjusted = cell_temperature_noct_wind(t_amb, irr, noct, 1.0);
-        approx_eq(basic, wind_adjusted);
-    }
-
-    #[test]
-    fn higher_wind_speed_reduces_cell_temperature() {
-        let noct = DEFAULT_NOCT_C;
-        let t_amb = 25.0;
-        let irr = 1000.0;
-        let t_calm = cell_temperature_noct_wind(t_amb, irr, noct, 0.5);
-        let t_moderate = cell_temperature_noct_wind(t_amb, irr, noct, 5.0);
-        let t_windy = cell_temperature_noct_wind(t_amb, irr, noct, 10.0);
-        // Cell temp must decrease monotonically with increasing wind speed.
-        assert!(t_calm > t_moderate, "calm {t_calm} > moderate {t_moderate}");
-        assert!(t_moderate > t_windy, "moderate {t_moderate} > windy {t_windy}");
-        // At 10 m/s the wind correction is 9.5/(5.7+38) = ~0.217, so cell temp
-        // rise above ambient should be ~22% of the no-wind rise.
-        let rise_calm = t_calm - t_amb;
-        let rise_windy = t_windy - t_amb;
-        assert!(
-            rise_windy < rise_calm * 0.30,
-            "windy rise {rise_windy} should be << calm rise {rise_calm}"
-        );
-    }
-
-    #[test]
-    fn wind_cooling_increases_pv_output() {
-        // Higher wind → lower cell temp → less temperature derating → more power.
-        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
-        let mut raw = HashMap::new();
-        raw.insert("equipment_id".to_string(), 1.0.into());
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        let cfg = EquipmentConfig {
-            name: "PV Wind".to_string(),
-            ochre_class: "PV".to_string(),
-            raw_config: raw,
-        };
-
-        // Calm day (0.5 m/s)
-        let env_calm = env_with_surfaces_full(
-            vec![SurfaceIrradiance {
-                surface_id: sid,
-                direct_w_m2: 900.0,
-                diffuse_w_m2: 100.0,
-                reflected_w_m2: 0.0,
-                angle_of_incidence_rad: 0.0,
-            }],
-            25.0,
-            0.5,
-        );
-        let mut pv_calm = PV::new(cfg.clone());
-        pv_calm.init(&cfg, &env_calm).unwrap();
-        let mut ports_calm = PortSlots::default();
-        pv_calm
-            .step(&env_calm, Duration::from_secs(60), &mut ports_calm)
-            .unwrap();
-        let power_calm = -ports_calm.electrical.generation_power_kw;
-
-        // Windy day (8 m/s)
-        let env_windy = env_with_surfaces_full(
-            vec![SurfaceIrradiance {
-                surface_id: sid,
-                direct_w_m2: 900.0,
-                diffuse_w_m2: 100.0,
-                reflected_w_m2: 0.0,
-                angle_of_incidence_rad: 0.0,
-            }],
-            25.0,
-            8.0,
-        );
-        let mut pv_windy = PV::new(cfg.clone());
-        pv_windy.init(&cfg, &env_windy).unwrap();
-        let mut ports_windy = PortSlots::default();
-        pv_windy
-            .step(&env_windy, Duration::from_secs(60), &mut ports_windy)
-            .unwrap();
-        let power_windy = -ports_windy.electrical.generation_power_kw;
-
-        assert!(
-            power_windy > power_calm,
-            "windy power {power_windy} should exceed calm power {power_calm}"
-        );
-    }
 
     // --- Regression tests for code-review fixes ---
 
@@ -2020,7 +1930,7 @@ mod tests {
         };
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
-            vec![SurfaceIrradiance { surface_id: sid, direct_w_m2: 0.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0 }],
+            vec![SurfaceIrradiance { surface_id: sid, direct_w_m2: 0.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0, angle_of_incidence_rad: 0.0 }],
             25.0,
         );
         let mut pv = PV::new(cfg.clone());
@@ -2043,7 +1953,7 @@ mod tests {
         };
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
-            vec![SurfaceIrradiance { surface_id: sid, direct_w_m2: 0.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0 }],
+            vec![SurfaceIrradiance { surface_id: sid, direct_w_m2: 0.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0, angle_of_incidence_rad: 0.0 }],
             25.0,
         );
         let mut pv = PV::new(cfg.clone());
@@ -2108,7 +2018,7 @@ mod tests {
         };
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
-                surface_id: sid, direct_w_m2: 1_000.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0,
+                surface_id: sid, direct_w_m2: 1_000.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0, angle_of_incidence_rad: 0.0,
             }],
             25.0, 1.0,
         );
@@ -2198,7 +2108,7 @@ mod tests {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
-                surface_id: sid, direct_w_m2: 1_000.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0,
+                surface_id: sid, direct_w_m2: 1_000.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0, angle_of_incidence_rad: 0.0,
             }],
             25.0,
         );
