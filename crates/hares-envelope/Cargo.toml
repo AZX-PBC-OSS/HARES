@@ -10,3 +10,7 @@ hares-types = { workspace = true }
 hares-physics = { workspace = true }
 nalgebra = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }

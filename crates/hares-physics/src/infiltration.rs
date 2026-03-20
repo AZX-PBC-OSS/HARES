@@ -1,1 +1,634 @@
 //! Air infiltration models (Sherman-Grimsrud, ELA-based).
+//!
+//! # Pressure exponent (`n_i`) — ASHRAE method only
+//!
+//! The infiltration pressure exponent `n_i` describes how air leakage rate
+//! scales with the driving pressure difference across the building envelope:
+//!
+//! ```text
+//! Q  ∝  ΔP^n_i
+//! ```
+//!
+//! | Value | Physical meaning |
+//! |-------|-----------------|
+//! | 0.50  | Perfect orifice / turbulent flow (leaky buildings) |
+//! | 0.65  | Typical residential envelope (OCHRE / ResStock default) |
+//! | 0.70  | Laminar crack flow (tight modern buildings) |
+//!
+//! Using 0.5 instead of 0.65 for a tight building causes ±15–30 % error in
+//! infiltration airflow.  Valid range is [0.5, 0.7].
+//!
+//! The `n_i` parameter applies only to `ashrae_wind_stack`. The ELA method
+//! uses a fixed exponent of 0.5 per ASHRAE 62.2 and OCHRE's implementation.
+//!
+//! # References
+//! - Walker & Wilson (1998) "Field Validation of Algebraic Equations for Stack
+//!   and Wind Driven Air Infiltration Calculations", *HVAC&R Research*.
+//! - ASHRAE Handbook of Fundamentals 2017, Chapter 16.
+//! - EnergyPlus Engineering Reference §15.4 (AIM-2 / Sherman-Grimsrud).
+
+use crate::units::*;
+
+const M2_TO_CM2: f64 = 10_000.0;
+const LPS_PER_CM2_TO_M3PS_PER_CM2: f64 = 1.0 / 1000.0;
+const SECONDS_PER_HOUR: f64 = 3600.0;
+
+const MET_STATION_ALPHA: f64 = 0.14;
+const MET_STATION_DELTA_M: f64 = 270.0;
+const MET_STATION_HEIGHT_M: f64 = 10.0;
+
+const RURAL_ALPHA: f64 = 0.14;
+const RURAL_DELTA_M: f64 = 270.0;
+const SUBURBAN_ALPHA: f64 = 0.22;
+const SUBURBAN_DELTA_M: f64 = 370.0;
+const URBAN_ALPHA: f64 = 0.33;
+const URBAN_DELTA_M: f64 = 460.0;
+
+/// Minimum physically meaningful pressure exponent (turbulent / perfect orifice).
+pub const N_I_MIN: f64 = 0.5;
+/// Maximum physically meaningful pressure exponent (laminar crack flow).
+pub const N_I_MAX: f64 = 0.7;
+/// Default pressure exponent — matches OCHRE / ResStock typical residential (0.65).
+pub const N_I_DEFAULT: f64 = 0.65;
+
+/// Canonical terrain classes from the architecture appendix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TerrainClass {
+    Rural,
+    Suburban,
+    Urban,
+}
+
+impl TerrainClass {
+    pub fn alpha(self) -> f64 {
+        match self {
+            Self::Rural => RURAL_ALPHA,
+            Self::Suburban => SUBURBAN_ALPHA,
+            Self::Urban => URBAN_ALPHA,
+        }
+    }
+
+    pub fn delta_m(self) -> f64 {
+        match self {
+            Self::Rural => RURAL_DELTA_M,
+            Self::Suburban => SUBURBAN_DELTA_M,
+            Self::Urban => URBAN_DELTA_M,
+        }
+    }
+}
+
+/// ASHRAE wind-stack infiltration using quadrature combination.
+///
+/// Implements the AIM-2 model (Walker & Wilson 1998) with a configurable
+/// pressure exponent `n_i`.
+///
+/// # Formula (matches OCHRE `_infiltration_ashrae`)
+/// ```text
+/// Q_stack = inf_c × inf_Cs × |ΔT|^n_i
+/// Q_wind  = inf_c × inf_Cw × (shelter × v)^(2·n_i)
+/// Q       = √(Q_stack² + Q_wind²)
+/// ```
+///
+/// Note: `n_stories` effect is baked into `c_s` (= `inf_c × inf_Cs`) during
+/// parameter setup (via `infiltration_height`). It is NOT applied inside `powf()`.
+///
+/// # Parameters
+/// - `c_s`: combined stack coefficient `inf_c × inf_Cs` [m³/s / K^n_i]
+/// - `c_w`: combined wind coefficient `inf_c × inf_Cw` [m³/s / (m/s)^(2·n_i)]
+/// - `delta_t_c`: indoor–outdoor temperature difference [K or °C, same Δ]
+/// - `wind_speed_m_s`: wind speed at building height [m/s]
+/// - `shelter_coeff`: dimensionless shelter coefficient [0, 1] (`inf_sft` in OCHRE)
+/// - `n_i`: pressure exponent in [0.5, 0.7]; use [`N_I_DEFAULT`] (0.65) for typical residential
+///
+/// Returns volumetric flow [m³/s].
+pub fn ashrae_wind_stack(
+    c_s: f64,
+    c_w: f64,
+    delta_t_c: f64,
+    wind_speed_m_s: f64,
+    shelter_coeff: f64,
+    n_i: f64,
+) -> f64 {
+    let n_i = n_i.clamp(N_I_MIN, N_I_MAX);
+    let q_temp = c_s * delta_t_c.abs().powf(n_i);
+    let q_wind = c_w * (shelter_coeff.max(0.0) * wind_speed_m_s).powf(2.0 * n_i);
+    (q_temp * q_temp + q_wind * q_wind).sqrt()
+}
+
+/// Effective leakage area (ELA) infiltration model.
+///
+/// Uses a fixed square-root (exponent = 0.5) per ASHRAE 62.2 and OCHRE's
+/// `_ela` path. The configurable `n_i` applies only to the ASHRAE method.
+///
+/// # Formula
+/// ```text
+/// Q = ELA_cm² × (L/s / cm²) × √(stack_coeff × |ΔT| + wind_coeff × v²)
+/// ```
+///
+/// # Parameters
+/// - `ela_m2`: effective leakage area [m²]
+/// - `stack_coeff`: ELA stack coefficient [L/(s·cm⁴·K)]
+/// - `wind_coeff`: ELA wind coefficient [L/(s·cm⁴·(m/s)²)]
+/// - `delta_t_c`: indoor–outdoor temperature difference [K]
+/// - `wind_speed_m_s`: wind speed at building height [m/s]
+///
+/// Returns volumetric flow [m³/s].
+pub fn ela_infiltration(
+    ela_m2: f64,
+    stack_coeff: f64,
+    wind_coeff: f64,
+    delta_t_c: f64,
+    wind_speed_m_s: f64,
+) -> f64 {
+    let ela_cm2 = ela_m2 * M2_TO_CM2;
+    let driver = (stack_coeff * delta_t_c.abs() + wind_coeff * wind_speed_m_s.powi(2)).max(0.0);
+    (ela_cm2 * LPS_PER_CM2_TO_M3PS_PER_CM2) * driver.sqrt()
+}
+
+/// ACH infiltration fallback model.
+///
+/// Returns volumetric flow [m³/s].
+pub fn ach_infiltration(ach: f64, volume_m3: f64) -> f64 {
+    ach * volume_m3 / SECONDS_PER_HOUR
+}
+
+/// Terrain-correct meteorological wind speed at building height.
+///
+/// Uses ASHRAE power-law correction with standard weather-station constants.
+pub fn terrain_wind_speed(u_met: f64, alpha_site: f64, delta_site: f64, height: f64) -> f64 {
+    if height <= 0.0 || delta_site <= 0.0 {
+        return 0.0;
+    }
+
+    u_met
+        * (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
+        * (height / delta_site).powf(alpha_site)
+}
+
+/// Terrain-correct meteorological wind speed for a standard terrain class.
+pub fn terrain_wind_speed_for_class(u_met: f64, class: TerrainClass, height: f64) -> f64 {
+    terrain_wind_speed(u_met, class.alpha(), class.delta_m(), height)
+}
+
+/// Natural ventilation flow through operable windows (ELA-style, OCHRE-matched).
+///
+/// Implements the ResStock / OCHRE natural ventilation model for operable windows.
+/// Flow is gated by three conditions (all must hold for non-zero flow):
+/// 1. Zone temperature > outdoor temperature (stack buoyancy drives outward exhaust).
+/// 2. Zone temperature > `t_base_c` (occupant comfort; no cooling benefit otherwise).
+/// 3. Outdoor humidity ratio < `max_outdoor_humidity_ratio` (muggy outdoor air is
+///    not beneficial for cooling — OCHRE default threshold: 0.0115 kg/kg from BA HSP).
+///
+/// When gated on, an adjustment factor `adj = (T_zone - T_base) / (T_zone - T_outdoor)`
+/// is applied to scale the flow proportionally to how far above the comfort base the
+/// zone is, clamped to [0, 1].
+///
+/// # Formula (OCHRE `_natural_ventilation`, no forced-vent interaction)
+/// ```text
+/// A_eff   = open_area_m2 × 0.6 × 10000 cm²/m²            (effectiveness × unit conv)
+/// q_drive = stack_coeff × |ΔT| + wind_coeff × v²          (ELA driver, same as infiltration)
+/// adj     = clamp((T_zone - T_base) / (T_zone - T_out), 0, 1)
+/// q_nat   = min(A_eff × adj × √q_drive / 1000, 20 ACH cap)
+/// ```
+///
+/// # Parameters
+/// - `open_area_m2`: effective open window area [m²] (typically 6.7% of total window area)
+/// - `t_zone_c`: zone (indoor) air temperature [°C]
+/// - `t_outdoor_c`: outdoor air temperature [°C]
+/// - `t_base_c`: comfort base temperature [°C]; no flow when `t_zone ≤ t_base`
+///   (OCHRE default: 22.78 °C = 73 °F)
+/// - `outdoor_humidity_ratio`: outdoor specific humidity [kg/kg]; flow suppressed
+///   when ≥ `max_outdoor_humidity_ratio`
+/// - `max_outdoor_humidity_ratio`: humidity threshold [kg/kg] (OCHRE default: 0.0115)
+/// - `wind_speed_m_s`: wind speed [m/s]
+/// - `stack_coeff`: ELA stack coefficient [L/(s·cm⁴·K)] — same as infiltration ELA coeff
+/// - `wind_coeff`: ELA wind coefficient [L/(s·cm⁴·(m/s)²)] — same as infiltration ELA coeff
+/// - `zone_volume_m3`: zone volume [m³] — used to cap at 20 ACH
+///
+/// Returns volumetric flow [m³/s], or 0.0 when gating conditions are not met.
+#[allow(clippy::too_many_arguments)]
+pub fn natural_ventilation_flow_m3_s(
+    open_area_m2: f64,
+    t_zone_c: f64,
+    t_outdoor_c: f64,
+    t_base_c: f64,
+    outdoor_humidity_ratio: f64,
+    max_outdoor_humidity_ratio: f64,
+    wind_speed_m_s: f64,
+    stack_coeff: f64,
+    wind_coeff: f64,
+    zone_volume_m3: f64,
+) -> f64 {
+    // Temperature and humidity gating (OCHRE: `if w_amb >= max_oa_hr or t_zone <= t_ext or t_zone <= t_base`)
+    if outdoor_humidity_ratio >= max_outdoor_humidity_ratio
+        || t_zone_c <= t_outdoor_c
+        || t_zone_c <= t_base_c
+        || open_area_m2 <= 0.0
+    {
+        return 0.0;
+    }
+
+    let delta_t = t_outdoor_c - t_zone_c; // negative (t_zone > t_outdoor)
+
+    // Effectiveness factor 0.6 per EnergyPlus/OCHRE; convert to cm² for ELA formula
+    let nat_vent_area_cm2 = open_area_m2 * 0.6 * M2_TO_CM2;
+
+    // Adjustment factor: how far above comfort base is the zone, relative to the delta
+    // adj = (t_zone - t_base) / (t_zone - t_outdoor); clamped to [0, 1]
+    let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
+
+    // ELA-style driver (same square-root form as `ela_infiltration`)
+    let driver = (stack_coeff * delta_t.abs() + wind_coeff * wind_speed_m_s.powi(2)).max(0.0);
+
+    // Flow in m³/s: area_cm2 * adj * √driver / 1000 (ELA L→m³ conversion)
+    let q_nat = nat_vent_area_cm2 * adj * driver.sqrt() * LPS_PER_CM2_TO_M3PS_PER_CM2;
+
+    // Cap at 20 ACH (OCHRE `max_nat_flow = 20.0 * volume * m3hr_to_m3s`)
+    let max_nat_flow = 20.0 * zone_volume_m3 / SECONDS_PER_HOUR;
+    q_nat.min(max_nat_flow)
+}
+
+// ---------------------------------------------------------------------------
+// Typed boundary wrappers
+// ---------------------------------------------------------------------------
+
+/// [`ach_infiltration`] with a typed `Volume` parameter.
+///
+/// Returns volumetric flow in m³/s as raw `f64` (compound return type
+/// would not add clarity here).
+pub fn ach_infiltration_typed(ach: f64, volume: Volume) -> f64 {
+    ach_infiltration(ach, volume.get::<uom::si::volume::cubic_meter>())
+}
+
+/// [`terrain_wind_speed`] with typed length / velocity parameters.
+pub fn terrain_wind_speed_typed(
+    u_met: Velocity,
+    alpha_site: f64,
+    delta_site: Length,
+    height: Length,
+) -> Velocity {
+    let raw = terrain_wind_speed(
+        u_met.get::<uom::si::velocity::meter_per_second>(),
+        alpha_site,
+        delta_site.get::<uom::si::length::meter>(),
+        height.get::<uom::si::length::meter>(),
+    );
+    Velocity::new::<uom::si::velocity::meter_per_second>(raw)
+}
+
+/// [`terrain_wind_speed_for_class`] with typed length / velocity parameters.
+pub fn terrain_wind_speed_for_class_typed(
+    u_met: Velocity,
+    class: TerrainClass,
+    height: Length,
+) -> Velocity {
+    terrain_wind_speed_typed(
+        u_met,
+        class.alpha(),
+        Length::new::<uom::si::length::meter>(class.delta_m()),
+        height,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uom::si::length::meter;
+    use uom::si::velocity::meter_per_second;
+    use uom::si::volume::cubic_meter;
+
+    fn approx_eq(actual: f64, expected: f64, tol: f64) {
+        assert!(
+            (actual - expected).abs() <= tol,
+            "actual={actual}, expected={expected}, tol={tol}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ASHRAE n_i default and OCHRE parity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ashrae_default_n_i_is_065() {
+        approx_eq(N_I_DEFAULT, 0.65, 1e-15);
+    }
+
+    #[test]
+    fn ashrae_matches_ochre_formula() {
+        // OCHRE: inf_flow_temp = inf_c * inf_Cs * abs(delta_t) ** n_i
+        //        inf_flow_wind = inf_c * inf_Cw * (inf_sft * wind) ** (2 * n_i)
+        //        return sqrt(temp² + wind²)
+        let c_s = 0.015;
+        let c_w = 0.0008;
+        let dt = 15.0;
+        let v = 4.0;
+        let shelter = 0.5;
+        let n_i = 0.65;
+
+        let q = ashrae_wind_stack(c_s, c_w, dt, v, shelter, n_i);
+        let q_temp = c_s * dt.abs().powf(n_i);
+        let q_wind = c_w * (shelter * v).powf(2.0 * n_i);
+        let expected = (q_temp * q_temp + q_wind * q_wind).sqrt();
+        approx_eq(q, expected, 1e-14);
+    }
+
+    // -----------------------------------------------------------------------
+    // ASHRAE pressure exponent sensitivity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ashrae_stack_only_n_i_monotonic_when_driver_gt_1() {
+        // For |ΔT| > 1: higher n_i → MORE flow
+        let c_s = 1.0;
+        let dt = 5.0;
+
+        let q_05 = ashrae_wind_stack(c_s, 0.0, dt, 0.0, 0.0, 0.5);
+        let q_65 = ashrae_wind_stack(c_s, 0.0, dt, 0.0, 0.0, 0.65);
+        let q_70 = ashrae_wind_stack(c_s, 0.0, dt, 0.0, 0.0, 0.70);
+
+        assert!(q_05 < q_65, "driver>1: q_ni05={q_05} < q_ni65={q_65}");
+        assert!(q_65 < q_70, "driver>1: q_ni65={q_65} < q_ni70={q_70}");
+    }
+
+    #[test]
+    fn ashrae_stack_only_n_i_monotonic_when_driver_lt_1() {
+        // For |ΔT| < 1: higher n_i → LESS flow
+        let c_s = 1.0;
+        let dt = 0.5;
+
+        let q_05 = ashrae_wind_stack(c_s, 0.0, dt, 0.0, 0.0, 0.5);
+        let q_65 = ashrae_wind_stack(c_s, 0.0, dt, 0.0, 0.0, 0.65);
+        let q_70 = ashrae_wind_stack(c_s, 0.0, dt, 0.0, 0.0, 0.70);
+
+        assert!(q_05 > q_65, "driver<1: q_ni05={q_05} > q_ni65={q_65}");
+        assert!(q_65 > q_70, "driver<1: q_ni65={q_65} > q_ni70={q_70}");
+    }
+
+    #[test]
+    fn ashrae_n_i_clamped_to_valid_range() {
+        // n_i outside [0.5, 0.7] should be clamped
+        let q_below = ashrae_wind_stack(0.02, 0.001, 10.0, 5.0, 0.7, 0.3);
+        let q_at_min = ashrae_wind_stack(0.02, 0.001, 10.0, 5.0, 0.7, N_I_MIN);
+        approx_eq(q_below, q_at_min, 1e-14);
+
+        let q_above = ashrae_wind_stack(0.02, 0.001, 10.0, 5.0, 0.7, 0.9);
+        let q_at_max = ashrae_wind_stack(0.02, 0.001, 10.0, 5.0, 0.7, N_I_MAX);
+        approx_eq(q_above, q_at_max, 1e-14);
+    }
+
+    // -----------------------------------------------------------------------
+    // ELA (fixed sqrt exponent per OCHRE / ASHRAE 62.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ela_matches_ochre_sqrt_formula() {
+        // OCHRE: inf_flow = f * ela/1000 * (stack*|ΔT| + wind*v²) ** 0.5
+        let ela_m2 = 0.03;
+        let stack = 0.000145;
+        let wind = 0.000087;
+        let dt = 10.0;
+        let v = 5.0;
+
+        let flow = ela_infiltration(ela_m2, stack, wind, dt, v);
+        let driver: f64 = stack * dt + wind * v * v;
+        let expected = (ela_m2 * M2_TO_CM2 * LPS_PER_CM2_TO_M3PS_PER_CM2) * driver.sqrt();
+        approx_eq(flow, expected, 1e-12);
+    }
+
+    #[test]
+    fn ela_physical_reasonableness_typical_residence() {
+        // Typical US single-family: 200 m² floor, 2.4 m ceiling = 480 m³
+        let ela_m2 = 0.12;
+        let stack_coeff = 0.000106;
+        let wind_coeff = 0.000143;
+        let dt = 10.0;
+        let v = 4.0;
+        let volume_m3 = 480.0;
+
+        let flow_m3s = ela_infiltration(ela_m2, stack_coeff, wind_coeff, dt, v);
+        let ach = flow_m3s / volume_m3 * SECONDS_PER_HOUR;
+        assert!(
+            (0.1..=2.0).contains(&ach),
+            "ACH={ach:.3} outside [0.1, 2.0]"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Quadrature and structural tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ashrae_combines_wind_and_stack_in_quadrature() {
+        let q_temp_only = ashrae_wind_stack(0.02, 0.0, 10.0, 5.0, 0.7, N_I_DEFAULT);
+        let q_wind_only = ashrae_wind_stack(0.0, 0.001, 10.0, 5.0, 0.7, N_I_DEFAULT);
+        let q_both = ashrae_wind_stack(0.02, 0.001, 10.0, 5.0, 0.7, N_I_DEFAULT);
+        approx_eq(
+            q_both,
+            (q_temp_only * q_temp_only + q_wind_only * q_wind_only).sqrt(),
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn ach_infiltration_converts_hourly_exchange() {
+        let flow = ach_infiltration(1.0, 200.0);
+        approx_eq(flow, 200.0 / SECONDS_PER_HOUR, 1e-12);
+    }
+
+    #[test]
+    fn terrain_coefficients_match_appendix_classes() {
+        let u_met = 5.0;
+        let height = 10.0;
+
+        let rural = terrain_wind_speed_for_class(u_met, TerrainClass::Rural, height);
+        let suburban = terrain_wind_speed_for_class(u_met, TerrainClass::Suburban, height);
+        let urban = terrain_wind_speed_for_class(u_met, TerrainClass::Urban, height);
+
+        approx_eq(rural, 5.0, 0.001);
+        approx_eq(suburban, 3.583_905_519, 0.001);
+        approx_eq(urban, 2.242_078_669, 0.001);
+    }
+
+    #[test]
+    fn ashrae_hof_ch16_table5_coefficients() {
+        // ASHRAE 2017 HOF Ch. 16, Table 5: Cs=0.000290, Cw=0.000231, shelter=1.0
+        let q = ashrae_wind_stack(0.000290, 0.000231, 10.0, 5.0, 1.0, N_I_DEFAULT);
+        assert!(
+            q > 0.0 && q < 0.01,
+            "ASHRAE HOF Ch.16 Table 5: {q:.6}, expected ~0.001 m³/s"
+        );
+    }
+
+    #[test]
+    fn typed_wrappers_match_raw_kernels() {
+        let vol = Volume::new::<cubic_meter>(200.0);
+        let raw_ach = ach_infiltration(1.0, 200.0);
+        let typed_ach = ach_infiltration_typed(1.0, vol);
+        approx_eq(typed_ach, raw_ach, 1e-15);
+
+        let u = Velocity::new::<meter_per_second>(5.0);
+        let h = Length::new::<meter>(10.0);
+        let delta = Length::new::<meter>(SUBURBAN_DELTA_M);
+        let raw_ws = terrain_wind_speed(5.0, SUBURBAN_ALPHA, SUBURBAN_DELTA_M, 10.0);
+        let typed_ws = terrain_wind_speed_typed(u, SUBURBAN_ALPHA, delta, h);
+        approx_eq(typed_ws.get::<meter_per_second>(), raw_ws, 1e-15);
+
+        let raw_cls = terrain_wind_speed_for_class(5.0, TerrainClass::Urban, 10.0);
+        let typed_cls = terrain_wind_speed_for_class_typed(u, TerrainClass::Urban, h);
+        approx_eq(typed_cls.get::<meter_per_second>(), raw_cls, 1e-15);
+    }
+
+    // -----------------------------------------------------------------------
+    // Zero / edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ashrae_zero_drivers_gives_zero_flow() {
+        let q = ashrae_wind_stack(0.02, 0.001, 0.0, 0.0, 0.5, 0.65);
+        approx_eq(q, 0.0, 1e-15);
+    }
+
+    #[test]
+    fn ela_zero_drivers_gives_zero_flow() {
+        let q = ela_infiltration(0.05, 0.000106, 0.000143, 0.0, 0.0);
+        approx_eq(q, 0.0, 1e-15);
+    }
+
+    #[test]
+    fn terrain_wind_zero_height_returns_zero() {
+        let u = terrain_wind_speed(5.0, SUBURBAN_ALPHA, SUBURBAN_DELTA_M, 0.0);
+        approx_eq(u, 0.0, 1e-15);
+    }
+
+    // -----------------------------------------------------------------------
+    // Natural ventilation
+    // -----------------------------------------------------------------------
+
+    /// Default test parameters — warm zone, cool outdoor, dry outdoor air,
+    /// non-trivial window area and ELA coefficients.
+    fn nat_vent_base_args() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+        (
+            0.5,       // open_area_m2
+            26.0,      // t_zone_c
+            18.0,      // t_outdoor_c
+            22.778,    // t_base_c  (73 °F — OCHRE default)
+            0.008,     // outdoor_humidity_ratio
+            0.0115,    // max_outdoor_humidity_ratio
+            3.0,       // wind_speed_m_s
+            0.000_106, // stack_coeff
+            0.000_143, // wind_coeff
+            200.0,     // zone_volume_m3
+        )
+    }
+
+    #[test]
+    fn nat_vent_zero_when_zone_cooler_than_outdoor() {
+        let (a, _, _, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
+        let q = natural_ventilation_flow_m3_s(a, 15.0, 18.0, tb, h, mh, v, sc, wc, vol);
+        approx_eq(q, 0.0, 1e-15);
+    }
+
+    #[test]
+    fn nat_vent_zero_when_zone_at_comfort_base() {
+        let (a, _, to, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
+        // t_zone == t_base → gated off (≤ check)
+        let q = natural_ventilation_flow_m3_s(a, tb, to, tb, h, mh, v, sc, wc, vol);
+        approx_eq(q, 0.0, 1e-15);
+    }
+
+    #[test]
+    fn nat_vent_zero_when_outdoor_too_humid() {
+        let (a, tz, to, tb, _, mh, v, sc, wc, vol) = nat_vent_base_args();
+        // humidity == threshold → gated off (>= check)
+        let q = natural_ventilation_flow_m3_s(a, tz, to, tb, mh, mh, v, sc, wc, vol);
+        approx_eq(q, 0.0, 1e-15);
+    }
+
+    #[test]
+    fn nat_vent_zero_when_no_open_area() {
+        let (_, tz, to, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
+        let q = natural_ventilation_flow_m3_s(0.0, tz, to, tb, h, mh, v, sc, wc, vol);
+        approx_eq(q, 0.0, 1e-15);
+    }
+
+    #[test]
+    fn nat_vent_positive_under_nominal_conditions() {
+        let (a, tz, to, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
+        let q = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, v, sc, wc, vol);
+        assert!(
+            q > 0.0,
+            "expected positive nat vent flow under nominal conditions, got {q}"
+        );
+    }
+
+    #[test]
+    fn nat_vent_matches_ochre_formula_directly() {
+        // Manually replicate OCHRE `_natural_ventilation` formula for cross-check.
+        let open_area_m2 = 0.5_f64;
+        let t_zone_c = 26.0_f64;
+        let t_outdoor_c = 18.0_f64;
+        let t_base_c = 22.778_f64;
+        let outdoor_hum = 0.008_f64;
+        let max_hum = 0.0115_f64;
+        let wind_speed = 3.0_f64;
+        let stack_coeff = 0.000_106_f64;
+        let wind_coeff = 0.000_143_f64;
+        let volume_m3 = 200.0_f64;
+
+        let q = natural_ventilation_flow_m3_s(
+            open_area_m2,
+            t_zone_c,
+            t_outdoor_c,
+            t_base_c,
+            outdoor_hum,
+            max_hum,
+            wind_speed,
+            stack_coeff,
+            wind_coeff,
+            volume_m3,
+        );
+
+        // Reproduce OCHRE `_natural_ventilation` formula step-by-step
+        let delta_t = t_outdoor_c - t_zone_c;
+        let nat_vent_area_cm2 = open_area_m2 * 0.6 * 10_000.0;
+        let max_nat_flow = 20.0 * volume_m3 / 3600.0;
+        let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
+        let nat_vent_data = stack_coeff * delta_t.abs() + wind_coeff * wind_speed * wind_speed;
+        let expected = (nat_vent_area_cm2 * adj * nat_vent_data.sqrt() / 1000.0).min(max_nat_flow);
+
+        approx_eq(q, expected, 1e-12);
+    }
+
+    #[test]
+    fn nat_vent_capped_at_20_ach() {
+        // Enormous open area should hit the 20-ACH cap.
+        let q = natural_ventilation_flow_m3_s(
+            1000.0, 35.0, 10.0, 22.778, 0.001, 0.0115, 20.0, 0.001, 0.001, 100.0,
+        );
+        let cap = 20.0 * 100.0 / SECONDS_PER_HOUR;
+        approx_eq(q, cap, 1e-10);
+    }
+
+    #[test]
+    fn nat_vent_higher_wind_increases_flow() {
+        let (a, tz, to, tb, h, mh, _, sc, wc, vol) = nat_vent_base_args();
+        let q_low = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, 1.0, sc, wc, vol);
+        let q_high = natural_ventilation_flow_m3_s(a, tz, to, tb, h, mh, 8.0, sc, wc, vol);
+        assert!(
+            q_high > q_low,
+            "higher wind must increase nat vent flow: q_low={q_low:.6}, q_high={q_high:.6}"
+        );
+    }
+
+    #[test]
+    fn nat_vent_larger_zone_outdoor_diff_increases_flow() {
+        let (a, _, to, tb, h, mh, v, sc, wc, vol) = nat_vent_base_args();
+        // Both zones are above t_base; larger delta_t drives more stack flow
+        let q_small = natural_ventilation_flow_m3_s(a, 25.0, to, tb, h, mh, v, sc, wc, vol);
+        let q_large = natural_ventilation_flow_m3_s(a, 35.0, to, tb, h, mh, v, sc, wc, vol);
+        assert!(
+            q_large > q_small,
+            "larger zone-outdoor delta must increase nat vent: q_small={q_small:.6}, q_large={q_large:.6}"
+        );
+    }
+}

@@ -1,1 +1,279 @@
-# Placeholder for ZIP load model parameters.
+# ZIP load model parameters.
+#
+# Each entry maps an equipment name to its ZIP coefficients:
+#   zp, ip, pp  — real power fractions (impedance, current, power)
+#   zq, iq, pq  — reactive power fractions
+#   pf          — power factor
+#
+# Source: OCHRE defaults/ZIP Parameters.csv
+# References cited therein (Hajagos & Danai 1998, Bokhari et al. 2014, etc.)
+
+[ashp_heater]
+zp = 0.72
+ip = -0.98
+pp = 1.26
+zq = 14.78
+iq = -23.71
+pq = 9.93
+pf = 0.84
+
+[mshp_heater]
+zp = 0.72
+ip = -0.98
+pp = 1.26
+zq = 14.78
+iq = -23.71
+pq = 9.93
+pf = 0.84
+
+[electric_baseboard]
+zp = 0.92
+ip = 0.10
+pp = -0.02
+zq = 0.15
+iq = 0.86
+pq = -0.01
+pf = 1.0
+
+[electric_furnace]
+zp = 0.92
+ip = 0.10
+pp = -0.02
+zq = 0.15
+iq = 0.86
+pq = -0.01
+pf = 1.0
+
+[electric_boiler]
+zp = 0.92
+ip = 0.10
+pp = -0.02
+zq = 0.15
+iq = 0.86
+pq = -0.01
+pf = 1.0
+
+[air_conditioner]
+zp = 1.60
+ip = -2.69
+pp = 2.09
+zq = 12.53
+iq = -21.11
+pq = 9.58
+pf = 0.96
+
+[ashp_cooler]
+zp = 1.60
+ip = -2.69
+pp = 2.09
+zq = 12.53
+iq = -21.11
+pq = 9.58
+pf = 0.96
+
+[mshp_cooler]
+zp = 1.60
+ip = -2.69
+pp = 2.09
+zq = 12.53
+iq = -21.11
+pq = 9.58
+pf = 0.96
+
+[room_ac]
+zp = 1.60
+ip = -2.69
+pp = 2.09
+zq = 12.53
+iq = -21.11
+pq = 9.58
+pf = 0.96
+
+[ideal_cooler]
+zp = 0.0
+ip = 0.0
+pp = 1.0
+zq = 0.0
+iq = 0.0
+pq = 1.0
+pf = 1.0
+
+[ideal_heater]
+zp = 0.0
+ip = 0.0
+pp = 1.0
+zq = 0.0
+iq = 0.0
+pq = 1.0
+pf = 1.0
+
+[electric_resistance_water_heater]
+zp = 1.0
+ip = 0.0
+pp = 0.0
+zq = 1.0
+iq = 0.0
+pq = 0.0
+pf = 1.0
+
+[heat_pump_water_heater]
+zp = 0.825
+ip = -0.44
+pp = 0.615
+zq = 7.465
+iq = -11.425
+pq = 4.96
+pf = 0.97
+
+[clothes_washer]
+zp = 0.05
+ip = 0.31
+pp = 0.64
+zq = -0.56
+iq = 2.20
+pq = -0.64
+pf = 0.65
+
+[clothes_dryer]
+zp = 1.0
+ip = 0.0
+pp = 0.0
+zq = 1.0
+iq = 0.0
+pq = 0.0
+pf = 0.99
+
+[dishwasher]
+zp = 1.0
+ip = 0.0
+pp = 0.0
+zq = 0.0
+iq = 0.0
+pq = 1.0
+pf = 0.99
+
+[refrigerator]
+zp = 5.03
+ip = -8.48
+pp = 4.45
+zq = 17.44
+iq = -28.62
+pq = 12.18
+pf = 0.80
+
+[freezer]
+zp = 5.03
+ip = -8.48
+pp = 4.45
+zq = 17.44
+iq = -28.62
+pq = 12.18
+pf = 0.80
+
+[range]
+zp = 1.0
+ip = 0.0
+pp = 0.0
+zq = 1.0
+iq = 0.0
+pq = 0.0
+pf = 1.0
+
+[lighting]
+zp = 0.54
+ip = 0.50
+pp = -0.04
+zq = 0.46
+iq = 0.51
+pq = 0.03
+pf = 1.0
+
+[exterior_lighting]
+zp = 0.54
+ip = 0.50
+pp = -0.04
+zq = 0.46
+iq = 0.51
+pq = 0.03
+pf = 1.0
+
+[mels]
+zp = 0.36147
+ip = -0.08583
+pp = 0.72436
+zq = 8.39985
+iq = -14.1677
+pq = 6.76785
+pf = 0.80
+
+[ventilation_fan]
+zp = 0.26
+ip = 0.90
+pp = -0.16
+zq = 0.50
+iq = 0.62
+pq = -0.12
+pf = 0.87
+
+[ceiling_fan]
+zp = 0.26
+ip = 0.90
+pp = -0.16
+zq = 0.50
+iq = 0.62
+pq = -0.12
+pf = 0.87
+
+[pool_heater]
+zp = 0.92
+ip = 0.10
+pp = -0.02
+zq = 0.15
+iq = 0.86
+pq = -0.01
+pf = 1.0
+
+[pool_pump]
+zp = 0.72
+ip = -0.98
+pp = 1.26
+zq = 14.78
+iq = -23.71
+pq = 9.93
+pf = 0.84
+
+[spa_heater]
+zp = 0.92
+ip = 0.10
+pp = -0.02
+zq = 0.15
+iq = 0.86
+pq = -0.01
+pf = 1.0
+
+[spa_pump]
+zp = 0.72
+ip = -0.98
+pp = 1.26
+zq = 14.78
+iq = -23.71
+pq = 9.93
+pf = 0.84
+
+[well_pump]
+zp = 0.72
+ip = -0.98
+pp = 1.26
+zq = 14.78
+iq = -23.71
+pq = 9.93
+pf = 0.84
+
+[dehumidifier]
+zp = 1.60
+ip = -2.69
+pp = 2.09
+zq = 12.53
+iq = -21.11
+pq = 9.58
+pf = 0.96

@@ -1,1 +1,1399 @@
 //! Electric resistance water heater model.
+
+use std::borrow::Cow;
+use std::time::Duration;
+
+use hares_types::{
+    ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, PortType, ScheduleSource, Telemetry,
+    TelemetryField, ZoneId,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+
+use super::tank::{StratifiedTank, StratifiedTankConfig};
+use super::{
+    WaterHeaterZip, apply_jacket_r_value, draw_schedule_source, hysteresis_call,
+    mains_temp_schedule_source, parse_usize, resolve_draw_rate_kg_s, resolve_storage_step_inputs,
+    weighted_average_tank_temp,
+};
+use crate::hvac::helpers::{
+    equipment_id_from_config, first_f64, loop_id_from_config, zone_id_from_config,
+};
+
+/// Element priority control mode for dual-element electric resistance water heaters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ElementPriorityMode {
+    /// Upper element (master) locks out lower element (slave) when firing.
+    /// This is the standard wiring for most residential electric water heaters.
+    #[default]
+    MasterSlave,
+    /// Both elements operate independently based on their own thermostat calls.
+    Simultaneous,
+}
+
+const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
+const GALLON_TO_M3: f64 = 0.003_785_411_784;
+const BTU_PER_HOUR_TO_W: f64 = 0.293_071_07;
+const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
+const DEFAULT_UA_W_PER_K: f64 = 2.0;
+const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;
+const DEFAULT_TANK_DIAMETER_M: f64 = 0.5;
+const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
+const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
+const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE default)
+const DEFAULT_ELEMENT_POWER_W: f64 = 4_500.0;
+const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ResistanceWhState {
+    setpoint_c: f64,
+    deadband_c: f64,
+    upper_element_on: bool,
+    lower_element_on: bool,
+    duty_cycle: f64,
+    mode_override: Option<OperatingMode>,
+    element_priority: ElementPriorityMode,
+    tank_state: Vec<u8>,
+    tank_avg_temp_c: f64,
+    upper_element_power_w: f64,
+    lower_element_power_w: f64,
+    electric_power_w: f64,
+    draw_flow_rate_kg_s: f64,
+    // --- Demand response state ---
+    dr_level: DRLevel,
+    dr_setpoint_offset_c: f64,
+    dr_load_fraction: f64,
+    dr_duration_remaining_s: Option<f64>,
+}
+
+pub struct ResistanceWH {
+    descriptor: EquipmentDescriptor,
+    ports: Vec<PortDeclaration>,
+    telemetry: Telemetry,
+    tank: StratifiedTank,
+    upper_node: usize,
+    lower_node: usize,
+    upper_element_power_w: f64,
+    lower_element_power_w: f64,
+    setpoint_c: f64,
+    deadband_c: f64,
+    max_tank_temp_c: f64,
+    duty_cycle: f64,
+    mode_override: Option<OperatingMode>,
+    element_priority: ElementPriorityMode,
+    upper_element_on: bool,
+    lower_element_on: bool,
+    loop_id: LoopId,
+    fluid_type: FluidType,
+    mains_temp_c: f64,
+    draw_flow_rate_kg_s: f64,
+    draw_l_per_min_source: Option<ScheduleSource>,
+    mains_temp_c_source: Option<ScheduleSource>,
+    // --- ZIP voltage model ---
+    zip: WaterHeaterZip,
+    // --- Demand response state ---
+    dr_setpoint_offset_c: f64,
+    dr_load_fraction: f64,
+    dr_duration_remaining_s: Option<f64>,
+    dr_level: DRLevel,
+    // Transient load fraction from LoadFraction control signal; reset each step.
+    ctrl_load_fraction: f64,
+}
+
+impl ResistanceWH {
+    #[must_use]
+    pub fn new(config: EquipmentConfig) -> Self {
+        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let loop_id =
+            loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or(LoopId(1));
+        let n_nodes = parse_usize(config.get_f64("tank_nodes"))
+            .unwrap_or(6)
+            .clamp(1, 12);
+        let upper_node = parse_usize(config.get_f64("upper_element_node"))
+            .unwrap_or(0)
+            .min(n_nodes - 1);
+        let lower_node = parse_usize(config.get_f64("lower_element_node"))
+            .unwrap_or(n_nodes - 1)
+            .min(n_nodes - 1);
+
+        let tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes,
+            height_m: DEFAULT_TANK_HEIGHT_M,
+            diameter_m: DEFAULT_TANK_DIAMETER_M,
+            ua_w_per_k: DEFAULT_UA_W_PER_K,
+            conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
+            initial_temp_c: DEFAULT_SETPOINT_C,
+            element_nodes: [Some(upper_node), Some(lower_node)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect("default resistance water-heater tank config must be valid");
+
+        Self {
+            descriptor: EquipmentDescriptor {
+                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+                name: config.name,
+                end_use: EndUse::WaterHeating,
+                equipment_type: Cow::Borrowed("Resistance Water Heater"),
+                zone: Some(zone),
+                fuel: FuelType::Electric,
+                stage: ExecutionStage::Thermal,
+                control_capabilities: ControlCapabilities::THERMAL_SETPOINT
+                    | ControlCapabilities::DUTY_CYCLE
+                    | ControlCapabilities::MODE_OVERRIDE
+                    | ControlCapabilities::LOAD_FRACTION
+                    | ControlCapabilities::POWER_LIMIT
+                    | ControlCapabilities::DEMAND_RESPONSE,
+                telemetry_fields: telemetry_fields(),
+            },
+            ports: vec![
+                PortDeclaration {
+                    port_type: PortType::Electrical,
+                    zone: None,
+                    loop_id: None,
+                    domain_id: None,
+                },
+                PortDeclaration {
+                    port_type: PortType::Fluid,
+                    zone: None,
+                    loop_id: Some(loop_id),
+                    domain_id: None,
+                },
+            ],
+            telemetry: default_telemetry(),
+            tank,
+            upper_node,
+            lower_node,
+            upper_element_power_w: DEFAULT_ELEMENT_POWER_W,
+            lower_element_power_w: DEFAULT_ELEMENT_POWER_W,
+            setpoint_c: DEFAULT_SETPOINT_C,
+            deadband_c: DEFAULT_DEADBAND_C,
+            max_tank_temp_c: DEFAULT_MAX_TANK_TEMP_C,
+            duty_cycle: 1.0,
+            mode_override: None,
+            element_priority: ElementPriorityMode::default(),
+            upper_element_on: false,
+            lower_element_on: false,
+            loop_id,
+            fluid_type: FluidType::Water,
+            mains_temp_c: 15.0,
+            draw_flow_rate_kg_s: 0.0,
+            draw_l_per_min_source: None,
+            mains_temp_c_source: None,
+            zip: WaterHeaterZip::default(),
+            dr_setpoint_offset_c: 0.0,
+            dr_load_fraction: 1.0,
+            dr_duration_remaining_s: None,
+            dr_level: DRLevel::Normal,
+            ctrl_load_fraction: 1.0,
+        }
+    }
+
+    fn effective_setpoint_c(&self) -> f64 {
+        self.setpoint_c + self.dr_setpoint_offset_c
+    }
+
+    fn thermostat_calls(&self) -> (bool, bool) {
+        let upper_temp = self.tank.node_temps()[self.upper_node];
+        // OCHRE averages the lower node with the node directly above it (when n_nodes >= 3)
+        // to reduce sensitivity to single-node temperature spikes.
+        let lower_temp = self.lower_sensor_temp();
+        let effective_sp = self.effective_setpoint_c();
+        let upper_call = hysteresis_call(
+            upper_temp,
+            effective_sp,
+            self.deadband_c,
+            self.upper_element_on,
+        );
+        let lower_call = hysteresis_call(
+            lower_temp,
+            effective_sp,
+            self.deadband_c,
+            self.lower_element_on,
+        );
+        (upper_call, lower_call)
+    }
+
+    /// Returns the temperature used by the lower thermostat.
+    ///
+    /// When the tank has at least 3 nodes, averages the lower node with the node
+    /// directly above it (index `lower_node - 1`), matching OCHRE behavior.
+    fn lower_sensor_temp(&self) -> f64 {
+        let temps = self.tank.node_temps();
+        let n = temps.len();
+        if n >= 3 && self.lower_node > 0 {
+            (temps[self.lower_node] + temps[self.lower_node - 1]) * 0.5
+        } else {
+            temps[self.lower_node]
+        }
+    }
+
+    fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
+        self.descriptor
+            .zone
+            .and_then(|zone| {
+                env.zones
+                    .iter()
+                    .find(|z| z.id == zone)
+                    .map(|z| z.temperature_c)
+            })
+            .unwrap_or(env.weather.outdoor_temp_c)
+    }
+}
+
+impl Equipment for ResistanceWH {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        let n_nodes = parse_usize(config.get_f64("tank_nodes"))
+            .unwrap_or(6)
+            .clamp(1, 12);
+
+        let tank_volume_m3 = first_f64(config, &["TankVolume", "tank_volume_gal"])
+            .unwrap_or(DEFAULT_TANK_VOLUME_GAL)
+            * GALLON_TO_M3;
+        let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
+            .unwrap_or(DEFAULT_TANK_DIAMETER_M);
+        let inferred_height_m =
+            tank_volume_m3 / (std::f64::consts::PI * (diameter_m * 0.5).powi(2));
+        let height_m =
+            first_f64(config, &["tank_height_m", "height_m"]).unwrap_or(inferred_height_m.max(0.2));
+
+        self.upper_node = parse_usize(config.get_f64("upper_element_node"))
+            .unwrap_or(0)
+            .min(n_nodes - 1);
+        self.lower_node = parse_usize(config.get_f64("lower_element_node"))
+            .unwrap_or(n_nodes - 1)
+            .min(n_nodes - 1);
+
+        let ua_base = first_f64(config, &["ua_w_per_k", "UA"]).unwrap_or(DEFAULT_UA_W_PER_K);
+        let ua_w_per_k = apply_jacket_r_value(ua_base, height_m, diameter_m, config);
+
+        self.tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes,
+            height_m,
+            diameter_m,
+            ua_w_per_k,
+            conductivity_w_m_k: first_f64(
+                config,
+                &["conductivity_w_m_k", "water_conductivity_w_m_k"],
+            )
+            .unwrap_or(DEFAULT_CONDUCTIVITY_W_M_K),
+            initial_temp_c: first_f64(
+                config,
+                &[
+                    "initial_tank_temp_c",
+                    "initial_temp_c",
+                    "SetpointTemperature",
+                ],
+            )
+            .unwrap_or(DEFAULT_SETPOINT_C),
+            element_nodes: [Some(self.upper_node), Some(self.lower_node)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })?;
+
+        let capacity_w = first_f64(config, &["HeatingCapacity", "heating_capacity_btu_hr"])
+            .map(|v| v * BTU_PER_HOUR_TO_W)
+            .unwrap_or(DEFAULT_ELEMENT_POWER_W);
+        self.upper_element_power_w =
+            first_f64(config, &["upper_element_power_w", "UpperElementPower"])
+                .unwrap_or(capacity_w)
+                .max(0.0);
+        self.lower_element_power_w =
+            first_f64(config, &["lower_element_power_w", "LowerElementPower"])
+                .unwrap_or(capacity_w)
+                .max(0.0);
+
+        self.setpoint_c = first_f64(
+            config,
+            &[
+                "setpoint_c",
+                "SetpointTemperature",
+                "setpoint_temperature_c",
+                "ThermostatSetpointC",
+            ],
+        )
+        .unwrap_or(DEFAULT_SETPOINT_C);
+        self.deadband_c = first_f64(config, &["deadband_c", "thermostat_deadband_c"])
+            .unwrap_or(DEFAULT_DEADBAND_C)
+            .max(0.0);
+        self.max_tank_temp_c =
+            first_f64(config, &["max_tank_temp_c"]).unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
+        self.duty_cycle = 1.0;
+        self.mode_override = None;
+        self.element_priority = if config.get_str("element_priority_mode") == Some("Simultaneous") {
+            ElementPriorityMode::Simultaneous
+        } else {
+            ElementPriorityMode::MasterSlave
+        };
+        self.upper_element_on = false;
+        self.lower_element_on = false;
+
+        self.loop_id =
+            loop_id_from_config(config, &["loop_id", "dhw_loop_id"]).unwrap_or(self.loop_id);
+        self.ports[1].loop_id = Some(self.loop_id);
+        self.mains_temp_c =
+            first_f64(config, &["mains_temp_c", "inlet_temp_c"]).unwrap_or(self.mains_temp_c);
+        self.draw_flow_rate_kg_s = resolve_draw_rate_kg_s(config);
+        self.draw_l_per_min_source = draw_schedule_source(config);
+        self.mains_temp_c_source = mains_temp_schedule_source(config);
+        self.zip = WaterHeaterZip::from_config(config);
+
+        self.dr_setpoint_offset_c = 0.0;
+        self.dr_load_fraction = 1.0;
+        self.dr_duration_remaining_s = None;
+        self.dr_level = DRLevel::Normal;
+        self.ctrl_load_fraction = 1.0;
+        self.telemetry = default_telemetry();
+        Ok(())
+    }
+
+    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        // Advance DR duration; auto-revert to Normal when expired.
+        let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
+        if let Some(remaining) = self.dr_duration_remaining_s {
+            let next = remaining - dt_s;
+            if next <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.apply_dr_level(DRLevel::Normal);
+            } else {
+                self.dr_duration_remaining_s = Some(next);
+            }
+        }
+
+        // Safety clamp: force off if upper node exceeds max tank temperature.
+        let upper_node_temp = self.tank.node_temps()[self.upper_node];
+        if upper_node_temp > self.max_tank_temp_c {
+            self.upper_element_on = false;
+            self.lower_element_on = false;
+            return OperatingMode::Off;
+        }
+
+        // DR GridEmergency full shed or explicit Off override.
+        if self.dr_load_fraction <= 0.0
+            || matches!(self.mode_override, Some(OperatingMode::Off))
+            || self.duty_cycle <= 0.0
+        {
+            self.upper_element_on = false;
+            self.lower_element_on = false;
+            return OperatingMode::Off;
+        }
+
+        let (upper_call, lower_call) = self.thermostat_calls();
+        match self.element_priority {
+            ElementPriorityMode::MasterSlave => {
+                self.upper_element_on = upper_call;
+                // Slave lockout: lower cannot fire while upper is firing.
+                self.lower_element_on = !self.upper_element_on && lower_call;
+            }
+            ElementPriorityMode::Simultaneous => {
+                self.upper_element_on = upper_call;
+                self.lower_element_on = lower_call;
+            }
+        }
+
+        if self.upper_element_on || self.lower_element_on {
+            OperatingMode::Heating
+        } else {
+            OperatingMode::Off
+        }
+    }
+
+    fn step(
+        &mut self,
+        env: &EnvironmentState,
+        dt: Duration,
+        ports: &mut PortSlots,
+    ) -> std::result::Result<(), HaresError> {
+        let mode = self.update_control(env);
+        let duty =
+            (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
+
+        let upper_power_w = if self.upper_element_on {
+            self.upper_element_power_w * duty
+        } else {
+            0.0
+        };
+        let lower_power_w = if self.lower_element_on {
+            self.lower_element_power_w * duty
+        } else {
+            0.0
+        };
+
+        if upper_power_w > 0.0 {
+            self.tank.heat_node(self.upper_node, upper_power_w, dt)?;
+        }
+        if lower_power_w > 0.0 {
+            self.tank.heat_node(self.lower_node, lower_power_w, dt)?;
+        }
+
+        let draw_l_per_min_source = self.draw_l_per_min_source.as_mut();
+        let mains_temp_c_source = self.mains_temp_c_source.as_mut();
+        let (mains_temp_c, draw_flow_rate_kg_s) = resolve_storage_step_inputs(
+            env,
+            self.mains_temp_c,
+            self.draw_flow_rate_kg_s,
+            draw_l_per_min_source,
+            mains_temp_c_source,
+        );
+        let draw_volume_m3 = draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
+        let draw = self
+            .tank
+            .step(self.ambient_temp_c(env), draw_volume_m3, mains_temp_c, dt)?;
+
+        let rated_electric_power_w = upper_power_w + lower_power_w;
+        let (electric_power_w, reactive_power_kvar) =
+            self.zip.apply(rated_electric_power_w, env.grid.voltage_pu);
+        if electric_power_w > 0.0 {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_kw: electric_power_w / 1_000.0,
+                reactive_power_kvar,
+            })?;
+        }
+
+        if draw_flow_rate_kg_s > 0.0 {
+            ports.accumulate(&PortContribution::Fluid {
+                loop_id: self.loop_id,
+                flow_rate_kg_s: draw_flow_rate_kg_s,
+                supply_temp_c: draw.outlet_temp_c,
+                return_temp_c: mains_temp_c,
+                fluid_type: self.fluid_type,
+            })?;
+        }
+
+        let avg_temp_c =
+            weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3());
+        self.telemetry.set("tank_avg_temp_c", avg_temp_c);
+        self.telemetry.set("upper_element_power_w", upper_power_w);
+        self.telemetry.set("lower_element_power_w", lower_power_w);
+        self.telemetry.set("electric_power_w", electric_power_w);
+        self.telemetry
+            .set("draw_flow_rate_kg_s", draw_flow_rate_kg_s);
+        self.telemetry.set(
+            "operating_mode",
+            if mode == OperatingMode::Heating {
+                1.0
+            } else {
+                0.0
+            },
+        );
+
+        // Reset transient ctrl_load_fraction after this step so it does not
+        // carry over to the next step unless reapplied by the controller.
+        self.ctrl_load_fraction = 1.0;
+
+        Ok(())
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        save_postcard(&ResistanceWhState {
+            setpoint_c: self.setpoint_c,
+            deadband_c: self.deadband_c,
+            upper_element_on: self.upper_element_on,
+            lower_element_on: self.lower_element_on,
+            duty_cycle: self.duty_cycle,
+            mode_override: self.mode_override,
+            element_priority: self.element_priority,
+            tank_state: self.tank.save_state(),
+            tank_avg_temp_c: self.telemetry.get("tank_avg_temp_c").unwrap_or(0.0),
+            upper_element_power_w: self.telemetry.get("upper_element_power_w").unwrap_or(0.0),
+            lower_element_power_w: self.telemetry.get("lower_element_power_w").unwrap_or(0.0),
+            electric_power_w: self.telemetry.get("electric_power_w").unwrap_or(0.0),
+            draw_flow_rate_kg_s: self.telemetry.get("draw_flow_rate_kg_s").unwrap_or(0.0),
+            dr_level: self.dr_level,
+            dr_setpoint_offset_c: self.dr_setpoint_offset_c,
+            dr_load_fraction: self.dr_load_fraction,
+            dr_duration_remaining_s: self.dr_duration_remaining_s,
+        })
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
+        let decoded: ResistanceWhState = load_postcard(state)?;
+        self.setpoint_c = decoded.setpoint_c;
+        self.deadband_c = decoded.deadband_c;
+        self.upper_element_on = decoded.upper_element_on;
+        self.lower_element_on = decoded.lower_element_on;
+        self.duty_cycle = decoded.duty_cycle;
+        self.mode_override = decoded.mode_override;
+        self.element_priority = decoded.element_priority;
+        self.dr_level = decoded.dr_level;
+        self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
+        self.dr_load_fraction = decoded.dr_load_fraction;
+        self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        self.tank.load_state(&decoded.tank_state)?;
+
+        self.telemetry
+            .insert("tank_avg_temp_c", decoded.tank_avg_temp_c);
+        self.telemetry
+            .insert("upper_element_power_w", decoded.upper_element_power_w);
+        self.telemetry
+            .insert("lower_element_power_w", decoded.lower_element_power_w);
+        self.telemetry
+            .insert("electric_power_w", decoded.electric_power_w);
+        self.telemetry
+            .insert("draw_flow_rate_kg_s", decoded.draw_flow_rate_kg_s);
+        self.telemetry.insert(
+            "operating_mode",
+            if decoded.upper_element_on || decoded.lower_element_on {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        Ok(())
+    }
+
+    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        match signal {
+            ControlSignal::ThermalSetpoint {
+                heating_setpoint_c,
+                cooling_setpoint_c,
+                deadband_c,
+            } => {
+                if let Some(sp) = heating_setpoint_c.or(*cooling_setpoint_c) {
+                    if !sp.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "invalid water-heater setpoint: {sp}"
+                        )));
+                    }
+                    self.setpoint_c = sp;
+                }
+                if let Some(db) = deadband_c {
+                    if !db.is_finite() || *db < 0.0 {
+                        return Err(HaresError::Control(format!(
+                            "invalid water-heater deadband: {db}"
+                        )));
+                    }
+                    self.deadband_c = *db;
+                }
+            }
+            ControlSignal::DutyCycle { on_fraction, .. } => {
+                if !on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction) {
+                    return Err(HaresError::Control(format!(
+                        "invalid duty cycle for ResistanceWH: {on_fraction}"
+                    )));
+                }
+                self.duty_cycle = *on_fraction;
+            }
+            ControlSignal::ModeOverride { mode } => {
+                self.mode_override = Some(*mode);
+            }
+            ControlSignal::LoadFraction { fraction } => {
+                self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
+            }
+            ControlSignal::PowerLimit { max_power_kw, .. } => {
+                // Clamp element power to respect the limit by reducing ctrl_load_fraction.
+                let total_w = self.upper_element_power_w + self.lower_element_power_w;
+                if total_w > 0.0 {
+                    let max_fraction = (max_power_kw * 1000.0 / total_w).clamp(0.0, 1.0);
+                    self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
+                }
+            }
+            ControlSignal::DemandResponse { level, duration_s } => {
+                self.apply_dr_level(*level);
+                self.dr_duration_remaining_s = *duration_s;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+impl ResistanceWH {
+    fn apply_dr_level(&mut self, level: DRLevel) {
+        self.dr_level = level;
+        match level {
+            DRLevel::Normal => {
+                self.dr_setpoint_offset_c = 0.0;
+                self.dr_load_fraction = 1.0;
+            }
+            DRLevel::Moderate => {
+                self.dr_setpoint_offset_c = -3.0;
+                self.dr_load_fraction = 1.0;
+            }
+            DRLevel::High => {
+                self.dr_setpoint_offset_c = -6.0;
+                self.dr_load_fraction = 0.8;
+            }
+            DRLevel::Critical => {
+                self.dr_setpoint_offset_c = -10.0;
+                self.dr_load_fraction = 0.5;
+            }
+            DRLevel::GridEmergency => {
+                self.dr_setpoint_offset_c = 0.0;
+                self.dr_load_fraction = 0.0;
+            }
+        }
+    }
+}
+
+pub fn register_with_registry(registry: &mut EquipmentRegistry) {
+    registry.register(
+        "Resistance Water Heater",
+        Box::new(|config| Box::new(ResistanceWH::new(config))),
+    );
+    registry.register(
+        "Electric Resistance Water Heater",
+        Box::new(|config| Box::new(ResistanceWH::new(config))),
+    );
+}
+
+fn default_telemetry() -> Telemetry {
+    let mut telemetry = Telemetry::with_capacity(6);
+    telemetry.insert("tank_avg_temp_c", 0.0);
+    telemetry.insert("upper_element_power_w", 0.0);
+    telemetry.insert("lower_element_power_w", 0.0);
+    telemetry.insert("electric_power_w", 0.0);
+    telemetry.insert("draw_flow_rate_kg_s", 0.0);
+    telemetry.insert("operating_mode", 0.0);
+    telemetry
+}
+
+fn telemetry_fields() -> Vec<TelemetryField> {
+    vec![
+        TelemetryField {
+            name: "tank_avg_temp_c".to_string(),
+            unit: "C".to_string(),
+            description: "Volume-weighted average tank temperature".to_string(),
+        },
+        TelemetryField {
+            name: "upper_element_power_w".to_string(),
+            unit: "W".to_string(),
+            description: "Upper element electric power".to_string(),
+        },
+        TelemetryField {
+            name: "lower_element_power_w".to_string(),
+            unit: "W".to_string(),
+            description: "Lower element electric power".to_string(),
+        },
+        TelemetryField {
+            name: "electric_power_w".to_string(),
+            unit: "W".to_string(),
+            description: "Total electric draw".to_string(),
+        },
+        TelemetryField {
+            name: "draw_flow_rate_kg_s".to_string(),
+            unit: "kg/s".to_string(),
+            description: "Domestic hot water draw flow rate".to_string(),
+        },
+        TelemetryField {
+            name: "operating_mode".to_string(),
+            unit: "enum".to_string(),
+            description: "0=Off, 1=Heating".to_string(),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use hares_types::{
+        ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
+        ZoneId, ZoneState,
+    };
+
+    use super::ResistanceWH;
+    use crate::{Equipment, EquipmentConfig};
+
+    fn env(zone_temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(60),
+        }
+    }
+
+    fn config() -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        raw.insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
+        EquipmentConfig {
+            name: "WH".to_string(),
+            ochre_class: "Resistance Water Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    fn ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            electrical: Default::default(),
+            fuel: Default::default(),
+            fluid: vec![hares_types::FluidAccumulator::new(
+                hares_types::LoopId(1),
+                hares_types::FluidType::Water,
+            )],
+            custom: vec![],
+        }
+    }
+
+    #[test]
+    fn upper_element_has_priority_when_tank_is_cold() {
+        let mut eq = ResistanceWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        assert!(eq.telemetry().get("upper_element_power_w").unwrap_or(0.0) > 0.0);
+        assert_eq!(
+            eq.telemetry().get("lower_element_power_w").unwrap_or(-1.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn lower_element_runs_after_upper_is_satisfied() {
+        let mut eq = ResistanceWH::new(config());
+        // Set max_tank_temp_c high so safety clamp does not interfere with
+        // the thermostat logic being tested here.
+        let mut cfg = config();
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        eq.tank
+            .heat_node(eq.upper_node, 200_000.0, Duration::from_secs(120))
+            .unwrap();
+
+        let mode = eq.update_control(&env(21.0));
+        assert_eq!(mode, hares_types::OperatingMode::Heating);
+        assert!(!eq.upper_element_on);
+        assert!(eq.lower_element_on);
+    }
+
+    #[test]
+    fn state_round_trip_restores_tank_and_control_state() {
+        let mut eq = ResistanceWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+        eq.apply_control(&ControlSignal::DutyCycle {
+            on_fraction: 0.4,
+            period_s: None,
+        })
+        .unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+        let state = eq.save_state();
+
+        let mut restored = ResistanceWH::new(config());
+        restored.init(&config(), &env(21.0)).unwrap();
+        restored.load_state(&state).unwrap();
+
+        assert_eq!(restored.duty_cycle, eq.duty_cycle);
+        assert_eq!(restored.upper_element_on, eq.upper_element_on);
+        assert_eq!(restored.lower_element_on, eq.lower_element_on);
+        assert_eq!(restored.tank.node_temps(), eq.tank.node_temps());
+    }
+
+    #[test]
+    fn default_deadband_matches_ochre_when_not_configured() {
+        let mut cfg = config();
+        cfg.raw_config.remove("deadband_c");
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        assert!(
+            (eq.deadband_c - 5.555_555_556).abs() < 1e-9,
+            "expected default deadband to be 5.555555556°C, got {}",
+            eq.deadband_c
+        );
+    }
+
+    #[test]
+    fn explicit_deadband_override_is_applied() {
+        let mut cfg = config();
+        cfg.raw_config.insert("deadband_c".to_string(), 3.0.into());
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        assert_eq!(eq.deadband_c, 3.0);
+    }
+
+    // --- Regression tests for bug fixes ---
+
+    /// For a 12-node tank with n_nodes >= 3, the lower thermostat must read the
+    /// average of lower_node and lower_node-1, not just lower_node alone.
+    #[test]
+    fn lower_thermostat_averages_two_bottom_nodes_for_large_tanks() {
+        let mut cfg_map = std::collections::HashMap::new();
+        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
+        cfg_map.insert("deadband_c".to_string(), 2.0.into());
+        cfg_map.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        cfg_map.insert("tank_nodes".to_string(), 12.0.into());
+        // Use max_tank_temp_c high so safety doesn't interfere.
+        cfg_map.insert("max_tank_temp_c".to_string(), 300.0.into());
+        let cfg = crate::EquipmentConfig {
+            name: "WH12".to_string(),
+            ochre_class: "Resistance Water Heater".to_string(),
+            raw_config: cfg_map,
+        };
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        let n = eq.tank.n_nodes();
+        assert!(n >= 3, "Tank must have at least 3 nodes for this test");
+
+        // Force the bottom node to be cold (below deadband) but the node above it hot.
+        // The average should be above setpoint - deadband, so lower element stays off.
+        let lower = eq.lower_node;
+        let above = lower - 1;
+        // Heat the node directly above lower_node well above setpoint.
+        eq.tank
+            .heat_node(above, 500_000.0, Duration::from_secs(120))
+            .unwrap();
+        // Now lower_node is still at ~40°C (below setpoint-deadband=50), but above is hot.
+        // Sensor average = (40 + hot) / 2. If hot is >60, average > 50, lower element stays off.
+
+        let lower_sensor = eq.lower_sensor_temp();
+        let node_temps = eq.tank.node_temps();
+        let expected_avg = (node_temps[lower] + node_temps[above]) * 0.5;
+        assert!(
+            (lower_sensor - expected_avg).abs() < 1e-9,
+            "lower_sensor_temp() should average lower_node ({:.2}) and above ({:.2}), \
+             got {lower_sensor:.2}, expected {expected_avg:.2}",
+            node_temps[lower],
+            node_temps[above]
+        );
+
+        // For a 2-node or 1-node tank, it should use only the lower_node directly.
+        let mut cfg_small = std::collections::HashMap::new();
+        cfg_small.insert("setpoint_c".to_string(), 52.0.into());
+        cfg_small.insert("deadband_c".to_string(), 2.0.into());
+        cfg_small.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        cfg_small.insert("tank_nodes".to_string(), 2.0.into());
+        cfg_small.insert("max_tank_temp_c".to_string(), 300.0.into());
+        let cfg2 = crate::EquipmentConfig {
+            name: "WH2".to_string(),
+            ochre_class: "Resistance Water Heater".to_string(),
+            raw_config: cfg_small,
+        };
+        let mut eq2 = ResistanceWH::new(cfg2.clone());
+        eq2.init(&cfg2, &env(21.0)).unwrap();
+        let single_sensor = eq2.lower_sensor_temp();
+        assert_eq!(
+            single_sensor,
+            eq2.tank.node_temps()[eq2.lower_node],
+            "2-node tank should use lower_node directly without averaging"
+        );
+    }
+
+    // --- DR and control signal tests ---
+
+    // DR Moderate: setpoint offset = -3°C. Tank at 50°C with setpoint 52°C — normally
+    // calling for heat. After Moderate, effective setpoint = 49°C < 50°C → no call.
+    #[test]
+    fn wh_dr_moderate_reduces_setpoint() {
+        // Start with tank just below setpoint so there is a call for heat.
+        let mut cfg = config();
+        cfg.raw_config
+            .insert("initial_tank_temp_c".to_string(), 50.0.into()); // setpoint=52, deadband=2
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let e = env(21.0);
+
+        // Baseline: tank at 50°C is within deadband below setpoint 52°C → heating.
+        let mut eq_base = ResistanceWH::new(cfg.clone());
+        eq_base.init(&cfg, &e).unwrap();
+        let mode_base = eq_base.update_control(&e);
+        assert!(
+            matches!(mode_base, hares_types::OperatingMode::Heating),
+            "baseline must be heating; got {mode_base:?}"
+        );
+
+        // DR Moderate: effective setpoint = 52 + (-3) = 49°C. Tank at 50°C > 49°C → no call.
+        let mut eq_dr = ResistanceWH::new(cfg.clone());
+        eq_dr.init(&cfg, &e).unwrap();
+        eq_dr
+            .apply_control(&ControlSignal::DemandResponse {
+                level: hares_types::DRLevel::Moderate,
+                duration_s: None,
+            })
+            .unwrap();
+        let mode_dr = eq_dr.update_control(&e);
+        assert_eq!(
+            mode_dr,
+            hares_types::OperatingMode::Off,
+            "DR Moderate must suppress heating by reducing effective setpoint; got {mode_dr:?}"
+        );
+    }
+
+    // DR Critical: setpoint offset = -10°C, dr_load_fraction = 0.5.
+    // Start with tank well below setpoint so heating is still active, but power is halved.
+    #[test]
+    fn wh_dr_critical_reduces_setpoint_and_load() {
+        // Tank at 40°C, setpoint=52, deadband=2; Critical offset=-10 → effective_sp=42.
+        // 40 < 42-2=40 is the hysteresis boundary — tank at 40°C is at the deadband edge.
+        // Use 38°C so it is clearly below 42-2=40 to ensure heating still fires.
+        let mut cfg = config();
+        cfg.raw_config
+            .insert("initial_tank_temp_c".to_string(), 38.0.into());
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let e = env(21.0);
+
+        // Baseline: full element power without DR.
+        let mut eq_base = ResistanceWH::new(cfg.clone());
+        eq_base.init(&cfg, &e).unwrap();
+        let mut p_base = ports();
+        eq_base
+            .step(&e, Duration::from_secs(60), &mut p_base)
+            .unwrap();
+        let w_base = eq_base.telemetry().get("electric_power_w").unwrap_or(0.0);
+
+        // DR Critical: dr_load_fraction=0.5 → power halved.
+        let mut eq_dr = ResistanceWH::new(cfg.clone());
+        eq_dr.init(&cfg, &e).unwrap();
+        eq_dr
+            .apply_control(&ControlSignal::DemandResponse {
+                level: hares_types::DRLevel::Critical,
+                duration_s: None,
+            })
+            .unwrap();
+        let mut p_dr = ports();
+        eq_dr.step(&e, Duration::from_secs(60), &mut p_dr).unwrap();
+        let w_dr = eq_dr.telemetry().get("electric_power_w").unwrap_or(0.0);
+
+        assert!(w_base > 0.0, "baseline must draw power");
+        assert!(
+            w_dr > 0.0,
+            "DR Critical must not completely shed (tank is heating)"
+        );
+        let ratio = w_dr / w_base;
+        assert!(
+            (ratio - 0.5).abs() < 0.05,
+            "DR Critical load_fraction=0.5 must halve element power; ratio={ratio:.3}"
+        );
+    }
+
+    /// When the upper node temperature exceeds max_tank_temp_c, both elements
+    /// must be forced off regardless of thermostat call.
+    #[test]
+    fn max_tank_temp_safety_forces_off_for_resistance_wh() {
+        // Set max_tank_temp_c below the initial temperature to immediately trigger safety.
+        let mut cfg_map = std::collections::HashMap::new();
+        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
+        cfg_map.insert("deadband_c".to_string(), 2.0.into());
+        cfg_map.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        cfg_map.insert("max_tank_temp_c".to_string(), 35.0.into());
+        let cfg = crate::EquipmentConfig {
+            name: "WH".to_string(),
+            ochre_class: "Resistance Water Heater".to_string(),
+            raw_config: cfg_map,
+        };
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        let mode = eq.update_control(&env(21.0));
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::Off,
+            "Expected Off when tank exceeds max_tank_temp_c"
+        );
+        assert!(!eq.upper_element_on);
+        assert!(!eq.lower_element_on);
+    }
+
+    /// M4: LoadFraction must not corrupt dr_load_fraction.
+    ///
+    /// After applying DR Critical (dr_load_fraction = 0.5), sending a
+    /// LoadFraction(0.5) must leave dr_load_fraction at 0.5 (not 0.25).
+    /// The effective load reduction is expressed through ctrl_load_fraction,
+    /// which is separate from the persistent DR state.
+    #[test]
+    fn load_fraction_does_not_corrupt_dr_state() {
+        use hares_types::{ControlSignal, DRLevel};
+
+        let mut cfg = config();
+        cfg.raw_config
+            .insert("initial_tank_temp_c".to_string(), 38.0.into());
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let e = env(21.0);
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        // Step 1: apply DR Critical → dr_load_fraction = 0.5.
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::Critical,
+            duration_s: None,
+        })
+        .unwrap();
+        assert_eq!(
+            eq.dr_load_fraction, 0.5,
+            "DR Critical must set dr_load_fraction to 0.5"
+        );
+
+        // Step 2: apply LoadFraction(0.5) → must set ctrl_load_fraction, NOT touch dr_load_fraction.
+        eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.5 })
+            .unwrap();
+        assert_eq!(
+            eq.dr_load_fraction, 0.5,
+            "LoadFraction must not corrupt dr_load_fraction (was 0.5, must remain 0.5, not 0.25)"
+        );
+        assert!(
+            (eq.ctrl_load_fraction - 0.5).abs() < 1e-9,
+            "ctrl_load_fraction must be 0.5 after LoadFraction(0.5); got {}",
+            eq.ctrl_load_fraction
+        );
+
+        // Step 3: step — effective load = duty_cycle(1.0) * dr_load_fraction(0.5) * ctrl_load_fraction(0.5) = 0.25.
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        // Baseline: full power.
+        let mut eq_base = ResistanceWH::new(cfg.clone());
+        eq_base.init(&cfg, &e).unwrap();
+        let mut p_base = ports();
+        eq_base
+            .step(&e, Duration::from_secs(60), &mut p_base)
+            .unwrap();
+
+        let w_compound = eq.telemetry().get("electric_power_w").unwrap_or(0.0);
+        let w_base = eq_base.telemetry().get("electric_power_w").unwrap_or(0.0);
+        assert!(w_base > 0.0, "baseline must draw power");
+        let ratio = w_compound / w_base;
+        assert!(
+            (ratio - 0.25).abs() < 0.05,
+            "effective load with dr=0.5 and ctrl=0.5 must be 25% of baseline; ratio={ratio:.3}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod element_priority_tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use hares_types::{
+        ControlSignal, EnvironmentState, GridState, OperatingMode, PortSlots, ThermalAccumulator,
+        WeatherState, ZoneId, ZoneState,
+    };
+
+    use super::{ElementPriorityMode, ResistanceWH};
+    use crate::{Equipment, EquipmentConfig};
+
+    fn env_state() -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(60),
+        }
+    }
+
+    /// Build a config with both elements cold (initial_tank_temp_c well below setpoint).
+    /// max_tank_temp_c is set high so the safety clamp never interferes.
+    fn cold_config(mode: &str) -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+        if !mode.is_empty() {
+            raw.insert("element_priority_mode".to_string(), mode.to_string().into());
+        }
+        EquipmentConfig {
+            name: "WH".to_string(),
+            ochre_class: "Resistance Water Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    fn ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            electrical: Default::default(),
+            fuel: Default::default(),
+            fluid: vec![hares_types::FluidAccumulator::new(
+                hares_types::LoopId(1),
+                hares_types::FluidType::Water,
+            )],
+            custom: vec![],
+        }
+    }
+
+    /// MasterSlave: when the upper element has a call for heat, the lower element
+    /// must be locked out even if its own thermostat also calls for heat.
+    #[test]
+    fn master_slave_upper_firing_locks_out_lower() {
+        let cfg = cold_config("MasterSlave");
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+        // Tank is at 40°C; setpoint=52, deadband=2. Both upper and lower thermostats call.
+        // Upper element has priority → lower must be locked out.
+        let mode = wh.update_control(&env_state());
+        assert!(
+            wh.upper_element_on,
+            "upper element must fire in MasterSlave mode"
+        );
+        assert!(
+            !wh.lower_element_on,
+            "lower element must be locked out when upper is firing"
+        );
+        assert_eq!(mode, OperatingMode::Heating);
+    }
+
+    /// MasterSlave: once the upper node is heated above setpoint, the upper element
+    /// turns off and the lower element is free to respond to its own call for heat.
+    #[test]
+    fn master_slave_upper_satisfied_allows_lower() {
+        let cfg = cold_config("MasterSlave");
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+        // Heat the upper node above setpoint using the same energy as the existing
+        // passing test `lower_element_runs_after_upper_is_satisfied`, which concentrates
+        // heat enough to satisfy the upper thermostat without heating the whole tank.
+        wh.tank
+            .heat_node(wh.upper_node, 200_000.0, Duration::from_secs(120))
+            .unwrap();
+        // Lower node stays cold (40°C), so lower thermostat still calls.
+        let mode = wh.update_control(&env_state());
+        assert!(
+            !wh.upper_element_on,
+            "upper element must be off when upper node is above setpoint"
+        );
+        assert!(
+            wh.lower_element_on,
+            "lower element must fire once upper is satisfied"
+        );
+        assert_eq!(mode, OperatingMode::Heating);
+    }
+
+    /// Simultaneous: both elements fire independently when both thermostats call.
+    #[test]
+    fn simultaneous_both_elements_can_fire_together() {
+        let cfg = cold_config("Simultaneous");
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+        // Tank is uniformly cold at 40°C; both thermostats call for heat.
+        let mode = wh.update_control(&env_state());
+        assert!(
+            wh.upper_element_on,
+            "upper element must fire in Simultaneous mode"
+        );
+        assert!(
+            wh.lower_element_on,
+            "lower element must also fire in Simultaneous mode"
+        );
+        assert_eq!(mode, OperatingMode::Heating);
+    }
+
+    /// MasterSlave recovery: upper fires first until satisfied, then lower takes over.
+    /// Verify the transition is clean with no overlap.
+    #[test]
+    fn master_slave_recovery_sequence_no_overlap() {
+        let cfg = cold_config("MasterSlave");
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+
+        // Initially both nodes cold — upper fires, lower locked out.
+        wh.update_control(&env_state());
+        assert!(wh.upper_element_on);
+        assert!(!wh.lower_element_on);
+
+        // Heat upper node above setpoint (same energy as the passing baseline test).
+        wh.tank
+            .heat_node(wh.upper_node, 200_000.0, Duration::from_secs(120))
+            .unwrap();
+
+        // Upper satisfied; lower takes over.
+        wh.update_control(&env_state());
+        assert!(!wh.upper_element_on, "upper must turn off when satisfied");
+        assert!(
+            wh.lower_element_on,
+            "lower must take over after upper is satisfied"
+        );
+
+        // Verify they never both fire at the same time in MasterSlave.
+        assert!(
+            !(wh.upper_element_on && wh.lower_element_on),
+            "MasterSlave must never fire both elements simultaneously"
+        );
+    }
+
+    /// ModeOverride::Off disables both elements regardless of priority mode.
+    #[test]
+    fn mode_override_off_disables_both_in_either_mode() {
+        for mode_str in ["MasterSlave", "Simultaneous"] {
+            let cfg = cold_config(mode_str);
+            let mut wh = ResistanceWH::new(cfg.clone());
+            wh.init(&cfg, &env_state()).unwrap();
+            wh.apply_control(&ControlSignal::ModeOverride {
+                mode: OperatingMode::Off,
+            })
+            .unwrap();
+            let mode = wh.update_control(&env_state());
+            assert!(
+                !wh.upper_element_on,
+                "upper must be off with ModeOverride::Off ({mode_str})"
+            );
+            assert!(
+                !wh.lower_element_on,
+                "lower must be off with ModeOverride::Off ({mode_str})"
+            );
+            assert_eq!(mode, OperatingMode::Off, "mode must be Off ({mode_str})");
+        }
+    }
+
+    /// Verify state round-trip preserves the element_priority field.
+    #[test]
+    fn state_round_trip_preserves_element_priority() {
+        for (mode_str, expected_mode) in [
+            ("MasterSlave", ElementPriorityMode::MasterSlave),
+            ("Simultaneous", ElementPriorityMode::Simultaneous),
+        ] {
+            let cfg = cold_config(mode_str);
+            let mut wh = ResistanceWH::new(cfg.clone());
+            wh.init(&cfg, &env_state()).unwrap();
+
+            let mut p = ports();
+            wh.step(&env_state(), Duration::from_secs(60), &mut p)
+                .unwrap();
+            let saved = wh.save_state();
+
+            let mut restored = ResistanceWH::new(cfg.clone());
+            restored.init(&cfg, &env_state()).unwrap();
+            restored.load_state(&saved).unwrap();
+
+            assert_eq!(
+                restored.element_priority, expected_mode,
+                "element_priority must survive save/load round-trip ({mode_str})"
+            );
+        }
+    }
+
+    #[test]
+    fn state_round_trip_preserves_dr_state() {
+        use hares_types::{ControlSignal, DRLevel};
+
+        let cfg = cold_config("MasterSlave");
+        let environment = env_state();
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::Critical,
+            duration_s: Some(300.0),
+        })
+        .unwrap();
+
+        let saved = eq.save_state();
+
+        let mut restored = ResistanceWH::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        restored.load_state(&saved).unwrap();
+
+        assert_eq!(
+            restored.dr_level,
+            DRLevel::Critical,
+            "dr_level must survive save/load"
+        );
+        assert!(
+            restored.dr_setpoint_offset_c < 0.0,
+            "dr_setpoint_offset_c must be negative after Critical DR (got {})",
+            restored.dr_setpoint_offset_c
+        );
+        assert_eq!(
+            restored.dr_duration_remaining_s,
+            Some(300.0),
+            "dr_duration_remaining_s must survive save/load"
+        );
+        assert!(
+            restored.dr_load_fraction < 1.0,
+            "dr_load_fraction must be < 1.0 after Critical DR (got {})",
+            restored.dr_load_fraction
+        );
+    }
+}

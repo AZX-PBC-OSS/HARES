@@ -1,1 +1,2825 @@
 //! Heat pump water heater model.
+
+use std::borrow::Cow;
+use std::time::Duration;
+
+use super::apply_jacket_r_value;
+use hares_physics::biquadratic::BiquadraticCurve;
+use hares_types::{
+    ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+
+use super::tank::{StratifiedTank, StratifiedTankConfig};
+use super::{
+    WaterHeaterZip, hysteresis_call, parse_usize, resolve_draw_rate_kg_s,
+    weighted_average_tank_temp,
+};
+use crate::hvac::helpers::{
+    equipment_id_from_config, first_f64, loop_id_from_config, zone_id_from_config,
+};
+
+/// Mutual exclusion mode between compressor and backup resistance elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ElementHpControlMode {
+    /// Compressor and backup elements cannot run simultaneously.
+    /// When the compressor is on, the backup element is locked out, and vice versa.
+    /// Compressor gets priority when neither is currently running.
+    #[default]
+    MutuallyExclusive,
+    /// Both compressor and backup elements can operate at the same time.
+    Simultaneous,
+}
+
+const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
+const GALLON_TO_M3: f64 = 0.003_785_411_784;
+const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
+const DEFAULT_DEADBAND_C: f64 = 2.0;
+const DEFAULT_UA_W_PER_K: f64 = 2.0;
+const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;
+const DEFAULT_TANK_DIAMETER_M: f64 = 0.5;
+const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
+const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
+const DEFAULT_COMPRESSOR_POWER_W: f64 = 1_200.0;
+const DEFAULT_BACKUP_ELEMENT_POWER_W: f64 = 4_500.0;
+const DEFAULT_BACKUP_ENABLE_OFFSET_C: f64 = 8.0;
+const DEFAULT_COP_CURVE: [f64; 6] = [2.4, 0.03, 0.0, -0.025, 0.0, 0.0];
+/// Standard EnergyPlus/OCHRE HPWH capacity curve (GE GeoSpring / A.O. Smith class).
+/// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+const DEFAULT_CAPACITY_CURVE: [f64; 6] = [0.563, 0.0437, 0.000039, 0.0055, -0.000148, -0.000145];
+const DEFAULT_ZONE_TEMP_BOUNDS_C: (f64, f64) = (5.0, 45.0);
+const DEFAULT_TANK_TEMP_BOUNDS_C: (f64, f64) = (20.0, 70.0);
+/// OCHRE-compatible ambient temperature lockout range (°C) — standard HPWH.
+/// 45°F = (45-32)×5/9 = 7.2̄°C; 110°F = (110-32)×5/9 = 43.3̄°C.
+const DEFAULT_MIN_AMBIENT_TEMP_C: f64 = 5.0 * (45.0 - 32.0) / 9.0; // 7.2222...
+const DEFAULT_MAX_AMBIENT_TEMP_C: f64 = 5.0 * (110.0 - 32.0) / 9.0; // 43.3333...
+/// Low-power HPWH ambient lockout bounds (°C).
+/// 37°F = 2.7̄°C; 145°F = 62.7̄°C.
+const LOW_POWER_MIN_AMBIENT_TEMP_C: f64 = 5.0 * (37.0 - 32.0) / 9.0; // 2.7777...
+const LOW_POWER_MAX_AMBIENT_TEMP_C: f64 = 5.0 * (145.0 - 32.0) / 9.0; // 62.7777...
+const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
+/// Sensible heat ratio of zone-air cooling from evaporator (OCHRE WH.py:671-674).
+const DEFAULT_SHR: f64 = 0.88;
+/// Fraction of compressor waste heat that exits the building envelope.
+const DEFAULT_LOST_HEAT_FRACTION: f64 = 0.0;
+/// Evaporator fan power (W); added to electrical consumption when compressor runs.
+const DEFAULT_FAN_POWER_W: f64 = 35.0;
+/// Standby parasitic power (W); drawn when compressor is off.
+/// OCHRE WaterHeater.py:457: `HPWH Parasitics (W)` default 1 W.
+#[allow(dead_code)] // Reserved for future parasitic standby loss implementation
+const DEFAULT_PARASITIC_POWER_W: f64 = 1.0;
+/// Resistance backup element efficiency (fraction). Default 1.0 = 100% electric→heat.
+const DEFAULT_BACKUP_EFFICIENCY: f64 = 1.0;
+/// Minimum compressor on-time (s) before an Off transition is allowed.
+const DEFAULT_MIN_ON_TIME_S: f64 = 600.0;
+/// OCHRE condenser heat distribution weights for 12-node tanks.
+/// Indices map to tank nodes 0–11 (top=0, bottom=11).
+/// Values: [0, 0, 0, 0, 0, 5, 10, 15, 20, 25, 30, 5] / 110.
+const OCHRE_12NODE_CONDENSER_WEIGHTS: [f64; 12] = [
+    0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 5.0,
+];
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HpwhState {
+    setpoint_c: f64,
+    deadband_c: f64,
+    compressor_on: bool,
+    backup_on: bool,
+    duty_cycle: f64,
+    mode_override: Option<OperatingMode>,
+    element_hp_control: ElementHpControlMode,
+    tank_state: Vec<u8>,
+    tank_avg_temp_c: f64,
+    cop: f64,
+    cap_mult: f64,
+    compressor_power_w: f64,
+    backup_element_power_w: f64,
+    zone_heat_extraction_w: f64,
+    draw_flow_rate_kg_s: f64,
+    /// Elapsed time (s) since compressor last turned on; `None` if currently off.
+    compressor_on_since_s: Option<f64>,
+    /// Elapsed time (s) since compressor last turned off; `None` if currently on.
+    compressor_off_since_s: Option<f64>,
+    // --- Minimum cycle time thresholds ---
+    min_on_time_s: f64,
+    min_off_time_s: f64,
+    // --- Demand response state ---
+    dr_level: DRLevel,
+    dr_setpoint_offset_c: f64,
+    dr_load_fraction: f64,
+    dr_duration_remaining_s: Option<f64>,
+}
+
+#[allow(dead_code)]
+pub struct HeatPumpWH {
+    descriptor: EquipmentDescriptor,
+    ports: Vec<PortDeclaration>,
+    telemetry: Telemetry,
+    tank: StratifiedTank,
+    thermostat_node: usize,
+    /// Upper thermostat node used for the 3/4 weight in composite control temperature.
+    ///
+    /// OCHRE WaterHeater.py:592-593: HPWH control temperature is a weighted average
+    /// of upper (3/4) and lower (1/4) nodes for better representation of usable energy.
+    thermostat_upper_node: usize,
+    condenser_node: usize,
+    /// Fractional weights for distributing condenser heat across tank nodes.
+    /// Must sum to a positive value; weights are normalized before use.
+    condenser_node_weights: Vec<f64>,
+    setpoint_c: f64,
+    deadband_c: f64,
+    duty_cycle: f64,
+    mode_override: Option<OperatingMode>,
+    compressor_on: bool,
+    backup_on: bool,
+    compressor_power_w: f64,
+    backup_element_power_w: f64,
+    backup_enable_offset_c: f64,
+    /// Resistance backup element efficiency (fraction).
+    #[allow(dead_code)]
+    backup_efficiency: f64,
+    cop_curve: BiquadraticCurve,
+    /// Scaling factor applied to the COP biquadratic output.
+    /// When HPXML provides a UEF-derived COP, this anchors the curve to that rated value
+    /// by computing scale = cop_rated / cop_curve(rated_conditions).
+    /// Defaults to 1.0 (no scaling; pure curve output).
+    cop_scale: f64,
+    /// Tempering valve delivery temperature (°C). When set, the Fluid port reports this
+    /// as the outlet temperature (cold water is mixed in at the valve) instead of the
+    /// raw tank outlet.  Typically 51.67°C (125°F); `None` means no valve present.
+    tempering_valve_setpoint_c: Option<f64>,
+    capacity_curve: BiquadraticCurve,
+    min_ambient_temp_c: f64,
+    max_ambient_temp_c: f64,
+    max_tank_temp_c: f64,
+    /// Sensible heat ratio of zone-air cooling from evaporator.
+    shr: f64,
+    /// Fraction of waste heat that exits the building rather than entering the zone.
+    lost_heat_fraction: f64,
+    /// Evaporator fan power (W); runs whenever compressor is on.
+    fan_power_w: f64,
+    /// Standby parasitic power (W); drawn when compressor is off.
+    parasitic_power_w: f64,
+    /// Elapsed time since compressor last turned on (s); `None` when compressor is off.
+    compressor_on_since_s: Option<f64>,
+    /// Elapsed time since compressor last turned off (s); `None` when compressor is on.
+    compressor_off_since_s: Option<f64>,
+    /// Minimum compressor on-time (s) before an Off transition is allowed.
+    min_on_time_s: f64,
+    /// Minimum compressor off-time (s) before a restart is allowed.
+    /// OCHRE does not implement this; added for realistic compressor cycling.
+    min_off_time_s: f64,
+    /// When true, the backup resistance element is permanently disabled.
+    /// OCHRE WaterHeater.py:521: `if not self.hp_only_mode`.
+    hp_only_mode: bool,
+    /// Fraction of sensible zone heat gain that goes to interior wall surfaces
+    /// rather than the zone air.  0.0 = all to zone air (default / backward compat).
+    /// OCHRE WaterHeater.py:483: `HPWH Wall Interaction Factor (-)`, default 0.5.
+    wall_heat_fraction: f64,
+    element_hp_control: ElementHpControlMode,
+    loop_id: LoopId,
+    fluid_type: FluidType,
+    mains_temp_c: f64,
+    draw_flow_rate_kg_s: f64,
+    zip: WaterHeaterZip,
+    // --- Demand response state ---
+    dr_setpoint_offset_c: f64,
+    dr_load_fraction: f64,
+    dr_duration_remaining_s: Option<f64>,
+    dr_level: DRLevel,
+    // Transient load fraction from LoadFraction control signal; reset each step.
+    ctrl_load_fraction: f64,
+}
+
+impl HeatPumpWH {
+    #[must_use]
+    pub fn new(config: EquipmentConfig) -> Self {
+        let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
+        let loop_id =
+            loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or(LoopId(1));
+        let n_nodes = parse_usize(config.get_f64("tank_nodes"))
+            .unwrap_or(6)
+            .clamp(1, 12);
+        let thermostat_node = parse_usize(config.get_f64("thermostat_node"))
+            .unwrap_or(n_nodes - 1)
+            .min(n_nodes - 1);
+        let condenser_node = parse_usize(config.get_f64("condenser_node"))
+            .unwrap_or(n_nodes / 2)
+            .min(n_nodes - 1);
+
+        let tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes,
+            height_m: DEFAULT_TANK_HEIGHT_M,
+            diameter_m: DEFAULT_TANK_DIAMETER_M,
+            ua_w_per_k: DEFAULT_UA_W_PER_K,
+            conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
+            initial_temp_c: DEFAULT_SETPOINT_C,
+            element_nodes: [Some(condenser_node), Some(thermostat_node)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect("default HPWH tank config must be valid");
+
+        Self {
+            descriptor: EquipmentDescriptor {
+                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
+                name: config.name,
+                end_use: EndUse::WaterHeating,
+                equipment_type: Cow::Borrowed("Heat Pump Water Heater"),
+                zone: Some(zone),
+                fuel: FuelType::Electric,
+                stage: ExecutionStage::Thermal,
+                control_capabilities: ControlCapabilities::THERMAL_SETPOINT
+                    | ControlCapabilities::DUTY_CYCLE
+                    | ControlCapabilities::MODE_OVERRIDE
+                    | ControlCapabilities::LOAD_FRACTION
+                    | ControlCapabilities::POWER_LIMIT
+                    | ControlCapabilities::DEMAND_RESPONSE,
+                telemetry_fields: telemetry_fields(),
+            },
+            ports: vec![
+                PortDeclaration {
+                    port_type: PortType::Electrical,
+                    zone: None,
+                    loop_id: None,
+                    domain_id: None,
+                },
+                PortDeclaration {
+                    port_type: PortType::Thermal,
+                    zone: Some(zone),
+                    loop_id: None,
+                    domain_id: None,
+                },
+                PortDeclaration {
+                    port_type: PortType::Fluid,
+                    zone: None,
+                    loop_id: Some(loop_id),
+                    domain_id: None,
+                },
+            ],
+            telemetry: default_telemetry(),
+            tank,
+            thermostat_node,
+            thermostat_upper_node: 0,
+            condenser_node,
+            condenser_node_weights: default_condenser_weights(n_nodes),
+            setpoint_c: DEFAULT_SETPOINT_C,
+            deadband_c: DEFAULT_DEADBAND_C,
+            duty_cycle: 1.0,
+            mode_override: None,
+            compressor_on: false,
+            backup_on: false,
+            compressor_power_w: DEFAULT_COMPRESSOR_POWER_W,
+            backup_element_power_w: DEFAULT_BACKUP_ELEMENT_POWER_W,
+            backup_enable_offset_c: DEFAULT_BACKUP_ENABLE_OFFSET_C,
+            backup_efficiency: DEFAULT_BACKUP_EFFICIENCY,
+            cop_curve: BiquadraticCurve {
+                coeffs: DEFAULT_COP_CURVE,
+                x1_bounds: DEFAULT_ZONE_TEMP_BOUNDS_C,
+                x2_bounds: DEFAULT_TANK_TEMP_BOUNDS_C,
+            },
+            cop_scale: 1.0,
+            tempering_valve_setpoint_c: None,
+            capacity_curve: BiquadraticCurve {
+                coeffs: DEFAULT_CAPACITY_CURVE,
+                x1_bounds: DEFAULT_ZONE_TEMP_BOUNDS_C,
+                x2_bounds: DEFAULT_TANK_TEMP_BOUNDS_C,
+            },
+            min_ambient_temp_c: DEFAULT_MIN_AMBIENT_TEMP_C,
+            max_ambient_temp_c: DEFAULT_MAX_AMBIENT_TEMP_C,
+            max_tank_temp_c: DEFAULT_MAX_TANK_TEMP_C,
+            shr: DEFAULT_SHR,
+            lost_heat_fraction: DEFAULT_LOST_HEAT_FRACTION,
+            fan_power_w: DEFAULT_FAN_POWER_W,
+            parasitic_power_w: DEFAULT_PARASITIC_POWER_W,
+            compressor_on_since_s: None,
+            compressor_off_since_s: None,
+            min_on_time_s: DEFAULT_MIN_ON_TIME_S,
+            min_off_time_s: 0.0,
+            hp_only_mode: false,
+            wall_heat_fraction: 0.0,
+            element_hp_control: ElementHpControlMode::default(),
+            loop_id,
+            fluid_type: FluidType::Water,
+            mains_temp_c: 15.0,
+            draw_flow_rate_kg_s: 0.0,
+            zip: WaterHeaterZip::default(),
+            dr_setpoint_offset_c: 0.0,
+            dr_load_fraction: 1.0,
+            dr_duration_remaining_s: None,
+            dr_level: DRLevel::Normal,
+            ctrl_load_fraction: 1.0,
+        }
+    }
+
+    fn zone_temp_c(&self, env: &EnvironmentState) -> f64 {
+        self.descriptor
+            .zone
+            .and_then(|zone| {
+                env.zones
+                    .iter()
+                    .find(|z| z.id == zone)
+                    .map(|z| z.temperature_c)
+            })
+            .unwrap_or(env.weather.outdoor_temp_c)
+    }
+
+    /// Wet-bulb temperature of the zone (used for COP/capacity curve input).
+    /// Falls back to dry-bulb when the zone is not found.
+    fn zone_wet_bulb_c(&self, env: &EnvironmentState) -> f64 {
+        self.descriptor
+            .zone
+            .and_then(|zone| {
+                env.zones
+                    .iter()
+                    .find(|z| z.id == zone)
+                    .map(|z| z.wet_bulb_c)
+            })
+            .unwrap_or_else(|| self.zone_temp_c(env))
+    }
+
+    fn ambient_temp_c(&self, env: &EnvironmentState) -> f64 {
+        self.zone_temp_c(env)
+    }
+
+    /// Composite thermostat temperature: 3/4 upper node + 1/4 lower node.
+    ///
+    /// OCHRE WaterHeater.py:592-593: HPWH control temperature is a weighted average
+    /// of upper (3/4) and lower (1/4) nodes, representing usable energy better than
+    /// a single-node sensor.
+    fn control_temp_c(&self) -> f64 {
+        let temps = self.tank.node_temps();
+        let t_upper = temps[self.thermostat_upper_node];
+        let t_lower = temps[self.thermostat_node];
+        0.75 * t_upper + 0.25 * t_lower
+    }
+
+    fn effective_setpoint_c(&self) -> f64 {
+        self.setpoint_c + self.dr_setpoint_offset_c
+    }
+
+    fn call_for_heat(&self) -> bool {
+        hysteresis_call(
+            self.control_temp_c(),
+            self.effective_setpoint_c(),
+            self.deadband_c,
+            self.compressor_on || self.backup_on,
+        )
+    }
+}
+
+impl Equipment for HeatPumpWH {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        let n_nodes = parse_usize(config.get_f64("tank_nodes"))
+            .unwrap_or(6)
+            .clamp(1, 12);
+        let tank_volume_m3 = first_f64(config, &["TankVolume", "tank_volume_gal"])
+            .unwrap_or(DEFAULT_TANK_VOLUME_GAL)
+            * GALLON_TO_M3;
+        let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
+            .unwrap_or(DEFAULT_TANK_DIAMETER_M);
+        let inferred_height_m =
+            tank_volume_m3 / (std::f64::consts::PI * (diameter_m * 0.5).powi(2));
+        let height_m =
+            first_f64(config, &["tank_height_m", "height_m"]).unwrap_or(inferred_height_m.max(0.2));
+
+        // OCHRE WaterHeater.py:57-62: upper node is index 2 (0-based) for >=12 nodes,
+        // else 0. Lower node is index 9 for >=12, else n_nodes-1.
+        self.thermostat_node = parse_usize(config.get_f64("thermostat_node"))
+            .unwrap_or(if n_nodes >= 12 { 9 } else { n_nodes - 1 })
+            .min(n_nodes - 1);
+        self.thermostat_upper_node = parse_usize(config.get_f64("thermostat_upper_node"))
+            .unwrap_or(if n_nodes >= 12 { 2 } else { 0 })
+            .min(n_nodes - 1);
+        self.condenser_node = parse_usize(config.get_f64("condenser_node"))
+            .unwrap_or(n_nodes / 2)
+            .min(n_nodes - 1);
+        self.condenser_node_weights = default_condenser_weights(n_nodes);
+
+        let ua_base = first_f64(config, &["ua_w_per_k", "UA"]).unwrap_or(DEFAULT_UA_W_PER_K);
+        let ua_w_per_k = apply_jacket_r_value(ua_base, height_m, diameter_m, config);
+
+        self.tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes,
+            height_m,
+            diameter_m,
+            ua_w_per_k,
+            conductivity_w_m_k: first_f64(
+                config,
+                &["conductivity_w_m_k", "water_conductivity_w_m_k"],
+            )
+            .unwrap_or(DEFAULT_CONDUCTIVITY_W_M_K),
+            initial_temp_c: first_f64(
+                config,
+                &[
+                    "initial_tank_temp_c",
+                    "initial_temp_c",
+                    "SetpointTemperature",
+                ],
+            )
+            .unwrap_or(DEFAULT_SETPOINT_C),
+            element_nodes: [Some(self.condenser_node), Some(self.thermostat_node)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })?;
+
+        self.setpoint_c = first_f64(
+            config,
+            &[
+                "setpoint_c",
+                "SetpointTemperature",
+                "setpoint_temperature_c",
+                "ThermostatSetpointC",
+            ],
+        )
+        .unwrap_or(DEFAULT_SETPOINT_C);
+        self.deadband_c = first_f64(config, &["deadband_c", "thermostat_deadband_c"])
+            .unwrap_or(DEFAULT_DEADBAND_C)
+            .max(0.0);
+        self.duty_cycle = 1.0;
+        self.mode_override = None;
+        self.compressor_on = false;
+        self.backup_on = false;
+
+        self.compressor_power_w = first_f64(config, &["compressor_power_w", "CompressorPower"])
+            .unwrap_or(DEFAULT_COMPRESSOR_POWER_W)
+            .max(0.0);
+        self.backup_element_power_w =
+            first_f64(config, &["backup_element_power_w", "BackupElementPower"])
+                .unwrap_or(DEFAULT_BACKUP_ELEMENT_POWER_W)
+                .max(0.0);
+        self.backup_enable_offset_c =
+            first_f64(config, &["backup_enable_offset_c", "backup_offset_c"])
+                .unwrap_or(DEFAULT_BACKUP_ENABLE_OFFSET_C)
+                .max(0.0);
+
+        self.cop_curve = BiquadraticCurve {
+            coeffs: parse_curve_coeffs(config, "cop_curve_coeffs")?.unwrap_or(DEFAULT_COP_CURVE),
+            x1_bounds: (
+                first_f64(config, &["cop_zone_temp_min_c"]).unwrap_or(DEFAULT_ZONE_TEMP_BOUNDS_C.0),
+                first_f64(config, &["cop_zone_temp_max_c"]).unwrap_or(DEFAULT_ZONE_TEMP_BOUNDS_C.1),
+            ),
+            x2_bounds: (
+                first_f64(config, &["cop_tank_temp_min_c"]).unwrap_or(DEFAULT_TANK_TEMP_BOUNDS_C.0),
+                first_f64(config, &["cop_tank_temp_max_c"]).unwrap_or(DEFAULT_TANK_TEMP_BOUNDS_C.1),
+            ),
+        };
+        // If HPXML provides a UEF-derived COP, scale the curve so that it passes through
+        // the rated value at the curve's reference conditions (midpoint of bounds).
+        self.cop_scale = if let Some(cop_rated) =
+            first_f64(config, &["cop", "rated_cop", "UniformEnergyFactor"])
+        {
+            let ref_zone_temp = (self.cop_curve.x1_bounds.0 + self.cop_curve.x1_bounds.1) * 0.5;
+            let ref_tank_temp = (self.cop_curve.x2_bounds.0 + self.cop_curve.x2_bounds.1) * 0.5;
+            let cop_at_ref = self
+                .cop_curve
+                .evaluate(ref_zone_temp, ref_tank_temp)
+                .max(1e-6);
+            (cop_rated / cop_at_ref).max(0.1)
+        } else {
+            1.0
+        };
+        self.tempering_valve_setpoint_c =
+            first_f64(config, &["tempering_valve_setpoint_c"]).filter(|&t| t > 0.0);
+        self.capacity_curve = BiquadraticCurve {
+            coeffs: parse_curve_coeffs(config, "capacity_curve_coeffs")?
+                .unwrap_or(DEFAULT_CAPACITY_CURVE),
+            x1_bounds: self.cop_curve.x1_bounds,
+            x2_bounds: self.cop_curve.x2_bounds,
+        };
+
+        // Apply OCHRE-accurate lockout bounds for low-power HPWHs.
+        // If the caller supplies explicit min/max values those win; otherwise
+        // use the type-appropriate defaults.
+        let low_power = config
+            .get_str("low_power_hpwh")
+            .is_some_and(|s| s.eq_ignore_ascii_case("true") || s == "1");
+        let default_min = if low_power {
+            LOW_POWER_MIN_AMBIENT_TEMP_C
+        } else {
+            DEFAULT_MIN_AMBIENT_TEMP_C
+        };
+        let default_max = if low_power {
+            LOW_POWER_MAX_AMBIENT_TEMP_C
+        } else {
+            DEFAULT_MAX_AMBIENT_TEMP_C
+        };
+        self.min_ambient_temp_c =
+            first_f64(config, &["min_ambient_temp_c"]).unwrap_or(default_min);
+        self.max_ambient_temp_c =
+            first_f64(config, &["max_ambient_temp_c"]).unwrap_or(default_max);
+        self.max_tank_temp_c =
+            first_f64(config, &["max_tank_temp_c"]).unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
+
+        self.shr = first_f64(config, &["shr", "sensible_heat_ratio"])
+            .unwrap_or(DEFAULT_SHR)
+            .clamp(0.0, 1.0);
+        self.lost_heat_fraction = first_f64(config, &["lost_heat_fraction"])
+            .unwrap_or(DEFAULT_LOST_HEAT_FRACTION)
+            .clamp(0.0, 1.0);
+        self.fan_power_w = first_f64(config, &["fan_power_w", "FanPower"])
+            .unwrap_or(DEFAULT_FAN_POWER_W)
+            .max(0.0);
+        self.parasitic_power_w = first_f64(config, &["parasitic_power_w", "ParasiticPower"])
+            .unwrap_or(DEFAULT_PARASITIC_POWER_W)
+            .max(0.0);
+        self.backup_efficiency = first_f64(config, &["backup_efficiency"])
+            .unwrap_or(DEFAULT_BACKUP_EFFICIENCY)
+            .max(0.0);
+        self.min_on_time_s = first_f64(config, &["min_on_time_s"])
+            .unwrap_or(DEFAULT_MIN_ON_TIME_S)
+            .max(0.0);
+        self.min_off_time_s = first_f64(config, &["min_off_time_s"])
+            .unwrap_or(0.0)
+            .max(0.0);
+        self.hp_only_mode = config
+            .get_str("hp_only_mode")
+            .is_some_and(|s| s.eq_ignore_ascii_case("true") || s == "1");
+        self.wall_heat_fraction = first_f64(config, &["wall_heat_fraction"])
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        self.compressor_on_since_s = None;
+        self.compressor_off_since_s = None;
+        self.element_hp_control =
+            if config.get_str("element_hp_control_mode") == Some("Simultaneous") {
+                ElementHpControlMode::Simultaneous
+            } else {
+                ElementHpControlMode::MutuallyExclusive
+            };
+
+        self.loop_id =
+            loop_id_from_config(config, &["loop_id", "dhw_loop_id"]).unwrap_or(self.loop_id);
+        self.ports[2].loop_id = Some(self.loop_id);
+        self.mains_temp_c =
+            first_f64(config, &["mains_temp_c", "inlet_temp_c"]).unwrap_or(self.mains_temp_c);
+        self.draw_flow_rate_kg_s = resolve_draw_rate_kg_s(config);
+        self.zip = WaterHeaterZip::from_config(config);
+
+        self.dr_setpoint_offset_c = 0.0;
+        self.dr_load_fraction = 1.0;
+        self.dr_duration_remaining_s = None;
+        self.dr_level = DRLevel::Normal;
+        self.ctrl_load_fraction = 1.0;
+        self.telemetry = default_telemetry();
+        Ok(())
+    }
+
+    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        // Advance DR duration; auto-revert to Normal when expired.
+        let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
+        if let Some(remaining) = self.dr_duration_remaining_s {
+            let next = remaining - dt_s;
+            if next <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.apply_dr_level(DRLevel::Normal);
+            } else {
+                self.dr_duration_remaining_s = Some(next);
+            }
+        }
+
+        // Safety clamp: force off if upper node exceeds max tank temperature.
+        let upper_node_temp = self.tank.node_temps()[self.thermostat_upper_node];
+        if upper_node_temp > self.max_tank_temp_c {
+            self.compressor_on = false;
+            self.backup_on = false;
+            return OperatingMode::Off;
+        }
+
+        // DR GridEmergency: full load shed.
+        if self.dr_load_fraction <= 0.0 {
+            self.compressor_on = false;
+            self.backup_on = false;
+            return OperatingMode::Off;
+        }
+
+        let call_for_heat = self.call_for_heat() && self.duty_cycle > 0.0;
+        let ambient_c = self.ambient_temp_c(env);
+        let ambient_in_range =
+            ambient_c >= self.min_ambient_temp_c && ambient_c <= self.max_ambient_temp_c;
+
+        // Minimum off-time guard: prevent compressor restart until min_off_time_s has elapsed.
+        let min_off_elapsed = self
+            .compressor_off_since_s
+            .is_none_or(|t| t >= self.min_off_time_s);
+
+        // hp_only_mode: backup element is permanently disabled.
+        // OCHRE WaterHeater.py:521: `if not self.hp_only_mode`.
+        let backup_allowed = !self.hp_only_mode;
+
+        match self.mode_override {
+            Some(OperatingMode::Off) => {
+                self.compressor_on = false;
+                self.backup_on = false;
+            }
+            Some(OperatingMode::HeatPumpWH) | Some(OperatingMode::HeatingHP) => {
+                // Respect mode override but still apply ambient lockout and min-off-time.
+                self.compressor_on = call_for_heat && ambient_in_range && min_off_elapsed;
+                self.backup_on = false;
+            }
+            Some(OperatingMode::BackupElement) | Some(OperatingMode::HeatingER) => {
+                self.compressor_on = false;
+                self.backup_on = call_for_heat && backup_allowed;
+            }
+            Some(OperatingMode::HeatingHPAndER) => {
+                self.compressor_on = call_for_heat && ambient_in_range && min_off_elapsed;
+                self.backup_on = call_for_heat && backup_allowed;
+            }
+            _ => {
+                if !ambient_in_range {
+                    // Outside operating envelope: compressor locked out, backup only.
+                    // OCHRE WaterHeater.py:617-620: er_only_mode when outside bounds.
+                    self.compressor_on = false;
+                    self.backup_on = call_for_heat && backup_allowed;
+                } else {
+                    let below_backup_threshold = self.control_temp_c()
+                        <= self.effective_setpoint_c() - self.backup_enable_offset_c;
+                    match self.element_hp_control {
+                        ElementHpControlMode::MutuallyExclusive => {
+                            if self.compressor_on {
+                                // Compressor already running: keep it, lock out backup.
+                                // Enforce min-on-time: only allow turning off when
+                                // call_for_heat is false and the timer has expired.
+                                let min_on_elapsed = self
+                                    .compressor_on_since_s
+                                    .is_none_or(|t| t >= self.min_on_time_s);
+                                self.compressor_on = call_for_heat || !min_on_elapsed;
+                                self.backup_on = false;
+                            } else if self.backup_on {
+                                // Backup already running: keep it, lock out compressor.
+                                self.compressor_on = false;
+                                self.backup_on =
+                                    call_for_heat && below_backup_threshold && backup_allowed;
+                            } else {
+                                // Neither running: compressor gets priority (unless min-off active).
+                                self.compressor_on = call_for_heat && min_off_elapsed;
+                                self.backup_on = false;
+                            }
+                        }
+                        ElementHpControlMode::Simultaneous => {
+                            // Enforce min-on-time when compressor is running.
+                            let min_on_elapsed = self
+                                .compressor_on_since_s
+                                .is_none_or(|t| t >= self.min_on_time_s);
+                            self.compressor_on = (call_for_heat && min_off_elapsed)
+                                || (self.compressor_on && !min_on_elapsed);
+                            self.backup_on =
+                                call_for_heat && below_backup_threshold && backup_allowed;
+                        }
+                    }
+                }
+            }
+        }
+
+        match (self.compressor_on, self.backup_on) {
+            (true, true) => OperatingMode::HeatingHPAndER,
+            (true, false) => OperatingMode::HeatPumpWH,
+            (false, true) => OperatingMode::BackupElement,
+            (false, false) => OperatingMode::Off,
+        }
+    }
+
+    fn step(
+        &mut self,
+        env: &EnvironmentState,
+        dt: Duration,
+        ports: &mut PortSlots,
+    ) -> std::result::Result<(), HaresError> {
+        let mode = self.update_control(env);
+        let duty =
+            (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
+
+        // Update compressor on/off timers for min-on-time and min-off-time enforcement.
+        if self.compressor_on {
+            let elapsed = self.compressor_on_since_s.get_or_insert(0.0);
+            *elapsed += dt.as_secs_f64();
+            self.compressor_off_since_s = None;
+        } else {
+            self.compressor_on_since_s = None;
+            let off_elapsed = self.compressor_off_since_s.get_or_insert(0.0);
+            *off_elapsed += dt.as_secs_f64();
+        }
+
+        let tank_avg_temp_c =
+            weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3());
+        // Use wet-bulb temperature for COP/capacity curves: HPWH performance depends
+        // on available enthalpy in the ambient air, not dry-bulb temperature alone.
+        let wet_bulb_c = self.zone_wet_bulb_c(env);
+        let cop = (self
+            .cop_curve
+            .evaluate(wet_bulb_c, tank_avg_temp_c)
+            * self.cop_scale)
+            .max(0.1);
+        // Capacity multiplier modulates the rated delivered heat based on ambient
+        // wet-bulb and tank temperature, matching EnergyPlus/OCHRE HPWH model.
+        let cap_mult = self
+            .capacity_curve
+            .evaluate(wet_bulb_c, tank_avg_temp_c)
+            .max(0.0);
+        // capacity_actual_w = rated compressor input * cap_mult (rated capacity delivered).
+        // power_input_w = capacity_actual_w / cop_actual (electrical input required).
+        let capacity_actual_w = self.compressor_power_w * cap_mult;
+        let compressor_power_w = if self.compressor_on {
+            (capacity_actual_w / cop) * duty
+        } else {
+            0.0
+        };
+        let backup_power_w = if self.backup_on {
+            self.backup_element_power_w * duty
+        } else {
+            0.0
+        };
+
+        // OCHRE WaterHeater.py:660-664: delivered heat from HP and ER.
+        // HP delivers capacity_actual_w * duty to tank; electrical draw is compressor_power_w.
+        let delivered_hp_w = compressor_power_w * cop;
+        let delivered_er_w = backup_power_w; // backup_efficiency is 1.0 for electric
+        let q_tank_delivered_w = delivered_hp_w + delivered_er_w;
+
+        if q_tank_delivered_w > 0.0 {
+            // Distribute heat across nodes using OCHRE-compatible condenser weights.
+            distribute_heat_to_nodes(
+                &mut self.tank,
+                &self.condenser_node_weights,
+                q_tank_delivered_w,
+                dt,
+            )?;
+        }
+
+        let draw_volume_m3 = self.draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
+        let draw = self.tank.step(
+            self.ambient_temp_c(env),
+            draw_volume_m3,
+            self.mains_temp_c,
+            dt,
+        )?;
+
+        // OCHRE WaterHeater.py:662: fan runs when compressor is on; parasitic when off.
+        let fan_parasitic_w = if self.compressor_on {
+            self.fan_power_w
+        } else {
+            self.parasitic_power_w
+        };
+
+        // OCHRE WaterHeater.py:671: total electric = compressor + ER + fan/parasitic.
+        let rated_electric_power_w = compressor_power_w + backup_power_w + fan_parasitic_w;
+        let (electric_power_w, reactive_power_kvar) =
+            self.zip.apply(rated_electric_power_w, env.grid.voltage_pu);
+
+        if electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_kw: electric_power_w / 1_000.0,
+                reactive_power_kvar,
+            })?;
+        }
+
+        // OCHRE WaterHeater.py:666-674: zone heat gains decomposed by SHR and lost_heat_fraction.
+        // hp_waste = power_hp - delivered_hp (negative: HP extracts heat from zone)
+        // er_waste = power_er - delivered_er (zero for 100% efficient electric)
+        let dry_bulb_c = self.zone_temp_c(env);
+        let shr = if (dry_bulb_c - wet_bulb_c) > 0.1 {
+            self.shr
+        } else {
+            1.0
+        };
+        let hp_waste_w = compressor_power_w - delivered_hp_w; // negative when COP > 1
+        let er_waste_w = backup_power_w - delivered_er_w; // zero for ideal ER
+        let keep_fraction = 1.0 - self.lost_heat_fraction;
+        let sensible_gain_w = (hp_waste_w * shr + fan_parasitic_w + er_waste_w) * keep_fraction;
+        let latent_gain_w = hp_waste_w * (1.0 - shr) * keep_fraction;
+
+        // For backward compat: zone_heat_extraction_w remains the total heat moved from zone to tank.
+        let zone_heat_extraction_w = delivered_hp_w - compressor_power_w;
+
+        // OCHRE WaterHeater.py:678-685: split sensible gain between zone air and interior wall.
+        // wall_heat_fraction of sensible gain goes to the wall surface; the rest to zone air.
+        // Wall heat fraction is tracked via telemetry for future wall-surface modeling.
+        // Until interior wall surfaces exist, both fractions are posted to the zone
+        // thermal port to preserve the energy balance.
+        let sensible_to_zone_w = sensible_gain_w * (1.0 - self.wall_heat_fraction);
+        let sensible_to_wall_w = sensible_gain_w * self.wall_heat_fraction;
+
+        if let Some(zone) = self.descriptor.zone {
+            if sensible_gain_w != 0.0 || latent_gain_w != 0.0 {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone,
+                    sensible_gain_w, // full sensible gain (zone + wall) to preserve energy balance
+                    latent_gain_w,
+                })?;
+            }
+        }
+
+        if self.draw_flow_rate_kg_s > 0.0 {
+            // Apply tempering valve: cold mains water is mixed with hot tank water to cap
+            // delivery temperature at tempering_valve_setpoint_c. The mixed outlet never
+            // exceeds the valve setpoint, and never drops below it when tank is cooler.
+            let delivery_temp_c = match self.tempering_valve_setpoint_c {
+                Some(valve_sp) => draw.outlet_temp_c.min(valve_sp),
+                None => draw.outlet_temp_c,
+            };
+            ports.accumulate(&PortContribution::Fluid {
+                loop_id: self.loop_id,
+                flow_rate_kg_s: self.draw_flow_rate_kg_s,
+                supply_temp_c: delivery_temp_c,
+                return_temp_c: self.mains_temp_c,
+                fluid_type: self.fluid_type,
+            })?;
+        }
+
+        self.telemetry.set(
+            "tank_avg_temp_c",
+            weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3()),
+        );
+        self.telemetry.set("cop", cop);
+        self.telemetry.set("cap_mult", cap_mult);
+        self.telemetry.set("compressor_power_w", compressor_power_w);
+        self.telemetry.set("backup_element_power_w", backup_power_w);
+        self.telemetry
+            .set("zone_heat_extraction_w", zone_heat_extraction_w);
+        self.telemetry
+            .set("draw_flow_rate_kg_s", self.draw_flow_rate_kg_s);
+        self.telemetry
+            .set("wall_sensible_gain_w", sensible_to_wall_w);
+        self.telemetry.set("unmet_load_w", draw.unmet_load_w);
+        self.telemetry.set(
+            "operating_mode",
+            match mode {
+                OperatingMode::HeatPumpWH => 1.0,
+                OperatingMode::BackupElement => 2.0,
+                OperatingMode::HeatingHPAndER => 3.0,
+                _ => 0.0,
+            },
+        );
+
+        // Reset transient ctrl_load_fraction after this step so it does not
+        // carry over to the next step unless reapplied by the controller.
+        self.ctrl_load_fraction = 1.0;
+
+        Ok(())
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        save_postcard(&HpwhState {
+            setpoint_c: self.setpoint_c,
+            deadband_c: self.deadband_c,
+            compressor_on: self.compressor_on,
+            backup_on: self.backup_on,
+            duty_cycle: self.duty_cycle,
+            mode_override: self.mode_override,
+            element_hp_control: self.element_hp_control,
+            tank_state: self.tank.save_state(),
+            tank_avg_temp_c: self.telemetry.get("tank_avg_temp_c").unwrap_or(0.0),
+            cop: self.telemetry.get("cop").unwrap_or(0.0),
+            cap_mult: self.telemetry.get("cap_mult").unwrap_or(1.0),
+            compressor_power_w: self.telemetry.get("compressor_power_w").unwrap_or(0.0),
+            backup_element_power_w: self.telemetry.get("backup_element_power_w").unwrap_or(0.0),
+            zone_heat_extraction_w: self.telemetry.get("zone_heat_extraction_w").unwrap_or(0.0),
+            draw_flow_rate_kg_s: self.telemetry.get("draw_flow_rate_kg_s").unwrap_or(0.0),
+            compressor_on_since_s: self.compressor_on_since_s,
+            compressor_off_since_s: self.compressor_off_since_s,
+            min_on_time_s: self.min_on_time_s,
+            min_off_time_s: self.min_off_time_s,
+            dr_level: self.dr_level,
+            dr_setpoint_offset_c: self.dr_setpoint_offset_c,
+            dr_load_fraction: self.dr_load_fraction,
+            dr_duration_remaining_s: self.dr_duration_remaining_s,
+        })
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
+        let decoded: HpwhState = load_postcard(state)?;
+        self.setpoint_c = decoded.setpoint_c;
+        self.deadband_c = decoded.deadband_c;
+        self.compressor_on = decoded.compressor_on;
+        self.backup_on = decoded.backup_on;
+        self.duty_cycle = decoded.duty_cycle;
+        self.mode_override = decoded.mode_override;
+        self.element_hp_control = decoded.element_hp_control;
+        self.compressor_on_since_s = decoded.compressor_on_since_s;
+        self.compressor_off_since_s = decoded.compressor_off_since_s;
+        self.min_on_time_s = decoded.min_on_time_s;
+        self.min_off_time_s = decoded.min_off_time_s;
+        self.dr_level = decoded.dr_level;
+        self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
+        self.dr_load_fraction = decoded.dr_load_fraction;
+        self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        self.tank.load_state(&decoded.tank_state)?;
+
+        self.telemetry
+            .insert("tank_avg_temp_c", decoded.tank_avg_temp_c);
+        self.telemetry.insert("cop", decoded.cop);
+        self.telemetry.insert("cap_mult", decoded.cap_mult);
+        self.telemetry
+            .insert("compressor_power_w", decoded.compressor_power_w);
+        self.telemetry
+            .insert("backup_element_power_w", decoded.backup_element_power_w);
+        self.telemetry
+            .insert("zone_heat_extraction_w", decoded.zone_heat_extraction_w);
+        self.telemetry
+            .insert("draw_flow_rate_kg_s", decoded.draw_flow_rate_kg_s);
+        self.telemetry.insert(
+            "operating_mode",
+            match (decoded.compressor_on, decoded.backup_on) {
+                (true, false) => 1.0,
+                (false, true) => 2.0,
+                (true, true) => 3.0,
+                (false, false) => 0.0,
+            },
+        );
+
+        Ok(())
+    }
+
+    fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
+        match signal {
+            ControlSignal::ThermalSetpoint {
+                heating_setpoint_c,
+                cooling_setpoint_c,
+                deadband_c,
+            } => {
+                if let Some(sp) = heating_setpoint_c.or(*cooling_setpoint_c) {
+                    if !sp.is_finite() {
+                        return Err(HaresError::Control(format!(
+                            "invalid water-heater setpoint: {sp}"
+                        )));
+                    }
+                    self.setpoint_c = sp;
+                }
+                if let Some(db) = deadband_c {
+                    if !db.is_finite() || *db < 0.0 {
+                        return Err(HaresError::Control(format!(
+                            "invalid water-heater deadband: {db}"
+                        )));
+                    }
+                    self.deadband_c = *db;
+                }
+            }
+            ControlSignal::DutyCycle { on_fraction, .. } => {
+                if !on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction) {
+                    return Err(HaresError::Control(format!(
+                        "invalid duty cycle for HeatPumpWH: {on_fraction}"
+                    )));
+                }
+                self.duty_cycle = *on_fraction;
+            }
+            ControlSignal::ModeOverride { mode } => {
+                self.mode_override = Some(*mode);
+            }
+            ControlSignal::LoadFraction { fraction } => {
+                self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
+            }
+            ControlSignal::PowerLimit { max_power_kw, .. } => {
+                let rated_w = self.compressor_power_w + self.backup_element_power_w;
+                if rated_w > 0.0 {
+                    let max_fraction = (max_power_kw * 1000.0 / rated_w).clamp(0.0, 1.0);
+                    self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
+                }
+            }
+            ControlSignal::DemandResponse { level, duration_s } => {
+                self.apply_dr_level(*level);
+                self.dr_duration_remaining_s = *duration_s;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+impl HeatPumpWH {
+    fn apply_dr_level(&mut self, level: DRLevel) {
+        self.dr_level = level;
+        match level {
+            DRLevel::Normal => {
+                self.dr_setpoint_offset_c = 0.0;
+                self.dr_load_fraction = 1.0;
+            }
+            DRLevel::Moderate => {
+                self.dr_setpoint_offset_c = -3.0;
+                self.dr_load_fraction = 1.0;
+            }
+            DRLevel::High => {
+                self.dr_setpoint_offset_c = -6.0;
+                self.dr_load_fraction = 0.8;
+            }
+            DRLevel::Critical => {
+                self.dr_setpoint_offset_c = -10.0;
+                self.dr_load_fraction = 0.5;
+            }
+            DRLevel::GridEmergency => {
+                self.dr_setpoint_offset_c = 0.0;
+                self.dr_load_fraction = 0.0;
+            }
+        }
+    }
+}
+
+pub fn register_with_registry(registry: &mut EquipmentRegistry) {
+    registry.register(
+        "Heat Pump Water Heater",
+        Box::new(|config| Box::new(HeatPumpWH::new(config))),
+    );
+    registry.register("HPWH", Box::new(|config| Box::new(HeatPumpWH::new(config))));
+}
+
+fn default_telemetry() -> Telemetry {
+    let mut telemetry = Telemetry::with_capacity(10);
+    telemetry.insert("tank_avg_temp_c", 0.0);
+    telemetry.insert("cop", 0.0);
+    telemetry.insert("cap_mult", 1.0);
+    telemetry.insert("compressor_power_w", 0.0);
+    telemetry.insert("backup_element_power_w", 0.0);
+    telemetry.insert("zone_heat_extraction_w", 0.0);
+    telemetry.insert("draw_flow_rate_kg_s", 0.0);
+    telemetry.insert("operating_mode", 0.0);
+    telemetry.insert("wall_sensible_gain_w", 0.0);
+    telemetry.insert("unmet_load_w", 0.0);
+    telemetry
+}
+
+fn telemetry_fields() -> Vec<TelemetryField> {
+    vec![
+        TelemetryField {
+            name: "tank_avg_temp_c".to_string(),
+            unit: "C".to_string(),
+            description: "Volume-weighted average tank temperature".to_string(),
+        },
+        TelemetryField {
+            name: "cop".to_string(),
+            unit: "-".to_string(),
+            description: "Instantaneous heat-pump COP".to_string(),
+        },
+        TelemetryField {
+            name: "cap_mult".to_string(),
+            unit: "-".to_string(),
+            description: "Capacity curve multiplier (function of wet-bulb and tank temperature)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: "compressor_power_w".to_string(),
+            unit: "W".to_string(),
+            description: "Compressor electric power".to_string(),
+        },
+        TelemetryField {
+            name: "backup_element_power_w".to_string(),
+            unit: "W".to_string(),
+            description: "Backup resistance element power".to_string(),
+        },
+        TelemetryField {
+            name: "zone_heat_extraction_w".to_string(),
+            unit: "W".to_string(),
+            description: "Heat extracted from surrounding zone air".to_string(),
+        },
+        TelemetryField {
+            name: "draw_flow_rate_kg_s".to_string(),
+            unit: "kg/s".to_string(),
+            description: "Domestic hot water draw flow rate".to_string(),
+        },
+        TelemetryField {
+            name: "operating_mode".to_string(),
+            unit: "enum".to_string(),
+            description: "0=Off, 1=HP, 2=Backup, 3=HP+Backup".to_string(),
+        },
+        TelemetryField {
+            name: "wall_sensible_gain_w".to_string(),
+            unit: "W".to_string(),
+            description: "Sensible heat directed to interior wall surfaces (wall_heat_fraction share)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: "unmet_load_w".to_string(),
+            unit: "W".to_string(),
+            description: "Unmet fixture load: heat not delivered because outlet temp < fixture setpoint"
+                .to_string(),
+        },
+    ]
+}
+
+/// Distribute `q_w` watts of heat across tank nodes for duration `dt` using `weights`.
+///
+/// Weights need not be pre-normalized; they are normalized internally. If the
+/// weight sum is zero the heat is concentrated at the bottom (last) node.
+fn distribute_heat_to_nodes(
+    tank: &mut StratifiedTank,
+    weights: &[f64],
+    q_w: f64,
+    dt: Duration,
+) -> crate::Result<()> {
+    let weight_sum: f64 = weights.iter().sum();
+    if weight_sum <= 0.0 {
+        return tank.heat_node(tank.n_nodes().saturating_sub(1), q_w, dt);
+    }
+    for (node, &w) in weights.iter().enumerate() {
+        if w > 0.0 && node < tank.n_nodes() {
+            tank.heat_node(node, q_w * w / weight_sum, dt)?;
+        }
+    }
+    Ok(())
+}
+
+/// Default condenser heat distribution weights for a tank with `n_nodes` nodes.
+///
+/// For 12-node tanks, returns the OCHRE-calibrated distribution (bottom-biased).
+/// For other node counts, concentrates all heat at the bottom half of the tank
+/// (nodes at or above index `n_nodes / 2`), matching OCHRE's general convention
+/// that condenser heat enters the lower portion of the tank.
+fn default_condenser_weights(n_nodes: usize) -> Vec<f64> {
+    if n_nodes == 12 {
+        return OCHRE_12NODE_CONDENSER_WEIGHTS.to_vec();
+    }
+    // For generic node counts: place 100% weight on the condenser node (n_nodes / 2).
+    let mut weights = vec![0.0_f64; n_nodes];
+    if n_nodes > 0 {
+        weights[n_nodes / 2] = 1.0;
+    }
+    weights
+}
+
+fn parse_curve_coeffs(config: &EquipmentConfig, key: &str) -> crate::Result<Option<[f64; 6]>> {
+    let Some(raw) = config.get_str(key) else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() != 6 {
+        return Err(HaresError::Equipment(format!(
+            "expected 6 coefficients in '{key}', got {}",
+            parts.len()
+        )));
+    }
+
+    let mut coeffs = [0.0_f64; 6];
+    for (idx, part) in parts.into_iter().enumerate() {
+        coeffs[idx] = part.parse::<f64>().map_err(|error| {
+            HaresError::Equipment(format!(
+                "failed to parse coefficient {idx} ('{part}') in '{key}': {error}"
+            ))
+        })?;
+    }
+
+    Ok(Some(coeffs))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use hares_types::{
+        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+    };
+
+    use super::HeatPumpWH;
+    use crate::{Equipment, EquipmentConfig};
+
+    fn env(zone_temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(60),
+        }
+    }
+
+    fn config() -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        raw.insert("compressor_power_w".to_string(), 1200.0.into());
+        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+        raw.insert("backup_enable_offset_c".to_string(), 3.0.into());
+        EquipmentConfig {
+            name: "HPWH".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    fn ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            electrical: Default::default(),
+            fuel: Default::default(),
+            fluid: vec![hares_types::FluidAccumulator::new(
+                hares_types::LoopId(1),
+                hares_types::FluidType::Water,
+            )],
+            custom: vec![],
+        }
+    }
+
+    fn env_with_wet_bulb(zone_temp_c: f64, wet_bulb_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(60),
+        }
+    }
+
+    #[test]
+    fn zone_thermal_port_is_negative_when_compressor_runs() {
+        let mut eq = HeatPumpWH::new(config());
+        eq.init(&config(), &env(24.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(24.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        assert!(eq.telemetry().get("compressor_power_w").unwrap_or(0.0) > 0.0);
+        assert!(p.thermal[0].sensible_gain_w < 0.0);
+    }
+
+    /// zone_heat_extraction_w = comp*COP - comp (heat moved from zone to tank by HP).
+    /// This is separate from fan/parasitic and ER contributions.
+    #[test]
+    fn hpwh_energy_balance_holds_each_step() {
+        let mut eq = HeatPumpWH::new(config());
+        eq.init(&config(), &env(24.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(24.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        let cop = eq.telemetry().get("cop").unwrap();
+        let comp = eq.telemetry().get("compressor_power_w").unwrap();
+        let extracted = eq.telemetry().get("zone_heat_extraction_w").unwrap();
+
+        // extracted = delivered_hp - comp = comp * cop - comp = comp * (cop - 1)
+        let expected_extraction = comp * (cop - 1.0);
+        assert!(
+            (extracted - expected_extraction).abs() < 1e-6,
+            "zone extraction should be comp*(COP-1): {extracted} vs {expected_extraction}"
+        );
+    }
+
+    // --- Regression tests for bug fixes ---
+
+    /// Same dry-bulb temperature but different wet-bulb temperatures must produce
+    /// different COP values, confirming the curve uses wet-bulb not dry-bulb.
+    #[test]
+    fn wet_bulb_cop_differs_with_same_dry_bulb_different_humidity() {
+        let dry_bulb_c = 24.0;
+        // Low humidity → low wet-bulb (~14°C at 24°C DB)
+        let env_low_wb = env_with_wet_bulb(dry_bulb_c, 14.0);
+        // High humidity → high wet-bulb (~20°C at 24°C DB, ~80% RH)
+        let env_high_wb = env_with_wet_bulb(dry_bulb_c, 20.0);
+
+        let mut eq_low = HeatPumpWH::new(config());
+        eq_low.init(&config(), &env_low_wb).unwrap();
+        let mut p_low = ports();
+        eq_low
+            .step(&env_low_wb, Duration::from_secs(60), &mut p_low)
+            .unwrap();
+        let cop_low_wb = eq_low.telemetry().get("cop").unwrap();
+
+        let mut eq_high = HeatPumpWH::new(config());
+        eq_high.init(&config(), &env_high_wb).unwrap();
+        let mut p_high = ports();
+        eq_high
+            .step(&env_high_wb, Duration::from_secs(60), &mut p_high)
+            .unwrap();
+        let cop_high_wb = eq_high.telemetry().get("cop").unwrap();
+
+        // Higher wet-bulb → more available enthalpy → higher COP.
+        // The default COP curve has a positive first-order wet-bulb coefficient.
+        assert!(
+            cop_high_wb > cop_low_wb,
+            "COP at WB=20°C ({cop_high_wb:.4}) should exceed COP at WB=14°C ({cop_low_wb:.4})"
+        );
+    }
+
+    /// For a 12-node tank, condenser heat must be spread across multiple nodes
+    /// rather than concentrated at a single node.
+    #[test]
+    fn condenser_heat_distributed_across_multiple_nodes_for_12_node_tank() {
+        let mut cfg_map = std::collections::HashMap::new();
+        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
+        cfg_map.insert("deadband_c".to_string(), 2.0.into());
+        cfg_map.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        cfg_map.insert("compressor_power_w".to_string(), 1200.0.into());
+        cfg_map.insert("backup_element_power_w".to_string(), 4500.0.into());
+        cfg_map.insert("backup_enable_offset_c".to_string(), 3.0.into());
+        cfg_map.insert("tank_nodes".to_string(), 12.0.into());
+        let cfg = EquipmentConfig {
+            name: "HPWH12".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: cfg_map,
+        };
+
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env(24.0)).unwrap();
+
+        // Snapshot temperatures before step.
+        let temps_before: Vec<f64> = eq.tank.node_temps().to_vec();
+
+        let mut p = ports();
+        eq.step(&env(24.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        let temps_after = eq.tank.node_temps();
+        // Count how many nodes increased in temperature due to condenser heat.
+        let nodes_heated = temps_before
+            .iter()
+            .zip(temps_after.iter())
+            .filter(|(before, after)| *after > *before)
+            .count();
+
+        // The OCHRE 12-node distribution has non-zero weights for 7 nodes (indices 5–11).
+        // After inversion mixing, at least 2 nodes must have been directly heated.
+        assert!(
+            nodes_heated >= 2,
+            "Expected condenser heat distributed to multiple nodes, \
+             but only {nodes_heated} nodes increased"
+        );
+    }
+
+    /// When ambient temperature is below the lockout threshold (7.2°C), the
+    /// compressor must be inhibited and mode must be BackupElement (if call for heat).
+    #[test]
+    fn ambient_lockout_below_minimum_forces_backup_element_mode() {
+        let cold_env = env_with_wet_bulb(5.0, 4.0); // 5°C DB, well below 7.2°C lockout
+
+        let mut eq = HeatPumpWH::new(config());
+        eq.init(&config(), &cold_env).unwrap();
+        // Tank starts at 40°C with setpoint 52°C → call for heat is active.
+
+        let mode = eq.update_control(&cold_env);
+
+        assert!(
+            !eq.compressor_on,
+            "Compressor must be off when ambient is below lockout"
+        );
+        // Backup should be on because there is a call for heat and ambient lockout forces ER.
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::BackupElement,
+            "Expected BackupElement mode during ambient lockout, got {mode:?}"
+        );
+    }
+
+    /// When the tank's upper node exceeds max_tank_temp_c, the equipment must
+    /// force Off regardless of call for heat or mode override.
+    #[test]
+    fn max_tank_temp_safety_forces_off_when_exceeded() {
+        // Set a very low max_tank_temp_c so the 40°C initial temp is already above it.
+        let mut cfg_map = std::collections::HashMap::new();
+        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
+        cfg_map.insert("deadband_c".to_string(), 2.0.into());
+        cfg_map.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        cfg_map.insert("compressor_power_w".to_string(), 1200.0.into());
+        cfg_map.insert("backup_element_power_w".to_string(), 4500.0.into());
+        cfg_map.insert("backup_enable_offset_c".to_string(), 3.0.into());
+        // Max tank temp below initial temp triggers safety immediately.
+        cfg_map.insert("max_tank_temp_c".to_string(), 35.0.into());
+        let cfg = EquipmentConfig {
+            name: "HPWH".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: cfg_map,
+        };
+
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env(24.0)).unwrap();
+
+        let mode = eq.update_control(&env(24.0));
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::Off,
+            "Expected Off when tank exceeds max_tank_temp_c"
+        );
+        assert!(!eq.compressor_on);
+        assert!(!eq.backup_on);
+    }
+
+    /// Composite thermostat (3/4 upper + 1/4 lower) shuts compressor off earlier
+    /// than a single lower-node sensor when the upper portion of the tank is hot
+    /// but the lower portion is still cold.
+    #[test]
+    fn composite_thermostat_shuts_off_sooner_than_single_node() {
+        use std::time::Duration;
+
+        // Build two HPWHs: one with composite (default), one where we force single-node
+        // by making thermostat_upper_node == thermostat_node.
+        let mut cfg_composite = config();
+        // tank_nodes=6, thermostat_node defaults to 5 (bottom), thermostat_upper_node=0 (top)
+        cfg_composite
+            .raw_config
+            .insert("min_on_time_s".to_string(), 0.0.into()); // disable min-on for this test
+
+        let mut cfg_single = config();
+        // Force upper == lower so composite collapses to single-node.
+        cfg_single
+            .raw_config
+            .insert("thermostat_upper_node".to_string(), 5.0.into());
+        cfg_single
+            .raw_config
+            .insert("min_on_time_s".to_string(), 0.0.into());
+
+        let e = env(24.0);
+
+        let mut eq_composite = HeatPumpWH::new(cfg_composite.clone());
+        eq_composite.init(&cfg_composite, &e).unwrap();
+
+        let mut eq_single = HeatPumpWH::new(cfg_single.clone());
+        eq_single.init(&cfg_single, &e).unwrap();
+
+        // Set tank profile: upper nodes hot (above setpoint), lower nodes cold.
+        // With composite: control_temp = 0.75 * hot_upper + 0.25 * cold_lower (> setpoint → off).
+        // With single (lower only): reads cold_lower → still calling for heat.
+        let setpoint = 52.0_f64;
+        let hot = setpoint + 5.0; // 57°C – well above setpoint
+        let cold = setpoint - 10.0; // 42°C – well below setpoint - deadband
+
+        for tank in [&mut eq_composite.tank, &mut eq_single.tank] {
+            let n = tank.n_nodes();
+            // Heat the top half hot, leave bottom half cold.
+            let half = n / 2;
+            for node in 0..half {
+                let delta = hot - tank.node_temps()[node];
+                let mcp = 1000.0 * tank.node_volumes_m3()[node] * 4183.0;
+                let energy = delta * mcp;
+                tank.heat_node(node, energy, Duration::from_secs(1))
+                    .unwrap();
+            }
+            // Force bottom nodes cold by directly setting temperatures.
+            for node in half..n {
+                let delta = cold - tank.node_temps()[node];
+                let mcp = 1000.0 * tank.node_volumes_m3()[node] * 4183.0;
+                let energy = delta * mcp;
+                if energy.abs() > 0.0 {
+                    tank.heat_node(node, energy, Duration::from_secs(1))
+                        .unwrap();
+                }
+            }
+        }
+
+        let mode_composite = eq_composite.update_control(&e);
+        let mode_single = eq_single.update_control(&e);
+
+        // Composite reads mostly the hot upper node → should be Off (satisfied).
+        // Single reads only the cold lower node → should still call for heat.
+        assert_eq!(
+            mode_composite,
+            hares_types::OperatingMode::Off,
+            "Composite thermostat should be Off with hot upper, cold lower: got {mode_composite:?}"
+        );
+        assert_ne!(
+            mode_single,
+            hares_types::OperatingMode::Off,
+            "Single lower-node thermostat should still call for heat when lower node is cold: got {mode_single:?}"
+        );
+    }
+
+    /// Fan power must appear in total electrical consumption when compressor runs,
+    /// and parasitic power when compressor is off.
+    /// OCHRE WaterHeater.py:662,671.
+    #[test]
+    fn fan_and_parasitic_appear_in_electrical() {
+        let mut cfg = config();
+        cfg.raw_config
+            .insert("fan_power_w".to_string(), 35.0.into());
+        cfg.raw_config
+            .insert("parasitic_power_w".to_string(), 2.0.into());
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env(24.0)).unwrap();
+
+        // Step with compressor running (tank at 40C, setpoint 52C).
+        let mut p = ports();
+        eq.step(&env(24.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        let comp = eq.telemetry().get("compressor_power_w").unwrap();
+        let backup = eq.telemetry().get("backup_element_power_w").unwrap();
+        assert!(comp > 0.0, "compressor must be running for this test");
+        let total_electric_w = p.electrical.net_active_kw() * 1000.0;
+        let expected_with_fan = comp + backup + 35.0;
+        assert!(
+            (total_electric_w - expected_with_fan).abs() < 1e-6,
+            "total electric ({total_electric_w} W) must include fan power ({expected_with_fan} W)"
+        );
+    }
+
+    /// SHR decomposes zone heat extraction into sensible + latent components.
+    /// OCHRE WaterHeater.py:672-674.
+    #[test]
+    fn shr_produces_latent_gain_when_humidity_gap_exists() {
+        let mut cfg = config();
+        cfg.raw_config.insert("shr".to_string(), 0.88.into());
+        cfg.raw_config
+            .insert("lost_heat_fraction".to_string(), 0.0.into());
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env(24.0)).unwrap();
+
+        // DB=24, WB=14 => gap=10 > 0.1, so SHR < 1 applies.
+        let e = env_with_wet_bulb(24.0, 14.0);
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        let comp = eq.telemetry().get("compressor_power_w").unwrap();
+        assert!(comp > 0.0, "compressor must be running for SHR test");
+        // HP extracts heat from zone (COP > 1), so hp_waste < 0.
+        // Latent = hp_waste * (1-SHR) * keep_frac < 0 (dehumidification).
+        assert!(
+            p.thermal[0].latent_gain_w < 0.0,
+            "latent gain should be negative (dehumidification) when COP>1, got {}",
+            p.thermal[0].latent_gain_w
+        );
+    }
+
+    /// Min-on-time prevents compressor from shutting off before the timer expires,
+    /// even when the tank has risen above setpoint.
+    #[test]
+    fn hpwh_min_on_time_prevents_early_shutdown() {
+        let mut cfg = config();
+        cfg.raw_config
+            .insert("min_on_time_s".to_string(), 120.0.into());
+        // Raise max_tank_temp_c high enough that the safety cutout won't interfere.
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let e = env(24.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        // Tank starts at 40°C, setpoint 52°C → compressor turns on after first step.
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+        assert!(
+            eq.compressor_on,
+            "compressor must be on after first step with cold tank"
+        );
+        // Timer is now Some(60.0) — 60s elapsed, less than 120s min_on_time.
+
+        // Force the tank above setpoint+deadband by raising the setpoint to a very low value,
+        // simulating conditions where call_for_heat would return false.
+        // Direct approach: lower the setpoint below the current tank temperature.
+        let tank_avg = eq
+            .telemetry()
+            .get("tank_avg_temp_c")
+            .expect("tank_avg_temp_c telemetry present");
+        eq.setpoint_c = tank_avg - 10.0; // setpoint now well below tank → no call for heat
+
+        // update_control with no call_for_heat but timer < min_on_time → compressor stays on.
+        let mode = eq.update_control(&e);
+        assert!(
+            eq.compressor_on,
+            "compressor must stay on: min-on-time not yet elapsed (60s < 120s), mode={mode:?}"
+        );
+
+        // Advance timer past 120s: one more step adds another 60s → total ≥ 120s elapsed.
+        let mut p2 = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p2).unwrap();
+        // compressor_on_since_s is now Some(120.0); min_on_time is met.
+        // update_control should now allow the compressor to shut off.
+        let mode_after = eq.update_control(&e);
+        assert!(
+            !eq.compressor_on,
+            "compressor must turn off after min-on-time (120s) has elapsed, mode={mode_after:?}"
+        );
+    }
+
+    /// compressor_on_since_s increments each step while running, then resets to None when off.
+    #[test]
+    fn hpwh_min_on_time_timer_lifecycle() {
+        let mut cfg = config();
+        // Set min_on_time_s well above test duration so the compressor never self-stops.
+        cfg.raw_config
+            .insert("min_on_time_s".to_string(), 9999.0.into());
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let e = env(24.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        // Three 60-second steps with cold tank → compressor runs all three.
+        for _ in 0..3 {
+            let mut p = ports();
+            eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+            assert!(
+                eq.compressor_on,
+                "compressor must remain on during each step"
+            );
+        }
+
+        let elapsed = eq
+            .compressor_on_since_s
+            .expect("compressor_on_since_s must be Some while running");
+        assert!(
+            (elapsed - 180.0).abs() < 1.0,
+            "elapsed time should be ~180s after 3×60s steps, got {elapsed}"
+        );
+
+        // Turn off the compressor by dropping min_on_time_s to 0 and setting setpoint
+        // well below the current tank temp so there is no call for heat.
+        eq.min_on_time_s = 0.0;
+        eq.setpoint_c = 0.0;
+        // Call step: update_control (inside step) sets compressor_on=false, then the
+        // timer management block in step clears compressor_on_since_s to None.
+        let mut p_off = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p_off).unwrap();
+
+        assert!(
+            !eq.compressor_on,
+            "compressor should be off after setpoint dropped below tank temp"
+        );
+        assert!(
+            eq.compressor_on_since_s.is_none(),
+            "compressor_on_since_s must reset to None when compressor turns off"
+        );
+    }
+
+    /// Safety cutout (max_tank_temp_c exceeded) must override min-on-time and force
+    /// the compressor off immediately regardless of how recently it started.
+    #[test]
+    fn hpwh_safety_override_bypasses_min_on_time() {
+        let mut cfg = config();
+        // Long min-on-time so normal logic would keep the compressor running.
+        cfg.raw_config
+            .insert("min_on_time_s".to_string(), 600.0.into());
+        // Set max_tank_temp_c just above initial tank temp (40°C) so the safety
+        // cutout triggers as soon as we raise the tank a little.
+        cfg.raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let e = env(24.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        // One step to start the compressor.
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+        assert!(
+            eq.compressor_on,
+            "compressor must be running before safety test"
+        );
+        // Timer is Some(60.0) — well below 600s.
+        assert!(
+            eq.compressor_on_since_s.map_or(false, |t| t < 600.0),
+            "timer must be below min_on_time_s"
+        );
+
+        // Trigger the safety cutout: set max_tank_temp below the current upper-node temp.
+        // The upper-node defaults to index 0 after init (n_nodes=6, upper=0).
+        let upper_temp = eq.tank.node_temps()[eq.thermostat_upper_node];
+        eq.max_tank_temp_c = upper_temp - 1.0;
+
+        // update_control must force Off immediately, ignoring min-on-time.
+        let mode = eq.update_control(&e);
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::Off,
+            "safety cutout must produce Off mode, got {mode:?}"
+        );
+        assert!(
+            !eq.compressor_on,
+            "compressor must be off after safety cutout despite min-on-time not elapsed"
+        );
+        assert!(!eq.backup_on, "backup must also be off after safety cutout");
+    }
+
+    /// Heat delivered to the tank is proportional to cap_mult from the capacity curve.
+    /// A unit-constant capacity curve (cap_mult = 1.0 everywhere) must deliver more
+    /// heat than a curve that returns cap_mult < 1.0 at the same conditions.
+    #[test]
+    fn hpwh_capacity_curve_modulates_heat_delivery() {
+        // Default capacity curve at wet_bulb=14°C, tank_avg≈40°C gives cap_mult < 1.0.
+        // Verify by computing it: DEFAULT_CAPACITY_CURVE = [0.563, 0.0437, 0.000039, 0.0055, -0.000148, -0.000145]
+        // At wb=14, tank=40: 0.563 + 0.0437*14 + 0.000039*196 + 0.0055*40 + (-0.000148)*1600 + (-0.000145)*560
+        //   ≈ 0.563 + 0.612 + 0.0076 + 0.22 - 0.237 - 0.0812 ≈ 1.084  (clamped by curves, so let's use as-is)
+        // To guarantee cap_mult < 1.0 at test conditions, use a curve with constant 0.8.
+        // Constant biquadratic curve that always returns 0.8: coeffs = [0.8, 0, 0, 0, 0, 0].
+        let low_curve_str = "0.8, 0.0, 0.0, 0.0, 0.0, 0.0";
+        let unit_curve_str = "1.0, 0.0, 0.0, 0.0, 0.0, 0.0";
+
+        let mut cfg_low = config();
+        cfg_low
+            .raw_config
+            .insert("capacity_curve_coeffs".to_string(), low_curve_str.into());
+        cfg_low
+            .raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let mut cfg_unit = config();
+        cfg_unit
+            .raw_config
+            .insert("capacity_curve_coeffs".to_string(), unit_curve_str.into());
+        cfg_unit
+            .raw_config
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+
+        let e = env(24.0);
+
+        let mut eq_low = HeatPumpWH::new(cfg_low.clone());
+        eq_low.init(&cfg_low, &e).unwrap();
+        let mut p_low = ports();
+        eq_low
+            .step(&e, Duration::from_secs(60), &mut p_low)
+            .unwrap();
+
+        let mut eq_unit = HeatPumpWH::new(cfg_unit.clone());
+        eq_unit.init(&cfg_unit, &e).unwrap();
+        let mut p_unit = ports();
+        eq_unit
+            .step(&e, Duration::from_secs(60), &mut p_unit)
+            .unwrap();
+
+        let cap_low = eq_low
+            .telemetry()
+            .get("cap_mult")
+            .expect("cap_mult must be in telemetry");
+        let cap_unit = eq_unit
+            .telemetry()
+            .get("cap_mult")
+            .expect("cap_mult must be in telemetry");
+
+        assert!(
+            (cap_low - 0.8).abs() < 1e-6,
+            "low curve must produce cap_mult = 0.8, got {cap_low}"
+        );
+        assert!(
+            (cap_unit - 1.0).abs() < 1e-6,
+            "unit curve must produce cap_mult = 1.0, got {cap_unit}"
+        );
+
+        let comp_low = eq_low
+            .telemetry()
+            .get("compressor_power_w")
+            .expect("compressor_power_w in telemetry");
+        let comp_unit = eq_unit
+            .telemetry()
+            .get("compressor_power_w")
+            .expect("compressor_power_w in telemetry");
+
+        assert!(
+            comp_low > 0.0 && comp_unit > 0.0,
+            "both compressors must be running for this comparison"
+        );
+        // Electrical draw = (compressor_power_w * cap_mult / cop) * duty.
+        // Since both share the same COP curve and conditions, comp_unit / comp_low ≈ 1.0 / 0.8.
+        let ratio = comp_unit / comp_low;
+        assert!(
+            (ratio - 1.0 / 0.8).abs() < 0.05,
+            "unit-curve draw should be ~1/0.8 × low-curve draw, ratio={ratio:.4}"
+        );
+    }
+
+    /// lost_heat_fraction reduces zone gains proportionally.
+    /// OCHRE WaterHeater.py:673: sensible *= (1 - lost_heat_fraction).
+    #[test]
+    fn lost_heat_fraction_reduces_zone_gains() {
+        let e = env_with_wet_bulb(24.0, 14.0);
+
+        let mut cfg0 = config();
+        cfg0.raw_config
+            .insert("lost_heat_fraction".to_string(), 0.0.into());
+        let mut eq0 = HeatPumpWH::new(cfg0.clone());
+        eq0.init(&cfg0, &e).unwrap();
+        let mut p0 = ports();
+        eq0.step(&e, Duration::from_secs(60), &mut p0).unwrap();
+
+        let mut cfg50 = config();
+        cfg50
+            .raw_config
+            .insert("lost_heat_fraction".to_string(), 0.5.into());
+        let mut eq50 = HeatPumpWH::new(cfg50.clone());
+        eq50.init(&cfg50, &e).unwrap();
+        let mut p50 = ports();
+        eq50.step(&e, Duration::from_secs(60), &mut p50).unwrap();
+
+        let sens0 = p0.thermal[0].sensible_gain_w;
+        let sens50 = p50.thermal[0].sensible_gain_w;
+        assert!(
+            sens0.abs() > 1e-6,
+            "baseline sensible gain must be non-zero for this test"
+        );
+        let ratio = sens50 / sens0;
+        assert!(
+            (ratio - 0.5).abs() < 0.05,
+            "lost_heat_fraction=0.5 should halve sensible gain: ratio={ratio:.3}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mutual_exclusion_tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use hares_types::{
+        ControlSignal, EnvironmentState, GridState, OperatingMode, PortSlots, ThermalAccumulator,
+        WeatherState, ZoneId, ZoneState,
+    };
+
+    use super::{ElementHpControlMode, HeatPumpWH};
+    use crate::{Equipment, EquipmentConfig};
+
+    fn env_state() -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 24.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(60),
+        }
+    }
+
+    /// Config: tank at 40°C (below setpoint 52°C, so call for heat active),
+    /// backup_enable_offset is large so backup only triggers well below setpoint.
+    fn base_config(mode: &str) -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        raw.insert("compressor_power_w".to_string(), 1200.0.into());
+        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+        // offset=20 means backup only fires when temp <= 32°C, so at 40°C backup stays off.
+        raw.insert("backup_enable_offset_c".to_string(), 20.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+        if !mode.is_empty() {
+            raw.insert(
+                "element_hp_control_mode".to_string(),
+                mode.to_string().into(),
+            );
+        }
+        EquipmentConfig {
+            name: "HPWH".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    /// Config where tank is very cold so backup threshold is also triggered.
+    fn very_cold_config(mode: &str) -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        // Tank starts so cold that control_temp <= setpoint - backup_enable_offset.
+        raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
+        raw.insert("compressor_power_w".to_string(), 1200.0.into());
+        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+        raw.insert("backup_enable_offset_c".to_string(), 8.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+        if !mode.is_empty() {
+            raw.insert(
+                "element_hp_control_mode".to_string(),
+                mode.to_string().into(),
+            );
+        }
+        EquipmentConfig {
+            name: "HPWH".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    fn ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            electrical: Default::default(),
+            fuel: Default::default(),
+            fluid: vec![hares_types::FluidAccumulator::new(
+                hares_types::LoopId(1),
+                hares_types::FluidType::Water,
+            )],
+            custom: vec![],
+        }
+    }
+
+    /// MutuallyExclusive: once compressor is running, backup element cannot start.
+    #[test]
+    fn mutually_exclusive_compressor_running_prevents_backup() {
+        let cfg = very_cold_config("MutuallyExclusive");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+
+        // Force compressor_on = true before calling update_control.
+        wh.compressor_on = true;
+        wh.backup_on = false;
+
+        let mode = wh.update_control(&env_state());
+        assert!(wh.compressor_on, "compressor must stay on");
+        assert!(
+            !wh.backup_on,
+            "backup must be locked out while compressor is running"
+        );
+        assert_eq!(mode, OperatingMode::HeatPumpWH);
+    }
+
+    /// MutuallyExclusive: once backup element is running, compressor cannot start.
+    #[test]
+    fn mutually_exclusive_backup_running_prevents_compressor() {
+        let cfg = very_cold_config("MutuallyExclusive");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+
+        // Force backup_on = true, compressor_on = false before calling update_control.
+        wh.compressor_on = false;
+        wh.backup_on = true;
+
+        let mode = wh.update_control(&env_state());
+        assert!(
+            !wh.compressor_on,
+            "compressor must be locked out while backup is running"
+        );
+        assert!(wh.backup_on, "backup element must continue running");
+        assert_eq!(mode, OperatingMode::BackupElement);
+    }
+
+    /// MutuallyExclusive: when neither is running, compressor gets priority over backup.
+    #[test]
+    fn mutually_exclusive_neither_running_compressor_gets_priority() {
+        let cfg = very_cold_config("MutuallyExclusive");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+
+        wh.compressor_on = false;
+        wh.backup_on = false;
+
+        let mode = wh.update_control(&env_state());
+        // Compressor should start; backup stays off even though tank is very cold.
+        assert!(
+            wh.compressor_on,
+            "compressor should start when neither is running"
+        );
+        assert!(
+            !wh.backup_on,
+            "backup must not start (compressor has priority)"
+        );
+        assert_eq!(mode, OperatingMode::HeatPumpWH);
+    }
+
+    /// Simultaneous: both compressor and backup can run when conditions are met.
+    #[test]
+    fn simultaneous_both_can_run_when_conditions_met() {
+        let cfg = very_cold_config("Simultaneous");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+
+        wh.compressor_on = false;
+        wh.backup_on = false;
+
+        let mode = wh.update_control(&env_state());
+        assert!(wh.compressor_on, "compressor must run in Simultaneous mode");
+        assert!(
+            wh.backup_on,
+            "backup must also run when temp is below backup threshold in Simultaneous mode"
+        );
+        assert_eq!(mode, OperatingMode::HeatingHPAndER);
+    }
+
+    /// ModeOverride::HeatingHPAndER forces both on, overriding mutual exclusion.
+    #[test]
+    fn mode_override_heating_hp_and_er_overrides_mutual_exclusion() {
+        let cfg = base_config("MutuallyExclusive");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+        wh.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHPAndER,
+        })
+        .unwrap();
+
+        let mode = wh.update_control(&env_state());
+        assert!(
+            wh.compressor_on,
+            "compressor must be on with HeatingHPAndER override"
+        );
+        assert!(
+            wh.backup_on,
+            "backup must be on with HeatingHPAndER override"
+        );
+        assert_eq!(mode, OperatingMode::HeatingHPAndER);
+    }
+
+    /// ModeOverride::HeatingHP forces compressor only, backup stays off.
+    #[test]
+    fn mode_override_heating_hp_respects_hp_only_command() {
+        let cfg = very_cold_config("MutuallyExclusive");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+        wh.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHP,
+        })
+        .unwrap();
+
+        let mode = wh.update_control(&env_state());
+        assert!(
+            wh.compressor_on,
+            "compressor must be on with HeatingHP override"
+        );
+        assert!(!wh.backup_on, "backup must be off with HeatingHP override");
+        assert_eq!(mode, OperatingMode::HeatPumpWH);
+    }
+
+    /// Verify state round-trip preserves the element_hp_control field.
+    #[test]
+    fn state_round_trip_preserves_element_hp_control() {
+        for (mode_str, expected_mode) in [
+            ("MutuallyExclusive", ElementHpControlMode::MutuallyExclusive),
+            ("Simultaneous", ElementHpControlMode::Simultaneous),
+        ] {
+            let cfg = base_config(mode_str);
+            let mut wh = HeatPumpWH::new(cfg.clone());
+            wh.init(&cfg, &env_state()).unwrap();
+
+            let mut p = ports();
+            wh.step(&env_state(), Duration::from_secs(60), &mut p)
+                .unwrap();
+            let saved = wh.save_state();
+
+            let mut restored = HeatPumpWH::new(cfg.clone());
+            restored.init(&cfg, &env_state()).unwrap();
+            restored.load_state(&saved).unwrap();
+
+            assert_eq!(
+                restored.element_hp_control, expected_mode,
+                "element_hp_control must survive save/load round-trip ({mode_str})"
+            );
+        }
+    }
+
+    #[test]
+    fn state_round_trip_preserves_dr_state() {
+        use hares_types::{ControlSignal, DRLevel};
+
+        let cfg = base_config("");
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env_state()).unwrap();
+
+        wh.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::Critical,
+            duration_s: Some(300.0),
+        })
+        .unwrap();
+
+        let saved = wh.save_state();
+
+        let mut restored = HeatPumpWH::new(cfg.clone());
+        restored.init(&cfg, &env_state()).unwrap();
+        restored.load_state(&saved).unwrap();
+
+        assert_eq!(
+            restored.dr_level,
+            DRLevel::Critical,
+            "dr_level must survive save/load"
+        );
+        assert!(
+            restored.dr_setpoint_offset_c < 0.0,
+            "dr_setpoint_offset_c must be negative after Critical DR (got {})",
+            restored.dr_setpoint_offset_c
+        );
+        assert_eq!(
+            restored.dr_duration_remaining_s,
+            Some(300.0),
+            "dr_duration_remaining_s must survive save/load"
+        );
+        assert!(
+            restored.dr_load_fraction < 1.0,
+            "dr_load_fraction must be < 1.0 after Critical DR (got {})",
+            restored.dr_load_fraction
+        );
+    }
+}
+
+#[cfg(test)]
+mod dr_tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use hares_types::{
+        ControlSignal, DRLevel, EnvironmentState, GridState, OperatingMode, PortSlots,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+    };
+
+    use super::HeatPumpWH;
+    use crate::{Equipment, EquipmentConfig};
+
+    fn env_state() -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 24.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(60),
+        }
+    }
+
+    /// Config: tank at 50°C (just below setpoint 52°C, within deadband → calling for heat).
+    /// max_tank_temp_c is high so safety never fires.
+    fn config_near_setpoint() -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 50.0.into());
+        raw.insert("compressor_power_w".to_string(), 1200.0.into());
+        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+        raw.insert("backup_enable_offset_c".to_string(), 20.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+        raw.insert("min_on_time_s".to_string(), 0.0.into());
+        EquipmentConfig {
+            name: "HPWH".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    /// Config: tank at 40°C (well below setpoint 52°C → calling for heat even with DR offsets).
+    fn config_cold_tank() -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        raw.insert("compressor_power_w".to_string(), 1200.0.into());
+        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+        raw.insert("backup_enable_offset_c".to_string(), 20.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+        raw.insert("min_on_time_s".to_string(), 0.0.into());
+        EquipmentConfig {
+            name: "HPWH".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    fn ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            electrical: Default::default(),
+            fuel: Default::default(),
+            fluid: vec![hares_types::FluidAccumulator::new(
+                hares_types::LoopId(1),
+                hares_types::FluidType::Water,
+            )],
+            custom: vec![],
+        }
+    }
+
+    /// DR Moderate applies a -3°C setpoint offset. A tank at 50°C that would normally
+    /// call for heat (setpoint=52°C) must stop calling after the offset (effective=49°C).
+    #[test]
+    fn hpwh_dr_moderate_reduces_setpoint() {
+        let cfg = config_near_setpoint();
+        let e = env_state();
+
+        // Baseline: tank at 50°C is within deadband below 52°C → heating.
+        let mut eq_base = HeatPumpWH::new(cfg.clone());
+        eq_base.init(&cfg, &e).unwrap();
+        let mode_base = eq_base.update_control(&e);
+        assert!(
+            mode_base != OperatingMode::Off,
+            "baseline must be heating with tank at 50°C; got {mode_base:?}"
+        );
+
+        // DR Moderate: effective setpoint = 52 + (-3) = 49°C. Tank at 50°C > 49°C → no call.
+        let mut eq_dr = HeatPumpWH::new(cfg.clone());
+        eq_dr.init(&cfg, &e).unwrap();
+        eq_dr
+            .apply_control(&ControlSignal::DemandResponse {
+                level: DRLevel::Moderate,
+                duration_s: None,
+            })
+            .unwrap();
+        assert_eq!(
+            eq_dr.dr_setpoint_offset_c, -3.0,
+            "Moderate DR must set offset to -3°C"
+        );
+        let mode_dr = eq_dr.update_control(&e);
+        assert_eq!(
+            mode_dr,
+            OperatingMode::Off,
+            "DR Moderate must suppress heating by reducing effective setpoint; got {mode_dr:?}"
+        );
+    }
+
+    /// DR GridEmergency sets dr_load_fraction=0.0, which forces the HPWH fully off.
+    #[test]
+    fn hpwh_dr_grid_emergency_forces_off() {
+        let cfg = config_cold_tank();
+        let e = env_state();
+
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: None,
+        })
+        .unwrap();
+        assert_eq!(
+            eq.dr_load_fraction, 0.0,
+            "GridEmergency must set dr_load_fraction to 0"
+        );
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        assert_eq!(
+            eq.telemetry().get("compressor_power_w").unwrap_or(1.0),
+            0.0,
+            "compressor must be off during GridEmergency"
+        );
+        assert_eq!(
+            eq.telemetry().get("backup_element_power_w").unwrap_or(1.0),
+            0.0,
+            "backup element must be off during GridEmergency"
+        );
+        let total_kw = p.electrical.net_active_kw();
+        assert!(
+            !eq.compressor_on,
+            "compressor_on must be false during GridEmergency"
+        );
+        assert!(
+            !eq.backup_on,
+            "backup_on must be false during GridEmergency"
+        );
+        // Compressor and backup element must contribute zero power.
+        let comp_kw = eq.telemetry().get("compressor_power_w").unwrap_or(1.0) / 1_000.0;
+        let backup_kw = eq.telemetry().get("backup_element_power_w").unwrap_or(1.0) / 1_000.0;
+        assert!(
+            comp_kw < 1e-9,
+            "compressor power must be zero during GridEmergency, got {comp_kw} kW"
+        );
+        assert!(
+            backup_kw < 1e-9,
+            "backup element power must be zero during GridEmergency, got {backup_kw} kW"
+        );
+        // When compressor is off, parasitic standby power (DEFAULT_PARASITIC_POWER_W = 1 W)
+        // still draws. Total should be at most that parasitic amount.
+        assert!(
+            total_kw <= 0.002,
+            "total electrical draw must be at most parasitic standby during GridEmergency, got {total_kw} kW"
+        );
+    }
+
+    /// DR Critical applies load_fraction=0.5. When the HPWH is in MutuallyExclusive mode
+    /// and the compressor is already running, backup cannot co-fire (mutual exclusion),
+    /// and compressor power is scaled by the load fraction.
+    #[test]
+    fn hpwh_dr_critical_with_mutual_exclusion_interaction() {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        raw.insert("compressor_power_w".to_string(), 1200.0.into());
+        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+        // Large offset: backup only fires when control_temp <= 42°C; tank starts at 40°C
+        // which is right on the boundary. Use very large offset so backup definitely off.
+        raw.insert("backup_enable_offset_c".to_string(), 30.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+        raw.insert("min_on_time_s".to_string(), 0.0.into());
+        // Explicit MutuallyExclusive (default, but stated for clarity).
+        let cfg = EquipmentConfig {
+            name: "HPWH".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        };
+
+        let e = env_state();
+
+        // Baseline: full compressor power, no DR.
+        let mut eq_base = HeatPumpWH::new(cfg.clone());
+        eq_base.init(&cfg, &e).unwrap();
+        let mut p_base = ports();
+        eq_base
+            .step(&e, Duration::from_secs(60), &mut p_base)
+            .unwrap();
+        let comp_w_base = eq_base.telemetry().get("compressor_power_w").unwrap_or(0.0);
+        assert!(comp_w_base > 0.0, "baseline compressor must be running");
+
+        // DR Critical: load_fraction=0.5 → compressor power halved.
+        let mut eq_dr = HeatPumpWH::new(cfg.clone());
+        eq_dr.init(&cfg, &e).unwrap();
+        eq_dr
+            .apply_control(&ControlSignal::DemandResponse {
+                level: DRLevel::Critical,
+                duration_s: None,
+            })
+            .unwrap();
+        assert_eq!(
+            eq_dr.dr_load_fraction, 0.5,
+            "Critical DR must set load fraction to 0.5"
+        );
+
+        let mut p_dr = ports();
+        eq_dr.step(&e, Duration::from_secs(60), &mut p_dr).unwrap();
+
+        let comp_w_dr = eq_dr.telemetry().get("compressor_power_w").unwrap_or(0.0);
+        let backup_w_dr = eq_dr
+            .telemetry()
+            .get("backup_element_power_w")
+            .unwrap_or(0.0);
+
+        // Compressor power should be ~50% of baseline.
+        let ratio = comp_w_dr / comp_w_base;
+        assert!(
+            (ratio - 0.5).abs() < 0.05,
+            "DR Critical must halve compressor power; ratio={ratio:.3}"
+        );
+
+        // Mutual exclusion must still hold: backup cannot fire while compressor runs.
+        assert_eq!(
+            backup_w_dr, 0.0,
+            "backup element must stay off (MutuallyExclusive) even under DR Critical"
+        );
+        assert!(
+            !eq_dr.backup_on,
+            "backup_on must be false (MutuallyExclusive + compressor running)"
+        );
+    }
+
+    /// The safety check for max_tank_temp_c must use thermostat_upper_node, not a
+    /// hardcoded node 0. With thermostat_upper_node=1 and a hot node 1, safety fires.
+    /// With thermostat_upper_node=0 and only node 1 hot (node 0 cold), safety must not fire.
+    #[test]
+    fn safety_temp_check_uses_thermostat_upper_node_not_hardcoded_zero() {
+        // Build a 6-node tank with thermostat_upper_node=1 (not default 0).
+        // Set max_tank_temp_c=30°C. The tank starts at 40°C at all nodes,
+        // but we specifically want the upper_node check at index 1.
+        // Since all nodes are 40°C > 30°C, safety fires in both cases.
+        // The real regression test: verify that when *only* node 1 is hot,
+        // a WH configured with thermostat_upper_node=1 fires safety but
+        // one configured with thermostat_upper_node=0 does not.
+
+        // Case A: thermostat_upper_node=1, node 1 is hot → safety fires.
+        let mut raw_a = HashMap::new();
+        raw_a.insert("setpoint_c".to_string(), 52.0.into());
+        raw_a.insert("deadband_c".to_string(), 2.0.into());
+        raw_a.insert("initial_tank_temp_c".to_string(), 20.0.into()); // all nodes cold
+        raw_a.insert("max_tank_temp_c".to_string(), 60.0.into());
+        raw_a.insert("thermostat_upper_node".to_string(), 1.0.into());
+        raw_a.insert("min_on_time_s".to_string(), 0.0.into());
+        let cfg_a = EquipmentConfig {
+            name: "HPWH_A".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw_a,
+        };
+
+        let e = env_state();
+
+        let mut eq_a = HeatPumpWH::new(cfg_a.clone());
+        eq_a.init(&cfg_a, &e).unwrap();
+        // Heat only node 1 above max_tank_temp_c (60°C).
+        // Default 50-gal tank: ~189.3 L across 6 nodes ≈ 31.55 kg per node.
+        // ΔT needed = 65 - 20 = 45°C → energy = 31.55 * 4183 * 45 ≈ 5.94 MJ.
+        // Use 10 MW for 1 s to far exceed that.
+        eq_a.tank
+            .heat_node(1, 10_000_000.0, Duration::from_secs(1))
+            .unwrap();
+        let mode_a = eq_a.update_control(&e);
+        assert_eq!(
+            mode_a,
+            OperatingMode::Off,
+            "Safety must fire when thermostat_upper_node=1 and node 1 is above max_tank_temp_c"
+        );
+
+        // Case B: thermostat_upper_node=0, only node 1 is hot (node 0 stays cold) → safety must NOT fire.
+        let mut raw_b = HashMap::new();
+        raw_b.insert("setpoint_c".to_string(), 52.0.into());
+        raw_b.insert("deadband_c".to_string(), 2.0.into());
+        raw_b.insert("initial_tank_temp_c".to_string(), 20.0.into()); // all nodes cold
+        raw_b.insert("max_tank_temp_c".to_string(), 60.0.into());
+        raw_b.insert("thermostat_upper_node".to_string(), 0.0.into());
+        raw_b.insert("min_on_time_s".to_string(), 0.0.into());
+        let cfg_b = EquipmentConfig {
+            name: "HPWH_B".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw_b,
+        };
+
+        let mut eq_b = HeatPumpWH::new(cfg_b.clone());
+        eq_b.init(&cfg_b, &e).unwrap();
+        // Heat only node 1 far above max_tank_temp_c; node 0 remains at 20°C.
+        eq_b.tank
+            .heat_node(1, 10_000_000.0, Duration::from_secs(1))
+            .unwrap();
+        let mode_b = eq_b.update_control(&e);
+        // Node 0 is 20°C < 60°C max → safety must NOT trigger.
+        // The equipment should be heating (tank is cold at node 0, call for heat).
+        assert_ne!(
+            mode_b,
+            OperatingMode::Off,
+            "Safety must NOT fire when thermostat_upper_node=0 and node 0 is below max_tank_temp_c"
+        );
+    }
+}
+
+#[cfg(test)]
+mod new_feature_tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use hares_types::{
+        EnvironmentState, GridState, OperatingMode, PortSlots, ThermalAccumulator, WeatherState,
+        ZoneId, ZoneState,
+    };
+
+    use super::HeatPumpWH;
+    use crate::{Equipment, EquipmentConfig};
+
+    fn env_at(zone_temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: zone_temp_c - 5.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: zone_temp_c,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            current_time: Utc
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(60),
+        }
+    }
+
+    fn base_config() -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("setpoint_c".to_string(), 52.0.into());
+        raw.insert("deadband_c".to_string(), 2.0.into());
+        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
+        raw.insert("compressor_power_w".to_string(), 1200.0.into());
+        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+        raw.insert("backup_enable_offset_c".to_string(), 8.0.into());
+        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+        raw.insert("min_on_time_s".to_string(), 0.0.into());
+        EquipmentConfig {
+            name: "HPWH".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    fn ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            electrical: Default::default(),
+            fuel: Default::default(),
+            fluid: vec![hares_types::FluidAccumulator::new(
+                hares_types::LoopId(1),
+                hares_types::FluidType::Water,
+            )],
+            custom: vec![],
+        }
+    }
+
+    // --- Change 2: low_power_hpwh lockout bounds ---
+
+    #[test]
+    fn standard_hpwh_lockout_bounds_are_ochre_values() {
+        let cfg = base_config();
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(24.0)).unwrap();
+        assert!(
+            (eq.min_ambient_temp_c - 7.222).abs() < 1e-3,
+            "standard min lockout should be 7.222, got {}",
+            eq.min_ambient_temp_c
+        );
+        assert!(
+            (eq.max_ambient_temp_c - 43.333).abs() < 1e-3,
+            "standard max lockout should be 43.333, got {}",
+            eq.max_ambient_temp_c
+        );
+    }
+
+    #[test]
+    fn low_power_hpwh_lockout_bounds_are_wider() {
+        let mut raw = base_config().raw_config;
+        raw.insert("low_power_hpwh".to_string(), "true".into());
+        let cfg = EquipmentConfig {
+            name: "HPWH_LP".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        };
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(24.0)).unwrap();
+        assert!(
+            (eq.min_ambient_temp_c - 2.778).abs() < 1e-3,
+            "low-power min lockout should be 2.778, got {}",
+            eq.min_ambient_temp_c
+        );
+        assert!(
+            (eq.max_ambient_temp_c - 62.778).abs() < 1e-3,
+            "low-power max lockout should be 62.778, got {}",
+            eq.max_ambient_temp_c
+        );
+    }
+
+    #[test]
+    fn explicit_lockout_config_overrides_low_power_default() {
+        let mut raw = base_config().raw_config;
+        raw.insert("low_power_hpwh".to_string(), "true".into());
+        raw.insert("min_ambient_temp_c".to_string(), 1.0.into());
+        let cfg = EquipmentConfig {
+            name: "HPWH_LP".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        };
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(24.0)).unwrap();
+        assert!(
+            (eq.min_ambient_temp_c - 1.0).abs() < 1e-9,
+            "explicit min_ambient_temp_c=1.0 must override low_power default"
+        );
+    }
+
+    // --- Change 3: wall_heat_fraction ---
+
+    #[test]
+    fn wall_heat_fraction_preserves_energy_balance_and_tracks_split() {
+        let e = env_at(24.0);
+
+        let cfg0 = base_config();
+        let mut eq0 = HeatPumpWH::new(cfg0.clone());
+        eq0.init(&cfg0, &e).unwrap();
+        let mut p0 = ports();
+        eq0.step(&e, Duration::from_secs(60), &mut p0).unwrap();
+        let sens0 = p0.thermal[0].sensible_gain_w;
+
+        let mut raw50 = base_config().raw_config;
+        raw50.insert("wall_heat_fraction".to_string(), 0.5.into());
+        let cfg50 = EquipmentConfig {
+            name: "HPWH_WF".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw50,
+        };
+        let mut eq50 = HeatPumpWH::new(cfg50.clone());
+        eq50.init(&cfg50, &e).unwrap();
+        let mut p50 = ports();
+        eq50.step(&e, Duration::from_secs(60), &mut p50).unwrap();
+        let sens50 = p50.thermal[0].sensible_gain_w;
+
+        assert!(sens0.abs() > 1e-6, "baseline sensible gain must be non-zero");
+        // Full sensible gain posted to zone port for energy balance (wall fraction
+        // tracked in telemetry only until wall surfaces are modeled).
+        let ratio = sens50 / sens0;
+        assert!(
+            (ratio - 1.0).abs() < 0.01,
+            "zone port must receive full sensible gain for energy balance: ratio={ratio:.4}"
+        );
+        // Telemetry tracks the wall-fraction split for future wall-surface modeling.
+        let wall_w = eq50.telemetry().get("wall_sensible_gain_w").unwrap_or(0.0);
+        assert!(
+            (wall_w.abs() - sens0.abs() * 0.5).abs() < 1.0,
+            "wall_sensible_gain_w telemetry should be half of total: {wall_w:.2} vs {:.2}",
+            sens0.abs() * 0.5
+        );
+    }
+
+    // --- Change 4: hp_only_mode ---
+
+    #[test]
+    fn hp_only_mode_disables_backup_element() {
+        let mut raw = base_config().raw_config;
+        raw.insert("hp_only_mode".to_string(), "true".into());
+        raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
+        raw.insert("backup_enable_offset_c".to_string(), 5.0.into());
+        raw.insert("element_hp_control_mode".to_string(), "Simultaneous".into());
+        let cfg = EquipmentConfig {
+            name: "HPWH_HPOnly".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        };
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(24.0)).unwrap();
+        for _ in 0..5 {
+            let mut p = ports();
+            eq.step(&env_at(24.0), Duration::from_secs(60), &mut p).unwrap();
+            assert!(!eq.backup_on, "backup element must remain off in hp_only_mode");
+        }
+    }
+
+    #[test]
+    fn without_hp_only_mode_backup_fires_when_tank_cold() {
+        let mut raw = base_config().raw_config;
+        raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
+        raw.insert("backup_enable_offset_c".to_string(), 5.0.into());
+        raw.insert("element_hp_control_mode".to_string(), "Simultaneous".into());
+        let cfg = EquipmentConfig {
+            name: "HPWH_Normal".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        };
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(24.0)).unwrap();
+        let mode = eq.update_control(&env_at(24.0));
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingHPAndER,
+            "Simultaneous + cold tank + no hp_only_mode must produce HeatingHPAndER"
+        );
+    }
+
+    // --- Change 5: min_off_time_s ---
+
+    #[test]
+    fn min_off_time_prevents_early_compressor_restart() {
+        let mut raw = base_config().raw_config;
+        raw.insert("min_off_time_s".to_string(), 120.0.into());
+        let cfg = EquipmentConfig {
+            name: "HPWH_MinOff".to_string(),
+            ochre_class: "Heat Pump Water Heater".to_string(),
+            raw_config: raw,
+        };
+        let e = env_at(24.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+        assert!(eq.compressor_on, "compressor should be running initially");
+
+        eq.setpoint_c = eq.telemetry().get("tank_avg_temp_c").unwrap_or(40.0) - 20.0;
+        let mut p2 = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p2).unwrap();
+        assert!(!eq.compressor_on, "compressor should now be off");
+        assert!(
+            eq.compressor_off_since_s.is_some(),
+            "compressor_off_since_s must start counting after shutdown"
+        );
+
+        eq.setpoint_c = 80.0;
+        let mode = eq.update_control(&e);
+        assert!(
+            !eq.compressor_on,
+            "compressor must not restart before min_off_time_s (off_since<120s), mode={mode:?}"
+        );
+
+        if let Some(t) = eq.compressor_off_since_s.as_mut() {
+            *t = 121.0;
+        }
+        let mode_after = eq.update_control(&e);
+        assert!(
+            eq.compressor_on,
+            "compressor must restart once min_off_time_s elapsed, mode={mode_after:?}"
+        );
+    }
+
+    #[test]
+    fn compressor_off_timer_resets_when_compressor_starts() {
+        let cfg = base_config();
+        let e = env_at(24.0);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        eq.compressor_off_since_s = Some(200.0);
+        eq.compressor_on = false;
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        assert!(eq.compressor_on, "compressor must be on after step with call for heat");
+        assert!(
+            eq.compressor_off_since_s.is_none(),
+            "compressor_off_since_s must be None while compressor is running"
+        );
+    }
+}

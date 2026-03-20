@@ -5,3 +5,9 @@ pub mod compat;
 pub mod dispatch;
 pub mod signal;
 pub mod types;
+
+pub use capabilities::{ControlCapabilities, can_accept};
+pub use compat::ochre_signal_to_control;
+pub use dispatch::{DispatchRequest, DispatchTarget};
+pub use signal::ControlSignalConstructors;
+pub use types::PriceSignal;

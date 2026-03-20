@@ -32,3 +32,5 @@ build/
 # Tools
 .serena
 .claude
+
+.recovery

@@ -56,3 +56,4 @@ thiserror = "2"
 bitflags = "2"
 toml = "1"
 numpy = "0.28"
+postcard = { version = "1", features = ["alloc"] }

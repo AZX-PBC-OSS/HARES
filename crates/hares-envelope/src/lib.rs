@@ -1,9 +1,35 @@
 //! RC network envelope model with state-space solvers.
 
+pub mod boundary_rc;
 pub mod electrical_solver;
 pub mod fluid_solver;
 pub mod humidity_solver;
+pub mod longwave_radiation;
 pub mod rc_network;
 pub mod state_space;
 pub mod thermal_solver;
-pub mod types;
+
+pub use boundary_rc::{
+    BoundaryInput, BuildingRC, ExteriorTarget, LayerInput, PrecomputedRCLayer, SurfaceLayerInfo,
+    ZoneInput, assemble_building_rc, derive_zone_capacitances,
+};
+pub use electrical_solver::{
+    ElectricalSolver, ElectricalSolverConfig, ElectricalSolverError, ZipCoefficients,
+};
+pub use fluid_solver::{FluidSolver, FluidSolverConfig};
+pub use humidity_solver::{HumiditySolver, HumiditySolverConfig};
+pub use longwave_radiation::{
+    EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW, ExteriorSurface,
+    InteriorSurface, STEFAN_BOLTZMANN, exterior_longwave_w, exterior_longwave_w_m2,
+    interior_longwave_linearised_w, interior_longwave_net_w, linearised_h_r, sky_view_factor,
+};
+pub use rc_network::{NodeId, RCNetwork, RCNetworkError, parallel_resistance};
+pub use state_space::{
+    OutputMapping, StabilityResult, StateSpaceError, StateSpaceModel, discretize_zoh,
+    eigenvalue_check, matrix_exp, van_loan_discretize,
+};
+pub use thermal_solver::{
+    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo,
+    NaturalVentilationConfig, ThermalSolver, ThermalSolverConfig, ThermalSolverError,
+    VentilationConfig, WindowSolarProperties,
+};

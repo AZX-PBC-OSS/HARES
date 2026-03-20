@@ -2,3 +2,259 @@
 //!
 //! Typed setpoints, power targets, SOC targets, and mode overrides that
 //! flow from the control layer to equipment.
+
+use bitflags::bitflags;
+use serde::{Deserialize, Serialize};
+
+use crate::{HaresError, OperatingMode, ProtocolId};
+
+/// Demand response severity levels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DRLevel {
+    Normal,
+    Moderate,
+    High,
+    Critical,
+    GridEmergency,
+}
+
+/// Typed external control signals consumed by equipment models.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ControlSignal {
+    ThermalSetpoint {
+        heating_setpoint_c: Option<f64>,
+        cooling_setpoint_c: Option<f64>,
+        deadband_c: Option<f64>,
+    },
+    HumiditySetpoint {
+        target_rh: f64,
+        min_rh: Option<f64>,
+        max_rh: Option<f64>,
+    },
+    PowerSetpoint {
+        active_power_kw: f64,
+        reactive_power_kvar: Option<f64>,
+    },
+    PowerLimit {
+        max_power_kw: f64,
+        ramp_rate_kw_per_s: Option<f64>,
+    },
+    SOCTarget {
+        target_soc: f64,
+        min_soc: Option<f64>,
+        max_soc: Option<f64>,
+    },
+    ModeOverride {
+        mode: OperatingMode,
+    },
+    DutyCycle {
+        on_fraction: f64,
+        period_s: Option<f64>,
+    },
+    LoadFraction {
+        fraction: f64,
+    },
+    GridConnect {
+        connected: bool,
+    },
+    SelfConsumption {
+        enabled: bool,
+        solar_only_charging: bool,
+    },
+    DemandResponse {
+        level: DRLevel,
+        duration_s: Option<f64>,
+    },
+    ProtocolNative {
+        protocol: ProtocolId,
+        payload: Vec<u8>,
+    },
+    CurtailmentPercent {
+        percent: f64,
+    },
+    ReactiveSetpoint {
+        kvar: f64,
+    },
+    PowerFactorSetpoint {
+        power_factor: f64,
+    },
+    InverterPriorityMode {
+        priority: InverterPriority,
+    },
+}
+
+/// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InverterPriority {
+    Watt,
+    Var,
+    Cpf,
+}
+
+bitflags! {
+    /// Equipment-declared set of supported control signal families.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct ControlCapabilities: u32 {
+        const POWER_SETPOINT = 1 << 0;
+        const SOC_TARGET = 1 << 1;
+        const THERMAL_SETPOINT = 1 << 2;
+        const POWER_LIMIT = 1 << 3;
+        const MODE_OVERRIDE = 1 << 4;
+        const DUTY_CYCLE = 1 << 5;
+        const LOAD_FRACTION = 1 << 6;
+        const GRID_CONNECT = 1 << 7;
+        const SELF_CONSUMPTION = 1 << 8;
+        const DEMAND_RESPONSE = 1 << 9;
+        const PROTOCOL_NATIVE = 1 << 10;
+        const HUMIDITY_SETPOINT = 1 << 11;
+        const CURTAILMENT_PERCENT = 1 << 12;
+        const REACTIVE_SETPOINT = 1 << 13;
+        const POWER_FACTOR_SETPOINT = 1 << 14;
+        const INVERTER_PRIORITY_MODE = 1 << 15;
+    }
+}
+
+impl ControlSignal {
+    pub fn required_capability(&self) -> ControlCapabilities {
+        match self {
+            Self::ThermalSetpoint { .. } => ControlCapabilities::THERMAL_SETPOINT,
+            Self::HumiditySetpoint { .. } => ControlCapabilities::HUMIDITY_SETPOINT,
+            Self::PowerSetpoint { .. } => ControlCapabilities::POWER_SETPOINT,
+            Self::PowerLimit { .. } => ControlCapabilities::POWER_LIMIT,
+            Self::SOCTarget { .. } => ControlCapabilities::SOC_TARGET,
+            Self::ModeOverride { .. } => ControlCapabilities::MODE_OVERRIDE,
+            Self::DutyCycle { .. } => ControlCapabilities::DUTY_CYCLE,
+            Self::LoadFraction { .. } => ControlCapabilities::LOAD_FRACTION,
+            Self::GridConnect { .. } => ControlCapabilities::GRID_CONNECT,
+            Self::SelfConsumption { .. } => ControlCapabilities::SELF_CONSUMPTION,
+            Self::DemandResponse { .. } => ControlCapabilities::DEMAND_RESPONSE,
+            Self::ProtocolNative { .. } => ControlCapabilities::PROTOCOL_NATIVE,
+            Self::CurtailmentPercent { .. } => ControlCapabilities::CURTAILMENT_PERCENT,
+            Self::ReactiveSetpoint { .. } => ControlCapabilities::REACTIVE_SETPOINT,
+            Self::PowerFactorSetpoint { .. } => ControlCapabilities::POWER_FACTOR_SETPOINT,
+            Self::InverterPriorityMode { .. } => ControlCapabilities::INVERTER_PRIORITY_MODE,
+        }
+    }
+}
+
+pub fn ensure_signal_supported(
+    capabilities: ControlCapabilities,
+    signal: &ControlSignal,
+) -> Result<(), HaresError> {
+    let required = signal.required_capability();
+    if capabilities.contains(required) {
+        Ok(())
+    } else {
+        Err(HaresError::Control(format!(
+            "unsupported control signal: requires {:?}, available {:?}",
+            required, capabilities
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_compose_and_contains_work() {
+        let caps = ControlCapabilities::POWER_SETPOINT
+            | ControlCapabilities::SOC_TARGET
+            | ControlCapabilities::GRID_CONNECT;
+        assert!(caps.contains(ControlCapabilities::POWER_SETPOINT));
+        assert!(caps.contains(ControlCapabilities::SOC_TARGET));
+        assert!(caps.contains(ControlCapabilities::GRID_CONNECT));
+        assert!(!caps.contains(ControlCapabilities::MODE_OVERRIDE));
+    }
+
+    #[test]
+    fn control_signal_variants_round_trip_through_json() {
+        let signals = vec![
+            ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: Some(24.0),
+                deadband_c: Some(1.0),
+            },
+            ControlSignal::HumiditySetpoint {
+                target_rh: 0.45,
+                min_rh: Some(0.30),
+                max_rh: Some(0.60),
+            },
+            ControlSignal::PowerSetpoint {
+                active_power_kw: 4.2,
+                reactive_power_kvar: Some(0.5),
+            },
+            ControlSignal::PowerLimit {
+                max_power_kw: 5.0,
+                ramp_rate_kw_per_s: Some(0.2),
+            },
+            ControlSignal::SOCTarget {
+                target_soc: 0.7,
+                min_soc: Some(0.2),
+                max_soc: Some(0.9),
+            },
+            ControlSignal::ModeOverride {
+                mode: OperatingMode::Standby,
+            },
+            ControlSignal::DutyCycle {
+                on_fraction: 0.5,
+                period_s: Some(900.0),
+            },
+            ControlSignal::LoadFraction { fraction: 0.8 },
+            ControlSignal::GridConnect { connected: true },
+            ControlSignal::SelfConsumption {
+                enabled: true,
+                solar_only_charging: false,
+            },
+            ControlSignal::DemandResponse {
+                level: DRLevel::High,
+                duration_s: Some(3600.0),
+            },
+            ControlSignal::ProtocolNative {
+                protocol: ProtocolId(17),
+                payload: vec![1, 2, 3, 4, 5],
+            },
+        ];
+
+        for signal in signals {
+            let json = serde_json::to_string(&signal).expect("serialize signal");
+            let decoded: ControlSignal = serde_json::from_str(&json).expect("deserialize signal");
+            assert_eq!(decoded, signal);
+        }
+    }
+
+    #[test]
+    fn control_capabilities_round_trip_through_json() {
+        let caps = ControlCapabilities::POWER_SETPOINT
+            | ControlCapabilities::SOC_TARGET
+            | ControlCapabilities::PROTOCOL_NATIVE;
+        let json = serde_json::to_string(&caps).expect("serialize capabilities");
+        let decoded: ControlCapabilities =
+            serde_json::from_str(&json).expect("deserialize capabilities");
+        assert_eq!(decoded, caps);
+    }
+
+    #[test]
+    fn unsupported_signal_returns_error() {
+        let capabilities = ControlCapabilities::POWER_SETPOINT;
+        let signal = ControlSignal::SOCTarget {
+            target_soc: 0.6,
+            min_soc: None,
+            max_soc: None,
+        };
+        let result = ensure_signal_supported(capabilities, &signal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn supported_signal_succeeds() {
+        let capabilities = ControlCapabilities::SOC_TARGET;
+        let signal = ControlSignal::SOCTarget {
+            target_soc: 0.6,
+            min_soc: None,
+            max_soc: None,
+        };
+        let result = ensure_signal_supported(capabilities, &signal);
+        assert!(result.is_ok());
+    }
+}

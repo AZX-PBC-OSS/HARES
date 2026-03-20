@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::{Equipment, EquipmentConfig, load_postcard, save_postcard};
 
 use super::super::{
-    common::{HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode},
+    HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
+    SpeedControlMode,
     helpers::{
         DUCT_DSE_KEYS, HEATING_CAPACITY_KEYS, apply_heating_control_unchecked,
         equipment_id_from_config, first_f64, load_stage_values, lookup_zone, zone_id_from_config,
