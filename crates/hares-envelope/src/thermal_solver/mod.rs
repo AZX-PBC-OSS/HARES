@@ -1,19 +1,24 @@
 //! Thermal domain solver for the building envelope.
 
+mod config;
+mod infiltration;
+mod solar;
+
+pub use config::{
+    EnvelopeComponentGains, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
+    InteriorSurfaceInfo, NaturalVentilationConfig, ThermalSolverConfig, ThermalSolverError,
+    VentilationConfig, WindowSolarProperties,
+};
+pub(crate) use config::Result;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
-use hares_physics::air_properties::moist_air_density_kg_m3;
-use hares_physics::constants::{CP_DRY_AIR_J_KG_K, KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
-use hares_physics::infiltration::{
-    ach_infiltration, ashrae_wind_stack, ela_infiltration, natural_ventilation_flow_m3_s,
-};
-use hares_physics::solar::{GlazingCurve, window_iam};
+use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ZoneId,
 };
 use nalgebra::{DMatrix, DVector};
-use thiserror::Error;
 
 use crate::longwave_radiation::{
     ExteriorSurface, InteriorSurface, exterior_longwave_w, interior_longwave_linearised_w,
@@ -21,290 +26,9 @@ use crate::longwave_radiation::{
 };
 use crate::state_space::{StateSpaceError, StateSpaceModel};
 
+use infiltration::apply_infiltration_and_ventilation;
+
 const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum InfiltrationMethod {
-    AshraeWindStack {
-        /// Combined stack coefficient `inf_c × inf_Cs` [m³/s / K^n_i].
-        /// n_stories effect is baked into this via infiltration_height during setup.
-        c_s: f64,
-        /// Combined wind coefficient `inf_c × inf_Cw` [m³/s / (m/s)^(2·n_i)].
-        c_w: f64,
-        /// Shelter factor (`inf_sft` in OCHRE) [0, 1].
-        shielding_coeff: f64,
-        /// Pressure exponent in [0.5, 0.7]. 0.65 = typical residential (OCHRE default).
-        n_i: f64,
-    },
-    Ela {
-        ela_m2: f64,
-        /// ELA stack coefficient [L/(s·cm⁴·K)].
-        stack_coeff: f64,
-        /// ELA wind coefficient [L/(s·cm⁴·(m/s)²)].
-        wind_coeff: f64,
-    },
-    Ach {
-        ach: f64,
-    },
-}
-
-impl Default for InfiltrationMethod {
-    fn default() -> Self {
-        Self::Ach { ach: 0.0 }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct VentilationConfig {
-    pub zone_flow_m3_s: HashMap<ZoneId, f64>,
-    /// Whether the ventilation system is balanced (ERV, HRV, or balanced fan).
-    /// Recovery efficiencies are only applied for balanced systems.
-    /// Unbalanced fans use quadrature combination with infiltration.
-    /// OCHRE Envelope.py:59-87 and hpxml.py:556.
-    pub balanced: bool,
-    /// Sensible heat recovery efficiency [0.0–1.0].
-    /// Reduces the sensible ventilation load for balanced systems.
-    /// Parsed from HPXML `SensibleRecoveryEfficiency`.
-    pub sensible_recovery_efficiency: f64,
-    /// Latent heat recovery efficiency [0.0–1.0].
-    /// Reduces the latent ventilation load for balanced systems.
-    /// Derived as `TotalRecoveryEfficiency - SensibleRecoveryEfficiency` (OCHRE hpxml.py:560).
-    pub latent_recovery_efficiency: f64,
-}
-
-/// Configuration for natural ventilation through operable windows.
-///
-/// Implements the OCHRE/ResStock model: flow is driven by stack effect and wind
-/// through operable windows, gated by temperature and outdoor humidity conditions.
-///
-/// # Defaults
-/// - `t_base_c`: 22.778 °C (73 °F) — OCHRE default comfort base temperature
-/// - `max_outdoor_humidity_ratio`: 0.0115 kg/kg — Building America HSP threshold
-/// - `OPEN_AREA_FRACTION`: 0.067 — matches OCHRE (0.67 × 0.5 × 0.2 of total window area)
-#[derive(Debug, Clone, PartialEq)]
-pub struct NaturalVentilationConfig {
-    /// Effective operable window area [m²].
-    ///
-    /// Typically computed as `total_window_area_m2 * OPEN_AREA_FRACTION`.
-    /// Use [`NaturalVentilationConfig::from_window_area`] to apply the standard fraction.
-    pub open_area_m2: f64,
-    /// ELA stack coefficient [L/(s·cm⁴·K)] — same table as infiltration ELA coefficients.
-    pub stack_coeff: f64,
-    /// ELA wind coefficient [L/(s·cm⁴·(m/s)²)] — same table as infiltration ELA coefficients.
-    pub wind_coeff: f64,
-    /// Comfort base temperature [°C]. Flow is suppressed when `T_zone ≤ t_base_c`.
-    pub t_base_c: f64,
-    /// Maximum outdoor specific humidity [kg/kg] above which nat vent is suppressed.
-    pub max_outdoor_humidity_ratio: f64,
-}
-
-impl NaturalVentilationConfig {
-    /// OCHRE default open-window fraction of total window area (0.67 × 0.5 × 0.2).
-    pub const OPEN_AREA_FRACTION: f64 = 0.067;
-    /// OCHRE default comfort base temperature (73 °F in °C).
-    pub const DEFAULT_T_BASE_C: f64 = 22.778;
-    /// Building America HSP outdoor humidity threshold [kg/kg].
-    pub const DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO: f64 = 0.0115;
-
-    /// Construct from total window area; applies the standard 6.7% open-area fraction.
-    pub fn from_window_area(total_window_area_m2: f64, stack_coeff: f64, wind_coeff: f64) -> Self {
-        Self {
-            open_area_m2: total_window_area_m2 * Self::OPEN_AREA_FRACTION,
-            stack_coeff,
-            wind_coeff,
-            t_base_c: Self::DEFAULT_T_BASE_C,
-            max_outdoor_humidity_ratio: Self::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
-        }
-    }
-}
-
-/// Solar properties for an individual window surface.
-///
-/// Used by the thermal solver to apply angle-of-incidence (IAM) corrections to
-/// window solar gains, following the EnergyPlus angular transmittance model.
-/// Construct the matching [`GlazingCurve`] via [`GlazingCurve::from_u_shgc`].
-///
-/// Pre-computed `transmittance` and `radiation_frac` decompose SHGC into
-/// transmitted and absorbed fractions per EnergyPlus Steps 4–5.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct WindowSolarProperties {
-    /// Solar heat gain coefficient at normal incidence [dimensionless].
-    pub shgc: f64,
-    /// Window U-factor [W/(m²·K)], used to select the EnergyPlus glazing curve.
-    pub u_factor_w_m2_k: f64,
-    /// Glazing area [m²].
-    pub area_m2: f64,
-    /// Solar transmittance at normal incidence [dimensionless].
-    /// Fraction of incident solar that passes directly through the glass.
-    pub transmittance: f64,
-    /// Inward-flowing fraction of absorbed solar [dimensionless].
-    /// Fraction of glass-absorbed heat that reaches the interior zone;
-    /// `(1 - radiation_frac)` is lost to the exterior.
-    pub radiation_frac: f64,
-}
-
-/// One interior surface participating in intra-zone longwave radiation exchange.
-///
-/// Each entry describes a surface node within a zone (e.g. ceiling, floor, wall).
-/// The linearised longwave heat flux is accumulated into `input_index` of the
-/// solver's input vector `u` each timestep.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InteriorSurfaceInfo {
-    /// Index into the state vector `x` for the RC node approximating this surface's
-    /// temperature.  In a lumped-zone model use the zone air state index; the net
-    /// exchange then collapses to zero because all surfaces share the same temperature.
-    pub state_index: usize,
-    /// Index into the input vector `u` where the net LW heat flux [W] is added.
-    pub input_index: usize,
-    /// Surface area [m²].
-    pub area_m2: f64,
-    /// Longwave emissivity [-].
-    pub emissivity: f64,
-    /// Fraction of the true surface temperature attributable to the RC node [-].
-    ///
-    /// Defined as `R_film / (R_film + R_material)` where `R_film` is the interior
-    /// convective film resistance and `R_material` is the resistance from the film
-    /// to the capacitor node.  The true interior surface temperature is then:
-    ///
-    ///   `T_surf = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
-    ///
-    /// A value of `1.0` means the node temperature *is* the surface temperature
-    /// (no film resistance, or film resistance already lumped into the node).
-    /// For lightweight boundaries with significant film resistance the correction
-    /// can be several degrees.
-    ///
-    /// Range: `[0, 1]`.  Default: `1.0`.
-    pub radiation_frac: f64,
-}
-
-/// Interior longwave radiation configuration for one zone.
-///
-/// Surfaces listed here participate in area-and-emissivity-weighted linearised
-/// interior LW exchange each timestep.  An empty `surfaces` list disables interior
-/// LW for this zone (backward-compatible default).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct InteriorLwrZoneConfig {
-    /// Zone this configuration applies to.
-    pub zone_id: ZoneId,
-    /// Surfaces in this zone participating in interior LW exchange.
-    pub surfaces: Vec<InteriorSurfaceInfo>,
-}
-
-/// Metadata for one exterior surface used to compute longwave radiation at runtime.
-///
-/// The sky view factor is derived from `tilt_deg` on each call via [`sky_view_factor`];
-/// it is not cached here so that the struct remains free of init ordering.
-///
-/// `t_prev_c` is mutable persistent state updated each timestep, so `Copy` is not derived.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExteriorSurfaceInfo {
-    /// Unique surface identifier matching [`SurfaceIrradiance::surface_id`] in weather data.
-    pub surface_id: u32,
-    /// Index into the state vector `x` for the RC node whose temperature approximates this surface.
-    pub state_index: usize,
-    /// Index into the input vector `u` where the longwave flux [W] is accumulated.
-    pub input_index: usize,
-    /// Surface area [m²].
-    pub area_m2: f64,
-    /// Longwave emissivity [-]; use [`EMISSIVITY_DEFAULT`] (0.90) for opaque surfaces.
-    pub emissivity: f64,
-    /// Surface tilt from horizontal [°]; 0° = horizontal roof, 90° = vertical wall.
-    pub tilt_deg: f64,
-    /// Radiation fraction: `R_film / (R_film + R_outermost_half)` — dimensionless [0,1].
-    ///
-    /// Controls how much the true surface temperature deviates from the RC node
-    /// temperature. A value of 0.0 means use the node temperature directly (no
-    /// exterior film resistance in the conduction path).
-    pub rad_frac: f64,
-    /// Radiation resistance: `R_film / area_m2` — K/W.
-    ///
-    /// Converts net surface heat flux [W] to a temperature perturbation on the
-    /// exterior surface.
-    pub rad_res_k_w: f64,
-    /// Number of sub-iterations per timestep: `ceil(dt_s / 300.0).max(1)`.
-    pub n_iter: u32,
-    /// Previous-timestep converged exterior surface temperature [°C].
-    ///
-    /// Persistent state updated each timestep for heavy-ball damping.
-    pub t_prev_c: f64,
-    /// Solar absorptance [-] (0–1). Default 0.60 for opaque surfaces, 0.05 for
-    /// radiant barriers. Ref: OCHRE `Envelope.py:222`.
-    pub absorptance: f64,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ThermalSolverConfig {
-    pub zone_state_indices: HashMap<ZoneId, usize>,
-    pub zone_output_indices: HashMap<ZoneId, usize>,
-    pub zone_sensible_input_indices: HashMap<ZoneId, usize>,
-    pub outdoor_temp_input_indices: Vec<usize>,
-    pub indoor_temp_input_indices: Vec<usize>,
-    pub solar_input_indices: HashMap<u32, usize>,
-    /// Window solar properties keyed by surface_id.
-    ///
-    /// When a surface_id appears in both `solar_input_indices` and `window_properties`,
-    /// the thermal solver applies the EnergyPlus IAM correction (angle-of-incidence
-    /// modifier) to beam radiation and a hemispherical average IAM to diffuse and
-    /// reflected radiation before multiplying by SHGC and area.
-    ///
-    /// Surfaces absent from this map are treated as opaque; opaque solar gain
-    /// is delivered via [`ExteriorSurfaceInfo::absorptance`] in `exterior_surfaces`.
-    pub window_properties: HashMap<u32, WindowSolarProperties>,
-    /// Exterior surfaces for LWR and opaque solar gain.
-    pub exterior_surfaces: Vec<ExteriorSurfaceInfo>,
-    /// Per-zone interior surface configurations for intra-zone LW radiation.
-    ///
-    /// Empty = no interior LW correction (backward-compatible default).
-    /// When populated, the solver calls [`interior_longwave_linearised_w`] for each zone
-    /// using the current zone air temperature as the linearisation point and accumulates
-    /// the net surface fluxes into the corresponding `input_index` entries in `u`.
-    pub interior_lwr_zones: Vec<InteriorLwrZoneConfig>,
-    pub ideal_setpoints_c: HashMap<ZoneId, f64>,
-    pub ideal_hvac_zones: Vec<ZoneId>,
-    /// Per-zone infiltration methods. Zones not listed default to zero ACH.
-    /// Uses a `Vec` instead of `HashMap` for cache-friendly hot-loop iteration.
-    pub infiltration: Vec<(ZoneId, InfiltrationMethod)>,
-    pub ventilation_flow_m3_s: f64,
-    pub ventilation: VentilationConfig,
-    /// Natural ventilation through operable windows. `None` disables the feature (default).
-    pub natural_ventilation: Option<NaturalVentilationConfig>,
-}
-
-#[derive(Debug, Error)]
-pub enum ThermalSolverError {
-    #[error("invalid zone mapping: zone {zone:?} is missing from {field}")]
-    MissingZoneMapping { zone: ZoneId, field: &'static str },
-    #[error("failed to initialize steady-state vector: {0}")]
-    Initialization(String),
-}
-
-pub type Result<T> = std::result::Result<T, ThermalSolverError>;
-
-/// Per-timestep envelope component gains [W] for output/diagnostics.
-///
-/// All values are signed: positive = heat flowing INTO the indoor zone.
-/// Populated after each `resolve()` call; read via [`ThermalSolver::component_gains`].
-#[derive(Debug, Clone, Default)]
-pub struct EnvelopeComponentGains {
-    /// Window transmitted solar (SHGC × IAM × area × POA) [W].
-    pub window_solar_w: f64,
-    /// Opaque exterior surface solar + LWR combined injection [W].
-    /// Includes surfaces routed through both iterative and non-iterative paths.
-    pub opaque_solar_lwr_w: f64,
-    /// Interior longwave radiation exchange net to indoor zone [W].
-    pub interior_lwr_w: f64,
-    /// Infiltration sensible heat gain (indoor zone only) [W].
-    pub infiltration_w: f64,
-    /// Forced mechanical ventilation sensible heat gain (indoor zone only) [W].
-    pub ventilation_w: f64,
-    /// Natural ventilation sensible heat gain [W].
-    pub natural_ventilation_w: f64,
-    /// Total sensible gains from all equipment ports (HVAC + appliances) [W].
-    pub port_sensible_w: f64,
-    /// Non-HVAC internal gains only (appliances, lighting, occupancy) [W].
-    /// Set by the dwelling after subtracting known HVAC contributions.
-    pub internal_gain_w: f64,
-}
 
 #[derive(Debug, Clone)]
 pub struct ThermalSolver {
@@ -596,78 +320,6 @@ impl ThermalSolver {
         }
     }
 
-    fn apply_solar_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
-        for irr in &env.weather.solar_irradiance {
-            let Some(&idx) = self.config.solar_input_indices.get(&irr.surface_id) else {
-                continue;
-            };
-            if idx >= u.len() {
-                continue;
-            }
-
-            if let Some(win) = self.config.window_properties.get(&irr.surface_id) {
-                // Window: EnergyPlus IAM correction with decomposed solar gain.
-                let curve = GlazingCurve::from_u_shgc(win.u_factor_w_m2_k, win.shgc);
-                let iam_beam = window_iam(irr.angle_of_incidence_rad, curve);
-                let iam_diffuse = curve.diffuse_iam();
-
-                // IAM-corrected plane-of-array irradiance [W/m²].
-                let poa_beam = irr.direct_w_m2 * iam_beam;
-                let poa_diffuse = (irr.diffuse_w_m2 + irr.reflected_w_m2) * iam_diffuse;
-                let poa_w_m2 = poa_beam + poa_diffuse;
-
-                // Transmitted solar: passes directly through glass to zone.
-                let transmitted_w = win.area_m2 * win.transmittance * poa_w_m2;
-
-                // Absorbed glass heat decomposition per ASHRAE Ch. 15:
-                //   SHGC = T_sol + A_sol × N_i
-                //   A_sol = (SHGC - T_sol) / N_i
-                // Zone receives the inward-flowing fraction of absorbed solar:
-                //   absorbed_zone = A_sol × N_i × POA × area = (SHGC - T_sol) × POA × area
-                // Exterior receives the rest: A_sol × (1 - N_i) — lost to outdoor convection.
-                let absorbed_inward = (win.shgc - win.transmittance).max(0.0);
-                let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
-
-                u[idx] += transmitted_w + absorbed_zone_w;
-            }
-            // Opaque solar is handled by apply_exterior_solar_inputs via ExteriorSurfaceInfo.
-        }
-    }
-
-    /// Delivers opaque solar gain to exterior surfaces via [`ExteriorSurfaceInfo`].
-    ///
-    /// `u[input_index] += (direct + diffuse + reflected) × absorptance × area_m2`
-    ///
-    /// Skips surfaces that are windows (handled by [`apply_solar_inputs`] via SHGC)
-    /// and surfaces with `rad_frac > 0` (handled by the iterative LWR path).
-    fn apply_exterior_solar_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
-        for info in &self.config.exterior_surfaces {
-            if info.input_index >= u.len() {
-                continue;
-            }
-            // Surfaces with rad_frac > 0 get solar via the iterative LWR path
-            // which applies the combined (solar + LWR) × rad_frac correctly.
-            if info.rad_frac > 0.0 {
-                continue;
-            }
-            // Windows get solar via apply_solar_inputs (SHGC/IAM path).
-            // Don't also apply opaque absorptance — that would double-count.
-            if self.config.window_properties.contains_key(&info.surface_id) {
-                continue;
-            }
-            let Some(irr) = env
-                .weather
-                .solar_irradiance
-                .iter()
-                .find(|s| s.surface_id == info.surface_id)
-            else {
-                continue;
-            };
-            let poa_w_m2 = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
-            u[info.input_index] += info.absorptance * info.area_m2 * poa_w_m2;
-        }
-    }
-
     /// Iterative exterior longwave radiation solver.
     ///
     /// For each exterior surface, converges on the true exterior surface temperature
@@ -775,16 +427,6 @@ impl ThermalSolver {
             let injected = (solar_w + q_lw) * info.rad_frac;
             u[info.input_index] += injected;
 
-            static LWR_DBG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let lwr_step = LWR_DBG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if lwr_step < 20 {
-                eprintln!(
-                    "[LWR sid={} tilt={:.0} area={:.1}m²] t_node={t_node_c:.1} t_surf={t_surf:.1} \
-                     solar={solar_w:.0}W q_lw={q_lw:.0}W injected={injected:.0}W \
-                     h_inj={h_lwr_inj:.0} e_fac={e_factor:.4} svf={svf:.2} input_col={}",
-                    info.surface_id, info.tilt_deg, info.area_m2, info.input_index,
-                );
-            }
         }
     }
 
@@ -882,126 +524,6 @@ fn zone_setpoint_c(config: &ThermalSolverConfig, env: &EnvironmentState, zone: Z
                 .map(|z| z.temperature_c)
         })
         .unwrap_or_default()
-}
-
-/// Populates `u` with infiltration and ventilation sensible gains and accumulates latent loads
-/// into `latent_out` (which the caller has already cleared).
-fn apply_infiltration_and_ventilation(
-    config: &ThermalSolverConfig,
-    u: &mut DVector<f64>,
-    env: &EnvironmentState,
-    latent_out: &mut HashMap<ZoneId, f64>,
-) {
-    let p_pa = env.weather.pressure_pa();
-    let t_out = env.weather.outdoor_temp_c;
-    let w_out = env.weather.outdoor_humidity_ratio;
-    // Outdoor density is physically correct here: infiltration mass flow = Q * rho_outdoor
-    // because the incoming air has outdoor properties (ASHRAE HOF 2021). The humidity solver
-    // separately uses zone-side density for its moisture balance (see humidity_solver.rs).
-    let rho = moist_air_density_kg_m3(p_pa, t_out, w_out);
-
-    for zone in &env.zones {
-        // Look up per-zone infiltration; default to zero ACH if not configured.
-        let method = config
-            .infiltration
-            .iter()
-            .find(|(id, _)| *id == zone.id)
-            .map(|(_, m)| *m)
-            .unwrap_or_default();
-
-        let q_inf_m3_s = match method {
-            InfiltrationMethod::AshraeWindStack {
-                c_s,
-                c_w,
-                shielding_coeff,
-                n_i,
-            } => ashrae_wind_stack(
-                c_s,
-                c_w,
-                t_out - zone.temperature_c,
-                env.weather.wind_speed_m_s,
-                shielding_coeff,
-                n_i,
-            ),
-            InfiltrationMethod::Ela {
-                ela_m2,
-                stack_coeff,
-                wind_coeff,
-            } => ela_infiltration(
-                ela_m2,
-                stack_coeff,
-                wind_coeff,
-                t_out - zone.temperature_c,
-                env.weather.wind_speed_m_s,
-            ),
-            InfiltrationMethod::Ach { ach } => ach_infiltration(ach, zone.volume_m3),
-        };
-
-        // Natural ventilation flow (operable windows).
-        let q_nat_m3_s = config
-            .natural_ventilation
-            .as_ref()
-            .map(|nv| {
-                natural_ventilation_flow_m3_s(
-                    nv.open_area_m2,
-                    zone.temperature_c,
-                    t_out,
-                    nv.t_base_c,
-                    w_out,
-                    nv.max_outdoor_humidity_ratio,
-                    env.weather.wind_speed_m_s,
-                    nv.stack_coeff,
-                    nv.wind_coeff,
-                    zone.volume_m3,
-                )
-            })
-            .unwrap_or(0.0);
-
-        // Forced mechanical ventilation flow.
-        let forced_flow_m3_s = config
-            .ventilation
-            .zone_flow_m3_s
-            .get(&zone.id)
-            .copied()
-            .unwrap_or(config.ventilation_flow_m3_s);
-
-        // Combine infiltration + natural ventilation + forced ventilation.
-        // OCHRE Envelope.py:59-87:
-        //   total_nat_flow = infiltration + natural_ventilation
-        //   balanced:   sensible_flow = total_nat + forced * (1 - sens_recovery_eff)
-        //               latent_flow   = total_nat + forced * (1 - lat_recovery_eff)
-        //   unbalanced: flow = sqrt(total_nat² + forced²)  (quadrature combination)
-        let total_nat_flow = q_inf_m3_s + q_nat_m3_s;
-        let (sensible_flow_m3_s, latent_flow_m3_s) = if config.ventilation.balanced {
-            (
-                total_nat_flow
-                    + forced_flow_m3_s
-                        * (1.0 - config.ventilation.sensible_recovery_efficiency),
-                total_nat_flow
-                    + forced_flow_m3_s
-                        * (1.0 - config.ventilation.latent_recovery_efficiency),
-            )
-        } else {
-            let combined =
-                (total_nat_flow * total_nat_flow + forced_flow_m3_s * forced_flow_m3_s).sqrt();
-            (combined, combined)
-        };
-
-        // Combined flow drives sensible/latent loads against outdoor conditions.
-        // Recovery efficiency already accounts for HRV/ERV heat exchange by
-        // reducing the effective flow rate (OCHRE model).
-        let m_dot_sens = rho * sensible_flow_m3_s;
-        let m_dot_lat = rho * latent_flow_m3_s;
-        let q_sensible = m_dot_sens * CP_DRY_AIR_J_KG_K * (t_out - zone.temperature_c);
-        let q_latent = m_dot_lat * H_FG_J_PER_KG * (w_out - zone.humidity_ratio);
-
-        if let Some(&idx) = config.zone_sensible_input_indices.get(&zone.id)
-            && idx < u.len()
-        {
-            u[idx] += q_sensible;
-        }
-        *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
-    }
 }
 
 /// Solves for the scalar input at `input_index` that drives output `output_index` to `y_target`
@@ -3125,7 +2647,7 @@ mod tests {
                     indoor_temp_input_indices: vec![],
                     solar_input_indices: HashMap::new(),
                     window_properties: HashMap::new(),
-    
+
                     exterior_surfaces,
                     interior_lwr_zones: vec![],
                     ideal_setpoints_c: HashMap::new(),

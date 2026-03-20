@@ -2,6 +2,7 @@
 
 pub mod gas;
 pub mod heat_pump_wh;
+pub(crate) mod hpwh_compressor;
 pub mod resistance;
 pub mod tank;
 pub mod tankless;

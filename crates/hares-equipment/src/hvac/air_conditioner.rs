@@ -4,21 +4,25 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use hares_physics::psychrometrics::humidity_ratio_from_twb;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
+    PortDeclaration, PortSlots, Telemetry, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
-use hares_types::parse_trimmed_f64;
-
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
+use super::ac_config::{
+    default_telemetry, load_curve_pair, parse_crankcase_capacity_curve, telemetry_fields,
+};
 use super::coil_physics::{
-    CoilResult, LatentDegradationParams, calculate_shr, coil_ao_factor,
+    CoilResult, LatentDegradationParams, calculate_shr,
     effective_shr_with_latent_degradation,
+};
+use super::latent_degradation::{
+    DEFAULT_LATENT_TIME_CONSTANT_S, DEFAULT_MAX_CYCLING_RATE, DEFAULT_TWET_RATED_S,
+    DEFAULT_GAMMA_RATED, compute_coil_ao_by_stage,
 };
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
@@ -28,7 +32,6 @@ use super::{
         operating_mode_code, zone_id_from_config,
     },
 };
-use super::hvac_core::parse_biquadratic_list;
 
 const CRANKCASE_HEATER_KW: f64 = 0.05;
 const CRANKCASE_HEATER_THRESHOLD_C: f64 = 12.8;
@@ -38,23 +41,6 @@ const DEFAULT_ROOM_AC_CAPACITY_W: f64 = 3_500.0;
 const DEFAULT_EIR_FALLBACK: f64 = 0.35;
 const BTU_PER_HR_PER_W: f64 = 3.412_141_633;
 
-/// Henderson-Rengarajan latent degradation defaults (EnergyPlus/ASHRAE RP-1120).
-const DEFAULT_TWET_RATED_S: f64 = 1000.0;
-const DEFAULT_GAMMA_RATED: f64 = 1.5;
-const DEFAULT_MAX_CYCLING_RATE: f64 = 3.0;
-const DEFAULT_LATENT_TIME_CONSTANT_S: f64 = 45.0;
-
-const AHRI_RATED_INDOOR_DB_C: f64 = 26.666_666_666_7;
-const AHRI_RATED_INDOOR_WB_C: f64 = 19.444_444_444_4;
-const AHRI_RATED_OUTDOOR_DB_C: f64 = 35.0;
-const RATED_PRESSURE_KPA: f64 = 101.3;
-
-const DEFAULT_AC_CAPACITY_CURVE: [f64; 6] = [1.5509, -0.07505, 0.0031, 0.0024, -0.00005, -0.00043];
-const DEFAULT_AC_EIR_CURVE: [f64; 6] = [-0.30428, 0.11805, -0.00342, -0.00626, 0.0007, -0.00047];
-const DEFAULT_ROOM_AC_CAPACITY_CURVE: [f64; 6] =
-    [0.6405, 0.01568, 0.0004531, 0.001615, -0.0001825, 0.00006614];
-const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
-    [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub struct AirConditioner {
     pub(super) core: CoolingCore,
@@ -449,7 +435,7 @@ impl CoolingCore {
         // Defaults to 0.75 — ASHRAE Handbook HVAC Systems and Equipment Ch. 42 typical value.
         let rated_shr = first_f64(config, &["rated_shr", "shr", "SHR", "shr_rated"]).unwrap_or(0.75);
         self.rated_shr = rated_shr.clamp(0.0, 1.0);
-        self.compute_coil_ao_by_stage(rated_shr)?;
+        self.compute_coil_ao(rated_shr)?;
 
         self.crankcase_rated_kw =
             first_f64(config, &["crankcase_heater_kw"]).unwrap_or(CRANKCASE_HEATER_KW);
@@ -876,44 +862,12 @@ impl CoolingCore {
         })
     }
 
-    /// Compute coil Ao factors per speed stage using the rated SHR at the AHRI
-    /// 80°F/67°F indoor / 95°F outdoor test point.
-    ///
-    /// `rated_shr` must come from configuration, not from `self.hvac.shr` which
-    /// is the runtime SHR and defaults to 1.0 at construction.
-    fn compute_coil_ao_by_stage(&mut self, rated_shr: f64) -> crate::Result<()> {
-        let rated_w = humidity_ratio_from_twb(
-            AHRI_RATED_INDOOR_DB_C,
-            AHRI_RATED_INDOOR_WB_C,
-            RATED_PRESSURE_KPA * 1000.0,
-        );
-
-        let mut ao = Vec::with_capacity(self.hvac.cooling_capacities_w.len().max(1));
-        for (idx, cap_w) in self.hvac.cooling_capacities_w.iter().copied().enumerate() {
-            let flow_m3_s = cap_w.max(0.0) * self.hvac.airflow_m3_s_per_w;
-            let shr = rated_shr.clamp(0.0, 1.0);
-            let ao_i = coil_ao_factor(
-                AHRI_RATED_INDOOR_DB_C,
-                rated_w,
-                RATED_PRESSURE_KPA,
-                (cap_w / 1000.0).max(0.0),
-                flow_m3_s,
-                shr,
-            )
-            .map_err(|err| {
-                HaresError::Equipment(format!(
-                    "failed to compute coil Ao for stage {} at {} C ambient: {}",
-                    idx + 1,
-                    AHRI_RATED_OUTDOOR_DB_C,
-                    err
-                ))
-            })?;
-            ao.push(ao_i);
-        }
-        if ao.is_empty() {
-            ao.push(10.0);
-        }
-        self.coil_ao_by_stage = ao;
+    fn compute_coil_ao(&mut self, rated_shr: f64) -> crate::Result<()> {
+        self.coil_ao_by_stage = compute_coil_ao_by_stage(
+            &self.hvac.cooling_capacities_w,
+            self.hvac.airflow_m3_s_per_w,
+            rated_shr,
+        )?;
         Ok(())
     }
 
@@ -1080,130 +1034,6 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     registry.register("Room AC", Box::new(|config| Box::new(RoomAC::new(config))));
 }
 
-fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(7);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("sensible_cooling_w", 0.0);
-    telemetry.insert("latent_cooling_w", 0.0);
-    telemetry.insert("shr", 1.0);
-    telemetry.insert("operating_mode", 0.0);
-    telemetry.insert("cop", 0.0);
-    telemetry.insert("runtime_fraction", 0.0);
-    telemetry
-}
-
-fn telemetry_fields() -> Vec<TelemetryField> {
-    vec![
-        TelemetryField {
-            name: "electric_kw".to_string(),
-            unit: "kW".to_string(),
-            description: "Total cooling electric power: compressor + fan + crankcase".to_string(),
-        },
-        TelemetryField {
-            name: "sensible_cooling_w".to_string(),
-            unit: "W".to_string(),
-            description: "Delivered sensible cooling magnitude".to_string(),
-        },
-        TelemetryField {
-            name: "latent_cooling_w".to_string(),
-            unit: "W".to_string(),
-            description: "Delivered latent cooling magnitude".to_string(),
-        },
-        TelemetryField {
-            name: "shr".to_string(),
-            unit: "-".to_string(),
-            description: "Sensible heat ratio".to_string(),
-        },
-        TelemetryField {
-            name: "operating_mode".to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 2=Cooling".to_string(),
-        },
-    ]
-}
-
-fn load_curve_pair(config: &EquipmentConfig, is_room_ac: bool) -> crate::Result<Vec<[f64; 6]>> {
-    let mut curves = if let Some(raw) = config.get_str("biquadratic_coeffs") {
-        parse_biquadratic_list(raw)?
-    } else {
-        Vec::new()
-    };
-
-    if let Some(cap) = parse_single_coeff_array(config.get_str("capacity_biquadratic_coeffs"))? {
-        if curves.is_empty() {
-            curves.push(cap);
-        } else {
-            curves[0] = cap;
-        }
-    }
-
-    if let Some(eir) = parse_single_coeff_array(config.get_str("eir_biquadratic_coeffs"))? {
-        if curves.len() < 2 {
-            curves.resize(2, eir);
-        }
-        curves[1] = eir;
-    }
-
-    if curves.is_empty() {
-        curves.push(if is_room_ac {
-            DEFAULT_ROOM_AC_CAPACITY_CURVE
-        } else {
-            DEFAULT_AC_CAPACITY_CURVE
-        });
-        curves.push(if is_room_ac {
-            DEFAULT_ROOM_AC_EIR_CURVE
-        } else {
-            DEFAULT_AC_EIR_CURVE
-        });
-    } else if curves.len() == 1 {
-        tracing::warn!(
-            "Only one biquadratic curve provided; duplicating for both capacity and EIR. \
-             This is likely incorrect."
-        );
-        curves.push(curves[0]);
-    }
-
-    Ok(curves)
-}
-
-fn parse_single_coeff_array(raw: Option<&str>) -> crate::Result<Option<[f64; 6]>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let curves = parse_biquadratic_list(raw)?;
-    match curves.len() {
-        0 => Ok(None),
-        1 => Ok(Some(curves[0])),
-        n => Err(HaresError::Equipment(format!(
-            "expected exactly 6 biquadratic coefficients, got {}",
-            n * 6
-        ))),
-    }
-}
-
-/// Parse optional crankcase heater capacity curve coefficients `[c0, c1, c2]`
-/// from a config string such as `"[1.0, -0.02, 0.0]"`.
-/// effective_capacity = rated * (c0 + c1*T + c2*T^2), clamped to >= 0.
-fn parse_crankcase_capacity_curve(raw: Option<&str>) -> crate::Result<Option<[f64; 3]>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let values: Vec<f64> = raw
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(',')
-        .filter_map(parse_trimmed_f64)
-        .collect();
-    if values.len() != 3 {
-        return Err(HaresError::Equipment(format!(
-            "crankcase_capacity_curve_coeffs must contain exactly 3 values [c0, c1, c2], \
-             got {}",
-            values.len()
-        )));
-    }
-    Ok(Some([values[0], values[1], values[2]]))
-}
 
 #[cfg(test)]
 mod tests {

@@ -296,8 +296,8 @@ mod tests {
 
     #[test]
     fn specific_heat_btu_lb_f_matches_old_constant() {
-        // uom uses the thermochemical BTU ≈ 4184.0 J/(kg·K).
-        approx_eq(specific_heat_btu_lb_f_to_j_kg_k(1.0), 4184.0, 1e-9);
+        // uom uses the IT BTU → 4183.9987 J/(kg·K), not the thermochemical 4186.8.
+        approx_eq(specific_heat_btu_lb_f_to_j_kg_k(1.0), 4183.998_673_699_118, 1e-9);
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod constants;
 mod cooler;
 mod defrost;
 mod heater;
+mod heater_config;
 
 pub use cooler::HpCooler;
 pub use heater::{ASHPHeater, MinisplitHeater};
