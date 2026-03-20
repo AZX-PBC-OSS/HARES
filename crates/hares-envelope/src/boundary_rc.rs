@@ -397,10 +397,9 @@ fn build_layered_boundary(
     // Odd counts keep n/2+1 layers with the middle layer's capacitance halved.
     if same_zone {
         let n = effective_layers.len();
-        let keep = if n % 2 == 0 { n / 2 } else { n / 2 + 1 };
-        if n % 2 != 0 {
-            halve_last_cap = true;
-        }
+        let even = n.is_multiple_of(2);
+        let keep = if even { n / 2 } else { n / 2 + 1 };
+        halve_last_cap = !even;
         effective_layers.truncate(keep);
         if effective_layers.is_empty() {
             return None;
@@ -418,12 +417,10 @@ fn build_layered_boundary(
         } else {
             boundary_area
         };
-        let mut cap =
-            (layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m * layer_area)
-                .max(MIN_CAPACITANCE_J_K);
-        if halve_last_cap && i == n_layers - 1 {
-            cap /= 2.0;
-        }
+        let raw_cap =
+            layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m * layer_area;
+        let halved = if halve_last_cap && i == n_layers - 1 { raw_cap / 2.0 } else { raw_cap };
+        let cap = halved.max(MIN_CAPACITANCE_J_K);
         capacitances.insert(node, cap);
         layer_nodes.push(node);
     }
@@ -852,6 +849,7 @@ mod tests {
             volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
+        // layer[1]: density=2000, cp=900, thickness=0.10, area=50 → full cap = 9000 J/K
         let layers = vec![
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
@@ -860,8 +858,15 @@ mod tests {
         // 3 layers → keep 2 (n/2+1), with layer[1]'s cap halved.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
         let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
-        // 1 zone air node + 2 layer nodes.
         assert_eq!(rc.a_c.nrows(), 3);
+
+        // Verify middle layer (second kept, NodeId 1001) has halved capacitance.
+        let middle_cap = rc.node_capacitances[&NodeId(LAYER_NODE_BASE + 1)];
+        let expected = 2000.0 * 900.0 * 0.10 * 50.0 / 2.0; // 4500 J/K
+        assert!(
+            (middle_cap - expected).abs() < 1e-6,
+            "middle cap={middle_cap}, expected {expected} (halved)"
+        );
     }
 
     #[test]
@@ -871,12 +876,20 @@ mod tests {
             volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
+        // density=2000, cp=900, thickness=0.10, area=50 → full cap = 9000 J/K
         let layers = vec![make_layer(0.10, 1.0, 2000.0, 900.0, 0.0)];
         // 1 layer → keep 1 (n/2+1=1), with halved capacitance.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
         let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
-        // 1 zone air node + 1 layer node.
         assert_eq!(rc.a_c.nrows(), 2);
+
+        // Verify layer node (NodeId 1000) has halved capacitance.
+        let layer_cap = rc.node_capacitances[&NodeId(LAYER_NODE_BASE)];
+        let expected = 2000.0 * 900.0 * 0.10 * 50.0 / 2.0; // 4500 J/K
+        assert!(
+            (layer_cap - expected).abs() < 1e-6,
+            "layer cap={layer_cap}, expected {expected} (halved)"
+        );
     }
 
     // ── Layer node IDs don't collide with external nodes ────────────────
