@@ -98,7 +98,7 @@ pub fn typical_zone_temps(avg_ground_c: f64, avg_ambient_c: f64) -> [f64; 6] {
 /// `delta_t_k` must be non-negative; `tilt_deg` is measured from horizontal.
 pub fn tarp_h_natural(tilt_deg: f64, delta_t_k: f64, above_hotter: bool) -> f64 {
     let cbrt_dt = delta_t_k.cbrt();
-    if (tilt_deg - 90.0).abs() < f64::EPSILON {
+    if (tilt_deg - 90.0).abs() < 1e-9 {
         1.31 * cbrt_dt
     } else {
         let cos_tilt = tilt_deg.to_radians().cos().abs();

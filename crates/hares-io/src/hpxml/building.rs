@@ -12,8 +12,6 @@ const U_BTU_HR_FT2_F_TO_W_M2_K: f64 = 5.678;
 const R_HR_FT2_F_BTU_TO_M2_K_W: f64 = 0.176_1;
 const CONDUCTIVITY_BTU_HR_FT_F_TO_W_M_K: f64 = 1.730_734_67;
 const CONDUCTIVITY_BTU_IN_HR_FT2_F_TO_W_M_K: f64 = 0.144_227_91;
-const LENGTH_IN_TO_M: f64 = 0.0254;
-const LENGTH_FT_TO_M: f64 = 0.3048;
 const DENSITY_LB_FT3_TO_KG_M3: f64 = 16.018_463_37;
 const SPECIFIC_HEAT_BTU_LB_F_TO_J_KG_K: f64 = 4_186.8;
 const BTU_PER_H_TO_W: f64 = 0.293_071_07;
@@ -1256,16 +1254,20 @@ fn convert_conductivity_to_w_m_k(value: f64, units: Option<&str>) -> f64 {
 }
 
 fn convert_length_to_m(value: f64, units: Option<&str>) -> f64 {
+    use uom::si::f64::Length;
+    use uom::si::length::{foot, inch, meter};
+
     match units {
-        Some("in") | Some("inch") | Some("inches") => value * LENGTH_IN_TO_M,
-        Some("ft") | Some("feet") => value * LENGTH_FT_TO_M,
+        Some("in") | Some("inch") | Some("inches") => Length::new::<inch>(value).get::<meter>(),
+        Some("ft") | Some("feet") => Length::new::<foot>(value).get::<meter>(),
         Some(_) => value,
         None => {
-            // HPXML uses imperial lengths by default when no units attribute is present
+            // HPXML uses feet as the default length unit when no units attribute is present.
+            // InfiltrationHeight, ceiling heights, etc. are all in feet.
             eprintln!(
-                "[WARN] Length value {value} has no units attribute; assuming inches and converting to meters"
+                "[WARN] Length value {value} has no units attribute; assuming feet and converting to meters"
             );
-            value * LENGTH_IN_TO_M
+            Length::new::<foot>(value).get::<meter>()
         }
     }
 }

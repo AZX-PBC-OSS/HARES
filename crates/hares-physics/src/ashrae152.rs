@@ -565,6 +565,11 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     // 14. Final DSE
     // ------------------------------------------------------------------
     let seas_dse = seas_de * seas_equip_factor * seas_load_factor * (1.0 - fcycloss);
+    if !seas_dse.is_finite() {
+        // Degenerate duct config (e.g. extreme leakage) produced NaN/Inf.
+        // Fall back to no distribution loss rather than propagating poison.
+        return 1.0;
+    }
     seas_dse.clamp(f64::MIN_POSITIVE, 1.0)
 }
 

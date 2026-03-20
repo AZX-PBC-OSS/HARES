@@ -28,8 +28,8 @@ mod tests {
                 .join("ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                // Match OCHRE smoke: May 5, 2019, 12:00 PM
-                start_time: Utc.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),
+                // Match OCHRE smoke: May 5, 2019, 12:00 PM Denver (UTC-7) = 19:00 UTC
+                start_time: Utc.with_ymd_and_hms(2019, 5, 5, 19, 0, 0).unwrap(),
                 duration: Duration::hours(duration_hours),
                 time_res: Duration::minutes(1),
                 output_verbosity: 3,

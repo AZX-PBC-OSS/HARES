@@ -36,7 +36,8 @@ mod tests {
                 .join("ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                start_time: Utc.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),
+                // Denver is UTC-7. OCHRE starts at 12:00 local = 19:00 UTC.
+                start_time: Utc.with_ymd_and_hms(2019, 5, 5, 19, 0, 0).unwrap(),
                 duration: Duration::hours(1),
                 time_res: Duration::minutes(1),
                 output_verbosity: 6, // envelope component breakdown

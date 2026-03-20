@@ -214,10 +214,10 @@ pub fn resolve_duct_dse(
     let lat = config.get_f64("duct_latitude_deg").unwrap_or(40.0);
     let lon = config.get_f64("duct_longitude_deg").unwrap_or(-100.0);
     let house_vol = config.get_f64("duct_house_volume_m3").unwrap_or(400.0);
-    let supply_leak = config.get_f64("duct_supply_leakage_frac").unwrap_or(0.0);
+    let supply_leak = config.get_f64("duct_supply_leakage_frac").unwrap_or(0.0).clamp(0.0, 1.0);
     let supply_area = config.get_f64("duct_supply_area_m2").unwrap_or(0.0);
     let supply_r = config.get_f64("duct_supply_r_m2_k_w").unwrap_or(0.0);
-    let return_leak = config.get_f64("duct_return_leakage_frac").unwrap_or(0.0);
+    let return_leak = config.get_f64("duct_return_leakage_frac").unwrap_or(0.0).clamp(0.0, 1.0);
     let return_area = config.get_f64("duct_return_area_m2").unwrap_or(0.0);
     let return_r = config.get_f64("duct_return_r_m2_k_w").unwrap_or(0.0);
 

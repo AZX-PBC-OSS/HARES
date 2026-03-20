@@ -290,16 +290,23 @@ impl EnvironmentManager {
 }
 
 /// Compute the step offset into an annual weather file for a given start time.
-/// EPW files cover Jan 1 00:00 through Dec 31 23:00 of a reference year.
-fn compute_annual_offset(_meta: &WeatherMeta, start_time: DateTime<Utc>, step_secs: u32) -> usize {
+///
+/// EPW files are indexed by **local standard time** (LST), not UTC. The
+/// `timezone_offset_h` from `WeatherMeta` (parsed from the EPW header) converts
+/// the simulation's UTC timestamp to the file's local-time index.
+fn compute_annual_offset(meta: &WeatherMeta, start_time: DateTime<Utc>, step_secs: u32) -> usize {
     if step_secs == 0 {
         return 0;
     }
-    // Day-of-year (0-based) * 86400 + hour * 3600 + minute * 60 + second
-    let doy0 = start_time.ordinal0() as u64;
-    let h = start_time.hour() as u64;
-    let m = start_time.minute() as u64;
-    let s = start_time.second() as u64;
+    // Convert UTC → local standard time by adding the timezone offset.
+    // EPW timezone is hours east of Greenwich (e.g., Denver = -7).
+    let offset_secs = (meta.timezone_offset_h * 3600.0) as i64;
+    let local = start_time + chrono::Duration::seconds(offset_secs);
+
+    let doy0 = local.ordinal0() as u64;
+    let h = local.hour() as u64;
+    let m = local.minute() as u64;
+    let s = local.second() as u64;
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
     (seconds_into_year / step_secs as u64) as usize
 }
