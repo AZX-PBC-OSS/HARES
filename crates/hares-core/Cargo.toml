@@ -7,6 +7,7 @@ license.workspace = true
 
 [features]
 profiling = []
+observe = []
 
 [dependencies]
 hares-types = { workspace = true }

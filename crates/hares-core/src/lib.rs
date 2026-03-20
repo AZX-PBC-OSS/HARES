@@ -6,6 +6,10 @@ pub mod diagnostics;
 pub mod dwelling;
 pub mod engine;
 pub mod environment;
+#[cfg(feature = "observe")]
+pub mod observer;
+#[cfg(feature = "observe")]
+mod observer_capture;
 pub mod rng;
 pub mod scheduler;
 pub mod telemetry;

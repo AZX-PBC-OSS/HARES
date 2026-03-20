@@ -1,0 +1,154 @@
+//! Zero-cost step observer for deep simulation debugging.
+//!
+//! All types and the buffer are gated by `#[cfg(feature = "observe")]` at the
+//! module level — when the feature is off, this module does not exist and the
+//! compiler eliminates every observation site in `run_timestep`.
+
+use std::collections::VecDeque;
+
+use chrono::{DateTime, Utc};
+use hares_envelope::EnvelopeComponentGains;
+use hares_types::{DomainUpdate, EndUse, FluidType, FuelType, LoopId, Telemetry, ZoneId};
+
+/// Complete snapshot of a single simulation timestep, populated incrementally
+/// at phase boundaries within `Dwelling::run_timestep`.
+#[derive(Debug, Clone)]
+pub struct StepSnapshot {
+    pub step_index: u64,
+    pub timestamp: DateTime<Utc>,
+    pub phases: PhaseSnapshots,
+}
+
+/// Incrementally populated captures for each phase of `run_timestep`.
+#[derive(Debug, Clone, Default)]
+pub struct PhaseSnapshots {
+    pub post_environment: Option<EnvironmentCapture>,
+    pub post_nonthermal_equipment: Option<EquipmentPhaseCapture>,
+    pub post_thermal_equipment: Option<EquipmentPhaseCapture>,
+    pub post_solvers: Option<SolverCapture>,
+    pub post_zone_update: Option<ZoneUpdateCapture>,
+}
+
+/// Weather and zone state after environment update.
+#[derive(Debug, Clone)]
+pub struct EnvironmentCapture {
+    pub outdoor_temp_c: f64,
+    pub ghi_w_m2: f64,
+    pub wind_speed_m_s: f64,
+    pub mains_temp_c: f64,
+    pub zone_temps_c: Vec<(ZoneId, f64)>,
+    pub zone_humidity_ratios: Vec<(ZoneId, f64)>,
+}
+
+/// Equipment telemetry + accumulated port state after an equipment phase.
+#[derive(Debug, Clone)]
+pub struct EquipmentPhaseCapture {
+    pub equipment: Vec<EquipmentObservation>,
+    pub ports: PortsCapture,
+}
+
+/// Per-equipment observation: identity + telemetry clone.
+#[derive(Debug, Clone)]
+pub struct EquipmentObservation {
+    pub name: String,
+    pub equipment_type: String,
+    pub end_use: EndUse,
+    pub telemetry: Telemetry,
+}
+
+/// Snapshot of all port accumulators at a phase boundary.
+#[derive(Debug, Clone)]
+pub struct PortsCapture {
+    pub thermal: Vec<(ZoneId, f64, f64)>,
+    pub electrical_load_kw: f64,
+    pub electrical_gen_kw: f64,
+    pub electrical_reactive_kvar: f64,
+    pub fuel_consumption_w: Vec<(FuelType, f64)>,
+    pub fluid: Vec<FluidPortCapture>,
+}
+
+/// Snapshot of a single fluid port accumulator.
+#[derive(Debug, Clone)]
+pub struct FluidPortCapture {
+    pub loop_id: LoopId,
+    pub fluid_type: FluidType,
+    pub total_flow_kg_s: f64,
+    pub mean_supply_temp_c: f64,
+    pub mean_return_temp_c: f64,
+}
+
+/// Domain solver outputs + envelope component gains.
+#[derive(Debug, Clone)]
+pub struct SolverCapture {
+    pub thermal_update: DomainUpdate,
+    pub humidity_update: DomainUpdate,
+    pub electrical_update: DomainUpdate,
+    pub fluid_update: DomainUpdate,
+    pub envelope_gains: EnvelopeComponentGains,
+}
+
+/// Final zone state after thermal + humidity updates are applied.
+#[derive(Debug, Clone)]
+pub struct ZoneUpdateCapture {
+    pub zone_temps_c: Vec<(ZoneId, f64)>,
+    pub zone_humidity_ratios: Vec<(ZoneId, f64)>,
+}
+
+/// Ring buffer of step snapshots with configurable capacity.
+#[derive(Debug, Clone)]
+pub struct ObserverBuffer {
+    snapshots: VecDeque<StepSnapshot>,
+    capacity: usize,
+}
+
+impl ObserverBuffer {
+    /// Creates a new buffer that retains up to `capacity` snapshots.
+    ///
+    /// # Panics
+    /// Panics if `capacity` is zero.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "ObserverBuffer capacity must be > 0");
+        Self {
+            snapshots: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Pushes a snapshot, evicting the oldest if at capacity.
+    pub fn push(&mut self, snapshot: StepSnapshot) {
+        if self.snapshots.len() == self.capacity {
+            self.snapshots.pop_front();
+        }
+        self.snapshots.push_back(snapshot);
+    }
+
+    /// Drains all snapshots out of the buffer.
+    pub fn drain(&mut self) -> Vec<StepSnapshot> {
+        self.snapshots.drain(..).collect()
+    }
+
+    /// Returns a reference to the most recent snapshot, if any.
+    #[must_use]
+    pub fn last(&self) -> Option<&StepSnapshot> {
+        self.snapshots.back()
+    }
+
+    /// Returns a slice-like view of all buffered snapshots.
+    #[must_use]
+    pub fn snapshots(&self) -> &VecDeque<StepSnapshot> {
+        &self.snapshots
+    }
+
+    /// Number of snapshots currently buffered.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.snapshots.len()
+    }
+
+    /// Whether the buffer is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.snapshots.is_empty()
+    }
+}

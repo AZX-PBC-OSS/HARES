@@ -52,6 +52,10 @@ use synthetic::{
 };
 #[cfg(feature = "profiling")]
 use synthetic::{current_process_hwm_kb, hot_path_alloc_counter};
+#[cfg(feature = "observe")]
+use crate::observer::{ObserverBuffer, PhaseSnapshots, StepSnapshot};
+#[cfg(feature = "observe")]
+use crate::observer_capture;
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 const DEFAULT_TEMP_SANITY_LOW_C: f64 = -80.0;
@@ -195,6 +199,8 @@ pub struct Dwelling {
     zone_capacitances_j_k: Vec<(ZoneId, f64)>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
+    #[cfg(feature = "observe")]
+    observer_buf: Option<ObserverBuffer>,
 }
 
 impl Dwelling {
@@ -454,6 +460,8 @@ impl Dwelling {
             zone_capacitances_j_k,
             #[cfg(feature = "profiling")]
             profiling: DwellingProfilingSummary::default(),
+            #[cfg(feature = "observe")]
+            observer_buf: None,
         };
 
         if let Some(init_dur) = config.initialization_duration {
@@ -627,6 +635,30 @@ impl Dwelling {
         self.profiling.clone()
     }
 
+    /// Enables the step observer with a ring buffer of the given capacity.
+    ///
+    /// Calling this again replaces any existing buffer and discards buffered snapshots.
+    #[cfg(feature = "observe")]
+    pub fn enable_observer(&mut self, capacity: usize) {
+        self.observer_buf = Some(ObserverBuffer::new(capacity));
+    }
+
+    /// Drains all buffered step snapshots.
+    #[cfg(feature = "observe")]
+    pub fn drain_observations(&mut self) -> Vec<StepSnapshot> {
+        self.observer_buf
+            .as_mut()
+            .map(|buf| buf.drain())
+            .unwrap_or_default()
+    }
+
+    /// Returns a reference to the observer buffer, if enabled.
+    #[cfg(feature = "observe")]
+    #[must_use]
+    pub fn observer_buffer(&self) -> Option<&ObserverBuffer> {
+        self.observer_buf.as_ref()
+    }
+
     /// Pushes a warning string into the internal warning queue.
     pub fn push_warning(&mut self, msg: String) {
         self.warnings.push(msg);
@@ -798,12 +830,20 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         let mut step_io: Option<StdDuration> = None;
 
+        #[cfg(feature = "observe")]
+        let mut obs_phases = PhaseSnapshots::default();
+
         // Step 1: update environment at current clock state.
         #[cfg(feature = "profiling")]
         let schedule_started = Instant::now();
         let env = self.environment.update(&self.clock, &self.latest_env.zones);
         self.latest_env = env;
 
+        #[cfg(feature = "observe")]
+        if self.observer_buf.is_some() {
+            obs_phases.post_environment =
+                Some(observer_capture::capture_environment(&self.latest_env));
+        }
 
         // Step 2: dispatch queued controls.
         self.control_dispatcher
@@ -853,6 +893,12 @@ impl Dwelling {
             });
         }
 
+        #[cfg(feature = "observe")]
+        if self.observer_buf.is_some() {
+            obs_phases.post_nonthermal_equipment =
+                Some(observer_capture::capture_equipment_phase(&self.equipment, &self.ports));
+        }
+
         // Step 3b: thermal stage equipment.
         for &idx in &indices {
             if self.equipment[idx].descriptor().stage != ExecutionStage::Thermal {
@@ -866,6 +912,13 @@ impl Dwelling {
                 ));
             }
         }
+
+        #[cfg(feature = "observe")]
+        if self.observer_buf.is_some() {
+            obs_phases.post_thermal_equipment =
+                Some(observer_capture::capture_equipment_phase(&self.equipment, &self.ports));
+        }
+
         #[cfg(feature = "profiling")]
         {
             let elapsed = hvac_started.elapsed();
@@ -895,6 +948,13 @@ impl Dwelling {
             .electrical_solver
             .resolve(&self.ports, &self.latest_env, dt);
         let fluid_update = self.fluid_solver.resolve(&self.ports, &self.latest_env, dt);
+
+        #[cfg(feature = "observe")]
+        let obs_fluid_update = if self.observer_buf.is_some() {
+            Some(fluid_update.clone())
+        } else {
+            None
+        };
 
         self.latest_env
             .custom_domains
@@ -942,9 +1002,30 @@ impl Dwelling {
             gains.internal_gain_w = gains.port_sensible_w - hvac_sensible_w;
         }
 
+        #[cfg(feature = "observe")]
+        if let Some(fluid) = obs_fluid_update {
+            obs_phases.post_solvers = Some(observer_capture::capture_solvers(
+                &thermal_update,
+                &humidity_update,
+                &electrical_update,
+                &fluid,
+                &self.thermal_solver,
+            ));
+        }
+
         apply_thermal_update_to_zones(&mut self.latest_env, &thermal_update);
         apply_humidity_update_to_zones(&mut self.latest_env, &humidity_update);
 
+        #[cfg(feature = "observe")]
+        if let Some(buf) = &mut self.observer_buf {
+            obs_phases.post_zone_update =
+                Some(observer_capture::capture_zone_update(&self.latest_env));
+            buf.push(StepSnapshot {
+                step_index: self.clock.current_step(),
+                timestamp: self.latest_env.current_time,
+                phases: obs_phases,
+            });
+        }
 
         #[cfg(feature = "profiling")]
         {

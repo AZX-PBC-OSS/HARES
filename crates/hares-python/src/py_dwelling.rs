@@ -160,6 +160,29 @@ impl PyDwelling {
         Ok(())
     }
 
+    #[cfg(feature = "observe")]
+    pub fn enable_observer(&self, capacity: usize) -> PyResult<()> {
+        let mut dwelling = self
+            .dwelling
+            .lock()
+            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        dwelling.enable_observer(capacity);
+        Ok(())
+    }
+
+    #[cfg(feature = "observe")]
+    pub fn drain_observations(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        let mut dwelling = self
+            .dwelling
+            .lock()
+            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let snapshots = dwelling.drain_observations();
+        snapshots
+            .into_iter()
+            .map(|snap| snapshot_to_py(py, &snap))
+            .collect()
+    }
+
     pub fn telemetry(&self) -> PyResult<PyTelemetry> {
         let dwelling = self
             .dwelling
@@ -456,4 +479,114 @@ fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<Utc>) -> PyResult<Py<PyAny
 
 fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {
     PyValueError::new_err(err.to_string())
+}
+
+#[cfg(feature = "observe")]
+fn snapshot_to_py(py: Python<'_>, snap: &hares_core::observer::StepSnapshot) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item("step_index", snap.step_index)?;
+    dict.set_item("timestamp", snap.timestamp.to_rfc3339())?;
+
+    let phases = &snap.phases;
+
+    if let Some(env) = &phases.post_environment {
+        let d = PyDict::new(py);
+        d.set_item("outdoor_temp_c", env.outdoor_temp_c)?;
+        d.set_item("ghi_w_m2", env.ghi_w_m2)?;
+        d.set_item("wind_speed_m_s", env.wind_speed_m_s)?;
+        d.set_item("mains_temp_c", env.mains_temp_c)?;
+        d.set_item(
+            "zone_temps_c",
+            env.zone_temps_c
+                .iter()
+                .map(|(z, t)| (z.0, *t))
+                .collect::<Vec<_>>(),
+        )?;
+        d.set_item(
+            "zone_humidity_ratios",
+            env.zone_humidity_ratios
+                .iter()
+                .map(|(z, h)| (z.0, *h))
+                .collect::<Vec<_>>(),
+        )?;
+        dict.set_item("post_environment", d)?;
+    }
+
+    for (key, phase) in [
+        ("post_nonthermal_equipment", &phases.post_nonthermal_equipment),
+        ("post_thermal_equipment", &phases.post_thermal_equipment),
+    ] {
+        if let Some(eq_phase) = phase {
+            let d = PyDict::new(py);
+            let eq_list: Vec<Py<PyAny>> = eq_phase
+                .equipment
+                .iter()
+                .map(|obs| {
+                    let ed = PyDict::new(py);
+                    ed.set_item("name", &obs.name)?;
+                    ed.set_item("equipment_type", &obs.equipment_type)?;
+                    ed.set_item("end_use", format!("{:?}", obs.end_use))?;
+                    let telem: Vec<(&String, &f64)> = obs.telemetry.0.iter().collect();
+                    let td = PyDict::new(py);
+                    for (k, v) in telem {
+                        td.set_item(k, v)?;
+                    }
+                    ed.set_item("telemetry", td)?;
+                    Ok(ed.unbind().into())
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            d.set_item("equipment", eq_list)?;
+
+            let ports = &eq_phase.ports;
+            let pd = PyDict::new(py);
+            pd.set_item(
+                "thermal",
+                ports.thermal.iter().map(|(z, s, l)| (z.0, *s, *l)).collect::<Vec<_>>(),
+            )?;
+            pd.set_item("electrical_load_kw", ports.electrical_load_kw)?;
+            pd.set_item("electrical_gen_kw", ports.electrical_gen_kw)?;
+            pd.set_item("electrical_reactive_kvar", ports.electrical_reactive_kvar)?;
+            pd.set_item(
+                "fuel_consumption_w",
+                ports.fuel_consumption_w.iter().map(|(ft, v)| (format!("{ft:?}"), *v)).collect::<Vec<_>>(),
+            )?;
+            d.set_item("ports", pd)?;
+            dict.set_item(key, d)?;
+        }
+    }
+
+    if let Some(solvers) = &phases.post_solvers {
+        let d = PyDict::new(py);
+        let gains = &solvers.envelope_gains;
+        d.set_item("window_solar_w", gains.window_solar_w)?;
+        d.set_item("opaque_solar_lwr_w", gains.opaque_solar_lwr_w)?;
+        d.set_item("interior_lwr_w", gains.interior_lwr_w)?;
+        d.set_item("infiltration_w", gains.infiltration_w)?;
+        d.set_item("ventilation_w", gains.ventilation_w)?;
+        d.set_item("natural_ventilation_w", gains.natural_ventilation_w)?;
+        d.set_item("port_sensible_w", gains.port_sensible_w)?;
+        d.set_item("internal_gain_w", gains.internal_gain_w)?;
+        dict.set_item("post_solvers", d)?;
+    }
+
+    if let Some(zu) = &phases.post_zone_update {
+        let d = PyDict::new(py);
+        d.set_item(
+            "zone_temps_c",
+            zu.zone_temps_c
+                .iter()
+                .map(|(z, t)| (z.0, *t))
+                .collect::<Vec<_>>(),
+        )?;
+        d.set_item(
+            "zone_humidity_ratios",
+            zu.zone_humidity_ratios
+                .iter()
+                .map(|(z, h)| (z.0, *h))
+                .collect::<Vec<_>>(),
+        )?;
+        dict.set_item("post_zone_update", d)?;
+    }
+
+    Ok(dict.unbind().into())
 }
