@@ -299,8 +299,11 @@ pub struct EnvelopeComponentGains {
     pub ventilation_w: f64,
     /// Natural ventilation sensible heat gain [W].
     pub natural_ventilation_w: f64,
-    /// Internal sensible gains from equipment ports (HVAC, appliances) [W].
+    /// Total sensible gains from all equipment ports (HVAC + appliances) [W].
     pub port_sensible_w: f64,
+    /// Non-HVAC internal gains only (appliances, lighting, occupancy) [W].
+    /// Set by the dwelling after subtracting known HVAC contributions.
+    pub internal_gain_w: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -331,6 +334,12 @@ impl ThermalSolver {
     /// Per-component envelope gains from the most recent `resolve()` call.
     pub fn component_gains(&self) -> &EnvelopeComponentGains {
         &self.component_gains
+    }
+
+    /// Mutable access to component gains for the dwelling to finalize
+    /// (e.g., splitting HVAC from internal gains after equipment runs).
+    pub fn component_gains_mut(&mut self) -> &mut EnvelopeComponentGains {
+        &mut self.component_gains
     }
 
     pub fn model_dims(&self) -> (usize, usize, usize) {
@@ -519,10 +528,11 @@ impl ThermalSolver {
             window_solar_w,
             opaque_solar_lwr_w,
             interior_lwr_w,
-            infiltration_w: infiltration_vent_w, // combined for now; split later
+            infiltration_w: infiltration_vent_w,
             ventilation_w: 0.0,
             natural_ventilation_w: 0.0,
             port_sensible_w,
+            internal_gain_w: 0.0, // set by dwelling after HVAC subtraction
         };
 
         for &zone in ideal_hvac_zones {
@@ -627,6 +637,9 @@ impl ThermalSolver {
     /// Delivers opaque solar gain to exterior surfaces via [`ExteriorSurfaceInfo`].
     ///
     /// `u[input_index] += (direct + diffuse + reflected) × absorptance × area_m2`
+    ///
+    /// Skips surfaces that are windows (handled by [`apply_solar_inputs`] via SHGC)
+    /// and surfaces with `rad_frac > 0` (handled by the iterative LWR path).
     fn apply_exterior_solar_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
         for info in &self.config.exterior_surfaces {
             if info.input_index >= u.len() {
@@ -635,6 +648,11 @@ impl ThermalSolver {
             // Surfaces with rad_frac > 0 get solar via the iterative LWR path
             // which applies the combined (solar + LWR) × rad_frac correctly.
             if info.rad_frac > 0.0 {
+                continue;
+            }
+            // Windows get solar via apply_solar_inputs (SHGC/IAM path).
+            // Don't also apply opaque absorptance — that would double-count.
+            if self.config.window_properties.contains_key(&info.surface_id) {
                 continue;
             }
             let Some(irr) = env

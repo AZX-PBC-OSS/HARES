@@ -1,0 +1,260 @@
+//! TARP interior + DOE-2 exterior dynamic film coefficient calculations.
+//!
+//! Interior convection follows the TARP (Thermal Analysis Research Program)
+//! model. Exterior forced convection follows the DOE-2 model with a
+//! surface-roughness correction factor.
+//!
+//! All inputs and outputs are in SI units.
+//!
+//! # References
+//! - EnergyPlus Engineering Reference §9.4 (TARP interior convection).
+//! - EnergyPlus Engineering Reference §9.5 (DOE-2 exterior convection).
+//! - OCHRE reference implementation `calculate_film_resistances`.
+
+/// Zone height ordering for TARP above/below determination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneLabel {
+    Ground,      // GND
+    Foundation,  // FND
+    Conditioned, // LIV
+    Garage,      // GAR
+    Attic,       // ATC
+    Outdoor,     // EXT
+}
+
+impl ZoneLabel {
+    /// Ordinal height rank (0 = lowest, 5 = highest / outdoor).
+    ///
+    /// Matches the `zone_order` list in the OCHRE reference implementation.
+    pub fn height_order(self) -> u8 {
+        match self {
+            Self::Ground => 0,
+            Self::Foundation => 1,
+            Self::Conditioned => 2,
+            Self::Garage => 3,
+            Self::Attic => 4,
+            Self::Outdoor => 5,
+        }
+    }
+}
+
+/// Surface roughness factor for DOE-2 exterior forced convection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRoughness {
+    VeryRough,
+    Rough,
+    MediumRough,
+    MediumSmooth,
+    Smooth,
+    VerySmooth,
+}
+
+impl SurfaceRoughness {
+    /// DOE-2 roughness correction factor `r_f`.
+    ///
+    /// Scales the excess convection coefficient `(h_glass - h_natural)`.
+    pub fn factor(self) -> f64 {
+        match self {
+            Self::VeryRough => 2.17,
+            Self::Rough => 1.67,
+            Self::MediumRough => 1.52,
+            Self::MediumSmooth => 1.13,
+            Self::Smooth => 1.11,
+            Self::VerySmooth => 1.00,
+        }
+    }
+}
+
+/// Typical zone temperatures [°C] for each [`ZoneLabel`] variant.
+///
+/// Anchor values: Ground = `avg_ground_c`, Conditioned = 20 °C,
+/// Outdoor = `avg_ambient_c + 5`.  Foundation, Garage, and Attic are linearly
+/// interpolated between adjacent anchors, matching the behaviour of
+/// `pandas.Series.interpolate()` in the OCHRE reference.
+///
+/// Returns `[ground, foundation, conditioned, garage, attic, outdoor]`.
+pub fn typical_zone_temps(avg_ground_c: f64, avg_ambient_c: f64) -> [f64; 6] {
+    let t_ground = avg_ground_c;
+    let t_conditioned = 20.0_f64;
+    let t_outdoor = avg_ambient_c + 5.0;
+
+    // Linear interpolation between the three anchors:
+    //   Ground(0) — Foundation(1) — Conditioned(2) — Garage(3) — Attic(4) — Outdoor(5)
+    let t_foundation = t_ground + (t_conditioned - t_ground) * (1.0 / 2.0);
+    let t_garage = t_conditioned + (t_outdoor - t_conditioned) * (1.0 / 3.0);
+    let t_attic = t_conditioned + (t_outdoor - t_conditioned) * (2.0 / 3.0);
+
+    [t_ground, t_foundation, t_conditioned, t_garage, t_attic, t_outdoor]
+}
+
+/// TARP natural convection coefficient h [W/(m²·K)].
+///
+/// - Vertical surface (`tilt_deg == 90`): `h = 1.31 · ΔT^(1/3)`
+/// - Non-vertical, warm side above (`above_hotter = true`):
+///   `h = 9.482 · ΔT^(1/3) / (7.238 − |cos(tilt)|)` (enhanced)
+/// - Non-vertical, warm side below (`above_hotter = false`):
+///   `h = 1.810 · ΔT^(1/3) / (1.382 + |cos(tilt)|)` (reduced)
+///
+/// `delta_t_k` must be non-negative; `tilt_deg` is measured from horizontal.
+pub fn tarp_h_natural(tilt_deg: f64, delta_t_k: f64, above_hotter: bool) -> f64 {
+    let cbrt_dt = delta_t_k.cbrt();
+    if (tilt_deg - 90.0).abs() < f64::EPSILON {
+        1.31 * cbrt_dt
+    } else {
+        let cos_tilt = tilt_deg.to_radians().cos().abs();
+        if above_hotter {
+            9.482 * cbrt_dt / (7.238 - cos_tilt)
+        } else {
+            1.810 * cbrt_dt / (1.382 + cos_tilt)
+        }
+    }
+}
+
+/// Film resistances for a building envelope boundary [m²·K/W].
+///
+/// Returns `(r_interior, r_exterior)`.
+///
+/// Interior resistance uses TARP natural convection.  Exterior resistance
+/// additionally applies the DOE-2 forced-convection model when
+/// `exterior_zone` is [`ZoneLabel::Outdoor`]; otherwise it equals the
+/// interior resistance.
+///
+/// # Parameters
+/// - `tilt_deg` — surface tilt in degrees from horizontal (0 = floor/ceiling,
+///   90 = vertical wall).
+/// - `interior_zone` / `exterior_zone` — zones bounding the surface.
+/// - `avg_wind_speed_m_s` — site average wind speed [m/s].
+/// - `avg_ground_temp_c` — annual average ground temperature [°C].
+/// - `avg_ambient_temp_c` — annual average outdoor dry-bulb temperature [°C].
+/// - `roughness` — surface roughness class for the DOE-2 `r_f` factor.
+pub fn film_resistances(
+    tilt_deg: f64,
+    interior_zone: ZoneLabel,
+    exterior_zone: ZoneLabel,
+    avg_wind_speed_m_s: f64,
+    avg_ground_temp_c: f64,
+    avg_ambient_temp_c: f64,
+    roughness: SurfaceRoughness,
+) -> (f64, f64) {
+    let temps = typical_zone_temps(avg_ground_temp_c, avg_ambient_temp_c);
+    let t_int = temps[interior_zone.height_order() as usize];
+    let t_ext = temps[exterior_zone.height_order() as usize];
+
+    let ext_above = exterior_zone.height_order() > interior_zone.height_order();
+    let t_ext_hotter = t_ext >= t_int;
+    // "above_hotter": the warmer side faces upward — enhanced convection.
+    let above_hotter = !(ext_above ^ t_ext_hotter);
+
+    let delta_t = (t_ext - t_int).abs().max(12.9);
+
+    let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
+    let r_int = 1.0 / h_natural;
+
+    let r_ext = if exterior_zone == ZoneLabel::Outdoor {
+        let h_glass = (h_natural.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
+        let h_forced = roughness.factor() * (h_glass - h_natural);
+        1.0 / (h_natural + h_forced)
+    } else {
+        r_int
+    };
+
+    (r_int, r_ext)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_approx(actual: f64, expected: f64, tol: f64) {
+        assert!(
+            (actual - expected).abs() <= tol,
+            "actual={actual:.6}, expected={expected:.6}, tol={tol}"
+        );
+    }
+
+    #[test]
+    fn vertical_surface_natural_h_and_resistance() {
+        // h = 1.31 * 12.9^(1/3) ≈ 3.0759; R = 1/h ≈ 0.3251
+        let h = tarp_h_natural(90.0, 12.9, true);
+        let expected_h = 1.31 * 12.9_f64.cbrt();
+        assert_approx(h, expected_h, 1e-10);
+        assert_approx(1.0 / h, 1.0 / expected_h, 1e-6);
+    }
+
+    #[test]
+    fn enhanced_tilt_above_hotter() {
+        // tilt=0 (horizontal), above_hotter=true → enhanced formula
+        // h = 9.482 * 12.9^(1/3) / (7.238 - |cos(0 rad)|)
+        //   = 9.482 * 12.9^(1/3) / (7.238 - 1.0)
+        let h = tarp_h_natural(0.0, 12.9, true);
+        let expected_h = 9.482 * 12.9_f64.cbrt() / (7.238 - 0.0_f64.to_radians().cos().abs());
+        assert_approx(h, expected_h, 1e-10);
+    }
+
+    #[test]
+    fn film_resistances_typical_wall_outdoor() {
+        // Vertical wall (tilt=90), LIV interior, EXT exterior.
+        // ground=10, ambient=10 → t_int(LIV)=20, t_ext(EXT)=15
+        // delta_t = max(12.9, |15-20|) = max(12.9, 5) = 12.9
+        // ext_above = 5 > 2 → true; t_ext_hotter = 15 >= 20 → false
+        // above_hotter = !(true ^ false) = !(true) = false
+        // But tilt=90 → h = 1.31 * 12.9^(1/3)
+        // h_glass = sqrt(h^2 + (3.40 * 2.0^0.75)^2)
+        // h_forced = 1.67 * (h_glass - h)
+        // r_int = 1/h, r_ext = 1/(h + h_forced)
+        let (r_int, r_ext) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Rough,
+        );
+        let h = 1.31 * 12.9_f64.cbrt();
+        let h_glass = (h.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
+        let h_forced = 1.67 * (h_glass - h);
+        assert_approx(r_int, 1.0 / h, 1e-10);
+        assert_approx(r_ext, 1.0 / (h + h_forced), 1e-10);
+        // Exterior resistance must be strictly less than interior (forced convection adds heat transfer).
+        assert!(r_ext < r_int, "r_ext={r_ext} should be < r_int={r_int}");
+    }
+
+    #[test]
+    fn film_resistances_interior_boundary_no_forced_convection() {
+        // LIV interior, ATC exterior — not outdoor, so r_ext == r_int.
+        let (r_int, r_ext) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Attic,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Rough,
+        );
+        assert_approx(r_int, r_ext, 1e-15);
+    }
+
+    #[test]
+    fn typical_zone_temps_known_anchors_and_interpolation() {
+        let temps = typical_zone_temps(10.0, 10.0);
+        // Anchors
+        assert_approx(temps[ZoneLabel::Ground.height_order() as usize], 10.0, 1e-12);
+        assert_approx(temps[ZoneLabel::Conditioned.height_order() as usize], 20.0, 1e-12);
+        assert_approx(temps[ZoneLabel::Outdoor.height_order() as usize], 15.0, 1e-12);
+        // Interpolated: Foundation = 10 + (20-10)*(1/2) = 15
+        assert_approx(temps[ZoneLabel::Foundation.height_order() as usize], 15.0, 1e-12);
+        // Garage = 20 + (15-20)*(1/3) = 20 - 5/3 ≈ 18.333...
+        assert_approx(
+            temps[ZoneLabel::Garage.height_order() as usize],
+            20.0 + (15.0 - 20.0) / 3.0,
+            1e-12,
+        );
+        // Attic = 20 + (15-20)*(2/3) = 20 - 10/3 ≈ 16.666...
+        assert_approx(
+            temps[ZoneLabel::Attic.height_order() as usize],
+            20.0 + (15.0 - 20.0) * 2.0 / 3.0,
+            1e-12,
+        );
+    }
+}

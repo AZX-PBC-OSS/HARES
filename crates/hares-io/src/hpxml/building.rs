@@ -102,6 +102,13 @@ pub struct Boundary {
     /// radiant barriers.  Ref: OCHRE `Envelope.py:222`.
     /// Valid range: 0.0–1.0.
     pub emittance: Option<f64>,
+    /// Surface tilt angle [degrees].
+    ///
+    /// 0 = horizontal facing up (flat roof), 90 = vertical (wall),
+    /// 180 = horizontal facing down (floor from above).
+    /// For roofs, computed from `<Pitch>` as `atan(pitch / 12)` in degrees.
+    /// Ref: OCHRE `hpxml.py` `pitch2deg()`.
+    pub tilt_deg: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +133,13 @@ pub enum DuctLocation {
     Other(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuctType {
+    Supply,
+    Return,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DuctSystem {
     pub id: String,
@@ -133,6 +147,7 @@ pub struct DuctSystem {
     pub insulation_r_value_m2_k_w: Option<f64>,
     pub surface_area_m2: Option<f64>,
     pub location: DuctLocation,
+    pub duct_type: DuctType,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -388,13 +403,17 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
     let mut zones_vec: Vec<Zone> = zones.into_values().collect();
     zones_vec.sort_by_key(|zone| zone_sort_key(&zone.zone_type));
 
-    // Assign volume to conditioned zones only; unconditioned zones (attic, garage,
-    // foundation) have distinct geometry that requires separate resolution.
+    // Assign volumes to all zones from available geometry.
     let default_height_m = ceiling_height_m.unwrap_or(2.5);
     for zone in &mut zones_vec {
-        if zone.zone_type == ZoneType::Conditioned {
-            zone.volume_m3 = zone.floor_area_m2.map(|a| a * default_height_m);
-        }
+        zone.volume_m3 = match zone.zone_type {
+            ZoneType::Conditioned => zone.floor_area_m2.map(|a| a * default_height_m),
+            ZoneType::Attic => compute_attic_volume(&boundaries, zone.floor_area_m2),
+            ZoneType::Garage | ZoneType::Foundation => {
+                zone.floor_area_m2.map(|a| a * default_height_m)
+            }
+            _ => None,
+        };
     }
 
     Ok(Building {
@@ -605,6 +624,7 @@ fn parse_windows(
             has_radiant_barrier: false,
             solar_absorptance: None,
             emittance: None,
+            tilt_deg: Some(90.0),
         });
     }
 
@@ -641,6 +661,24 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
     let (construction_type, finish_type) = extract_construction_metadata(node, &boundary_type);
     let insulation_details = extract_insulation_details(node);
 
+    // Surface tilt from HPXML <Pitch> (roofs) or implied by boundary type.
+    // Pitch is rise:12 run (US roofing convention); tilt = atan(pitch/12).
+    // Ref: OCHRE hpxml.py pitch2deg().
+    let tilt_deg = match boundary_type {
+        BoundaryType::Roof => {
+            let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw)
+                .unwrap_or(0.0);
+            Some((pitch / 12.0).atan().to_degrees())
+        }
+        BoundaryType::Wall | BoundaryType::FoundationWall | BoundaryType::RimJoist => {
+            Some(90.0)
+        }
+        BoundaryType::Floor => Some(0.0),
+        BoundaryType::Slab => Some(180.0),
+        BoundaryType::Door => Some(90.0),
+        _ => None,
+    };
+
     let interior_zone = parse_zone_ref(node.child("InteriorAdjacentTo"));
     let exterior_zone = parse_zone_ref(node.child("ExteriorAdjacentTo"))
         .or_else(|| infer_exterior_zone(&boundary_type));
@@ -661,6 +699,7 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         has_radiant_barrier,
         solar_absorptance,
         emittance,
+        tilt_deg,
     })
 }
 
@@ -1051,6 +1090,15 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
 
         let location = parse_duct_location(&location_text);
 
+        let duct_type = duct_node
+            .first_descendant("DuctType")
+            .map(|n| match n.text.trim().to_ascii_lowercase().as_str() {
+                "supply" => DuctType::Supply,
+                "return" => DuctType::Return,
+                _ => DuctType::Unknown,
+            })
+            .unwrap_or(DuctType::Unknown);
+
         let zone_key = if location_text.to_ascii_lowercase().contains("condition") {
             "conditioned"
         } else if location_text.to_ascii_lowercase().contains("attic") {
@@ -1074,6 +1122,7 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
                 insulation_r_value_m2_k_w,
                 surface_area_m2,
                 location,
+                duct_type,
             });
         }
     }
@@ -1318,6 +1367,74 @@ fn zone_key(zone_type: &ZoneType) -> String {
         ZoneType::Outdoor => "outdoor".to_string(),
         ZoneType::Other(label) => label.to_ascii_lowercase(),
     }
+}
+
+/// Compute attic volume from gable wall areas and roof pitch.
+///
+/// Treats the attic as a triangular prism:
+///   V = 0.5 × floor_area × height
+/// where height = √(gable_area × tan(roof_tilt_rad)).
+///
+/// The gable area is the largest attic-facing wall, and roof tilt comes from
+/// parsed `<Pitch>` on Roof boundaries adjacent to the attic.
+///
+/// Ref: OCHRE `hpxml.py` `parse_hpxml_zones()` lines 584–631.
+fn compute_attic_volume(boundaries: &[Boundary], attic_floor_area_m2: Option<f64>) -> Option<f64> {
+    // Attic floor area: prefer explicit zone value, fall back to the Floor boundary
+    // between conditioned space and attic (OCHRE calls this "Attic Floor").
+    let floor_area = attic_floor_area_m2
+        .or_else(|| {
+            boundaries
+                .iter()
+                .find(|b| {
+                    b.boundary_type == BoundaryType::Floor
+                        && ((b.interior_zone.as_ref() == Some(&ZoneType::Conditioned)
+                            && b.exterior_zone.as_ref() == Some(&ZoneType::Attic))
+                            || (b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                                && b.exterior_zone.as_ref() == Some(&ZoneType::Conditioned)))
+                })
+                .map(|b| b.area_m2)
+        })
+        .filter(|&a| a > 0.0)?;
+
+    // Find attic gable walls: Wall boundaries with interior=Attic, exterior=Outdoor.
+    let gable_areas: Vec<f64> = boundaries
+        .iter()
+        .filter(|b| {
+            b.boundary_type == BoundaryType::Wall
+                && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+                && matches!(
+                    b.exterior_zone.as_ref(),
+                    Some(&ZoneType::Outdoor) | None
+                )
+        })
+        .map(|b| b.area_m2)
+        .collect();
+
+    // Find roof tilt from Roof boundaries facing the attic.
+    let roof_tilt_deg: Option<f64> = boundaries
+        .iter()
+        .filter(|b| {
+            b.boundary_type == BoundaryType::Roof
+                && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
+        })
+        .find_map(|b| b.tilt_deg);
+
+    let tilt_rad = roof_tilt_deg?.to_radians();
+    if tilt_rad <= 0.0 {
+        return None;
+    }
+
+    // Use the largest gable wall area (handles both 2-gable and 3-gable cases).
+    let gable_area = gable_areas
+        .into_iter()
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
+    if gable_area <= 0.0 {
+        return None;
+    }
+
+    let attic_height = (gable_area * tilt_rad.tan()).sqrt();
+    Some(0.5 * floor_area * attic_height)
 }
 
 fn zone_sort_key(zone_type: &ZoneType) -> u8 {

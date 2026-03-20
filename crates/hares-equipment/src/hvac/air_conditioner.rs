@@ -22,7 +22,7 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     SpeedControlMode,
     helpers::{
-        DUCT_DSE_KEYS, equipment_id_from_config, first_f64, load_stage_values, lookup_zone,
+        equipment_id_from_config, first_f64, load_stage_values, lookup_zone,
         operating_mode_code, zone_id_from_config,
     },
 };
@@ -385,11 +385,10 @@ impl CoolingCore {
                 self.hvac.startup.c_d = 0.22;
             }
         } else {
-            self.hvac.duct_dse = first_f64(config, DUCT_DSE_KEYS).unwrap_or(1.0);
+            // DSE computed below after capacity is resolved.
             self.hvac.duct_zone_id =
                 super::helpers::parse_zone_id_key(config, "duct_zone_id");
         }
-        self.hvac.update_zone_heat_fractions();
 
         self.flow_fraction_correction = first_f64(
             config,
@@ -443,6 +442,17 @@ impl CoolingCore {
                 ));
             }
         }
+
+        // Resolve DSE now that cooling capacity is known.
+        if !self.is_room_ac {
+            let rated_cap = self.hvac.cooling_capacities_w.last().copied().unwrap_or(0.0);
+            let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
+            let n_speeds = self.hvac.cooling_capacities_w.len().min(255) as u8;
+            self.hvac.duct_dse = super::helpers::resolve_duct_dse(
+                config, false, rated_cap, fan_flow, n_speeds, false,
+            );
+        }
+        self.hvac.update_zone_heat_fractions();
 
         self.hvac.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
         // Rated SHR at the AHRI test point, used only for coil Ao initialisation.

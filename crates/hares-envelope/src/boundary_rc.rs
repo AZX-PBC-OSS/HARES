@@ -85,6 +85,10 @@ pub struct BoundaryInput {
     pub precomputed_rc: Vec<PrecomputedRCLayer>,
     /// Assembly R-value fallback [m²·K/W], used when no valid material layers.
     pub fallback_r_m2_k_w: f64,
+    /// Interior air-film resistance [m²·K/W] for this boundary.
+    pub r_film_interior_m2_k_w: f64,
+    /// Exterior air-film resistance [m²·K/W] for this boundary.
+    pub r_film_exterior_m2_k_w: f64,
 }
 
 /// Zone input: floor area and volume for capacitance derivation.
@@ -210,10 +214,7 @@ pub fn assemble_building_rc(
             ExteriorTarget::Ground => ground_node,
         };
 
-        // Skip boundaries that connect a zone to itself (self-loops are invalid).
-        if interior_node == exterior_node {
-            continue;
-        }
+        let same_zone = interior_node == exterior_node;
 
         match bd.exterior {
             ExteriorTarget::Outdoor => outdoor_connected = true,
@@ -223,8 +224,6 @@ pub fn assemble_building_rc(
 
         // Precomputed RC path (OCHRE LUT) takes priority over raw material layers.
         if !bd.precomputed_rc.is_empty() {
-            let same_zone =
-                matches!(bd.exterior, ExteriorTarget::Zone(idx) if idx == bd.interior_zone_idx);
             let outer_node = build_precomputed_boundary(
                 &bd.precomputed_rc,
                 bd.area_m2,
@@ -234,6 +233,8 @@ pub fn assemble_building_rc(
                 &mut next_layer_id,
                 &mut capacitances,
                 &mut resistances,
+                bd.r_film_interior_m2_k_w,
+                bd.r_film_exterior_m2_k_w,
             );
             if let Some(outer) = outer_node {
                 layer_info.insert(
@@ -259,19 +260,25 @@ pub fn assemble_building_rc(
                 bd.area_m2,
                 interior_node,
                 exterior_node,
+                same_zone,
                 &mut next_layer_id,
                 &mut capacitances,
                 &mut resistances,
+                bd.r_film_interior_m2_k_w,
+                bd.r_film_exterior_m2_k_w,
             );
-            layer_info.insert(
-                bd_idx,
-                SurfaceLayerInfo {
-                    outer_node,
-                    interior_zone_idx: bd.interior_zone_idx,
-                },
-            );
-        } else {
+            if let Some(outer) = outer_node {
+                layer_info.insert(
+                    bd_idx,
+                    SurfaceLayerInfo {
+                        outer_node: outer,
+                        interior_zone_idx: bd.interior_zone_idx,
+                    },
+                );
+            }
+        } else if !same_zone {
             // No valid material layers: single-resistance connection.
+            // Same-zone pure-resistance boundaries have no thermal mass — skip.
             let r_ohm = bd.fallback_r_m2_k_w.max(1e-6) / bd.area_m2;
             add_resistance(&mut resistances, interior_node, exterior_node, r_ohm);
         }
@@ -366,20 +373,44 @@ pub fn assemble_building_rc(
 
 /// Build RC nodes and resistances for a boundary with valid material layers.
 ///
-/// Returns the NodeId of the outermost (exterior-side) layer node.
+/// When `same_zone` is true (adjacent/party wall), keep only the inner half
+/// of layers as a dead-end "fin" of thermal mass (matches OCHRE's halving).
+/// For odd layer counts, the middle layer is kept with halved capacitance.
+/// Returns `None` if no capacitor nodes remain.
 fn build_layered_boundary(
     layers: &[&LayerInput],
     boundary_area: f64,
     interior_node: NodeId,
     exterior_node: NodeId,
+    same_zone: bool,
     next_layer_id: &mut u32,
     capacitances: &mut HashMap<NodeId, f64>,
     resistances: &mut HashMap<(NodeId, NodeId), f64>,
-) -> NodeId {
-    let n_layers = layers.len();
+    r_film_interior: f64,
+    r_film_exterior: f64,
+) -> Option<NodeId> {
+    let mut effective_layers: Vec<&LayerInput> = layers.to_vec();
+    // Track whether the outermost retained layer needs halved capacitance (odd count).
+    let mut halve_last_cap = false;
+
+    // Same-zone: keep only the inner half of layers (matching OCHRE halving).
+    // Odd counts keep n/2+1 layers with the middle layer's capacitance halved.
+    if same_zone {
+        let n = effective_layers.len();
+        let keep = if n % 2 == 0 { n / 2 } else { n / 2 + 1 };
+        if n % 2 != 0 {
+            halve_last_cap = true;
+        }
+        effective_layers.truncate(keep);
+        if effective_layers.is_empty() {
+            return None;
+        }
+    }
+
+    let n_layers = effective_layers.len();
     let mut layer_nodes: Vec<NodeId> = Vec::with_capacity(n_layers);
 
-    for layer in layers.iter() {
+    for (i, layer) in effective_layers.iter().enumerate() {
         let node = NodeId(*next_layer_id);
         *next_layer_id += 1;
         let layer_area = if layer.area_m2 > 0.0 {
@@ -387,28 +418,31 @@ fn build_layered_boundary(
         } else {
             boundary_area
         };
-        let cap =
+        let mut cap =
             (layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m * layer_area)
                 .max(MIN_CAPACITANCE_J_K);
+        if halve_last_cap && i == n_layers - 1 {
+            cap /= 2.0;
+        }
         capacitances.insert(node, cap);
         layer_nodes.push(node);
     }
 
     // Interior zone → innermost layer.
-    let inner = layers[0];
+    let inner = effective_layers[0];
     let inner_area = if inner.area_m2 > 0.0 {
         inner.area_m2
     } else {
         boundary_area
     };
     let r_int = inner.thickness_m / (2.0 * inner.conductivity_w_m_k * inner_area)
-        + R_FILM_INTERIOR_M2_K_W / inner_area;
+        + r_film_interior / inner_area;
     add_resistance(resistances, interior_node, layer_nodes[0], r_int);
 
     // Adjacent layer connections.
     for i in 0..(n_layers - 1) {
-        let li = layers[i];
-        let lj = layers[i + 1];
+        let li = effective_layers[i];
+        let lj = effective_layers[i + 1];
         let ai = if li.area_m2 > 0.0 {
             li.area_m2
         } else {
@@ -424,18 +458,20 @@ fn build_layered_boundary(
         add_resistance(resistances, layer_nodes[i], layer_nodes[i + 1], r);
     }
 
-    // Outermost layer → exterior node.
-    let outer = layers[n_layers - 1];
-    let outer_area = if outer.area_m2 > 0.0 {
-        outer.area_m2
-    } else {
-        boundary_area
-    };
-    let r_ext = outer.thickness_m / (2.0 * outer.conductivity_w_m_k * outer_area)
-        + R_FILM_EXTERIOR_M2_K_W / outer_area;
-    add_resistance(resistances, layer_nodes[n_layers - 1], exterior_node, r_ext);
+    // Outermost layer → exterior node (skip for same-zone dead-end fin).
+    if !same_zone {
+        let outer = effective_layers[n_layers - 1];
+        let outer_area = if outer.area_m2 > 0.0 {
+            outer.area_m2
+        } else {
+            boundary_area
+        };
+        let r_ext = outer.thickness_m / (2.0 * outer.conductivity_w_m_k * outer_area)
+            + r_film_exterior / outer_area;
+        add_resistance(resistances, layer_nodes[n_layers - 1], exterior_node, r_ext);
+    }
 
-    layer_nodes[n_layers - 1]
+    Some(layer_nodes[n_layers - 1])
 }
 
 /// Build RC nodes from pre-computed OCHRE layer data.
@@ -458,6 +494,8 @@ fn build_precomputed_boundary(
     next_layer_id: &mut u32,
     capacitances: &mut HashMap<NodeId, f64>,
     resistances: &mut HashMap<(NodeId, NodeId), f64>,
+    r_film_interior: f64,
+    r_film_exterior: f64,
 ) -> Option<NodeId> {
     if layers.is_empty() {
         return None;
@@ -535,11 +573,11 @@ fn build_precomputed_boundary(
 
     // Step 6: add film resistances
     if !res_abs.is_empty() {
-        res_abs[0] += R_FILM_INTERIOR_M2_K_W / boundary_area;
+        res_abs[0] += r_film_interior / boundary_area;
     }
     if !same_zone && !res_abs.is_empty() {
         let last = res_abs.len() - 1;
-        res_abs[last] += R_FILM_EXTERIOR_M2_K_W / boundary_area;
+        res_abs[last] += r_film_exterior / boundary_area;
     }
 
     // Step 7: create nodes and wire
@@ -618,6 +656,8 @@ mod tests {
             material_layers: layers,
             precomputed_rc: Vec::new(),
             fallback_r_m2_k_w: fallback_r,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
         }
     }
 
@@ -765,20 +805,78 @@ mod tests {
         assert_eq!(rc.n_ext, 1);
     }
 
-    // ── Self-loop boundary is skipped ───────────────────────────────────
+    // ── Same-zone boundary without layers is a no-op ───────────────────
 
     #[test]
-    fn self_loop_boundary_is_skipped() {
+    fn same_zone_no_layers_is_noop() {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
-        // Boundary where interior == exterior zone.
+        // Same-zone boundary with no material layers — no thermal mass to model.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), vec![], 2.5)];
-        // Should succeed (zone gets fallback connection to outdoor).
         let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        // Only the zone air node; pure-resistance self-loop is skipped.
         assert_eq!(rc.a_c.nrows(), 1);
+    }
+
+    // ── Same-zone boundary with layers becomes internal mass ─────────
+
+    #[test]
+    fn same_zone_with_layers_creates_internal_mass() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+        }];
+        let caps = derive_zone_capacitances(&zones);
+        let layers = vec![
+            make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
+            make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
+            make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
+            make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
+        ];
+        // Same-zone boundary with 4 layers → halved to 2 internal mass nodes.
+        let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
+        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        // 1 zone air node + 2 layer nodes (inner half of 4 layers).
+        assert_eq!(rc.a_c.nrows(), 3);
+    }
+
+    // ── Same-zone boundary with odd layers halves middle cap ──────────
+
+    #[test]
+    fn same_zone_odd_layers_halves_middle_capacitance() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+        }];
+        let caps = derive_zone_capacitances(&zones);
+        let layers = vec![
+            make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
+            make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
+            make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
+        ];
+        // 3 layers → keep 2 (n/2+1), with layer[1]'s cap halved.
+        let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
+        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        // 1 zone air node + 2 layer nodes.
+        assert_eq!(rc.a_c.nrows(), 3);
+    }
+
+    #[test]
+    fn same_zone_single_layer_keeps_one_node_with_halved_cap() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+        }];
+        let caps = derive_zone_capacitances(&zones);
+        let layers = vec![make_layer(0.10, 1.0, 2000.0, 900.0, 0.0)];
+        // 1 layer → keep 1 (n/2+1=1), with halved capacitance.
+        let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
+        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        // 1 zone air node + 1 layer node.
+        assert_eq!(rc.a_c.nrows(), 2);
     }
 
     // ── Layer node IDs don't collide with external nodes ────────────────
@@ -955,6 +1053,8 @@ mod tests {
             material_layers: Vec::new(),
             precomputed_rc: precomputed,
             fallback_r_m2_k_w: fallback_r,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
         }
     }
 
@@ -1195,6 +1295,8 @@ mod tests {
             material_layers: raw_layers,
             precomputed_rc: precomputed,
             fallback_r_m2_k_w: 2.5,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
         };
         let rc = assemble_building_rc(&[bd], 1, &caps).unwrap();
 

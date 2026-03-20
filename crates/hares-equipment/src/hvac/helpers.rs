@@ -186,6 +186,95 @@ pub fn apply_heating_control_unchecked(
     Ok(())
 }
 
+/// Resolve duct DSE from equipment config.
+///
+/// Checks for a direct `duct_dse` override first, then builds ASHRAE 152
+/// inputs from raw duct parameters and computes DSE dynamically.
+pub fn resolve_duct_dse(
+    config: &EquipmentConfig,
+    is_heating: bool,
+    capacity_w: f64,
+    fan_flow_m3_s: f64,
+    n_speeds: u8,
+    is_heat_pump: bool,
+) -> f64 {
+    // Direct override takes priority.
+    if let Some(dse) = first_f64(config, DUCT_DSE_KEYS) {
+        return dse.clamp(0.0, 1.0);
+    }
+
+    // Check for raw duct params from ASHRAE 152 passthrough.
+    let Some(zone_type_str) = config.get_str("duct_zone_type") else {
+        return 1.0;
+    };
+    let Some(zone_type) = parse_ashrae152_zone_type(&zone_type_str) else {
+        return 1.0;
+    };
+
+    let lat = config.get_f64("duct_latitude_deg").unwrap_or(40.0);
+    let lon = config.get_f64("duct_longitude_deg").unwrap_or(-100.0);
+    let house_vol = config.get_f64("duct_house_volume_m3").unwrap_or(400.0);
+    let supply_leak = config.get_f64("duct_supply_leakage_frac").unwrap_or(0.0);
+    let supply_area = config.get_f64("duct_supply_area_m2").unwrap_or(0.0);
+    let supply_r = config.get_f64("duct_supply_r_m2_k_w").unwrap_or(0.0);
+    let return_leak = config.get_f64("duct_return_leakage_frac").unwrap_or(0.0);
+    let return_area = config.get_f64("duct_return_area_m2").unwrap_or(0.0);
+    let return_r = config.get_f64("duct_return_r_m2_k_w").unwrap_or(0.0);
+
+    // Need positive capacity and fan flow for meaningful DSE calculation.
+    if capacity_w <= 0.0 || fan_flow_m3_s <= 0.0 {
+        return 1.0;
+    }
+
+    let hvac_mult = if is_heating { 1.0 } else { -1.0 };
+
+    let input = hares_physics::ashrae152::DuctDseInput {
+        zone_type,
+        latitude_deg: lat,
+        longitude_deg: lon,
+        house_volume_m3: house_vol,
+        supply_leakage_frac: supply_leak,
+        supply_area_m2: supply_area,
+        supply_r_nominal_m2_k_w: supply_r,
+        return_leakage_frac: return_leak,
+        return_area_m2: return_area,
+        return_r_nominal_m2_k_w: return_r,
+        is_heating,
+        capacity_w,
+        fan_flow_m3_s,
+        n_speeds,
+        hvac_mult,
+        capacity_low_w: None,
+        fan_flow_low_m3_s: None,
+        is_heat_pump,
+    };
+
+    hares_physics::ashrae152::calculate_dse(&input)
+}
+
+fn parse_ashrae152_zone_type(s: &str) -> Option<hares_physics::ashrae152::Ashrae152ZoneType> {
+    use hares_physics::ashrae152::Ashrae152ZoneType;
+    match s {
+        "attic_vented" => Some(Ashrae152ZoneType::AtticVented),
+        "attic_vented_radiant_barrier" => Some(Ashrae152ZoneType::AtticVentedRadiantBarrier),
+        "attic_unvented" => Some(Ashrae152ZoneType::AtticUnvented),
+        "attic_unvented_radiant_barrier" => Some(Ashrae152ZoneType::AtticUnventedRadiantBarrier),
+        "garage" => Some(Ashrae152ZoneType::Garage),
+        "unvent_unins_crawlspace" => Some(Ashrae152ZoneType::UnventUninsulatedCrawlspace),
+        "unvent_crawlspace_ins_floor_wall" => Some(Ashrae152ZoneType::UnventCrawlspaceInsFloorWall),
+        "unvent_crawlspace_ins_floor" => Some(Ashrae152ZoneType::UnventCrawlspaceInsFloor),
+        "vent_unins_crawlspace" => Some(Ashrae152ZoneType::VentUninsulatedCrawlspace),
+        "vent_crawlspace_ins_floor_wall" => Some(Ashrae152ZoneType::VentCrawlspaceInsFloorWall),
+        "vent_crawlspace_ins_floor" => Some(Ashrae152ZoneType::VentCrawlspaceInsFloor),
+        "unins_basement" => Some(Ashrae152ZoneType::UninsulatedBasement),
+        "basement_ins_walls" => Some(Ashrae152ZoneType::BasementInsWalls),
+        "basement_ins_ceiling" => Some(Ashrae152ZoneType::BasementInsCeiling),
+        "under_slab" => Some(Ashrae152ZoneType::UnderSlab),
+        "ext_walls" => Some(Ashrae152ZoneType::ExteriorWalls),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use hares_types::OperatingMode;

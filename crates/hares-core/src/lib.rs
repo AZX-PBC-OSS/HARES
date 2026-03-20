@@ -14,6 +14,7 @@ pub use checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
 pub use clock::SimClock;
 pub use dwelling::{
     Dwelling, DwellingConfig, SimulationResults as DwellingSimulationResults, StepResult,
+    building_to_boundary_inputs, building_to_zone_inputs,
 };
 pub use engine::{KernelTimer, SimStatus, SimulationEngine, SimulationResults};
 pub use environment::EnvironmentManager;

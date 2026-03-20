@@ -51,8 +51,6 @@ pub const DEFAULT_HEATING_CAPACITY_W: f64 = 10_000.0;
 pub const DEFAULT_HEATING_EIR: f64 = 0.35;
 pub const DEFAULT_BACKUP_CAPACITY_W: f64 = 5_000.0;
 pub const DEFAULT_BACKUP_EIR: f64 = 1.0;
-pub const DEFAULT_DUCT_DSE: f64 = 1.0;
-
 pub const DEFAULT_MSHP_SPEED_MAP: [u8; 4] = [1, 3, 5, 9];
 pub const MAX_MSHP_SPEED_INDEX: u8 = 9;
 pub const MSHP_PAN_HEATER_DEFAULT_KW: f64 = 0.150;

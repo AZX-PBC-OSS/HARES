@@ -19,13 +19,13 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     SpeedControlMode,
     helpers::{
-        DUCT_DSE_KEYS, HEATING_CAPACITY_KEYS, apply_heating_control_unchecked,
+        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked,
         equipment_id_from_config, first_f64, load_stage_values, lookup_zone, zone_id_from_config,
     },
 };
 use super::constants::{
     DEFAULT_AC_SPEED_MAP_ERROR, DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR,
-    DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR, DEFAULT_DEFROST_POWER_W, DEFAULT_DUCT_DSE,
+    DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR, DEFAULT_DEFROST_POWER_W,
     DEFAULT_EQUIPMENT_ID, DEFAULT_ER_HARD_LOCKOUT_TIME_S, DEFAULT_ER_LOCKOUT_TEMP_C,
     DEFAULT_ER_SETPOINT_DEADBAND_OFFSET, DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER,
     DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR, DEFAULT_HP_LOCKOUT_TEMP_C,
@@ -365,12 +365,8 @@ impl HeatPumpHeaterCore {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        self.hvac.duct_dse = first_f64(config, DUCT_DSE_KEYS).unwrap_or(DEFAULT_DUCT_DSE);
         self.hvac.duct_zone_id =
             super::super::helpers::parse_zone_id_key(config, "duct_zone_id");
-        self.hvac.update_zone_heat_fractions();
-        self.hvac.duct_zone_id = super::super::helpers::parse_zone_id_key(config, "duct_zone_id");
-        self.hvac.update_zone_heat_fractions();
 
         self.hvac.heating_capacities_w = load_stage_values(
             config,
@@ -410,6 +406,21 @@ impl HeatPumpHeaterCore {
             &mut self.hvac.eir_by_stage,
             DEFAULT_HEATING_EIR,
         )?;
+
+        // Resolve DSE now that capacity stages are known.
+        let is_mshp = matches!(self.variant, HeaterVariant::Minisplit);
+        if is_mshp {
+            // Ductless MSHP: no distribution losses.
+            self.hvac.duct_dse = 1.0;
+        } else {
+            let rated_cap = self.hvac.heating_capacities_w.last().copied().unwrap_or(0.0);
+            let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
+            let n_speeds = self.hvac.heating_capacities_w.len().min(255) as u8;
+            self.hvac.duct_dse = super::super::helpers::resolve_duct_dse(
+                config, true, rated_cap, fan_flow, n_speeds, true,
+            );
+        }
+        self.hvac.update_zone_heat_fractions();
 
         self.defrost_config = DefrostConfig::on_demand(
             first_f64(config, &["defrost_capacity_reduction_factor"])

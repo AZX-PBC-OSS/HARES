@@ -549,6 +549,7 @@ mod tests {
                     has_radiant_barrier: false,
                     solar_absorptance: None,
                     emittance: None,
+                    tilt_deg: Some(90.0),
                 },
                 Boundary {
                     id: "north-wall".to_string(),
@@ -566,6 +567,7 @@ mod tests {
                     has_radiant_barrier: false,
                     solar_absorptance: None,
                     emittance: None,
+                    tilt_deg: Some(90.0),
                 },
             ],
             windows: Vec::<Window>::new(),

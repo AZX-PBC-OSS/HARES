@@ -42,6 +42,22 @@ const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 const DEFAULT_TEMP_SANITY_LOW_C: f64 = -80.0;
 const DEFAULT_TEMP_SANITY_HIGH_C: f64 = 90.0;
 
+/// Annual weather averages needed for film coefficient computation.
+struct WeatherAverages {
+    avg_wind_m_s: f64,
+    avg_ambient_c: f64,
+    avg_ground_c: f64,
+}
+
+fn compute_weather_averages(weather: &WeatherTimeSeries) -> WeatherAverages {
+    let n = weather.len().max(1) as f64;
+    WeatherAverages {
+        avg_wind_m_s: weather.wind_speed_m_s.iter().sum::<f64>() / n,
+        avg_ambient_c: weather.dry_bulb_c.iter().sum::<f64>() / n,
+        avg_ground_c: weather.ground_temp_c.iter().sum::<f64>() / n,
+    }
+}
+
 /// Core result type for dwelling operations.
 pub type Result<T> = std::result::Result<T, HaresError>;
 
@@ -309,6 +325,7 @@ impl Dwelling {
         );
 
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
+        let weather_avgs = compute_weather_averages(&weather);
         let mut environment = EnvironmentManager::new(
             weather, schedule, &building, time_res, config.sim_config.start_time,
         )
@@ -334,7 +351,7 @@ impl Dwelling {
         };
 
         let (thermal_solver, humidity_solver, electrical_solver, fluid_solver, zone_capacitances_j_k) =
-            build_default_solvers(&initial_env, &config.sim_config, &building, &defaults)?;
+            build_default_solvers(&initial_env, &config.sim_config, &building, &defaults, &weather_avgs)?;
 
         let empty_overrides = Value::Object(Map::new());
         let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
@@ -911,6 +928,29 @@ impl Dwelling {
             self.latest_env.custom_domains.push(update);
         }
 
+        // Split HVAC sensible from internal gains.
+        // Only zone-conditioning HVAC (HvacHeating/HvacCooling) is subtracted.
+        // Water heaters are Thermal stage but heat water, not the zone.
+        {
+            let hvac_sensible_w: f64 = self
+                .equipment
+                .iter()
+                .filter(|eq| matches!(
+                    eq.descriptor().end_use,
+                    EndUse::HvacHeating | EndUse::HvacCooling
+                ))
+                .map(|eq| {
+                    let t = eq.telemetry();
+                    // Heaters: thermal_output_w (positive = heating zone)
+                    // Coolers: sensible_cooling_w (positive magnitude, port gets negative)
+                    t.get("thermal_output_w").unwrap_or(0.0)
+                        - t.get("sensible_cooling_w").unwrap_or(0.0)
+                })
+                .sum();
+            let gains = self.thermal_solver.component_gains_mut();
+            gains.internal_gain_w = gains.port_sensible_w - hvac_sensible_w;
+        }
+
         apply_thermal_update_to_zones(&mut self.latest_env, &thermal_update);
         apply_humidity_update_to_zones(&mut self.latest_env, &humidity_update);
 
@@ -1115,7 +1155,7 @@ impl Dwelling {
             ("Infiltration Heat Gain - Indoor (W)", gains.infiltration_w),
             ("Forced Ventilation Heat Gain - Indoor (W)", gains.ventilation_w),
             ("Natural Ventilation Heat Gain - Indoor (W)", gains.natural_ventilation_w),
-            ("Internal Heat Gain - Indoor (W)", gains.port_sensible_w),
+            ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w),
             ("Radiation Heat Gain - Indoor (W)", gains.interior_lwr_w),
         ];
         for &(col_name, value) in envelope_cols {
@@ -1174,6 +1214,7 @@ fn build_default_solvers(
     sim_config: &SimulationConfig,
     building: &Building,
     defaults: &DefaultsStore,
+    weather_avgs: &WeatherAverages,
 ) -> Result<SolverBundle> {
     use hares_envelope::state_space::{OutputMapping, StateSpaceModel};
     use nalgebra::DMatrix;
@@ -1182,7 +1223,10 @@ fn build_default_solvers(
 
     // Convert building data to envelope-crate input types.
     let zone_inputs = building_to_zone_inputs(building, n_zones);
-    let boundary_inputs = building_to_boundary_inputs(building, n_zones, defaults);
+    let boundary_inputs = building_to_boundary_inputs(
+        building, n_zones, defaults,
+        weather_avgs.avg_wind_m_s, weather_avgs.avg_ambient_c, weather_avgs.avg_ground_c,
+    );
 
     // Zone air node capacitances [J/K].
     let zone_capacitances = derive_zone_capacitances(&zone_inputs);
@@ -1376,8 +1420,8 @@ fn build_default_solvers(
         // Compute radiation fraction and resistance for iterative LWR solver.
         // rad_frac = R_film / (R_film + R_outermost_half) [m²·K/W]
         // rad_res  = R_film / area [K/W]
-        let r_film = hares_envelope::boundary_rc::R_FILM_EXTERIOR_M2_K_W;
         let bd_input = &boundary_inputs[surface_idx];
+        let r_film = bd_input.r_film_exterior_m2_k_w;
         let r_outermost_half = if !bd_input.precomputed_rc.is_empty() {
             bd_input.precomputed_rc.last().unwrap().resistance_m2_k_w / 2.0
         } else {
@@ -1432,8 +1476,8 @@ fn build_default_solvers(
             //   R_total = 1/U, R_glass ≈ R_total - R_film_int - R_film_ext
             let r_total = 1.0 / u_factor.max(0.01);
             let r_glass = (r_total
-                - hares_envelope::boundary_rc::R_FILM_INTERIOR_M2_K_W
-                - hares_envelope::boundary_rc::R_FILM_EXTERIOR_M2_K_W)
+                - bd_input.r_film_interior_m2_k_w
+                - bd_input.r_film_exterior_m2_k_w)
                 .max(0.0);
             let (transmittance, radiation_frac) =
                 hares_physics::solar::calculate_window_parameters(
@@ -1601,7 +1645,7 @@ fn build_default_solvers(
 const DEFAULT_R_M2_K_W: f64 = hares_envelope::boundary_rc::DEFAULT_R_M2_K_W;
 
 /// Convert building zones to envelope-crate ZoneInput.
-fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput> {
+pub fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput> {
     (0..n_zones)
         .map(|idx| ZoneInput {
             floor_area_m2: building.zones.get(idx).and_then(|z| z.floor_area_m2),
@@ -1615,13 +1659,17 @@ fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput
 /// When the defaults store contains an envelope LUT, attempts to resolve each
 /// boundary to OCHRE pre-computed RC layers. Falls through to raw material
 /// layers on LUT miss.
-fn building_to_boundary_inputs(
+pub fn building_to_boundary_inputs(
     building: &Building,
     n_zones: usize,
     defaults: &DefaultsStore,
+    avg_wind_m_s: f64,
+    avg_ambient_c: f64,
+    avg_ground_c: f64,
 ) -> Vec<BoundaryInput> {
     use hares_envelope::PrecomputedRCLayer;
     use hares_io::envelope_lut::resolve_boundary_name;
+    use hares_physics::film_coefficients::{SurfaceRoughness, film_resistances};
 
     let envelope_lut = defaults.envelope_lut();
 
@@ -1673,6 +1721,24 @@ fn building_to_boundary_inputs(
                 })
                 .unwrap_or_default();
 
+            let tilt_deg = match bd.boundary_type {
+                hares_io::hpxml::BoundaryType::Roof => 0.0,
+                hares_io::hpxml::BoundaryType::Slab
+                | hares_io::hpxml::BoundaryType::Floor => 180.0,
+                _ => 90.0,
+            };
+            let interior_label = zone_type_to_label(bd.interior_zone.as_ref());
+            let exterior_label = zone_type_to_label(bd.exterior_zone.as_ref());
+            let (r_film_int, r_film_ext) = film_resistances(
+                tilt_deg,
+                interior_label,
+                exterior_label,
+                avg_wind_m_s,
+                avg_ground_c,
+                avg_ambient_c,
+                SurfaceRoughness::Rough,
+            );
+
             BoundaryInput {
                 area_m2: bd.area_m2,
                 interior_zone_idx,
@@ -1690,9 +1756,25 @@ fn building_to_boundary_inputs(
                     .collect(),
                 precomputed_rc,
                 fallback_r_m2_k_w: fallback_r,
+                r_film_interior_m2_k_w: r_film_int,
+                r_film_exterior_m2_k_w: r_film_ext,
             }
         })
         .collect()
+}
+
+/// Map HPXML ZoneType to film-coefficient ZoneLabel.
+fn zone_type_to_label(zt: Option<&hares_io::hpxml::ZoneType>) -> hares_physics::film_coefficients::ZoneLabel {
+    use hares_io::hpxml::ZoneType;
+    use hares_physics::film_coefficients::ZoneLabel;
+    match zt {
+        Some(ZoneType::Conditioned) => ZoneLabel::Conditioned,
+        Some(ZoneType::Attic) => ZoneLabel::Attic,
+        Some(ZoneType::Garage) => ZoneLabel::Garage,
+        Some(ZoneType::Foundation) => ZoneLabel::Foundation,
+        Some(ZoneType::Outdoor) | None => ZoneLabel::Outdoor,
+        Some(ZoneType::Other(_)) => ZoneLabel::Outdoor,
+    }
 }
 
 /// Find zone index by ZoneType equality (exact match including Other payload).
@@ -2219,6 +2301,7 @@ fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
             has_radiant_barrier: false,
             solar_absorptance: None,
             emittance: None,
+            tilt_deg: Some(90.0),
         }],
         windows: Vec::new(),
         infiltration_ach50: None,

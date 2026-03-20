@@ -16,7 +16,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        DUCT_DSE_KEYS, HEATING_CAPACITY_KEYS, apply_heating_control_unchecked,
+        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked,
         equipment_id_from_config, first_f64, operating_mode_code, parse_fuel_type,
         update_heating_control, zone_id_from_config,
     },
@@ -120,14 +120,18 @@ impl Equipment for ElectricFurnace {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        self.hvac.duct_dse = first_f64(config, DUCT_DSE_KEYS).unwrap_or(1.0);
-        self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
-        self.hvac.update_zone_heat_fractions();
 
         self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
             .unwrap_or(10_000.0)
             .max(0.0);
         self.eir = first_f64(config, &["eir", "heating_eir", "EIR"]).unwrap_or(1.0);
+
+        let fan_flow = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
+        self.hvac.duct_dse = super::helpers::resolve_duct_dse(
+            config, true, self.rated_capacity_w, fan_flow, 1, false,
+        );
+        self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
+        self.hvac.update_zone_heat_fractions();
 
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.eir_by_stage = vec![self.eir];
@@ -289,12 +293,17 @@ impl Equipment for GasFurnace {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        self.hvac.duct_dse = first_f64(config, DUCT_DSE_KEYS).unwrap_or(1.0);
-        self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
-        self.hvac.update_zone_heat_fractions();
+
         self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
             .unwrap_or(10_000.0)
             .max(0.0);
+
+        let fan_flow = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
+        self.hvac.duct_dse = super::helpers::resolve_duct_dse(
+            config, true, self.rated_capacity_w, fan_flow, 1, false,
+        );
+        self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
+        self.hvac.update_zone_heat_fractions();
         self.fuel_efficiency = first_f64(config, &["fuel_efficiency", "afue", "efficiency"])
             .unwrap_or(DEFAULT_GAS_AFUE);
         if self.fuel_efficiency <= 0.0 || !self.fuel_efficiency.is_finite() {

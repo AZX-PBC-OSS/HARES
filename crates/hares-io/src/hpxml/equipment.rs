@@ -80,23 +80,35 @@ fn apply_overrides(specs: &mut [EquipmentSpec], overrides: &Value) {
     }
 }
 
-/// Compute simplified ASHRAE 152 Distribution System Efficiency from parsed duct data.
+/// Extract raw duct parameters for ASHRAE 152 DSE calculation.
 ///
-/// Scans `building.zones` for the first non-conditioned zone containing duct systems
-/// and returns `(duct_dse, duct_zone_index)` params for injection into HVAC equipment
-/// configs. The zone index is 1-based (matching `ZoneId(u16)`).
+/// Scans `building.zones` for non-conditioned duct systems and passes through
+/// the raw parameters needed by `hares_physics::ashrae152::calculate_dse()`.
+/// The HVAC equipment `init` function computes DSE from these at init time,
+/// when capacity and fan flow are known.
 ///
-/// Simplified DSE per OCHRE:
-///   DSE = 1 - leakage_loss - conduction_loss
-///
-/// - leakage_loss: `leakage_fraction * 0.5` (half supply, half return averaging)
-/// - conduction_loss: `surface_area_m2 / (r_value_m2_k_w * conditioned_volume_m3)`
-///   scaled by an assumed delta-T ratio of 0.1 (10% of conditioned-to-duct temp difference).
-///   Only applied when both surface area and R-value are available.
+/// Falls back to `AnnualDistributionSystemEfficiency` from HPXML if present.
 fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
-    let mut params = Map::new();
+    use super::building::DuctType;
 
-    let conditioned_volume_m3 = building.conditioned_volume_m3.unwrap_or(0.0);
+    let mut params = Map::new();
+    let house_volume_m3 = building.conditioned_volume_m3.unwrap_or(400.0);
+
+    // Check for direct DSE override from HPXML first.
+    // (AnnualDistributionSystemEfficiency would be set on a per-equipment basis
+    //  by the caller if available; this function handles the duct-based path.)
+
+    // Aggregate supply vs return duct data from unconditioned zones.
+    let mut supply_leakage = 0.0_f64;
+    let mut supply_area_m2 = 0.0_f64;
+    let mut supply_r_m2_k_w = 0.0_f64;
+    let mut supply_count = 0u32;
+    let mut return_leakage = 0.0_f64;
+    let mut return_area_m2 = 0.0_f64;
+    let mut return_r_m2_k_w = 0.0_f64;
+    let mut return_count = 0u32;
+    let mut duct_zone_idx: Option<usize> = None;
+    let mut duct_zone_type_str: Option<String> = None;
 
     for (zone_idx, zone) in building.zones.iter().enumerate() {
         if matches!(zone.zone_type, ZoneType::Conditioned) {
@@ -108,41 +120,80 @@ fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
                 continue;
             }
 
-            let mut dse = 1.0_f64;
-
-            // Leakage loss: half-split between supply and return
-            if let Some(leak) = duct.leakage_fraction {
-                dse -= leak * 0.5;
+            if duct_zone_idx.is_none() {
+                duct_zone_idx = Some(zone_idx);
+                duct_zone_type_str = Some(zone_type_to_ashrae152_str(&zone.zone_type, zone.vented));
             }
 
-            // Conduction loss from duct surface area and R-value
-            if let Some(area_m2) = duct.surface_area_m2 {
-                if let Some(r_val) = duct.insulation_r_value_m2_k_w {
-                    if r_val > 0.0 && conditioned_volume_m3 > 0.0 {
-                        // UA = area / R-value [W/K]. Normalize by a reference capacity
-                        // derived from house volume (rough proxy for system size).
-                        // Factor 0.1 accounts for seasonal avg delta-T fraction.
-                        let ua_w_k = area_m2 / r_val;
-                        let ref_capacity_w = conditioned_volume_m3 * 40.0; // ~40 W/m3 sizing rule
-                        let conduction_loss = (ua_w_k * 10.0) / ref_capacity_w; // delta-T ~10K
-                        dse -= conduction_loss;
-                    }
+            let leak = duct.leakage_fraction.unwrap_or(0.0);
+            let area = duct.surface_area_m2.unwrap_or(0.0);
+            let r_val = duct.insulation_r_value_m2_k_w.unwrap_or(0.0);
+
+            match duct.duct_type {
+                DuctType::Supply => {
+                    supply_leakage += leak;
+                    supply_area_m2 += area;
+                    supply_r_m2_k_w = supply_r_m2_k_w.max(r_val);
+                    supply_count += 1;
                 }
-            }
-
-            dse = dse.clamp(0.3, 1.0);
-
-            if dse < 1.0 {
-                params.insert("duct_dse".to_string(), json!(dse));
-                // zone_idx is 0-based; ZoneId is 1-based
-                let zone_id = (zone_idx as u16) + 1;
-                params.insert("duct_zone_id".to_string(), json!(zone_id));
-                return params;
+                DuctType::Return => {
+                    return_leakage += leak;
+                    return_area_m2 += area;
+                    return_r_m2_k_w = return_r_m2_k_w.max(r_val);
+                    return_count += 1;
+                }
+                DuctType::Unknown => {
+                    // Unknown type: split evenly between supply and return
+                    supply_leakage += leak * 0.5;
+                    supply_area_m2 += area * 0.5;
+                    supply_r_m2_k_w = supply_r_m2_k_w.max(r_val);
+                    supply_count += 1;
+                    return_leakage += leak * 0.5;
+                    return_area_m2 += area * 0.5;
+                    return_r_m2_k_w = return_r_m2_k_w.max(r_val);
+                    return_count += 1;
+                }
             }
         }
     }
 
+    if supply_count == 0 && return_count == 0 {
+        return params;
+    }
+
+    let zone_idx = duct_zone_idx.unwrap_or(0);
+    let zone_id = (zone_idx as u16) + 1;
+    params.insert("duct_zone_id".to_string(), json!(zone_id));
+    params.insert("duct_house_volume_m3".to_string(), json!(house_volume_m3));
+    params.insert("duct_supply_leakage_frac".to_string(), json!(supply_leakage));
+    params.insert("duct_supply_area_m2".to_string(), json!(supply_area_m2));
+    params.insert("duct_supply_r_m2_k_w".to_string(), json!(supply_r_m2_k_w));
+    params.insert("duct_return_leakage_frac".to_string(), json!(return_leakage));
+    params.insert("duct_return_area_m2".to_string(), json!(return_area_m2));
+    params.insert("duct_return_r_m2_k_w".to_string(), json!(return_r_m2_k_w));
+    params.insert("duct_latitude_deg".to_string(), json!(building.site.latitude_deg));
+    params.insert("duct_longitude_deg".to_string(), json!(building.site.longitude_deg));
+
+    if let Some(zt) = duct_zone_type_str {
+        params.insert("duct_zone_type".to_string(), Value::String(zt));
+    }
+
     params
+}
+
+/// Map HPXML zone type to ASHRAE 152 zone type string.
+fn zone_type_to_ashrae152_str(zt: &ZoneType, vented: bool) -> String {
+    match zt {
+        ZoneType::Attic => {
+            if vented { "attic_vented" } else { "attic_unvented" }
+        }
+        ZoneType::Garage => "garage",
+        ZoneType::Foundation => {
+            if vented { "vent_unins_crawlspace" } else { "unvent_unins_crawlspace" }
+        }
+        _ => "attic_vented",
+    }
+    .to_string()
 }
 
 fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) -> std::result::Result<(), HpxmlError> {
@@ -891,6 +942,18 @@ fn resolve_scheduled_loads(
                             .map(|v| v.eq_ignore_ascii_case("true"))
                             .unwrap_or(true);
                         params.insert("vented".to_string(), json!(vented));
+
+                        // Vented dryers exhaust 85% of energy; unvented keep all.
+                        // Gas combustion has a lower sensible fraction than electric.
+                        // The 0.89 gas factor approximates OCHRE's BTU-weighted blend of
+                        // 0.90 (electric parasitic) and 0.8894 (gas combustion), stable
+                        // across CEF values (~7%/93% electric/gas split).
+                        let frac_lost = if vented { 0.85 } else { 0.0 };
+                        let gain_factor = if fuel == FuelType::Gas { 0.89 } else { 0.90 };
+                        let frac_sens = (1.0 - frac_lost) * gain_factor;
+                        let frac_lat = 1.0 - frac_sens - frac_lost;
+                        params.insert("sensible_gain_fraction".to_string(), json!(frac_sens));
+                        params.insert("latent_gain_fraction".to_string(), json!(frac_lat));
                     }
                     "Dishwasher" => {
                         if let Some(cap) = child_f64(node, "PlaceSettingCapacity") {
@@ -1219,9 +1282,9 @@ fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<(f64, f64)>
                 Some((0.72, 0.08))
             }
         }
-        "Clothes Dryer" => Some((0.15, 0.05)),
-        "Clothes Washer" => Some((0.80, 0.00)),
-        "Dishwasher" => Some((0.60, 0.15)),
+        // Dryer fractions are computed inline with venting awareness; see ClothesDryer arm.
+        "Clothes Washer" => Some((0.27, 0.03)),
+        "Dishwasher" => Some((0.30, 0.30)),
         "Refrigerator" | "Freezer" => Some((1.00, 0.00)),
         "MELs" | "Plug Loads" | "TV" => Some((0.73, 0.02)),
         "Indoor Lighting" | "Exterior Lighting" | "Basement Lighting" | "Garage Lighting"
@@ -2557,7 +2620,7 @@ mod tests {
     }
 
     #[test]
-    fn duct_dse_injected_into_furnace_from_attic_ducts() {
+    fn duct_raw_params_injected_into_furnace_from_attic_ducts() {
         let xml = hvac_with_ducts_xml(
             r#"<HeatingSystem>
               <HeatingSystemFuel>natural gas</HeatingSystemFuel>
@@ -2573,22 +2636,22 @@ mod tests {
             .find(|s| s.name == "Gas Furnace")
             .expect("Gas Furnace spec must be present");
 
-        let dse = furnace
-            .parameters
-            .get("duct_dse")
-            .and_then(Value::as_f64)
-            .expect("duct_dse must be set");
-        assert!(dse < 1.0, "DSE must be less than 1.0 with attic ducts, got {dse}");
-        assert!(dse > 0.3, "DSE must be reasonable, got {dse}");
-
         assert!(
             furnace.parameters.contains_key("duct_zone_id"),
             "duct_zone_id must be set for non-conditioned duct location"
         );
+        assert!(
+            furnace.parameters.contains_key("duct_zone_type"),
+            "duct_zone_type must be set for ASHRAE 152 computation"
+        );
+        assert!(
+            furnace.parameters.contains_key("duct_supply_leakage_frac"),
+            "raw duct supply leakage must be passed through"
+        );
     }
 
     #[test]
-    fn duct_dse_injected_into_ashp_from_attic_ducts() {
+    fn duct_raw_params_injected_into_ashp_from_attic_ducts() {
         let xml = hvac_with_ducts_xml(
             r#"<HeatPump>
               <HeatPumpType>air-to-air</HeatPumpType>
@@ -2603,20 +2666,18 @@ mod tests {
             .iter()
             .find(|s| s.name == "ASHP Heater")
             .expect("ASHP Heater");
-        let dse = heater
-            .parameters
-            .get("duct_dse")
-            .and_then(Value::as_f64)
-            .expect("duct_dse must be set on ASHP Heater");
-        assert!(dse < 1.0 && dse > 0.3, "DSE {dse} out of expected range");
+        assert!(
+            heater.parameters.contains_key("duct_zone_type"),
+            "ASHP Heater must have duct_zone_type for ASHRAE 152"
+        );
 
         let cooler = specs
             .iter()
             .find(|s| s.name == "ASHP Cooler")
             .expect("ASHP Cooler");
         assert!(
-            cooler.parameters.contains_key("duct_dse"),
-            "ASHP Cooler must also have duct_dse"
+            cooler.parameters.contains_key("duct_zone_type"),
+            "ASHP Cooler must also have duct_zone_type"
         );
     }
 
@@ -2640,6 +2701,124 @@ mod tests {
             !heater.parameters.contains_key("duct_dse"),
             "mini-split must not have duct_dse"
         );
+    }
+
+    fn minimal_appliance_xml(appliance_inner: &str) -> String {
+        format!(
+            r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction><ConditionedFloorArea>1000</ConditionedFloorArea></BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Appliances>{appliance_inner}</Appliances>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#
+        )
+    }
+
+    fn find_spec<'a>(specs: &'a [super::super::EquipmentSpec], name: &str) -> &'a super::super::EquipmentSpec {
+        specs.iter().find(|s| s.name == name).unwrap_or_else(|| panic!("spec '{name}' not found"))
+    }
+
+    #[test]
+    fn clothes_washer_gain_fractions_match_ochre() {
+        let xml = minimal_appliance_xml("<ClothesWasher />");
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let cw = find_spec(&specs, "Clothes Washer");
+        let sens = cw.parameters["sensible_gain_fraction"].as_f64().unwrap();
+        let lat = cw.parameters["latent_gain_fraction"].as_f64().unwrap();
+        assert!((sens - 0.27).abs() < 1e-9, "sensible={sens}, expected 0.27");
+        assert!((lat - 0.03).abs() < 1e-9, "latent={lat}, expected 0.03");
+    }
+
+    #[test]
+    fn dishwasher_gain_fractions_match_ochre() {
+        let xml = minimal_appliance_xml("<Dishwasher />");
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let dw = find_spec(&specs, "Dishwasher");
+        let sens = dw.parameters["sensible_gain_fraction"].as_f64().unwrap();
+        let lat = dw.parameters["latent_gain_fraction"].as_f64().unwrap();
+        assert!((sens - 0.30).abs() < 1e-9, "sensible={sens}, expected 0.30");
+        assert!((lat - 0.30).abs() < 1e-9, "latent={lat}, expected 0.30");
+    }
+
+    #[test]
+    fn vented_electric_dryer_gain_fractions() {
+        let xml = minimal_appliance_xml(
+            "<ClothesDryer><FuelType>electricity</FuelType><Vented>true</Vented></ClothesDryer>",
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let dryer = find_spec(&specs, "Clothes Dryer");
+        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
+        // frac_lost=0.85, gain_factor=0.90 → sens=0.135, lat=0.015
+        assert!((sens - 0.135).abs() < 1e-9, "sensible={sens}, expected 0.135");
+        assert!((lat - 0.015).abs() < 1e-9, "latent={lat}, expected 0.015");
+    }
+
+    #[test]
+    fn unvented_electric_dryer_gain_fractions() {
+        let xml = minimal_appliance_xml(
+            "<ClothesDryer><FuelType>electricity</FuelType><Vented>false</Vented></ClothesDryer>",
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let dryer = find_spec(&specs, "Clothes Dryer");
+        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
+        // frac_lost=0.0, gain_factor=0.90 → sens=0.90, lat=0.10
+        assert!((sens - 0.90).abs() < 1e-9, "sensible={sens}, expected 0.90");
+        assert!((lat - 0.10).abs() < 1e-9, "latent={lat}, expected 0.10");
+    }
+
+    #[test]
+    fn vented_gas_dryer_gain_fractions() {
+        let xml = minimal_appliance_xml(
+            "<ClothesDryer><FuelType>natural gas</FuelType><Vented>true</Vented></ClothesDryer>",
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let dryer = find_spec(&specs, "Clothes Dryer");
+        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
+        // frac_lost=0.85, gain_factor=0.89 → sens=0.1335, lat=0.0165
+        assert!((sens - 0.1335).abs() < 1e-9, "sensible={sens}, expected 0.1335");
+        assert!((lat - 0.0165).abs() < 1e-9, "latent={lat}, expected 0.0165");
+    }
+
+    #[test]
+    fn unvented_gas_dryer_gain_fractions() {
+        let xml = minimal_appliance_xml(
+            "<ClothesDryer><FuelType>natural gas</FuelType><Vented>false</Vented></ClothesDryer>",
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let dryer = find_spec(&specs, "Clothes Dryer");
+        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+        let lat = dryer.parameters["latent_gain_fraction"].as_f64().unwrap();
+        // frac_lost=0.0, gain_factor=0.89 → sens=0.89, lat=0.11
+        assert!((sens - 0.89).abs() < 1e-9, "sensible={sens}, expected 0.89");
+        assert!((lat - 0.11).abs() < 1e-9, "latent={lat}, expected 0.11");
+    }
+
+    #[test]
+    fn dryer_defaults_to_vented_when_element_absent() {
+        let xml = minimal_appliance_xml(
+            "<ClothesDryer><FuelType>electricity</FuelType></ClothesDryer>",
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).unwrap();
+        let dryer = find_spec(&specs, "Clothes Dryer");
+        let sens = dryer.parameters["sensible_gain_fraction"].as_f64().unwrap();
+        // Defaults to vented (frac_lost=0.85) → sens=0.135
+        assert!((sens - 0.135).abs() < 1e-9, "should default to vented: sensible={sens}");
     }
 
     #[test]
