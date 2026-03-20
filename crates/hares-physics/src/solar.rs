@@ -1809,7 +1809,6 @@ mod tests {
     #[ignore]
     fn debug_solar_poa_at_may_5_noon_denver() {
         // May 5 noon local Denver = May 5 19:00 UTC (Denver is UTC-7 in May)
-        let utc_time = DateTime::<Utc>::default();
         let utc_time = Utc
             .with_ymd_and_hms(2024, 5, 5, 19, 0, 0)
             .single()

@@ -16,13 +16,17 @@ impl ThermalSolver {
 
             if let Some(win) = self.config.window_properties.get(&irr.surface_id) {
                 // Window: EnergyPlus IAM correction with decomposed solar gain.
+                // Note: reflected_w_m2 (ground-reflected irradiance) does NOT pass through the window glass.
+                // It hits opaque building surfaces and frames, which handle it separately via
+                // convection and radiant exchange. Exclude from POA transmitted through glass.
                 let curve = GlazingCurve::from_u_shgc(win.u_factor_w_m2_k, win.shgc);
                 let iam_beam = window_iam(irr.angle_of_incidence_rad, curve);
                 let iam_diffuse = curve.diffuse_iam();
 
                 // IAM-corrected plane-of-array irradiance [W/m²].
+                // Sky diffuse only; ground reflection is handled separately via opaque boundary convection.
                 let poa_beam = irr.direct_w_m2 * iam_beam;
-                let poa_diffuse = (irr.diffuse_w_m2 + irr.reflected_w_m2) * iam_diffuse;
+                let poa_diffuse = irr.diffuse_w_m2 * iam_diffuse;
                 let poa_w_m2 = poa_beam + poa_diffuse;
 
                 // Transmitted solar: passes directly through glass to zone.
