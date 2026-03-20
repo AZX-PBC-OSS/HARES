@@ -753,11 +753,13 @@ dependencies = [
  "hares-io",
  "hares-physics",
  "hares-types",
+ "nalgebra",
  "rand",
  "rand_chacha",
  "serde",
  "serde_json",
  "thiserror",
+ "toml",
  "tracing",
 ]
 
