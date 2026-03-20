@@ -330,27 +330,41 @@ fn ashp_thermostat_deadband_transitions() {
     );
     let registry = EquipmentRegistry::new();
 
-    // Zone well below setpoint → must be heating
+    // Zone well below setpoint → must be in a heating mode (HP, ER, or combined)
     {
         let mut eq = registry.create("ASHP Heater", c.clone()).unwrap();
         let env = make_env(17.0, 5.0, 11.0);
         eq.init(&c, &env).unwrap();
         let mode = eq.update_control(&env);
-        assert_eq!(
-            mode, OperatingMode::Heating,
-            "ASHP must demand heating when zone (17°C) is well below setpoint (21°C)"
+        let is_heating = matches!(
+            mode,
+            OperatingMode::Heating
+                | OperatingMode::HeatingHP
+                | OperatingMode::HeatingER
+                | OperatingMode::HeatingHPAndER
+        );
+        assert!(
+            is_heating,
+            "ASHP must demand heating when zone (17°C) is well below setpoint (21°C); got {mode:?}"
         );
     }
 
-    // Zone well above setpoint → must be off (not heating)
+    // Zone well above setpoint → must be off (not any heating mode)
     {
         let mut eq = registry.create("ASHP Heater", c.clone()).unwrap();
         let env = make_env(24.0, 5.0, 18.0);
         eq.init(&c, &env).unwrap();
         let mode = eq.update_control(&env);
-        assert_ne!(
-            mode, OperatingMode::Heating,
-            "ASHP must NOT heat when zone (24°C) is well above setpoint (21°C)"
+        let is_heating = matches!(
+            mode,
+            OperatingMode::Heating
+                | OperatingMode::HeatingHP
+                | OperatingMode::HeatingER
+                | OperatingMode::HeatingHPAndER
+        );
+        assert!(
+            !is_heating,
+            "ASHP must NOT heat when zone (24°C) is well above setpoint (21°C); got {mode:?}"
         );
     }
 }

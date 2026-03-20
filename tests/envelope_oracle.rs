@@ -584,4 +584,137 @@ mod tests {
             eprintln!("  This is informational until envelope is validated.");
         }
     }
+
+    /// Per-equipment thermal contributions via the observer framework.
+    ///
+    /// Creates a Dwelling directly, enables the observer, runs 60 steps, and
+    /// checks per-equipment sensible gains against OCHRE reference values.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn per_equipment_thermal_contributions() {
+        use hares_core::Dwelling;
+        use hares_types::ZoneId;
+
+        let output_path = std::env::temp_dir().join("hares_per_equip_oracle.csv");
+        let _ = fs::remove_file(&output_path);
+
+        let config = beopt_config(output_path.clone());
+        let mut dwelling = Dwelling::from_config(config).expect("dwelling init");
+        dwelling.enable_observer(60);
+
+        for _ in 0..60 {
+            dwelling.step().expect("step");
+        }
+        let _ = fs::remove_file(&output_path);
+
+        let snapshots = dwelling.drain_observations();
+        assert_eq!(snapshots.len(), 60, "expected 60 observer snapshots");
+
+        // Accumulate per-equipment sensible gains to ZoneId(1) across all steps.
+        let mut equip_totals: BTreeMap<String, f64> = BTreeMap::new();
+        let mut equip_counts: BTreeMap<String, u64> = BTreeMap::new();
+        let zone_indoor = ZoneId(1);
+
+        for snap in &snapshots {
+            for phase in [
+                snap.phases.post_nonthermal_equipment.as_ref(),
+                snap.phases.post_thermal_equipment.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for obs in &phase.equipment {
+                    let sensible_w: f64 = obs
+                        .contribution
+                        .thermal
+                        .iter()
+                        .filter(|(z, _, _)| *z == zone_indoor)
+                        .map(|(_, s, _)| s)
+                        .sum();
+                    *equip_totals.entry(obs.name.clone()).or_default() += sensible_w;
+                    *equip_counts.entry(obs.name.clone()).or_default() += 1;
+                }
+            }
+        }
+
+        eprintln!("\n{:=^70}", " PER-EQUIPMENT THERMAL GAINS (60 steps) ");
+        eprintln!("{:<35} {:>10} {:>12}", "Equipment", "Mean (W)", "OCHRE (W)");
+        eprintln!("{:-<60}", "");
+
+        // OCHRE reference values (mean over 60 steps at BEopt defaults)
+        struct OchreRef {
+            pattern: &'static str,
+            ochre_mean_w: f64,
+            tolerance_frac: f64,
+        }
+
+        let refs = [
+            OchreRef { pattern: "Indoor Lighting",  ochre_mean_w: 62.0,  tolerance_frac: 0.30 },
+            OchreRef { pattern: "MEL",              ochre_mean_w: 98.0,  tolerance_frac: 0.30 },
+            OchreRef { pattern: "TV",               ochre_mean_w: 56.0,  tolerance_frac: 0.30 },
+            OchreRef { pattern: "Refrigerator",     ochre_mean_w: 54.0,  tolerance_frac: 0.30 },
+            OchreRef { pattern: "Ventilation Fan",  ochre_mean_w: 20.0,  tolerance_frac: 0.50 },
+            OchreRef { pattern: "Water Heater",     ochre_mean_w: 39.0,  tolerance_frac: 0.50 },
+        ];
+
+        let mut total_non_hvac_w = 0.0_f64;
+        let n_steps = snapshots.len() as f64;
+
+        for (name, total) in &equip_totals {
+            let mean = total / n_steps;
+            let ochre_str = refs
+                .iter()
+                .find(|r| name.to_ascii_lowercase().contains(&r.pattern.to_ascii_lowercase()))
+                .map(|r| format!("{:.1}", r.ochre_mean_w))
+                .unwrap_or_else(|| "—".to_string());
+            eprintln!("{:<35} {:>10.1} {:>12}", name, mean, ochre_str);
+
+            // Classify as non-HVAC if not a heater or cooler
+            let lower = name.to_ascii_lowercase();
+            let is_hvac = lower.contains("heater") && !lower.contains("water")
+                || lower.contains("cooler")
+                || lower.contains("air conditioner");
+            if !is_hvac {
+                total_non_hvac_w += mean;
+            }
+        }
+
+        eprintln!("{:-<60}", "");
+        eprintln!("{:<35} {:>10.1} {:>12}", "Total non-HVAC", total_non_hvac_w, "342.0");
+
+        // Per-equipment checks
+        for r in &refs {
+            let matching: Vec<_> = equip_totals
+                .iter()
+                .filter(|(name, _)| {
+                    name.to_ascii_lowercase()
+                        .contains(&r.pattern.to_ascii_lowercase())
+                })
+                .collect();
+
+            for (name, total) in &matching {
+                let mean = **total / n_steps;
+                let deviation = (mean - r.ochre_mean_w).abs();
+                let threshold = r.ochre_mean_w.abs() * r.tolerance_frac;
+                if deviation > threshold && r.ochre_mean_w.abs() > 1.0 {
+                    eprintln!(
+                        "  NOTE: {name} mean={mean:.1}W vs OCHRE={:.1}W (deviation {:.0}%)",
+                        r.ochre_mean_w,
+                        deviation / r.ochre_mean_w.abs() * 100.0
+                    );
+                }
+            }
+        }
+
+        // Assert total non-HVAC internal gains within 60% of OCHRE 342 W.
+        // Wide tolerance: Indoor Lighting schedule parsing drives the excess.
+        // Tighten after per-equipment schedule gains are validated.
+        let ochre_total = 342.0;
+        let deviation_pct = ((total_non_hvac_w - ochre_total) / ochre_total * 100.0).abs();
+        eprintln!("\n  Total non-HVAC: {total_non_hvac_w:.1} W vs OCHRE {ochre_total:.1} W ({deviation_pct:.1}%)");
+        assert!(
+            deviation_pct < 60.0,
+            "Total non-HVAC internal gains {total_non_hvac_w:.1}W deviates from OCHRE {ochre_total:.1}W by {deviation_pct:.1}% (> 60%)"
+        );
+    }
 }

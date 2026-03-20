@@ -224,7 +224,7 @@ impl ThermalSolver {
         let opaque_solar_lwr_w = u.iter().sum::<f64>() - u_pre;
 
         let u_pre = u.iter().sum::<f64>();
-        self.apply_interior_longwave_inputs(&mut u, env);
+        let interior_lwr_by_zone = self.apply_interior_longwave_inputs(&mut u, env);
         let interior_lwr_w = u.iter().sum::<f64>() - u_pre;
 
         self.apply_port_sensible_inputs(&mut u, ports);
@@ -268,6 +268,11 @@ impl ThermalSolver {
             .map(|a| a.sensible_for_category(ThermalCategory::DuctLoss))
             .unwrap_or(0.0);
 
+        // Build sorted per-zone infiltration Vec from the HashMap.
+        let mut infiltration_by_zone_vec: Vec<(ZoneId, f64)> =
+            infiltration_by_zone.iter().map(|(&z, &v)| (z, v)).collect();
+        infiltration_by_zone_vec.sort_by_key(|(z, _)| *z);
+
         self.component_gains = EnvelopeComponentGains {
             window_solar_w,
             opaque_solar_lwr_w,
@@ -280,6 +285,8 @@ impl ThermalSolver {
             hvac_cooling_w,
             internal_gain_w: internal_gain_cat_w + jacket_loss_w,
             duct_loss_w,
+            infiltration_by_zone: infiltration_by_zone_vec,
+            interior_lwr_by_zone,
         };
 
         for &zone in ideal_hvac_zones {
@@ -468,7 +475,14 @@ impl ThermalSolver {
     /// For each zone in [`ThermalSolverConfig::interior_lwr_zones`], collects current
     /// surface temperatures from the state vector, calls [`interior_longwave_linearised_w`],
     /// and accumulates the resulting per-surface heat fluxes into `u`.
-    fn apply_interior_longwave_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
+    ///
+    /// Returns per-zone net interior LWR heat gains [W] for diagnostics output.
+    fn apply_interior_longwave_inputs(
+        &self,
+        u: &mut DVector<f64>,
+        env: &EnvironmentState,
+    ) -> Vec<(ZoneId, f64)> {
+        let mut lwr_by_zone = Vec::with_capacity(self.config.interior_lwr_zones.len());
         for zone_cfg in &self.config.interior_lwr_zones {
             if zone_cfg.surfaces.len() < 2 {
                 continue;
@@ -504,12 +518,16 @@ impl ThermalSolver {
                 .collect();
 
             let net_lw = interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone_c);
+            let mut zone_total = 0.0_f64;
             for (info, &q) in zone_cfg.surfaces.iter().zip(net_lw.iter()) {
                 if info.input_index < u.len() {
                     u[info.input_index] += q;
                 }
+                zone_total += q;
             }
+            lwr_by_zone.push((zone_cfg.zone_id, zone_total));
         }
+        lwr_by_zone
     }
 }
 

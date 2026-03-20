@@ -162,11 +162,15 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
             "Forced Ventilation Heat Gain - Indoor (W)",
             "Natural Ventilation Heat Gain - Indoor (W)",
             "Internal Heat Gain - Indoor (W)",
+            "Radiation Heat Gain - Indoor (W)",
             "Roof Heat Gain - Indoor (W)",
             "Floor Heat Gain - Indoor (W)",
             "Wall Heat Gain - Indoor (W)",
             "Window Heat Gain - Indoor (W)",
             "Internal Mass Heat Gain - Indoor (W)",
+            // Attic zone envelope breakdown (multi-zone buildings).
+            "Infiltration Heat Gain - Attic (W)",
+            "Radiation Heat Gain - Attic (W)",
         ] {
             fields.push(Field::new(*label, DataType::Float64, true));
         }

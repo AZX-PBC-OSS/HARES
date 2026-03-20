@@ -1037,6 +1037,9 @@ impl Dwelling {
             self.latest_env.custom_domains.push(update);
         }
 
+        // internal_gain_w is computed directly in the thermal solver from
+        // ThermalCategory subtotals — no post-hoc subtraction needed.
+
         #[cfg(feature = "observe")]
         if let Some(fluid) = obs_fluid_update {
             obs_phases.post_solvers = Some(observer_capture::capture_solvers(
@@ -1216,6 +1219,25 @@ impl Dwelling {
             }
         }
 
+        // Per-zone infiltration columns (e.g., attic zone).
+        for &(zone, value) in &gains.infiltration_by_zone {
+            if zone == ZoneId(1) {
+                continue; // already written as "Infiltration Heat Gain - Indoor (W)"
+            }
+            let col_name = format!("Infiltration Heat Gain - {} (W)", zone_display_name(zone));
+            if let Some(&idx) = self.output_column_index.get(col_name.as_str()) {
+                row[idx] = value;
+            }
+        }
+
+        // Per-zone interior LWR columns.
+        for &(zone, value) in &gains.interior_lwr_by_zone {
+            let col_name = format!("Radiation Heat Gain - {} (W)", zone_display_name(zone));
+            if let Some(&idx) = self.output_column_index.get(col_name.as_str()) {
+                row[idx] = value;
+            }
+        }
+
         self.recorder
             .push_row(&step.timestamp.to_rfc3339(), &row)
             .map_err(|err| HaresError::Io(format!("record push failed: {err}")))
@@ -1255,6 +1277,16 @@ impl Dwelling {
 
         // Temporal sanity.
         debug_assert!(dt.as_secs_f64().is_finite() && dt.as_secs_f64() > 0.0);
+    }
+}
+
+/// Maps a ZoneId to its display name for output column labels.
+/// ZoneId(1) = "Indoor", ZoneId(2) = "Attic", others = "Zone_{id}".
+fn zone_display_name(zone: ZoneId) -> String {
+    match zone.0 {
+        1 => "Indoor".to_string(),
+        2 => "Attic".to_string(),
+        n => format!("Zone_{n}"),
     }
 }
 
