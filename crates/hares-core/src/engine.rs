@@ -98,6 +98,7 @@ impl SimulationEngine {
         Self
     }
 
+    /// Run a simulation from config — creates the dwelling internally.
     pub fn run(&self, config: DwellingConfig) -> Result<SimulationResults, HaresError> {
         validate_input_paths(&config)?;
 
@@ -177,6 +178,90 @@ impl SimulationEngine {
             }
             Err(payload) => SimulationResults {
                 timeseries_path: Some(output_path),
+                timeseries: None,
+                metrics: empty_metrics(),
+                warnings,
+                status: SimStatus::Failed(panic_payload_to_string(payload)),
+                elapsed,
+            },
+        };
+
+        Ok(result)
+    }
+
+    /// Run a simulation with a pre-configured dwelling.
+    ///
+    /// Use this when you need to configure the dwelling before simulation
+    /// (e.g., enabling the observer, setting initial state, or injecting
+    /// custom domain solvers).
+    ///
+    /// ```ignore
+    /// let mut dwelling = Dwelling::from_config(config)?;
+    /// dwelling.enable_observer(60);
+    /// let result = engine.run_dwelling(&mut dwelling, &sim_config)?;
+    /// let snapshots = dwelling.drain_observations();
+    /// ```
+    pub fn run_dwelling(
+        &self,
+        dwelling: &mut Dwelling,
+        sim_config: &SimulationConfig,
+    ) -> Result<SimulationResults, HaresError> {
+        let run_started = Instant::now();
+
+        let sim_outcome = panic::catch_unwind(AssertUnwindSafe(|| dwelling.simulate()));
+        let elapsed = run_started.elapsed();
+
+        let mut warnings = dwelling.take_warnings();
+        let result = match sim_outcome {
+            Ok(Ok(_)) => {
+                let batches = dwelling.recorder.flushed_batches().to_vec();
+                if batches.is_empty() {
+                    warnings.push(
+                        "simulation produced zero output batches (zero-step run)".to_string(),
+                    );
+                    SimulationResults {
+                        timeseries_path: None,
+                        timeseries: Some(Vec::new()),
+                        metrics: empty_metrics(),
+                        warnings,
+                        status: SimStatus::Flagged(
+                            "zero-step simulation: no metrics computed".to_string(),
+                        ),
+                        elapsed,
+                    }
+                } else {
+                    let outcome = compute_metrics_from_batches(&batches, sim_config);
+                    if let Some(w) = &outcome.warning {
+                        warnings.push(w.clone());
+                    }
+                    let status = if warnings.is_empty() {
+                        SimStatus::Ok
+                    } else {
+                        SimStatus::Flagged(format!("{} warning(s)", warnings.len()))
+                    };
+                    SimulationResults {
+                        timeseries_path: None,
+                        timeseries: Some(batches),
+                        metrics: outcome.metrics,
+                        warnings,
+                        status,
+                        elapsed,
+                    }
+                }
+            }
+            Ok(Err(err)) => {
+                warnings.push(format!("simulation error: {err}"));
+                SimulationResults {
+                    timeseries_path: None,
+                    timeseries: None,
+                    metrics: empty_metrics(),
+                    warnings,
+                    status: SimStatus::Failed(err.to_string()),
+                    elapsed,
+                }
+            }
+            Err(payload) => SimulationResults {
+                timeseries_path: None,
                 timeseries: None,
                 metrics: empty_metrics(),
                 warnings,

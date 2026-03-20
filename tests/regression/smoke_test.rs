@@ -151,21 +151,49 @@ mod tests {
                 }
             }
 
-            // OCHRE reference values (from OCHRE 0.9.2, same inputs, same time window)
+            // OCHRE reference values (from OCHRE 0.9.2, same inputs, same time window).
+            // Column names differ between OCHRE and HARES for HVAC equipment:
+            //   OCHRE: "HVAC Heating Electric Power (kW)"
+            //   HARES: "ASHP Heater Electric Power (kW)" (equipment-specific naming)
+            // The aliases list maps OCHRE names to possible HARES column names.
             eprintln!("\n  === OCHRE reference (kWh) ===");
-            let ochre_ref = [
-                ("Total Electric Power (kW)", 1.3395),
-                ("HVAC Heating Electric Power (kW)", 0.9113),
-                ("HVAC Cooling Electric Power (kW)", 0.0500),
-                ("Indoor Lighting Electric Power (kW)", 0.0879),
-                ("Exterior Lighting Electric Power (kW)", 0.0064),
-                ("MELs Electric Power (kW)", 0.1340),
-                ("TV Electric Power (kW)", 0.0761),
-                ("Refrigerator Electric Power (kW)", 0.0540),
-                ("Ventilation Fan Electric Power (kW)", 0.0199),
+            let ochre_ref: &[(&str, f64, &[&str])] = &[
+                ("Total Electric Power (kW)", 1.3395, &[]),
+                ("HVAC Heating Electric Power (kW)", 0.9113, &[
+                    "ASHP Heater Electric Power (kW)",
+                    "MSHP Heater Electric Power (kW)",
+                    "Gas Furnace Electric Power (kW)",
+                    "Electric Furnace Electric Power (kW)",
+                ]),
+                ("HVAC Cooling Electric Power (kW)", 0.0500, &[
+                    "ASHP Cooler Electric Power (kW)",
+                    "MSHP Cooler Electric Power (kW)",
+                    "Air Conditioner Electric Power (kW)",
+                    "Room Air Conditioner Electric Power (kW)",
+                ]),
+                ("Indoor Lighting Electric Power (kW)", 0.0879, &["Indoor Lighting Electric Power (kW)"]),
+                ("Exterior Lighting Electric Power (kW)", 0.0064, &["Exterior Lighting Electric Power (kW)"]),
+                ("MELs Electric Power (kW)", 0.1340, &["MELs Electric Power (kW)"]),
+                ("TV Electric Power (kW)", 0.0761, &["TV Electric Power (kW)"]),
+                ("Refrigerator Electric Power (kW)", 0.0540, &["Refrigerator Electric Power (kW)"]),
+                ("Ventilation Fan Electric Power (kW)", 0.0199, &["Ventilation Fan Electric Power (kW)"]),
             ];
-            for (name, ochre_kwh) in &ochre_ref {
-                let hares_kwh = breakdown.get(*name).copied().unwrap_or(f64::NAN);
+            for (ochre_name, ochre_kwh, aliases) in ochre_ref {
+                // Try OCHRE name first, then each alias; sum all matches
+                // (e.g., HVAC Heating could be split across heater + aux)
+                let hares_kwh = if let Some(&v) = breakdown.get(*ochre_name) {
+                    v
+                } else {
+                    let sum: f64 = aliases
+                        .iter()
+                        .filter_map(|a| breakdown.get(*a))
+                        .sum();
+                    if aliases.iter().any(|a| breakdown.contains_key(*a)) {
+                        sum
+                    } else {
+                        f64::NAN
+                    }
+                };
                 let ochre_val: f64 = *ochre_kwh;
                 let diff_pct = if ochre_val.abs() > 1e-9 {
                     (hares_kwh - ochre_val) / ochre_val * 100.0
@@ -174,8 +202,17 @@ mod tests {
                 } else {
                     0.0
                 };
+                let hares_col = if breakdown.contains_key(*ochre_name) {
+                    ochre_name.to_string()
+                } else {
+                    aliases
+                        .iter()
+                        .find(|a| breakdown.contains_key(**a))
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| "???".to_string())
+                };
                 eprintln!(
-                    "    {name:55} OCHRE={ochre_kwh:8.4}  HARES={hares_kwh:8.4}  diff={diff_pct:+7.1}%"
+                    "    {ochre_name:55} OCHRE={ochre_val:8.4}  HARES={hares_kwh:8.4}  diff={diff_pct:+7.1}%  [{hares_col}]"
                 );
             }
 

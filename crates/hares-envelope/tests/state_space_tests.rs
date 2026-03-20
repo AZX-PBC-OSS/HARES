@@ -94,9 +94,9 @@ fn single_node_rc_passive_decay() {
     let tau = r * c;
     let expected = t0 * (-t_elapsed / tau).exp();
 
-    // Integration error accumulates; 0.01 K tolerance over 200 steps is achievable
-    // with ZOH discretization which is exact for piecewise-constant inputs.
-    assert_close(x[0], expected, 0.01, "temperature after decay");
+    // ZOH discretization is algebraically exact for piecewise-constant inputs,
+    // so the accumulated error should be near machine epsilon.
+    assert_close(x[0], expected, 1e-6, "temperature after decay");
     assert!(x[0] > 0.0, "temperature must still be positive (decaying not reversed)");
     assert!(x[0] < t0, "temperature must be lower than initial");
 }

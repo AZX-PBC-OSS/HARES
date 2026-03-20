@@ -13,12 +13,15 @@ use super::H_FG_J_PER_KG;
 
 /// Populates `u` with infiltration and ventilation sensible gains and accumulates latent loads
 /// into `latent_out` (which the caller has already cleared).
+///
+/// Returns per-zone sensible infiltration+ventilation gains [W] for diagnostics.
 pub(crate) fn apply_infiltration_and_ventilation(
     config: &ThermalSolverConfig,
     u: &mut DVector<f64>,
     env: &EnvironmentState,
     latent_out: &mut HashMap<ZoneId, f64>,
-) {
+) -> HashMap<ZoneId, f64> {
+    let mut sensible_by_zone = HashMap::new();
     let p_pa = env.weather.pressure_pa();
     let t_out = env.weather.outdoor_temp_c;
     let w_out = env.weather.outdoor_humidity_ratio;
@@ -127,6 +130,8 @@ pub(crate) fn apply_infiltration_and_ventilation(
         {
             u[idx] += q_sensible;
         }
+        *sensible_by_zone.entry(zone.id).or_insert(0.0) += q_sensible;
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
+    sensible_by_zone
 }

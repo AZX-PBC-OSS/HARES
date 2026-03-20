@@ -158,18 +158,25 @@ fn gas_furnace_consumes_gas_fuel() {
         ports.fuel.get(FuelType::Gas),
     );
 
-    // Electric port is fan-only. Capacity=10000W, efficiency=0.8, fan=400W:
-    // fuel_input = 10000/0.8 = 12500 W; electric = fan = 400 W = 0.4 kW.
-    // We only assert fan power is present and small relative to capacity.
-    let electric_kw = ports.electrical.net_active_kw();
+    // Verify AFUE relationship: fuel_input = capacity / efficiency = 10000 / 0.8 = 12500 W.
+    let expected_fuel_w = 10_000.0 / 0.8;
     assert!(
-        electric_kw > 0.0,
-        "expected fan-only electric draw to be positive, got {electric_kw:.4} kW",
+        (ports.fuel.get(FuelType::Gas) - expected_fuel_w).abs() < expected_fuel_w * 0.02,
+        "gas consumption must equal capacity/efficiency = {expected_fuel_w:.0} W ±2%; \
+         got {:.0} W",
+        ports.fuel.get(FuelType::Gas),
+    );
+
+    // Electric port is fan-only: configured at 400 W = 0.4 kW.
+    let electric_kw = ports.electrical.net_active_kw();
+    let fan_w = electric_kw * 1_000.0;
+    assert!(
+        fan_w > 0.0,
+        "expected fan-only electric draw to be positive, got {fan_w:.1} W",
     );
     assert!(
-        electric_kw < ports.fuel.get(FuelType::Gas) / 1_000.0,
-        "gas furnace electric should be fan-only (< fuel consumption), got {electric_kw:.4} kW vs {:.4} kW fuel",
-        ports.fuel.get(FuelType::Gas) / 1_000.0,
+        (fan_w - 400.0).abs() < 50.0,
+        "fan power must equal configured 400 W ±50 W; got {fan_w:.1} W",
     );
 }
 
@@ -241,9 +248,17 @@ fn ashp_heating_cop_above_unity() {
     assert!(electric_kw > 1e-6, "ASHP must draw positive electricity, got {electric_kw:.4} kW");
 
     let cop = thermal_w / (electric_kw * 1_000.0);
+    // AHRI 210/240-2023 Tier 1 minimum COP at 47°F (8.3°C) is 2.0.
+    // At 7°C outdoor with default EIR=0.35, expected COP ≈ 2.86.
     assert!(
-        cop > 1.0,
-        "ASHP COP must exceed 1.0 at mild conditions, got {cop:.3} (thermal={thermal_w:.1} W, electric={electric_kw:.4} kW)",
+        cop > 2.0,
+        "ASHP COP must exceed 2.0 at 7°C outdoor (near AHRI 47°F rating point); \
+         AHRI 210/240-2023 minimum=2.0, got {cop:.3} \
+         (thermal={thermal_w:.1} W, electric={electric_kw:.4} kW)",
+    );
+    assert!(
+        cop < 5.0,
+        "ASHP COP {cop:.3} unrealistically high at 7°C outdoor",
     );
 }
 

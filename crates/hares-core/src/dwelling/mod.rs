@@ -4,7 +4,7 @@ mod conversions;
 mod solver_builder;
 mod synthetic;
 
-pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs};
+pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ use conversions::{
     apply_humidity_update_to_zones, apply_thermal_update_to_zones, build_output_column_index,
     chrono_to_std_duration, default_output_path, duration_to_u32_secs,
     equipment_config_from_spec, merged_equipment_config,
-    required_datetime, required_duration, required_path, stage_rank, validate_sim_config,
+    required_datetime, required_duration, required_path, validate_sim_config,
 };
 use solver_builder::{build_default_solvers, compute_weather_averages};
 use synthetic::{
@@ -53,7 +53,7 @@ use synthetic::{
 #[cfg(feature = "profiling")]
 use synthetic::{current_process_hwm_kb, hot_path_alloc_counter};
 #[cfg(feature = "observe")]
-use crate::observer::{ObserverBuffer, PhaseSnapshots, StepSnapshot};
+use crate::observer::{EquipmentObservation, ObserverBuffer, PhaseSnapshots, StepSnapshot};
 #[cfg(feature = "observe")]
 use crate::observer_capture;
 
@@ -873,17 +873,44 @@ impl Dwelling {
         let mut indices: Vec<usize> = (0..self.equipment.len()).collect();
         indices.sort_by_key(|&idx| stage_rank(self.equipment[idx].descriptor().stage));
 
+        #[cfg(feature = "observe")]
+        let observing = self.observer_buf.is_some();
+        #[cfg(feature = "observe")]
+        let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
+        #[cfg(feature = "observe")]
+        let mut pre_snapshot = if observing {
+            Some(self.ports.clone())
+        } else {
+            None
+        };
+
         for &idx in &indices {
             let stage = self.equipment[idx].descriptor().stage;
             if stage == ExecutionStage::Thermal {
                 continue;
             }
+            #[cfg(feature = "observe")]
+            let pre_ports = pre_snapshot
+                .as_ref()
+                .map(|s| observer_capture::capture_ports(s));
+
             let _ = self.equipment[idx].update_control(&self.latest_env);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.warnings.push(format!(
                     "equipment step failed for '{}' : {err}",
                     self.equipment[idx].descriptor().name
                 ));
+            }
+
+            #[cfg(feature = "observe")]
+            if let Some(ref mut snapshot) = pre_snapshot {
+                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                nonthermal_obs.push(observer_capture::capture_single_equipment(
+                    self.equipment[idx].as_ref(),
+                    contribution,
+                    pre_ports.unwrap(),
+                ));
+                *snapshot = self.ports.clone();
             }
         }
         #[cfg(debug_assertions)]
@@ -894,16 +921,32 @@ impl Dwelling {
         }
 
         #[cfg(feature = "observe")]
-        if self.observer_buf.is_some() {
+        if observing {
             obs_phases.post_nonthermal_equipment =
-                Some(observer_capture::capture_equipment_phase(&self.equipment, &self.ports));
+                Some(observer_capture::capture_equipment_phase(nonthermal_obs, &self.ports));
         }
 
         // Step 3b: thermal stage equipment.
+        #[cfg(feature = "observe")]
+        let mut thermal_obs: Vec<EquipmentObservation> = Vec::new();
+        #[cfg(feature = "observe")]
+        {
+            pre_snapshot = if observing {
+                Some(self.ports.clone())
+            } else {
+                None
+            };
+        }
+
         for &idx in &indices {
             if self.equipment[idx].descriptor().stage != ExecutionStage::Thermal {
                 continue;
             }
+            #[cfg(feature = "observe")]
+            let pre_ports = pre_snapshot
+                .as_ref()
+                .map(|s| observer_capture::capture_ports(s));
+
             let _ = self.equipment[idx].update_control(&self.latest_env);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.warnings.push(format!(
@@ -911,12 +954,23 @@ impl Dwelling {
                     self.equipment[idx].descriptor().name
                 ));
             }
+
+            #[cfg(feature = "observe")]
+            if let Some(ref mut snapshot) = pre_snapshot {
+                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                thermal_obs.push(observer_capture::capture_single_equipment(
+                    self.equipment[idx].as_ref(),
+                    contribution,
+                    pre_ports.unwrap(),
+                ));
+                *snapshot = self.ports.clone();
+            }
         }
 
         #[cfg(feature = "observe")]
-        if self.observer_buf.is_some() {
+        if observing {
             obs_phases.post_thermal_equipment =
-                Some(observer_capture::capture_equipment_phase(&self.equipment, &self.ports));
+                Some(observer_capture::capture_equipment_phase(thermal_obs, &self.ports));
         }
 
         #[cfg(feature = "profiling")]

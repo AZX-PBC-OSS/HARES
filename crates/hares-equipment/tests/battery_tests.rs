@@ -108,6 +108,15 @@ fn charge_increases_soc() {
         soc_after > soc_before,
         "SOC should increase after charging: before={soc_before:.4} after={soc_after:.4}"
     );
+
+    // Verify ΔSOC magnitude: 60 steps × 60s × 3kW × η=0.97 / 13.5kWh ≈ 0.216
+    let delta_soc = soc_after - soc_before;
+    let expected_delta = 3.0 * (60.0 * 60.0 / 3600.0) * 0.97 / 13.5;
+    assert!(
+        (delta_soc - expected_delta).abs() < expected_delta * 0.10,
+        "SOC gain {delta_soc:.4} must be within 10% of expected {expected_delta:.4} \
+         (3kW × 1h × η=0.97 / 13.5kWh); ohmic losses account for the remainder"
+    );
 }
 
 #[test]
@@ -128,6 +137,15 @@ fn discharge_decreases_soc() {
     assert!(
         soc_after < soc_before,
         "SOC should decrease after discharging: before={soc_before:.4} after={soc_after:.4}"
+    );
+
+    // Verify ΔSOC magnitude: 60 steps × 60s × 3kW / (η=0.97) / 13.5kWh ≈ 0.229
+    let delta_soc = soc_before - soc_after;
+    let expected_delta = 3.0 * (60.0 * 60.0 / 3600.0) / 0.97 / 13.5;
+    assert!(
+        (delta_soc - expected_delta).abs() < expected_delta * 0.10,
+        "SOC loss {delta_soc:.4} must be within 10% of expected {expected_delta:.4} \
+         (3kW × 1h / η=0.97 / 13.5kWh); ohmic losses account for the remainder"
     );
 }
 
@@ -228,10 +246,10 @@ fn round_trip_efficiency_below_unity() {
     for _ in 0..n_steps {
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).expect("step");
-        let p = ports.electrical.load_power_kw + ports.electrical.generation_power_kw;
+        let p_net = ports.electrical.net_active_kw();
         // Only tally positive (charging) contribution.
-        if p > 0.0 {
-            energy_in_kwh += p * (60.0 / 3600.0);
+        if p_net > 0.0 {
+            energy_in_kwh += p_net * (60.0 / 3600.0);
         }
     }
 
@@ -245,10 +263,10 @@ fn round_trip_efficiency_below_unity() {
     for _ in 0..n_steps {
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).expect("step");
-        let p = ports.electrical.load_power_kw + ports.electrical.generation_power_kw;
+        let p_net = ports.electrical.net_active_kw();
         // Only tally negative (discharging) contribution.
-        if p < 0.0 {
-            energy_out_kwh += p.abs() * (60.0 / 3600.0);
+        if p_net < 0.0 {
+            energy_out_kwh += p_net.abs() * (60.0 / 3600.0);
         }
     }
 
@@ -263,6 +281,17 @@ fn round_trip_efficiency_below_unity() {
     assert!(
         energy_out_kwh < energy_in_kwh,
         "Round-trip efficiency must be below 1.0: energy_in={energy_in_kwh:.4} kWh, energy_out={energy_out_kwh:.4} kWh"
+    );
+
+    // Verify RTE magnitude. At 0.22C (3kW/13.5kWh), inverter η=0.97 gives
+    // theoretical RTE = η² × (1 - ohmic fraction) ≈ 0.94 × 0.98 ≈ 0.92.
+    // Lower bound 0.85 catches double-application of inverter losses or
+    // other systematic efficiency errors.
+    let rte = energy_out_kwh / energy_in_kwh;
+    assert!(
+        rte > 0.85,
+        "Round-trip efficiency {rte:.4} must exceed 0.85 at 0.22C rate \
+         (inverter η=0.97 → theoretical RTE ≈ 0.92)"
     );
 }
 
@@ -368,10 +397,12 @@ fn inverter_efficiency_applied() {
         energy_stored_kwh <= dc_energy_expected_kwh + 1e-4,
         "Energy stored ({energy_stored_kwh:.4} kWh) must not exceed AC×eta ({dc_energy_expected_kwh:.4} kWh)"
     );
-    // And the stored energy must be positive and reasonably close to dc_expected.
+    // At 0.148C (2kW/13.5kWh), ohmic losses are <2%. Tighten lower bound
+    // to catch incorrect pack resistance computation.
     assert!(
-        energy_stored_kwh > dc_energy_expected_kwh * 0.90,
-        "Energy stored ({energy_stored_kwh:.4} kWh) should be within 10% of DC expected ({dc_energy_expected_kwh:.4} kWh)"
+        energy_stored_kwh > dc_energy_expected_kwh * 0.97,
+        "Energy stored ({energy_stored_kwh:.4} kWh) should be within 3% of DC expected \
+         ({dc_energy_expected_kwh:.4} kWh); ohmic losses at 0.148C are <2%"
     );
 }
 

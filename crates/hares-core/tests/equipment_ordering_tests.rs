@@ -1,24 +1,14 @@
 //! Integration tests for ExecutionStage ordering guarantees.
 //!
-//! `stage_rank` is crate-private so these tests verify the same contract by
-//! asserting the documented ordering through the discriminant positions defined
-//! in the enum.  The ordering encodes a hard protocol assumption: Independent
-//! equipment (schedules, PV) runs before Electrical equipment (batteries), which
-//! runs before Thermal equipment (HVAC, water heaters), which precedes
+//! Uses the real `stage_rank` function from the Dwelling orchestrator so that
+//! any change to the production ordering is detected by these tests.
+//! The ordering encodes a hard protocol assumption: Independent equipment
+//! (schedules, PV) runs before Electrical equipment (batteries), which runs
+//! before Thermal equipment (HVAC, water heaters), which precedes
 //! EnvelopeResolution (solver-only, no equipment).
 
+use hares_core::dwelling::stage_rank;
 use hares_types::ExecutionStage;
-
-/// Maps a stage to the integer rank used by the Dwelling orchestrator.
-/// Must stay in sync with `hares_core::dwelling::conversions::stage_rank`.
-fn stage_rank(stage: ExecutionStage) -> u8 {
-    match stage {
-        ExecutionStage::Independent => 0,
-        ExecutionStage::Electrical => 1,
-        ExecutionStage::Thermal => 2,
-        ExecutionStage::EnvelopeResolution => 3,
-    }
-}
 
 fn assert_strictly_before(earlier: ExecutionStage, later: ExecutionStage) {
     assert!(

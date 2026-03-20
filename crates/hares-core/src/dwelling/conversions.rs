@@ -217,7 +217,7 @@ pub(crate) fn chrono_to_std_duration(duration: Duration) -> Result<StdDuration> 
     Ok(StdDuration::from_millis(ms_u64))
 }
 
-pub(crate) fn stage_rank(stage: ExecutionStage) -> u8 {
+pub fn stage_rank(stage: ExecutionStage) -> u8 {
     match stage {
         ExecutionStage::Independent => 0,
         ExecutionStage::Electrical => 1,

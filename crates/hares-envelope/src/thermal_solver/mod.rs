@@ -232,26 +232,37 @@ impl ThermalSolver {
         self.apply_interior_longwave_inputs(&mut u, env);
         let interior_lwr_w = u.iter().sum::<f64>() - u_pre;
 
-        let u_pre = u.iter().sum::<f64>();
         self.apply_port_sensible_inputs(&mut u, ports);
-        let port_sensible_w = u.iter().sum::<f64>() - u_pre;
+        // Per-zone port sensible gains directly from the thermal accumulators.
+        let port_sensible_indoor_w = ports
+            .thermal
+            .iter()
+            .find(|t| t.zone == ZoneId(1))
+            .map(|t| t.sensible_gain_w)
+            .unwrap_or(0.0);
 
         // Swap out the latent buffer so we can call &self methods on the rest of the struct.
         let mut latent_by_zone = std::mem::take(&mut self.latent_buf);
         latent_by_zone.clear();
 
-        let u_pre = u.iter().sum::<f64>();
-        apply_infiltration_and_ventilation(&self.config, &mut u, env, &mut latent_by_zone);
-        let infiltration_vent_w = u.iter().sum::<f64>() - u_pre;
+        let infiltration_by_zone =
+            apply_infiltration_and_ventilation(&self.config, &mut u, env, &mut latent_by_zone);
+
+        // Report conditioned zone (ZoneId(1)) infiltration for oracle comparison.
+        // Total across all zones is available by summing the map.
+        let infiltration_indoor_w = infiltration_by_zone
+            .get(&ZoneId(1))
+            .copied()
+            .unwrap_or(0.0);
 
         self.component_gains = EnvelopeComponentGains {
             window_solar_w,
             opaque_solar_lwr_w,
             interior_lwr_w,
-            infiltration_w: infiltration_vent_w,
+            infiltration_w: infiltration_indoor_w,
             ventilation_w: 0.0,
             natural_ventilation_w: 0.0,
-            port_sensible_w,
+            port_sensible_w: port_sensible_indoor_w,
             internal_gain_w: 0.0, // set by dwelling after HVAC subtraction
         };
 

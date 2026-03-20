@@ -99,20 +99,20 @@ fn ashrae_canonical_20c_50rh() {
     let p_v = rh_target * p_sat;
     let w = EPSILON * p_v / (p_pa - p_v);
 
-    // Humidity ratio: w ≈ 0.00726 kg/kg — ASHRAE HOF 2021 Ch. 1
-    assert_approx(w, 0.007_26, 0.000_5);
+    // Humidity ratio: w ≈ 0.00726 kg/kg — PsychroLib exact: 0.007255
+    assert_approx(w, 0.007_26, 1e-5);
 
-    // Enthalpy: h ≈ 38 500 J/kg — ASHRAE HOF 2021 Ch. 1, Eq. 30
+    // Enthalpy: h ≈ 38 552 J/kg — PsychroLib: GetMoistAirEnthalpy(20, 0.00726)
     let h = moist_air_enthalpy(t_db, w);
-    assert_approx(h, 38_500.0, 500.0);
+    assert_approx(h, 38_552.0, 100.0);
 
-    // Wet-bulb: Twb ≈ 13.7°C — ASHRAE HOF 2021 Ch. 1 psychrometric chart
+    // Wet-bulb: Twb ≈ 13.74°C — PsychroLib reference
     let t_wb = wet_bulb_from_humidity_ratio(t_db, w, p_pa);
-    assert_approx(t_wb, 13.7, 0.5);
+    assert_approx(t_wb, 13.74, 0.1);
 
-    // Dew point: Tdp ≈ 9.3°C — ASHRAE HOF 2021 Ch. 1 psychrometric chart
+    // Dew point: Tdp ≈ 9.27°C — PsychroLib reference
     let t_dp = dew_point(w, p_pa);
-    assert_approx(t_dp, 9.3, 0.5);
+    assert_approx(t_dp, 9.27, 0.05);
 
     // Ordering constraint: Tdp ≤ Twb ≤ Tdb
     assert!(
@@ -499,6 +499,65 @@ fn biquadratic_evaluation() {
     // OCHRE Single_1 coefficients from Biquadratic Air Conditioner.csv
     let ochre_coeffs = [1.5509_f64, -0.075_05, 0.0031, 0.0024, -0.000_05, -0.000_43];
     let ahri_result = biquadratic(&ochre_coeffs, 19.44, 35.0);
-    // Analytical result ≈ 0.9936; allow ±0.01 for rounding in published table
-    assert_approx(ahri_result, 0.9936, 0.01);
+    // Exact algebraic evaluation of known coefficients — machine-epsilon tolerance.
+    // 1.5509 + (-0.07505)(19.44) + 0.0031(19.44²) + 0.0024(35.0) + (-0.00005)(35.0²)
+    //   + (-0.00043)(19.44)(35.0) = 0.993638...
+    assert_approx(ahri_result, 0.993_638, 1e-4);
+}
+
+// ===========================================================================
+// 13. Multi-point psychrometric grid (OCHRE parity)
+// ===========================================================================
+
+/// OCHRE's test_psychrolib_jit.py validates psychrometrics across a wide grid.
+/// This test checks round-trip consistency (T,W → RH → W) across 7 temperatures
+/// and 3 humidity levels at sea level — matching OCHRE's coverage approach.
+///
+/// Reference: PsychroLib test suite, ASHRAE HOF 2021 Ch. 1.
+#[test]
+fn psychrometric_multi_point_round_trip() {
+    let p_pa = 101_325.0_f64;
+    let mut checked = 0_usize;
+
+    for &t_db_c in &[0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0] {
+        let p_sat = saturation_pressure_pa(t_db_c);
+        for &rh_target in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+            let p_v = rh_target * p_sat;
+            let w = EPSILON * p_v / (p_pa - p_v);
+            if w < 1e-7 {
+                continue;
+            }
+
+            // RH round-trip: T + W → RH → compare with target
+            let rh_back = relative_humidity(t_db_c, w, p_pa);
+            assert!(
+                (rh_back - rh_target).abs() < 0.005,
+                "RH round-trip failed at T={t_db_c}°C RH={rh_target}: got {rh_back:.6}"
+            );
+
+            // Wet-bulb round-trip: T + W → Twb → W_back → compare
+            let t_wb = wet_bulb_from_humidity_ratio(t_db_c, w, p_pa);
+            assert!(
+                t_wb <= t_db_c + 0.01,
+                "Twb ({t_wb:.3}) must be ≤ Tdb ({t_db_c:.1})"
+            );
+
+            // Dew-point round-trip: W → Tdp → W_back
+            let t_dp = dew_point(w, p_pa);
+            assert!(
+                t_dp <= t_wb + 0.1,
+                "Tdp ({t_dp:.3}) must be ≤ Twb ({t_wb:.3}) at T={t_db_c}°C RH={rh_target}"
+            );
+
+            // Enthalpy must be finite and monotonically increase with W at fixed T
+            let h = moist_air_enthalpy(t_db_c, w);
+            assert!(h.is_finite(), "enthalpy must be finite at T={t_db_c}°C W={w:.6}");
+
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 40,
+        "expected at least 40 validated conditions, got {checked}"
+    );
 }

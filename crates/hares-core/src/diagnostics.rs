@@ -15,10 +15,28 @@ pub struct StepDiagnostics {
     pub timestamp_s: f64,
     pub outdoor_temp_c: f64,
     pub zone_temps_c: Vec<(ZoneId, f64)>,
+    /// Total thermal port sensible gain per zone [W] (HVAC + appliances combined).
     pub thermal_gains_w: Vec<(ZoneId, f64)>,
     pub thermal_latent_w: Vec<(ZoneId, f64)>,
     pub electrical_net_kw: f64,
     pub equipment: Vec<EquipmentDiag>,
+    /// Per-equipment sensible gain contributions to each zone.
+    pub equipment_sensible_w: Vec<(String, ZoneId, f64)>,
+    /// Envelope component gains from the thermal solver.
+    pub envelope: Option<EnvelopeDiag>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct EnvelopeDiag {
+    pub window_solar_w: f64,
+    pub opaque_solar_lwr_w: f64,
+    pub interior_lwr_w: f64,
+    /// Per-zone infiltration+ventilation sensible [W].
+    pub infiltration_by_zone: Vec<(ZoneId, f64)>,
+    /// Non-HVAC internal gains [W].
+    pub internal_gain_w: f64,
+    /// Total port sensible [W] (HVAC + appliances).
+    pub port_sensible_w: f64,
 }
 
 #[derive(Debug)]
@@ -26,6 +44,7 @@ pub struct EquipmentDiag {
     pub name: String,
     pub mode: f64,
     pub electric_kw: f64,
+    pub sensible_gain_w: f64,
 }
 
 /// Writes diagnostic CSV header.
@@ -108,5 +127,7 @@ pub fn capture(
         thermal_latent_w,
         electrical_net_kw,
         equipment: Vec::new(),
+        equipment_sensible_w: Vec::new(),
+        envelope: None,
     }
 }

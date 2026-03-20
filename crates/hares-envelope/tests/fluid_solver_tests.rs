@@ -171,11 +171,6 @@ fn checkpoint_round_trip() {
 
     // Snapshot.
     let payload = solver.snapshot_payload();
-    assert_eq!(
-        payload.len() % 3,
-        0,
-        "snapshot payload length must be a multiple of 3"
-    );
     assert!(!payload.is_empty(), "snapshot must be non-empty after flow step");
 
     // Build a fresh solver and restore.

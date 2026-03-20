@@ -8,7 +8,9 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 use hares_envelope::EnvelopeComponentGains;
-use hares_types::{DomainUpdate, EndUse, FluidType, FuelType, LoopId, Telemetry, ZoneId};
+use hares_types::{
+    DomainUpdate, EndUse, FluidType, FuelType, LoopId, PortDeclaration, Telemetry, ZoneId,
+};
 
 /// Complete snapshot of a single simulation timestep, populated incrementally
 /// at phase boundaries within `Dwelling::run_timestep`.
@@ -47,13 +49,40 @@ pub struct EquipmentPhaseCapture {
     pub ports: PortsCapture,
 }
 
-/// Per-equipment observation: identity + telemetry clone.
+/// Per-equipment observation: identity, telemetry, port declarations, and contributions.
 #[derive(Debug, Clone)]
 pub struct EquipmentObservation {
     pub name: String,
     pub equipment_type: String,
     pub end_use: EndUse,
     pub telemetry: Telemetry,
+    /// The port declarations this equipment registered at init.
+    pub port_declarations: Vec<PortDeclaration>,
+    /// What this equipment contributed to the shared port accumulators during its `step()`.
+    pub contribution: EquipmentContribution,
+    /// Snapshot of the aggregate port accumulators visible to this equipment before its `step()`.
+    pub pre_step_ports: PortsCapture,
+}
+
+/// Per-equipment port contribution: the delta this equipment added to `PortSlots` during one step.
+#[derive(Debug, Clone)]
+pub struct EquipmentContribution {
+    pub thermal: Vec<(ZoneId, f64, f64)>,
+    pub electrical_load_kw: f64,
+    pub electrical_gen_kw: f64,
+    pub electrical_reactive_kvar: f64,
+    pub fuel_consumption_w: Vec<(FuelType, f64)>,
+    pub fluid: Vec<FluidContributionCapture>,
+}
+
+/// Per-equipment fluid contribution for a single loop, back-calculated from accumulator diffs.
+#[derive(Debug, Clone)]
+pub struct FluidContributionCapture {
+    pub loop_id: LoopId,
+    pub fluid_type: FluidType,
+    pub delta_flow_kg_s: f64,
+    pub supply_temp_c: f64,
+    pub return_temp_c: f64,
 }
 
 /// Snapshot of all port accumulators at a phase boundary.
