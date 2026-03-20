@@ -5,6 +5,8 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
+use hares_types::parse_trimmed_f64;
+
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
@@ -302,7 +304,7 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
             continue;
         }
 
-        let Some(depth_m) = fields[base].trim().parse::<f64>().ok() else {
+        let Some(depth_m) = parse_trimmed_f64(fields[base]) else {
             continue;
         };
 

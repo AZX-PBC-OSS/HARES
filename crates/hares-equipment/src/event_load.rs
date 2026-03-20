@@ -6,7 +6,7 @@ use std::time::Duration;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, PortType, ScheduleSource,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
     Telemetry, TelemetryField, ZoneId,
 };
 use rand::{RngExt, SeedableRng};
@@ -373,13 +373,7 @@ impl Equipment for EventBasedLoad {
 
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.fuel_type != FuelType::Electric {
-            self.ports.push(PortDeclaration {
-                port_type: PortType::Fuel,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
+            self.ports.push(PortDeclaration::fuel());
         }
 
         self.rng_seed = derive_rng_seed(config);
@@ -453,13 +447,7 @@ impl Equipment for EventBasedLoad {
         // Rebuild ports from config-derived state (fuel_type set during init).
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.fuel_type != FuelType::Electric {
-            self.ports.push(PortDeclaration {
-                port_type: PortType::Fuel,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
+            self.ports.push(PortDeclaration::fuel());
         }
 
         let active_power_kw = if self.phase == EventPhase::Active {
@@ -742,22 +730,10 @@ impl Equipment for WetAppliance {
 
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.hot_water_draw_rate_kg_s > 0.0 {
-            self.ports.push(PortDeclaration {
-                port_type: PortType::Fluid,
-                zone: None,
-                loop_id: Some(crate::water_heater::DHW_DEMAND_LOOP),
-                domain_id: None,
-                fluid_type: Some(FluidType::Water),
-            });
+            self.ports.push(PortDeclaration::fluid(crate::water_heater::DHW_DEMAND_LOOP, FluidType::Water));
         }
         if self.fuel_type != FuelType::Electric {
-            self.ports.push(PortDeclaration {
-                port_type: PortType::Fuel,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
+            self.ports.push(PortDeclaration::fuel());
         }
 
         self.active = false;
@@ -836,22 +812,10 @@ impl Equipment for WetAppliance {
         // Regenerate ports to reflect restored DHW demand and fuel state.
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.hot_water_draw_rate_kg_s > 0.0 {
-            self.ports.push(PortDeclaration {
-                port_type: PortType::Fluid,
-                zone: None,
-                loop_id: Some(crate::water_heater::DHW_DEMAND_LOOP),
-                domain_id: None,
-                fluid_type: Some(FluidType::Water),
-            });
+            self.ports.push(PortDeclaration::fluid(crate::water_heater::DHW_DEMAND_LOOP, FluidType::Water));
         }
         if self.fuel_type != FuelType::Electric {
-            self.ports.push(PortDeclaration {
-                port_type: PortType::Fuel,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
+            self.ports.push(PortDeclaration::fuel());
         }
 
         self.rng_seed = decoded.rng_seed;
@@ -1190,21 +1154,9 @@ fn cycle_phase_ordinal(active: bool, phase_index: usize) -> f64 {
 }
 
 fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
-    let mut ports = vec![PortDeclaration {
-        port_type: PortType::Electrical,
-        zone: None,
-        loop_id: None,
-        domain_id: None,
-        fluid_type: None,
-    }];
+    let mut ports = vec![PortDeclaration::electrical()];
     if let Some(zone) = zone {
-        ports.push(PortDeclaration {
-            port_type: PortType::Thermal,
-            zone: Some(zone),
-            loop_id: None,
-            domain_id: None,
-            fluid_type: None,
-        });
+        ports.push(PortDeclaration::thermal(zone));
     }
     ports
 }

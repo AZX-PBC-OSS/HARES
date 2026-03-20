@@ -7,14 +7,18 @@ use serde_json::{Map, Value, json};
 
 use super::HpxmlError;
 use super::building::{Building, DuctLocation, XmlNode, ZoneType};
+use super::xml_helpers::{
+    capitalize, child_energy_kwh, child_f64, child_load_kwh, child_load_therms,
+    child_temperature_c, child_text, children_named, descendants_named, element_id, parse_fuel,
+};
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
+use hares_physics::units as conv;
+
 use crate::defaults::{DefaultsStore, ZipParameters};
 use crate::draw_profile::{DistributionSystem, FixtureEfficiency, combined_daily_hot_water_l};
 
-const BTU_PER_HOUR_TO_KBTU_PER_HOUR: f64 = 0.001;
 const SEER2_TO_SEER_FACTOR: f64 = 1.0 / 0.95;
 const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.95;
-const M2_TO_FT2: f64 = 10.763_910_416_709_722;
 /// OCHRE EV fuel economy: 1/325 * 1000 miles per kWh (for sedans).
 const EV_FUEL_ECONOMY: f64 = 1000.0 / 325.0;
 
@@ -344,7 +348,7 @@ fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<E
         if let Some(cap_btu) = child_f64(heat_pump, "BackupHeatingCapacity") {
             params.insert(
                 "backup_capacity_w".to_string(),
-                json!(cap_btu * 0.293_071_07),
+                json!(conv::power_btu_h_to_w(cap_btu)),
             );
         }
         if let Some(eff_node) = heat_pump.child("BackupAnnualHeatingEfficiency") {
@@ -376,7 +380,7 @@ fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<E
         ] {
             for xml_key in xml_keys {
                 if let Some(f_val) = child_f64(heat_pump, xml_key) {
-                    params.insert(param_key.to_string(), json!((f_val - 32.0) / 1.8));
+                    params.insert(param_key.to_string(), json!(conv::temperature_f_to_c(f_val)));
                     break;
                 }
             }
@@ -526,7 +530,7 @@ fn resolve_water_heaters(
         if let Some(cap) = heating_capacity_btu_hr {
             params.insert(
                 "heating_capacity_kbtu_h".to_string(),
-                json!(cap * BTU_PER_HOUR_TO_KBTU_PER_HOUR),
+                json!(conv::power_btu_h_to_kbtu_h(cap)),
             );
         }
         params.insert(
@@ -587,7 +591,7 @@ fn resolve_water_heaters(
             // Convert hr·ft²·°F/BTU → m²·K/W
             params.insert(
                 "jacket_r_value_m2_k_w".to_string(),
-                json!(jacket_r * 0.176_110_184),
+                json!(conv::r_value_ip_to_si(jacket_r)),
             );
         }
 
@@ -677,7 +681,7 @@ fn parse_distribution_system(details: &XmlNode, n_bedrooms: f64) -> Distribution
         // 2 * sqrt(floor_area_ft2 / floors) + 10 * floors + 5 * has_unfinished_basement
         // We use a bedroom-count proxy when floor area data is not available.
         let default_piping_length_m = derive_default_piping_length_m(details, n_bedrooms);
-        let piping_length_m = child_f64(standard, "PipingLength").map(|ft| ft * 0.3048); // HPXML PipingLength is in feet
+        let piping_length_m = child_f64(standard, "PipingLength").map(conv::length_ft_to_m); // HPXML PipingLength is in feet
         DistributionSystem::Standard {
             pipe_r_value,
             piping_length_m,
@@ -686,7 +690,7 @@ fn parse_distribution_system(details: &XmlNode, n_bedrooms: f64) -> Distribution
     } else if let Some(recirc) = system_type.and_then(|n| n.child("Recirculation")) {
         // BranchPipingLoopLength is in feet in HPXML.
         let branch_loop_length_m =
-            child_f64(recirc, "BranchPipingLoopLength").map(|ft| ft * 0.3048);
+            child_f64(recirc, "BranchPipingLoopLength").map(conv::length_ft_to_m);
         DistributionSystem::Recirculation {
             pipe_r_value,
             branch_loop_length_m,
@@ -704,9 +708,6 @@ fn parse_distribution_system(details: &XmlNode, n_bedrooms: f64) -> Distribution
 /// Falls back to a bedroom-count proxy (25 + 5 * n_bedrooms ft ≈ 7.6 + 1.5 * n_bedrooms m)
 /// when floor area data is unavailable.
 fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
-    const FT_TO_M: f64 = 0.3048;
-    const FT2_TO_M2: f64 = 0.092_903_04;
-
     let floor_area_m2 = details
         .path(&[
             "BuildingSummary",
@@ -720,7 +721,7 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
             if units.eq_ignore_ascii_case("m2") {
                 Some(val)
             } else {
-                Some(val * FT2_TO_M2)
+                Some(conv::area_ft2_to_m2(val))
             }
         });
 
@@ -747,15 +748,15 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
         .unwrap_or(false);
 
     if let Some(area_m2) = floor_area_m2 {
-        let area_ft2 = area_m2 / FT2_TO_M2;
+        let area_ft2 = conv::area_m2_to_ft2(area_m2);
         let ft_per_floor = area_ft2 / n_floors;
         let default_ft = 2.0 * ft_per_floor.sqrt()
             + 10.0 * n_floors
             + if has_unfinished_bsmt { 5.0 } else { 0.0 };
-        default_ft * FT_TO_M
+        conv::length_ft_to_m(default_ft)
     } else {
         // Bedroom-count proxy when floor area is absent.
-        (25.0 + 5.0 * n_bedrooms) * FT_TO_M
+        conv::length_ft_to_m(25.0 + 5.0 * n_bedrooms)
     }
 }
 
@@ -976,9 +977,9 @@ fn resolve_scheduled_loads(
     }
 
     if let Some(lighting) = details.child("Lighting") {
-        let indoor_area_ft2 = conditioned_floor_area_m2(building) * M2_TO_FT2;
-        let foundation_area_ft2 = foundation_floor_area_m2(building) * M2_TO_FT2;
-        let garage_area_ft2 = garage_floor_area_m2(building) * M2_TO_FT2;
+        let indoor_area_ft2 = conv::area_m2_to_ft2(conditioned_floor_area_m2(building));
+        let foundation_area_ft2 = conv::area_m2_to_ft2(foundation_floor_area_m2(building));
+        let garage_area_ft2 = conv::area_m2_to_ft2(garage_floor_area_m2(building));
 
         let mut by_location: HashMap<String, LightingFractions> = HashMap::new();
         for group in children_named(lighting, "LightingGroup") {
@@ -1377,33 +1378,18 @@ fn canonical_water_heater_name(wh_type: &str, fuel: FuelType) -> String {
     }
 }
 
-fn parse_fuel(raw: Option<&str>) -> FuelType {
-    match raw
-        .unwrap_or("electricity")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "electricity" | "electric" | "none" => FuelType::Electric,
-        "natural gas" | "natural_gas" | "gas" => FuelType::Gas,
-        "propane" => FuelType::Propane,
-        "oil" | "fuel oil" | "fuel_oil" => FuelType::Oil,
-        _ => FuelType::Electric,
-    }
-}
-
 fn insert_capacity_kbtu_h(params: &mut Map<String, Value>, node: &XmlNode, tag: &str) {
     if let Some(cap) = child_f64(node, tag) {
         params.insert(
             format!("{}_kbtu_h", tag.to_ascii_lowercase()),
-            json!(cap * BTU_PER_HOUR_TO_KBTU_PER_HOUR),
+            json!(conv::power_btu_h_to_kbtu_h(cap)),
         );
     }
 }
 
 fn insert_capacity_w(params: &mut Map<String, Value>, node: &XmlNode, tag: &str, key: &str) {
     if let Some(cap_btu_h) = child_f64(node, tag) {
-        params.insert(key.to_string(), json!(cap_btu_h * 0.293_071_07));
+        params.insert(key.to_string(), json!(conv::power_btu_h_to_w(cap_btu_h)));
     }
 }
 
@@ -1673,72 +1659,6 @@ fn select_variants_for_speed_count(
     matches
 }
 
-fn element_id(node: &XmlNode) -> Option<String> {
-    node.child("SystemIdentifier")
-        .and_then(|id_node| id_node.attrs.get("id"))
-        .cloned()
-}
-
-fn child_text(node: &XmlNode, child_name: &str) -> Option<String> {
-    node.child(child_name).map(|n| n.text.trim().to_string())
-}
-
-fn child_f64(node: &XmlNode, child_name: &str) -> Option<f64> {
-    node.child(child_name)
-        .and_then(|n| n.text.trim().parse::<f64>().ok())
-}
-
-fn child_temperature_c(node: &XmlNode) -> Option<f64> {
-    let temp = node
-        .child("HotWaterTemperature")
-        .or_else(|| node.child("Temperature"))?;
-    let value = temp.text.trim().parse::<f64>().ok()?;
-    let units = temp
-        .attrs
-        .get("units")
-        .map(String::as_str)
-        .unwrap_or("F")
-        .to_ascii_lowercase();
-    Some(
-        if units == "f" || units == "degf" || units == "fahrenheit" {
-            (value - 32.0) * (5.0 / 9.0)
-        } else {
-            value
-        },
-    )
-}
-
-fn child_energy_kwh(node: &XmlNode, child_name: &str) -> Option<f64> {
-    let target = node.child(child_name)?;
-    let value = child_f64(target, "Value")?;
-    let units = child_text(target, "Units")?.to_ascii_lowercase();
-    match units.as_str() {
-        "kwh" | "kwh/year" | "kwh/yr" => Some(value),
-        "wh" | "wh/year" | "wh/yr" => Some(value / 1000.0),
-        _ => None,
-    }
-}
-
-fn child_load_kwh(node: &XmlNode) -> Option<f64> {
-    let load = node.child("Load")?;
-    let value = child_f64(load, "Value")?;
-    let units = child_text(load, "Units")?.to_ascii_lowercase();
-    match units.as_str() {
-        "kwh/year" | "kwh/yr" | "kwh" => Some(value),
-        _ => None,
-    }
-}
-
-fn child_load_therms(node: &XmlNode) -> Option<f64> {
-    let load = node.child("Load")?;
-    let value = child_f64(load, "Value")?;
-    let units = child_text(load, "Units")?.to_ascii_lowercase();
-    match units.as_str() {
-        "therm/year" | "therm/yr" | "therm" => Some(value),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct LightingFractions {
     led: f64,
@@ -1798,17 +1718,6 @@ fn read_extension_month_multipliers(ext: Option<&XmlNode>, prefix: &str) -> Opti
     }
 }
 
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    let mut out = String::new();
-    out.extend(first.to_uppercase());
-    out.push_str(chars.as_str());
-    out
-}
-
 fn conditioned_floor_area_m2(building: &Building) -> f64 {
     building
         .zones
@@ -1834,25 +1743,6 @@ fn garage_floor_area_m2(building: &Building) -> f64 {
         .find(|z| matches!(z.zone_type, super::building::ZoneType::Garage))
         .and_then(|z| z.floor_area_m2)
         .unwrap_or(0.0)
-}
-
-fn children_named<'a>(node: &'a XmlNode, name: &'a str) -> impl Iterator<Item = &'a XmlNode> {
-    node.children.iter().filter(move |child| child.name == name)
-}
-
-fn descendants_named<'a>(node: &'a XmlNode, name: &'a str) -> Vec<&'a XmlNode> {
-    let mut out = Vec::new();
-    collect_descendants(node, name, &mut out);
-    out
-}
-
-fn collect_descendants<'a>(node: &'a XmlNode, name: &str, out: &mut Vec<&'a XmlNode>) {
-    if node.name == name {
-        out.push(node);
-    }
-    for child in &node.children {
-        collect_descendants(child, name, out);
-    }
 }
 
 /// Parse HVACControl setpoints and return them as JSON key-value pairs
@@ -1887,7 +1777,7 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
                         .trim()
                         .split(',')
                         .filter_map(|s: &str| s.trim().parse::<f64>().ok())
-                        .map(|f| (f - 32.0) / 1.8)
+                        .map(conv::temperature_f_to_c)
                         .collect();
                     if vals.len() == 24 {
                         out.push((param_key, json!(vals)));
@@ -1900,7 +1790,7 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
             let const_key = format!("SetpointTemp{hvac_type}Season");
             if let Some(node) = control.child(&const_key) {
                 if let Ok(f_val) = node.text.trim().parse::<f64>() {
-                    let c_val = (f_val - 32.0) / 1.8;
+                    let c_val = conv::temperature_f_to_c(f_val);
                     out.push((param_key, json!(vec![c_val; 24])));
                 }
             }
@@ -2029,6 +1919,8 @@ fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String,
 #[cfg(test)]
 mod tests {
     use serde_json::{Map, Value, json};
+
+    use hares_physics::units as conv;
 
     use super::{nested_update, resolve_equipment};
     use crate::defaults::DefaultsStore;
@@ -2432,7 +2324,7 @@ mod tests {
             .expect("ua_w_per_k must be present for HPWH with TankVolume");
 
         // 50 gal × 0.9 = 45 gal → bin ≤ 58 gal → 3.6 Btu/hr·°F → 1.899 W/K
-        let expected = 3.6 * (0.293_071_07 * 9.0 / 5.0);
+        let expected = conv::btu_hr_per_f_to_w_per_k(3.6);
         assert!(
             (ua - expected).abs() < 1e-6,
             "HPWH ua_w_per_k={ua:.4}, expected {expected:.4}"

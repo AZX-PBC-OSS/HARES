@@ -5,16 +5,12 @@ use std::collections::HashMap;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
-use super::HpxmlError;
+use hares_types::{normalize_ascii, parse_trimmed_f64};
 
-const AREA_FT2_TO_M2: f64 = 0.092_903_04;
-const U_BTU_HR_FT2_F_TO_W_M2_K: f64 = 5.678;
-const R_HR_FT2_F_BTU_TO_M2_K_W: f64 = 0.176_1;
-const CONDUCTIVITY_BTU_HR_FT_F_TO_W_M_K: f64 = 1.730_734_67;
-const CONDUCTIVITY_BTU_IN_HR_FT2_F_TO_W_M_K: f64 = 0.144_227_91;
-const DENSITY_LB_FT3_TO_KG_M3: f64 = 16.018_463_37;
-const SPECIFIC_HEAT_BTU_LB_F_TO_J_KG_K: f64 = 4_186.8;
-const BTU_PER_H_TO_W: f64 = 0.293_071_07;
+use hares_physics::units as conv;
+
+use super::HpxmlError;
+use super::xml_helpers::element_id;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SiteType {
@@ -236,7 +232,7 @@ impl XmlNode {
     }
 
     fn text_as_f64(&self) -> Option<f64> {
-        self.text.trim().parse::<f64>().ok()
+        parse_trimmed_f64(&self.text)
     }
 }
 
@@ -353,7 +349,7 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
         .map(|node| parse_site_type(node.text.trim()));
     let shielding_of_home = site_node
         .child("ShieldingOfHome")
-        .map(|n| n.text.trim().to_ascii_lowercase())
+        .map(|n| normalize_ascii(&n.text))
         .filter(|s| !s.is_empty());
     let latitude_deg = root
         .path(&["Building", "Site", "Latitude"])
@@ -448,7 +444,7 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
         }),
         hvac_capacity_w: find_descendant_f64(details, "HeatingCapacity", ValueKind::Raw)
             .or_else(|| find_descendant_f64(details, "CoolingCapacity", ValueKind::Raw))
-            .map(|btu_per_h| btu_per_h * BTU_PER_H_TO_W),
+            .map(conv::power_btu_h_to_w),
         seer2: find_descendant_f64(details, "SEER2", ValueKind::Raw),
         hspf2: find_descendant_f64(details, "HSPF2", ValueKind::Raw),
         water_heater_setpoint_c: details
@@ -495,8 +491,8 @@ fn parse_hvac_setpoints(details: &XmlNode, hvac_type: &str, weekday: bool) -> Op
                 .text
                 .trim()
                 .split(',')
-                .filter_map(|s| s.trim().parse::<f64>().ok())
-                .map(|f| (f - 32.0) / 1.8)
+                .filter_map(parse_trimmed_f64)
+                .map(conv::temperature_f_to_c)
                 .collect();
             if vals.len() == 24 {
                 return Some(vals);
@@ -508,7 +504,7 @@ fn parse_hvac_setpoints(details: &XmlNode, hvac_type: &str, weekday: bool) -> Op
     let const_key = format!("SetpointTemp{hvac_type}Season");
     if let Some(node) = control.child(&const_key) {
         if let Ok(f_val) = node.text.trim().parse::<f64>() {
-            let c_val = (f_val - 32.0) / 1.8;
+            let c_val = conv::temperature_f_to_c(f_val);
             return Some(vec![c_val; 24]);
         }
     }
@@ -562,7 +558,7 @@ fn parse_windows(
     };
 
     for window in group.children_named("Window") {
-        let id = element_id(window);
+        let id = element_id(window).unwrap_or_else(|| "unknown".to_string());
         let area_m2 =
             parse_value_with_units(window.child("Area"), ValueKind::Area).ok_or_else(|| {
                 HpxmlError::Parse(format!("window '{}' is missing required Area element", id))
@@ -630,7 +626,7 @@ fn parse_windows(
 }
 
 fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundary, HpxmlError> {
-    let id = element_id(node);
+    let id = element_id(node).unwrap_or_else(|| "unknown".to_string());
     let area_m2 = parse_boundary_area(node, &boundary_type, &id)?;
     let r_value_layers_m2_k_w = parse_nominal_r_layers(node);
     let assembly_r_value_m2_k_w =
@@ -820,7 +816,7 @@ fn extract_insulation_details(node: &XmlNode) -> Option<String> {
     // Sum nominal R-values, format as "R-{value}" (imperial, matching OCHRE convention).
     let total_r: f64 = r_layers.iter().sum();
     // Convert from m²·K/W back to imperial R for LUT matching.
-    let imperial_r = total_r / R_HR_FT2_F_BTU_TO_M2_K_W;
+    let imperial_r = total_r / conv::r_value_ip_to_si(1.0);
     if imperial_r < 1.0 {
         Some("Uninsulated".to_string())
     } else {
@@ -880,7 +876,7 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
         .attrs
         .get("UnitofMeasure")
         .or_else(|| vr.attrs.get("unitofmeasure"))
-        .map(|s| s.trim().to_ascii_lowercase());
+        .map(|s| normalize_ascii(s));
     match (value, unit.as_deref()) {
         (Some(v), Some("achnatural")) => (Some(v), None),
         (Some(v), Some("sla")) => (None, Some(v)),
@@ -889,7 +885,7 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
             let value_node = vr.child("Value").and_then(|n| n.text_as_f64());
             let unit_node = vr
                 .child("UnitofMeasure")
-                .map(|n| n.text.trim().to_ascii_lowercase());
+                .map(|n| normalize_ascii(&n.text));
             match (value_node, unit_node.as_deref()) {
                 (Some(v), Some("achnatural")) => (Some(v), None),
                 (Some(v), Some("sla")) => (None, Some(v)),
@@ -1048,7 +1044,7 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
     details.descendants("DuctSystem", &mut ducts);
 
     for duct_node in ducts {
-        let id = element_id(duct_node);
+        let id = element_id(duct_node).unwrap_or_else(|| "unknown".to_string());
         let leakage_fraction = duct_node
             .first_descendant("LeakageFraction")
             .and_then(XmlNode::text_as_f64)
@@ -1090,7 +1086,7 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
 
         let duct_type = duct_node
             .first_descendant("DuctType")
-            .map(|n| match n.text.trim().to_ascii_lowercase().as_str() {
+            .map(|n| match normalize_ascii(&n.text).as_str() {
                 "supply" => DuctType::Supply,
                 "return" => DuctType::Return,
                 _ => DuctType::Unknown,
@@ -1166,7 +1162,7 @@ fn parse_value_with_units(node: Option<&XmlNode>, kind: ValueKind) -> Option<f64
         .attrs
         .get("units")
         .or_else(|| node.attrs.get("unit"))
-        .map(|s| s.trim().to_ascii_lowercase());
+        .map(|s| normalize_ascii(s));
 
     match kind {
         ValueKind::Raw => Some(value),
@@ -1185,27 +1181,22 @@ fn parse_value_with_units(node: Option<&XmlNode>, kind: ValueKind) -> Option<f64
 fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("ft2") | Some("ft^2") | Some("ftsq") | Some("ftsq.") | Some("square feet") => {
-            value * AREA_FT2_TO_M2
+            conv::area_ft2_to_m2(value)
         }
         Some(_) => value,
         None => {
-            // HPXML uses imperial (ft²) by default when no units attribute is present
             eprintln!(
                 "[WARN] Area value {value} has no units attribute; assuming ft² and converting to m²"
             );
-            value * AREA_FT2_TO_M2
+            conv::area_ft2_to_m2(value)
         }
     }
 }
 
 fn convert_volume_to_m3(value: f64, units: Option<&str>) -> f64 {
-    use uom::si::f64::Volume;
-    use uom::si::volume::{cubic_foot, cubic_meter};
-
     match units {
         Some("ft3") | Some("ft^3") | Some("cubic feet") | None => {
-            // HPXML specifies ft³ as the implicit unit for volume elements
-            Volume::new::<cubic_foot>(value).get::<cubic_meter>()
+            conv::volume_ft3_to_m3(value)
         }
         Some(_) => value,
     }
@@ -1214,15 +1205,14 @@ fn convert_volume_to_m3(value: f64, units: Option<&str>) -> f64 {
 fn convert_u_to_w_m2_k(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("btu/hr-ft2-f") | Some("btu/hr-ft^2-f") | Some("btu/(h*ft2*f)") => {
-            value * U_BTU_HR_FT2_F_TO_W_M2_K
+            conv::u_value_ip_to_si(value)
         }
         Some(_) => value,
         None => {
-            // HPXML uses imperial U-values by default when no units attribute is present
             eprintln!(
                 "[WARN] U-value {value} has no units attribute; assuming BTU/(hr·ft²·°F) and converting to W/(m²·K)"
             );
-            value * U_BTU_HR_FT2_F_TO_W_M2_K
+            conv::u_value_ip_to_si(value)
         }
     }
 }
@@ -1230,58 +1220,56 @@ fn convert_u_to_w_m2_k(value: f64, units: Option<&str>) -> f64 {
 fn convert_r_to_m2_k_w(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("hr-ft2-f/btu") | Some("hr-ft^2-f/btu") | Some("h*ft2*f/btu") => {
-            value * R_HR_FT2_F_BTU_TO_M2_K_W
+            conv::r_value_ip_to_si(value)
         }
         Some(_) => value,
         None => {
-            // HPXML uses imperial R-values by default when no units attribute is present
             eprintln!(
                 "[WARN] R-value {value} has no units attribute; assuming hr·ft²·°F/BTU and converting to m²·K/W"
             );
-            value * R_HR_FT2_F_BTU_TO_M2_K_W
+            conv::r_value_ip_to_si(value)
         }
     }
 }
 
 fn convert_conductivity_to_w_m_k(value: f64, units: Option<&str>) -> f64 {
     match units {
-        Some("btu/hr-ft-f") | Some("btu/(h*ft*f)") => value * CONDUCTIVITY_BTU_HR_FT_F_TO_W_M_K,
+        Some("btu/hr-ft-f") | Some("btu/(h*ft*f)") => {
+            conv::conductivity_btu_h_ft_f_to_w_m_k(value)
+        }
         Some("btu-in/hr-ft2-f") | Some("btu in/hr ft2 f") | Some("btu*in/(h*ft2*f)") => {
-            value * CONDUCTIVITY_BTU_IN_HR_FT2_F_TO_W_M_K
+            conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value)
         }
         _ => value,
     }
 }
 
 fn convert_length_to_m(value: f64, units: Option<&str>) -> f64 {
-    use uom::si::f64::Length;
-    use uom::si::length::{foot, inch, meter};
-
     match units {
-        Some("in") | Some("inch") | Some("inches") => Length::new::<inch>(value).get::<meter>(),
-        Some("ft") | Some("feet") => Length::new::<foot>(value).get::<meter>(),
+        Some("in") | Some("inch") | Some("inches") => conv::length_in_to_m(value),
+        Some("ft") | Some("feet") => conv::length_ft_to_m(value),
         Some(_) => value,
         None => {
-            // HPXML uses feet as the default length unit when no units attribute is present.
-            // InfiltrationHeight, ceiling heights, etc. are all in feet.
             eprintln!(
                 "[WARN] Length value {value} has no units attribute; assuming feet and converting to meters"
             );
-            Length::new::<foot>(value).get::<meter>()
+            conv::length_ft_to_m(value)
         }
     }
 }
 
 fn convert_density_to_kg_m3(value: f64, units: Option<&str>) -> f64 {
     match units {
-        Some("lb/ft3") | Some("lb/ft^3") | Some("lbm/ft3") => value * DENSITY_LB_FT3_TO_KG_M3,
+        Some("lb/ft3") | Some("lb/ft^3") | Some("lbm/ft3") => {
+            conv::density_lb_ft3_to_kg_m3(value)
+        }
         _ => value,
     }
 }
 
 fn convert_specific_heat_to_j_kg_k(value: f64, units: Option<&str>) -> f64 {
     match units {
-        Some("btu/lb-f") | Some("btu/(lb*f)") => value * SPECIFIC_HEAT_BTU_LB_F_TO_J_KG_K,
+        Some("btu/lb-f") | Some("btu/(lb*f)") => conv::specific_heat_btu_lb_f_to_j_kg_k(value),
         _ => value,
     }
 }
@@ -1289,28 +1277,21 @@ fn convert_specific_heat_to_j_kg_k(value: f64, units: Option<&str>) -> f64 {
 fn convert_temperature_to_c(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("F") | Some("f") | Some("degF") | Some("degf") | Some("fahrenheit") => {
-            (value - 32.0) / 1.8
+            conv::temperature_f_to_c(value)
         }
         Some("C") | Some("c") | Some("degC") | Some("degc") | Some("celsius") => value,
         Some(_) => value,
         None => {
-            // HPXML uses Fahrenheit by default when no units attribute is present
             eprintln!(
                 "[WARN] Temperature value {value} has no units attribute; assuming °F and converting to °C"
             );
-            (value - 32.0) / 1.8
+            conv::temperature_f_to_c(value)
         }
     }
 }
 
-fn element_id(node: &XmlNode) -> String {
-    node.child("SystemIdentifier")
-        .and_then(|id_node| id_node.attrs.get("id").cloned())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 fn parse_site_type(text: &str) -> SiteType {
-    match text.trim().to_ascii_lowercase().as_str() {
+    match normalize_ascii(text).as_str() {
         "rural" => SiteType::Rural,
         "suburban" => SiteType::Suburban,
         "urban" => SiteType::Urban,
@@ -1324,19 +1305,19 @@ fn parse_zone_ref(node: Option<&XmlNode>) -> Option<ZoneType> {
 }
 
 fn parse_zone_label(text: &str) -> ZoneType {
-    let normalized = text.trim().to_ascii_lowercase();
-    if normalized.contains("condition") || normalized == "living space" {
+    let norm = normalize_ascii(text);
+    if norm.contains("condition") || norm == "living space" {
         ZoneType::Conditioned
-    } else if normalized.contains("attic") {
+    } else if norm.contains("attic") {
         ZoneType::Attic
-    } else if normalized.contains("garage") {
+    } else if norm.contains("garage") {
         ZoneType::Garage
-    } else if normalized.contains("foundation")
-        || normalized.contains("basement")
-        || normalized.contains("crawl")
+    } else if norm.contains("foundation")
+        || norm.contains("basement")
+        || norm.contains("crawl")
     {
         ZoneType::Foundation
-    } else if normalized.contains("out") || normalized.contains("ambient") || normalized == "ground"
+    } else if norm.contains("out") || norm.contains("ambient") || norm == "ground"
     {
         ZoneType::Outdoor
     } else {
@@ -1345,14 +1326,14 @@ fn parse_zone_label(text: &str) -> ZoneType {
 }
 
 fn parse_duct_location(text: &str) -> DuctLocation {
-    let normalized = text.trim().to_ascii_lowercase();
-    if normalized.contains("condition") {
+    let norm = normalize_ascii(text);
+    if norm.contains("condition") {
         DuctLocation::InsideConditionedSpace
-    } else if normalized.contains("out")
-        || normalized.contains("attic")
-        || normalized.contains("garage")
-        || normalized.contains("crawl")
-        || normalized.contains("basement")
+    } else if norm.contains("out")
+        || norm.contains("attic")
+        || norm.contains("garage")
+        || norm.contains("crawl")
+        || norm.contains("basement")
     {
         DuctLocation::OutsideConditionedSpace
     } else {

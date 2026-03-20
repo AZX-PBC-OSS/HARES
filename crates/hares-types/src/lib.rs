@@ -13,6 +13,7 @@ pub mod fluid;
 pub mod ports;
 pub mod schedule;
 pub mod telemetry;
+pub mod text;
 
 pub use control_signal::*;
 pub use domain_solver::*;
@@ -23,6 +24,7 @@ pub use fluid::*;
 pub use ports::*;
 pub use schedule::*;
 pub use telemetry::*;
+pub use text::{normalize_ascii, parse_trimmed_f64};
 
 #[cfg(test)]
 pub mod test_utils {

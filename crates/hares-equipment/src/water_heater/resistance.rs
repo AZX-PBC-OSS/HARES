@@ -6,7 +6,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, PortType, ScheduleSource, Telemetry,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
     TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ use super::{
     mains_temp_schedule_source, parse_usize, resolve_draw_rate_kg_s, resolve_storage_step_inputs,
     weighted_average_tank_temp,
 };
+use hares_physics::units as conv;
+
 use crate::hvac::helpers::{
     equipment_id_from_config, first_f64, loop_id_from_config, zone_id_from_config,
 };
@@ -34,18 +36,14 @@ pub enum ElementPriorityMode {
     Simultaneous,
 }
 
-const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
-const GALLON_TO_M3: f64 = 0.003_785_411_784;
-const BTU_PER_HOUR_TO_W: f64 = 0.293_071_07;
-const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
-const DEFAULT_UA_W_PER_K: f64 = 2.0;
-const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;
-const DEFAULT_TANK_DIAMETER_M: f64 = 0.5;
-const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
-const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
+use super::{
+    DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
+    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_GAL, DEFAULT_UA_W_PER_K,
+    WATER_DENSITY_KG_PER_M3,
+};
+
 const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE default)
 const DEFAULT_ELEMENT_POWER_W: f64 = 4_500.0;
-const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResistanceWhState {
@@ -150,27 +148,9 @@ impl ResistanceWH {
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Fluid,
-                    zone: None,
-                    loop_id: Some(loop_id),
-                    domain_id: None,
-                    fluid_type: Some(FluidType::Water),
-                },
-                PortDeclaration {
-                    port_type: PortType::Fluid,
-                    zone: None,
-                    loop_id: Some(super::DHW_DEMAND_LOOP),
-                    domain_id: None,
-                    fluid_type: Some(FluidType::Water),
-                },
+                PortDeclaration::electrical(),
+                PortDeclaration::fluid(loop_id, FluidType::Water),
+                PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
             ],
             telemetry: default_telemetry(),
             tank,
@@ -267,9 +247,10 @@ impl Equipment for ResistanceWH {
             .unwrap_or(6)
             .clamp(1, 12);
 
-        let tank_volume_m3 = first_f64(config, &["TankVolume", "tank_volume_gal"])
-            .unwrap_or(DEFAULT_TANK_VOLUME_GAL)
-            * GALLON_TO_M3;
+        let tank_volume_m3 = conv::volume_gal_to_m3(
+            first_f64(config, &["TankVolume", "tank_volume_gal"])
+                .unwrap_or(DEFAULT_TANK_VOLUME_GAL),
+        );
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =
@@ -312,7 +293,7 @@ impl Equipment for ResistanceWH {
         })?;
 
         let capacity_w = first_f64(config, &["HeatingCapacity", "heating_capacity_btu_hr"])
-            .map(|v| v * BTU_PER_HOUR_TO_W)
+            .map(conv::power_btu_h_to_w)
             .unwrap_or(DEFAULT_ELEMENT_POWER_W);
         self.upper_element_power_w =
             first_f64(config, &["upper_element_power_w", "UpperElementPower"])

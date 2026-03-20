@@ -23,7 +23,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -361,39 +361,14 @@ impl Generator {
         };
 
         let mut ports = vec![
-            PortDeclaration {
-                port_type: PortType::Electrical,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
-            PortDeclaration {
-                port_type: PortType::Fuel,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
+            PortDeclaration::electrical(),
+            PortDeclaration::fuel(),
         ];
         if let Some(z) = zone {
-            // Thermal port for zone heat gains (CHP or waste heat)
-            ports.push(PortDeclaration {
-                port_type: PortType::Thermal,
-                zone: Some(z),
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
+            ports.push(PortDeclaration::thermal(z));
         }
         if let Some(lid) = chp_loop_id {
-            ports.push(PortDeclaration {
-                port_type: PortType::Fluid,
-                zone: None,
-                loop_id: Some(lid),
-                domain_id: None,
-                fluid_type: Some(FluidType::Water),
-            });
+            ports.push(PortDeclaration::fluid(lid, FluidType::Water));
         }
 
         let has_chp = eta_thermal > 0.0;
@@ -939,7 +914,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use hares_types::{
         ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType, GridState,
-        OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        OperatingMode, PortSlots, PortType, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
     use crate::config::ConfigValue;

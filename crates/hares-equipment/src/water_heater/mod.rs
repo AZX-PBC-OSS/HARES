@@ -8,6 +8,16 @@ pub mod tankless;
 
 pub use tank::{DrawResult, StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 
+// Shared physical constants and defaults used by multiple water heater types.
+pub(crate) const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
+pub(crate) const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
+pub(crate) const DEFAULT_UA_W_PER_K: f64 = 2.0;
+pub(crate) const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;
+pub(crate) const DEFAULT_TANK_DIAMETER_M: f64 = 0.5;
+pub(crate) const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
+pub(crate) const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
+pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
+
 use hares_types::{BoundaryPolicy, DomainId, EnvironmentState, LoopId, PortSlots, ScheduleSource};
 
 use crate::EquipmentRegistry;

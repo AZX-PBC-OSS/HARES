@@ -10,7 +10,7 @@ use chrono::{Datelike, Timelike};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, PortType, SurfaceIrradiance, Telemetry, TelemetryField,
+    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
@@ -603,13 +603,7 @@ impl PV {
 
         Self {
             descriptor,
-            ports: vec![PortDeclaration {
-                port_type: PortType::Electrical,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            }],
+            ports: vec![PortDeclaration::electrical()],
             telemetry,
             arrays,
             surface_resolution_deg: DEFAULT_SURFACE_RESOLUTION_DEG,

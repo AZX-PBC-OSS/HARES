@@ -8,7 +8,7 @@ use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +19,8 @@ use super::{
     WaterHeaterZip, hysteresis_call, parse_usize, resolve_draw_rate_kg_s,
     weighted_average_tank_temp,
 };
+use hares_physics::units as conv;
+
 use crate::hvac::helpers::{
     equipment_id_from_config, first_f64, loop_id_from_config, zone_id_from_config,
 };
@@ -35,15 +37,13 @@ pub enum ElementHpControlMode {
     Simultaneous,
 }
 
-const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
-const GALLON_TO_M3: f64 = 0.003_785_411_784;
-const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
+use super::{
+    DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
+    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_GAL, DEFAULT_UA_W_PER_K,
+    WATER_DENSITY_KG_PER_M3,
+};
+
 const DEFAULT_DEADBAND_C: f64 = 8.166_666_667; // 14.7°F (OCHRE HPWH-specific default)
-const DEFAULT_UA_W_PER_K: f64 = 2.0;
-const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;
-const DEFAULT_TANK_DIAMETER_M: f64 = 0.5;
-const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
-const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
 const DEFAULT_COMPRESSOR_POWER_W: f64 = 1_200.0;
 const DEFAULT_BACKUP_ELEMENT_POWER_W: f64 = 4_500.0;
 const DEFAULT_BACKUP_ENABLE_OFFSET_C: f64 = 8.0;
@@ -61,7 +61,6 @@ const DEFAULT_MAX_AMBIENT_TEMP_C: f64 = 5.0 * (110.0 - 32.0) / 9.0; // 43.3333..
 /// 37°F = 2.7̄°C; 145°F = 62.7̄°C.
 const LOW_POWER_MIN_AMBIENT_TEMP_C: f64 = 5.0 * (37.0 - 32.0) / 9.0; // 2.7777...
 const LOW_POWER_MAX_AMBIENT_TEMP_C: f64 = 5.0 * (145.0 - 32.0) / 9.0; // 62.7777...
-const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 /// Sensible heat ratio of zone-air cooling from evaporator (OCHRE WH.py:671-674).
 const DEFAULT_SHR: f64 = 0.88;
 /// Fraction of compressor waste heat that exits the building envelope.
@@ -242,34 +241,10 @@ impl HeatPumpWH {
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Thermal,
-                    zone: Some(zone),
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Fluid,
-                    zone: None,
-                    loop_id: Some(loop_id),
-                    domain_id: None,
-                    fluid_type: Some(FluidType::Water),
-                },
-                PortDeclaration {
-                    port_type: PortType::Fluid,
-                    zone: None,
-                    loop_id: Some(super::DHW_DEMAND_LOOP),
-                    domain_id: None,
-                    fluid_type: Some(FluidType::Water),
-                },
+                PortDeclaration::electrical(),
+                PortDeclaration::thermal(zone),
+                PortDeclaration::fluid(loop_id, FluidType::Water),
+                PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
             ],
             telemetry: default_telemetry(),
             tank,
@@ -395,9 +370,10 @@ impl Equipment for HeatPumpWH {
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
             .clamp(1, 12);
-        let tank_volume_m3 = first_f64(config, &["TankVolume", "tank_volume_gal"])
-            .unwrap_or(DEFAULT_TANK_VOLUME_GAL)
-            * GALLON_TO_M3;
+        let tank_volume_m3 = conv::volume_gal_to_m3(
+            first_f64(config, &["TankVolume", "tank_volume_gal"])
+                .unwrap_or(DEFAULT_TANK_VOLUME_GAL),
+        );
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =

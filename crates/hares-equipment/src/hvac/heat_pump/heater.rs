@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -306,20 +306,8 @@ impl HeatPumpHeaterCore {
                 telemetry_fields: heater_telemetry_fields(),
             },
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Thermal,
-                    zone: Some(zone),
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
+                PortDeclaration::electrical(),
+                PortDeclaration::thermal(zone),
             ],
             telemetry: default_heater_telemetry(),
             hvac: HvacEquipment::new(hvac_type, zone),

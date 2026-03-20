@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,20 +84,8 @@ impl ElectricFurnace {
         Self {
             descriptor,
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Thermal,
-                    zone: Some(zone),
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
+                PortDeclaration::electrical(),
+                PortDeclaration::thermal(zone),
             ],
             telemetry: electric_furnace_default_telemetry(),
             hvac: HvacEquipment::new(HvacEquipmentType::ElectricFurnace, zone),
@@ -248,27 +236,9 @@ impl GasFurnace {
         Self {
             descriptor,
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Fuel,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Thermal,
-                    zone: Some(zone),
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
+                PortDeclaration::fuel(),
+                PortDeclaration::electrical(),
+                PortDeclaration::thermal(zone),
             ],
             telemetry: gas_furnace_default_telemetry(),
             hvac: HvacEquipment::new(HvacEquipmentType::GasFurnace, zone),

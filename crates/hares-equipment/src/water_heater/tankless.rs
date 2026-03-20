@@ -6,7 +6,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -461,40 +461,13 @@ fn parse_tankless_fuel_type(raw: Option<&str>) -> FuelType {
 /// Electric: one Electrical port only.
 /// Gas: one Fuel port + one Electrical port (for the ignition controller parasitic).
 fn build_ports(fuel_type: FuelType) -> Vec<PortDeclaration> {
-    let dhw_port = PortDeclaration {
-        port_type: PortType::Fluid,
-        zone: None,
-        loop_id: Some(super::DHW_DEMAND_LOOP),
-        domain_id: None,
-        fluid_type: Some(FluidType::Water),
-    };
+    let dhw_port = PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water);
     if fuel_type == FuelType::Electric {
-        vec![
-            PortDeclaration {
-                port_type: PortType::Electrical,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
-            dhw_port,
-        ]
+        vec![PortDeclaration::electrical(), dhw_port]
     } else {
         vec![
-            PortDeclaration {
-                port_type: PortType::Fuel,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
-            PortDeclaration {
-                port_type: PortType::Electrical,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
+            PortDeclaration::fuel(),
+            PortDeclaration::electrical(),
             dhw_port,
         ]
     }

@@ -1802,4 +1802,84 @@ mod tests {
         // Single-pane: transmittance should be majority of SHGC.
         assert!(t > 0.60 * 0.5, "single-pane transmittance should be >50% of SHGC");
     }
+
+    /// Debug test: POA irradiance on 6 windows (N/S/E/W orientation) at Denver May 5 noon.
+    /// Traces whether solar decomposition is correct.
+    #[test]
+    #[ignore]
+    fn debug_solar_poa_at_may_5_noon_denver() {
+        // May 5 noon local Denver = May 5 19:00 UTC (Denver is UTC-7 in May)
+        let utc_time = DateTime::<Utc>::default();
+        let utc_time = Utc
+            .with_ymd_and_hms(2024, 5, 5, 19, 0, 0)
+            .single()
+            .unwrap();
+        let denver_lat = 39.83;
+        let denver_lon = -104.65;
+
+        // Solar position at May 5 noon
+        let pos = solar_position(denver_lat, denver_lon, utc_time);
+        eprintln!("\n=== Solar Position at May 5 noon UTC ===");
+        eprintln!("Solar altitude: {:.2}°", pos.altitude_deg);
+        eprintln!("Solar azimuth: {:.2}°", pos.azimuth_deg);
+
+        // Weather at May 5 noon from Denver EPW
+        let ghi = 928.0; // W/m² (from EPW)
+        let dni = 883.0; // W/m² (from EPW)
+        let dhi = 124.0; // W/m² (from EPW)
+        let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
+        let day_of_year = 126; // May 5 = day 125 (1-indexed)
+
+        eprintln!("\n=== Weather Data (Denver May 5, 12:00 local) ===");
+        eprintln!("GHI: {} W/m²", ghi);
+        eprintln!("DNI: {} W/m²", dni);
+        eprintln!("DHI: {} W/m²", dhi);
+        eprintln!("Solar zenith: {:.2}°", solar_zenith_deg);
+
+        // Window orientations: 2xE, 1xN, 2xW, 1xS (per user description)
+        let orientations = vec![
+            ("East-1", 90.0),
+            ("East-2", 90.0),
+            ("North", 0.0),
+            ("West-1", 270.0),
+            ("West-2", 270.0),
+            ("South", 180.0),
+        ];
+
+        eprintln!("\n=== Per-Window POA Irradiance (vertical, tilt=90°) ===");
+        let mut total_poa = 0.0;
+
+        for (name, azimuth) in orientations.iter() {
+            let tilt = 90.0; // vertical window
+            let aoi = angle_of_incidence(tilt, *azimuth, pos.altitude_deg, pos.azimuth_deg);
+
+            let irr = perez_tilted_irradiance(
+                0,
+                ghi,
+                dni,
+                dhi,
+                solar_zenith_deg,
+                pos.azimuth_deg,
+                tilt,
+                *azimuth,
+                day_of_year,
+            );
+
+            let total_poa_window = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
+            total_poa += total_poa_window;
+
+            eprintln!(
+                "{:8} (az={:3.0}°): direct={:6.1}, diffuse={:6.1}, reflected={:5.1}, total={:6.1} W/m², AOI={:5.1}°",
+                name, azimuth,
+                irr.direct_w_m2, irr.diffuse_w_m2, irr.reflected_w_m2, total_poa_window, aoi
+            );
+        }
+
+        let mean_poa = total_poa / 6.0;
+        eprintln!("\nMean POA across 6 windows: {:.1} W/m²", mean_poa);
+        eprintln!(
+            "Expected: ~100–120 W/m² (user reports OCHRE gives 356W × 0.21 SHGC / 15.6 m² = 4.8 W/m² per window)"
+        );
+        eprintln!("HARES currently high: ~200+ W/m² suggests POA is 2x too high");
+    }
 }

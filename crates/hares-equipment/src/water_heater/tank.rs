@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::{Result, load_postcard, save_postcard};
 use hares_types::HaresError;
 
+use super::WATER_DENSITY_KG_PER_M3;
+
 const MIN_NODES: usize = 1;
 const MAX_NODES: usize = 12;
-const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
 const WATER_SPECIFIC_HEAT_J_PER_KG_K: f64 = 4183.0;
 
 /// Configuration for a stratified tank.

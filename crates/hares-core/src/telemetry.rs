@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use hares_types::HaresError;
+use hares_types::normalize_ascii;
 
 /// Dense telemetry snapshot for one dwelling timestep.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,35 +46,35 @@ impl DwellingTelemetry {
                 continue;
             }
             if let Some(name) = bracket_name(field, "zone_temp") {
-                let idx = *zone_index.get(&normalize(name)).ok_or_else(|| {
+                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
                     HaresError::Control(format!("unknown zone in field `{field}`"))
                 })?;
                 out.push(self.zone_temperatures_c[idx]);
                 continue;
             }
             if let Some(name) = bracket_name(field, "setpoint_heat") {
-                let idx = *zone_index.get(&normalize(name)).ok_or_else(|| {
+                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
                     HaresError::Control(format!("unknown zone in field `{field}`"))
                 })?;
                 out.push(self.setpoint_heat_c[idx]);
                 continue;
             }
             if let Some(name) = bracket_name(field, "setpoint_cool") {
-                let idx = *zone_index.get(&normalize(name)).ok_or_else(|| {
+                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
                     HaresError::Control(format!("unknown zone in field `{field}`"))
                 })?;
                 out.push(self.setpoint_cool_c[idx]);
                 continue;
             }
             if let Some(name) = bracket_name(field, "equipment_soc") {
-                let idx = *equip_index.get(&normalize(name)).ok_or_else(|| {
+                let idx = *equip_index.get(&normalize_ascii(name)).ok_or_else(|| {
                     HaresError::Control(format!("unknown equipment in field `{field}`"))
                 })?;
                 out.push(self.equipment_soc[idx]);
                 continue;
             }
             if let Some(name) = bracket_name(field, "equipment_power") {
-                let idx = *equip_index.get(&normalize(name)).ok_or_else(|| {
+                let idx = *equip_index.get(&normalize_ascii(name)).ok_or_else(|| {
                     HaresError::Control(format!("unknown equipment in field `{field}`"))
                 })?;
                 out.push(self.equipment_power_kw[idx]);
@@ -101,15 +102,11 @@ impl DwellingTelemetry {
     }
 }
 
-fn normalize(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
 fn index_map(names: &[String]) -> HashMap<String, usize> {
     names
         .iter()
         .enumerate()
-        .map(|(idx, name)| (normalize(name), idx))
+        .map(|(idx, name)| (normalize_ascii(name), idx))
         .collect()
 }
 
@@ -125,7 +122,7 @@ fn single_instance_alias(
     canonical_name: &str,
     field: &str,
 ) -> Result<usize, HaresError> {
-    if let Some(&idx) = equip_index.get(&normalize(canonical_name)) {
+    if let Some(&idx) = equip_index.get(&normalize_ascii(canonical_name)) {
         return Ok(idx);
     }
     Err(HaresError::Control(format!(

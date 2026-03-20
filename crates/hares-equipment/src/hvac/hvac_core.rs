@@ -7,6 +7,7 @@ use hares_types::{
     BoundaryPolicy, ControlSignal, EnvironmentState, HaresError, PortContribution, PortSlots,
     ScheduleSource, ZoneId,
 };
+use hares_types::normalize_ascii;
 
 use crate::EquipmentConfig;
 
@@ -1381,7 +1382,7 @@ fn load_bounds_pair(
 fn parse_speed_control_mode(config: &EquipmentConfig) -> SpeedControlMode {
     let from_text = config
         .get_str("speed_control_mode")
-        .map(|v| v.trim().to_ascii_lowercase());
+        .map(normalize_ascii);
     if let Some(value) = from_text {
         return match value.as_str() {
             "single" | "single_speed" | "single-speed" => SpeedControlMode::SingleSpeed,

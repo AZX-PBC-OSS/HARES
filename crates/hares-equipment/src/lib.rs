@@ -102,7 +102,7 @@ mod tests {
     use hares_types::{
         ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor,
         EquipmentId, ExecutionStage, FluidType, FuelType, GridState, LoopId, OperatingMode,
-        PortDeclaration, PortSlots, PortType, ProtocolId, SurfaceIrradiance, Telemetry,
+        PortDeclaration, PortSlots, ProtocolId, SurfaceIrradiance, Telemetry,
         TelemetryField, WeatherState, ZoneId, ZoneState,
     };
     use serde::{Deserialize, Serialize};
@@ -136,13 +136,7 @@ mod tests {
                         description: "mock value".to_string(),
                     }],
                 },
-                ports: vec![PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                }],
+                ports: vec![PortDeclaration::electrical()],
                 telemetry: Telemetry::with_capacity(2),
                 mode: OperatingMode::Off,
                 state_value: 0.0,

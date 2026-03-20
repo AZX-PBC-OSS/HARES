@@ -6,10 +6,12 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, PortType, ScheduleSource, Telemetry,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
     TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
+
+use hares_types::normalize_ascii;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -19,24 +21,22 @@ use super::{
     mains_temp_schedule_source, parse_usize, resolve_draw_rate_kg_s, resolve_storage_step_inputs,
     weighted_average_tank_temp,
 };
+use hares_physics::units as conv;
+
 use crate::hvac::helpers::{
     equipment_id_from_config, first_f64, loop_id_from_config, parse_fuel_type, zone_id_from_config,
 };
 
-const WATER_DENSITY_KG_PER_M3: f64 = 1000.0;
-const GALLON_TO_M3: f64 = 0.003_785_411_784;
-const BTU_PER_HOUR_TO_W: f64 = 0.293_071_07;
-const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
+use super::{
+    DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
+    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_GAL, DEFAULT_UA_W_PER_K,
+    WATER_DENSITY_KG_PER_M3,
+};
+
 const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE storage WH default)
-const DEFAULT_UA_W_PER_K: f64 = 2.0;
-const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;
-const DEFAULT_TANK_DIAMETER_M: f64 = 0.5;
-const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
-const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
 const DEFAULT_BURNER_INPUT_W: f64 = 11_000.0;
 const DEFAULT_BURNER_EFFICIENCY: f64 = 0.78;
 const DEFAULT_FLUE_LOSS_FRACTION: f64 = 0.10;
-const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 /// Standing pilot flame power (thermal). Central estimate from DOE 10 CFR 430
 /// test-procedure/manufacturer ranges for natural-draft atmospheric gas water heaters.
 const DEFAULT_PILOT_POWER_W: f64 = 5.0;
@@ -150,41 +150,11 @@ impl GasWH {
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Fuel,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Thermal,
-                    zone: Some(zone),
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Fluid,
-                    zone: None,
-                    loop_id: Some(loop_id),
-                    domain_id: None,
-                    fluid_type: Some(FluidType::Water),
-                },
-                PortDeclaration {
-                    port_type: PortType::Fluid,
-                    zone: None,
-                    loop_id: Some(super::DHW_DEMAND_LOOP),
-                    domain_id: None,
-                    fluid_type: Some(FluidType::Water),
-                },
+                PortDeclaration::fuel(),
+                PortDeclaration::electrical(),
+                PortDeclaration::thermal(zone),
+                PortDeclaration::fluid(loop_id, FluidType::Water),
+                PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
             ],
             telemetry: default_telemetry(),
             tank,
@@ -276,9 +246,10 @@ impl Equipment for GasWH {
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
             .clamp(1, 12);
-        let tank_volume_m3 = first_f64(config, &["TankVolume", "tank_volume_gal"])
-            .unwrap_or(DEFAULT_TANK_VOLUME_GAL)
-            * GALLON_TO_M3;
+        let tank_volume_m3 = conv::volume_gal_to_m3(
+            first_f64(config, &["TankVolume", "tank_volume_gal"])
+                .unwrap_or(DEFAULT_TANK_VOLUME_GAL),
+        );
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =
@@ -318,7 +289,7 @@ impl Equipment for GasWH {
         })?;
 
         self.burner_input_w = first_f64(config, &["HeatingCapacity", "heating_capacity_btu_hr"])
-            .map(|v| v * BTU_PER_HOUR_TO_W)
+            .map(conv::power_btu_h_to_w)
             .unwrap_or(DEFAULT_BURNER_INPUT_W)
             .max(0.0);
         let has_standing_pilot =
@@ -813,7 +784,7 @@ fn ignition_uses_standing_pilot(raw: Option<&str>) -> bool {
         return true;
     };
     !matches!(
-        raw_value.trim().to_ascii_lowercase().as_str(),
+        normalize_ascii(raw_value).as_str(),
         "electronic" | "electronic_ignition" | "intermittent_ignition"
     )
 }

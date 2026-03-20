@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::Value;
+use hares_types::{normalize_ascii, parse_trimmed_f64};
 use tracing::warn;
 
 use crate::EquipmentSpec;
@@ -262,7 +263,7 @@ fn load_default_profiles(defaults_dir: &Path) -> HashMap<String, DefaultSchedule
 
         let values: Vec<f64> = values_str
             .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
+            .filter_map(parse_trimmed_f64)
             .collect();
 
         match ochre_element {
@@ -806,7 +807,7 @@ fn inject_compact_constant_power(spec: &mut EquipmentSpec, constant_kw: f64) {
 }
 
 fn normalize_schedule_col_name(name: &str) -> String {
-    name.trim().to_ascii_lowercase().replace([' ', '-'], "_")
+    normalize_ascii(name).replace([' ', '-'], "_")
 }
 
 #[cfg(test)]

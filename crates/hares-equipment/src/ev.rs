@@ -9,7 +9,7 @@ use chrono::{DateTime, Datelike, Timelike, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, PortType, Telemetry, TelemetryField,
+    PortSlots, Telemetry, TelemetryField,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rand::{RngExt, SeedableRng};
@@ -326,13 +326,7 @@ impl Ev {
 
         Self {
             descriptor,
-            ports: vec![PortDeclaration {
-                port_type: PortType::Electrical,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            }],
+            ports: vec![PortDeclaration::electrical()],
             telemetry: default_telemetry(charging_level),
             battery_capacity_kwh,
             charging_level,

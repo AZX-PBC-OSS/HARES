@@ -7,7 +7,7 @@ use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -122,20 +122,8 @@ impl Dehumidifier {
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Thermal,
-                    zone: Some(zone),
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
+                PortDeclaration::electrical(),
+                PortDeclaration::thermal(zone),
             ],
             telemetry: default_telemetry(),
             zone_id: zone,
@@ -285,20 +273,8 @@ impl Equipment for Dehumidifier {
         self.zone_id = zone_id_from_config(config).unwrap_or(self.zone_id);
         self.descriptor.zone = Some(self.zone_id);
         self.ports = vec![
-            PortDeclaration {
-                port_type: PortType::Electrical,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
-            PortDeclaration {
-                port_type: PortType::Thermal,
-                zone: Some(self.zone_id),
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
+            PortDeclaration::electrical(),
+            PortDeclaration::thermal(self.zone_id),
         ];
 
         self.rated_water_removal_l_day = first_f64(

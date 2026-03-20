@@ -3,6 +3,7 @@
 use hares_types::{
     ControlSignal, EnvironmentState, FluidType, FuelType, HaresError, LoopId, OperatingMode, ZoneId,
 };
+use hares_types::normalize_ascii;
 
 use crate::EquipmentConfig;
 
@@ -104,7 +105,7 @@ pub fn equipment_id_from_config(config: &EquipmentConfig) -> crate::Result<u32> 
 }
 
 pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
-    match raw?.trim().to_ascii_lowercase().as_str() {
+    match normalize_ascii(raw?).as_str() {
         "gas" | "natural_gas" | "natural gas" => Some(FuelType::Gas),
         "propane" => Some(FuelType::Propane),
         "oil" | "fuel_oil" | "fuel oil" => Some(FuelType::Oil),
@@ -113,7 +114,7 @@ pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
 }
 
 pub fn parse_fluid_type(raw: Option<&str>) -> Option<FluidType> {
-    match raw?.trim().to_ascii_lowercase().as_str() {
+    match normalize_ascii(raw?).as_str() {
         "water" => Some(FluidType::Water),
         "glycol" => Some(FluidType::Glycol),
         "refrigerant" => Some(FluidType::Refrigerant),
@@ -207,7 +208,7 @@ pub fn resolve_duct_dse(
     let Some(zone_type_str) = config.get_str("duct_zone_type") else {
         return 1.0;
     };
-    let Some(zone_type) = parse_ashrae152_zone_type(&zone_type_str) else {
+    let Some(zone_type) = parse_ashrae152_zone_type(zone_type_str) else {
         return 1.0;
     };
 

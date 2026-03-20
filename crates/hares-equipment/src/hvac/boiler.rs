@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FLUID, FluidDomainPayload, FluidType, FuelType, HaresError, LoopId,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, PortType, Telemetry,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
     TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
@@ -132,20 +132,8 @@ impl ElectricBoiler {
         Self {
             descriptor,
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Fluid,
-                    zone: None,
-                    loop_id: Some(loop_id),
-                    domain_id: None,
-                    fluid_type: Some(FluidType::Water),
-                },
+                PortDeclaration::electrical(),
+                PortDeclaration::fluid(loop_id, FluidType::Water),
             ],
             telemetry: electric_boiler_default_telemetry(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
@@ -324,27 +312,9 @@ impl GasBoiler {
         Self {
             descriptor,
             ports: vec![
-                PortDeclaration {
-                    port_type: PortType::Fuel,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Electrical,
-                    zone: None,
-                    loop_id: None,
-                    domain_id: None,
-                    fluid_type: None,
-                },
-                PortDeclaration {
-                    port_type: PortType::Fluid,
-                    zone: None,
-                    loop_id: Some(loop_id),
-                    domain_id: None,
-                    fluid_type: Some(FluidType::Water),
-                },
+                PortDeclaration::fuel(),
+                PortDeclaration::electrical(),
+                PortDeclaration::fluid(loop_id, FluidType::Water),
             ],
             telemetry: gas_boiler_default_telemetry(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),

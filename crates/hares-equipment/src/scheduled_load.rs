@@ -9,7 +9,7 @@ use hares_physics::constants::GAS_THERMS_PER_HOUR_TO_W;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, PortType, ScheduleSource, Telemetry,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
     TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
@@ -200,13 +200,7 @@ impl ScheduledLoad {
         };
         Self {
             descriptor,
-            ports: vec![PortDeclaration {
-                port_type: PortType::Electrical,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            }],
+            ports: vec![PortDeclaration::electrical()],
             telemetry: default_telemetry(),
             gas_source: None,
             gas_schedule_unit: GasScheduleUnit::ThermsPerHour,
@@ -225,30 +219,12 @@ impl ScheduledLoad {
 
     fn update_ports(&mut self) {
         self.ports.clear();
-        self.ports.push(PortDeclaration {
-            port_type: PortType::Electrical,
-            zone: None,
-            loop_id: None,
-            domain_id: None,
-            fluid_type: None,
-        });
+        self.ports.push(PortDeclaration::electrical());
         if let Some(zone) = self.descriptor.zone {
-            self.ports.push(PortDeclaration {
-                port_type: PortType::Thermal,
-                zone: Some(zone),
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
+            self.ports.push(PortDeclaration::thermal(zone));
         }
         if self.gas_source.is_some() {
-            self.ports.push(PortDeclaration {
-                port_type: PortType::Fuel,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
+            self.ports.push(PortDeclaration::fuel());
         }
     }
 

@@ -58,6 +58,48 @@ pub struct PortDeclaration {
     pub fluid_type: Option<FluidType>,
 }
 
+impl PortDeclaration {
+    pub fn electrical() -> Self {
+        Self {
+            port_type: PortType::Electrical,
+            zone: None,
+            loop_id: None,
+            domain_id: None,
+            fluid_type: None,
+        }
+    }
+
+    pub fn thermal(zone: ZoneId) -> Self {
+        Self {
+            port_type: PortType::Thermal,
+            zone: Some(zone),
+            loop_id: None,
+            domain_id: None,
+            fluid_type: None,
+        }
+    }
+
+    pub fn fuel() -> Self {
+        Self {
+            port_type: PortType::Fuel,
+            zone: None,
+            loop_id: None,
+            domain_id: None,
+            fluid_type: None,
+        }
+    }
+
+    pub fn fluid(loop_id: LoopId, fluid_type: FluidType) -> Self {
+        Self {
+            port_type: PortType::Fluid,
+            zone: None,
+            loop_id: Some(loop_id),
+            domain_id: None,
+            fluid_type: Some(fluid_type),
+        }
+    }
+}
+
 /// Thermal contribution totals for one zone.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThermalAccumulator {
@@ -643,35 +685,11 @@ mod tests {
     #[test]
     fn from_declarations_builds_correct_slots() {
         let decls = &[
-            PortDeclaration {
-                port_type: PortType::Thermal,
-                zone: Some(ZoneId(1)),
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
-            PortDeclaration {
-                port_type: PortType::Thermal,
-                zone: Some(ZoneId(2)),
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
+            PortDeclaration::thermal(ZoneId(1)),
+            PortDeclaration::thermal(ZoneId(2)),
             // Duplicate zone should be deduplicated
-            PortDeclaration {
-                port_type: PortType::Thermal,
-                zone: Some(ZoneId(1)),
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
-            PortDeclaration {
-                port_type: PortType::Electrical,
-                zone: None,
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            },
+            PortDeclaration::thermal(ZoneId(1)),
+            PortDeclaration::electrical(),
             PortDeclaration {
                 port_type: PortType::Custom,
                 zone: None,
@@ -680,21 +698,9 @@ mod tests {
                 fluid_type: None,
             },
             // Fluid port with loop_id and fluid_type should create accumulator
-            PortDeclaration {
-                port_type: PortType::Fluid,
-                zone: None,
-                loop_id: Some(LoopId(10)),
-                domain_id: None,
-                fluid_type: Some(FluidType::Water),
-            },
+            PortDeclaration::fluid(LoopId(10), FluidType::Water),
             // Duplicate (loop_id, fluid_type) should be deduplicated
-            PortDeclaration {
-                port_type: PortType::Fluid,
-                zone: None,
-                loop_id: Some(LoopId(10)),
-                domain_id: None,
-                fluid_type: Some(FluidType::Water),
-            },
+            PortDeclaration::fluid(LoopId(10), FluidType::Water),
         ];
 
         let slots = PortSlots::from_declarations(decls);

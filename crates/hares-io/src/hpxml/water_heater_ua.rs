@@ -22,11 +22,7 @@ const T_SETPOINT_EF_F: f64 = 135.0;
 const T_SETPOINT_UEF_F: f64 = 125.0;
 /// DOE EF test: daily draw volume, gal.
 const VOLUME_DRAWN_EF_GAL: f64 = 64.3;
-/// Conversion: 1 Btu/hr·°R → W/K.
-/// °R and °F differ only by offset (Rankine = absolute Fahrenheit), so a
-/// 1 °R *difference* equals a 5/9 K *difference*.  Therefore:
-/// 1 Btu/hr·°R = 0.293071 W · (9/5) K⁻¹ = 0.52752 W/K.
-const BTU_HR_PER_F_TO_W_PER_K: f64 = 0.293_071_07 * 9.0 / 5.0;
+use hares_physics::units as conv;
 
 /// Water heater type and fuel discriminant, sufficient for UA routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +106,7 @@ fn ua_for_hpwh(inputs: &UaInputs) -> Result<UaResult, String> {
         4.7_f64
     };
 
-    let ua_w_per_k = ua_btu_hr_f * BTU_HR_PER_F_TO_W_PER_K;
+    let ua_w_per_k = conv::btu_hr_per_f_to_w_per_k(ua_btu_hr_f);
     Ok(UaResult {
         ua_w_per_k,
         conversion_efficiency: 1.0,
@@ -146,7 +142,7 @@ fn ua_for_electric_storage(inputs: &UaInputs) -> Result<UaResult, String> {
 
     validate_ua(ua_btu_hr_f)?;
     Ok(UaResult {
-        ua_w_per_k: ua_btu_hr_f * BTU_HR_PER_F_TO_W_PER_K,
+        ua_w_per_k: conv::btu_hr_per_f_to_w_per_k(ua_btu_hr_f),
         conversion_efficiency: 1.0,
         energy_factor: Some(ef_out),
     })
@@ -189,7 +185,7 @@ fn ua_for_gas_storage(inputs: &UaInputs) -> Result<UaResult, String> {
     }
 
     Ok(UaResult {
-        ua_w_per_k: ua_btu_hr_f * BTU_HR_PER_F_TO_W_PER_K,
+        ua_w_per_k: conv::btu_hr_per_f_to_w_per_k(ua_btu_hr_f),
         conversion_efficiency: eta_c,
         energy_factor: Some(ef_out),
     })
@@ -356,7 +352,7 @@ mod tests {
             .expect("some result");
 
         // 50 gal × 0.9 = 45 gal actual → bin ≤ 58 gal → ua = 3.6 Btu/hr·°F
-        let expected_ua = 3.6 * BTU_HR_PER_F_TO_W_PER_K;
+        let expected_ua = conv::btu_hr_per_f_to_w_per_k(3.6);
         assert!(
             (result.ua_w_per_k - expected_ua).abs() < 1e-9,
             "HPWH 50-gal UEF=3.45: ua={:.4} W/K, expected {expected_ua:.4}",
@@ -376,7 +372,7 @@ mod tests {
         let result = ua_from_energy_factor(&hpwh_inputs(3.45, 85.0))
             .unwrap()
             .unwrap();
-        let expected = 4.7 * BTU_HR_PER_F_TO_W_PER_K;
+        let expected = conv::btu_hr_per_f_to_w_per_k(4.7);
         assert!(
             (result.ua_w_per_k - expected).abs() < 1e-9,
             "85-gal HPWH (76.5 gal actual) ua={:.4}, expected {expected:.4}",

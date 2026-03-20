@@ -10,7 +10,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
+    PortSlots, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -605,21 +605,9 @@ impl Battery {
             .unwrap_or(0);
         let zone = config.get_f64(KEY_ZONE_ID).map(|v| ZoneId(v as u16));
 
-        let mut ports = vec![PortDeclaration {
-            port_type: PortType::Electrical,
-            zone: None,
-            loop_id: None,
-            domain_id: None,
-            fluid_type: None,
-        }];
+        let mut ports = vec![PortDeclaration::electrical()];
         if let Some(z) = zone {
-            ports.push(PortDeclaration {
-                port_type: PortType::Thermal,
-                zone: Some(z),
-                loop_id: None,
-                domain_id: None,
-                fluid_type: None,
-            });
+            ports.push(PortDeclaration::thermal(z));
         }
 
         let descriptor = EquipmentDescriptor {

@@ -9,6 +9,7 @@ pub mod building;
 pub mod equipment;
 pub mod validation;
 pub mod water_heater_ua;
+pub(crate) mod xml_helpers;
 
 use building::parse_building;
 use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema};
