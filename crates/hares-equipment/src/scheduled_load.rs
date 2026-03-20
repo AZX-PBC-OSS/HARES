@@ -182,7 +182,8 @@ impl ScheduledLoad {
         } else if name_lower.contains("basement") {
             Some(FOUNDATION_ZONE_ID)
         } else {
-            None
+            // Indoor equipment defaults to the primary conditioned zone.
+            Some(ZoneId(1))
         };
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(parse_u32(&config.raw_config, KEY_EQUIPMENT_ID).unwrap_or_default()),
