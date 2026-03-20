@@ -71,7 +71,6 @@ struct HpwhState {
     dr_duration_remaining_s: Option<f64>,
 }
 
-#[allow(dead_code)]
 pub struct HeatPumpWH {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
@@ -97,7 +96,6 @@ pub struct HeatPumpWH {
     backup_element_power_w: f64,
     backup_enable_offset_c: f64,
     /// Resistance backup element efficiency (fraction).
-    #[allow(dead_code)]
     backup_efficiency: f64,
     cop_curve: BiquadraticCurve,
     /// Scaling factor applied to the COP biquadratic output.
@@ -509,7 +507,7 @@ impl Equipment for HeatPumpWH {
         self.mains_temp_c =
             first_f64(config, &["mains_temp_c", "inlet_temp_c"]).unwrap_or(self.mains_temp_c);
         self.draw_flow_rate_kg_s = resolve_draw_rate_kg_s(config);
-        self.zip = WaterHeaterZip::from_config(config);
+        self.zip = WaterHeaterZip::from_config(config)?;
 
         self.dr_setpoint_offset_c = 0.0;
         self.dr_load_fraction = 1.0;
@@ -692,7 +690,7 @@ impl Equipment for HeatPumpWH {
         // OCHRE WaterHeater.py:660-664: delivered heat from HP and ER.
         // HP delivers capacity_actual_w * duty to tank; electrical draw is compressor_power_w.
         let delivered_hp_w = compressor_power_w * cop;
-        let delivered_er_w = backup_power_w; // backup_efficiency is 1.0 for electric
+        let delivered_er_w = backup_power_w * self.backup_efficiency;
         let q_tank_delivered_w = delivered_hp_w + delivered_er_w;
 
         let heat_injections = build_heat_injections(
@@ -1762,6 +1760,67 @@ mod tests {
         assert!(
             (ratio - 0.5).abs() < 0.05,
             "lost_heat_fraction=0.5 should halve sensible gain: ratio={ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn backup_efficiency_scales_backup_power_delivery() {
+        // Force backup-only mode so the backup element fires on the first step.
+        // With backup_efficiency=0.8, delivered heat = 0.8 * electrical input,
+        // so the tank heats less per step than at efficiency=1.0.
+        let make_cfg = |eff: f64| {
+            let mut raw = HashMap::new();
+            raw.insert("setpoint_c".to_string(), 52.0.into());
+            raw.insert("deadband_c".to_string(), 2.0.into());
+            raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
+            raw.insert("compressor_power_w".to_string(), 1200.0.into());
+            raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+            raw.insert("backup_enable_offset_c".to_string(), 8.0.into());
+            raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+            raw.insert("backup_efficiency".to_string(), eff.into());
+            // Use Simultaneous mode so backup fires alongside compressor
+            // when control temp is below backup threshold.
+            raw.insert("element_hp_control_mode".to_string(), "Simultaneous".into());
+            EquipmentConfig {
+                name: "HPWH".to_string(),
+                ochre_class: "Heat Pump Water Heater".to_string(),
+                raw_config: raw,
+            }
+        };
+
+        let e = env(24.0);
+
+        let cfg_100 = make_cfg(1.0);
+        let mut eq_100 = HeatPumpWH::new(cfg_100.clone());
+        eq_100.init(&cfg_100, &e).unwrap();
+        let mut p_100 = ports();
+        eq_100.step(&e, Duration::from_secs(60), &mut p_100).unwrap();
+        let backup_100 = eq_100.telemetry().get("backup_element_power_w").unwrap();
+        assert!(backup_100 > 0.0, "backup must fire for this test: got {backup_100}");
+        let tank_100 = eq_100.telemetry().get("tank_avg_temp_c").unwrap();
+
+        let cfg_80 = make_cfg(0.8);
+        let mut eq_80 = HeatPumpWH::new(cfg_80.clone());
+        eq_80.init(&cfg_80, &e).unwrap();
+        let mut p_80 = ports();
+        eq_80.step(&e, Duration::from_secs(60), &mut p_80).unwrap();
+        let backup_80 = eq_80.telemetry().get("backup_element_power_w").unwrap();
+        assert!(backup_80 > 0.0, "backup must fire for this test: got {backup_80}");
+        let tank_80 = eq_80.telemetry().get("tank_avg_temp_c").unwrap();
+
+        // Both draw the same backup electrical power, but the 80% efficient
+        // unit delivers less heat to the tank.
+        assert!(
+            tank_80 < tank_100,
+            "backup_efficiency=0.8 ({tank_80:.4} C) must deliver less heat than 1.0 ({tank_100:.4} C)"
+        );
+
+        // Electrical consumption should be the same (same backup element draw).
+        let elec_100 = p_100.electrical.load_power_kw;
+        let elec_80 = p_80.electrical.load_power_kw;
+        assert!(
+            (elec_100 - elec_80).abs() < 0.01,
+            "electrical consumption should be the same: {elec_100:.4} vs {elec_80:.4}"
         );
     }
 }

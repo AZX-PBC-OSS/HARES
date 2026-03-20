@@ -35,7 +35,7 @@ const WATTS_PER_KILOWATT: f64 = 1_000.0;
 const WATTS_PER_KILOWATT_HOUR: f64 = 3_600_000.0;
 const DEFAULT_NORMALIZED_CURVE: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
-const KEY_EQUIPMENT_ID: &str = "equipment_id";
+use crate::config::KEY_EQUIPMENT_ID;
 const KEY_RATED_CAPACITY_PINTS_DAY: &str = "Capacity";
 const KEY_RATED_CAPACITY_PINTS_DAY_ALT: &str = "capacity_pints_day";
 const KEY_RATED_CAPACITY_L_DAY: &str = "capacity_l_day";
@@ -310,8 +310,8 @@ impl Equipment for Dehumidifier {
         let maybe_ef = first_f64(config, &[KEY_ENERGY_FACTOR, KEY_ENERGY_FACTOR_ALT]);
         self.rated_energy_factor_l_kwh = maybe_ief.or(maybe_ef).unwrap_or(1.8);
         if maybe_ief.is_some() {
-            eprintln!(
-                "HARES dehumidifier warning: IntegratedEnergyFactor is used with EF-era curves; part-load predictions may deviate."
+            tracing::warn!(
+                "IntegratedEnergyFactor is used with EF-era curves; part-load predictions may deviate"
             );
         }
         if !self.rated_energy_factor_l_kwh.is_finite() || self.rated_energy_factor_l_kwh <= 0.0 {

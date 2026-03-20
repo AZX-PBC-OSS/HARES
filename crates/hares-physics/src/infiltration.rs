@@ -615,12 +615,7 @@ mod tests {
     use uom::si::velocity::meter_per_second;
     use uom::si::volume::cubic_meter;
 
-    fn approx_eq(actual: f64, expected: f64, tol: f64) {
-        assert!(
-            (actual - expected).abs() <= tol,
-            "actual={actual}, expected={expected}, tol={tol}"
-        );
-    }
+    use crate::test_utils::approx_eq;
 
     // -----------------------------------------------------------------------
     // ASHRAE n_i default and OCHRE parity

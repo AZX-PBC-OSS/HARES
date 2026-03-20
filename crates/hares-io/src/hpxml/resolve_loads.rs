@@ -9,7 +9,7 @@ use hares_types::FuelType;
 use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec};
 use super::xml_helpers::{
-    capitalize, child_f64, child_load_kwh, child_load_therms, child_text, children_named,
+    capitalize, child_f64, child_load_kwh, child_load_therms, child_text,
     parse_fuel,
 };
 use hares_physics::units as conv;
@@ -54,7 +54,7 @@ pub(super) fn resolve_scheduled_loads(
             ("Freezer", "Freezer"),
             ("CookingRange", "Cooking Range"),
         ] {
-            for node in children_named(appliances, tag) {
+            for node in appliances.children_named(tag) {
                 let mut params = Map::new();
                 let mut fuel = FuelType::Electric;
                 if let Some(kwh) = child_f64(node, "RatedAnnualkWh") {
@@ -133,7 +133,7 @@ pub(super) fn resolve_scheduled_loads(
         let garage_area_ft2 = conv::area_m2_to_ft2(garage_floor_area_m2(building));
 
         let mut by_location: HashMap<String, LightingFractions> = HashMap::new();
-        for group in children_named(lighting, "LightingGroup") {
+        for group in lighting.children_named("LightingGroup") {
             let location = child_text(group, "Location")
                 .unwrap_or_else(|| "interior".to_string())
                 .to_ascii_lowercase();
@@ -232,7 +232,7 @@ pub(super) fn resolve_scheduled_loads(
     }
 
     if let Some(misc_loads) = details.child("MiscLoads") {
-        for plug in children_named(misc_loads, "PlugLoad") {
+        for plug in misc_loads.children_named("PlugLoad") {
             let load_type = child_text(plug, "PlugLoadType")
                 .unwrap_or_else(|| "other".to_string())
                 .to_ascii_lowercase();
@@ -280,7 +280,7 @@ pub(super) fn resolve_scheduled_loads(
             specs.push(build_spec(name.to_string(), fuel, params, defaults));
         }
 
-        for fuel_load in children_named(misc_loads, "FuelLoad") {
+        for fuel_load in misc_loads.children_named("FuelLoad") {
             let load_type = child_text(fuel_load, "FuelLoadType")
                 .unwrap_or_else(|| "other".to_string())
                 .to_ascii_lowercase();
@@ -308,13 +308,13 @@ pub(super) fn resolve_scheduled_loads(
         ("Spas", "Spa", "Spa Pump", "Spa Heater"),
     ] {
         if let Some(group) = details.child(container) {
-            for entry in children_named(group, item) {
+            for entry in group.children_named(item) {
                 for (pump_container, pump_item, schedule_name) in [
                     ("PoolPumps", "PoolPump", pump_name),
                     ("SpaPumps", "SpaPump", pump_name),
                 ] {
                     if let Some(pumps) = entry.child(pump_container) {
-                        for pump in children_named(pumps, pump_item) {
+                        for pump in pumps.children_named(pump_item) {
                             if let Some(kwh) = child_load_kwh(pump) {
                                 let mut params = Map::new();
                                 params.insert("annual_electric_kwh".to_string(), json!(kwh));
@@ -372,7 +372,7 @@ pub(super) fn resolve_ventilation(
         return;
     };
 
-    for fan in children_named(vent_fans, "VentilationFan") {
+    for fan in vent_fans.children_named("VentilationFan") {
         // Only include whole-building ventilation fans, matching OCHRE's filter logic
         let is_whole_building = child_text(fan, "UsedForWholeBuildingVentilation")
             .is_some_and(|v| v.eq_ignore_ascii_case("true"));
@@ -496,9 +496,10 @@ fn read_extension_month_multipliers(ext: Option<&XmlNode>, prefix: &str) -> Opti
         Some(vals)
     } else {
         if !vals.is_empty() {
-            eprintln!(
-                "[WARN] {key} has {} values (expected 12); ignoring",
-                vals.len()
+            tracing::warn!(
+                key = %key,
+                count = vals.len(),
+                "MonthlyScheduleMultipliers has unexpected number of values (expected 12); ignoring"
             );
         }
         None
@@ -565,9 +566,10 @@ fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String,
         if vals.len() == 24 {
             out.push(("weekday_schedule_fractions".to_string(), json!(vals)));
         } else if !vals.is_empty() {
-            eprintln!(
-                "[WARN] {weekday_key} has {} values (expected 24); ignoring",
-                vals.len()
+            tracing::warn!(
+                key = %weekday_key,
+                count = vals.len(),
+                "WeekdayScheduleFractions has unexpected number of values (expected 24); ignoring"
             );
         }
     }
@@ -581,9 +583,10 @@ fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String,
         if vals.len() == 24 {
             out.push(("weekend_schedule_fractions".to_string(), json!(vals)));
         } else if !vals.is_empty() {
-            eprintln!(
-                "[WARN] {weekend_key} has {} values (expected 24); ignoring",
-                vals.len()
+            tracing::warn!(
+                key = %weekend_key,
+                count = vals.len(),
+                "WeekendScheduleFractions has unexpected number of values (expected 24); ignoring"
             );
         }
     }
@@ -607,32 +610,10 @@ fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String,
         if vals.len() == 12 {
             out.push(("month_multipliers".to_string(), json!(vals)));
         } else if !vals.is_empty() {
-            eprintln!(
-                "[WARN] {month_key} has {} values (expected 12); ignoring",
-                vals.len()
-            );
-        }
-    }
-
-    // Monthly schedule multipliers (same pattern as lighting)
-    let month_key = if prefix.is_empty() {
-        "MonthlyScheduleMultipliers".to_string()
-    } else {
-        format!("{prefix}MonthlyScheduleMultipliers")
-    };
-    if let Some(node) = ext.child(&month_key) {
-        let vals: Vec<f64> = node
-            .text
-            .trim()
-            .split(',')
-            .filter_map(|s| s.trim().parse::<f64>().ok())
-            .collect();
-        if vals.len() == 12 {
-            out.push(("month_multipliers".to_string(), json!(vals)));
-        } else if !vals.is_empty() {
-            eprintln!(
-                "[WARN] {month_key} has {} values (expected 12); ignoring",
-                vals.len()
+            tracing::warn!(
+                key = %month_key,
+                count = vals.len(),
+                "MonthlyScheduleMultipliers has unexpected number of values (expected 12); ignoring"
             );
         }
     }
@@ -646,4 +627,33 @@ fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String,
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::building::{XmlNode, parse_xml_document};
+
+    /// Verify that `parse_schedule_extension_params` emits `month_multipliers` only once.
+    /// Before the fix, a duplicated code block would emit it twice.
+    #[test]
+    fn month_multipliers_emitted_only_once() {
+        let xml = r#"<node>
+          <extension>
+            <MonthlyScheduleMultipliers>1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0</MonthlyScheduleMultipliers>
+            <WeekdayScheduleFractions>0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1</WeekdayScheduleFractions>
+          </extension>
+        </node>"#;
+        let root = parse_xml_document(xml).expect("parse test XML");
+
+        let result = parse_schedule_extension_params(&root, "");
+        let month_count = result
+            .iter()
+            .filter(|(k, _)| k == "month_multipliers")
+            .count();
+        assert_eq!(
+            month_count, 1,
+            "month_multipliers should appear exactly once in output, found {month_count}"
+        );
+    }
 }

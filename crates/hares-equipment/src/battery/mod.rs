@@ -26,8 +26,7 @@ use ocv::{OcvTable, UNegTable};
 // Config keys
 // ---------------------------------------------------------------------------
 
-const KEY_EQUIPMENT_ID: &str = "equipment_id";
-const KEY_ZONE_ID: &str = "zone_id";
+use crate::config::{KEY_EQUIPMENT_ID, KEY_ZONE_ID};
 const KEY_CAPACITY_KWH: &str = "capacity_kwh";
 const KEY_MAX_CHARGE_KW: &str = "max_charge_kw";
 const KEY_MAX_DISCHARGE_KW: &str = "max_discharge_kw";
@@ -439,8 +438,7 @@ impl Battery {
 
     fn day_ordinal(env: &EnvironmentState) -> i32 {
         use chrono::Datelike;
-        let dt = env.current_time;
-        dt.year() * 366 + dt.ordinal() as i32
+        env.current_time.date_naive().num_days_from_ce()
     }
 }
 
@@ -1137,6 +1135,27 @@ mod tests {
         assert!(field_names.contains(&"cell_temp_c"));
         assert!(field_names.contains(&"cycle_count"));
         assert!(field_names.contains(&"capacity_fade_pct"));
+    }
+
+    #[test]
+    fn day_ordinal_is_contiguous_across_year_boundary() {
+        let mut env_dec31 = base_env();
+        env_dec31.current_time = Utc
+            .with_ymd_and_hms(2025, 12, 31, 23, 59, 0)
+            .single()
+            .expect("valid");
+        let mut env_jan1 = base_env();
+        env_jan1.current_time = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid");
+        let ord_dec31 = Battery::day_ordinal(&env_dec31);
+        let ord_jan1 = Battery::day_ordinal(&env_jan1);
+        assert_eq!(
+            ord_jan1 - ord_dec31,
+            1,
+            "day_ordinal must be contiguous across year boundary: Dec 31={ord_dec31}, Jan 1={ord_jan1}"
+        );
     }
 
     #[test]

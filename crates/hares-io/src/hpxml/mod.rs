@@ -15,8 +15,8 @@ pub mod validation;
 pub mod water_heater_ua;
 pub(crate) mod xml_helpers;
 
-use building::parse_building;
-use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema};
+use building::{parse_building_from_node, parse_xml_document};
+use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema_node};
 
 pub use building::{
     Boundary, BoundaryType, Building, DuctLocation, DuctSystem, MaterialLayer, Site, SiteType,
@@ -63,12 +63,14 @@ pub fn parse_hpxml(path: &Path) -> Result<Building> {
 
 /// Parse HPXML from a string input.
 pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
-    let schema_warnings = validate_hpxml_schema(xml).map_err(HpxmlError::SchemaValidation)?;
+    let root = parse_xml_document(xml).map_err(|e| HpxmlError::Parse(e.to_string()))?;
+
+    let schema_warnings = validate_hpxml_schema_node(&root).map_err(HpxmlError::SchemaValidation)?;
     for w in &schema_warnings {
         tracing::warn!(field = %w.field, message = %w.message, "HPXML schema warning");
     }
 
-    let building = parse_building(xml)?;
+    let building = parse_building_from_node(&root)?;
 
     let report = validate_building_ranges(&building);
     if report.has_errors() {

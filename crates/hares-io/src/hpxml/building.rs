@@ -182,6 +182,9 @@ pub struct Building {
     pub floors_above_grade: Option<f64>,
     /// `<extension><HasFlueOrChimneyInConditionedSpace>` boolean.
     pub has_flue_or_chimney: Option<bool>,
+    // TODO: `details_xml` leaks the parse tree (`XmlNode`) into the domain model,
+    // forcing `hares-core` to construct XmlNode trees. Extract remaining
+    // XML-dependent fields into typed struct members and remove this field.
     pub details_xml: XmlNode,
 }
 
@@ -198,7 +201,7 @@ impl XmlNode {
         self.children.iter().find(|n| n.name == name)
     }
 
-    fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a XmlNode> {
+    pub(crate) fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a XmlNode> {
         self.children.iter().filter(move |n| n.name == name)
     }
 
@@ -323,6 +326,10 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
 
 pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
     let root = parse_xml_document(xml)?;
+    parse_building_from_node(&root)
+}
+
+pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> {
     let details = root
         .path(&["Building", "BuildingDetails"])
         .ok_or_else(|| HpxmlError::Parse("missing Building/BuildingDetails".to_string()))?;
@@ -354,11 +361,11 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
     let latitude_deg = root
         .path(&["Building", "Site", "Latitude"])
         .and_then(XmlNode::text_as_f64)
-        .or_else(|| find_descendant_f64(&root, "Latitude", ValueKind::Raw));
+        .or_else(|| find_descendant_f64(root, "Latitude", ValueKind::Raw));
     let longitude_deg = root
         .path(&["Building", "Site", "Longitude"])
         .and_then(XmlNode::text_as_f64)
-        .or_else(|| find_descendant_f64(&root, "Longitude", ValueKind::Raw));
+        .or_else(|| find_descendant_f64(root, "Longitude", ValueKind::Raw));
 
     let conditioned_floor_area_m2 = summary
         .path(&["BuildingConstruction", "ConditionedFloorArea"])
@@ -471,45 +478,11 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
 
 /// Parse HVAC thermostat setpoints from `<HVACControl>`.
 ///
-/// OCHRE's `hpxml.py` reads either:
-///   1. `<extension><WeekdaySetpointTemps{hvac_type}Season>` (comma-separated 24h °F)
-///   2. `<SetpointTemp{hvac_type}Season>` (single constant °F, expanded to 24 values)
+/// Delegates to the shared `xml_helpers::parse_setpoint_from_control` after
+/// locating the HVACControl node.
 fn parse_hvac_setpoints(details: &XmlNode, hvac_type: &str, weekday: bool) -> Option<Vec<f64>> {
-    let hvac_plant = details
-        .first_descendant("HVACPlant")
-        .or_else(|| details.first_descendant("HVAC"));
-    let control = hvac_plant
-        .and_then(|p| p.child("HVACControl"))
-        .or_else(|| details.first_descendant("HVACControl"))?;
-
-    let day_prefix = if weekday { "Weekday" } else { "Weekend" };
-    let ext_key = format!("{day_prefix}SetpointTemps{hvac_type}Season");
-
-    if let Some(ext) = control.child("extension") {
-        if let Some(node) = ext.child(&ext_key) {
-            let vals: Vec<f64> = node
-                .text
-                .trim()
-                .split(',')
-                .filter_map(parse_trimmed_f64)
-                .map(conv::temperature_f_to_c)
-                .collect();
-            if vals.len() == 24 {
-                return Some(vals);
-            }
-        }
-    }
-
-    // Fallback: single constant value from <SetpointTemp{hvac_type}Season>
-    let const_key = format!("SetpointTemp{hvac_type}Season");
-    if let Some(node) = control.child(&const_key) {
-        if let Ok(f_val) = node.text.trim().parse::<f64>() {
-            let c_val = conv::temperature_f_to_c(f_val);
-            return Some(vec![c_val; 24]);
-        }
-    }
-
-    None
+    let control = super::xml_helpers::find_hvac_control(details)?;
+    super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday)
 }
 
 fn parse_boundaries(details: &XmlNode) -> Result<Vec<Boundary>, HpxmlError> {
@@ -1185,9 +1158,7 @@ fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
         }
         Some(_) => value,
         None => {
-            eprintln!(
-                "[WARN] Area value {value} has no units attribute; assuming ft² and converting to m²"
-            );
+            tracing::debug!(value, "Area value has no units attribute; assuming ft² and converting to m²");
             conv::area_ft2_to_m2(value)
         }
     }
@@ -1195,10 +1166,14 @@ fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
 
 fn convert_volume_to_m3(value: f64, units: Option<&str>) -> f64 {
     match units {
-        Some("ft3") | Some("ft^3") | Some("cubic feet") | None => {
+        Some("ft3") | Some("ft^3") | Some("cubic feet") => {
             conv::volume_ft3_to_m3(value)
         }
         Some(_) => value,
+        None => {
+            tracing::warn!(value, "Volume value has no units attribute; assuming ft³ and converting to m³");
+            conv::volume_ft3_to_m3(value)
+        }
     }
 }
 
@@ -1209,9 +1184,7 @@ fn convert_u_to_w_m2_k(value: f64, units: Option<&str>) -> f64 {
         }
         Some(_) => value,
         None => {
-            eprintln!(
-                "[WARN] U-value {value} has no units attribute; assuming BTU/(hr·ft²·°F) and converting to W/(m²·K)"
-            );
+            tracing::debug!(value, "U-value has no units attribute; assuming BTU/(hr*ft2*F) and converting to W/(m2*K)");
             conv::u_value_ip_to_si(value)
         }
     }
@@ -1224,9 +1197,7 @@ fn convert_r_to_m2_k_w(value: f64, units: Option<&str>) -> f64 {
         }
         Some(_) => value,
         None => {
-            eprintln!(
-                "[WARN] R-value {value} has no units attribute; assuming hr·ft²·°F/BTU and converting to m²·K/W"
-            );
+            tracing::debug!(value, "R-value has no units attribute; assuming hr*ft2*F/BTU and converting to m2*K/W");
             conv::r_value_ip_to_si(value)
         }
     }
@@ -1250,9 +1221,7 @@ fn convert_length_to_m(value: f64, units: Option<&str>) -> f64 {
         Some("ft") | Some("feet") => conv::length_ft_to_m(value),
         Some(_) => value,
         None => {
-            eprintln!(
-                "[WARN] Length value {value} has no units attribute; assuming feet and converting to meters"
-            );
+            tracing::debug!(value, "Length value has no units attribute; assuming feet and converting to meters");
             conv::length_ft_to_m(value)
         }
     }
@@ -1282,9 +1251,7 @@ fn convert_temperature_to_c(value: f64, units: Option<&str>) -> f64 {
         Some("C") | Some("c") | Some("degC") | Some("degc") | Some("celsius") => value,
         Some(_) => value,
         None => {
-            eprintln!(
-                "[WARN] Temperature value {value} has no units attribute; assuming °F and converting to °C"
-            );
+            tracing::debug!(value, "Temperature value has no units attribute; assuming F and converting to C");
             conv::temperature_f_to_c(value)
         }
     }

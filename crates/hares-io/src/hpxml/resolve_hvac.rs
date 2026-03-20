@@ -452,7 +452,7 @@ fn canonical_hvac_heating_name(system_type: &str, fuel: FuelType) -> String {
 fn canonical_hvac_cooling_name(system_type: &str, _fuel: FuelType) -> String {
     match system_type.trim() {
         "central air conditioner" => "Air Conditioner".to_string(),
-        "room air conditioner" => "Room AC".to_string(),
+        "room air conditioner" => "Room Air Conditioner".to_string(),
         _ => "Generic Cooler".to_string(),
     }
 }
@@ -740,52 +740,21 @@ fn select_variants_for_speed_count(
 
 /// Parse HVACControl setpoints and return them as JSON key-value pairs
 /// ready for injection into HVAC equipment config.
+///
+/// Delegates to the shared `xml_helpers::parse_setpoint_from_control` for
+/// the actual XML parsing logic.
 fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
     let mut out = Vec::new();
 
-    // Locate HVACControl: prefer one nested under HVACPlant or HVAC, else any descendant.
-    let control: Option<&XmlNode> = descendants_named(details, "HVACPlant")
-        .into_iter()
-        .find_map(|p| p.child("HVACControl"))
-        .or_else(|| {
-            descendants_named(details, "HVAC")
-                .into_iter()
-                .find_map(|p| p.child("HVACControl"))
-        })
-        .or_else(|| descendants_named(details, "HVACControl").into_iter().next());
-
-    let Some(control) = control else {
+    let Some(control) = super::xml_helpers::find_hvac_control(details) else {
         return out;
     };
 
     for (hvac_type, param_prefix) in [("Heating", "heating"), ("Cooling", "cooling")] {
-        for (day_type, day_suffix) in [("Weekday", "weekday"), ("Weekend", "weekend")] {
-            let ext_key = format!("{day_type}SetpointTemps{hvac_type}Season");
+        for (weekday, day_suffix) in [(true, "weekday"), (false, "weekend")] {
             let param_key = format!("{param_prefix}_{day_suffix}_setpoints_c");
-
-            if let Some(ext) = control.child("extension") {
-                if let Some(node) = ext.child(&ext_key) {
-                    let vals: Vec<f64> = node
-                        .text
-                        .trim()
-                        .split(',')
-                        .filter_map(|s: &str| s.trim().parse::<f64>().ok())
-                        .map(conv::temperature_f_to_c)
-                        .collect();
-                    if vals.len() == 24 {
-                        out.push((param_key, json!(vals)));
-                        continue;
-                    }
-                }
-            }
-
-            // Fallback: constant setpoint for the season
-            let const_key = format!("SetpointTemp{hvac_type}Season");
-            if let Some(node) = control.child(&const_key) {
-                if let Ok(f_val) = node.text.trim().parse::<f64>() {
-                    let c_val = conv::temperature_f_to_c(f_val);
-                    out.push((param_key, json!(vec![c_val; 24])));
-                }
+            if let Some(vals) = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday) {
+                out.push((param_key, json!(vals)));
             }
         }
     }

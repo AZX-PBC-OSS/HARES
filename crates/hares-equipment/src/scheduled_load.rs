@@ -20,7 +20,7 @@ use crate::schedule_helpers::{
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-const KEY_EQUIPMENT_ID: &str = "equipment_id";
+use crate::config::KEY_EQUIPMENT_ID;
 const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
 // Reserved for future radiant/convective split (OCHRE ScheduledLoad heat gain decomposition).
 #[allow(dead_code)]

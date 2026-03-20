@@ -4,7 +4,7 @@ use crate::EquipmentConfig;
 
 use super::ChargingLevel;
 
-pub(super) const KEY_EQUIPMENT_ID: &str = "equipment_id";
+pub(super) use crate::config::KEY_EQUIPMENT_ID;
 pub(super) const KEY_MASTER_SEED: &str = "master_seed";
 pub(super) const KEY_BUILDING_ID: &str = "building_id";
 pub(super) const KEY_BATTERY_CAPACITY_KWH: &str = "capacity_kwh";

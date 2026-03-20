@@ -33,8 +33,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 // Config keys
 // ---------------------------------------------------------------------------
 
-const KEY_EQUIPMENT_ID: &str = "equipment_id";
-const KEY_ZONE_ID: &str = "zone_id";
+use crate::config::{KEY_EQUIPMENT_ID, KEY_ZONE_ID};
 const KEY_RATED_POWER_KW: &str = "rated_power_kw";
 const KEY_CAPACITY_MIN_KW: &str = "capacity_min_kw";
 const KEY_ETA_ELECTRIC: &str = "eta_electric";

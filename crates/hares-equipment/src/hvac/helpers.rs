@@ -227,8 +227,6 @@ pub fn resolve_duct_dse(
         return 1.0;
     }
 
-    let hvac_mult = if is_heating { 1.0 } else { -1.0 };
-
     let input = hares_physics::ashrae152::DuctDseInput {
         zone_type,
         latitude_deg: lat,
@@ -244,7 +242,6 @@ pub fn resolve_duct_dse(
         capacity_w,
         fan_flow_m3_s,
         n_speeds,
-        hvac_mult,
         capacity_low_w: None,
         fan_flow_low_m3_s: None,
         is_heat_pump,

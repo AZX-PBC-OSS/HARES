@@ -442,8 +442,8 @@ impl HvacEquipment {
         };
         if let Some(f) = frac {
             if !(0.0..=1.0).contains(&f) {
-                eprintln!(
-                    "[WARN] space_fraction {f} out of range [0,1] for {:?}, clamping",
+                tracing::warn!(
+                    "space_fraction {f} out of range [0,1] for {:?}, clamping",
                     self.equipment_type
                 );
             }

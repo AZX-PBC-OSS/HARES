@@ -7,13 +7,16 @@ use hares_types::{normalize_ascii, parse_trimmed_f64};
 use super::building::XmlNode;
 
 pub(crate) fn parse_fuel(raw: Option<&str>) -> FuelType {
-    match normalize_ascii(raw.unwrap_or("electricity")).as_str()
-    {
+    let normalized = normalize_ascii(raw.unwrap_or("electricity"));
+    match normalized.as_str() {
         "electricity" | "electric" | "none" => FuelType::Electric,
         "natural gas" | "natural_gas" | "gas" => FuelType::Gas,
         "propane" => FuelType::Propane,
         "oil" | "fuel oil" | "fuel_oil" => FuelType::Oil,
-        _ => FuelType::Electric,
+        other => {
+            tracing::warn!(fuel = %other, "unrecognized fuel string; defaulting to Electric");
+            FuelType::Electric
+        }
     }
 }
 
@@ -94,10 +97,6 @@ pub(crate) fn capitalize(s: &str) -> String {
     out
 }
 
-pub(crate) fn children_named<'a>(node: &'a XmlNode, name: &'a str) -> impl Iterator<Item = &'a XmlNode> {
-    node.children.iter().filter(move |child| child.name == name)
-}
-
 pub(crate) fn descendants_named<'a>(node: &'a XmlNode, name: &'a str) -> Vec<&'a XmlNode> {
     let mut out = Vec::new();
     collect_descendants(node, name, &mut out);
@@ -111,4 +110,58 @@ fn collect_descendants<'a>(node: &'a XmlNode, name: &str, out: &mut Vec<&'a XmlN
     for child in &node.children {
         collect_descendants(child, name, out);
     }
+}
+
+/// Locate the `HVACControl` node from a `BuildingDetails` subtree.
+///
+/// Search order: under `HVACPlant`, then `HVAC`, then any descendant.
+pub(crate) fn find_hvac_control(details: &XmlNode) -> Option<&XmlNode> {
+    descendants_named(details, "HVACPlant")
+        .into_iter()
+        .find_map(|p| p.child("HVACControl"))
+        .or_else(|| {
+            descendants_named(details, "HVAC")
+                .into_iter()
+                .find_map(|p| p.child("HVACControl"))
+        })
+        .or_else(|| details.first_descendant("HVACControl"))
+}
+
+/// Parse a single HVAC setpoint schedule (24h array in °C) from an `HVACControl` node.
+///
+/// Returns `None` if no setpoint data is found for the given `hvac_type`/`weekday` combination.
+/// Used by both `building.rs::parse_hvac_setpoints` and `resolve_hvac.rs::parse_hvac_setpoint_params`.
+pub(crate) fn parse_setpoint_from_control(
+    control: &XmlNode,
+    hvac_type: &str,
+    weekday: bool,
+) -> Option<Vec<f64>> {
+    let day_prefix = if weekday { "Weekday" } else { "Weekend" };
+    let ext_key = format!("{day_prefix}SetpointTemps{hvac_type}Season");
+
+    if let Some(ext) = control.child("extension") {
+        if let Some(node) = ext.child(&ext_key) {
+            let vals: Vec<f64> = node
+                .text
+                .trim()
+                .split(',')
+                .filter_map(|s| s.trim().parse::<f64>().ok())
+                .map(conv::temperature_f_to_c)
+                .collect();
+            if vals.len() == 24 {
+                return Some(vals);
+            }
+        }
+    }
+
+    // Fallback: single constant value from <SetpointTemp{hvac_type}Season>
+    let const_key = format!("SetpointTemp{hvac_type}Season");
+    if let Some(node) = control.child(&const_key) {
+        if let Ok(f_val) = node.text.trim().parse::<f64>() {
+            let c_val = conv::temperature_f_to_c(f_val);
+            return Some(vec![c_val; 24]);
+        }
+    }
+
+    None
 }

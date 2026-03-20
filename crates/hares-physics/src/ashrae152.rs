@@ -73,8 +73,6 @@ pub struct DuctDseInput {
     pub fan_flow_m3_s: f64,
     /// Number of compressor / fan speeds (1 or 2+).
     pub n_speeds: u8,
-    /// Sign multiplier: `+1.0` for heating, `-1.0` for cooling.
-    pub hvac_mult: f64,
     /// Rated capacity at low speed (W). Required when `n_speeds > 1`.
     pub capacity_low_w: Option<f64>,
     /// Fan airflow at low speed (m³/s). Required when `n_speeds > 1`.
@@ -332,6 +330,8 @@ fn zone_temps(
 /// Returns a DSE clamped to `(0.0, 1.0]`.  All inputs must be in SI units;
 /// see [`DuctDseInput`] for field documentation.
 pub fn calculate_dse(input: &DuctDseInput) -> f64 {
+    let hvac_mult = if input.is_heating { 1.0 } else { -1.0 };
+
     // ------------------------------------------------------------------
     // 1. Convert inputs to IP units
     // ------------------------------------------------------------------
@@ -409,7 +409,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     let seas_supply_zone_enthalpy =
         seas_supply_zone_temp * 0.24 + seas_hr * (1061.0 + 0.444 * seas_supply_zone_temp);
     let seas_return_zone_enthalpy =
-        if seas_supply_zone_enthalpy * input.hvac_mult > seas_in_enthalpy * input.hvac_mult {
+        if seas_supply_zone_enthalpy * hvac_mult > seas_in_enthalpy * hvac_mult {
             (seas_enthalpy + seas_supply_zone_enthalpy) / 2.0
         } else {
             seas_supply_zone_enthalpy
@@ -437,7 +437,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     let ar_high = (fan_flow_cfm - return_duct_leakage) / fan_flow_cfm;
 
     let denom_high = 60.0 * fan_flow_cfm * 0.075 * 0.24;
-    let dte_high = capacity_btu_h * input.hvac_mult / denom_high;
+    let dte_high = capacity_btu_h * hvac_mult / denom_high;
     let bs_high = f64::exp(-supply_area_ft2 / (denom_high * supply_r));
     let br_high = f64::exp(-return_area_ft2 / (denom_high * return_r));
 
@@ -474,7 +474,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
         let ar_l = (flow_low - rdl_low) / flow_low;
 
         let denom_low = 60.0 * flow_low * 0.075 * 0.24;
-        let dte_l = cap_low * input.hvac_mult / denom_low;
+        let dte_l = cap_low * hvac_mult / denom_low;
         let bs_l = f64::exp(-supply_area_ft2 / (denom_low * supply_r));
         let br_l = f64::exp(-return_area_ft2 / (denom_low * return_r));
 
@@ -642,7 +642,6 @@ mod tests {
             capacity_w: 14_650.0,      // ~50 000 Btu/h
             fan_flow_m3_s: 0.566,      // ~1 200 CFM
             n_speeds: 1,
-            hvac_mult: 1.0,
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
@@ -671,12 +670,83 @@ mod tests {
             capacity_w: 10_550.0,   // ~36 000 Btu/h (3 ton)
             fan_flow_m3_s: 0.472,   // ~1 000 CFM
             n_speeds: 1,
-            hvac_mult: -1.0,
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
             is_heat_pump: false,
         };
         let dse = calculate_dse(&input);
         assert!(dse > 0.0 && dse <= 1.0, "DSE out of bounds: {dse}");
+    }
+
+    #[test]
+    fn dse_cooling_multi_speed_in_bounds() {
+        let input = DuctDseInput {
+            zone_type: Ashrae152ZoneType::AtticVented,
+            latitude_deg: 33.45,
+            longitude_deg: -112.02,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.10,
+            supply_area_m2: 9.29,
+            supply_r_nominal_m2_k_w: 1.76,
+            return_leakage_frac: 0.06,
+            return_area_m2: 4.65,
+            return_r_nominal_m2_k_w: 1.76,
+            is_heating: false,
+            capacity_w: 10_550.0,
+            fan_flow_m3_s: 0.472,
+            n_speeds: 2,
+            capacity_low_w: Some(7_000.0),
+            fan_flow_low_m3_s: Some(0.330),
+            is_heat_pump: false,
+        };
+        let dse = calculate_dse(&input);
+        assert!(dse > 0.0 && dse <= 1.0, "multi-speed cooling DSE out of bounds: {dse}");
+    }
+
+    #[test]
+    fn dse_heating_and_cooling_derive_correct_hvac_mult_sign() {
+        let heating_input = DuctDseInput {
+            zone_type: Ashrae152ZoneType::AtticVented,
+            latitude_deg: 39.74,
+            longitude_deg: -104.87,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.10,
+            supply_area_m2: 9.29,
+            supply_r_nominal_m2_k_w: 1.76,
+            return_leakage_frac: 0.06,
+            return_area_m2: 4.65,
+            return_r_nominal_m2_k_w: 1.76,
+            is_heating: true,
+            capacity_w: 14_650.0,
+            fan_flow_m3_s: 0.566,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+        let dse_h = calculate_dse(&heating_input);
+        assert!(dse_h > 0.0 && dse_h <= 1.0, "heating DSE: {dse_h}");
+
+        let cooling_input = DuctDseInput {
+            zone_type: Ashrae152ZoneType::AtticVented,
+            latitude_deg: 33.45,
+            longitude_deg: -112.02,
+            house_volume_m3: 340.0,
+            supply_leakage_frac: 0.10,
+            supply_area_m2: 9.29,
+            supply_r_nominal_m2_k_w: 1.76,
+            return_leakage_frac: 0.06,
+            return_area_m2: 4.65,
+            return_r_nominal_m2_k_w: 1.76,
+            is_heating: false,
+            capacity_w: 10_550.0,
+            fan_flow_m3_s: 0.472,
+            n_speeds: 1,
+            capacity_low_w: None,
+            fan_flow_low_m3_s: None,
+            is_heat_pump: false,
+        };
+        let dse_c = calculate_dse(&cooling_input);
+        assert!(dse_c > 0.0 && dse_c <= 1.0, "cooling DSE: {dse_c}");
     }
 }

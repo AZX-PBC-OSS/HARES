@@ -1,5 +1,10 @@
 //! Equipment configuration and parameter types.
 
+/// Common config key for equipment ID, shared across all equipment types.
+pub(crate) const KEY_EQUIPMENT_ID: &str = "equipment_id";
+/// Common config key for zone ID, shared across equipment types that are zone-attached.
+pub(crate) const KEY_ZONE_ID: &str = "zone_id";
+
 use std::collections::HashMap;
 use std::fmt;
 

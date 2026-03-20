@@ -4,7 +4,7 @@ use nalgebra::{Complex, DMatrix, DVector};
 use thiserror::Error;
 
 const RCOND_THRESHOLD: f64 = 1.0e-12;
-const ZERO_GAIN_EPSILON: f64 = 1.0e-12;
+pub const ZERO_GAIN_EPSILON: f64 = 1.0e-12;
 
 /// Discrete eigenvalue magnitude threshold for near-unity stability warning.
 /// Eigenvalues with |λ| > this value trigger a tracing::warn for slow convergence.
@@ -130,6 +130,44 @@ impl StateSpaceModel {
     /// Computes output from current state/input: y[k] = C * x[k] + D * u[k].
     pub fn output(&self, x: &DVector<f64>, u: &DVector<f64>) -> DVector<f64> {
         &self.c * x + &self.d * u
+    }
+
+    /// Solves for a scalar input that drives a specific output row to `y_target`
+    /// after one step, without cloning A_d or B_d.
+    pub fn solve_for_output_input(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        output_index: usize,
+        input_index: usize,
+    ) -> Result<f64> {
+        if input_index >= self.b_d.ncols() {
+            return Err(StateSpaceError::InputIndexOutOfBounds {
+                index: input_index,
+                input_dim: self.b_d.ncols(),
+            });
+        }
+
+        let u_i_original = u[input_index];
+
+        // x_next_fixed = A_d * x + B_d * u - B_d[:,input_index] * u_i
+        let x_next_fixed =
+            &self.a_d * x + &self.b_d * u - self.b_d.column(input_index) * u_i_original;
+
+        let c_row = self.c.row(output_index);
+        let d_row = self.d.row(output_index);
+        let y_fixed =
+            (c_row * &x_next_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
+
+        let b_col = self.b_d.column(input_index);
+        let effective_gain = (c_row * b_col)[0] + self.d[(output_index, input_index)];
+
+        if effective_gain.abs() <= ZERO_GAIN_EPSILON {
+            return Err(StateSpaceError::ZeroEffectiveGain { input_index });
+        }
+
+        Ok((y_target - y_fixed) / effective_gain)
     }
 
     /// Solves for one scalar input value to hit a scalar output target after one step.

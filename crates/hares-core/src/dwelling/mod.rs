@@ -373,7 +373,7 @@ impl Dwelling {
                         "equipment '{}' (class '{}') not available, skipping: {err}",
                         base_cfg.name, base_cfg.ochre_class
                     );
-                    eprintln!("[WARN] {msg}");
+                    tracing::warn!("{msg}");
                     warnings.push(msg);
                     continue;
                 }
@@ -389,7 +389,7 @@ impl Dwelling {
                         "equipment '{}' init failed, skipping: {err}",
                         merged_cfg.name
                     );
-                    eprintln!("[WARN] {msg}");
+                    tracing::warn!("{msg}");
                     warnings.push(msg);
                 }
             }
@@ -778,7 +778,6 @@ impl Dwelling {
         Ok(())
     }
 
-    #[allow(unused_assignments)]
     fn run_timestep(&mut self, record_output: bool) -> Result<StepResult> {
         if self.clock.current_step() >= self.clock.total_steps() {
             return Err(HaresError::Physics(
@@ -798,8 +797,6 @@ impl Dwelling {
         let mut step_envelope: Option<StdDuration> = None;
         #[cfg(feature = "profiling")]
         let mut step_io: Option<StdDuration> = None;
-
-        let _step_num = self.clock.current_step();
 
         // Step 1: update environment at current clock state.
         #[cfg(feature = "profiling")]
@@ -849,9 +846,12 @@ impl Dwelling {
                 ));
             }
         }
-        self.stage_snapshot = Some(StageSnapshot {
-            ports: self.ports.clone(),
-        });
+        #[cfg(debug_assertions)]
+        {
+            self.stage_snapshot = Some(StageSnapshot {
+                ports: self.ports.clone(),
+            });
+        }
 
         // Step 3b: thermal stage equipment.
         for &idx in &indices {

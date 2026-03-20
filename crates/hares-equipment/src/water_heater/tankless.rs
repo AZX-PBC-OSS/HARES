@@ -208,7 +208,7 @@ impl Equipment for TanklessWH {
         self.inlet_temp_c =
             first_f64(config, &["inlet_temp_c", "mains_temp_c"]).unwrap_or(self.inlet_temp_c);
         self.draw_flow_rate_kg_s = resolve_draw_rate_kg_s(config);
-        self.zip = WaterHeaterZip::from_config(config);
+        self.zip = WaterHeaterZip::from_config(config)?;
         self.dr_setpoint_offset_c = 0.0;
         self.dr_load_fraction = 1.0;
         self.dr_duration_remaining_s = None;

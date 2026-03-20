@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use hares_physics::air_properties::moist_air_density_kg_m3;
+use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
 use hares_physics::psychrometrics::{
     humidity_ratio_from_tdp, relative_humidity, wet_bulb_from_humidity_ratio,
 };
@@ -20,7 +21,7 @@ pub struct HumiditySolverConfig {
     /// building material moisture absorption. 15× matches OCHRE's `humidity_cap_mult`.
     /// Applied uniformly to all zones (single-zone validated only).
     pub moisture_buffering_multiplier: f64,
-    /// Latent heat of vaporisation at ~20°C [J/kg]; matches OCHRE's h_vap = 2454 kJ/kg.
+    /// Latent heat of vaporisation at 0°C [J/kg]; 2501 kJ/kg per ASHRAE / OCHRE.
     pub h_fg_j_kg: f64,
 }
 
@@ -31,7 +32,7 @@ impl Default for HumiditySolverConfig {
             // 15× matches OCHRE's humidity_cap_mult: furniture and building materials
             // absorb moisture, slowing RH swings and preventing dehumidifier cycling.
             moisture_buffering_multiplier: 15.0,
-            h_fg_j_kg: 2_454_000.0,
+            h_fg_j_kg: LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J,
         }
     }
 }
@@ -460,6 +461,56 @@ mod tests {
         assert!((dw2 - 0.5 * dw1).abs() < 1e-8);
     }
 
+    /// Verifies that the thermal solver's latent heat constant matches the
+    /// humidity solver's. If they diverge, infiltration-driven moisture will
+    /// accumulate a systematic error (~1.9% per step for 2454 vs 2501 kJ/kg).
+    #[test]
+    fn thermal_and_humidity_solvers_share_latent_heat_constant() {
+        use hares_physics::constants::{KJ_TO_J, LATENT_HEAT_VAPORISATION_0C_KJ_KG};
+
+        let thermal_h_fg = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
+        let humidity_h_fg = HumiditySolverConfig::default().h_fg_j_kg;
+
+        assert!(
+            (thermal_h_fg - humidity_h_fg).abs() < f64::EPSILON,
+            "latent heat mismatch: thermal={thermal_h_fg} J/kg, humidity={humidity_h_fg} J/kg"
+        );
+    }
+
+    /// Integration test: known infiltration latent load through both solvers
+    /// must produce a humidity ratio that matches first-principles calculation.
+    /// Q_latent = m_dot_infiltration * h_fg * (w_outdoor - w_indoor)
+    /// delta_w = Q_latent * dt / (h_fg * rho * V * multiplier)
+    #[test]
+    fn infiltration_humidity_ratio_matches_first_principles() {
+        let h_fg = HumiditySolverConfig::default().h_fg_j_kg;
+        let w_indoor = 0.008;
+        let w_outdoor = 0.012;
+        let t_c = 22.0;
+        let p_pa = 101_325.0;
+        let volume_m3 = 200.0;
+        let dt_s = 300.0;
+
+        let rho = hares_physics::air_properties::moist_air_density_kg_m3(p_pa, t_c, w_indoor);
+        let infiltration_m3_s = 0.05; // ~180 m³/h
+        let m_dot = infiltration_m3_s * rho;
+
+        // Latent heat gain from infiltration (as the thermal solver would compute)
+        let q_latent_w = m_dot * h_fg * (w_outdoor - w_indoor);
+
+        // Expected humidity ratio change (as the humidity solver computes)
+        let dw_expected = humidity_ratio_increment(q_latent_w, dt_s, h_fg, rho, volume_m3, 1.0);
+
+        // First-principles: delta_w = m_dot * (w_out - w_in) * dt / (rho * V)
+        let dw_first_principles = m_dot * (w_outdoor - w_indoor) * dt_s / (rho * volume_m3);
+
+        assert!(
+            (dw_expected - dw_first_principles).abs() < 1e-12,
+            "humidity ratio mismatch: solver={dw_expected:.9e}, \
+             first_principles={dw_first_principles:.9e} — latent heat cancellation failed"
+        );
+    }
+
     /// The default multiplier (15×) must produce a humidity-ratio change exactly
     /// 15× smaller than the same solver at multiplier=1.0 under identical load.
     /// This pins the OCHRE-aligned default and catches accidental resets.
@@ -468,7 +519,7 @@ mod tests {
         // Explicit pin: catch any accidental change to the default constant
         let cfg = HumiditySolverConfig::default();
         assert_eq!(cfg.moisture_buffering_multiplier, 15.0);
-        assert_eq!(cfg.h_fg_j_kg, 2_454_000.0);
+        assert_eq!(cfg.h_fg_j_kg, 2_501_000.0);
 
         let env = env_with_zone(22.0, 0.008);
         let mut solver_unbuffered = HumiditySolver::new(

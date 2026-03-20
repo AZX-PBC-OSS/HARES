@@ -212,13 +212,7 @@ fn bisect<F: Fn(f64) -> f64>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn approx_eq(actual: f64, expected: f64, tol: f64) {
-        assert!(
-            (actual - expected).abs() <= tol,
-            "actual={actual}, expected={expected}, tol={tol}"
-        );
-    }
+    use crate::test_utils::approx_eq;
 
     #[test]
     fn saturation_pressure_matches_reference_points() {
@@ -463,6 +457,17 @@ mod tests {
         let raw = moist_air_enthalpy(25.0, w);
         let typed = moist_air_enthalpy_typed(t_db, w);
         approx_eq(typed, raw, 1e-9);
+    }
+
+    #[test]
+    fn moist_air_enthalpy_sub_zero_temperature() {
+        // At -10°C with low humidity (typical cold winter air)
+        let h = moist_air_enthalpy(-10.0, 0.001);
+        assert!(h.is_finite(), "enthalpy at -10°C must be finite");
+        // h = 1.006*(-10) + 0.001*(2501 + 1.86*(-10)) = -10.06 + 2.4814 = -7.5786 kJ/kg
+        // In J/kg: ≈ -7578.6
+        assert!(h < 0.0, "enthalpy at -10°C should be negative, got {h}");
+        approx_eq(h, -7_578.6, 10.0);
     }
 
     #[test]

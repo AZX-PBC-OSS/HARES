@@ -127,4 +127,15 @@ mod tests {
         let err = FluidDomainPayload::decode(&[1.0, 0.0, 2.0]).unwrap_err();
         assert!(err.to_string().contains("invalid fluid payload length"));
     }
+
+    #[test]
+    fn decode_rejects_invalid_fluid_type_discriminator() {
+        // Valid length (5), but fluid_type discriminator 99.0 is invalid
+        let payload = vec![1.0, 99.0, 500.0, 60.0, 40.0];
+        let err = FluidDomainPayload::decode(&payload).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid fluid type discriminator"),
+            "expected fluid type error, got: {err}"
+        );
+    }
 }

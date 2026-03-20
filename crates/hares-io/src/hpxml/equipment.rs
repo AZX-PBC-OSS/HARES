@@ -928,4 +928,112 @@ mod tests {
             "without duct data, duct_dse must not be injected"
         );
     }
+
+    #[test]
+    fn room_ac_gets_setpoints_and_no_duct_dse() {
+        let xml = hvac_with_ducts_xml(
+            r#"<CoolingSystem>
+              <CoolingSystemType>room air conditioner</CoolingSystemType>
+              <CoolingCapacity>12000</CoolingCapacity>
+              <SEER>10</SEER>
+            </CoolingSystem>
+            <HVACControl>
+              <SetpointTempCoolingSeason>75</SetpointTempCoolingSeason>
+            </HVACControl>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
+
+        let rac = specs
+            .iter()
+            .find(|s| s.name == "Room Air Conditioner")
+            .expect("Room Air Conditioner spec must be present");
+
+        // Room AC must NOT get duct DSE params (no ducts for window units).
+        assert!(
+            !rac.parameters.contains_key("duct_zone_id"),
+            "Room Air Conditioner must not have duct_zone_id"
+        );
+        assert!(
+            !rac.parameters.contains_key("duct_zone_type"),
+            "Room Air Conditioner must not have duct_zone_type"
+        );
+
+        // Room AC must get cooling setpoints injected.
+        assert!(
+            rac.parameters.contains_key("cooling_weekday_setpoints_c"),
+            "Room Air Conditioner must receive cooling setpoints"
+        );
+        let setpoints = rac
+            .parameters
+            .get("cooling_weekday_setpoints_c")
+            .and_then(Value::as_array)
+            .expect("setpoints array");
+        assert_eq!(setpoints.len(), 24, "setpoints must have 24 values");
+        let expected_c = conv::temperature_f_to_c(75.0);
+        assert!(
+            (setpoints[0].as_f64().unwrap() - expected_c).abs() < 1e-6,
+            "setpoint should be 75F converted to C"
+        );
+    }
+
+    /// Both `building.rs::parse_hvac_setpoints` and `resolve_hvac.rs::parse_hvac_setpoint_params`
+    /// use the same shared helper. Verify they produce identical output for the same input.
+    #[test]
+    fn both_setpoint_parsers_produce_same_output() {
+        let xml = minimal_hvac_xml(
+            r#"<HVACControl>
+              <SetpointTempHeatingSeason>68</SetpointTempHeatingSeason>
+              <SetpointTempCoolingSeason>75</SetpointTempCoolingSeason>
+            </HVACControl>
+            <HeatingSystem>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <HeatingCapacity>60000</HeatingCapacity>
+            </HeatingSystem>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+
+        // Path 1: setpoints parsed into the Building struct by building.rs
+        let bldg_heating_wd = building.heating_weekday_setpoints_c.as_ref()
+            .expect("building heating weekday setpoints");
+        let bldg_cooling_wd = building.cooling_weekday_setpoints_c.as_ref()
+            .expect("building cooling weekday setpoints");
+
+        // Path 2: setpoints parsed by resolve_equipment → resolve_hvac → parse_hvac_setpoint_params
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
+        let furnace = specs
+            .iter()
+            .find(|s| s.name == "Gas Furnace")
+            .expect("Gas Furnace");
+
+        let spec_heating_wd = furnace
+            .parameters
+            .get("heating_weekday_setpoints_c")
+            .and_then(Value::as_array)
+            .expect("spec heating setpoints");
+
+        // Both paths should produce the same 24-element array.
+        assert_eq!(bldg_heating_wd.len(), 24);
+        assert_eq!(spec_heating_wd.len(), 24);
+        for (i, (bldg_val, spec_val)) in bldg_heating_wd.iter().zip(spec_heating_wd.iter()).enumerate() {
+            let sv = spec_val.as_f64().unwrap();
+            assert!(
+                (bldg_val - sv).abs() < 1e-10,
+                "heating setpoint mismatch at index {i}: building={bldg_val}, spec={sv}"
+            );
+        }
+
+        // Verify the actual value: 68°F → °C
+        let expected_c = conv::temperature_f_to_c(68.0);
+        assert!(
+            (bldg_heating_wd[0] - expected_c).abs() < 1e-6,
+            "heating setpoint should be 68F converted to C"
+        );
+        let expected_cool = conv::temperature_f_to_c(75.0);
+        assert!(
+            (bldg_cooling_wd[0] - expected_cool).abs() < 1e-6,
+            "cooling setpoint should be 75F converted to C"
+        );
+    }
 }

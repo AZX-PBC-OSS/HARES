@@ -24,7 +24,7 @@ use crate::longwave_radiation::{
     ExteriorSurface, InteriorSurface, exterior_longwave_w, interior_longwave_linearised_w,
     sky_view_factor,
 };
-use crate::state_space::{StateSpaceError, StateSpaceModel};
+use crate::state_space::StateSpaceModel;
 
 use infiltration::apply_infiltration_and_ventilation;
 
@@ -74,12 +74,14 @@ impl ThermalSolver {
         )
     }
 
+    #[cfg(test)]
     pub fn b_d_column(&self, col: usize) -> Vec<f64> {
         (0..self.model.b_d.nrows())
             .map(|r| self.model.b_d[(r, col)])
             .collect()
     }
 
+    #[cfg(test)]
     pub fn a_d_diagonal(&self) -> Vec<f64> {
         (0..self.model.a_d.nrows())
             .map(|i| self.model.a_d[(i, i)])
@@ -191,15 +193,9 @@ impl ThermalSolver {
             return 0.0;
         };
         let y_target = zone_setpoint_c(&self.config, env, zone);
-        solve_for_output_input(
-            &self.model,
-            &self.x,
-            &self.last_u,
-            y_target,
-            output_idx,
-            input_idx,
-        )
-        .unwrap_or(0.0)
+        self.model
+            .solve_for_output_input(&self.x, &self.last_u, y_target, output_idx, input_idx)
+            .unwrap_or(0.0)
     }
 
     pub fn set_ideal_hvac_zones(&mut self, zones: Vec<ZoneId>) {
@@ -269,7 +265,7 @@ impl ThermalSolver {
             let target = zone_setpoint_c(&self.config, env, zone);
 
             if let Ok(q) =
-                solve_for_output_input(&self.model, &self.x, &u, target, output_idx, input_idx)
+                self.model.solve_for_output_input(&self.x, &u, target, output_idx, input_idx)
             {
                 u[input_idx] = q;
             }
@@ -524,43 +520,6 @@ fn zone_setpoint_c(config: &ThermalSolverConfig, env: &EnvironmentState, zone: Z
                 .map(|z| z.temperature_c)
         })
         .unwrap_or_default()
-}
-
-/// Solves for the scalar input at `input_index` that drives output `output_index` to `y_target`
-/// after one step, without cloning A_d or B_d.
-fn solve_for_output_input(
-    model: &StateSpaceModel,
-    x: &DVector<f64>,
-    u: &DVector<f64>,
-    y_target: f64,
-    output_index: usize,
-    input_index: usize,
-) -> std::result::Result<f64, StateSpaceError> {
-    // Zero the target input so we can compute the baseline prediction without it.
-    // We operate on a temporary scalar instead of cloning the full u vector.
-    let u_i_original = u[input_index];
-
-    // x_next_fixed = A_d * x + B_d * u_fixed  (u_fixed has u[input_index] = 0)
-    // Computed as: A_d*x + B_d*u - B_d[:,input_index]*u_i
-    let x_next_fixed =
-        &model.a_d * x + &model.b_d * u - model.b_d.column(input_index) * u_i_original;
-
-    // y_fixed = C * x_next_fixed + D * u_fixed
-    // Use matrix-vector products rather than dot() to avoid shape mismatch between
-    // row slices (1×n) and column vectors (n×1) in nalgebra's dot() check.
-    let c_row = model.c.row(output_index);
-    let d_row = model.d.row(output_index);
-    let y_fixed = (c_row * &x_next_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
-
-    // effective_gain = C[output_index, :] * B_d[:, input_index] + D[output_index, input_index]
-    let b_col = model.b_d.column(input_index);
-    let effective_gain = (c_row * b_col)[0] + model.d[(output_index, input_index)];
-
-    if effective_gain.abs() <= 1.0e-12 {
-        return Err(StateSpaceError::ZeroEffectiveGain { input_index });
-    }
-
-    Ok((y_target - y_fixed) / effective_gain)
 }
 
 /// Solves for the true conditioned steady-state temperature profile.

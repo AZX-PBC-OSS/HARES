@@ -173,6 +173,11 @@ pub fn temperature_c_to_f(c: f64) -> f64 {
     UomTemperature::new::<degree_celsius>(c).get::<degree_fahrenheit>()
 }
 
+/// Temperature delta conversion: °C range → °F range (multiply by 9/5, no +32 offset).
+pub fn temperature_delta_c_to_f(delta_c: f64) -> f64 {
+    delta_c * 9.0 / 5.0
+}
+
 // --- Composite: BTU/(hr·°F) → W/K ---
 // Used for water-heater UA conversions.  1 BTU/(hr·°F) = BTU_PER_HOUR_TO_W * 9/5.
 pub fn btu_hr_per_f_to_w_per_k(x: f64) -> f64 {
@@ -182,13 +187,7 @@ pub fn btu_hr_per_f_to_w_per_k(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn approx_eq(actual: f64, expected: f64, tol: f64) {
-        assert!(
-            (actual - expected).abs() <= tol,
-            "actual={actual}, expected={expected}, tol={tol}"
-        );
-    }
+    use crate::test_utils::approx_eq;
 
     #[test]
     fn celsius_and_kelvin_helpers_are_consistent() {

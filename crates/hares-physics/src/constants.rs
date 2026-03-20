@@ -119,6 +119,10 @@ pub const OCCUPANT_LATENT_GAIN_W: f64 = 51.2;
 /// the convective component only (radiative = 0 by default). Kept for documentation.
 pub const OCCUPANT_CONVECTIVE_FRACTION: f64 = 1.0;
 
+/// Celsius to Kelvin offset [K].
+/// ISA 1976 / NIST: T(K) = T(°C) + 273.15.
+pub const CELSIUS_TO_KELVIN: f64 = 273.15;
+
 /// Fahrenheit to Celsius offset.
 pub const FAHRENHEIT_OFFSET: f64 = 32.0;
 

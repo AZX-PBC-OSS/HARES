@@ -1,13 +1,12 @@
 //! Moist air thermodynamic properties.
 
 use crate::constants::{
-    DRY_AIR_GAS_CONSTANT_J_KG_K, HUMIDITY_DENSITY_CORRECTION, ISA_LAPSE_COEFFICIENT,
-    ISA_PRESSURE_EXPONENT, MIN_HUMIDITY_RATIO_DENSITY, SEA_LEVEL_PRESSURE_PA,
+    CELSIUS_TO_KELVIN, DRY_AIR_GAS_CONSTANT_J_KG_K, HUMIDITY_DENSITY_CORRECTION,
+    ISA_LAPSE_COEFFICIENT, ISA_PRESSURE_EXPONENT, MIN_HUMIDITY_RATIO_DENSITY,
+    SEA_LEVEL_PRESSURE_PA,
 };
 use crate::units::*;
 use uom::si::length::meter;
-
-const CELSIUS_TO_KELVIN: f64 = 273.15;
 
 /// ISA standard pressure at altitude [Pa].
 pub fn standard_pressure_pa(elevation_m: f64) -> f64 {
@@ -54,13 +53,7 @@ pub fn dry_air_density(p: Pressure, t: Temperature) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn approx_eq(actual: f64, expected: f64, tol: f64) {
-        assert!(
-            (actual - expected).abs() <= tol,
-            "actual={actual}, expected={expected}, tol={tol}"
-        );
-    }
+    use crate::test_utils::approx_eq;
 
     #[test]
     fn standard_pressure_matches_isa_reference() {
@@ -146,6 +139,14 @@ mod tests {
                 "standard_pressure_pa({alt}) = {result}, expected {expected} ± {tol} (ISA 1976)"
             );
         }
+    }
+
+    #[test]
+    fn moist_air_density_zero_pressure_does_not_panic() {
+        // 0 Pa produces 0 density (0 / finite = 0), should not panic or NaN
+        let rho = moist_air_density_kg_m3(0.0, 20.0, 0.01);
+        assert!(rho.is_finite(), "density at 0 Pa must be finite, got {rho}");
+        approx_eq(rho, 0.0, 1e-15);
     }
 
     #[test]

@@ -39,19 +39,7 @@ const LAG_SLOPE: f64 = 1.0;
 /// Degrees-to-radians conversion.
 const DEG_TO_RAD: f64 = PI / 180.0;
 
-// ---------------------------------------------------------------------------
-// Unit conversion helpers (internal only)
-// ---------------------------------------------------------------------------
-
-#[inline]
-fn celsius_to_fahrenheit(t_c: f64) -> f64 {
-    t_c * 9.0 / 5.0 + 32.0
-}
-
-#[inline]
-fn fahrenheit_to_celsius(t_f: f64) -> f64 {
-    (t_f - 32.0) * 5.0 / 9.0
-}
+use crate::units::{temperature_c_to_f, temperature_delta_c_to_f, temperature_f_to_c};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -102,8 +90,8 @@ pub fn water_mains_temperature_c(
         "day_of_year must be in 1..=366, got {day_of_year}"
     );
 
-    let t_avg_f = celsius_to_fahrenheit(t_annual_avg_c);
-    let dt_annual_range_f = dt_annual_range_c * 9.0 / 5.0; // difference, no +32 offset
+    let t_avg_f = temperature_c_to_f(t_annual_avg_c);
+    let dt_annual_range_f = temperature_delta_c_to_f(dt_annual_range_c);
 
     // Clamp ratio to [0.0, 1.0] to prevent phase inversion for arctic climates
     // (annual avg < −24 °C) where the unclamped formula goes negative.
@@ -122,7 +110,7 @@ pub fn water_mains_temperature_c(
 
     let t_mains_f = t_avg_f + OFFSET_F + amplitude * (angle_deg * DEG_TO_RAD).sin();
 
-    fahrenheit_to_celsius(t_mains_f)
+    temperature_f_to_c(t_mains_f)
 }
 
 /// Hemisphere selector for [`water_mains_temperature_c`].
@@ -144,12 +132,7 @@ pub enum Hemisphere {
 mod tests {
     use super::*;
 
-    fn approx_eq(actual: f64, expected: f64, tol: f64) {
-        assert!(
-            (actual - expected).abs() <= tol,
-            "actual={actual:.4}, expected={expected:.4}, tol={tol}"
-        );
-    }
+    use crate::test_utils::approx_eq;
 
     /// Compute mains temperature for all 365 days and return (min, max, mean).
     fn annual_stats(t_avg_c: f64, dt_annual_range_c: f64) -> (f64, f64, f64) {
@@ -219,7 +202,7 @@ mod tests {
         // At −40 °C, unclamped ratio = 0.4 + 0.01*(−40 °C in °F − 44) = very negative.
         // With clamping ratio = 0.0, amplitude = 0, and the result equals t_avg + offset.
         let t_avg_c = -40.0_f64;
-        let expected_mean_c = fahrenheit_to_celsius(celsius_to_fahrenheit(t_avg_c) + OFFSET_F);
+        let expected_mean_c = temperature_f_to_c(temperature_c_to_f(t_avg_c) + OFFSET_F);
         for d in [1u16, 91, 182, 274, 365] {
             let t = water_mains_temperature_c(t_avg_c, 30.0, d, Hemisphere::Northern);
             assert!(t.is_finite(), "arctic day {d} should be finite");
@@ -331,8 +314,8 @@ mod tests {
 
         // Replicate OCHRE formula directly (Northern Hemisphere: sign = -1)
         // t_mains_f = t_avg_f + 6 + ratio * (dt_f / 2) * sin(π/180 * (0.986*(yday-15-lag) - 90))
-        let t_avg_f = celsius_to_fahrenheit(t_avg_c);
-        let dt_f = dt_c * 9.0 / 5.0;
+        let t_avg_f = temperature_c_to_f(t_avg_c);
+        let dt_f = temperature_delta_c_to_f(dt_c);
         // Chicago: t_avg_f ≈ 49.44 which is above T_REF_F=44, so ratio > 0 and no clamping.
         let ratio = (RATIO_BASE + RATIO_SLOPE * (t_avg_f - T_REF_F)).clamp(0.0, 1.0);
         let lag = LAG_BASE - LAG_SLOPE * (t_avg_f - T_REF_F);
@@ -343,7 +326,7 @@ mod tests {
                 + ratio
                     * (dt_f / 2.0)
                     * ((DEG_TO_RAD * (DEG_PER_DAY * (f64::from(day) - 15.0 - lag) - 90.0)).sin());
-            let ochre_c = fahrenheit_to_celsius(ochre_f);
+            let ochre_c = temperature_f_to_c(ochre_f);
 
             let ours = water_mains_temperature_c(t_avg_c, dt_c, day, Hemisphere::Northern);
             approx_eq(ours, ochre_c, 0.001);
@@ -402,7 +385,7 @@ mod tests {
     #[test]
     fn unit_conversion_round_trips() {
         for t in [-20.0_f64, 0.0, 15.0, 35.0, 50.0] {
-            let round = fahrenheit_to_celsius(celsius_to_fahrenheit(t));
+            let round = temperature_f_to_c(temperature_c_to_f(t));
             approx_eq(round, t, 1e-10);
         }
     }

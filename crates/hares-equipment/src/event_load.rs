@@ -20,7 +20,7 @@ use crate::schedule_helpers::{
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-const KEY_EQUIPMENT_ID: &str = "equipment_id";
+use crate::config::KEY_EQUIPMENT_ID;
 const KEY_BUILDING_ID: &str = "building_id";
 const KEY_MASTER_SEED: &str = "master_seed";
 const KEY_N_UNITS: &str = "n_units";

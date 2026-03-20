@@ -67,7 +67,7 @@ impl ValidationReport {
     }
 }
 
-/// Structural completeness check for HPXML documents.
+/// Structural completeness check for HPXML documents (string input).
 ///
 /// Accepts HPXML 3.x (with warning) and 4.x (silently). Rejects major
 /// versions below 3 as unsupported.
@@ -78,7 +78,11 @@ pub fn validate_hpxml_schema(xml: &str) -> Result<Vec<ValidationWarning>, Valida
             format!("could not parse XML before schema checks: {err}"),
         )
     })?;
+    validate_hpxml_schema_node(&root)
+}
 
+/// Structural completeness check for a pre-parsed HPXML document tree.
+pub fn validate_hpxml_schema_node(root: &super::building::XmlNode) -> Result<Vec<ValidationWarning>, ValidationError> {
     let mut warnings = Vec::new();
 
     if root.name != "HPXML" {

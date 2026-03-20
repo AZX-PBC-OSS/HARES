@@ -242,7 +242,9 @@ impl WaterHeaterZip {
     ///
     /// Keys: `zip_z`, `zip_i`, `zip_p`, `zip_zq`, `zip_iq`, `zip_pq`, `zip_pf`.
     /// Falls back to constant-power defaults (0, 0, 1) if keys are absent.
-    pub(super) fn from_config(config: &crate::EquipmentConfig) -> Self {
+    pub(super) fn from_config(
+        config: &crate::EquipmentConfig,
+    ) -> std::result::Result<Self, hares_types::HaresError> {
         let z = config.get_f64("zip_z").unwrap_or(0.0);
         let i = config.get_f64("zip_i").unwrap_or(0.0);
         let p = config.get_f64("zip_p").unwrap_or(1.0);
@@ -250,21 +252,21 @@ impl WaterHeaterZip {
         let iq = config.get_f64("zip_iq").unwrap_or(0.0);
         let pq = config.get_f64("zip_pq").unwrap_or(1.0);
 
-        debug_assert!(
-            (z + i + p - 1.0).abs() < 0.01,
-            "ZIP z+i+p must sum to 1.0, got z={z} i={i} p={p} sum={}",
-            z + i + p
-        );
+        if (z + i + p - 1.0).abs() >= 0.01 {
+            return Err(hares_types::HaresError::Equipment(format!(
+                "ZIP z+i+p must sum to 1.0, got z={z} i={i} p={p} sum={}",
+                z + i + p
+            )));
+        }
         let has_reactive = zq != 0.0 || iq != 0.0 || pq != 0.0;
-        if has_reactive {
-            debug_assert!(
-                (zq + iq + pq - 1.0).abs() < 0.01,
+        if has_reactive && (zq + iq + pq - 1.0).abs() >= 0.01 {
+            return Err(hares_types::HaresError::Equipment(format!(
                 "ZIP zq+iq+pq must sum to 1.0, got zq={zq} iq={iq} pq={pq} sum={}",
                 zq + iq + pq
-            );
+            )));
         }
 
-        Self {
+        Ok(Self {
             z,
             i,
             p,
@@ -273,7 +275,7 @@ impl WaterHeaterZip {
             iq,
             pq,
             pf: config.get_f64("zip_pf").unwrap_or(0.0),
-        }
+        })
     }
 
     /// Apply ZIP voltage scaling to a rated real power [W].
@@ -344,8 +346,8 @@ mod tests {
     };
 
     use super::{
-        apply_jacket_r_value, draw_schedule_source, hysteresis_call, mains_temp_schedule_source,
-        resolve_storage_step_inputs,
+        WaterHeaterZip, apply_jacket_r_value, draw_schedule_source, hysteresis_call,
+        mains_temp_schedule_source, resolve_storage_step_inputs,
     };
     use crate::EquipmentConfig;
 
@@ -536,6 +538,54 @@ mod tests {
                 col_idx: 2,
                 boundary: BoundaryPolicy::Clamp,
             })
+        );
+    }
+
+    #[test]
+    fn zip_invalid_coefficients_produce_error() {
+        let mut cfg = base_config();
+        cfg.raw_config.insert("zip_z".to_string(), 0.5.into());
+        cfg.raw_config.insert("zip_i".to_string(), 0.3.into());
+        cfg.raw_config.insert("zip_p".to_string(), 0.3.into()); // sum = 1.1, exceeds tolerance
+        let result = WaterHeaterZip::from_config(&cfg);
+        assert!(
+            result.is_err(),
+            "ZIP z+i+p=1.1 must be rejected in release builds"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("z+i+p must sum to 1.0"),
+            "error message should mention z+i+p, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn zip_valid_coefficients_parse_ok() {
+        let mut cfg = base_config();
+        cfg.raw_config.insert("zip_z".to_string(), 0.3.into());
+        cfg.raw_config.insert("zip_i".to_string(), 0.3.into());
+        cfg.raw_config.insert("zip_p".to_string(), 0.4.into()); // sum = 1.0
+        let zip = WaterHeaterZip::from_config(&cfg).expect("valid ZIP must parse");
+        assert!((zip.z - 0.3).abs() < 1e-12);
+        assert!((zip.i - 0.3).abs() < 1e-12);
+        assert!((zip.p - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zip_invalid_reactive_coefficients_produce_error() {
+        let mut cfg = base_config();
+        // Valid real-power coefficients
+        cfg.raw_config.insert("zip_z".to_string(), 0.5.into());
+        cfg.raw_config.insert("zip_i".to_string(), 0.3.into());
+        cfg.raw_config.insert("zip_p".to_string(), 0.2.into());
+        // Invalid reactive coefficients (sum = 1.1)
+        cfg.raw_config.insert("zip_zq".to_string(), 0.5.into());
+        cfg.raw_config.insert("zip_iq".to_string(), 0.3.into());
+        cfg.raw_config.insert("zip_pq".to_string(), 0.3.into());
+        let result = WaterHeaterZip::from_config(&cfg);
+        assert!(
+            result.is_err(),
+            "ZIP zq+iq+pq=1.1 must be rejected"
         );
     }
 }

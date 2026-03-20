@@ -98,6 +98,16 @@ impl PortDeclaration {
             fluid_type: Some(fluid_type),
         }
     }
+
+    pub fn custom(domain_id: DomainId) -> Self {
+        Self {
+            port_type: PortType::Custom,
+            zone: None,
+            loop_id: None,
+            domain_id: Some(domain_id),
+            fluid_type: None,
+        }
+    }
 }
 
 /// Thermal contribution totals for one zone.
@@ -690,13 +700,7 @@ mod tests {
             // Duplicate zone should be deduplicated
             PortDeclaration::thermal(ZoneId(1)),
             PortDeclaration::electrical(),
-            PortDeclaration {
-                port_type: PortType::Custom,
-                zone: None,
-                loop_id: None,
-                domain_id: Some(DomainId(5)),
-                fluid_type: None,
-            },
+            PortDeclaration::custom(DomainId(5)),
             // Fluid port with loop_id and fluid_type should create accumulator
             PortDeclaration::fluid(LoopId(10), FluidType::Water),
             // Duplicate (loop_id, fluid_type) should be deduplicated
@@ -751,6 +755,44 @@ mod tests {
         let mut fluid = FluidAccumulator::new(LoopId(1), FluidType::Water);
         let result = fluid.add(-1.0, 50.0, 40.0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn custom_port_factory_and_from_declarations() {
+        let decls = &[
+            PortDeclaration::custom(DomainId(7)),
+            PortDeclaration::custom(DomainId(7)), // duplicate should be deduplicated
+            PortDeclaration::custom(DomainId(8)),
+        ];
+        let slots = PortSlots::from_declarations(decls);
+        assert_eq!(slots.custom.len(), 2);
+        assert_eq!(slots.custom[0].domain_id, DomainId(7));
+        assert_eq!(slots.custom[1].domain_id, DomainId(8));
+
+        let mut slots = slots;
+        slots
+            .accumulate(&PortContribution::Custom {
+                domain_id: DomainId(7),
+                payload: [1.0; 16],
+            })
+            .unwrap();
+        assert_eq!(slots.custom[0].payload, [1.0; 16]);
+    }
+
+    #[test]
+    fn fuel_port_in_from_declarations() {
+        let decls = &[
+            PortDeclaration::fuel(),
+            PortDeclaration::fuel(), // singletons — no extra accumulators
+        ];
+        let mut slots = PortSlots::from_declarations(decls);
+        slots
+            .accumulate(&PortContribution::Fuel {
+                fuel_type: FuelType::Gas,
+                consumption_w: 500.0,
+            })
+            .unwrap();
+        approx_eq(slots.fuel.get(FuelType::Gas), 500.0);
     }
 
     #[test]

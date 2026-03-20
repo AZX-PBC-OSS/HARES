@@ -331,7 +331,7 @@ impl Equipment for GasWH {
         self.draw_flow_rate_kg_s = resolve_draw_rate_kg_s(config);
         self.draw_l_per_min_source = draw_schedule_source(config);
         self.mains_temp_c_source = mains_temp_schedule_source(config);
-        self.zip = WaterHeaterZip::from_config(config);
+        self.zip = WaterHeaterZip::from_config(config)?;
 
         self.flue_loss_fraction = first_f64(config, &["flue_loss_fraction", "FlueLossFraction"])
             .unwrap_or(DEFAULT_FLUE_LOSS_FRACTION)

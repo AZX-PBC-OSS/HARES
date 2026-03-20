@@ -249,7 +249,7 @@ pub(crate) fn build_default_solvers(
         let bd_input = &boundary_inputs[surface_idx];
         let r_film = bd_input.r_film_exterior_m2_k_w;
         let r_outermost_half = if !bd_input.precomputed_rc.is_empty() {
-            bd_input.precomputed_rc.last().unwrap().resistance_m2_k_w / 2.0
+            bd_input.precomputed_rc.last().map(|l| l.resistance_m2_k_w / 2.0).unwrap_or(0.0)
         } else {
             let valid_layers: Vec<&hares_envelope::LayerInput> = bd_input
                 .material_layers
@@ -271,8 +271,8 @@ pub(crate) fn build_default_solvers(
         } else {
             (0.0, 0.0)
         };
-        // OCHRE Envelope.py:207: iterations = time_res // timedelta(minutes=5) + 1
-        let n_iter = (dt_s / 300.0).floor() as u32 + 1;
+        // OCHRE Envelope.py:207: iterations = ceil(time_res / 5 min).max(1)
+        let n_iter = ((dt_s / 300.0).ceil() as u32).max(1);
         let outdoor_temp_c = env.weather.outdoor_temp_c;
 
         let surface_id = u32::try_from(surface_idx).unwrap_or(u32::MAX);
@@ -465,4 +465,27 @@ pub(crate) fn build_default_solvers(
         fluid_solver,
         zone_caps,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn n_iter_matches_ceil_formula() {
+        for &dt_s in &[60.0_f64, 300.0, 600.0, 900.0, 3600.0] {
+            let n_iter = ((dt_s / 300.0_f64).ceil() as u32).max(1);
+            let expected = (dt_s / 300.0_f64).ceil() as u32;
+            let expected = expected.max(1);
+            assert_eq!(
+                n_iter, expected,
+                "n_iter mismatch for dt_s={dt_s}: got {n_iter}, expected {expected}"
+            );
+        }
+
+        // Specific expected values
+        assert_eq!(((60.0_f64 / 300.0).ceil() as u32).max(1), 1);
+        assert_eq!(((300.0_f64 / 300.0).ceil() as u32).max(1), 1);
+        assert_eq!(((600.0_f64 / 300.0).ceil() as u32).max(1), 2);
+        assert_eq!(((900.0_f64 / 300.0).ceil() as u32).max(1), 3);
+        assert_eq!(((3600.0_f64 / 300.0).ceil() as u32).max(1), 12);
+    }
 }

@@ -145,7 +145,12 @@ pub fn film_resistances(
     // "above_hotter": the warmer side faces upward — enhanced convection.
     let above_hotter = !(ext_above ^ t_ext_hotter);
 
-    let delta_t = (t_ext - t_int).abs().max(12.9);
+    // Minimum delta-T floor for TARP natural convection [°C / K].
+    // Prevents near-zero h (and thus near-infinite R) when zone temperatures
+    // are close. Value from EnergyPlus ConvectionCoefficients.cc.
+    const MIN_DELTA_T_TARP_NATURAL_C: f64 = 12.9;
+
+    let delta_t = (t_ext - t_int).abs().max(MIN_DELTA_T_TARP_NATURAL_C);
 
     let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
     let r_int = 1.0 / h_natural;
@@ -165,11 +170,10 @@ pub fn film_resistances(
 mod tests {
     use super::*;
 
+    use crate::test_utils::approx_eq;
+
     fn assert_approx(actual: f64, expected: f64, tol: f64) {
-        assert!(
-            (actual - expected).abs() <= tol,
-            "actual={actual:.6}, expected={expected:.6}, tol={tol}"
-        );
+        approx_eq(actual, expected, tol);
     }
 
     #[test]
@@ -233,6 +237,21 @@ mod tests {
             SurfaceRoughness::Rough,
         );
         assert_approx(r_int, r_ext, 1e-15);
+    }
+
+    /// When delta_t=0, all TARP formulas produce h=0 (cbrt(0)=0).
+    /// This is physically correct: no temperature difference means no
+    /// buoyancy-driven convection.
+    #[test]
+    fn tarp_h_natural_zero_delta_t_returns_zero() {
+        let h_vert = tarp_h_natural(90.0, 0.0, true);
+        assert_approx(h_vert, 0.0, 1e-15);
+
+        let h_horiz_above = tarp_h_natural(0.0, 0.0, true);
+        assert_approx(h_horiz_above, 0.0, 1e-15);
+
+        let h_horiz_below = tarp_h_natural(0.0, 0.0, false);
+        assert_approx(h_horiz_below, 0.0, 1e-15);
     }
 
     #[test]

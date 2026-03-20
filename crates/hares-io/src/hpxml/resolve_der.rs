@@ -8,7 +8,7 @@ use hares_types::FuelType;
 
 use super::building::XmlNode;
 use super::equipment::{EquipmentSpec, build_spec};
-use super::xml_helpers::{child_energy_kwh, child_f64, child_text, children_named, element_id};
+use super::xml_helpers::{child_energy_kwh, child_f64, child_text, element_id};
 
 use crate::defaults::DefaultsStore;
 
@@ -18,7 +18,7 @@ pub(super) fn resolve_pv(details: &XmlNode, defaults: &DefaultsStore, specs: &mu
     };
 
     let mut inverter_eff_by_id: HashMap<String, f64> = HashMap::new();
-    for inverter in children_named(photovoltaics, "Inverter") {
+    for inverter in photovoltaics.children_named("Inverter") {
         if let (Some(id), Some(eff)) = (
             element_id(inverter),
             child_f64(inverter, "InverterEfficiency"),
@@ -27,7 +27,7 @@ pub(super) fn resolve_pv(details: &XmlNode, defaults: &DefaultsStore, specs: &mu
         }
     }
 
-    for pv in children_named(photovoltaics, "PVSystem") {
+    for pv in photovoltaics.children_named("PVSystem") {
         let mut params = Map::new();
         if let Some(kw) = child_f64(pv, "MaxPowerOutput") {
             params.insert("system_capacity_kw".to_string(), json!(kw));
@@ -65,7 +65,7 @@ pub(super) fn resolve_batteries(details: &XmlNode, defaults: &DefaultsStore, spe
         return;
     };
 
-    for battery in children_named(batteries, "Battery") {
+    for battery in batteries.children_named("Battery") {
         let mut params = Map::new();
         if let Some(kwh) = child_energy_kwh(battery, "NominalCapacity") {
             params.insert("capacity_kwh".to_string(), json!(kwh));
@@ -90,7 +90,7 @@ pub(super) fn resolve_batteries(details: &XmlNode, defaults: &DefaultsStore, spe
 
 pub(super) fn resolve_ev(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
     if let Some(evs) = details.path(&["Systems", "ElectricVehicles"]) {
-        for ev in children_named(evs, "ElectricVehicle") {
+        for ev in evs.children_named("ElectricVehicle") {
             let mut params = Map::new();
             if let Some(level) = child_text(ev, "ChargingLevel") {
                 params.insert("ChargingLevel".to_string(), Value::String(level));

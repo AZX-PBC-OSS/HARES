@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-const KEY_EQUIPMENT_ID: &str = "equipment_id";
+use crate::config::KEY_EQUIPMENT_ID;
 const KEY_CAPACITY_KW: &str = "capacity_kw";
 const KEY_SYSTEM_SIZE_KW: &str = "SystemSize";
 const KEY_TILT_DEG: &str = "tilt_deg";
@@ -122,6 +122,7 @@ pub struct PV {
     inverter_min_pf: Option<f64>,
     q_setpoint_kvar: f64,
     luts_by_surface: HashMap<u32, PvLut>,
+    last_ac_power_kw: f64,
     init_error: Option<HaresError>,
 }
 
@@ -176,6 +177,7 @@ impl PV {
             inverter_min_pf: Some(0.8),
             q_setpoint_kvar: 0.0,
             luts_by_surface: HashMap::new(),
+            last_ac_power_kw: 0.0,
             init_error,
         }
     }
@@ -407,7 +409,7 @@ impl Equipment for PV {
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
-        if self.telemetry.get("ac_power_kw").unwrap_or(0.0) > 0.0 {
+        if self.last_ac_power_kw > 0.0 {
             OperatingMode::Standby
         } else {
             OperatingMode::Off
@@ -491,6 +493,7 @@ impl Equipment for PV {
             env.weather.outdoor_temp_c
         };
 
+        self.last_ac_power_kw = final_p_kw;
         self.telemetry.set("dc_power_kw", total_dc_power_kw);
         self.telemetry.set("ac_power_kw", final_p_kw);
         self.telemetry

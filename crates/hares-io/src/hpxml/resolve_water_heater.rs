@@ -85,10 +85,12 @@ pub(super) fn resolve_water_heaters(
             Ok(None) => {
                 // Instantaneous or other type with no tank: leave ua_w_per_k absent.
             }
-            Err(_) => {
-                // Inputs are inconsistent (e.g. missing capacity for gas, negative UA).
-                // Do not insert ua_w_per_k; the equipment model will fall back to its
-                // default. The simulation log would surface this at a higher layer.
+            Err(err) => {
+                tracing::warn!(
+                    water_heater_type = %wh_type,
+                    %err,
+                    "UA calculation failed; equipment model will use default"
+                );
             }
         }
 

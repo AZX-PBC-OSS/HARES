@@ -162,9 +162,7 @@ impl DefaultsStore {
         match crate::envelope_lut::EnvelopeLookup::load(&envelope_dir) {
             Ok(lut) => store.envelope_lut = Some(lut),
             Err(err) => {
-                eprintln!(
-                    "[WARN] envelope LUT load failed, falling back to material layers: {err}"
-                );
+                tracing::warn!(%err, "envelope LUT load failed, falling back to material layers");
             }
         }
 
@@ -388,7 +386,7 @@ fn load_hvac_curves_dir(dir: &Path) -> Result<HashMap<String, HvacCurveSet>, Def
                     map.insert(stem, curve_set);
                 }
                 Err(err) => {
-                    eprintln!("[WARN] failed to parse HVAC CSV {}: {err}", path.display());
+                    tracing::warn!(path = %path.display(), %err, "failed to parse HVAC CSV");
                 }
             },
             _ => {}

@@ -11,4 +11,7 @@ pub mod solar;
 pub mod units;
 pub mod water_mains;
 
+#[cfg(test)]
+pub mod test_utils;
+
 pub use constants::*;
