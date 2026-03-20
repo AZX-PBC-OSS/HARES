@@ -606,11 +606,16 @@ fn discover_hvac_capacity_pairs(schema: &Schema) -> Result<Vec<(usize, usize)>, 
     Ok(pairs)
 }
 
+/// Relative tolerance for HVAC capacity comparison. Avoids false negatives
+/// at high wattages where the absolute difference may exceed a tiny epsilon.
+const HVAC_CAPACITY_REL_TOL: f64 = 1e-6;
+
 fn is_hvac_at_capacity(pairs: &[(&Float64Array, &Float64Array)], row: usize) -> bool {
     pairs.iter().any(
         |(output, capacity)| match (value_at(output, row), value_at(capacity, row)) {
             (Some(output_kw), Some(capacity_kw)) if capacity_kw.abs() > EPSILON => {
-                (output_kw.abs() - capacity_kw.abs()).abs() <= EPSILON
+                let diff = (output_kw.abs() - capacity_kw.abs()).abs();
+                diff / capacity_kw.abs().max(1.0) < HVAC_CAPACITY_REL_TOL
             }
             _ => false,
         },
@@ -903,6 +908,85 @@ mod tests {
             result.is_ok(),
             "MetricsCalculator should accept build_schema output: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn electric_and_gas_metrics_both_populated() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            TOTAL_GAS_POWER_THERMS,
+            "Temperature - Indoor (C)",
+            "HVAC Heating Setpoint (C)",
+            "HVAC Cooling Setpoint (C)",
+            "HVAC Heating Delivered (W)",
+            "HVAC Heating Capacity (W)",
+        ]);
+        let mut calc =
+            MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+
+        let rows = 24;
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![2.0; rows]),
+            (TOTAL_GAS_POWER_THERMS, vec![0.5; rows]),
+            ("Temperature - Indoor (C)", vec![21.5; rows]),
+            ("HVAC Heating Setpoint (C)", vec![21.0; rows]),
+            ("HVAC Cooling Setpoint (C)", vec![23.0; rows]),
+            ("HVAC Heating Delivered (W)", vec![1.0; rows]),
+            ("HVAC Heating Capacity (W)", vec![5.0; rows]),
+        ]));
+        let metrics = calc.finish();
+
+        assert!(
+            metrics.annual_energy_kwh.total > 0.0,
+            "annual electric energy must be > 0"
+        );
+        assert!(
+            metrics.comfort_hours.unwrap_or(0.0) > 0.0,
+            "comfort hours must be > 0"
+        );
+        assert!(
+            metrics.grid_interaction_metrics.peak_import_kw > 0.0,
+            "peak demand must be > 0"
+        );
+        let gas = metrics.gas_energy.expect("gas energy must be present");
+        assert!(gas.total_therms > 0.0, "gas therms must be > 0");
+        assert!(gas.total_kwh_equivalent > 0.0, "gas kWh must be > 0");
+    }
+
+    #[test]
+    fn hvac_at_capacity_uses_relative_tolerance() {
+        // At high wattages, absolute 1e-9 tolerance would produce false negatives.
+        // The relative tolerance should correctly detect capacity saturation.
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Temperature - Indoor (C)",
+            "HVAC Heating Setpoint (C)",
+            "HVAC Cooling Setpoint (C)",
+            "HVAC Heating Delivered (W)",
+            "HVAC Heating Capacity (W)",
+        ]);
+        let mut calc =
+            MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+
+        // Row with output nearly equal to capacity at high wattage (50 kW).
+        // Difference = 0.00005 W → relative = 0.00005 / 50000 = 1e-9, well within 1e-6.
+        let capacity = 50_000.0;
+        let output = capacity - 0.00005;
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
+            ("Temperature - Indoor (C)", vec![25.0]), // outside cooling setpoint
+            ("HVAC Heating Setpoint (C)", vec![21.0]),
+            ("HVAC Cooling Setpoint (C)", vec![22.0]),
+            ("HVAC Heating Delivered (W)", vec![output]),
+            ("HVAC Heating Capacity (W)", vec![capacity]),
+        ]));
+        let metrics = calc.finish();
+
+        assert_eq!(
+            metrics.unmet_load_hours,
+            Some(1.0),
+            "should detect capacity saturation at high wattage"
         );
     }
 }

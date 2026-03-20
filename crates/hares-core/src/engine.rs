@@ -14,6 +14,13 @@ use hares_io::output::metrics::{
 use hares_io::{OutputFormat, SimulationConfig};
 use hares_types::HaresError;
 
+/// Result of computing metrics from Arrow batches, including status context.
+struct MetricsOutcome {
+    metrics: SimulationMetrics,
+    /// If set, indicates that metrics computation degraded (e.g., calculator init failed).
+    warning: Option<String>,
+}
+
 #[cfg(feature = "profiling")]
 use crate::dwelling::DwellingProfilingSummary;
 use crate::dwelling::{Dwelling, DwellingConfig};
@@ -116,31 +123,45 @@ impl SimulationEngine {
         let output_path = resolved_output_path(&config);
         let mut warnings = dwelling.take_warnings();
         let result = match sim_outcome {
-            Ok(Ok(dwelling_results)) => {
-                let batches = dwelling.flushed_batches().to_vec();
-                let metrics = if batches.is_empty() {
-                    metrics_from_steps(&dwelling_results.steps, &config.sim_config)
-                } else {
-                    compute_metrics_from_batches(&batches, &config.sim_config)
-                };
+            Ok(Ok(_dwelling_results)) => {
+                let batches = dwelling.recorder.flushed_batches().to_vec();
                 #[cfg(feature = "profiling")]
                 emit_dwelling_profiling_summary(&dwelling.profiling_summary());
-                let status = if warnings.is_empty() {
-                    SimStatus::Ok
+
+                if batches.is_empty() {
+                    // Zero-step edge case: duration == 0 or duration == initialization_duration.
+                    // No data was produced, so flag rather than return bogus metrics.
+                    warnings.push(
+                        "simulation produced zero output batches (zero-step run)".to_string(),
+                    );
+                    SimulationResults {
+                        timeseries_path: Some(output_path),
+                        timeseries: Some(Vec::new()),
+                        metrics: empty_metrics(),
+                        warnings,
+                        status: SimStatus::Flagged(
+                            "zero-step simulation: no metrics computed".to_string(),
+                        ),
+                        elapsed,
+                    }
                 } else {
-                    SimStatus::Flagged(format!("{} warning(s)", warnings.len()))
-                };
-                SimulationResults {
-                    timeseries_path: Some(output_path),
-                    timeseries: if batches.is_empty() {
-                        None
+                    let outcome = compute_metrics_from_batches(&batches, &config.sim_config);
+                    if let Some(w) = &outcome.warning {
+                        warnings.push(w.clone());
+                    }
+                    let status = if warnings.is_empty() {
+                        SimStatus::Ok
                     } else {
-                        Some(batches)
-                    },
-                    metrics,
-                    warnings,
-                    status,
-                    elapsed,
+                        SimStatus::Flagged(format!("{} warning(s)", warnings.len()))
+                    };
+                    SimulationResults {
+                        timeseries_path: Some(output_path),
+                        timeseries: Some(batches),
+                        metrics: outcome.metrics,
+                        warnings,
+                        status,
+                        elapsed,
+                    }
                 }
             }
             Ok(Err(err)) => {
@@ -226,60 +247,14 @@ fn resolved_output_path(config: &DwellingConfig) -> PathBuf {
     PathBuf::from(format!("dwelling_{}.{}", config.bldg_id, ext))
 }
 
-fn metrics_from_steps(
-    steps: &[crate::dwelling::StepResult],
-    sim_config: &SimulationConfig,
-) -> SimulationMetrics {
-    let timestep_h = (sim_config.time_res.num_seconds() as f64 / 3600.0).max(0.0);
-    let mut annual_total = 0.0;
-    let mut peak_import_kw: f64 = 0.0;
-    let mut peak_export_kw: f64 = 0.0;
-
-    for step in steps {
-        let power_kw = step.net_electric_power_kw;
-        annual_total += power_kw * timestep_h;
-        peak_import_kw = peak_import_kw.max(power_kw);
-        peak_export_kw = peak_export_kw.max((-power_kw).max(0.0));
-    }
-
-    let mut annual_per_end_use = BTreeMap::new();
-    annual_per_end_use.insert("total_electric_power_kw".to_string(), annual_total);
-    let mut peak_per_end_use = BTreeMap::new();
-    peak_per_end_use.insert(
-        "total_electric_power_kw".to_string(),
-        peak_import_kw.max(0.0),
-    );
-
-    SimulationMetrics {
-        annual_energy_kwh: AnnualEnergyKwh {
-            total: annual_total,
-            per_end_use: annual_per_end_use,
-        },
-        peak_power_kw: PeakPowerKw {
-            per_end_use: peak_per_end_use,
-            rolling: RollingPeakKw {
-                peak_15min_kw: 0.0,
-                peak_30min_kw: 0.0,
-                peak_60min_kw: 0.0,
-            },
-        },
-        comfort_hours: None,
-        unmet_load_hours: None,
-        renewable_energy_fraction: None,
-        grid_interaction_metrics: GridInteractionMetrics {
-            peak_import_kw: peak_import_kw.max(0.0),
-            peak_export_kw,
-        },
-    }
-}
-
 fn compute_metrics_from_batches(
     batches: &[RecordBatch],
     sim_config: &SimulationConfig,
-) -> SimulationMetrics {
-    if batches.is_empty() {
-        return empty_metrics();
-    }
+) -> MetricsOutcome {
+    debug_assert!(
+        !batches.is_empty(),
+        "compute_metrics_from_batches called with empty batches"
+    );
 
     let schema = batches[0].schema();
     let time_res_secs = u32::try_from(sim_config.time_res.num_seconds()).unwrap_or(3600);
@@ -287,10 +262,12 @@ fn compute_metrics_from_batches(
     let mut calculator = match MetricsCalculator::new(&schema, time_res_secs, sim_config) {
         Ok(calc) => calc,
         Err(err) => {
-            tracing::warn!(
-                "MetricsCalculator init failed: {err}, falling back to step-based metrics"
-            );
-            return empty_metrics();
+            return MetricsOutcome {
+                metrics: empty_metrics(),
+                warning: Some(format!(
+                    "MetricsCalculator init failed: {err} — metrics are zeroed"
+                )),
+            };
         }
     };
 
@@ -298,7 +275,10 @@ fn compute_metrics_from_batches(
         calculator.accumulate(batch);
     }
 
-    calculator.finish().metrics
+    MetricsOutcome {
+        metrics: calculator.finish().metrics,
+        warning: None,
+    }
 }
 
 fn empty_metrics() -> SimulationMetrics {

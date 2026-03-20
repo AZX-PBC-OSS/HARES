@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use hares_physics::{constants::W_PER_TON, psychrometrics::humidity_ratio_from_twb};
+use hares_physics::psychrometrics::humidity_ratio_from_twb;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,

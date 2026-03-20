@@ -21,11 +21,12 @@ use hares_io::{
     parse_schedule_csv, resolve_equipment,
 };
 use hares_physics::constants::{
-    GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W,
+    GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
+    OCCUPANT_SENSIBLE_GAIN_W,
 };
 use hares_types::{
     ControlSignal, DomainSolver, DomainUpdate, EndUse, EnvironmentState, ExecutionStage, GridState,
-    HaresError, PortContribution, PortDeclaration, PortSlots, THERMAL, ZoneId,
+    HaresError, PortDeclaration, PortSlots, THERMAL, ZoneId,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -309,8 +310,6 @@ impl Dwelling {
         let occupancy_column_idx = environment.occupancy_column_idx();
 
         let initial_env = environment.update(&clock, &[]);
-        let (thermal_solver, humidity_solver, electrical_solver, fluid_solver) =
-            build_default_solvers(&initial_env, &config.sim_config, &building)?;
 
         let mut warnings = Vec::new();
         let defaults_dir = config
@@ -327,9 +326,12 @@ impl Dwelling {
             }
         };
 
+        let (thermal_solver, humidity_solver, electrical_solver, fluid_solver) =
+            build_default_solvers(&initial_env, &config.sim_config, &building, &defaults)?;
+
         let empty_overrides = Value::Object(Map::new());
         let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides);
-        hares_io::inject_schedule_into_specs(&mut equipment_specs, environment.schedule());
+        hares_io::inject_schedule_into_specs(&mut equipment_specs, environment.schedule_mut(), Some(&defaults_dir));
         let override_root = config
             .overrides
             .clone()
@@ -601,6 +603,12 @@ impl Dwelling {
         self.warnings.push(msg);
     }
 
+    /// Returns all record batches flushed by the streaming recorder so far.
+    #[must_use]
+    pub fn flushed_batches(&self) -> &[arrow::record_batch::RecordBatch] {
+        self.recorder.flushed_batches()
+    }
+
     /// Snapshot current simulation state to an in-memory checkpoint struct.
     #[must_use]
     pub fn save_checkpoint(&self) -> DwellingCheckpoint {
@@ -685,6 +693,13 @@ impl Dwelling {
     ///   - sensible convective: `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION`
     ///   - latent:              `n_occupants × OCCUPANT_LATENT_GAIN_W`
     ///
+    /// Accumulates occupancy-driven internal heat gains into zone thermal ports.
+    ///
+    /// Reads the current occupancy count from the schedule payload carried in
+    /// `latest_env.custom_domains`, then for every declared thermal zone injects:
+    ///   - sensible convective: `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION`
+    ///   - latent:              `n_occupants × OCCUPANT_LATENT_GAIN_W`
+    ///
     /// If no occupancy column is present in the schedule the method returns without
     /// side-effects, preserving backward-compatibility with synthetic TOML inputs.
     fn apply_occupancy_gains(&mut self) {
@@ -708,12 +723,10 @@ impl Dwelling {
             return;
         }
 
-        let sensible_w = n_occupants * OCCUPANT_SENSIBLE_GAIN_W;
+        let sensible_w = n_occupants * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
         let latent_w = n_occupants * OCCUPANT_LATENT_GAIN_W;
 
-        // OCHRE Envelope.py:1265-1269: occupancy gains are injected to the indoor
-        // (primary conditioned) zone only — index 0 in the sorted zone list.
-        if let Some(thermal) = self.ports.thermal.first_mut() {
+        for thermal in &mut self.ports.thermal {
             thermal.add(sensible_w, latent_w);
         }
     }
@@ -1050,6 +1063,7 @@ fn build_default_solvers(
     env: &EnvironmentState,
     sim_config: &SimulationConfig,
     building: &Building,
+    defaults: &DefaultsStore,
 ) -> Result<(ThermalSolver, HumiditySolver, ElectricalSolver, FluidSolver)> {
     use hares_envelope::state_space::{OutputMapping, StateSpaceModel};
     use nalgebra::DMatrix;
@@ -1058,14 +1072,14 @@ fn build_default_solvers(
 
     // Convert building data to envelope-crate input types.
     let zone_inputs = building_to_zone_inputs(building, n_zones);
-    let boundary_inputs = building_to_boundary_inputs(building, n_zones);
+    let boundary_inputs = building_to_boundary_inputs(building, n_zones, defaults);
 
     // Zone air node capacitances [J/K].
     let zone_capacitances = derive_zone_capacitances(&zone_inputs);
 
     // Build the RC network from material layers where available.
     let rc = assemble_building_rc(&boundary_inputs, n_zones, &zone_capacitances)
-        .map_err(|err| HaresError::Envelope(err))?;
+        .map_err(HaresError::Envelope)?;
 
     let BuildingRC {
         a_c,
@@ -1178,7 +1192,7 @@ fn build_default_solvers(
         };
         let tilt_deg = match boundary.boundary_type {
             hares_io::hpxml::BoundaryType::Roof => 0.0,
-            hares_io::hpxml::BoundaryType::Slab => 180.0,
+            hares_io::hpxml::BoundaryType::Slab | hares_io::hpxml::BoundaryType::Floor => 180.0,
             _ => 90.0,
         };
         thermal_cfg.exterior_surfaces.push(ExteriorSurfaceInfo {
@@ -1222,7 +1236,20 @@ fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput
 }
 
 /// Convert building boundaries to envelope-crate BoundaryInput with pre-resolved zone indices.
-fn building_to_boundary_inputs(building: &Building, n_zones: usize) -> Vec<BoundaryInput> {
+///
+/// When the defaults store contains an envelope LUT, attempts to resolve each
+/// boundary to OCHRE pre-computed RC layers. Falls through to raw material
+/// layers on LUT miss.
+fn building_to_boundary_inputs(
+    building: &Building,
+    n_zones: usize,
+    defaults: &DefaultsStore,
+) -> Vec<BoundaryInput> {
+    use hares_envelope::PrecomputedRCLayer;
+    use hares_io::envelope_lut::resolve_boundary_name;
+
+    let envelope_lut = defaults.envelope_lut();
+
     building
         .boundaries
         .iter()
@@ -1239,6 +1266,38 @@ fn building_to_boundary_inputs(building: &Building, n_zones: usize) -> Vec<Bound
                 .unwrap_or(DEFAULT_R_M2_K_W)
                 .max(1e-6);
 
+            // Try LUT lookup for precomputed RC layers.
+            let precomputed_rc = envelope_lut
+                .and_then(|lut| {
+                    let boundary_name = resolve_boundary_name(
+                        &bd.boundary_type,
+                        bd.interior_zone.as_ref(),
+                        bd.exterior_zone.as_ref(),
+                    )?;
+                    let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
+                        let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
+                        if sum > 0.0 { Some(sum) } else { None }
+                    });
+                    let result = lut.lookup(
+                        boundary_name,
+                        bd.construction_type.as_deref(),
+                        bd.finish_type.as_deref(),
+                        bd.insulation_details.as_deref(),
+                        r_value,
+                    )?;
+                    Some(
+                        result
+                            .layers
+                            .into_iter()
+                            .map(|l| PrecomputedRCLayer {
+                                resistance_m2_k_w: l.resistance_m2_k_w,
+                                capacitance_kj_m2_k: l.capacitance_kj_m2_k,
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap_or_default();
+
             BoundaryInput {
                 area_m2: bd.area_m2,
                 interior_zone_idx,
@@ -1254,7 +1313,7 @@ fn building_to_boundary_inputs(building: &Building, n_zones: usize) -> Vec<Bound
                         area_m2: l.area_m2,
                     })
                     .collect(),
-                precomputed_rc: Vec::new(),
+                precomputed_rc,
                 fallback_r_m2_k_w: fallback_r,
             }
         })

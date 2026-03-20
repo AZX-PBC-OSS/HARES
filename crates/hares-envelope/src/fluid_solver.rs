@@ -59,6 +59,48 @@ impl FluidSolver {
     pub fn loop_state(&self, loop_id: LoopId) -> Option<&FluidLoopState> {
         self.loop_states.get(&loop_id)
     }
+
+    /// Serializes current solver state into a flat `Vec<f64>` for checkpointing.
+    ///
+    /// Layout: for each entry in `last_known_temps` (sorted by `LoopId`):
+    ///   `[loop_id.0 as f64, supply_temp_c, return_temp_c]`
+    #[must_use]
+    pub fn snapshot_payload(&self) -> Vec<f64> {
+        let mut sorted: Vec<_> = self.last_known_temps.iter().collect();
+        sorted.sort_by_key(|(id, _)| id.0);
+        let mut payload = Vec::with_capacity(sorted.len() * 3);
+        for (loop_id, (supply, ret)) in &sorted {
+            payload.push(f64::from(loop_id.0));
+            payload.push(*supply);
+            payload.push(*ret);
+        }
+        payload
+    }
+
+    /// Restores solver state from a checkpoint payload produced by [`snapshot_payload`].
+    pub fn restore_from_payload(&mut self, payload: &[f64]) -> Result<(), HaresError> {
+        self.last_known_temps.clear();
+        if payload.is_empty() {
+            return Ok(());
+        }
+        if !payload.len().is_multiple_of(3) {
+            return Err(HaresError::Envelope(format!(
+                "fluid checkpoint payload length {} is not a multiple of 3",
+                payload.len()
+            )));
+        }
+        for chunk in payload.chunks_exact(3) {
+            let loop_id_raw = chunk[0];
+            if !loop_id_raw.is_finite() || loop_id_raw < 0.0 || loop_id_raw > f64::from(u16::MAX) {
+                return Err(HaresError::Envelope(format!(
+                    "invalid loop_id in fluid checkpoint: {loop_id_raw}"
+                )));
+            }
+            let loop_id = LoopId(loop_id_raw as u16);
+            self.last_known_temps.insert(loop_id, (chunk[1], chunk[2]));
+        }
+        Ok(())
+    }
 }
 
 impl DomainSolver for FluidSolver {

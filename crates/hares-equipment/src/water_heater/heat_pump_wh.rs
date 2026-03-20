@@ -807,7 +807,7 @@ impl Equipment for HeatPumpWH {
         // Wall heat fraction is tracked via telemetry for future wall-surface modeling.
         // Until interior wall surfaces exist, both fractions are posted to the zone
         // thermal port to preserve the energy balance.
-        let sensible_to_zone_w = sensible_gain_w * (1.0 - self.wall_heat_fraction);
+        let _sensible_to_zone_w = sensible_gain_w * (1.0 - self.wall_heat_fraction);
         let sensible_to_wall_w = sensible_gain_w * self.wall_heat_fraction;
 
         if let Some(zone) = self.descriptor.zone {

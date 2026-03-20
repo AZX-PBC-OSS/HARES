@@ -11,6 +11,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_physics::constants::BTU_PER_HR_PER_W;
+
 use crate::{Equipment, EquipmentConfig, load_postcard, save_postcard};
 
 use super::super::{
@@ -1128,8 +1130,6 @@ fn heater_telemetry_fields() -> Vec<TelemetryField> {
     ]
 }
 
-const BTU_PER_HR_PER_W: f64 = 3.412_141_633;
-
 fn compute_eir_from_efficiency(config: &EquipmentConfig, default_eir: f64) -> f64 {
     if let Some(eir) = first_f64(
         config,
@@ -1390,7 +1390,7 @@ mod tests {
 
     #[test]
     fn hspf_to_eir_conversion() {
-        use crate::ConfigValue;
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(8.5));
@@ -1408,7 +1408,7 @@ mod tests {
 
     #[test]
     fn cop_to_eir_no_conversion() {
-        use crate::ConfigValue;
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(3.0));
@@ -1426,7 +1426,7 @@ mod tests {
 
     #[test]
     fn eer_to_eir_conversion() {
-        use crate::ConfigValue;
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(12.0));
@@ -1440,8 +1440,26 @@ mod tests {
     }
 
     #[test]
+    fn seer_to_eir_conversion() {
+        use crate::config::ConfigValue;
+        let mut cfg = heater_config();
+        cfg.raw_config
+            .insert("heating_efficiency".to_string(), ConfigValue::Float(14.0));
+        cfg.raw_config.insert(
+            "heating_efficiency_units".to_string(),
+            ConfigValue::Text("SEER".to_string()),
+        );
+        let eq = ASHPHeater::new(cfg);
+        let eir = eq.core.hvac.eir_by_stage[0];
+        assert!(
+            (eir - 0.244).abs() < 0.01,
+            "SEER=14 → EIR≈0.244, got {eir}"
+        );
+    }
+
+    #[test]
     fn afue_to_eir_no_conversion() {
-        use crate::ConfigValue;
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config
             .insert("heating_efficiency".to_string(), ConfigValue::Float(95.0));
@@ -1452,8 +1470,8 @@ mod tests {
         let eq = ASHPHeater::new(cfg);
         let eir = eq.core.hvac.eir_by_stage[0];
         assert!(
-            (eir - 0.95 / 100.0).abs() < 0.001,
-            "AFUE=95% → EIR≈0.95, got {eir}"
+            (eir - 1.0 / 95.0).abs() < 0.001,
+            "AFUE=95 → EIR≈0.01053 (no unit conversion), got {eir}"
         );
     }
 
@@ -1684,37 +1702,41 @@ mod tests {
 
     fn make_env(zone_temp_c: f64, outdoor_c: f64, second: i64) -> EnvironmentState {
         use chrono::{TimeZone, Utc};
-        fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
-            EnvironmentState {
-                zones: vec![ZoneState {
-                    id: ZoneId(1),
-                    temperature_c: zone_temp_c,
-                    humidity_ratio: 0.008,
-                    relative_humidity: 0.45,
-                    wet_bulb_c: 14.0,
-                    volume_m3: 200.0,
-                }],
-                weather: WeatherState {
-                    outdoor_temp_c: outdoor_c,
-                    outdoor_humidity_ratio: outdoor_w,
-                    wind_speed_m_s: 2.0,
-                    wind_dir_deg: 0.0,
-                    ground_temp_c: 12.0,
-                    solar_direct_w_m2: 0.0,
-                    solar_diffuse_w_m2: 0.0,
-                },
-                grid: GridState::default(),
-                current_time: Utc::now(),
-            }
-        }
-        let base = env(zone_temp_c, outdoor_c, 0.003);
         EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: outdoor_c,
+                outdoor_humidity_ratio: 0.003,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
             current_time: Utc
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid")
                 + chrono::Duration::seconds(second),
-            ..base
+            time_res: ChronoDuration::minutes(1),
         }
     }
 
@@ -2468,72 +2490,4 @@ mod tests {
         assert_eq!(cop, 0.0, "heater off must give COP=0, got {cop}");
     }
 
-    #[test]
-    fn hspf_to_eir_conversion() {
-        use crate::ConfigValue;
-        let mut cfg = heater_config();
-        cfg.raw_config
-            .insert("heating_efficiency".to_string(), ConfigValue::Float(8.5));
-        cfg.raw_config.insert(
-            "heating_efficiency_units".to_string(),
-            ConfigValue::Text("HSPF".to_string()),
-        );
-        let eq = ASHPHeater::new(cfg);
-        let eir = eq.core.hvac.eir_by_stage[0];
-        assert!(
-            (eir - 0.401).abs() < 0.01,
-            "HSPF=8.5 → EIR≈0.401, got {eir}"
-        );
-    }
-
-    #[test]
-    fn cop_to_eir_no_conversion() {
-        use crate::ConfigValue;
-        let mut cfg = heater_config();
-        cfg.raw_config
-            .insert("heating_efficiency".to_string(), ConfigValue::Float(3.0));
-        cfg.raw_config.insert(
-            "heating_efficiency_units".to_string(),
-            ConfigValue::Text("COP".to_string()),
-        );
-        let eq = ASHPHeater::new(cfg);
-        let eir = eq.core.hvac.eir_by_stage[0];
-        assert!(
-            (eir - 0.333).abs() < 0.01,
-            "COP=3.0 → EIR≈0.333 (no conversion), got {eir}"
-        );
-    }
-
-    #[test]
-    fn eer_to_eir_conversion() {
-        use crate::ConfigValue;
-        let mut cfg = heater_config();
-        cfg.raw_config
-            .insert("heating_efficiency".to_string(), ConfigValue::Float(12.0));
-        cfg.raw_config.insert(
-            "heating_efficiency_units".to_string(),
-            ConfigValue::Text("EER".to_string()),
-        );
-        let eq = ASHPHeater::new(cfg);
-        let eir = eq.core.hvac.eir_by_stage[0];
-        assert!((eir - 0.284).abs() < 0.01, "EER=12 → EIR≈0.284, got {eir}");
-    }
-
-    #[test]
-    fn afue_to_eir_no_conversion() {
-        use crate::ConfigValue;
-        let mut cfg = heater_config();
-        cfg.raw_config
-            .insert("heating_efficiency".to_string(), ConfigValue::Float(95.0));
-        cfg.raw_config.insert(
-            "heating_efficiency_units".to_string(),
-            ConfigValue::Text("AFUE".to_string()),
-        );
-        let eq = ASHPHeater::new(cfg);
-        let eir = eq.core.hvac.eir_by_stage[0];
-        assert!(
-            (eir - 0.95 / 100.0).abs() < 0.001,
-            "AFUE=95% → EIR≈0.95, got {eir}"
-        );
-    }
 }

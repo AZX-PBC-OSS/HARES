@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 hares-core = { workspace = true }
 hares-io = { workspace = true }
+hares-types = { workspace = true }
 rayon = { workspace = true }
 tracing = { workspace = true }
+arrow = { workspace = true }
+chrono = { workspace = true }
 thiserror = { workspace = true }

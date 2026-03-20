@@ -797,8 +797,11 @@ dependencies = [
 name = "hares-fleet"
 version = "0.1.0"
 dependencies = [
+ "arrow",
+ "chrono",
  "hares-core",
  "hares-io",
+ "hares-types",
  "rayon",
  "thiserror",
  "tracing",
