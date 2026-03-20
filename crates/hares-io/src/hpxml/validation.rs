@@ -67,17 +67,19 @@ impl ValidationReport {
     }
 }
 
-/// Structural completeness check for HPXML 4.0 documents.
+/// Structural completeness check for HPXML documents.
 ///
-/// This is not full XSD validation but verifies that required structural
-/// elements are present per the HPXML 4.0 specification.
-pub fn validate_hpxml_schema(xml: &str) -> Result<(), ValidationError> {
+/// Accepts HPXML 3.x (with warning) and 4.x (silently). Rejects major
+/// versions below 3 as unsupported.
+pub fn validate_hpxml_schema(xml: &str) -> Result<Vec<ValidationWarning>, ValidationError> {
     let root = parse_xml_document(xml).map_err(|err| {
         ValidationError::new(
             "schema",
             format!("could not parse XML before schema checks: {err}"),
         )
     })?;
+
+    let mut warnings = Vec::new();
 
     if root.name != "HPXML" {
         return Err(ValidationError::new(
@@ -86,15 +88,39 @@ pub fn validate_hpxml_schema(xml: &str) -> Result<(), ValidationError> {
         ));
     }
 
-    let schema_version = root.attrs.get("schemaVersion").map(String::as_str);
-    if schema_version != Some("4.0") {
-        return Err(ValidationError::new(
-            "schemaVersion",
-            format!(
-                "expected HPXML schemaVersion `4.0`, found `{}`",
-                schema_version.unwrap_or("<missing>")
-            ),
-        ));
+    let version_str = root
+        .attrs
+        .get("schemaVersion")
+        .map(String::as_str)
+        .unwrap_or("");
+    let major_version = version_str
+        .split('.')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok());
+
+    match major_version {
+        Some(v) if v >= 4 => {}
+        Some(3) => {
+            warnings.push(ValidationWarning::new(
+                "schemaVersion",
+                format!(
+                    "HPXML {version_str} may have untested element paths; 4.x is recommended"
+                ),
+            ));
+        }
+        _ => {
+            return Err(ValidationError::new(
+                "schemaVersion",
+                format!(
+                    "unsupported HPXML schemaVersion `{}`; requires 3.x or 4.x",
+                    if version_str.is_empty() {
+                        "<missing>"
+                    } else {
+                        version_str
+                    }
+                ),
+            ));
+        }
     }
 
     let xmlns = root
@@ -169,7 +195,7 @@ pub fn validate_hpxml_schema(xml: &str) -> Result<(), ValidationError> {
         ));
     }
 
-    Ok(())
+    Ok(warnings)
 }
 
 pub fn validate_building_ranges(building: &Building) -> ValidationReport {
@@ -559,6 +585,53 @@ mod tests {
         let bad = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0"><Building /></HPXML>"#;
         let err = validate_hpxml_schema(bad).expect_err("schema should fail");
         assert!(err.message.contains("missing required path"));
+    }
+
+    #[test]
+    fn schema_version_3x_accepted_with_warning() {
+        let xml = BASE_XML.replace(r#"schemaVersion="4.0""#, r#"schemaVersion="3.0""#);
+        let warnings = validate_hpxml_schema(&xml).expect("3.x should be accepted");
+        assert!(
+            warnings.iter().any(|w| w.field == "schemaVersion"),
+            "3.x should produce a schemaVersion warning"
+        );
+    }
+
+    #[test]
+    fn schema_version_3_4_accepted_with_warning() {
+        let xml = BASE_XML.replace(r#"schemaVersion="4.0""#, r#"schemaVersion="3.4""#);
+        let warnings = validate_hpxml_schema(&xml).expect("3.4 should be accepted");
+        assert!(
+            warnings.iter().any(|w| w.field == "schemaVersion"),
+            "3.4 should produce a schemaVersion warning"
+        );
+    }
+
+    #[test]
+    fn schema_version_4_2_accepted_without_warning() {
+        let xml = BASE_XML.replace(r#"schemaVersion="4.0""#, r#"schemaVersion="4.2""#);
+        let warnings = validate_hpxml_schema(&xml).expect("4.2 should be accepted");
+        assert!(
+            warnings.is_empty(),
+            "4.x should not produce warnings, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn schema_version_2x_rejected() {
+        let xml = BASE_XML.replace(r#"schemaVersion="4.0""#, r#"schemaVersion="2.3""#);
+        let err = validate_hpxml_schema(&xml).expect_err("2.x should be rejected");
+        assert!(
+            err.field == "schemaVersion",
+            "error should be on schemaVersion field"
+        );
+    }
+
+    #[test]
+    fn schema_version_missing_rejected() {
+        let xml = BASE_XML.replace(r#" schemaVersion="4.0""#, "");
+        let err = validate_hpxml_schema(&xml).expect_err("missing version should be rejected");
+        assert!(err.field == "schemaVersion");
     }
 
     #[test]

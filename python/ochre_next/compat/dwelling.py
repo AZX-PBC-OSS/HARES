@@ -84,10 +84,10 @@ class Dwelling:
                 )
                 continue
 
-            signal = _map_ochre_payload(payload)
+            signal = _map_ochre_payload(equipment_name, payload)
             if signal is None:
                 LOGGER.warning(
-                    "unrecognized control keys for %s; payload keys=%s",
+                    "unrecognized or invalid control for %s; payload keys=%s",
                     equipment_name,
                     sorted(payload.keys()),
                 )
@@ -114,41 +114,87 @@ class Dwelling:
         return metrics
 
 
-def _map_ochre_payload(payload: Mapping[str, Any]) -> PyControlSignal | None:
-    if "Setpoint Temperature (C)" in payload:
+_COOLING_NAMES: frozenset[str] = frozenset({
+    "HVAC Cooling",
+    "Air Conditioner",
+    "Room AC",
+    "ASHP Cooler",
+    "MSHP Cooler",
+})
+
+
+def _is_cooling_equipment(name: str) -> bool:
+    return name in _COOLING_NAMES
+
+
+def _safe_float(value: Any, key: str, equipment_name: str) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "invalid value for %s on %s: %r; skipping", key, equipment_name, value,
+        )
+        return None
+
+
+def _map_ochre_payload(
+    equipment_name: str, payload: Mapping[str, Any]
+) -> PyControlSignal | None:
+    is_cooling = _is_cooling_equipment(equipment_name)
+
+    if "Setpoint" in payload:
+        sp = _safe_float(payload["Setpoint"], "Setpoint", equipment_name)
+        if sp is None:
+            return None
+        deadband_c: float | None = None
+        if "Deadband" in payload:
+            deadband_c = _safe_float(payload["Deadband"], "Deadband", equipment_name)
+        if is_cooling:
+            return PyControlSignal.thermal_setpoint(
+                heat_c=None, cool_c=sp, deadband_c=deadband_c,
+            )
         return PyControlSignal.thermal_setpoint(
-            heat_c=float(payload["Setpoint Temperature (C)"]),
-            cool_c=None,
-            deadband_c=None,
+            heat_c=sp, cool_c=None, deadband_c=deadband_c,
+        )
+
+    if "Deadband" in payload:
+        db = _safe_float(payload["Deadband"], "Deadband", equipment_name)
+        if db is None:
+            return None
+        return PyControlSignal.thermal_setpoint(
+            heat_c=None, cool_c=None, deadband_c=db,
         )
 
     if "P Setpoint" in payload:
-        return PyControlSignal.power_setpoint(
-            kw=float(payload["P Setpoint"]),
-            reactive_kvar=None,
-        )
+        kw = _safe_float(payload["P Setpoint"], "P Setpoint", equipment_name)
+        if kw is None:
+            return None
+        return PyControlSignal.power_setpoint(kw=kw, reactive_kvar=None)
 
     if "Duty Cycle" in payload:
-        return PyControlSignal.from_dict(
-            {
-                "type": "DutyCycle",
-                "on_fraction": float(payload["Duty Cycle"]),
-            }
-        )
+        dc = _safe_float(payload["Duty Cycle"], "Duty Cycle", equipment_name)
+        if dc is None:
+            return None
+        return PyControlSignal.from_dict({"type": "DutyCycle", "on_fraction": dc})
 
     if "Load Fraction" in payload:
-        return PyControlSignal.from_dict(
-            {
-                "type": "LoadFraction",
-                "fraction": float(payload["Load Fraction"]),
-            }
-        )
+        lf = _safe_float(payload["Load Fraction"], "Load Fraction", equipment_name)
+        if lf is None:
+            return None
+        return PyControlSignal.from_dict({"type": "LoadFraction", "fraction": lf})
 
     if "SOC" in payload:
+        soc = _safe_float(payload["SOC"], "SOC", equipment_name)
+        if soc is None:
+            return None
         return PyControlSignal.soc_target(
-            target=float(payload["SOC"]),
-            min=float(payload["Min SOC"]) if "Min SOC" in payload else None,
-            max=float(payload["Max SOC"]) if "Max SOC" in payload else None,
+            target=soc,
+            min=_safe_float(payload["Min SOC"], "Min SOC", equipment_name)
+            if "Min SOC" in payload
+            else None,
+            max=_safe_float(payload["Max SOC"], "Max SOC", equipment_name)
+            if "Max SOC" in payload
+            else None,
         )
 
     if "Self Consumption Mode" in payload:

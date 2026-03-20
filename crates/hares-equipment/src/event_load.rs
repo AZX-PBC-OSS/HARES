@@ -13,6 +13,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::hvac::helpers::parse_fuel_type;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, parse_u32, parse_usize, parse_zone_id,
     restore_schedule_source_state,
@@ -97,6 +98,7 @@ pub struct EventBasedLoad {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    fuel_type: FuelType,
 
     event_window_source: ScheduleSource,
     event_probability_source: ScheduleSource,
@@ -124,6 +126,7 @@ pub struct WetAppliance {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    fuel_type: FuelType,
 
     event_window_source: ScheduleSource,
     event_probability_source: ScheduleSource,
@@ -169,6 +172,7 @@ impl EventBasedLoad {
             descriptor,
             ports,
             telemetry: default_event_load_telemetry(),
+            fuel_type: FuelType::Electric,
             event_window_source: ScheduleSource::Constant(1.0),
             event_probability_source: ScheduleSource::Constant(1.0),
             active_power_kw: 0.0,
@@ -281,14 +285,27 @@ impl EventBasedLoad {
         } else {
             0.0
         };
+
+        let is_fuel = self.fuel_type != FuelType::Electric;
+        let fuel_consumption_w = if is_fuel { active_power_kw * 1_000.0 } else { 0.0 };
+        let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
+
+        // Thermal gains come from all input energy regardless of fuel type.
         let gain_source_w = active_power_kw * 1_000.0;
         let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
         let latent_gain_w = gain_source_w * self.latent_gain_fraction;
 
-        if active_power_kw != 0.0 {
+        if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw,
+                active_power_kw: electric_power_kw,
                 reactive_power_kvar: 0.0,
+            })?;
+        }
+
+        if fuel_consumption_w > 0.0 {
+            ports.accumulate(&PortContribution::Fuel {
+                fuel_type: self.fuel_type,
+                consumption_w: fuel_consumption_w,
             })?;
         }
 
@@ -302,9 +319,10 @@ impl EventBasedLoad {
             })?;
         }
 
-        self.telemetry.set("active_power_kw", active_power_kw);
+        self.telemetry.set("active_power_kw", electric_power_kw);
         self.telemetry.set("sensible_gain_w", sensible_gain_w);
         self.telemetry.set("latent_gain_w", latent_gain_w);
+        self.telemetry.set("gas_consumption_w", fuel_consumption_w);
         self.telemetry.set("state", phase_ordinal(self.phase));
         Ok(())
     }
@@ -338,12 +356,26 @@ impl Equipment for EventBasedLoad {
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
 
+        self.fuel_type = parse_fuel_type(config.get_str("fuel_type")).unwrap_or(FuelType::Electric);
+        self.descriptor.fuel = self.fuel_type;
+
         self.phase = EventPhase::Idle;
         self.remaining_phase_s = 0.0;
         self.load_fraction = 1.0;
         self.forced_mode = None;
         self.power_setpoint_override = None;
         self.telemetry = default_event_load_telemetry();
+
+        self.ports = ports_for_zone(self.descriptor.zone);
+        if self.fuel_type != FuelType::Electric {
+            self.ports.push(PortDeclaration {
+                port_type: PortType::Fuel,
+                zone: None,
+                loop_id: None,
+                domain_id: None,
+                fluid_type: None,
+            });
+        }
 
         self.rng_seed = derive_rng_seed(config);
         self.rng_draws = 0;
@@ -413,19 +445,35 @@ impl Equipment for EventBasedLoad {
             &decoded.event_probability_source_state,
         )?;
 
+        // Rebuild ports from config-derived state (fuel_type set during init).
+        self.ports = ports_for_zone(self.descriptor.zone);
+        if self.fuel_type != FuelType::Electric {
+            self.ports.push(PortDeclaration {
+                port_type: PortType::Fuel,
+                zone: None,
+                loop_id: None,
+                domain_id: None,
+                fluid_type: None,
+            });
+        }
+
         let active_power_kw = if self.phase == EventPhase::Active {
             self.active_power_kw * self.load_fraction.max(0.0)
         } else {
             0.0
         };
+        let is_fuel = self.fuel_type != FuelType::Electric;
+        let fuel_consumption_w = if is_fuel { active_power_kw * 1_000.0 } else { 0.0 };
+        let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
         let gain_source_w = active_power_kw * 1_000.0;
-        self.telemetry.set("active_power_kw", active_power_kw);
+        self.telemetry.set("active_power_kw", electric_power_kw);
         self.telemetry.set(
             "sensible_gain_w",
             gain_source_w * self.sensible_gain_fraction,
         );
         self.telemetry
             .set("latent_gain_w", gain_source_w * self.latent_gain_fraction);
+        self.telemetry.set("gas_consumption_w", fuel_consumption_w);
         self.telemetry.set("state", phase_ordinal(self.phase));
         Ok(())
     }
@@ -485,6 +533,7 @@ impl WetAppliance {
             descriptor,
             ports,
             telemetry: default_wet_appliance_telemetry(),
+            fuel_type: FuelType::Electric,
             event_window_source: ScheduleSource::Constant(1.0),
             event_probability_source: ScheduleSource::Constant(1.0),
             phases: vec![CyclePhase {
@@ -587,14 +636,26 @@ impl WetAppliance {
             0.0
         };
 
+        let is_fuel = self.fuel_type != FuelType::Electric;
+        let fuel_consumption_w = if is_fuel { active_power_kw * 1_000.0 } else { 0.0 };
+        let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
+
+        // Thermal gains come from all input energy regardless of fuel type.
         let gain_source_w = active_power_kw * 1_000.0;
         let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
         let latent_gain_w = gain_source_w * self.latent_gain_fraction;
 
-        if self.active && active_power_kw != 0.0 {
+        if electric_power_kw != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw,
+                active_power_kw: electric_power_kw,
                 reactive_power_kvar: 0.0,
+            })?;
+        }
+
+        if fuel_consumption_w > 0.0 {
+            ports.accumulate(&PortContribution::Fuel {
+                fuel_type: self.fuel_type,
+                consumption_w: fuel_consumption_w,
             })?;
         }
 
@@ -618,9 +679,10 @@ impl WetAppliance {
             })?;
         }
 
-        self.telemetry.set("active_power_kw", active_power_kw);
+        self.telemetry.set("active_power_kw", electric_power_kw);
         self.telemetry.set("sensible_gain_w", sensible_gain_w);
         self.telemetry.set("latent_gain_w", latent_gain_w);
+        self.telemetry.set("gas_consumption_w", fuel_consumption_w);
         self.telemetry.set(
             "cycle_phase",
             cycle_phase_ordinal(self.active, self.phase_index),
@@ -654,6 +716,9 @@ impl Equipment for WetAppliance {
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
 
+        self.fuel_type = parse_fuel_type(config.get_str("fuel_type")).unwrap_or(FuelType::Electric);
+        self.descriptor.fuel = self.fuel_type;
+
         let total_cycle_duration_s: f64 = self.phases.iter().map(|p| p.duration_s).sum();
         self.hot_water_draw_rate_kg_s = if total_cycle_duration_s > 0.0 {
             config
@@ -673,6 +738,15 @@ impl Equipment for WetAppliance {
                 loop_id: Some(crate::water_heater::DHW_DEMAND_LOOP),
                 domain_id: None,
                 fluid_type: Some(FluidType::Water),
+            });
+        }
+        if self.fuel_type != FuelType::Electric {
+            self.ports.push(PortDeclaration {
+                port_type: PortType::Fuel,
+                zone: None,
+                loop_id: None,
+                domain_id: None,
+                fluid_type: None,
             });
         }
 
@@ -749,7 +823,7 @@ impl Equipment for WetAppliance {
         self.forced_mode = decoded.forced_mode;
         self.hot_water_draw_rate_kg_s = decoded.hot_water_draw_rate_kg_s;
 
-        // Regenerate ports to reflect restored DHW demand state.
+        // Regenerate ports to reflect restored DHW demand and fuel state.
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.hot_water_draw_rate_kg_s > 0.0 {
             self.ports.push(PortDeclaration {
@@ -758,6 +832,15 @@ impl Equipment for WetAppliance {
                 loop_id: Some(crate::water_heater::DHW_DEMAND_LOOP),
                 domain_id: None,
                 fluid_type: Some(FluidType::Water),
+            });
+        }
+        if self.fuel_type != FuelType::Electric {
+            self.ports.push(PortDeclaration {
+                port_type: PortType::Fuel,
+                zone: None,
+                loop_id: None,
+                domain_id: None,
+                fluid_type: None,
             });
         }
 
@@ -780,14 +863,18 @@ impl Equipment for WetAppliance {
         } else {
             0.0
         };
+        let is_fuel = self.fuel_type != FuelType::Electric;
+        let fuel_consumption_w = if is_fuel { active_power_kw * 1_000.0 } else { 0.0 };
+        let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
         let gain_source_w = active_power_kw * 1_000.0;
-        self.telemetry.set("active_power_kw", active_power_kw);
+        self.telemetry.set("active_power_kw", electric_power_kw);
         self.telemetry.set(
             "sensible_gain_w",
             gain_source_w * self.sensible_gain_fraction,
         );
         self.telemetry
             .set("latent_gain_w", gain_source_w * self.latent_gain_fraction);
+        self.telemetry.set("gas_consumption_w", fuel_consumption_w);
         self.telemetry.set(
             "cycle_phase",
             cycle_phase_ordinal(self.active, self.phase_index),
@@ -1113,19 +1200,21 @@ fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
 }
 
 fn default_event_load_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(4);
+    let mut telemetry = Telemetry::with_capacity(5);
     telemetry.insert("active_power_kw", 0.0);
     telemetry.insert("sensible_gain_w", 0.0);
     telemetry.insert("latent_gain_w", 0.0);
+    telemetry.insert("gas_consumption_w", 0.0);
     telemetry.insert("state", 0.0);
     telemetry
 }
 
 fn default_wet_appliance_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(4);
+    let mut telemetry = Telemetry::with_capacity(5);
     telemetry.insert("active_power_kw", 0.0);
     telemetry.insert("sensible_gain_w", 0.0);
     telemetry.insert("latent_gain_w", 0.0);
+    telemetry.insert("gas_consumption_w", 0.0);
     telemetry.insert("cycle_phase", 0.0);
     telemetry
 }
@@ -1146,6 +1235,11 @@ fn event_load_telemetry_fields() -> Vec<TelemetryField> {
             name: "latent_gain_w".to_string(),
             unit: "W".to_string(),
             description: "Latent thermal gain to assigned zone".to_string(),
+        },
+        TelemetryField {
+            name: "gas_consumption_w".to_string(),
+            unit: "W".to_string(),
+            description: "Gas fuel consumption rate converted to watts".to_string(),
         },
         TelemetryField {
             name: "state".to_string(),
@@ -1173,6 +1267,11 @@ fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
             description: "Latent thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
+            name: "gas_consumption_w".to_string(),
+            unit: "W".to_string(),
+            description: "Gas fuel consumption rate converted to watts".to_string(),
+        },
+        TelemetryField {
             name: "cycle_phase".to_string(),
             unit: "ordinal".to_string(),
             description: "Cycle phase (0=Idle,1..N=phase index + 1)".to_string(),
@@ -1187,8 +1286,8 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use hares_types::{
-        ControlSignal, DomainUpdate, EnvironmentState, ExecutionStage, GridState, PortSlots,
-        WeatherState, ZoneId, ZoneState, schedule_domain_id,
+        ControlSignal, DomainUpdate, EnvironmentState, ExecutionStage, FuelType, GridState,
+        PortSlots, PortType, WeatherState, ZoneId, ZoneState, schedule_domain_id,
     };
 
     use super::{
@@ -1755,6 +1854,7 @@ mod tests {
             elapsed_in_phase_s: 0.0,
             load_fraction: 1.0,
             forced_mode: None,
+            hot_water_draw_rate_kg_s: 0.0,
             rng_seed: eq.rng_seed,
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
@@ -1857,6 +1957,7 @@ mod tests {
             elapsed_in_phase_s: 10.0,
             load_fraction: 1.0,
             forced_mode: None,
+            hot_water_draw_rate_kg_s: 0.0,
             rng_seed: eq.rng_seed,
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
@@ -1870,5 +1971,119 @@ mod tests {
             "phase_index=1 should be valid for 2-phase appliance"
         );
         assert_eq!(eq.phase_index, 1);
+    }
+
+    // =======================================================================
+    // FX-025: Gas fuel type handling
+    // =======================================================================
+
+    fn gas_event_config(name: &str) -> EquipmentConfig {
+        let mut cfg = event_config(name, "Cooking Range");
+        cfg.raw_config
+            .insert("fuel_type".to_string(), "Gas".into());
+        cfg
+    }
+
+    fn gas_wet_config(name: &str) -> EquipmentConfig {
+        let mut cfg = wet_config(name, "Clothes Dryer", 1.0);
+        cfg.raw_config
+            .insert("fuel_type".to_string(), "Gas".into());
+        cfg
+    }
+
+    #[test]
+    fn gas_cooking_range_reports_gas_not_electric() {
+        let mut env = base_env();
+        let config = gas_event_config("Gas Range");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(eq.descriptor().fuel, FuelType::Gas);
+        assert!(eq.ports().iter().any(|p| p.port_type == PortType::Fuel));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        // Gas power should be non-zero, electric should be zero.
+        assert!(
+            slots.fuel.get(FuelType::Gas) > 0.0,
+            "gas cooking range must report gas consumption"
+        );
+        assert_eq!(
+            slots.electrical.load_power_kw, 0.0,
+            "gas cooking range must not report electrical consumption"
+        );
+        // Thermal gains must still be emitted (gas energy heats the zone).
+        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+        assert!(t.sensible_gain_w > 0.0);
+    }
+
+    #[test]
+    fn gas_clothes_dryer_reports_gas() {
+        let mut env = base_env();
+        let config = gas_wet_config("Gas Dryer");
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Dryer");
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(eq.descriptor().fuel, FuelType::Gas);
+        assert!(eq.ports().iter().any(|p| p.port_type == PortType::Fuel));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        assert!(
+            slots.fuel.get(FuelType::Gas) > 0.0,
+            "gas clothes dryer must report gas consumption"
+        );
+        assert_eq!(
+            slots.electrical.load_power_kw, 0.0,
+            "gas clothes dryer must not report electrical consumption"
+        );
+        let t = slots.thermal.iter().find(|t| t.zone == ZoneId(1)).unwrap();
+        assert!(t.sensible_gain_w > 0.0);
+    }
+
+    #[test]
+    fn electric_cooking_range_still_reports_electric() {
+        let mut env = base_env();
+        let config = event_config("Electric Range", "Cooking Range");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        assert_eq!(eq.descriptor().fuel, FuelType::Electric);
+        assert!(!eq.ports().iter().any(|p| p.port_type == PortType::Fuel));
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        assert!(
+            slots.electrical.load_power_kw > 0.0,
+            "electric cooking range must report electrical consumption"
+        );
+        assert_eq!(
+            slots.fuel.get(FuelType::Gas),
+            0.0,
+            "electric cooking range must not report gas consumption"
+        );
+    }
+
+    #[test]
+    fn gas_telemetry_reports_gas_consumption_w() {
+        let mut env = base_env();
+        let config = gas_event_config("Gas Range Telem");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let gas_w = eq.telemetry().get("gas_consumption_w").unwrap();
+        let elec_kw = eq.telemetry().get("active_power_kw").unwrap();
+        assert!(gas_w > 0.0, "gas_consumption_w must be positive for gas equipment");
+        assert_eq!(elec_kw, 0.0, "active_power_kw must be zero for gas equipment");
     }
 }

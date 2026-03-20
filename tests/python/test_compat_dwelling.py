@@ -15,7 +15,7 @@ def _install_fake_hares(monkeypatch: pytest.MonkeyPatch):
     class FakePyControlSignal:
         @staticmethod
         def thermal_setpoint(heat_c=None, cool_c=None, deadband_c=None):
-            return {"kind": "thermal", "heat_c": heat_c}
+            return {"kind": "thermal", "heat_c": heat_c, "cool_c": cool_c, "deadband_c": deadband_c}
 
         @staticmethod
         def power_setpoint(kw, reactive_kvar=None):
@@ -134,7 +134,7 @@ def test_update_model_warns_and_skips_unknown(monkeypatch: pytest.MonkeyPatch, c
     with caplog.at_level(logging.WARNING):
         out = d.update_model(
             {
-                "HVAC Heating": {"Setpoint Temperature (C)": 21.0},
+                "HVAC Heating": {"Setpoint": 21.0},
                 "UnknownEquipment": {"SomeKey": 1.0},
             }
         )
@@ -142,7 +142,12 @@ def test_update_model_warns_and_skips_unknown(monkeypatch: pytest.MonkeyPatch, c
     assert out is None
     assert d._dwelling.step_calls == 1
     assert len(d._dwelling.apply_calls) == 1
-    assert "unrecognized control keys" in caplog.text
+    name, signal = d._dwelling.apply_calls[0]
+    assert name == "HVAC Heating"
+    assert signal["heat_c"] == 21.0
+    assert signal["cool_c"] is None
+    assert "unrecognized or invalid control" in caplog.text
+    assert "UnknownEquipment" in caplog.text
 
 
 def test_generate_results_requires_simulate(monkeypatch: pytest.MonkeyPatch):
@@ -158,6 +163,91 @@ def test_generate_results_requires_simulate(monkeypatch: pytest.MonkeyPatch):
 
     with pytest.raises(RuntimeError):
         d.generate_results()
+
+
+@pytest.mark.parametrize(
+    "equipment_name",
+    ["HVAC Cooling", "Air Conditioner", "Room AC", "ASHP Cooler", "MSHP Cooler"],
+)
+def test_cooling_setpoint_routes_to_cool_c(
+    monkeypatch: pytest.MonkeyPatch, equipment_name: str,
+):
+    dwelling_mod, _ = _install_fake_hares(monkeypatch)
+    d = dwelling_mod.Dwelling(
+        hpxml_file="in.xml",
+        hpxml_schedule_file="schedule.csv",
+        weather_file="weather.epw",
+        start_time=datetime(2020, 1, 1),
+        time_res=timedelta(minutes=1),
+        duration=timedelta(hours=1),
+    )
+
+    d.update_model({equipment_name: {"Setpoint": 26.0}})
+
+    assert len(d._dwelling.apply_calls) == 1
+    name, signal = d._dwelling.apply_calls[0]
+    assert name == equipment_name
+    assert signal["cool_c"] == 26.0
+    assert signal["heat_c"] is None
+
+
+def test_deadband_only_routes_correctly(monkeypatch: pytest.MonkeyPatch):
+    dwelling_mod, _ = _install_fake_hares(monkeypatch)
+    d = dwelling_mod.Dwelling(
+        hpxml_file="in.xml",
+        hpxml_schedule_file="schedule.csv",
+        weather_file="weather.epw",
+        start_time=datetime(2020, 1, 1),
+        time_res=timedelta(minutes=1),
+        duration=timedelta(hours=1),
+    )
+
+    d.update_model({"HVAC Heating": {"Deadband": 2.0}})
+
+    assert len(d._dwelling.apply_calls) == 1
+    _, signal = d._dwelling.apply_calls[0]
+    assert signal["deadband_c"] == 2.0
+    assert signal["heat_c"] is None
+    assert signal["cool_c"] is None
+
+
+def test_setpoint_with_deadband_combined(monkeypatch: pytest.MonkeyPatch):
+    dwelling_mod, _ = _install_fake_hares(monkeypatch)
+    d = dwelling_mod.Dwelling(
+        hpxml_file="in.xml",
+        hpxml_schedule_file="schedule.csv",
+        weather_file="weather.epw",
+        start_time=datetime(2020, 1, 1),
+        time_res=timedelta(minutes=1),
+        duration=timedelta(hours=1),
+    )
+
+    d.update_model({"HVAC Cooling": {"Setpoint": 25.0, "Deadband": 1.5}})
+
+    assert len(d._dwelling.apply_calls) == 1
+    _, signal = d._dwelling.apply_calls[0]
+    assert signal["cool_c"] == 25.0
+    assert signal["heat_c"] is None
+    assert signal["deadband_c"] == 1.5
+
+
+def test_unknown_keys_log_warning(monkeypatch: pytest.MonkeyPatch, caplog):
+    dwelling_mod, _ = _install_fake_hares(monkeypatch)
+    d = dwelling_mod.Dwelling(
+        hpxml_file="in.xml",
+        hpxml_schedule_file="schedule.csv",
+        weather_file="weather.epw",
+        start_time=datetime(2020, 1, 1),
+        time_res=timedelta(minutes=1),
+        duration=timedelta(hours=1),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        d.update_model({"HVAC Heating": {"UnknownKey": 42}})
+
+    assert len(d._dwelling.apply_calls) == 0
+    assert "unrecognized or invalid control" in caplog.text
+    assert "HVAC Heating" in caplog.text
 
 
 def test_top_level_reexports(monkeypatch: pytest.MonkeyPatch):

@@ -11,7 +11,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
 
-use crate::conversions::steps_to_polars_df;
+use crate::conversions::{record_batches_to_polars_df, steps_to_polars_df};
 use crate::py_control::PyControlSignal;
 use crate::py_telemetry::PyTelemetry;
 
@@ -87,18 +87,26 @@ impl PyDwelling {
     }
 
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let steps = py
-            .detach(|| {
-                let mut dwelling = self
-                    .dwelling
-                    .lock()
-                    .map_err(|_| "failed to lock dwelling state".to_string())?;
-                let results = dwelling.simulate().map_err(|err| err.to_string())?;
-                Ok::<_, String>(results.steps)
-            })
-            .map_err(PyValueError::new_err)?;
+        py.detach(|| {
+            let mut dwelling = self
+                .dwelling
+                .lock()
+                .map_err(|_| "failed to lock dwelling state".to_string())?;
+            dwelling.simulate().map_err(|err| err.to_string())?;
+            Ok::<_, String>(())
+        })
+        .map_err(PyValueError::new_err)?;
 
-        steps_to_polars_df(py, &steps)
+        let dwelling = self
+            .dwelling
+            .lock()
+            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let batches = dwelling.flushed_batches();
+        if batches.is_empty() {
+            // Fallback to steps path if no batches were flushed.
+            return steps_to_polars_df(py, &dwelling.results().steps);
+        }
+        record_batches_to_polars_df(py, batches)
     }
 
     pub fn step(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -109,6 +117,14 @@ impl PyDwelling {
         let out = PyDict::new(py);
         out.set_item("time", chrono_to_py_datetime(py, step.timestamp)?)?;
         out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
+        for (zone_id, temp_c) in &step.zone_temperatures_c {
+            let key = if zone_id.0 == 0 {
+                "Temperature - Indoor (C)".to_string()
+            } else {
+                format!("Temperature - Zone_{} (C)", zone_id.0)
+            };
+            out.set_item(key, *temp_c)?;
+        }
         Ok(out.unbind().into())
     }
 
@@ -157,7 +173,11 @@ impl PyDwelling {
             .dwelling
             .lock()
             .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
-        steps_to_polars_df(py, &dwelling.results().steps)
+        let batches = dwelling.flushed_batches();
+        if batches.is_empty() {
+            return steps_to_polars_df(py, &dwelling.results().steps);
+        }
+        record_batches_to_polars_df(py, batches)
     }
 
     pub fn reset_with_seed(&mut self, seed: u64) -> PyResult<()> {

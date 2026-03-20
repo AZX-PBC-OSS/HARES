@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
+    EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, PortType, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
@@ -260,12 +260,15 @@ impl Equipment for TanklessWH {
             None => self.rated_thermal_power_w,
         };
 
+        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
+        let total_draw_kg_s = self.draw_flow_rate_kg_s + appliance_demand_kg_s;
+
         let (thermal_output_w, outlet_temp_c) = if mode == OperatingMode::Heating
-            && self.draw_flow_rate_kg_s > 0.0
+            && total_draw_kg_s > 0.0
         {
             // Unclamped thermal demand to reach setpoint.
             let demand_w =
-                self.draw_flow_rate_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K * delta_t_c * duty;
+                total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K * delta_t_c * duty;
 
             let capacity_w = effective_max_w * duty;
 
@@ -277,7 +280,7 @@ impl Equipment for TanklessWH {
                 // using full (non-duty-scaled) power — the heater fires at rated power
                 // during its on-fraction.
                 let outlet_c = inlet_temp_c
-                    + effective_max_w / (self.draw_flow_rate_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+                    + effective_max_w / (total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K);
                 (capacity_w, outlet_c)
             }
         } else if mode == OperatingMode::Heating {
@@ -321,7 +324,7 @@ impl Equipment for TanklessWH {
         self.telemetry
             .set("parasitic_electric_w", self.parasitic_power_w);
         self.telemetry
-            .set("draw_flow_rate_kg_s", self.draw_flow_rate_kg_s);
+            .set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry.set(
             "operating_mode",
             if mode == OperatingMode::Heating {
@@ -458,14 +461,24 @@ fn parse_tankless_fuel_type(raw: Option<&str>) -> FuelType {
 /// Electric: one Electrical port only.
 /// Gas: one Fuel port + one Electrical port (for the ignition controller parasitic).
 fn build_ports(fuel_type: FuelType) -> Vec<PortDeclaration> {
+    let dhw_port = PortDeclaration {
+        port_type: PortType::Fluid,
+        zone: None,
+        loop_id: Some(super::DHW_DEMAND_LOOP),
+        domain_id: None,
+        fluid_type: Some(FluidType::Water),
+    };
     if fuel_type == FuelType::Electric {
-        vec![PortDeclaration {
-            port_type: PortType::Electrical,
-            zone: None,
-            loop_id: None,
-            domain_id: None,
-            fluid_type: None,
-        }]
+        vec![
+            PortDeclaration {
+                port_type: PortType::Electrical,
+                zone: None,
+                loop_id: None,
+                domain_id: None,
+                fluid_type: None,
+            },
+            dhw_port,
+        ]
     } else {
         vec![
             PortDeclaration {
@@ -482,6 +495,7 @@ fn build_ports(fuel_type: FuelType) -> Vec<PortDeclaration> {
                 domain_id: None,
                 fluid_type: None,
             },
+            dhw_port,
         ]
     }
 }

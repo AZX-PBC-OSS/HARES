@@ -1053,6 +1053,12 @@ impl Dwelling {
             let gas_w = self.ports.fuel.get(hares_types::FuelType::Gas);
             row[idx] = gas_w / GAS_THERMS_PER_HOUR_TO_W;
         }
+        if let Some(&idx) = self
+            .output_column_index
+            .get("Total Reactive Power (kVAR)")
+        {
+            row[idx] = self.electrical_solver.net_reactive_kvar();
+        }
 
         // Per-equipment power columns: "{Name} Electric Power (kW)"
         for eq in &self.equipment {

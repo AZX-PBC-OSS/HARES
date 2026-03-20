@@ -58,7 +58,10 @@ pub fn parse_hpxml(path: &Path) -> Result<Building> {
 
 /// Parse HPXML from a string input.
 pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
-    validate_hpxml_schema(xml).map_err(HpxmlError::SchemaValidation)?;
+    let schema_warnings = validate_hpxml_schema(xml).map_err(HpxmlError::SchemaValidation)?;
+    for w in &schema_warnings {
+        tracing::warn!("{w}");
+    }
 
     let building = parse_building(xml)?;
 

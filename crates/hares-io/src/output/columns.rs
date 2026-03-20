@@ -14,7 +14,11 @@ use hares_types::{FuelType, OperatingMode};
 const TIMESTAMP_COL: &str = "Time";
 
 /// Verbosity 0: total power only.
-const LEVEL_0_COLUMNS: &[&str] = &["Total Electric Power (kW)", "Total Gas Power (therms/hour)"];
+const LEVEL_0_COLUMNS: &[&str] = &[
+    "Total Electric Power (kW)",
+    "Total Gas Power (therms/hour)",
+    "Total Reactive Power (kVAR)",
+];
 
 /// Per-end-use column name suffixes for verbosity 1.
 /// Each equipment contributes `"{name} Electric Power (kW)"` and/or
@@ -359,6 +363,7 @@ mod tests {
                 "Time",
                 "Total Electric Power (kW)",
                 "Total Gas Power (therms/hour)",
+                "Total Reactive Power (kVAR)",
             ]
         );
     }

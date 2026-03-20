@@ -1,162 +1,195 @@
-# TEST-001: Thermal envelope integration test suite
+# TEST-001: Thermal envelope test suite with OCHRE oracle comparison
 
 ## Status: Open
 
 ## Problem
 
-FIX-029 (solar injected at zone node instead of exterior RC node, 33x overcounting)
-was not caught by existing tests. The test suite has 94 tests but critical gaps:
+FIX-029 (solar injected at zone node instead of exterior RC node) was not caught
+by existing tests. The 94-test suite lacks:
 
-1. No test verifies solar injects at the correct B-matrix column
-2. No test for thermal runaway / temperature divergence detection
-3. No multi-hour thermal stability tests
-4. No combined solar + LWR + infiltration interaction tests
-5. Smoke tests compare column names that don't match (`HVAC Heating` vs `ASHP Heater`)
-6. No per-surface comparison against OCHRE reference data
-7. No B-matrix structural verification
+1. No per-surface comparison against OCHRE reference data
+2. No test verifies solar injects at the correct B-matrix column
+3. No thermal runaway / divergence detection
+4. Smoke tests have column name mismatches (NaN for HVAC comparison)
+5. No energy conservation test that exercises the multi-node solar path
 
-Additionally: HARES injects ~4.25 kW opaque solar vs OCHRE's ~115.8 kW for the
-BEopt 1h scenario. HARES heater uses 0.395 kWh vs OCHRE 0.911 kWh (under-heating
-by 57%). These gaps suggest missing exterior surfaces (attic roof alone is 92.8 kW
-in OCHRE) or incorrect wiring.
+### Current HARES vs OCHRE comparison (BEopt 1h, May 5 noon Denver)
 
-## Test categories
+| Quantity | OCHRE | HARES | Gap |
+|---|---|---|---|
+| Indoor temp | 20.8-22.0 C | 20.2-21.6 C | close |
+| ASHP Heater energy | 0.911 kWh | 0.395 kWh | -57% |
+| ASHP Cooler energy | 0.050 kWh | 0.050 kWh | match |
+| Ext Wall solar | 18,573 W mean | ~4,253 W total | -77% |
+| Attic Roof solar | 92,800 W mean | not modelled | -100% |
+| Ext Wall LWR | -7,007 W mean | unknown | ? |
+| Wall heat gain indoor | -345 W mean | unknown | ? |
+| Roof heat gain indoor | -171 W mean | unknown | ? |
+| Non-HVAC loads | ~0.38 kWh | ~0.38 kWh | <1% |
 
-### T1: B-matrix structural verification (unit tests in thermal_solver.rs)
+Root cause of heater gap: HARES doesn't model enough exterior surfaces (attic
+roof = 92.8 kW solar alone), so envelope heat loss is too low, so less heating
+needed. The physics must match before we can claim accuracy.
 
-#### T1.1: `solar_at_exterior_node_attenuates_vs_zone_node`
-- **Model**: 2-state (zone air C=500kJ/K + wall node C=50kJ/K), R=0.5 K/W
-- **Setup**: Run two solvers for 60 steps with 600 W/m2 solar, 10 m2 wall:
-  - Solver A: input_index = exterior node column (correct)
-  - Solver B: input_index = zone sensible column (the FIX-029 bug)
-- **Assert**: T_zone_A < T_zone_B (heat must traverse wall thermal mass)
-- **Catches**: FIX-029 root cause directly
+## Approach: OCHRE as oracle
 
-#### T1.2: `b_matrix_surface_column_gain_is_at_outer_node_row`
-- **Model**: 2-state from `assemble_building_rc` with one layered boundary
-- **Assert**: B_d entry at wall-node row >> B_d entry at zone-air row for the
-  surface injection column
-- **Catches**: B-matrix construction errors in dwelling.rs
+OCHRE output captured at `tests/fixtures/parity/beopt_smoke_1h/ochre_reference.csv`
+(60 rows, 1-min resolution, 169 columns). Key oracle columns:
 
-#### T1.3: `zone_sensible_columns_shifted_by_surface_count`
-- **Model**: Build B_c for a building with 3 exterior layered surfaces, 1 zone
-- **Assert**: Zone sensible column index = n_ext + 3 (not n_ext + 0)
-- **Catches**: Index shift errors when adding per-surface columns
+**Per-surface exterior (solar, LWR, surface temp):**
+- `Exterior Wall Ext. Solar Gain (W)` — mean 18,573 W
+- `Exterior Wall Ext. LWR Gain (W)` — mean -7,007 W
+- `Exterior Wall Ext. Surface Temperature (C)` — mean 23.4 C
+- `Attic Roof Ext. Solar Gain (W)` — mean 92,800 W
+- `Attic Roof Ext. LWR Gain (W)` — mean -29,359 W
+- `Window Ext. Solar Gain (W)` — mean 537 W
+- `Door Ext. Solar Gain (W)` — mean 160 W
 
-### T2: OCHRE reference comparison (integration tests in tests/)
+**Zone-level envelope heat flows:**
+- `Net Sensible Heat Gain - Indoor (W)` — mean 1,737 W
+- `Infiltration Heat Gain - Indoor (W)` — mean -12 W
+- `Window Transmitted Solar Gain (W)` — mean 356 W
+- `Wall Heat Gain - Indoor (W)` — mean -345 W
+- `Roof Heat Gain - Indoor (W)` — mean -171 W
+- `Floor Heat Gain - Indoor (W)` — mean -759 W
+- `Radiation Heat Gain - Indoor (W)` — mean 96 W
+- `Internal Heat Gain - Indoor (W)` — mean 342 W
 
-#### T2.1: `per_surface_solar_gain_matches_ochre`
-- **Setup**: Run BEopt 1h, extract per-surface opaque solar from solver debug
-- **Reference**: OCHRE CSV breakdown per surface type:
-  - Exterior walls: ~18.6 kW total
-  - Attic walls: ~4.3 kW
-  - Attic/pitched roof: ~92.8 kW
-  - Doors: ~0.16 kW
-- **Assert**: Total HARES opaque solar within 2x of OCHRE total (~115.8 kW)
-- **Notes**: Requires all exterior surfaces to be wired up. Will fail until
-  missing surfaces (attic roof, attic walls, doors) are connected.
+**Zone temperatures:**
+- `Temperature - Indoor (C)` — mean 21.3 C
+- `Temperature - Attic (C)` — mean 14.5 C
+- `Temperature - Outdoor (C)` — mean 11.7 C
 
-#### T2.2: `heater_energy_within_50pct_of_ochre`
-- **Setup**: BEopt 1h smoke test
-- **Assert**: ASHP Heater kWh within 50% of OCHRE 0.911 kWh
-- **Notes**: Fix smoke test column name mismatch first (`ASHP Heater` vs `HVAC Heating`)
+Tolerance bands: where HARES uses better physics (e.g., EnergyPlus IAM vs OCHRE
+simple cosine), a documented >5% deviation is acceptable. Unexplained deviations
+>50% must be investigated and ticketed.
 
-#### T2.3: `cooler_energy_within_50pct_of_ochre`
-- **Setup**: BEopt 1h smoke test
-- **Assert**: ASHP Cooler kWh within 50% of OCHRE 0.050 kWh
-- **Current**: Already matches at 0.050 kWh
+## Test plan
 
-#### T2.4: `zone_temperature_trajectory_matches_ochre`
-- **Setup**: BEopt 1h, extract zone temp timeseries
-- **Reference**: OCHRE zone temp for same period
-- **Assert**: RMSE < 2.0 C over the 60-minute window
+### Phase 1: Expose HARES envelope internals for comparison
 
-### T3: Thermal runaway detection (unit tests in thermal_solver.rs)
+HARES verbosity 6 already defines envelope breakdown columns (wall/roof/floor/
+window heat gains, infiltration, solar). Wire these up in the thermal solver so
+they're populated in the output CSV. Currently the schema exists but values may
+be zero.
 
-#### T3.1: `zone_temperature_stays_in_physical_bounds_48h`
-- **Model**: BESTEST Case 600 with opaque solar (10 m2 south wall) + window solar
-- **Setup**: Sinusoidal outdoor temp (25-35C), sinusoidal solar (0-1000 W/m2), 48h
-- **Assert**: Zone temp in [-50, 80] C every timestep
+**Required output columns (match OCHRE names where possible):**
+- `Temperature - Indoor (C)` (already at verbosity ≥2)
+- `Window Transmitted Solar Gain (W)` (already defined at verbosity 6)
+- `Wall Heat Gain - Indoor (W)` (defined, needs wiring)
+- `Roof Heat Gain - Indoor (W)` (defined, needs wiring)
+- `Floor Heat Gain - Indoor (W)` (defined, needs wiring)
+- `Infiltration Heat Gain - Indoor (W)` (defined, needs wiring)
+- `Radiation Heat Gain - Indoor (W)` (defined, needs wiring)
 
-#### T3.2: `free_float_temperature_rate_decays_toward_equilibrium`
-- **Model**: 1R1C, constant 2000 W solar input
-- **Assert**: After initial 20-step transient, |dT/dt| monotonically non-increasing
-- **Catches**: Positive feedback loops / exponential divergence
+**New columns needed for per-surface oracle comparison:**
+- Per-surface opaque solar gain (W) — total across all surfaces
+- Per-surface LWR gain (W) — total across all surfaces
+- Per-surface exterior surface temperature (C) — from state vector
 
-#### T3.3: `per_timestep_solar_temperature_rise_bounded`
-- **Model**: 1R1C, 1000 W/m2 on 10 m2 surface, absorptance 0.6
-- **Assert**: Single-step dT < 3 * (absorptance * area * POA * dt / C_zone)
-- **Catches**: Any overcounting > 3x
+### Phase 2: Oracle integration tests
 
-### T4: Energy conservation with solar (unit tests in thermal_solver.rs)
+#### `envelope_oracle_beopt_1h`
+- **File**: `tests/parity/mod.rs` (or new `tests/envelope_oracle.rs`)
+- **Setup**: Run BEopt 1h at verbosity 6, parse HARES output CSV. Load
+  `tests/fixtures/parity/beopt_smoke_1h/ochre_reference.csv` as oracle.
+- **Comparisons** (each is a separate named check):
 
-#### T4.1: `energy_balance_holds_with_solar_input`
-- **Model**: 1R1C, constant 500 W/m2 on 5 m2 surface, absorptance 0.6
-- **Assert**: Each step: |C * dT/dt - (Q_solar + Q_cond)| < 1% of max flux
-- **Notes**: Extends existing `per_timestep_energy_balance_holds` which has no solar
+| Check | OCHRE column | Tolerance | Rationale |
+|---|---|---|---|
+| zone_temp_indoor | Temperature - Indoor (C) | MAE < 2.0 C | within-hour transient |
+| wall_heat_gain | Wall Heat Gain - Indoor (W) | mean within 100% | surfaces may differ |
+| roof_heat_gain | Roof Heat Gain - Indoor (W) | mean within 100% | attic coupling |
+| floor_heat_gain | Floor Heat Gain - Indoor (W) | mean within 100% | ground coupling |
+| window_solar | Window Transmitted Solar Gain (W) | mean within 30% | IAM differences |
+| infiltration | Infiltration Heat Gain - Indoor (W) | mean within 50% | method differences |
+| total_opaque_solar | sum of Ext. Solar columns | within 5x | missing surfaces known |
+| total_ext_lwr | sum of Ext. LWR columns | within 5x | missing surfaces known |
+| heater_energy | ASHP Heater kWh | within 100% | depends on envelope |
+| cooler_energy | ASHP Cooler kWh | within 100% | depends on envelope |
 
-#### T4.2: `two_state_energy_conservation_with_wall_solar`
-- **Model**: 2-state (zone + wall), solar at outer node
-- **Assert**: Total energy change (C_zone*dT_zone + C_wall*dT_wall) = injected energy
-- **Catches**: FIX-029 — energy routing through wrong node breaks conservation
+Initial tolerance bands are wide. As we fix missing surfaces and verify physics,
+tighten them. The test's value is catching regressions and flagging new issues,
+not passing with green immediately.
 
-### T5: Combined physics interaction (unit tests in thermal_solver.rs)
+#### `envelope_oracle_resstock_1h`
+- Same approach with ResStock fixture once OCHRE reference is captured.
 
-#### T5.1: `combined_solar_lwr_infiltration_stays_bounded`
-- **Model**: 1R1C with all paths active: 500 W/m2 solar, LWR (sky=-10C),
-  0.5 ACH infiltration, outdoor=5C
-- **Assert**: All temps in [-40, 60] C; steady state within 12 hours
+### Phase 3: Physics unit tests (catch FIX-029 class bugs)
 
-#### T5.2: `lwr_net_cooling_opposes_solar_heating`
-- **Model**: 2-state, south wall, noon conditions
-- **Assert**: Zone temp with (solar + LWR) < zone temp with (solar only)
-  because LWR is net cooling to cold sky
+#### `solar_at_exterior_node_attenuates_vs_zone_node`
+- **File**: `crates/hares-envelope/src/thermal_solver.rs`
+- **Model**: 2-state (zone + wall), run two solvers:
+  - A: solar input_index = exterior node column (correct)
+  - B: solar input_index = zone sensible column (the bug)
+- **Assert**: T_zone_A < T_zone_B after 60 steps
+- **Why**: This is the exact property FIX-029 violated
 
-### T6: Smoke test hardening (tests/regression/smoke_test.rs)
+#### `two_state_energy_conservation_with_wall_solar`
+- **Model**: 2-state, solar at outer node, track dE = C1*dT1 + C2*dT2
+- **Assert**: dE/dt ≈ Q_solar + Q_outdoor_cond within 2% per step
+- **Why**: Energy conservation across nodes catches routing errors
 
-#### T6.1: Fix column name mismatch
-- Map `ASHP Heater Electric Power (kW)` to OCHRE's `HVAC Heating Electric Power (kW)`
-- Map `ASHP Cooler Electric Power (kW)` to OCHRE's `HVAC Cooling Electric Power (kW)`
+#### `per_timestep_solar_rise_bounded`
+- **Model**: 1R1C, 1000 W/m2 on 10 m2, absorptance 0.6
+- **Assert**: single-step dT < 3x theoretical maximum
+- **Why**: Any overcounting > 3x is caught immediately
 
-#### T6.2: `zone_temperature_in_physical_range`
-- **Assert**: Every timestep indoor temp in [-10, 50] C (Denver in May)
+#### `lwr_net_cooling_opposes_solar_heating`
+- **Model**: 2-state, south wall, noon conditions, sky_temp=-10C
+- **Assert**: T_zone(solar+LWR) < T_zone(solar only)
+- **Why**: LWR should be net cooling; if it's heating, sign is wrong
 
-#### T6.3: `total_electric_within_order_of_magnitude_of_ochre`
-- **Assert**: 0.1 * OCHRE_total < HARES_total < 10 * OCHRE_total
+#### `zone_temperature_bounded_24h_free_float`
+- **Model**: BESTEST-like, sinusoidal outdoor + solar, no HVAC
+- **Assert**: Zone temp in [-50, 80] C every step for 24h
+- **Why**: Catches thermal runaway from any overcounting
 
-### T7: Edge cases (unit tests in thermal_solver.rs)
+### Phase 4: Smoke test hardening
 
-#### T7.1: `extreme_solar_does_not_produce_nan`
-- **Setup**: 2000 W/m2 on 20 m2, 100 steps
-- **Assert**: All temps finite
+#### Fix column name mismatch in `smoke_beopt_1h`
+- HARES outputs `ASHP Heater Electric Power (kW)`, OCHRE expects `HVAC Heating Electric Power (kW)`
+- Add column name aliases to the comparison lookup
 
-#### T7.2: `negative_solar_does_not_heat`
-- **Setup**: direct_w_m2 = -100 (bad weather data)
-- **Assert**: Zone temp does not increase vs zero-solar baseline
+#### Add hard assertions to `smoke_beopt_1h`
+- Zone temp every timestep in [-10, 50] C
+- Total electric within 10x of OCHRE reference
+- ASHP Heater kWh > 0 (it IS running, just check it's reported)
 
-## Priority order
+### Phase 5: Additional oracle scenarios
 
-1. T1.1, T1.2 (directly catch FIX-029 class bugs)
-2. T3.1, T3.3 (catch thermal runaway)
-3. T4.1, T4.2 (energy conservation with solar)
-4. T6.1, T6.2 (smoke test hardening — quick wins)
-5. T2.1, T2.2, T2.4 (OCHRE reference comparison)
-6. T5.1, T5.2 (combined physics)
-7. T7.1, T7.2 (edge cases)
-8. T1.3, T2.3, T3.2, T6.3 (completeness)
+Generate OCHRE reference data for diverse conditions:
+1. **Summer cooling** — July afternoon, high solar, AC running
+2. **Winter heating** — January night, no solar, furnace running
+3. **Shoulder season** — March, moderate solar, mixed heating/cooling
+4. **Multi-zone** — Building with attic + conditioned + basement
 
-## Known open issues
+Each scenario: capture OCHRE CSV, commit as fixture, add oracle test.
 
-- **Missing surfaces**: Attic roof, attic walls, doors not appearing as exterior
-  surfaces in HARES. This accounts for most of the 27x opaque solar gap.
-- **Heater under-heating**: HARES 0.395 kWh vs OCHRE 0.911 kWh. Likely related
-  to missing surfaces reducing envelope heat loss.
-- **Zone temp output**: CSV column `Temperature - Indoor (C)` shows 0.0 in some
-  parsers — investigate whether this is a reporting bug or actual values.
+## Priority
 
-## Files to create/modify
+1. Phase 3 — unit tests (fast to write, catch FIX-029 class bugs immediately)
+2. Phase 4 — smoke hardening (quick wins, catch regressions)
+3. Phase 1 — expose internals (needed for meaningful oracle comparison)
+4. Phase 2 — oracle integration tests (highest long-term value)
+5. Phase 5 — diverse scenarios (coverage breadth)
 
-- `crates/hares-envelope/src/thermal_solver.rs` mod tests: T1.1-T1.2, T3.1-T3.3, T4.1-T4.2, T5.1-T5.2, T7.1-T7.2
-- `crates/hares-envelope/src/boundary_rc.rs` mod tests: T1.3
-- `tests/regression/smoke_test.rs`: T6.1-T6.3
-- `tests/parity/`: T2.1-T2.4
+## Known issues to investigate alongside
+
+- **Missing exterior surfaces**: Attic roof, attic walls, doors not wired as
+  exterior surfaces. This is the dominant cause of the opaque solar gap (4 kW
+  vs 116 kW) and likely the heater energy gap (0.4 vs 0.9 kWh).
+- **LWR magnitude**: OCHRE shows -7 kW wall LWR and -29 kW roof LWR. HARES
+  reports ~18 kW in the "lwr" debug (but this includes solar). Need to separate
+  solar and LWR in diagnostics.
+- **Attic zone thermal coupling**: OCHRE shows attic at 14.5 C (between outdoor
+  11.7 C and indoor 21.3 C). HARES zone 2 is at ~19.8 C — suggests attic
+  insulation or coupling is wrong.
+
+## Files
+
+- `tests/fixtures/parity/beopt_smoke_1h/ochre_reference.csv` — OCHRE oracle data (committed)
+- `tests/parity/mod.rs` or `tests/envelope_oracle.rs` — oracle integration tests
+- `crates/hares-envelope/src/thermal_solver.rs` mod tests — physics unit tests
+- `tests/regression/smoke_test.rs` — smoke hardening
+- `crates/hares-io/src/output/` — envelope column wiring
