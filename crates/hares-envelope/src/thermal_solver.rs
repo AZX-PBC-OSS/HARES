@@ -280,6 +280,29 @@ pub enum ThermalSolverError {
 
 pub type Result<T> = std::result::Result<T, ThermalSolverError>;
 
+/// Per-timestep envelope component gains [W] for output/diagnostics.
+///
+/// All values are signed: positive = heat flowing INTO the indoor zone.
+/// Populated after each `resolve()` call; read via [`ThermalSolver::component_gains`].
+#[derive(Debug, Clone, Default)]
+pub struct EnvelopeComponentGains {
+    /// Window transmitted solar (SHGC × IAM × area × POA) [W].
+    pub window_solar_w: f64,
+    /// Opaque exterior surface solar + LWR combined injection [W].
+    /// Includes surfaces routed through both iterative and non-iterative paths.
+    pub opaque_solar_lwr_w: f64,
+    /// Interior longwave radiation exchange net to indoor zone [W].
+    pub interior_lwr_w: f64,
+    /// Infiltration sensible heat gain (indoor zone only) [W].
+    pub infiltration_w: f64,
+    /// Forced mechanical ventilation sensible heat gain (indoor zone only) [W].
+    pub ventilation_w: f64,
+    /// Natural ventilation sensible heat gain [W].
+    pub natural_ventilation_w: f64,
+    /// Internal sensible gains from equipment ports (HVAC, appliances) [W].
+    pub port_sensible_w: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ThermalSolver {
     model: StateSpaceModel,
@@ -292,6 +315,8 @@ pub struct ThermalSolver {
     u_buf: DVector<f64>,
     /// Reusable latent-load accumulator: cleared at the start of each infiltration pass.
     latent_buf: HashMap<ZoneId, f64>,
+    /// Last-step component gains for output/diagnostics.
+    component_gains: EnvelopeComponentGains,
 }
 
 impl ThermalSolver {
@@ -301,6 +326,11 @@ impl ThermalSolver {
 
     pub fn config(&self) -> &ThermalSolverConfig {
         &self.config
+    }
+
+    /// Per-component envelope gains from the most recent `resolve()` call.
+    pub fn component_gains(&self) -> &EnvelopeComponentGains {
+        &self.component_gains
     }
 
     pub fn model_dims(&self) -> (usize, usize, usize) {
@@ -344,6 +374,7 @@ impl ThermalSolver {
             last_u,
             u_buf,
             latent_buf,
+            component_gains: EnvelopeComponentGains::default(),
         })
     }
 
@@ -458,29 +489,41 @@ impl ThermalSolver {
         }
 
         self.apply_outdoor_inputs(&mut u, env);
-        let u_after_outdoor = u.iter().sum::<f64>();
-        self.apply_solar_inputs(&mut u, env);
-        let u_after_window_solar = u.iter().sum::<f64>() - u_after_outdoor;
-        self.apply_exterior_solar_inputs(&mut u, env);
-        let u_after_opaque_solar = u.iter().sum::<f64>() - u_after_outdoor - u_after_window_solar;
-        self.apply_exterior_longwave_inputs_iterative(&mut u, env);
-        let u_after_lwr = u.iter().sum::<f64>() - u_after_outdoor - u_after_window_solar - u_after_opaque_solar;
-        self.apply_interior_longwave_inputs(&mut u, env);
-        self.apply_port_sensible_inputs(&mut u, ports);
-        let u_total = u.iter().sum::<f64>();
 
-        static SOLVER_STEP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let ss = SOLVER_STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if ss < 5 || ss.is_multiple_of(10) {
-            eprintln!(
-                "[solver s={ss}] u_total={u_total:.0}W outdoor={u_after_outdoor:.0} win_solar={u_after_window_solar:.0} opaque_solar={u_after_opaque_solar:.0} lwr={u_after_lwr:.0}",
-            );
-        }
+        let u_pre = u.iter().sum::<f64>();
+        self.apply_solar_inputs(&mut u, env);
+        let window_solar_w = u.iter().sum::<f64>() - u_pre;
+
+        let u_pre = u.iter().sum::<f64>();
+        self.apply_exterior_solar_inputs(&mut u, env);
+        self.apply_exterior_longwave_inputs_iterative(&mut u, env);
+        let opaque_solar_lwr_w = u.iter().sum::<f64>() - u_pre;
+
+        let u_pre = u.iter().sum::<f64>();
+        self.apply_interior_longwave_inputs(&mut u, env);
+        let interior_lwr_w = u.iter().sum::<f64>() - u_pre;
+
+        let u_pre = u.iter().sum::<f64>();
+        self.apply_port_sensible_inputs(&mut u, ports);
+        let port_sensible_w = u.iter().sum::<f64>() - u_pre;
 
         // Swap out the latent buffer so we can call &self methods on the rest of the struct.
         let mut latent_by_zone = std::mem::take(&mut self.latent_buf);
         latent_by_zone.clear();
+
+        let u_pre = u.iter().sum::<f64>();
         apply_infiltration_and_ventilation(&self.config, &mut u, env, &mut latent_by_zone);
+        let infiltration_vent_w = u.iter().sum::<f64>() - u_pre;
+
+        self.component_gains = EnvelopeComponentGains {
+            window_solar_w,
+            opaque_solar_lwr_w,
+            interior_lwr_w,
+            infiltration_w: infiltration_vent_w, // combined for now; split later
+            ventilation_w: 0.0,
+            natural_ventilation_w: 0.0,
+            port_sensible_w,
+        };
 
         for &zone in ideal_hvac_zones {
             let Some(&input_idx) = self.config.zone_sensible_input_indices.get(&zone) else {

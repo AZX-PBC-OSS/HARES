@@ -291,6 +291,202 @@ pub fn terrain_wind_speed_for_class_typed(
 }
 
 // ---------------------------------------------------------------------------
+// AIM-2 coefficients from ACH50 (Walker & Wilson 1998)
+//
+// Converts a blower-door ACH50 measurement to the runtime `c_s`, `c_w`,
+// `shelter_coeff` parameters consumed by `ashrae_wind_stack()`.
+//
+// References:
+//   Walker & Wilson (1998) "Field Validation of Algebraic Equations for Stack
+//   and Wind Driven Air Infiltration Calculations", HVAC&R Research 4(2).
+//   ASHRAE Handbook of Fundamentals 2021, Chapter 16.
+//   EnergyPlus Engineering Reference §15.4 (AIM-2 Enhanced Model).
+//   OCHRE: vendors/OCHRE/ochre/utils/envelope.py:488-633.
+// ---------------------------------------------------------------------------
+
+/// Shielding class for the AIM-2 shelter coefficient.
+///
+/// Values from Walker & Wilson (1998) Table 3 and ResStock `get_aim2_shelter_coefficient`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShieldingClass {
+    /// Typical suburban — `shelter_raw = 0.5`.
+    Normal,
+    /// Flat terrain, few obstructions — `shelter_raw = 0.9`.
+    Exposed,
+    /// Dense surroundings — `shelter_raw = 0.3`.
+    WellShielded,
+}
+
+impl ShieldingClass {
+    /// Raw shelter coefficient before terrain/flue correction.
+    /// Walker & Wilson (1998) Table 3; ResStock `airflow.get_aim2_shelter_coefficient`.
+    pub fn raw(self) -> f64 {
+        match self {
+            Self::Normal => 0.5,
+            Self::Exposed => 0.9,
+            Self::WellShielded => 0.3,
+        }
+    }
+}
+
+/// Foundation leakage distribution class.
+///
+/// Walker & Wilson (1998) Table 1 — leakage fractions for ceiling/walls/floor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FoundationLeakageClass {
+    /// Vented crawlspace: ceil=0.15, wall=0.35, floor=0.50.
+    VentedCrawlspace,
+    /// Slab, basement, or unvented crawlspace: ceil=0.25, wall=0.50, floor=0.25.
+    Other,
+}
+
+/// Input parameters for `aim2_coefficients_from_ach50`.
+#[derive(Clone, Debug)]
+pub struct Aim2Params {
+    /// Blower-door result at 50 Pa [ACH].
+    pub ach50: f64,
+    /// Conditioned volume [m³].
+    pub volume_m3: f64,
+    /// Infiltration height [m] (total envelope height for stack effect).
+    pub infiltration_height_m: f64,
+    /// Foundation leakage distribution.
+    pub foundation: FoundationLeakageClass,
+    /// Site shielding class.
+    pub shielding: ShieldingClass,
+    /// Terrain class for wind speed correction.
+    pub terrain: TerrainClass,
+    /// Whether a flue or chimney is present in conditioned space.
+    pub has_flue: bool,
+    /// Pressure exponent; use [`N_I_DEFAULT`] (0.65) for typical residential.
+    pub n_i: f64,
+    /// Number of conditioned floors above grade (used for flue correction).
+    pub floors_above_grade: f64,
+}
+
+/// Output coefficients from `aim2_coefficients_from_ach50`.
+#[derive(Clone, Debug)]
+pub struct Aim2Coefficients {
+    /// Combined stack coefficient `C × Cs` [m³/s / K^n_i].
+    pub c_s: f64,
+    /// Combined wind coefficient `C × Cw` [m³/s / (m/s)^(2·n_i)].
+    pub c_w: f64,
+    /// Shelter coefficient (terrain-corrected) for `ashrae_wind_stack()`.
+    pub shelter_coeff: f64,
+    /// Pressure exponent (passed through for convenience).
+    pub n_i: f64,
+}
+
+/// Convert ACH50 blower-door result to AIM-2 runtime coefficients.
+///
+/// Implements the full Walker & Wilson (1998) SI pipeline:
+/// ACH50 → flow coefficient C → leakage distribution → stack/wind factors
+/// → `c_s`, `c_w`, `shelter_coeff` for [`ashrae_wind_stack()`].
+///
+/// # References
+/// - Walker & Wilson (1998), Equations 9–25.
+/// - ASHRAE HOF 2021 Ch. 16.
+/// - OCHRE `calculate_ashrae_infiltration_params` (envelope.py:488-633).
+pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
+    /// Standard air density [kg/m³] at ~20 °C, 101.325 kPa.
+    const RHO: f64 = 1.2041;
+    /// Standard gravity [m/s²].
+    const G: f64 = 9.80665;
+    /// Assumed indoor temperature [K] ≈ 23 °C (73.5 °F) — matches OCHRE.
+    const T_IN_K: f64 = 296.15;
+
+    let n_i = params.n_i.clamp(N_I_MIN, N_I_MAX);
+
+    // Step 1: Flow coefficient C [m³/s/Pa^n_i]
+    // Q_50 = ACH50 × V / 3600 [m³/s], ΔP = 50 Pa
+    // Q_50 = C × 50^n_i  →  C = Q_50 / 50^n_i
+    let c_flow = (params.ach50 * params.volume_m3) / (SECONDS_PER_HOUR * 50.0_f64.powf(n_i));
+
+    // Step 2: Leakage distribution — Walker & Wilson (1998) Table 1
+    let (leak_ceil, leak_floor) = match params.foundation {
+        FoundationLeakageClass::VentedCrawlspace => (0.15, 0.50),
+        FoundationLeakageClass::Other => (0.25, 0.25),
+    };
+
+    let y_i = if params.has_flue { 0.2 } else { 0.0 };
+    // Walker & Wilson (1998) §3: vertical fraction and asymmetry
+    let r_i = (leak_ceil + leak_floor) * (1.0 - y_i);
+    let x_i_raw = (leak_ceil - leak_floor) * (1.0 - y_i);
+
+    // Step 3: Stack factor — Walker & Wilson (1998) Eq. 9-12
+    let m_o = (x_i_raw + (2.0 * n_i + 1.0) * y_i).powi(2) / (2.0 - r_i);
+    let m_i = m_o.min(1.0); // Eq. 10-11
+
+    let f_i = if params.has_flue {
+        // Flue correction — Walker & Wilson (1998) Eq. 12-13
+        let ncfl = params.floors_above_grade.max(1.0);
+        let z_f = (ncfl + 0.5) / ncfl;
+        // Critical ceiling-floor leakage difference (Eq. 13)
+        let x_c = r_i + (2.0 * (1.0 - r_i - y_i)) / (n_i + 1.0)
+            - 2.0 * y_i * (z_f - 1.0).powf(n_i);
+        // Additive flue function (Eq. 12)
+        n_i * y_i
+            * (z_f - 1.0).powf((3.0 * n_i - 1.0) / 3.0)
+            * (1.0
+                - (3.0 * (x_c - x_i_raw).powi(2) * r_i.powf(1.0 - n_i))
+                    / (2.0 * (z_f + 1.0)))
+    } else {
+        0.0
+    };
+
+    // Walker & Wilson (1998) Eq. 9
+    let f_s =
+        ((1.0 + n_i * r_i) / (n_i + 1.0)) * (0.5 - 0.5 * m_i.powf(1.2)).powf(n_i + 1.0) + f_i;
+
+    // Step 4: Stack coefficient Cs — pure SI
+    // Cs = f_s × (ρ·g·H / T_in)^n_i  [(Pa/K)^n_i]
+    let cs = f_s * (RHO * G * params.infiltration_height_m / T_IN_K).powf(n_i);
+
+    // Step 5: Wind factor — Walker & Wilson (1998) Eq. 15-25
+    let f_w = if matches!(params.foundation, FoundationLeakageClass::VentedCrawlspace) {
+        // Crawlspace modified wind factor (Eq. 20-24)
+        let x_i = x_i_raw.min(1.0 - 2.0 * y_i); // Eq. 25 clamp
+        let r_x = 1.0 - r_i * (n_i / 2.0 + 0.2); // Eq. 21
+        let y_x = 1.0 - y_i / 4.0; // Eq. 22
+        let x_s = (1.0 - r_i) / 5.0 - 1.5 * y_i; // Eq. 24
+        let x_x = 1.0 - (((x_i - x_s) / (2.0 - r_i)).powi(2)).powf(0.75); // Eq. 23
+        0.19 * (2.0 - n_i) * x_x * r_x * y_x // Eq. 20
+    } else {
+        // Non-crawlspace wind factor (Eq. 15-19)
+        let j_i = (x_i_raw + r_i + 2.0 * y_i) / 2.0;
+        0.19 * (2.0 - n_i) * (1.0 - ((x_i_raw + r_i) / 2.0).powf(1.5 - y_i))
+            - y_i / 4.0 * (j_i - 2.0 * y_i * j_i.powi(4))
+    };
+
+    // Step 6: Wind coefficient Cw — pure SI
+    // Cw = f_w × (ρ/2)^n_i  [(Pa/(m/s)²)^n_i]
+    let cw = f_w * (RHO / 2.0).powf(n_i);
+
+    // Step 7: Combined coefficients
+    let c_s = c_flow * cs;
+    let c_w = c_flow * cw;
+
+    // Step 8: Shelter coefficient — terrain-corrected
+    // f_t from terrain_wind_speed() with u_met=1.0 at infiltration height
+    let f_t = terrain_wind_speed(
+        1.0,
+        params.terrain.alpha(),
+        params.terrain.delta_m(),
+        params.infiltration_height_m,
+    );
+    let s_wflue = if params.has_flue { 1.0 } else { 0.0 };
+    // OCHRE envelope.py:521: inf_sft = f_t * (shelter * (1-y_i) + s_wflue * 1.5 * y_i)
+    let shelter_coeff =
+        f_t * (params.shielding.raw() * (1.0 - y_i) + s_wflue * 1.5 * y_i);
+
+    Aim2Coefficients {
+        c_s,
+        c_w,
+        shelter_coeff,
+        n_i,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ELA coefficient calculation
 //
 // Walker & Wilson (1998) "Field Validation of Algebraic Equations for Stack
@@ -844,5 +1040,186 @@ mod tests {
         let f_s = 1.0 / 3.0;
         let expected = f_s * f_s * 9.80665 * 2.5 / 296.15 * 1e-2;
         approx_eq(stack, expected, 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    // AIM-2 from ACH50 (Walker & Wilson 1998)
+    // -----------------------------------------------------------------------
+
+    use super::{
+        Aim2Params, FoundationLeakageClass, ShieldingClass, aim2_coefficients_from_ach50,
+    };
+
+    fn typical_aim2_params() -> Aim2Params {
+        Aim2Params {
+            ach50: 7.0,
+            volume_m3: 400.0,
+            infiltration_height_m: 5.0,
+            foundation: FoundationLeakageClass::Other,
+            shielding: ShieldingClass::Normal,
+            terrain: TerrainClass::Suburban,
+            has_flue: false,
+            n_i: N_I_DEFAULT,
+            floors_above_grade: 2.0,
+        }
+    }
+
+    #[test]
+    fn aim2_flow_coefficient_matches_formula() {
+        // C = ACH50 × V / (3600 × 50^n_i)
+        // 7 × 400 / (3600 × 50^0.65) = 2800 / (3600 × 14.6247..) = 2800 / 45783.5.. ≈ 0.06117
+        let p = typical_aim2_params();
+        let expected_c = (p.ach50 * p.volume_m3) / (3600.0 * 50.0_f64.powf(p.n_i));
+        approx_eq(expected_c, 0.061_17, 0.001);
+    }
+
+    #[test]
+    fn aim2_produces_positive_coefficients() {
+        let coeffs = aim2_coefficients_from_ach50(&typical_aim2_params());
+        assert!(coeffs.c_s > 0.0, "c_s must be positive: {}", coeffs.c_s);
+        assert!(coeffs.c_w > 0.0, "c_w must be positive: {}", coeffs.c_w);
+        assert!(
+            coeffs.shelter_coeff > 0.0,
+            "shelter must be positive: {}",
+            coeffs.shelter_coeff
+        );
+    }
+
+    #[test]
+    fn aim2_higher_ach50_increases_coefficients() {
+        let mut p_low = typical_aim2_params();
+        p_low.ach50 = 3.0;
+        let mut p_high = typical_aim2_params();
+        p_high.ach50 = 10.0;
+
+        let low = aim2_coefficients_from_ach50(&p_low);
+        let high = aim2_coefficients_from_ach50(&p_high);
+
+        assert!(
+            high.c_s > low.c_s,
+            "higher ACH50 must increase c_s: low={}, high={}",
+            low.c_s,
+            high.c_s
+        );
+        assert!(
+            high.c_w > low.c_w,
+            "higher ACH50 must increase c_w: low={}, high={}",
+            low.c_w,
+            high.c_w
+        );
+    }
+
+    #[test]
+    fn aim2_foundation_affects_wind_coefficient() {
+        let mut p_slab = typical_aim2_params();
+        p_slab.foundation = FoundationLeakageClass::Other;
+        let mut p_crawl = typical_aim2_params();
+        p_crawl.foundation = FoundationLeakageClass::VentedCrawlspace;
+
+        let slab = aim2_coefficients_from_ach50(&p_slab);
+        let crawl = aim2_coefficients_from_ach50(&p_crawl);
+
+        // Different foundation types must produce different wind factors
+        assert!(
+            (slab.c_w - crawl.c_w).abs() > 1e-10,
+            "foundation must affect c_w: slab={}, crawl={}",
+            slab.c_w,
+            crawl.c_w
+        );
+    }
+
+    #[test]
+    fn aim2_flue_increases_stack_coefficient() {
+        let mut p_no = typical_aim2_params();
+        p_no.has_flue = false;
+        let mut p_yes = typical_aim2_params();
+        p_yes.has_flue = true;
+
+        let no_flue = aim2_coefficients_from_ach50(&p_no);
+        let with_flue = aim2_coefficients_from_ach50(&p_yes);
+
+        assert!(
+            with_flue.c_s > no_flue.c_s,
+            "flue must increase c_s: no_flue={}, with_flue={}",
+            no_flue.c_s,
+            with_flue.c_s
+        );
+    }
+
+    #[test]
+    fn aim2_shielding_classes_map_correctly() {
+        approx_eq(ShieldingClass::Normal.raw(), 0.5, 1e-15);
+        approx_eq(ShieldingClass::Exposed.raw(), 0.9, 1e-15);
+        approx_eq(ShieldingClass::WellShielded.raw(), 0.3, 1e-15);
+    }
+
+    #[test]
+    fn aim2_no_flue_slab_hand_calculated() {
+        // Hand-calculate Walker-Wilson for: no flue, slab, n_i=0.65
+        // Leakage: ceil=0.25, floor=0.25 → r_i=0.50, x_i=0.0, y_i=0.0
+        // m_o = (0 + 0)² / (2 - 0.5) = 0
+        // m_i = 0
+        // f_s = ((1 + 0.65×0.5)/(0.65+1)) × (0.5 - 0)^(1.65) + 0
+        //     = (1.325/1.65) × 0.5^1.65
+        //     = 0.80303 × 0.31855 = 0.25581
+        let n_i = 0.65_f64;
+        let r_i = 0.5_f64;
+        let expected_f_s = ((1.0 + n_i * r_i) / (n_i + 1.0))
+            * (0.5_f64).powf(n_i + 1.0);
+        approx_eq(expected_f_s, 0.255_81, 0.001);
+
+        // f_w (non-crawlspace, no flue): J_i = (0 + 0.5 + 0)/2 = 0.25
+        // f_w = 0.19×(2-0.65)×(1 - (0.5/2)^1.5) - 0
+        //     = 0.19×1.35×(1 - 0.25^1.5)
+        //     = 0.2565 × (1 - 0.125) = 0.2565 × 0.875 = 0.22444
+        let expected_f_w = 0.19 * (2.0 - n_i)
+            * (1.0 - (0.25_f64).powf(1.5));
+        approx_eq(expected_f_w, 0.224_44, 0.001);
+
+        let p = Aim2Params {
+            ach50: 5.0,
+            volume_m3: 300.0,
+            infiltration_height_m: 5.0,
+            foundation: FoundationLeakageClass::Other,
+            shielding: ShieldingClass::Normal,
+            terrain: TerrainClass::Suburban,
+            has_flue: false,
+            n_i,
+            floors_above_grade: 1.0,
+        };
+        let coeffs = aim2_coefficients_from_ach50(&p);
+
+        let c_flow = (5.0 * 300.0) / (3600.0 * 50.0_f64.powf(n_i));
+        let rho = 1.2041_f64;
+        let g = 9.80665_f64;
+        let t_in = 296.15_f64;
+
+        let cs = expected_f_s * (rho * g * 5.0 / t_in).powf(n_i);
+        let cw = expected_f_w * (rho / 2.0).powf(n_i);
+        let expected_c_s = c_flow * cs;
+        let expected_c_w = c_flow * cw;
+
+        approx_eq(coeffs.c_s, expected_c_s, 1e-6);
+        approx_eq(coeffs.c_w, expected_c_w, 1e-6);
+    }
+
+    #[test]
+    fn aim2_physical_reasonableness() {
+        // Typical US home: 7 ACH50, 400 m³, 5m height
+        // Should produce natural ACH roughly 0.2-0.8 under moderate conditions
+        let coeffs = aim2_coefficients_from_ach50(&typical_aim2_params());
+        let q = super::ashrae_wind_stack(
+            coeffs.c_s,
+            coeffs.c_w,
+            15.0, // 15 K delta_t
+            4.0,  // 4 m/s wind
+            coeffs.shelter_coeff,
+            coeffs.n_i,
+        );
+        let ach = q / 400.0 * 3600.0;
+        assert!(
+            (0.1..=1.5).contains(&ach),
+            "natural ACH={ach:.3} outside reasonable range [0.1, 1.5]"
+        );
     }
 }

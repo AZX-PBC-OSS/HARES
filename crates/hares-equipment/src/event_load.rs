@@ -356,7 +356,12 @@ impl Equipment for EventBasedLoad {
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
 
-        self.fuel_type = parse_fuel_type(config.get_str("fuel_type")).unwrap_or(FuelType::Electric);
+        self.fuel_type = match config.get_str("fuel_type") {
+            None => FuelType::Electric,
+            Some(raw) => parse_fuel_type(Some(raw)).ok_or_else(|| {
+                HaresError::Equipment(format!("unrecognised fuel_type: {raw}"))
+            })?,
+        };
         self.descriptor.fuel = self.fuel_type;
 
         self.phase = EventPhase::Idle;
@@ -716,7 +721,12 @@ impl Equipment for WetAppliance {
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
 
-        self.fuel_type = parse_fuel_type(config.get_str("fuel_type")).unwrap_or(FuelType::Electric);
+        self.fuel_type = match config.get_str("fuel_type") {
+            None => FuelType::Electric,
+            Some(raw) => parse_fuel_type(Some(raw)).ok_or_else(|| {
+                HaresError::Equipment(format!("unrecognised fuel_type: {raw}"))
+            })?,
+        };
         self.descriptor.fuel = self.fuel_type;
 
         let total_cycle_duration_s: f64 = self.phases.iter().map(|p| p.duration_s).sum();

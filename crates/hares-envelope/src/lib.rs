@@ -30,7 +30,7 @@ pub use state_space::{
     eigenvalue_check, matrix_exp, van_loan_discretize,
 };
 pub use thermal_solver::{
-    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo,
-    NaturalVentilationConfig, ThermalSolver, ThermalSolverConfig,
+    EnvelopeComponentGains, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
+    InteriorSurfaceInfo, NaturalVentilationConfig, ThermalSolver, ThermalSolverConfig,
     ThermalSolverError, VentilationConfig, WindowSolarProperties,
 };

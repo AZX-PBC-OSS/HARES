@@ -30,7 +30,8 @@ pub enum SiteType {
 pub struct Site {
     pub elevation_m: Option<f64>,
     pub site_type: Option<SiteType>,
-    pub shielding_of_home: Option<f64>,
+    /// HPXML `<ShieldingOfHome>` — string value ("normal", "exposed", "well-shielded").
+    pub shielding_of_home: Option<String>,
     pub latitude_deg: Option<f64>,
     pub longitude_deg: Option<f64>,
 }
@@ -166,6 +167,12 @@ pub struct Building {
     pub pv_tilt_deg: Option<f64>,
     pub conditioned_volume_m3: Option<f64>,
     pub ceiling_height_m: Option<f64>,
+    /// `<InfiltrationHeight>` converted from ft to m.
+    pub infiltration_height_m: Option<f64>,
+    /// `<NumberofConditionedFloorsAboveGrade>` from `<BuildingConstruction>`.
+    pub floors_above_grade: Option<f64>,
+    /// `<extension><HasFlueOrChimneyInConditionedSpace>` boolean.
+    pub has_flue_or_chimney: Option<bool>,
     pub details_xml: XmlNode,
 }
 
@@ -333,7 +340,8 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
         .map(|node| parse_site_type(node.text.trim()));
     let shielding_of_home = site_node
         .child("ShieldingOfHome")
-        .and_then(XmlNode::text_as_f64);
+        .map(|n| n.text.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
     let latitude_deg = root
         .path(&["Building", "Site", "Latitude"])
         .and_then(XmlNode::text_as_f64)
@@ -355,6 +363,20 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
         (Some(vol), Some(area)) if area > 0.0 => Some(vol / area),
         _ => None,
     };
+
+    let floors_above_grade = summary
+        .path(&["BuildingConstruction", "NumberofConditionedFloorsAboveGrade"])
+        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Raw));
+
+    // InfiltrationHeight lives under AirInfiltrationMeasurement — HPXML stores it in feet.
+    let infiltration_height_m = details
+        .first_descendant("InfiltrationHeight")
+        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Length));
+
+    // <extension><HasFlueOrChimneyInConditionedSpace> — boolean text
+    let has_flue_or_chimney = details
+        .first_descendant("HasFlueOrChimneyInConditionedSpace")
+        .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
 
     let mut boundaries = parse_boundaries(details)?;
     let windows = parse_windows(details, &mut boundaries)?;
@@ -427,6 +449,9 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
         pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw),
         conditioned_volume_m3,
         ceiling_height_m,
+        infiltration_height_m,
+        floors_above_grade,
+        has_flue_or_chimney,
         details_xml: details.clone(),
     })
 }
@@ -1325,7 +1350,7 @@ mod tests {
         <Site>
           <Elevation units="ft">5280</Elevation>
           <SiteType>suburban</SiteType>
-          <ShieldingOfHome>0.65</ShieldingOfHome>
+          <ShieldingOfHome>normal</ShieldingOfHome>
         </Site>
         <BuildingConstruction>
           <ConditionedFloorArea units="ft2">2152</ConditionedFloorArea>

@@ -1,0 +1,586 @@
+//! Envelope oracle tests: compare HARES thermal envelope behavior against
+//! OCHRE reference output for the same building, weather, and schedule inputs.
+//!
+//! OCHRE is treated as the oracle — not because it's perfect, but because it's
+//! a validated reference implementation. When HARES deviates, we must understand
+//! WHY and document whether our physics is more accurate or we have a bug.
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use chrono::{Duration, TimeZone, Utc};
+    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+    use hares_io::OutputFormat;
+
+    fn vendor_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendors/OCHRE")
+    }
+
+    fn project_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn fixture_dir() -> PathBuf {
+        project_root().join("tests/fixtures/parity/beopt_smoke_1h")
+    }
+
+    fn beopt_config(output_path: PathBuf) -> DwellingConfig {
+        DwellingConfig {
+            hpxml_path: vendor_dir().join("ochre/defaults/Input Files/BEopt_example.xml"),
+            schedule_path: vendor_dir()
+                .join("ochre/defaults/Input Files/BEopt_example_schedule.csv"),
+            weather_path: vendor_dir()
+                .join("ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            defaults_path: Some(project_root().join("defaults")),
+            sim_config: SimulationConfig {
+                start_time: Utc.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),
+                duration: Duration::hours(1),
+                time_res: Duration::minutes(1),
+                output_verbosity: 6, // envelope component breakdown
+                output_path: Some(output_path),
+                output_format: OutputFormat::Csv,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 42,
+            },
+            overrides: None,
+            bldg_id: 1,
+            initialization_duration: None,
+        }
+    }
+
+    // ── OCHRE oracle values ─────────────────────────────────────────────────
+    // BEopt 1h (May 5 2019, 12:00 PM, Denver, 1-min resolution, 60 steps)
+    // Source: vendors/OCHRE smoke test output (OCHRE 0.9.2)
+
+    struct OracleValue {
+        name: &'static str,
+        mean: f64,
+        min: f64,
+        max: f64,
+    }
+
+    // Zone temperatures
+    const OCHRE_TEMP_INDOOR: OracleValue = OracleValue {
+        name: "Temperature - Indoor (C)",
+        mean: 21.3, min: 20.8, max: 22.0,
+    };
+    const OCHRE_TEMP_ATTIC: OracleValue = OracleValue {
+        name: "Temperature - Attic (C)",
+        mean: 14.5, min: 12.0, max: 18.2,
+    };
+
+    // Exterior surface solar gains [W] (absorbed at exterior surface)
+    const OCHRE_EXT_WALL_SOLAR: OracleValue = OracleValue {
+        name: "Exterior Wall Ext. Solar Gain (W)",
+        mean: 18_572.5, min: 16_329.1, max: 20_765.3,
+    };
+    const OCHRE_ATTIC_WALL_SOLAR: OracleValue = OracleValue {
+        name: "Attic Wall Ext. Solar Gain (W)",
+        mean: 4_306.4, min: 2_929.5, max: 5_717.6,
+    };
+    const OCHRE_ATTIC_ROOF_SOLAR: OracleValue = OracleValue {
+        name: "Attic Roof Ext. Solar Gain (W)",
+        mean: 92_799.5, min: 89_911.1, max: 96_054.7,
+    };
+    const OCHRE_WINDOW_EXT_SOLAR: OracleValue = OracleValue {
+        name: "Window Ext. Solar Gain (W)",
+        mean: 536.8, min: 503.2, max: 583.7,
+    };
+    const OCHRE_DOOR_EXT_SOLAR: OracleValue = OracleValue {
+        name: "Door Ext. Solar Gain (W)",
+        mean: 159.5, min: 151.7, max: 168.1,
+    };
+
+    // Exterior surface LWR gains [W] (net LW radiation, always negative = cooling)
+    const OCHRE_EXT_WALL_LWR: OracleValue = OracleValue {
+        name: "Exterior Wall Ext. LWR Gain (W)",
+        mean: -7_007.4, min: -8_303.2, max: -2_285.6,
+    };
+    const OCHRE_ATTIC_ROOF_LWR: OracleValue = OracleValue {
+        name: "Attic Roof Ext. LWR Gain (W)",
+        mean: -29_359.3, min: -43_591.9, max: -7_719.4,
+    };
+
+    // Exterior surface temperatures [C]
+    const OCHRE_EXT_WALL_SURF_TEMP: OracleValue = OracleValue {
+        name: "Exterior Wall Ext. Surface Temperature (C)",
+        mean: 23.4, min: 12.1, max: 26.8,
+    };
+    const OCHRE_ATTIC_ROOF_SURF_TEMP: OracleValue = OracleValue {
+        name: "Attic Roof Ext. Surface Temperature (C)",
+        mean: 42.3, min: 12.1, max: 60.0,
+    };
+
+    // Indoor zone heat gains [W] (positive = heating the zone)
+    const OCHRE_WALL_HEAT_GAIN: OracleValue = OracleValue {
+        name: "Wall Heat Gain - Indoor (W)",
+        mean: -344.8, min: -520.3, max: 9.5,
+    };
+    const OCHRE_ROOF_HEAT_GAIN: OracleValue = OracleValue {
+        name: "Roof Heat Gain - Indoor (W)",
+        mean: -171.1, min: -295.7, max: -2.3,
+    };
+    const OCHRE_FLOOR_HEAT_GAIN: OracleValue = OracleValue {
+        name: "Floor Heat Gain - Indoor (W)",
+        mean: -758.7, min: -931.7, max: 107.5,
+    };
+    const OCHRE_WINDOW_HEAT_GAIN: OracleValue = OracleValue {
+        name: "Window Heat Gain - Indoor (W)",
+        mean: -52.5, min: -68.5, max: 1.2,
+    };
+    const OCHRE_WINDOW_SOLAR_TRANSMITTED: OracleValue = OracleValue {
+        name: "Window Transmitted Solar Gain (W)",
+        mean: 356.1, min: 333.9, max: 387.3,
+    };
+    const OCHRE_INFILTRATION_INDOOR: OracleValue = OracleValue {
+        name: "Infiltration Heat Gain - Indoor (W)",
+        mean: -11.7, min: -14.3, max: -9.7,
+    };
+    const OCHRE_VENTILATION_INDOOR: OracleValue = OracleValue {
+        name: "Forced Ventilation Heat Gain - Indoor (W)",
+        mean: -267.6, min: -300.5, max: -238.5,
+    };
+    const OCHRE_INTERNAL_GAIN: OracleValue = OracleValue {
+        name: "Internal Heat Gain - Indoor (W)",
+        mean: 341.9, min: 341.9, max: 341.9,
+    };
+    const OCHRE_RADIATION_INDOOR: OracleValue = OracleValue {
+        name: "Radiation Heat Gain - Indoor (W)",
+        mean: 95.7, min: 59.4, max: 120.8,
+    };
+
+    // Attic zone
+    const OCHRE_INFILTRATION_ATTIC: OracleValue = OracleValue {
+        name: "Infiltration Heat Gain - Attic (W)",
+        mean: -376.1, min: -933.9, max: -81.3,
+    };
+    const OCHRE_RADIATION_ATTIC: OracleValue = OracleValue {
+        name: "Radiation Heat Gain - Attic (W)",
+        mean: 380.1, min: -72.5, max: 590.1,
+    };
+
+    // ── OCHRE RC circuit structure ──────────────────────────────────────────
+    // BEopt building: 2 zones (Indoor, Attic), 15 distinct exterior surfaces
+
+    struct OchreSurface {
+        name: &'static str,
+        count: usize,
+        total_area_m2: f64,
+        tilt_deg: f64,        // 0=horizontal roof, 90=wall, 180=floor
+        absorptance: f64,     // solar absorptance (0.6 opaque, 0.75 shingle)
+    }
+
+    const OCHRE_SURFACES: &[OchreSurface] = &[
+        OchreSurface { name: "Exterior Wall", count: 4, total_area_m2: 86.59, tilt_deg: 90.0, absorptance: 0.60 },
+        OchreSurface { name: "Attic Wall",    count: 2, total_area_m2: 26.85, tilt_deg: 90.0, absorptance: 0.60 },
+        OchreSurface { name: "Attic Roof",    count: 2, total_area_m2: 124.64, tilt_deg: 26.57, absorptance: 0.75 }, // pitched, not horizontal!
+        OchreSurface { name: "Window",         count: 4, total_area_m2: 15.61, tilt_deg: 90.0, absorptance: 0.0 },
+        OchreSurface { name: "Door",           count: 1, total_area_m2: 1.86,  tilt_deg: 90.0, absorptance: 0.60 },
+    ];
+
+    // OCHRE zone capacitances [J/K]
+    // C = rho * cp * V * multiplier = 1.2041 * 1006 * V * 7
+    const OCHRE_INDOOR_VOLUME_M3: f64 = 271.84;
+    const OCHRE_ATTIC_VOLUME_M3: f64 = 144.42;
+    const OCHRE_INDOOR_CAPACITANCE_JK: f64 = 1.2041 * 1006.0 * 271.84 * 7.0; // ~2.3 MJ/K
+    const OCHRE_ATTIC_CAPACITANCE_JK: f64 = 1.2041 * 1006.0 * 144.42 * 7.0;  // ~1.2 MJ/K
+
+    // ── Parse helpers ───────────────────────────────────────────────────────
+
+    fn parse_csv_columns(path: &PathBuf) -> BTreeMap<String, Vec<f64>> {
+        let contents = fs::read_to_string(path).expect("read output CSV");
+        let mut lines = contents.lines();
+        let header = lines.next().expect("header line");
+        let columns: Vec<&str> = header.split(',').map(|s| s.trim()).collect();
+
+        let mut data: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for col in &columns {
+            data.insert(col.to_string(), Vec::new());
+        }
+
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split(',').collect();
+            for (i, field) in fields.iter().enumerate() {
+                if i < columns.len() {
+                    if let Ok(v) = field.trim().parse::<f64>() {
+                        data.get_mut(columns[i]).unwrap().push(v);
+                    }
+                }
+            }
+        }
+        data
+    }
+
+    fn col_mean(data: &BTreeMap<String, Vec<f64>>, col: &str) -> Option<f64> {
+        data.get(col).and_then(|v| {
+            if v.is_empty() { None }
+            else { Some(v.iter().sum::<f64>() / v.len() as f64) }
+        })
+    }
+
+    fn col_range(data: &BTreeMap<String, Vec<f64>>, col: &str) -> Option<(f64, f64)> {
+        data.get(col).and_then(|v| {
+            if v.is_empty() { None }
+            else {
+                let mn = v.iter().copied().fold(f64::INFINITY, f64::min);
+                let mx = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                Some((mn, mx))
+            }
+        })
+    }
+
+    // ── Comparison helpers ──────────────────────────────────────────────────
+
+    struct Check {
+        name: String,
+        ochre: f64,
+        hares: f64,
+        tolerance_pct: f64,
+        passed: bool,
+        note: String,
+    }
+
+    impl Check {
+        fn compare_mean(
+            name: &str,
+            ochre: &OracleValue,
+            hares_val: Option<f64>,
+            tolerance_pct: f64,
+            note: &str,
+        ) -> Self {
+            let hares = hares_val.unwrap_or(f64::NAN);
+            let deviation_pct = if ochre.mean.abs() > 1e-6 {
+                ((hares - ochre.mean) / ochre.mean * 100.0).abs()
+            } else if hares.abs() > 1e-6 {
+                f64::INFINITY
+            } else {
+                0.0
+            };
+            Check {
+                name: name.to_string(),
+                ochre: ochre.mean,
+                hares,
+                tolerance_pct,
+                passed: deviation_pct <= tolerance_pct || hares.is_nan(),
+                note: if hares.is_nan() {
+                    format!("MISSING — {note}")
+                } else if deviation_pct <= tolerance_pct {
+                    format!("OK ({deviation_pct:+.1}%) — {note}")
+                } else {
+                    format!("DEVIATION {deviation_pct:+.1}% — {note}")
+                },
+            }
+        }
+    }
+
+    // ── Main oracle test ────────────────────────────────────────────────────
+
+    /// Compare HARES envelope thermal behavior against OCHRE oracle data.
+    ///
+    /// This test runs the BEopt example for 1 hour and compares per-component
+    /// thermal quantities against OCHRE reference output. Wide initial tolerances
+    /// narrow as we verify physics.
+    ///
+    /// When a check shows DEVIATION, investigate:
+    /// 1. Is HARES using better physics? Document why.
+    /// 2. Is there a bug? File a ticket.
+    /// 3. Is a feature missing? Track in the note.
+    #[test]
+    fn envelope_oracle_beopt_1h() {
+        let output_path = std::env::temp_dir().join("hares_envelope_oracle_beopt.csv");
+        let _ = fs::remove_file(&output_path);
+
+        let engine = SimulationEngine::new();
+        let result = engine
+            .run(beopt_config(output_path.clone()))
+            .expect("engine.run should succeed");
+
+        assert!(
+            !matches!(result.status, SimStatus::Failed(_)),
+            "simulation failed: {:?}",
+            result.status
+        );
+
+        let actual_path = result
+            .timeseries_path
+            .as_ref()
+            .cloned()
+            .unwrap_or(output_path.clone());
+
+        assert!(actual_path.exists(), "output CSV not found at {}", actual_path.display());
+        let hares = parse_csv_columns(&actual_path);
+        let _ = fs::remove_file(&actual_path);
+
+        // Also load OCHRE reference CSV for timeseries comparison
+        let ochre_csv = fixture_dir().join("ochre_reference.csv");
+        let ochre_ts = if ochre_csv.exists() {
+            Some(parse_csv_columns(&ochre_csv))
+        } else {
+            eprintln!("[oracle] OCHRE reference CSV not found at {}", ochre_csv.display());
+            None
+        };
+
+        // Print HARES column inventory
+        eprintln!("\n=== HARES output columns ({} total) ===", hares.len());
+        for (col, vals) in &hares {
+            if !vals.is_empty() {
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                eprintln!("  {col:55} n={:>3} mean={mean:>10.1}", vals.len());
+            }
+        }
+
+        let mut checks: Vec<Check> = Vec::new();
+
+        // ── Zone temperatures ───────────────────────────────────────────
+        eprintln!("\n=== Zone Temperatures ===");
+
+        checks.push(Check::compare_mean(
+            "Indoor zone temperature",
+            &OCHRE_TEMP_INDOOR,
+            col_mean(&hares, "Temperature - Indoor (C)"),
+            20.0, // within 20% (~4 C absolute)
+            "zone coupling, HVAC setpoint tracking",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Attic zone temperature",
+            &OCHRE_TEMP_ATTIC,
+            col_mean(&hares, "Temperature - Attic (C)")
+                .or_else(|| {
+                    // HARES may use different zone naming; try zone 2
+                    hares.keys()
+                        .find(|k| k.contains("Attic") && k.contains("(C)"))
+                        .and_then(|k| col_mean(&hares, k))
+                }),
+            50.0, // wide — attic coupling is complex
+            "attic insulation, roof solar, infiltration",
+        ));
+
+        // ── Indoor zone heat gains ──────────────────────────────────────
+        eprintln!("\n=== Indoor Zone Heat Gains (zone-level conduction) ===");
+
+        checks.push(Check::compare_mean(
+            "Wall heat gain (indoor)",
+            &OCHRE_WALL_HEAT_GAIN,
+            col_mean(&hares, "Wall Heat Gain - Indoor (W)"),
+            100.0, // very wide initially
+            "wall R-value, outdoor coupling, surface count",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Roof heat gain (indoor)",
+            &OCHRE_ROOF_HEAT_GAIN,
+            col_mean(&hares, "Roof Heat Gain - Indoor (W)"),
+            100.0,
+            "attic floor insulation, attic-to-indoor coupling",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Floor heat gain (indoor)",
+            &OCHRE_FLOOR_HEAT_GAIN,
+            col_mean(&hares, "Floor Heat Gain - Indoor (W)"),
+            100.0,
+            "ground coupling, slab R-value",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Window heat gain (indoor)",
+            &OCHRE_WINDOW_HEAT_GAIN,
+            col_mean(&hares, "Window Heat Gain - Indoor (W)"),
+            100.0,
+            "window U-factor, frame effects",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Window transmitted solar",
+            &OCHRE_WINDOW_SOLAR_TRANSMITTED,
+            col_mean(&hares, "Window Transmitted Solar Gain (W)"),
+            50.0, // should be closer — pure optics
+            "SHGC, IAM correction, window area",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Infiltration (indoor)",
+            &OCHRE_INFILTRATION_INDOOR,
+            col_mean(&hares, "Infiltration Heat Gain - Indoor (W)"),
+            200.0, // very wide — method differences (ASHRAE vs OCHRE)
+            "infiltration method, ACH50 interpretation",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Forced ventilation (indoor)",
+            &OCHRE_VENTILATION_INDOOR,
+            col_mean(&hares, "Forced Ventilation Heat Gain - Indoor (W)"),
+            100.0,
+            "mechanical ventilation rate, supply temp",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Internal heat gain",
+            &OCHRE_INTERNAL_GAIN,
+            col_mean(&hares, "Internal Heat Gain - Indoor (W)"),
+            20.0, // should match closely — same schedules
+            "schedule parsing, occupant gains",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Interior LWR (indoor)",
+            &OCHRE_RADIATION_INDOOR,
+            col_mean(&hares, "Radiation Heat Gain - Indoor (W)"),
+            100.0,
+            "interior surface LWR exchange, emissivity",
+        ));
+
+        // ── Exterior surface solar (per-surface type) ───────────────────
+        // HARES doesn't output per-surface-type breakdowns yet.
+        // Compare total opaque solar from HARES solver debug vs OCHRE.
+        eprintln!("\n=== Exterior Surface Solar Gains ===");
+
+        let ochre_total_opaque_solar = OCHRE_EXT_WALL_SOLAR.mean
+            + OCHRE_ATTIC_WALL_SOLAR.mean
+            + OCHRE_ATTIC_ROOF_SOLAR.mean
+            + OCHRE_DOOR_EXT_SOLAR.mean;
+        let ochre_total_ext_lwr = OCHRE_EXT_WALL_LWR.mean + OCHRE_ATTIC_ROOF_LWR.mean;
+
+        eprintln!("  OCHRE total opaque solar: {ochre_total_opaque_solar:.0} W");
+        eprintln!("    Ext walls:  {:.0} W", OCHRE_EXT_WALL_SOLAR.mean);
+        eprintln!("    Attic walls: {:.0} W", OCHRE_ATTIC_WALL_SOLAR.mean);
+        eprintln!("    Attic roof:  {:.0} W (absorptance=0.75, pitched ~27deg)", OCHRE_ATTIC_ROOF_SOLAR.mean);
+        eprintln!("    Doors:       {:.0} W", OCHRE_DOOR_EXT_SOLAR.mean);
+        eprintln!("  OCHRE total ext LWR: {ochre_total_ext_lwr:.0} W");
+
+        // ── HVAC comparison ─────────────────────────────────────────────
+        eprintln!("\n=== HVAC Energy ===");
+
+        // HARES uses "ASHP Heater" not "HVAC Heating"
+        let heater_kw_col = hares.keys()
+            .find(|k| k.to_ascii_lowercase().contains("heater") && k.contains("(kW)") && !k.contains("mean"))
+            .cloned();
+        let cooler_kw_col = hares.keys()
+            .find(|k| k.to_ascii_lowercase().contains("cooler") && k.contains("(kW)") && !k.contains("mean"))
+            .cloned();
+
+        let heater_kwh = heater_kw_col.as_ref()
+            .and_then(|col| hares.get(col.as_str()))
+            .map(|v| v.iter().sum::<f64>() / 60.0); // kW * (1/60 h) per minute step
+        let cooler_kwh = cooler_kw_col.as_ref()
+            .and_then(|col| hares.get(col.as_str()))
+            .map(|v| v.iter().sum::<f64>() / 60.0);
+
+        let ochre_heater_kwh = 0.9113;
+        let ochre_cooler_kwh = 0.0500;
+
+        if let Some(h) = heater_kwh {
+            let pct = ((h - ochre_heater_kwh) / ochre_heater_kwh * 100.0).abs();
+            eprintln!("  Heater: HARES={h:.4} kWh  OCHRE={ochre_heater_kwh:.4} kWh  diff={pct:.1}%");
+            checks.push(Check {
+                name: "ASHP Heater energy".to_string(),
+                ochre: ochre_heater_kwh,
+                hares: h,
+                tolerance_pct: 100.0,
+                passed: pct <= 100.0,
+                note: format!("diff={pct:.1}% — envelope tightness affects heating load"),
+            });
+        } else {
+            eprintln!("  Heater: MISSING in HARES output");
+        }
+
+        if let Some(c) = cooler_kwh {
+            let pct = ((c - ochre_cooler_kwh) / ochre_cooler_kwh * 100.0).abs();
+            eprintln!("  Cooler: HARES={c:.4} kWh  OCHRE={ochre_cooler_kwh:.4} kWh  diff={pct:.1}%");
+        }
+
+        // ── Zone structure comparison ───────────────────────────────────
+        eprintln!("\n=== Zone Structure ===");
+        eprintln!("  OCHRE: 2 zones (Indoor V={OCHRE_INDOOR_VOLUME_M3:.0}m3, Attic V={OCHRE_ATTIC_VOLUME_M3:.0}m3)");
+        eprintln!("  OCHRE capacitances: Indoor={:.0} J/K, Attic={:.0} J/K",
+            OCHRE_INDOOR_CAPACITANCE_JK, OCHRE_ATTIC_CAPACITANCE_JK);
+        eprintln!("  OCHRE surfaces: {} types, {} total surfaces",
+            OCHRE_SURFACES.len(),
+            OCHRE_SURFACES.iter().map(|s| s.count).sum::<usize>());
+        for s in OCHRE_SURFACES {
+            eprintln!("    {}: {} surfaces, {:.1}m2 total, tilt={:.0}deg, absorptance={:.2}",
+                s.name, s.count, s.total_area_m2, s.tilt_deg, s.absorptance);
+        }
+
+        // ── Timeseries comparison (if OCHRE reference available) ────────
+        if let Some(ref ochre) = ochre_ts {
+            eprintln!("\n=== Timeseries Comparison (OCHRE reference CSV) ===");
+
+            if let (Some(h_vals), Some(o_vals)) = (
+                hares.get("Temperature - Indoor (C)"),
+                ochre.get("Temperature - Indoor (C)"),
+            ) {
+                let n = h_vals.len().min(o_vals.len());
+                if n > 0 {
+                    let mae: f64 = h_vals.iter().zip(o_vals.iter())
+                        .take(n)
+                        .map(|(h, o)| (h - o).abs())
+                        .sum::<f64>() / n as f64;
+                    let rmse: f64 = (h_vals.iter().zip(o_vals.iter())
+                        .take(n)
+                        .map(|(h, o)| (h - o).powi(2))
+                        .sum::<f64>() / n as f64).sqrt();
+                    eprintln!("  Indoor temp: MAE={mae:.2}C  RMSE={rmse:.2}C  (n={n} steps)");
+
+                    checks.push(Check {
+                        name: "Indoor temp timeseries MAE".to_string(),
+                        ochre: 0.0,
+                        hares: mae,
+                        tolerance_pct: 100.0, // not a percentage; just tracking
+                        passed: mae < 5.0, // hard fail if > 5 C mean deviation
+                        note: format!("MAE={mae:.2}C RMSE={rmse:.2}C"),
+                    });
+                }
+            }
+        }
+
+        // ── Summary ─────────────────────────────────────────────────────
+        eprintln!("\n{:=^70}", " ORACLE SUMMARY ");
+        let mut n_pass = 0;
+        let mut n_fail = 0;
+        let mut n_missing = 0;
+
+        for check in &checks {
+            let status = if check.hares.is_nan() {
+                n_missing += 1;
+                "MISS"
+            } else if check.passed {
+                n_pass += 1;
+                "PASS"
+            } else {
+                n_fail += 1;
+                "FAIL"
+            };
+            eprintln!(
+                "  {status} {:<35} OCHRE={:>10.1}  HARES={:>10.1}  {}",
+                check.name, check.ochre, check.hares, check.note
+            );
+        }
+
+        eprintln!("\n  Total: {n_pass} pass, {n_fail} fail, {n_missing} missing");
+        eprintln!("  (Missing = HARES doesn't output this column yet at verbosity 6)");
+
+        // Hard assertions: zone temperatures must be physical
+        if let Some((mn, mx)) = col_range(&hares, "Temperature - Indoor (C)") {
+            assert!(
+                mn > -10.0 && mx < 50.0,
+                "Indoor temperature out of physical bounds: [{mn:.1}, {mx:.1}] C (Denver in May)"
+            );
+        }
+
+        // Soft assertion: report failures but don't block CI yet
+        // (tighten as we fix envelope issues)
+        if n_fail > 0 {
+            eprintln!("\n  WARNING: {n_fail} oracle checks exceeded tolerance.");
+            eprintln!("  This is informational until envelope is validated.");
+        }
+    }
+}

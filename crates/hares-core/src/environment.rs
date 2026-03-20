@@ -582,6 +582,9 @@ mod tests {
             pv_tilt_deg: None,
             conditioned_volume_m3: None,
             ceiling_height_m: None,
+            infiltration_height_m: None,
+            floors_above_grade: None,
+            has_flue_or_chimney: None,
             details_xml,
         }
     }

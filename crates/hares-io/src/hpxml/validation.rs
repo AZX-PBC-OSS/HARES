@@ -88,37 +88,29 @@ pub fn validate_hpxml_schema(xml: &str) -> Result<Vec<ValidationWarning>, Valida
         ));
     }
 
-    let version_str = root
-        .attrs
-        .get("schemaVersion")
-        .map(String::as_str)
-        .unwrap_or("");
-    let major_version = version_str
-        .split('.')
-        .next()
+    let version_attr = root.attrs.get("schemaVersion");
+    let major_version = version_attr
+        .and_then(|s| s.split('.').next())
         .and_then(|s| s.parse::<u32>().ok());
 
-    match major_version {
-        Some(v) if v >= 4 => {}
-        Some(3) => {
+    match (version_attr, major_version) {
+        (_, Some(v)) if v >= 4 => {}
+        (Some(s), Some(3)) => {
             warnings.push(ValidationWarning::new(
                 "schemaVersion",
-                format!(
-                    "HPXML {version_str} may have untested element paths; 4.x is recommended"
-                ),
+                format!("HPXML {s} may have untested element paths; 4.x is recommended"),
             ));
         }
-        _ => {
+        (None, _) => {
             return Err(ValidationError::new(
                 "schemaVersion",
-                format!(
-                    "unsupported HPXML schemaVersion `{}`; requires 3.x or 4.x",
-                    if version_str.is_empty() {
-                        "<missing>"
-                    } else {
-                        version_str
-                    }
-                ),
+                "schemaVersion attribute is missing",
+            ));
+        }
+        (Some(s), _) => {
+            return Err(ValidationError::new(
+                "schemaVersion",
+                format!("unsupported HPXML schemaVersion `{s}`; requires 3.x or 4.x"),
             ));
         }
     }
@@ -148,7 +140,7 @@ pub fn validate_hpxml_schema(xml: &str) -> Result<Vec<ValidationWarning>, Valida
         ));
     }
 
-    // Required structural elements per HPXML 4.0
+    // Required structural elements (present in both 3.x and 4.x)
     let required_paths: &[(&[&str], &str)] = &[
         (
             &["Building", "BuildingDetails", "BuildingSummary"],
@@ -632,6 +624,19 @@ mod tests {
         let xml = BASE_XML.replace(r#" schemaVersion="4.0""#, "");
         let err = validate_hpxml_schema(&xml).expect_err("missing version should be rejected");
         assert!(err.field == "schemaVersion");
+        assert!(err.message.contains("missing"));
+    }
+
+    #[test]
+    fn schema_version_malformed_rejected() {
+        let xml = BASE_XML.replace(r#"schemaVersion="4.0""#, r#"schemaVersion="four.0""#);
+        let err = validate_hpxml_schema(&xml).expect_err("malformed version should be rejected");
+        assert!(err.field == "schemaVersion");
+        assert!(
+            err.message.contains("four.0"),
+            "error should include the malformed value, got: {}",
+            err.message
+        );
     }
 
     #[test]

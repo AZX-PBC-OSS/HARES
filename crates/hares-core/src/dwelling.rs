@@ -169,6 +169,8 @@ pub struct Dwelling {
     custom_domain_solvers: Vec<Box<dyn DomainSolver>>,
     stage_snapshot: Option<StageSnapshot>,
     output_column_index: HashMap<String, usize>,
+    /// Number of numeric columns expected by the recorder (schema fields minus timestamp).
+    output_value_count: usize,
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
@@ -402,6 +404,7 @@ impl Dwelling {
         let ports = PortSlots::from_declarations(&declarations);
 
         let schema = build_schema(&equipment_specs, config.sim_config.output_verbosity);
+        let output_value_count = schema.fields().len() - 1; // exclude timestamp
         let output_column_index = build_output_column_index(&schema);
         let output_path = config
             .sim_config
@@ -438,6 +441,7 @@ impl Dwelling {
             custom_domain_solvers: Vec::new(),
             stage_snapshot: None,
             output_column_index,
+            output_value_count,
             occupancy_column_idx,
             zone_capacitances_j_k,
             #[cfg(feature = "profiling")]
@@ -1040,8 +1044,7 @@ impl Dwelling {
     }
 
     fn record_step(&mut self, step: &StepResult) -> Result<()> {
-        let value_count = self.output_column_index.len();
-        let mut row = vec![0.0; value_count];
+        let mut row = vec![0.0; self.output_value_count];
 
         if let Some(&idx) = self.output_column_index.get("Total Electric Power (kW)") {
             row[idx] = step.net_electric_power_kw;
@@ -1089,9 +1092,10 @@ impl Dwelling {
             }
         }
 
-        // Zone temperature columns
+        // Zone temperature columns.
+        // ZoneId(1) is the primary conditioned zone ("Indoor" in OCHRE convention).
         for (zone_id, temp_c) in &step.zone_temperatures_c {
-            let zone_label = if zone_id.0 == 0 { "Indoor" } else { &format!("Zone_{}", zone_id.0) };
+            let zone_label = if zone_id.0 == 1 { "Indoor" } else { &format!("Zone_{}", zone_id.0) };
             let col_key = format!("Temperature - {zone_label} (C)");
             if let Some(&idx) = self.output_column_index.get(&col_key) {
                 row[idx] = *temp_c;
@@ -1102,6 +1106,22 @@ impl Dwelling {
             && let Some((_, temp_c)) = step.zone_temperatures_c.first()
         {
             row[idx] = *temp_c;
+        }
+
+        // Envelope component gains from the thermal solver (verbosity >= 6).
+        let gains = self.thermal_solver.component_gains();
+        let envelope_cols: &[(&str, f64)] = &[
+            ("Window Transmitted Solar Gain (W)", gains.window_solar_w),
+            ("Infiltration Heat Gain - Indoor (W)", gains.infiltration_w),
+            ("Forced Ventilation Heat Gain - Indoor (W)", gains.ventilation_w),
+            ("Natural Ventilation Heat Gain - Indoor (W)", gains.natural_ventilation_w),
+            ("Internal Heat Gain - Indoor (W)", gains.port_sensible_w),
+            ("Radiation Heat Gain - Indoor (W)", gains.interior_lwr_w),
+        ];
+        for &(col_name, value) in envelope_cols {
+            if let Some(&idx) = self.output_column_index.get(col_name) {
+                row[idx] = value;
+            }
         }
 
         self.recorder
@@ -1435,12 +1455,15 @@ fn build_default_solvers(
     }
 
     // --- Per-zone infiltration (Walker-Wilson 1998 / ASHRAE HOF Ch. 16) ---
-    // Each unconditioned zone gets a physics-appropriate infiltration method.
-    // Conditioned zone infiltration is a separate ticket (ASHRAE wind-stack from ACH50).
+    // Each zone gets a physics-appropriate infiltration method.
+    // Conditioned zone uses AIM-2 model when ACH50 is available.
     {
         use hares_envelope::InfiltrationMethod;
         use hares_io::hpxml::ZoneType;
-        use hares_physics::infiltration::attic_ela_coefficients;
+        use hares_physics::infiltration::{
+            Aim2Params, FoundationLeakageClass, N_I_DEFAULT,
+            aim2_coefficients_from_ach50, attic_ela_coefficients,
+        };
 
         let default_ceiling_height_m = building.ceiling_height_m.unwrap_or(2.5);
         let building_height_m = default_ceiling_height_m
@@ -1460,8 +1483,39 @@ fn build_default_solvers(
 
             let method = match bz.zone_type {
                 ZoneType::Conditioned => {
-                    // Separate ticket for ASHRAE wind-stack from ACH50.
-                    InfiltrationMethod::Ach { ach: 0.0 }
+                    if let Some(ach50) = building.infiltration_ach50 {
+                        let terrain = site_type_to_terrain(&building.site.site_type);
+                        let shielding =
+                            shielding_str_to_class(building.site.shielding_of_home.as_deref());
+                        let foundation = if has_vented_crawlspace(building) {
+                            FoundationLeakageClass::VentedCrawlspace
+                        } else {
+                            FoundationLeakageClass::Other
+                        };
+                        let h = building.infiltration_height_m.unwrap_or(
+                            default_ceiling_height_m
+                                * building.floors_above_grade.unwrap_or(1.0),
+                        );
+                        let coeffs = aim2_coefficients_from_ach50(&Aim2Params {
+                            ach50,
+                            volume_m3: building.conditioned_volume_m3.unwrap_or(400.0),
+                            infiltration_height_m: h,
+                            foundation,
+                            shielding,
+                            terrain,
+                            has_flue: building.has_flue_or_chimney.unwrap_or(false),
+                            n_i: N_I_DEFAULT,
+                            floors_above_grade: building.floors_above_grade.unwrap_or(1.0),
+                        });
+                        InfiltrationMethod::AshraeWindStack {
+                            c_s: coeffs.c_s,
+                            c_w: coeffs.c_w,
+                            shielding_coeff: coeffs.shelter_coeff,
+                            n_i: coeffs.n_i,
+                        }
+                    } else {
+                        InfiltrationMethod::Ach { ach: 0.0 }
+                    }
                 }
                 ZoneType::Attic => {
                     if let Some(ach) = bz.ventilation_ach {
@@ -2036,6 +2090,45 @@ fn default_output_chunk_size() -> usize {
     10_000
 }
 
+/// Map HPXML `<SiteType>` to [`TerrainClass`] for AIM-2 wind correction.
+fn site_type_to_terrain(
+    site_type: &Option<hares_io::hpxml::SiteType>,
+) -> hares_physics::infiltration::TerrainClass {
+    use hares_io::hpxml::SiteType;
+    use hares_physics::infiltration::TerrainClass;
+    match site_type {
+        Some(SiteType::Rural) => TerrainClass::Rural,
+        Some(SiteType::Urban) => TerrainClass::Urban,
+        _ => TerrainClass::Suburban,
+    }
+}
+
+/// Map HPXML `<ShieldingOfHome>` string to [`ShieldingClass`].
+///
+/// HPXML values: "normal", "exposed", "well-shielded".
+/// Walker & Wilson (1998) Table 3; ResStock `airflow.get_aim2_shelter_coefficient`.
+fn shielding_str_to_class(
+    s: Option<&str>,
+) -> hares_physics::infiltration::ShieldingClass {
+    use hares_physics::infiltration::ShieldingClass;
+    match s {
+        Some("exposed") => ShieldingClass::Exposed,
+        Some("well-shielded") => ShieldingClass::WellShielded,
+        _ => ShieldingClass::Normal,
+    }
+}
+
+/// Check if any Foundation zone has `vented == true` (vented crawlspace).
+///
+/// Used to select [`FoundationLeakageClass`] for AIM-2 leakage distribution.
+fn has_vented_crawlspace(building: &Building) -> bool {
+    use hares_io::hpxml::ZoneType;
+    building
+        .zones
+        .iter()
+        .any(|z| z.zone_type == ZoneType::Foundation && z.vented)
+}
+
 fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
     use hares_io::hpxml::{Boundary, BoundaryType, Site, Zone, ZoneType};
 
@@ -2141,6 +2234,9 @@ fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
         pv_tilt_deg: None,
         conditioned_volume_m3: Some(config.geometry.zone_volume_m3),
         ceiling_height_m: None,
+        infiltration_height_m: None,
+        floors_above_grade: None,
+        has_flue_or_chimney: None,
         details_xml,
     }
 }

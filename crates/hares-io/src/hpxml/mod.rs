@@ -44,7 +44,7 @@ pub type Result<T> = std::result::Result<T, HpxmlError>;
 /// Parse HPXML from a file path.
 ///
 /// Validation order:
-/// 1. Schema/structure checks against HPXML 4.0 expectations.
+/// 1. Schema/structure checks: 3.x accepted with warning, 4.x silently, below 3 rejected.
 /// 2. Structural extraction into the `Building` model.
 /// 3. Domain range checks.
 pub fn parse_hpxml(path: &Path) -> Result<Building> {
@@ -60,7 +60,7 @@ pub fn parse_hpxml(path: &Path) -> Result<Building> {
 pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
     let schema_warnings = validate_hpxml_schema(xml).map_err(HpxmlError::SchemaValidation)?;
     for w in &schema_warnings {
-        tracing::warn!("{w}");
+        tracing::warn!(field = %w.field, message = %w.message, "HPXML schema warning");
     }
 
     let building = parse_building(xml)?;
