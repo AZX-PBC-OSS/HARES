@@ -471,9 +471,7 @@ impl CoolingCore {
             .unwrap_or(0.0),
         };
 
-        if let Some(w_per_cfm) = first_f64(config, &["fan_power_w_per_cfm"]) {
-            self.hvac.fan_power_w_per_cfm = w_per_cfm.max(0.0);
-        }
+        // fan_power_w_per_cfm → fan_power_w_per_m3_s conversion handled by hvac.init()
 
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
@@ -734,15 +732,13 @@ impl CoolingCore {
         // OCHRE: coil_input_db += fan_power_per_flow_rate / 1000 / rho_air / cp_air
         // Applied as a first-order correction to the indoor wet-bulb temperature
         // used as the biquadratic x1 input (same ΔT in °C).
-        let airflow_cfm_for_fan =
-            (stage_cap_w / W_PER_TON).max(0.0) * self.hvac.airflow_cfm_per_ton;
-        let flow_m3_s_for_fan = airflow_cfm_for_fan * CFM_TO_M3_S;
+        let flow_m3_s_for_fan = stage_cap_w.max(0.0) * self.hvac.airflow_m3_s_per_w;
         let fan_shaft_heat_correction_c = if flow_m3_s_for_fan > 0.0 {
             use hares_physics::{
                 air_properties::moist_air_density_kg_m3,
                 psychrometrics::SPECIFIC_HEAT_DRY_AIR_KJ_KG_K,
             };
-            let fan_power_w = self.hvac.fan_power_w_per_cfm * airflow_cfm_for_fan;
+            let fan_power_w = self.hvac.fan_power_w_per_m3_s * flow_m3_s_for_fan;
             let rho = moist_air_density_kg_m3(
                 env.weather.pressure_kpa * 1000.0,
                 zone.temperature_c,
@@ -786,8 +782,8 @@ impl CoolingCore {
             .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
         let total_capacity_w = (staged_capacity_w * plr).max(0.0);
 
-        let airflow_cfm = airflow_cfm_for_fan;
         let flow_m3_s = flow_m3_s_for_fan;
+        let airflow_cfm = flow_m3_s / CFM_TO_M3_S;
 
         let ao = self.ao_for_speed(speed_index);
         let CoilResult {
@@ -875,8 +871,7 @@ impl CoolingCore {
 
         let mut ao = Vec::with_capacity(self.hvac.cooling_capacities_w.len().max(1));
         for (idx, cap_w) in self.hvac.cooling_capacities_w.iter().copied().enumerate() {
-            let airflow_cfm = (cap_w / W_PER_TON).max(0.0) * self.hvac.airflow_cfm_per_ton;
-            let flow_m3_s = airflow_cfm * CFM_TO_M3_S;
+            let flow_m3_s = cap_w.max(0.0) * self.hvac.airflow_m3_s_per_w;
             let shr = rated_shr.clamp(0.0, 1.0);
             let ao_i = coil_ao_factor(
                 AHRI_RATED_INDOOR_DB_C,

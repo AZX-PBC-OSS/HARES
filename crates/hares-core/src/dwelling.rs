@@ -25,7 +25,7 @@ use hares_physics::constants::{
 };
 use hares_types::{
     ControlSignal, DomainSolver, DomainUpdate, EndUse, EnvironmentState, ExecutionStage, GridState,
-    HaresError, PortDeclaration, PortSlots, THERMAL, ZoneId, schedule_domain_id,
+    HaresError, PortContribution, PortDeclaration, PortSlots, THERMAL, ZoneId,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -302,11 +302,7 @@ impl Dwelling {
 
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let mut environment = EnvironmentManager::new(
-            weather,
-            schedule,
-            &building,
-            time_res,
-            config.sim_config.start_time,
+            weather, schedule, &building, time_res, config.sim_config.start_time,
         )
         .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
 
@@ -333,12 +329,8 @@ impl Dwelling {
             build_default_solvers(&initial_env, &config.sim_config, &building, &defaults)?;
 
         let empty_overrides = Value::Object(Map::new());
-        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)?;
-        hares_io::inject_schedule_into_specs(
-            &mut equipment_specs,
-            environment.schedule_mut(),
-            Some(&defaults_dir),
-        );
+        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides);
+        hares_io::inject_schedule_into_specs(&mut equipment_specs, environment.schedule(), Some(&defaults_dir));
         let override_root = config
             .overrides
             .clone()
@@ -462,12 +454,6 @@ impl Dwelling {
     #[must_use]
     pub fn results(&self) -> SimulationResults {
         self.simulation_results.clone()
-    }
-
-    /// Returns the flushed record batches from the recorder for metrics calculation.
-    #[must_use]
-    pub fn flushed_batches(&self) -> &[arrow::record_batch::RecordBatch] {
-        self.recorder.flushed_batches()
     }
 
     /// Executes exactly one simulation timestep.
@@ -707,11 +693,13 @@ impl Dwelling {
             return;
         };
 
+        // The schedule domain is always DomainId(u16::MAX) (see environment.rs).
+        const SCHEDULE_DOMAIN_ID: hares_types::DomainId = hares_types::DomainId(u16::MAX);
         let n_occupants = self
             .latest_env
             .custom_domains
             .iter()
-            .find(|u| u.domain_id == schedule_domain_id())
+            .find(|u| u.domain_id == SCHEDULE_DOMAIN_ID)
             .and_then(|u| u.custom_payload.as_ref())
             .and_then(|p| p.get(col_idx))
             .copied()
@@ -818,13 +806,11 @@ impl Dwelling {
         });
 
         // Step 3b: thermal stage equipment.
-        let thermal_control_env =
-            preview_env_with_non_thermal_gains(&self.latest_env, &self.ports, dt);
         for &idx in &indices {
             if self.equipment[idx].descriptor().stage != ExecutionStage::Thermal {
                 continue;
             }
-            let _ = self.equipment[idx].update_control(&thermal_control_env);
+            let _ = self.equipment[idx].update_control(&self.latest_env);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.warnings.push(format!(
                     "equipment step failed for '{}' : {err}",
@@ -1006,11 +992,7 @@ impl Dwelling {
 
         // Zone temperature columns
         for (zone_id, temp_c) in &step.zone_temperatures_c {
-            let zone_label = if zone_id.0 == 0 {
-                "Indoor"
-            } else {
-                &format!("Zone_{}", zone_id.0)
-            };
+            let zone_label = if zone_id.0 == 0 { "Indoor" } else { &format!("Zone_{}", zone_id.0) };
             let col_key = format!("Temperature - {zone_label} (C)");
             if let Some(&idx) = self.output_column_index.get(&col_key) {
                 row[idx] = *temp_c;
@@ -1078,14 +1060,14 @@ fn build_default_solvers(
 
     // Convert building data to envelope-crate input types.
     let zone_inputs = building_to_zone_inputs(building, n_zones);
-    let boundary_inputs = building_to_boundary_inputs(building, n_zones, defaults);
+    let boundary_inputs = building_to_boundary_inputs(building, n_zones);
 
     // Zone air node capacitances [J/K].
     let zone_capacitances = derive_zone_capacitances(&zone_inputs);
 
     // Build the RC network from material layers where available.
     let rc = assemble_building_rc(&boundary_inputs, n_zones, &zone_capacitances)
-        .map_err(HaresError::Envelope)?;
+        .map_err(|err| HaresError::Envelope(err))?;
 
     let BuildingRC {
         a_c,
@@ -1232,137 +1214,310 @@ fn build_default_solvers(
 /// Default assembly R-value fallback (re-exported for dwelling-level use).
 const DEFAULT_R_M2_K_W: f64 = hares_envelope::boundary_rc::DEFAULT_R_M2_K_W;
 
-/// Convert building zones to envelope-crate ZoneInput.
-fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput> {
-    (0..n_zones)
-        .map(|idx| ZoneInput {
-            floor_area_m2: building.zones.get(idx).and_then(|z| z.floor_area_m2),
-        })
-        .collect()
-}
-
-/// Convert building boundaries to envelope-crate BoundaryInput with pre-resolved zone indices.
+/// Builds the multi-layer RC network from HPXML boundary data.
 ///
-/// When the defaults store contains an envelope LUT, attempts to resolve each
-/// boundary to OCHRE pre-computed RC layers. Falls through to raw material
-/// layers on LUT miss.
-fn building_to_boundary_inputs(
+/// Returns:
+/// - `A_c`: continuous-time state matrix
+/// - `B_ext`: B matrix with columns for external nodes only (outdoor + ground)
+/// - `internal_node_order`: sorted internal NodeIds (maps row index → NodeId)
+/// - `zone_state_rows`: state-vector row index for each zone air node (len = n_zones)
+/// - `layer_info`: per-boundary (bd_idx → Vec<(NodeId, heat_col)>) for outermost layer tracking.
+///   Each entry is `(node_id, heat_injection_col_in_augmented_B)`. `heat_col` here is a
+///   placeholder; actual augmented column indices are computed in the caller after knowing n_ext.
+///   Stored as `(NodeId, usize_placeholder=0)` — caller uses node_state_row instead.
+fn build_rc_network(
     building: &Building,
     n_zones: usize,
-    defaults: &DefaultsStore,
-) -> Vec<BoundaryInput> {
-    use hares_envelope::PrecomputedRCLayer;
-    use hares_io::envelope_lut::resolve_boundary_name;
+    zone_capacitances: &[f64],
+) -> Result<(
+    nalgebra::DMatrix<f64>,
+    nalgebra::DMatrix<f64>,
+    Vec<NodeId>,
+    Vec<usize>,
+    HashMap<usize, Vec<(NodeId, usize)>>,
+)> {
+    let outdoor_node = NodeId(OUTDOOR_NODE_ID);
+    let ground_node = NodeId(GROUND_NODE_ID);
 
-    let envelope_lut = defaults.envelope_lut();
-
-    building
-        .boundaries
+    // Build a zone type → zone index lookup from building.zones.
+    let zone_type_to_idx: HashMap<String, usize> = building
+        .zones
         .iter()
-        .map(|bd| {
-            let interior_zone_idx = find_zone_idx(building, bd.interior_zone.as_ref(), n_zones);
-            let exterior = resolve_exterior(building, bd, n_zones);
-            let fallback_r = bd
+        .enumerate()
+        .map(|(idx, z)| (zone_type_key(&z.zone_type), idx))
+        .collect();
+
+    let mut capacitances: HashMap<NodeId, f64> = HashMap::new();
+    let mut resistances: HashMap<(NodeId, NodeId), f64> = HashMap::new();
+    let mut external_nodes_set: std::collections::BTreeSet<NodeId> =
+        std::collections::BTreeSet::new();
+
+    // Insert zone air nodes as internal nodes.
+    for (zone_idx, cap) in zone_capacitances.iter().enumerate().take(n_zones) {
+        let node = NodeId((zone_idx + 1) as u32);
+        capacitances.insert(node, cap.max(MIN_CAPACITANCE_J_K));
+    }
+
+    // Track per-boundary layer info: (outermost NodeId, heat_col placeholder).
+    let mut layer_info: HashMap<usize, Vec<(NodeId, usize)>> = HashMap::new();
+
+    // Track whether any boundary actually connects to a given external node
+    // so we don't add disconnected external nodes.
+    let mut outdoor_connected = false;
+    let mut ground_connected = false;
+
+    for (bd_idx, boundary) in building.boundaries.iter().enumerate() {
+        let area = boundary.area_m2;
+        if area <= 0.0 {
+            continue;
+        }
+
+        let interior_node = zone_node_for_boundary(
+            building,
+            boundary.interior_zone.as_ref(),
+            n_zones,
+            &zone_type_to_idx,
+        );
+        let exterior_node = exterior_node_for_boundary(
+            boundary,
+            n_zones,
+            &zone_type_to_idx,
+            outdoor_node,
+            ground_node,
+        );
+
+        if exterior_node == outdoor_node {
+            outdoor_connected = true;
+        } else if exterior_node == ground_node {
+            ground_connected = true;
+        }
+        // If exterior_node is a zone air node, it is already an internal node.
+
+        let has_valid_layers = boundary.material_layers.iter().any(|l| {
+            l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0
+        });
+
+        if has_valid_layers {
+            let layers: Vec<&hares_io::hpxml::MaterialLayer> = boundary
+                .material_layers
+                .iter()
+                .filter(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
+                .collect();
+            let n_layers = layers.len();
+
+            // Create internal layer nodes and their capacitances.
+            let mut layer_nodes: Vec<NodeId> = Vec::with_capacity(n_layers);
+            for (layer_idx, layer) in layers.iter().enumerate() {
+                let node = NodeId((1000 * (bd_idx + 1) + layer_idx) as u32);
+                let layer_area = if layer.area_m2 > 0.0 { layer.area_m2 } else { area };
+                let cap = (layer.density_kg_m3
+                    * layer.specific_heat_j_kg_k
+                    * layer.thickness_m
+                    * layer_area)
+                    .max(MIN_CAPACITANCE_J_K);
+                capacitances.insert(node, cap);
+                layer_nodes.push(node);
+            }
+
+            // Connect interior zone air node → innermost layer node.
+            // R_int = thickness_n / (2 * k_n * area) + R_film_int / area
+            let inner = layers[0];
+            let inner_area = if inner.area_m2 > 0.0 { inner.area_m2 } else { area };
+            let r_int = inner.thickness_m / (2.0 * inner.conductivity_w_m_k * inner_area)
+                + R_FILM_INTERIOR_M2_K_W / inner_area;
+            add_resistance(&mut resistances, interior_node, layer_nodes[0], r_int);
+
+            // Connect adjacent layer nodes.
+            for i in 0..(n_layers - 1) {
+                let li = layers[i];
+                let lj = layers[i + 1];
+                let ai = if li.area_m2 > 0.0 { li.area_m2 } else { area };
+                let aj = if lj.area_m2 > 0.0 { lj.area_m2 } else { area };
+                let r = li.thickness_m / (2.0 * li.conductivity_w_m_k * ai)
+                    + lj.thickness_m / (2.0 * lj.conductivity_w_m_k * aj);
+                add_resistance(&mut resistances, layer_nodes[i], layer_nodes[i + 1], r);
+            }
+
+            // Connect outermost layer node → exterior node.
+            // R_ext = thickness_0 / (2 * k_0 * area) + R_film_ext / area
+            let outer = layers[n_layers - 1];
+            let outer_area = if outer.area_m2 > 0.0 { outer.area_m2 } else { area };
+            let r_ext = outer.thickness_m / (2.0 * outer.conductivity_w_m_k * outer_area)
+                + R_FILM_EXTERIOR_M2_K_W / outer_area;
+            add_resistance(
+                &mut resistances,
+                layer_nodes[n_layers - 1],
+                exterior_node,
+                r_ext,
+            );
+
+            // Mark outermost layer node for this boundary (placeholder heat_col = 0).
+            layer_info.insert(bd_idx, vec![(layer_nodes[n_layers - 1], 0)]);
+        } else {
+            // No valid material layers: use assembly R-value or default.
+            let r_total = boundary
                 .assembly_r_value_m2_k_w
                 .or_else(|| {
-                    let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
+                    let sum: f64 = boundary.r_value_layers_m2_k_w.iter().sum();
                     if sum > 0.0 { Some(sum) } else { None }
                 })
                 .unwrap_or(DEFAULT_R_M2_K_W)
                 .max(1e-6);
+            let r_ohm = r_total / area;
+            add_resistance(&mut resistances, interior_node, exterior_node, r_ohm);
+        }
 
-            // Try LUT lookup for precomputed RC layers.
-            let precomputed_rc = envelope_lut
-                .and_then(|lut| {
-                    let boundary_name = resolve_boundary_name(
-                        &bd.boundary_type,
-                        bd.interior_zone.as_ref(),
-                        bd.exterior_zone.as_ref(),
-                    )?;
-                    let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
-                        let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
-                        if sum > 0.0 { Some(sum) } else { None }
-                    });
-                    let result = lut.lookup(
-                        boundary_name,
-                        bd.construction_type.as_deref(),
-                        bd.finish_type.as_deref(),
-                        bd.insulation_details.as_deref(),
-                        r_value,
-                    )?;
-                    Some(
-                        result
-                            .layers
-                            .into_iter()
-                            .map(|l| PrecomputedRCLayer {
-                                resistance_m2_k_w: l.resistance_m2_k_w,
-                                capacitance_kj_m2_k: l.capacitance_kj_m2_k,
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default();
+        // Register external nodes.
+        if exterior_node == outdoor_node || exterior_node == ground_node {
+            external_nodes_set.insert(exterior_node);
+        }
+    }
 
-            BoundaryInput {
-                area_m2: bd.area_m2,
-                interior_zone_idx,
-                exterior,
-                material_layers: bd
-                    .material_layers
-                    .iter()
-                    .map(|l| LayerInput {
-                        thickness_m: l.thickness_m,
-                        conductivity_w_m_k: l.conductivity_w_m_k,
-                        density_kg_m3: l.density_kg_m3,
-                        specific_heat_j_kg_k: l.specific_heat_j_kg_k,
-                        area_m2: l.area_m2,
-                    })
-                    .collect(),
-                precomputed_rc,
-                fallback_r_m2_k_w: fallback_r,
-            }
+    // Ensure every zone air node participates in at least one resistance.
+    // Zones with no boundary reference get a high-R fallback to outdoor so the
+    // RC network remains fully connected.
+    for zone_idx in 0..n_zones {
+        let zone_node = NodeId((zone_idx + 1) as u32);
+        let has_connection = resistances.keys().any(|&(a, b)| a == zone_node || b == zone_node);
+        if !has_connection {
+            // Very high resistance ≈ well-insulated but not disconnected.
+            let fallback_r = DEFAULT_R_M2_K_W * 100.0; // ~250 m²·K/W → very weak coupling
+            add_resistance(&mut resistances, zone_node, outdoor_node, fallback_r);
+            outdoor_connected = true;
+        }
+    }
+
+    // Ensure every zone air node participates in at least one resistance.
+    // Zones with no boundary reference get a high-R fallback to outdoor so the
+    // RC network remains fully connected.
+    for zone_idx in 0..n_zones {
+        let zone_node = NodeId((zone_idx + 1) as u32);
+        let has_connection = resistances.keys().any(|&(a, b)| a == zone_node || b == zone_node);
+        if !has_connection {
+            // Very high resistance ≈ well-insulated but not disconnected.
+            let fallback_r = DEFAULT_R_M2_K_W * 100.0; // ~250 m²·K/W → very weak coupling
+            add_resistance(&mut resistances, zone_node, outdoor_node, fallback_r);
+            outdoor_connected = true;
+        }
+    }
+
+    // If no boundaries connected to outdoor/ground, we must still have at least
+    // one external node for the network to be valid. Fall back to deriving UAs.
+    if !outdoor_connected && !ground_connected {
+        let zone_uas = derive_zone_uas_w_per_k(building, n_zones);
+        for i in 0..n_zones {
+            let zone_node = NodeId((i + 1) as u32);
+            let r = 1.0 / zone_uas[i].max(1e-6);
+            add_resistance(&mut resistances, zone_node, outdoor_node, r);
+        }
+        outdoor_connected = true;
+    }
+
+    if outdoor_connected {
+        external_nodes_set.insert(outdoor_node);
+    }
+    if ground_connected {
+        external_nodes_set.insert(ground_node);
+    }
+
+    let external_nodes: Vec<NodeId> = external_nodes_set.into_iter().collect();
+
+    let rc = RCNetwork::from_elements(capacitances, resistances, external_nodes)
+        .map_err(|err| HaresError::Envelope(format!("RC network build failed: {err}")))?;
+
+    let (a_c, b_ext) = rc
+        .build_matrices()
+        .map_err(|err| HaresError::Envelope(format!("RC matrix assembly failed: {err}")))?;
+
+    // Compute internal node order (sorted ascending by NodeId — matches build_matrices).
+    let mut internal_nodes: Vec<NodeId> = rc.capacitances.keys().copied().collect();
+    internal_nodes.sort_unstable();
+
+    // Map zone index → state-vector row (zone air NodeId = zone_idx + 1).
+    let zone_state_rows: Vec<usize> = (0..n_zones)
+        .map(|zone_idx| {
+            let node = NodeId((zone_idx + 1) as u32);
+            internal_nodes
+                .iter()
+                .position(|&n| n == node)
+                .unwrap_or(zone_idx)
         })
-        .collect()
+        .collect();
+
+    Ok((a_c, b_ext, internal_nodes, zone_state_rows, layer_info))
 }
 
-/// Find zone index by ZoneType equality (exact match including Other payload).
-fn find_zone_idx(
-    building: &Building,
+fn zone_type_key(zt: &hares_io::hpxml::ZoneType) -> String {
+    match zt {
+        hares_io::hpxml::ZoneType::Conditioned => "Conditioned".to_string(),
+        hares_io::hpxml::ZoneType::Attic => "Attic".to_string(),
+        hares_io::hpxml::ZoneType::Garage => "Garage".to_string(),
+        hares_io::hpxml::ZoneType::Foundation => "Foundation".to_string(),
+        hares_io::hpxml::ZoneType::Outdoor => "Outdoor".to_string(),
+        hares_io::hpxml::ZoneType::Other(s) => s.clone(),
+    }
+}
+
+fn zone_node_for_boundary(
+    _building: &Building,
     zone_type: Option<&hares_io::hpxml::ZoneType>,
     n_zones: usize,
-) -> usize {
-    if n_zones == 0 {
-        return 0;
-    }
-    if let Some(target) = zone_type {
-        building
-            .zones
-            .iter()
-            .position(|z| z.zone_type == *target)
+    zone_type_to_idx: &HashMap<String, usize>,
+) -> NodeId {
+    let idx = if let Some(zt) = zone_type {
+        let key = zone_type_key(zt);
+        zone_type_to_idx
+            .get(&key)
+            .copied()
             .unwrap_or(0)
-            .min(n_zones - 1)
+            .min(n_zones.saturating_sub(1))
     } else {
         0
-    }
+    };
+    NodeId((idx + 1) as u32)
 }
 
-fn resolve_exterior(
-    building: &Building,
+fn exterior_node_for_boundary(
     boundary: &hares_io::hpxml::Boundary,
     n_zones: usize,
-) -> ExteriorTarget {
+    zone_type_to_idx: &HashMap<String, usize>,
+    outdoor_node: NodeId,
+    ground_node: NodeId,
+) -> NodeId {
     match boundary.exterior_zone.as_ref() {
-        Some(hares_io::hpxml::ZoneType::Outdoor) => ExteriorTarget::Outdoor,
+        Some(hares_io::hpxml::ZoneType::Outdoor) => outdoor_node,
         Some(hares_io::hpxml::ZoneType::Foundation)
             if boundary.boundary_type == hares_io::hpxml::BoundaryType::Slab =>
         {
-            ExteriorTarget::Ground
+            ground_node
         }
         Some(zt) => {
-            let idx = find_zone_idx(building, Some(zt), n_zones);
-            ExteriorTarget::Zone(idx)
+            let key = zone_type_key(zt);
+            let idx = zone_type_to_idx
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                .min(n_zones.saturating_sub(1));
+            NodeId((idx + 1) as u32)
         }
-        None => ExteriorTarget::Outdoor,
+        None => outdoor_node,
+    }
+}
+
+/// Adds a resistance edge, combining in parallel if the edge already exists.
+fn add_resistance(
+    resistances: &mut HashMap<(NodeId, NodeId), f64>,
+    a: NodeId,
+    b: NodeId,
+    r: f64,
+) {
+    let r = r.max(1e-6);
+    let edge = if a <= b { (a, b) } else { (b, a) };
+    if let Some(existing) = resistances.get_mut(&edge) {
+        use hares_envelope::rc_network::parallel_resistance;
+        *existing = parallel_resistance(*existing, r);
+    } else {
+        resistances.insert(edge, r);
     }
 }
 
@@ -1404,50 +1559,6 @@ fn stage_rank(stage: ExecutionStage) -> u8 {
         ExecutionStage::Thermal => 2,
         ExecutionStage::EnvelopeResolution => 3,
     }
-}
-
-fn collect_zone_sensible_gain_w(ports: &PortSlots) -> HashMap<ZoneId, f64> {
-    let mut gains = HashMap::with_capacity(ports.thermal.len());
-    for thermal in &ports.thermal {
-        if thermal.sensible_gain_w != 0.0 {
-            gains.insert(thermal.zone, thermal.sensible_gain_w);
-        }
-    }
-    gains
-}
-
-fn preview_env_with_non_thermal_gains(
-    env: &EnvironmentState,
-    ports: &PortSlots,
-    dt: StdDuration,
-) -> EnvironmentState {
-    let mut preview = env.clone();
-    let dt_s = dt.as_secs_f64();
-    if dt_s <= 0.0 {
-        return preview;
-    }
-
-    let gains = collect_zone_sensible_gain_w(ports);
-    for zone in &mut preview.zones {
-        let sensible_gain_w = gains.get(&zone.id).copied().unwrap_or(0.0);
-        if sensible_gain_w == 0.0 {
-            continue;
-        }
-        let volume_m3 = if zone.volume_m3 > 0.0 {
-            zone.volume_m3
-        } else {
-            hares_envelope::boundary_rc::DEFAULT_VOLUME_M3
-        };
-        let thermal_mass_j_k = (hares_envelope::boundary_rc::AIR_DENSITY_KG_M3
-            * hares_envelope::boundary_rc::AIR_CP_J_KG_K
-            * volume_m3
-            * hares_envelope::boundary_rc::INTERIOR_MASS_MULTIPLIER)
-            .max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
-        let delta_t_c = sensible_gain_w * dt_s / thermal_mass_j_k;
-        zone.temperature_c += delta_t_c;
-    }
-
-    preview
 }
 
 fn apply_thermal_update_to_zones(env: &mut EnvironmentState, update: &DomainUpdate) {
@@ -1981,65 +2092,6 @@ mod tests {
         assert_eq!(
             json_value_to_config_value(&serde_json::json!(true)),
             Some(ConfigValue::Bool(true))
-        );
-    }
-
-    #[test]
-    fn collect_zone_sensible_gain_w_reads_thermal_port_totals() {
-        let ports = PortSlots {
-            thermal: vec![
-                hares_types::ThermalAccumulator {
-                    zone: ZoneId(1),
-                    sensible_gain_w: 5000.0,
-                    latent_gain_w: 0.0,
-                },
-                hares_types::ThermalAccumulator {
-                    zone: ZoneId(2),
-                    sensible_gain_w: -1200.0,
-                    latent_gain_w: 0.0,
-                },
-            ],
-            ..Default::default()
-        };
-
-        let gains = collect_zone_sensible_gain_w(&ports);
-        assert_eq!(gains.get(&ZoneId(1)).copied(), Some(5000.0));
-        assert_eq!(gains.get(&ZoneId(2)).copied(), Some(-1200.0));
-    }
-
-    #[test]
-    fn preview_env_with_non_thermal_gains_increases_zone_temp_with_positive_gain() {
-        let env = EnvironmentState {
-            zones: vec![hares_types::ZoneState {
-                id: ZoneId(1),
-                temperature_c: 20.0,
-                humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
-                volume_m3: 200.0,
-            }],
-            weather: hares_types::WeatherState::default(),
-            grid: GridState {
-                voltage_pu: 1.0,
-                frequency_hz: 60.0,
-            },
-            custom_domains: Vec::new(),
-            current_time: Utc::now(),
-            time_res: Duration::minutes(1),
-        };
-        let ports = PortSlots {
-            thermal: vec![hares_types::ThermalAccumulator {
-                zone: ZoneId(1),
-                sensible_gain_w: 5000.0,
-                latent_gain_w: 0.0,
-            }],
-            ..Default::default()
-        };
-
-        let preview = preview_env_with_non_thermal_gains(&env, &ports, StdDuration::from_secs(60));
-        assert!(
-            preview.zones[0].temperature_c > env.zones[0].temperature_c,
-            "positive sensible gains should raise preview zone temp"
         );
     }
 }

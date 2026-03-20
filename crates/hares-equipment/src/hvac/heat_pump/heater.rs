@@ -390,7 +390,7 @@ impl HeatPumpHeaterCore {
             )?;
             self.hvac.eir_by_stage =
                 remap_minisplit_stages(self.hvac.eir_by_stage.clone(), self.mshp_speed_map)?;
-            self.hvac.speed_control_mode = super::super::common::SpeedControlMode::FourSpeed;
+            self.hvac.speed_control_mode = SpeedControlMode::FourSpeed;
             self.pan_heater_kw = first_f64(config, &["pan_heater_kw", "mshp_pan_heater_kw"])
                 .unwrap_or(MSHP_PAN_HEATER_DEFAULT_KW);
             self.pan_heater_temp_c =

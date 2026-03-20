@@ -12,6 +12,7 @@
 //! 9. ResStock state fallback error
 //! 10. ColumnMapper re-export
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -23,10 +24,10 @@ use chrono::{Duration, Utc};
 use parquet::arrow::arrow_writer::ArrowWriter;
 use tempfile::{NamedTempFile, tempdir};
 
-use hares_io::output::metrics::MetricsCalculator;
+use hares_io::output::metrics::{MetricsCalculator, MetricsError};
 use hares_io::{
-    ColumnMapper, OutputFormat, ResStockError, ResStockVersion, SimulationConfig, build_schema,
-    expected_columns_at_verbosity, parse_resstock_metadata,
+    ColumnMapper, OutputFormat, ResStockError, ResStockVersion, SimulationConfig,
+    build_schema, expected_columns_at_verbosity, parse_resstock_metadata,
 };
 use hares_types::FuelType;
 
@@ -141,14 +142,18 @@ fn build_schema_output_accepted_by_metrics_calculator_all_verbosity_levels() {
 #[test]
 fn verbosity_2_produces_ochre_temperature_format() {
     let schema = build_schema(&[], 2);
-    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let names: Vec<&str> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
     assert!(
         names.contains(&"Temperature - Indoor (C)"),
         "verbosity 2 must produce 'Temperature - Indoor (C)' (OCHRE format), got: {names:?}"
     );
     // Must NOT produce the old format.
     assert!(
-        !names.contains(&"Indoor Temperature (C)"),
+        !names.iter().any(|n| *n == "Indoor Temperature (C)"),
         "must not contain 'Indoor Temperature (C)' (non-OCHRE format)"
     );
 }
@@ -156,7 +161,11 @@ fn verbosity_2_produces_ochre_temperature_format() {
 #[test]
 fn verbosity_0_column_names_match_ochre() {
     let schema = build_schema(&[], 0);
-    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let names: Vec<&str> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
     assert!(
         names.contains(&"Total Electric Power (kW)"),
         "verbosity 0 must contain 'Total Electric Power (kW)'"
@@ -223,7 +232,11 @@ fn verbosity_8_produces_additional_columns_beyond_level_7() {
 fn verbosity_6_includes_envelope_component_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
     let schema = build_schema(&specs, 6);
-    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let names: Vec<&str> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
     assert!(
         names.contains(&"Window Transmitted Solar Gain (W)"),
         "verbosity 6 should include envelope component columns"
@@ -234,7 +247,11 @@ fn verbosity_6_includes_envelope_component_columns() {
 fn verbosity_7_includes_schedule_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
     let schema = build_schema(&specs, 7);
-    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let names: Vec<&str> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
     assert!(
         names.contains(&"ASHP Heater Schedule (-)"),
         "verbosity 7 should include schedule columns"
@@ -245,7 +262,11 @@ fn verbosity_7_includes_schedule_columns() {
 fn verbosity_8_includes_capacity_and_cop_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
     let schema = build_schema(&specs, 8);
-    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let names: Vec<&str> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
     assert!(
         names.contains(&"ASHP Heater Capacity (W)"),
         "verbosity 8 should include capacity columns"
@@ -262,8 +283,10 @@ fn verbosity_8_includes_capacity_and_cop_columns() {
 
 #[test]
 fn gas_annual_energy_therms_is_non_none_with_gas_column() {
-    let schema =
-        schema_from_columns(&["Total Electric Power (kW)", "Total Gas Power (therms/hour)"]);
+    let schema = schema_from_columns(&[
+        "Total Electric Power (kW)",
+        "Total Gas Power (therms/hour)",
+    ]);
     let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
     calc.accumulate(&build_batch(vec![
         ("Total Electric Power (kW)", vec![1.0, 2.0]),
@@ -271,21 +294,23 @@ fn gas_annual_energy_therms_is_non_none_with_gas_column() {
     ]));
     let metrics = calc.finish();
 
-    let gas = metrics
-        .gas_energy
-        .as_ref()
-        .expect("gas energy must be Some when gas column is present");
     assert!(
-        (gas.total_therms - 2.0).abs() < 1e-9,
-        "gas energy should be 2.0 therms (0.5 + 1.5) * 1h, got {}",
-        gas.total_therms
+        metrics.annual_energy_kwh.total_gas_therms.is_some(),
+        "gas_annual_energy_therms must be Some when gas column is present"
+    );
+    let gas_therms = metrics.annual_energy_kwh.total_gas_therms.unwrap();
+    assert!(
+        (gas_therms - 2.0).abs() < 1e-9,
+        "gas energy should be 2.0 therms (0.5 + 1.5) * 1h, got {gas_therms}"
     );
 }
 
 #[test]
 fn total_energy_includes_both_electric_and_gas() {
-    let schema =
-        schema_from_columns(&["Total Electric Power (kW)", "Total Gas Power (therms/hour)"]);
+    let schema = schema_from_columns(&[
+        "Total Electric Power (kW)",
+        "Total Gas Power (therms/hour)",
+    ]);
     let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
     calc.accumulate(&build_batch(vec![
         ("Total Electric Power (kW)", vec![1.0]),
@@ -293,16 +318,15 @@ fn total_energy_includes_both_electric_and_gas() {
     ]));
     let metrics = calc.finish();
 
-    let electric_kwh = metrics.annual_energy_kwh.total;
-    let gas = metrics.gas_energy.as_ref().expect("gas must be present");
-    let combined = metrics.combined_annual_energy_kwh();
+    let electric_kwh = metrics.annual_energy_kwh.total_electric_kwh;
+    let gas_therms = metrics.annual_energy_kwh.total_gas_therms.unwrap();
+    let combined = metrics.annual_energy_kwh.combined_total_kwh;
 
     // combined = electric_kwh + gas_therms * 29.3001
-    let expected_combined = electric_kwh + gas.total_therms * 29.3001;
+    let expected_combined = electric_kwh + gas_therms * 29.3001;
     assert!(
         (combined - expected_combined).abs() < 1e-6,
-        "combined total ({combined}) should equal electric ({electric_kwh}) + gas ({}) * 29.3001 = {expected_combined}",
-        gas.total_therms
+        "combined total ({combined}) should equal electric ({electric_kwh}) + gas ({gas_therms}) * 29.3001 = {expected_combined}"
     );
     assert!(
         combined > electric_kwh,
@@ -320,7 +344,7 @@ fn v2024_2_mapper_rejects_v2024_1_schema() {
     // Applying V2024_2 mapper to a V2024_1 schema should fail with VersionMismatch.
     let tmp = tempdir().expect("tmp");
     let schema = Arc::new(Schema::new(vec![
-        Field::new("bldg_id", DataType::Int64, false), // V2024_1 name
+        Field::new("bldg_id", DataType::Int64, false),        // V2024_1 name
         Field::new("upgrade", DataType::Int64, false),
         Field::new("sample_weight", DataType::Float64, false),
         Field::new("in.state", DataType::Utf8, false),
@@ -357,7 +381,7 @@ fn v2024_1_mapper_rejects_v2024_2_schema() {
     // V2024_2 uses "building_id", V2024_1 expects "bldg_id".
     let tmp = tempdir().expect("tmp");
     let schema = Arc::new(Schema::new(vec![
-        Field::new("building_id", DataType::Int64, false), // V2024_2 name
+        Field::new("building_id", DataType::Int64, false),     // V2024_2 name
         Field::new("upgrade", DataType::Int64, false),
         Field::new("sample_weight", DataType::Float64, false),
         Field::new("in.state", DataType::Utf8, false),
@@ -396,7 +420,7 @@ fn v2024_1_mapper_rejects_v2024_2_schema() {
 fn null_bldg_id_returns_error() {
     let tmp = tempdir().expect("tmp");
     let schema = Arc::new(Schema::new(vec![
-        Field::new("bldg_id", DataType::Int64, true), // nullable
+        Field::new("bldg_id", DataType::Int64, true),  // nullable
         Field::new("upgrade", DataType::Int64, false),
         Field::new("sample_weight", DataType::Float64, false),
         Field::new("in.state", DataType::Utf8, false),
@@ -404,7 +428,7 @@ fn null_bldg_id_returns_error() {
     let batch = RecordBatch::try_new(
         schema,
         vec![
-            Arc::new(Int64Array::from(vec![None])) as ArrayRef, // null bldg_id
+            Arc::new(Int64Array::from(vec![None])) as ArrayRef,  // null bldg_id
             Arc::new(Int64Array::from(vec![0])) as ArrayRef,
             Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
             Arc::new(StringArray::from(vec!["CO"])) as ArrayRef,
@@ -484,7 +508,9 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
     // after initial creation succeeds.
     let mut recorder =
         hares_io::StreamingRecorder::new(schema, 1000, OutputFormat::Csv, &path).unwrap();
-    recorder.push_row("2024-01-01T00:00:00Z", &[1.0]).unwrap();
+    recorder
+        .push_row("2024-01-01T00:00:00Z", &[1.0])
+        .unwrap();
 
     // finish() should succeed here — the main path works.
     let summary = recorder.finish().unwrap();
@@ -557,13 +583,7 @@ tdb_bounds = [-20.0, 30.0]
 
     // Create all other required subdirs.
     for subdir in &[
-        "battery",
-        "envelope",
-        "ev",
-        "generator",
-        "loads",
-        "pv",
-        "water_heating",
+        "battery", "envelope", "ev", "generator", "loads", "pv", "water_heating",
     ] {
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
     }
@@ -655,13 +675,7 @@ tdb_bounds = [-25.0, 25.0]
     .unwrap();
 
     for subdir in &[
-        "battery",
-        "envelope",
-        "ev",
-        "generator",
-        "loads",
-        "pv",
-        "water_heating",
+        "battery", "envelope", "ev", "generator", "loads", "pv", "water_heating",
     ] {
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
     }

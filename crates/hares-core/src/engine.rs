@@ -118,7 +118,11 @@ impl SimulationEngine {
         let result = match sim_outcome {
             Ok(Ok(dwelling_results)) => {
                 let batches = dwelling.flushed_batches().to_vec();
-                let metrics = compute_metrics_from_batches(&batches, &config.sim_config);
+                let metrics = if batches.is_empty() {
+                    metrics_from_steps(&dwelling_results.steps, &config.sim_config)
+                } else {
+                    compute_metrics_from_batches(&batches, &config.sim_config)
+                };
                 #[cfg(feature = "profiling")]
                 emit_dwelling_profiling_summary(&dwelling.profiling_summary());
                 let status = if warnings.is_empty() {
@@ -220,6 +224,53 @@ fn resolved_output_path(config: &DwellingConfig) -> PathBuf {
         OutputFormat::Parquet => "parquet",
     };
     PathBuf::from(format!("dwelling_{}.{}", config.bldg_id, ext))
+}
+
+fn metrics_from_steps(
+    steps: &[crate::dwelling::StepResult],
+    sim_config: &SimulationConfig,
+) -> SimulationMetrics {
+    let timestep_h = (sim_config.time_res.num_seconds() as f64 / 3600.0).max(0.0);
+    let mut annual_total = 0.0;
+    let mut peak_import_kw: f64 = 0.0;
+    let mut peak_export_kw: f64 = 0.0;
+
+    for step in steps {
+        let power_kw = step.net_electric_power_kw;
+        annual_total += power_kw * timestep_h;
+        peak_import_kw = peak_import_kw.max(power_kw);
+        peak_export_kw = peak_export_kw.max((-power_kw).max(0.0));
+    }
+
+    let mut annual_per_end_use = BTreeMap::new();
+    annual_per_end_use.insert("total_electric_power_kw".to_string(), annual_total);
+    let mut peak_per_end_use = BTreeMap::new();
+    peak_per_end_use.insert(
+        "total_electric_power_kw".to_string(),
+        peak_import_kw.max(0.0),
+    );
+
+    SimulationMetrics {
+        annual_energy_kwh: AnnualEnergyKwh {
+            total: annual_total,
+            per_end_use: annual_per_end_use,
+        },
+        peak_power_kw: PeakPowerKw {
+            per_end_use: peak_per_end_use,
+            rolling: RollingPeakKw {
+                peak_15min_kw: 0.0,
+                peak_30min_kw: 0.0,
+                peak_60min_kw: 0.0,
+            },
+        },
+        comfort_hours: None,
+        unmet_load_hours: None,
+        renewable_energy_fraction: None,
+        grid_interaction_metrics: GridInteractionMetrics {
+            peak_import_kw: peak_import_kw.max(0.0),
+            peak_export_kw,
+        },
+    }
 }
 
 fn compute_metrics_from_batches(
