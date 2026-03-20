@@ -1425,10 +1425,21 @@ fn compute_attic_volume(boundaries: &[Boundary], attic_floor_area_m2: Option<f64
         return None;
     }
 
-    // Use the largest gable wall area (handles both 2-gable and 3-gable cases).
-    let gable_area = gable_areas
-        .into_iter()
-        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
+    // Select gable area following OCHRE's convention:
+    // - Standard 2-gable roof: both gables should be equal (within 0.2 m²), use first.
+    // - 3-gable (garage-combined): use median (index 1 after sorting).
+    // Ref: OCHRE hpxml.py parse_hpxml_zones() lines 599–611.
+    let gable_area = match gable_areas.len() {
+        0 => return None,
+        1 => gable_areas[0],
+        2 => gable_areas[0], // standard symmetric gable
+        _ => {
+            // 3+ gables: sort and take median (index 1)
+            let mut sorted = gable_areas;
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted[1]
+        }
+    };
     if gable_area <= 0.0 {
         return None;
     }

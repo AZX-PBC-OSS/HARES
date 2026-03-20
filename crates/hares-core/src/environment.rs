@@ -378,11 +378,7 @@ fn build_surface_geometry(building: &Building) -> Vec<SurfaceGeometry> {
         .iter()
         .enumerate()
         .map(|(idx, boundary)| {
-            let tilt_deg = match boundary.boundary_type {
-                hares_io::hpxml::BoundaryType::Roof => 0.0,
-                hares_io::hpxml::BoundaryType::Slab => 180.0,
-                _ => 90.0,
-            };
+            let tilt_deg = boundary.tilt_deg.unwrap_or(90.0);
             SurfaceGeometry {
                 surface_id: u32::try_from(idx).unwrap_or(u32::MAX),
                 azimuth_deg: boundary.azimuth_deg.unwrap_or(180.0),

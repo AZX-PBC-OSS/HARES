@@ -1721,12 +1721,7 @@ pub fn building_to_boundary_inputs(
                 })
                 .unwrap_or_default();
 
-            let tilt_deg = match bd.boundary_type {
-                hares_io::hpxml::BoundaryType::Roof => 0.0,
-                hares_io::hpxml::BoundaryType::Slab
-                | hares_io::hpxml::BoundaryType::Floor => 180.0,
-                _ => 90.0,
-            };
+            let tilt_deg = bd.tilt_deg.unwrap_or(90.0);
             let interior_label = zone_type_to_label(bd.interior_zone.as_ref());
             let exterior_label = zone_type_to_label(bd.exterior_zone.as_ref());
             let (r_film_int, r_film_ext) = film_resistances(
