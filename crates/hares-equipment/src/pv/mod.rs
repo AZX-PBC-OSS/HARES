@@ -2,6 +2,7 @@
 
 mod array_config;
 mod lut;
+pub mod soiling;
 
 pub use array_config::{ModuleType, PvArray, surface_id_for_orientation};
 use array_config::{parse_arrays_from_config, parse_u32_from_f64};
@@ -40,6 +41,14 @@ const KEY_SURFACE_RESOLUTION_DEG: &str = "surface_resolution_deg";
 const KEY_SAM_LUT_PATH: &str = "sam_lut_path";
 const KEY_SYSTEM_LOSSES_FRACTION: &str = "system_losses_fraction";
 const KEY_SYSTEM_LOSSES_FRACTION_ALT: &str = "SystemLossesFraction";
+
+const KEY_SOILING_ENABLED: &str = "soiling_enabled";
+const KEY_SOILING_CLEANING_THRESHOLD_MM: &str = "soiling_cleaning_threshold_mm";
+const KEY_SOILING_LOSS_RATE_PER_DAY: &str = "soiling_loss_rate_per_day";
+const KEY_SOILING_GRACE_PERIOD_DAYS: &str = "soiling_grace_period_days";
+const KEY_SOILING_MAX_LOSS: &str = "soiling_max_loss";
+const KEY_SOILING_INITIAL_LOSS: &str = "soiling_initial_loss";
+const KEY_SOILING_RAIN_ACCUM_HOURS: &str = "soiling_rain_accum_hours";
 
 const DEFAULT_NOCT_C: f64 = 47.0;
 const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.96;
@@ -103,6 +112,8 @@ struct PvCheckpoint {
     q_setpoint_kvar: f64,
     inverter_priority: InverterPriority,
     power_factor: f64,
+    soiling_config: Option<soiling::SoilingConfig>,
+    soiling_state: Option<soiling::SoilingState>,
 }
 
 pub struct PV {
@@ -123,6 +134,8 @@ pub struct PV {
     q_setpoint_kvar: f64,
     luts_by_surface: HashMap<u32, PvLut>,
     last_ac_power_kw: f64,
+    soiling_config: Option<soiling::SoilingConfig>,
+    soiling_state: Option<soiling::SoilingState>,
     init_error: Option<HaresError>,
 }
 
@@ -151,7 +164,7 @@ impl PV {
             telemetry_fields: telemetry_fields(),
         };
 
-        let mut telemetry = Telemetry::with_capacity(8);
+        let mut telemetry = Telemetry::with_capacity(9);
         telemetry.insert("dc_power_kw", 0.0);
         telemetry.insert("ac_power_kw", 0.0);
         telemetry.insert("reactive_power_kvar", 0.0);
@@ -160,6 +173,7 @@ impl PV {
         telemetry.insert("inverter_efficiency", DEFAULT_INVERTER_EFFICIENCY);
         telemetry.insert("curtailment_kw", 0.0);
         telemetry.insert("inverter_clipping_kw", 0.0);
+        telemetry.insert("soiling_ratio", 1.0);
 
         Self {
             descriptor,
@@ -178,6 +192,8 @@ impl PV {
             q_setpoint_kvar: 0.0,
             luts_by_surface: HashMap::new(),
             last_ac_power_kw: 0.0,
+            soiling_config: None,
+            soiling_state: None,
             init_error,
         }
     }
@@ -187,8 +203,13 @@ impl PV {
         env: &EnvironmentState,
         irr: &SurfaceIrradiance,
         array: &PvArray,
+        soiling_ratio: f64,
     ) -> ArrayStepOutput {
-        let irradiance_w_m2 = (irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2).max(0.0);
+        // Soiling reduces effective irradiance reaching the cells.
+        // Applied before cell temperature and power calculations so that a
+        // soiled panel also runs cooler (less absorbed irradiance as heat).
+        let irradiance_w_m2 =
+            (irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2).max(0.0) * soiling_ratio;
         let ambient_temp_c = env.weather.outdoor_temp_c;
 
         if let Some(lut) = array
@@ -395,6 +416,44 @@ impl Equipment for PV {
             }
         }
 
+        // Parse soiling configuration. Soiling is opt-in: enabled when
+        // `soiling_enabled` is set or any soiling parameter is present.
+        let soiling_enabled = config
+            .get_f64(KEY_SOILING_ENABLED)
+            .map(|v| v != 0.0)
+            .unwrap_or_else(|| {
+                config.get_f64(KEY_SOILING_CLEANING_THRESHOLD_MM).is_some()
+                    || config.get_f64(KEY_SOILING_LOSS_RATE_PER_DAY).is_some()
+            });
+
+        if soiling_enabled {
+            let mut cfg = soiling::SoilingConfig::default();
+            if let Some(v) = config.get_f64(KEY_SOILING_CLEANING_THRESHOLD_MM) {
+                cfg.cleaning_threshold_m = v / 1000.0;
+            }
+            if let Some(v) = config.get_f64(KEY_SOILING_LOSS_RATE_PER_DAY) {
+                cfg.soiling_loss_rate_per_s = v / 86_400.0;
+            }
+            if let Some(v) = config.get_f64(KEY_SOILING_GRACE_PERIOD_DAYS) {
+                cfg.grace_period_s = v * 86_400.0;
+            }
+            if let Some(v) = config.get_f64(KEY_SOILING_MAX_LOSS) {
+                cfg.max_soiling = v;
+            }
+            if let Some(v) = config.get_f64(KEY_SOILING_INITIAL_LOSS) {
+                cfg.initial_soiling = v;
+            }
+            if let Some(v) = config.get_f64(KEY_SOILING_RAIN_ACCUM_HOURS) {
+                cfg.rain_accum_period_s = v * 3600.0;
+            }
+            let dt_s = env.time_step_secs();
+            self.soiling_state = Some(soiling::SoilingState::new(&cfg, dt_s));
+            self.soiling_config = Some(cfg);
+        } else {
+            self.soiling_config = None;
+            self.soiling_state = None;
+        }
+
         self.telemetry
             .set("inverter_efficiency", self.inverter_efficiency);
         self.telemetry.set("dc_power_kw", 0.0);
@@ -405,6 +464,7 @@ impl Equipment for PV {
         self.telemetry.set("irradiance_w_m2", 0.0);
         self.telemetry.set("curtailment_kw", 0.0);
         self.telemetry.set("inverter_clipping_kw", 0.0);
+        self.telemetry.set("soiling_ratio", 1.0);
         Ok(())
     }
 
@@ -422,6 +482,14 @@ impl Equipment for PV {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        // Advance soiling model with current-timestep rainfall.
+        let soiling_ratio = match (&self.soiling_config, &mut self.soiling_state) {
+            (Some(cfg), Some(state)) => {
+                state.step(cfg, env.weather.rainfall_m, env.time_step_secs(), false)
+            }
+            _ => 1.0,
+        };
+
         let mut total_dc_power_kw = 0.0;
         let mut total_ac_power_kw = 0.0;
         let mut total_irradiance_weighted = 0.0;
@@ -446,7 +514,7 @@ impl Equipment for PV {
                     ))
                 })?;
 
-            let output = self.step_one_array(env, irr, array);
+            let output = self.step_one_array(env, irr, array, soiling_ratio);
             total_dc_power_kw += output.dc_power_kw;
             total_ac_power_kw += output.ac_power_kw;
             total_irradiance_weighted += output.irradiance_w_m2 * array.capacity_kw;
@@ -505,6 +573,7 @@ impl Equipment for PV {
         self.telemetry.set("curtailment_kw", curtailment_kw);
         self.telemetry
             .set("inverter_clipping_kw", inverter_clipping_kw);
+        self.telemetry.set("soiling_ratio", soiling_ratio);
 
         Ok(())
     }
@@ -520,6 +589,8 @@ impl Equipment for PV {
             q_setpoint_kvar: self.q_setpoint_kvar,
             inverter_priority: self.inverter_priority,
             power_factor: self.power_factor,
+            soiling_config: self.soiling_config.clone(),
+            soiling_state: self.soiling_state.clone(),
         })
     }
 
@@ -530,6 +601,8 @@ impl Equipment for PV {
         self.q_setpoint_kvar = decoded.q_setpoint_kvar;
         self.inverter_priority = decoded.inverter_priority;
         self.power_factor = decoded.power_factor;
+        self.soiling_config = decoded.soiling_config;
+        self.soiling_state = decoded.soiling_state;
         Ok(())
     }
 
@@ -655,6 +728,12 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             name: "inverter_clipping_kw".to_string(),
             unit: "kW".to_string(),
             description: "Power lost to inverter AC capacity clipping (DC/AC ratio > 1)"
+                .to_string(),
+        },
+        TelemetryField {
+            name: "soiling_ratio".to_string(),
+            unit: "-".to_string(),
+            description: "PV soiling ratio (1.0 = clean, < 1.0 = soiled). Kimber model."
                 .to_string(),
         },
     ]

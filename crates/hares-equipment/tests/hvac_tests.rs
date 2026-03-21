@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
-use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
+use hares_equipment::{EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
     ThermalAccumulator, WeatherState, ZoneId, ZoneState,

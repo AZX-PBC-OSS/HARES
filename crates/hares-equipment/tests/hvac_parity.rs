@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
-use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
+use hares_equipment::{EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
     ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -484,15 +484,13 @@ fn air_conditioner_setpoint_override() {
 //
 // HARES uses the EnergyPlus OnDemand humidity-based defrost model, which
 // computes time_fraction from outdoor coil moisture accumulation. The model
-// also applies extra_power_w from the defrost EIR modifier.
+// also applies extra_power_w from the defrost EIR modifier (DEFROST_EIR_TEMP_MODIFIER,
+// a dimensionless 0.1528 scalar producing watts from watts — NOT kW).
 //
-// This test verifies that defrost engages at 0°C (below max_oat_defrost_c)
-// and that the unit continues to operate rather than locking out. The test
-// explicitly does NOT assert a specific COP bound because the OnDemand defrost
-// model's extra_power_w calculation uses DEFROST_EIR_TEMP_MODIFIER_KW which
-// can produce large values at rated capacity (by design — tracks the OCHRE
-// EnergyPlus-derived formula). The important behavior invariant tested here
-// is defrost activation and continued heat delivery.
+// This test verifies that defrost engages at 0°C (below max_oat_defrost_c),
+// that the unit continues to deliver heat, and that the port-derived COP
+// stays above 0.5 — confirming the extra_power_w is correctly sized (~90-200 W
+// of overhead for a 10 kW unit, not 1000× inflated).
 // ---------------------------------------------------------------------------
 #[test]
 fn ashp_defrost_at_sub_freezing_outdoor_temp() {
@@ -513,10 +511,11 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     eq.init(&c, &env).unwrap();
 
     // Run 30 minutes at sub-freezing to allow defrost logic to accumulate
+    let mut last_ports = make_ports();
     for _ in 0..30 {
-        let mut ports = make_ports();
+        last_ports = make_ports();
         eq.update_control(&env);
-        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        eq.step(&env, Duration::from_secs(60), &mut last_ports).unwrap();
     }
 
     let tel = eq.telemetry();
@@ -525,7 +524,6 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     let thermal_output_w = tel.get("thermal_output_w").unwrap_or(0.0);
     let electric_kw = tel.get("electric_kw").unwrap_or(0.0);
 
-    // Document observed defrost behavior at 0°C
     eprintln!(
         "[hvac_parity] defrost_at_0C: defrost_active={defrost_active:.0}, \
          defrost_time_fraction={defrost_fraction:.4}, \
@@ -540,11 +538,25 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
          got defrost_active={defrost_active:.0}, defrost_time_fraction={defrost_fraction:.4}"
     );
 
-    // The unit must not crash and must still operate (thermal output or defrost mode)
+    // The unit must deliver positive heat and draw positive electricity.
     assert!(
-        thermal_output_w >= 0.0 && electric_kw >= 0.0,
-        "ASHP must not produce negative outputs at 0°C; \
-         thermal={thermal_output_w:.1} W, electric={electric_kw:.4} kW"
+        thermal_output_w > 0.0,
+        "ASHP must deliver positive thermal output at 0°C during defrost; \
+         got {thermal_output_w:.1} W"
+    );
+    assert!(
+        electric_kw > 0.0,
+        "ASHP must draw positive electricity at 0°C; got {electric_kw:.4} kW"
+    );
+
+    // COP must be physically plausible. DEFROST_EIR_TEMP_MODIFIER is dimensionless
+    // (0.1528 × capacity_W / 1.01667 → extra_power in W). With correct units, the
+    // defrost overhead for a 10 kW unit is ~150 W, not 150 kW, so COP stays above 0.5.
+    let cop = thermal_output_w / (electric_kw * 1_000.0);
+    assert!(
+        cop > 0.5,
+        "ASHP COP during defrost at 0°C must be > 0.5 (heat pump, not resistance heater); \
+         got COP={cop:.3} (thermal={thermal_output_w:.1} W, electric={electric_kw:.4} kW)"
     );
 }
 

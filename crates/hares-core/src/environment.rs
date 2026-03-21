@@ -298,6 +298,12 @@ impl EnvironmentManager {
     }
 }
 
+/// EPW hour-ending midpoint shift (30 minutes = 1800 seconds).
+/// EPW files use hour-ending convention: hour 13 covers 12:00–13:00.
+/// Subtracting 30 minutes aligns the data with the period midpoint,
+/// matching the pvlib/OCHRE convention.
+const EPW_MIDPOINT_SHIFT_SECS: u64 = 1800;
+
 /// Compute the step offset into an annual weather file for a given start time.
 ///
 /// EPW files are indexed by **local standard time** (LST), not UTC. The
@@ -307,8 +313,6 @@ fn compute_annual_offset(meta: &WeatherMeta, start_time: DateTime<Utc>, step_sec
     if step_secs == 0 {
         return 0;
     }
-    // Convert UTC → local standard time by adding the timezone offset.
-    // EPW timezone is hours east of Greenwich (e.g., Denver = -7).
     let offset_secs = (meta.timezone_offset_h * 3600.0) as i64;
     let local = start_time + chrono::Duration::seconds(offset_secs);
 
@@ -317,7 +321,15 @@ fn compute_annual_offset(meta: &WeatherMeta, start_time: DateTime<Utc>, step_sec
     let m = local.minute() as u64;
     let s = local.second() as u64;
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
-    (seconds_into_year / step_secs as u64) as usize
+
+    let year_secs = if local.date_naive().leap_year() {
+        366 * 86400_u64
+    } else {
+        365 * 86400_u64
+    };
+    let shifted = (seconds_into_year + year_secs - EPW_MIDPOINT_SHIFT_SECS) % year_secs;
+
+    (shifted / step_secs as u64) as usize
 }
 
 /// Compute offset into the schedule time series. If the schedule has timestamps,
@@ -341,7 +353,7 @@ fn compute_schedule_offset(
 }
 
 fn compute_mains_inputs(weather: &WeatherTimeSeries, step_secs: u32) -> (f64, f64) {
-    let annual_avg_c = mean_or_default(&weather.dry_bulb_c, DEFAULT_INDOOR_TEMP_C);
+    let annual_avg_c = mean_or_default(&weather.dry_bulb_c, 20.0);
 
     let temps = &weather.dry_bulb_c;
     let samples_per_day = usize::try_from(86_400 / step_secs.max(1)).unwrap_or(0);
@@ -405,8 +417,13 @@ fn build_surface_geometry(building: &Building) -> Vec<SurfaceGeometry> {
         .collect()
 }
 
-fn initial_zones(building: &Building) -> Vec<ZoneState> {
-    let default_temp = extract_indoor_design_temp_c(building).unwrap_or(DEFAULT_INDOOR_TEMP_C);
+/// Outdoor temperature threshold for selecting heating vs cooling setpoint
+/// at initialization, matching OCHRE's Envelope.initialize_state().
+const OUTDOOR_HEATING_COOLING_THRESHOLD_C: f64 = 12.0;
+const DEFAULT_SETPOINT_C: f64 = 21.0;
+
+fn initial_zones(building: &Building, outdoor_temp_c: f64) -> Vec<ZoneState> {
+    let default_temp = determine_initial_indoor_temp_c(building, outdoor_temp_c);
     if building.zones.is_empty() {
         return vec![ZoneState {
             id: ZoneId(1),
@@ -433,27 +450,34 @@ fn initial_zones(building: &Building) -> Vec<ZoneState> {
         .collect()
 }
 
-fn extract_indoor_design_temp_c(building: &Building) -> Option<f64> {
-    let candidates = [
-        "IndoorTemperature",
-        "IndoorDesignTemperature",
-        "HeatingSetpointTemp",
-    ];
-    find_text_f64_recursive(&building.details_xml, &candidates)
-}
+/// Determines initial indoor temperature from HVAC setpoints and outdoor temp.
+///
+/// Matches OCHRE's `Envelope.initialize_state()`:
+/// - outdoor > 12°C → cooling setpoint (building is in cooling mode)
+/// - outdoor ≤ 12°C → heating setpoint (building is in heating mode)
+/// - No setpoints available → 21°C (OCHRE default)
+fn determine_initial_indoor_temp_c(building: &Building, outdoor_temp_c: f64) -> f64 {
+    let heating_sp = building
+        .heating_weekday_setpoints_c
+        .as_ref()
+        .and_then(|v| v.first().copied());
+    let cooling_sp = building
+        .cooling_weekday_setpoints_c
+        .as_ref()
+        .and_then(|v| v.first().copied());
 
-fn find_text_f64_recursive(
-    node: &hares_io::hpxml::building::XmlNode,
-    names: &[&str],
-) -> Option<f64> {
-    if names.iter().any(|target| *target == node.name)
-        && let Ok(value) = node.text.trim().parse::<f64>()
-    {
-        return Some(value);
+    match (heating_sp, cooling_sp) {
+        (Some(h), Some(c)) => {
+            if outdoor_temp_c > OUTDOOR_HEATING_COOLING_THRESHOLD_C {
+                c
+            } else {
+                h
+            }
+        }
+        (Some(h), None) => h,
+        (None, Some(c)) => c,
+        (None, None) => DEFAULT_SETPOINT_C,
     }
-    node.children
-        .iter()
-        .find_map(|child| find_text_f64_recursive(child, names))
 }
 
 #[cfg(test)]
@@ -771,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_indoor_design_temperature_falls_back_to_20c() {
+    fn missing_setpoints_falls_back_to_ochre_default_21c() {
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
@@ -781,7 +805,7 @@ mod tests {
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
-        assert_eq!(env.zones[0].temperature_c, 20.0);
+        assert_eq!(env.zones[0].temperature_c, 21.0);
     }
 
     /// Clear-sky solar noon on a south-facing tilted surface must produce non-zero
@@ -851,6 +875,8 @@ mod tests {
     }
 
     /// Weather offset: simulation starting mid-year reads the correct row.
+    /// With the EPW 30-min midpoint shift, starting at 02:30 LST aligns with
+    /// the EPW row covering 02:00–03:00 (index 2, temp = 20°C).
     #[test]
     fn weather_offset_reads_correct_row_for_midyear_start() {
         // Build 4-row hourly weather: temps = [-10, 5, 20, 35]
@@ -870,8 +896,9 @@ mod tests {
         weather.ground_temp_c = vec![8.0; 4];
         weather.liquid_precip_m = vec![0.0; 4];
 
-        // Simulation starts at hour 2 (row index 2, temp = 20°C)
-        let start = Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap();
+        // Simulation starts at 02:30 LST: midpoint shift places this at row 2 (20°C).
+        // seconds_into_year = 9000, shifted = 9000 - 1800 = 7200, 7200/3600 = 2.
+        let start = Utc.with_ymd_and_hms(2024, 1, 1, 2, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather,
             schedule_series(),
@@ -892,81 +919,87 @@ mod tests {
 
     /// compute_annual_offset: leap year (2024) — May 5 noon.
     /// Feb has 29 days so May 5 = ordinal 126, ordinal0 = 125.
+    /// With 30-min EPW midpoint shift: (125*86400 + 12*3600 - 1800) / 3600 = 3011.
     #[test]
     fn annual_offset_leap_year_may_5_noon() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2024, 5, 5, 12, 0, 0).unwrap();
         let offset = compute_annual_offset(&meta, start, 3600);
-        assert_eq!(offset, 125 * 24 + 12); // ordinal0=125, hour 12
+        assert_eq!(offset, 3011);
     }
 
     /// compute_annual_offset: non-leap year (2023) — May 5 noon.
     /// Feb has 28 days so May 5 = ordinal 125, ordinal0 = 124.
+    /// With 30-min EPW midpoint shift: (124*86400 + 12*3600 - 1800) / 3600 = 2987.
     #[test]
     fn annual_offset_non_leap_year_may_5_noon() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2023, 5, 5, 12, 0, 0).unwrap();
         let offset = compute_annual_offset(&meta, start, 3600);
-        assert_eq!(offset, 124 * 24 + 12); // ordinal0=124, hour 12
+        assert_eq!(offset, 2987);
     }
 
-    /// compute_annual_offset: leap year Jan 1 00:00 → offset 0.
+    /// compute_annual_offset: leap year Jan 1 00:00.
+    /// Shift wraps to last step of previous year: (366*86400 - 1800) / 3600 = 8783.
     #[test]
     fn annual_offset_leap_year_jan_1() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 0);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 8783);
     }
 
-    /// compute_annual_offset: non-leap year Jan 1 00:00 → offset 0.
+    /// compute_annual_offset: non-leap year Jan 1 00:00.
+    /// Shift wraps to last step of previous year: (365*86400 - 1800) / 3600 = 8759.
     #[test]
     fn annual_offset_non_leap_year_jan_1() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 0);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 8759);
     }
 
-    /// compute_annual_offset: leap year Dec 31 23:00 → last hour of year.
-    /// Leap year has 366 days → ordinal0 = 365, hour 23 → offset = 365*24+23 = 8783.
+    /// compute_annual_offset: leap year Dec 31 23:00.
+    /// With 30-min shift: (365*86400 + 23*3600 - 1800) / 3600 = 8782.
     #[test]
     fn annual_offset_leap_year_dec_31() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2024, 12, 31, 23, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 365 * 24 + 23);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 8782);
     }
 
-    /// compute_annual_offset: non-leap year Dec 31 23:00 → last hour of year.
-    /// Non-leap year has 365 days → ordinal0 = 364, hour 23 → offset = 364*24+23 = 8759.
+    /// compute_annual_offset: non-leap year Dec 31 23:00.
+    /// With 30-min shift: (364*86400 + 23*3600 - 1800) / 3600 = 8758.
     #[test]
     fn annual_offset_non_leap_year_dec_31() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2023, 12, 31, 23, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 364 * 24 + 23);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 8758);
     }
 
-    /// compute_annual_offset: leap year Feb 29 → day exists, ordinal0 = 59.
+    /// compute_annual_offset: leap year Feb 29 → ordinal0 = 59.
+    /// With 30-min shift: (59*86400 + 6*3600 - 1800) / 3600 = 1421.
     #[test]
     fn annual_offset_leap_year_feb_29() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2024, 2, 29, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 59 * 24 + 6);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 1421);
     }
 
-    /// compute_annual_offset: non-leap year Mar 1 → ordinal0 = 59 (same as leap Feb 29).
+    /// compute_annual_offset: non-leap year Mar 1 → ordinal0 = 59.
+    /// With 30-min shift: (59*86400 + 6*3600 - 1800) / 3600 = 1421.
     #[test]
     fn annual_offset_non_leap_year_mar_1() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2023, 3, 1, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 59 * 24 + 6);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 1421);
     }
 
     /// compute_annual_offset: sub-hourly resolution (15-min steps).
+    /// start = 2023-01-01T01:30:00: seconds_into_year=5400, shifted=3600, 3600/900=4.
     #[test]
     fn annual_offset_15min_resolution() {
         let meta = weather_series().meta;
         let start = Utc.with_ymd_and_hms(2023, 1, 1, 1, 30, 0).unwrap();
-        // 1h30m = 5400s / 900s = 6 steps
-        assert_eq!(compute_annual_offset(&meta, start, 900), 6);
+        assert_eq!(compute_annual_offset(&meta, start, 900), 4);
     }
 
     /// Various climate offsets produce correct temperatures.
