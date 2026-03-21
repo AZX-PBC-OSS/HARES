@@ -517,15 +517,12 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
 
     let tel = eq.telemetry();
     let defrost_active = tel.get("defrost_active").expect("defrost_active must exist in telemetry");
-    let defrost_fraction =
-        tel.get("defrost_time_fraction").expect("defrost_time_fraction must exist in telemetry");
     let thermal_output_w =
         tel.get("thermal_output_w").expect("thermal_output_w must exist in telemetry");
     let electric_kw = tel.get("electric_kw").expect("electric_kw must exist in telemetry");
 
     eprintln!(
         "[hvac_parity] defrost_at_0C: defrost_active={defrost_active:.0}, \
-         defrost_time_fraction={defrost_fraction:.4}, \
          thermal_output={thermal_output_w:.1} W, electric={electric_kw:.4} kW"
     );
 
@@ -534,7 +531,7 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     assert!(
         defrost_active > 0.0,
         "ASHP defrost must be active at 0°C outdoor (below max_oat_defrost_c); \
-         got defrost_active={defrost_active:.0}, defrost_time_fraction={defrost_fraction:.4}"
+         got defrost_active={defrost_active:.0}"
     );
 
     // The unit must deliver positive heat and draw positive electricity.

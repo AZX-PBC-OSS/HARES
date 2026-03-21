@@ -476,7 +476,7 @@ impl Equipment for ResistanceWH {
         // Jacket loss: tank skin heat flows into the conditioned zone.
         let skin_loss_w = self.tank.skin_loss_w();
         if let Some(zone) = self.descriptor.zone {
-            if skin_loss_w.abs() > f64::EPSILON {
+            if skin_loss_w.abs() > 1e-3 {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: skin_loss_w,

@@ -336,6 +336,58 @@ mod tests {
             .expect("ThermalSetpoint should be accepted by HpCooler");
     }
 
+    /// OCHRE parity: cooler must be OFF at initialization when zone_temp == cooling_setpoint.
+    ///
+    /// OCHRE HVAC.py: turn_on = setpoint + deadband * (1 - offset) = 24.4 + 1.0 * 0.8 = 25.2
+    /// With zone_temp = 24.4 <= 25.2, OCHRE stays OFF (mode_prev = "Off", neither
+    /// turn-on nor turn-off condition fires → keeps current "Off" mode).
+    /// HARES must match: thermostat stays in Deadband, no electrical draw, no cooling.
+    #[test]
+    fn cooler_off_when_zone_temp_at_setpoint_at_init() {
+        let mut raw = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
+        raw.insert("eir".to_string(), 0.33.into());
+        raw.insert("cooling_setpoint_c".to_string(), 24.4.into());
+        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
+        raw.insert("capacity_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        let cfg = EquipmentConfig {
+            name: "ASHP Cooler".to_string(),
+            ochre_class: "ASHP Cooler".to_string(),
+            raw_config: raw,
+        };
+
+        // Zone at exactly the cooling setpoint (24.4°C).
+        // turn_on = 24.4 + 1.0 * (1 - 0.2) = 25.2 → zone NOT above threshold → cooler must be OFF.
+        let env = cooling_env(24.4, 35.0);
+
+        let mut eq = HpCooler::ashp_cooler(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert_eq!(
+            ports.thermal[0].sensible_gain_w,
+            0.0,
+            "cooler must produce zero thermal output when zone_temp (24.4°C) == cooling_setpoint; \
+             OCHRE turn-on threshold = 25.2°C — got {:.3} W",
+            ports.thermal[0].sensible_gain_w
+        );
+        assert_eq!(
+            ports.electrical.net_active_kw(),
+            0.0,
+            "cooler must draw 0 kW when zone_temp (24.4°C) <= turn-on threshold (25.2°C); \
+             got {:.6} kW",
+            ports.electrical.net_active_kw()
+        );
+    }
+
     /// MSHP crankcase defaults (15 W / 0 °C) must be active even when step() is
     /// called without a prior init().  The distinguishing condition uses an outdoor
     /// temp between the MSHP threshold (0 °C) and the central-AC default (12.8 °C):

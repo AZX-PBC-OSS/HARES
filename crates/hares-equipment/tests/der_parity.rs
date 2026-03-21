@@ -14,8 +14,6 @@
 //!   vendors/OCHRE/ochre/Equipment/Generator.py
 //!   vendors/OCHRE/ochre/Equipment/EV.py
 
-mod common;
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -278,21 +276,27 @@ fn battery_degradation_model_documented() {
         bat.step(&env, dt, &mut ports).unwrap();
     }
 
-    let soc = bat.telemetry().get("soc").unwrap();
-    // After cycling, SOC must be physically valid
+    let soc = bat.telemetry().get("soc").expect("soc must exist");
     assert!(
-        soc >= 0.0 && soc <= 1.0,
+        (0.0..=1.0).contains(&soc),
         "SOC must remain in [0, 1] after 200 cycle steps; got {soc:.6}"
     );
 
-    // Degradation note: HARES uses Smith 2017 variant (RainflowCounter).
-    // OCHRE uses Nrel_NMC degradation with dq_li1 = 0.5 * b1² / q_li1.
-    // For a meaningful capacity_fade comparison, run OCHRE offline and store reference.
+    // After ~20 full cycles, capacity fade should be measurable but small.
+    // Smith 2017 model: expect 0.1–2% fade for 20 cycles on NMC chemistry.
+    let capacity_fade = bat.telemetry().get("capacity_fade").unwrap_or(0.0);
     eprintln!(
-        "[der_parity] degradation_model: HARES uses Smith 2017 (RainflowCounter). \
-         OCHRE uses NREL NMC formula. Compare offline for exact cycle count parity."
+        "[der_parity] degradation: soc={soc:.4}, capacity_fade={capacity_fade:.6} \
+         (HARES: Smith 2017 RainflowCounter, OCHRE: NREL NMC)"
     );
-    eprintln!("[der_parity] degradation_model: soc after 200h cycling = {soc:.4}");
+    // If degradation model is active, fade must be positive after cycling
+    if capacity_fade > 0.0 {
+        assert!(
+            capacity_fade < 0.05,
+            "capacity fade after ~20 cycles should be < 5%; got {:.2}%",
+            capacity_fade * 100.0
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,8 +355,8 @@ fn pv_cell_temperature_noct_model() {
     let mut ports = PortSlots::default();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    let cell_temp_c = eq.telemetry().get("cell_temp_c").unwrap_or(0.0);
-    let ac_power_kw = eq.telemetry().get("ac_power_kw").unwrap_or(0.0);
+    let cell_temp_c = eq.telemetry().get("cell_temp_c").expect("cell_temp_c must exist");
+    let ac_power_kw = eq.telemetry().get("ac_power_kw").expect("ac_power_kw must exist");
 
     eprintln!(
         "[der_parity] pv_cell_temp: cell_temp={cell_temp_c:.2}°C, \
@@ -363,18 +367,16 @@ fn pv_cell_temperature_noct_model() {
     // T_cell ≈ 49.3°C (wind corrected) vs 57°C (basic NOCT, OCHRE).
     // HARES must be below the basic NOCT value (shows wind correction is active)
     // and above ambient temperature (makes physical sense).
-    if cell_temp_c > 0.0 {
-        assert!(
-            cell_temp_c > env.weather.outdoor_temp_c,
-            "cell temp ({cell_temp_c:.2}°C) must exceed ambient ({:.1}°C) when irradiance > 0",
-            env.weather.outdoor_temp_c
-        );
-        // HARES SAM-NOCT should be below plain NOCT = ambient + (NOCT-20) = 30 + 27 = 57°C
-        assert!(
-            cell_temp_c < 65.0,
-            "cell temp ({cell_temp_c:.2}°C) unrealistically high (OCHRE NOCT gives 57°C at 0 wind)"
-        );
-    }
+    assert!(
+        cell_temp_c > env.weather.outdoor_temp_c,
+        "cell temp ({cell_temp_c:.2}°C) must exceed ambient ({:.1}°C) when irradiance > 0",
+        env.weather.outdoor_temp_c
+    );
+    // HARES SAM-NOCT should be below plain NOCT = ambient + (NOCT-20) = 30 + 27 = 57°C
+    assert!(
+        cell_temp_c < 65.0,
+        "cell temp ({cell_temp_c:.2}°C) unrealistically high (OCHRE NOCT gives 57°C at 0 wind)"
+    );
 
     // PV must produce positive AC power when irradiance is non-zero
     assert!(
@@ -427,8 +429,8 @@ fn pv_power_temperature_derating() {
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         (
-            eq.telemetry().get("ac_power_kw").unwrap_or(0.0),
-            eq.telemetry().get("cell_temp_c").unwrap_or(0.0),
+            eq.telemetry().get("ac_power_kw").expect("ac_power_kw must exist"),
+            eq.telemetry().get("cell_temp_c").expect("cell_temp_c must exist"),
         )
     };
 
@@ -440,21 +442,29 @@ fn pv_power_temperature_derating() {
          hot(45°C): cell={cell_temp_hot:.1}°C p={power_hot:.4} kW"
     );
 
+    // Both must produce positive power with 800 W/m² irradiance
+    assert!(
+        power_cool > 0.0,
+        "PV must produce power at 10°C ambient with 800 W/m² irradiance; got {power_cool:.4} kW"
+    );
+    assert!(
+        power_hot > 0.0,
+        "PV must produce power at 45°C ambient with 800 W/m² irradiance; got {power_hot:.4} kW"
+    );
+
     // Hot ambient → higher cell temp → more derating → lower power
-    if power_cool > 0.0 && power_hot > 0.0 {
-        assert!(
-            power_hot < power_cool,
-            "PV output at 45°C ambient ({power_hot:.4} kW) must be less than at 10°C \
-             ({power_cool:.4} kW) due to temperature derating"
-        );
-        // gamma ≈ -0.47%/°C; ΔT ≈ 35°C → derating ≈ 16%
-        let derating = (power_cool - power_hot) / power_cool;
-        assert!(
-            derating > 0.05 && derating < 0.35,
-            "temperature derating from 10°C to 45°C must be 5-35%; got {:.1}%",
-            derating * 100.0
-        );
-    }
+    assert!(
+        power_hot < power_cool,
+        "PV output at 45°C ambient ({power_hot:.4} kW) must be less than at 10°C \
+         ({power_cool:.4} kW) due to temperature derating"
+    );
+    // gamma ≈ -0.47%/°C; ΔT ≈ 35°C → derating ≈ 16%
+    let derating = (power_cool - power_hot) / power_cool;
+    assert!(
+        (0.05..=0.35).contains(&derating),
+        "temperature derating from 10°C to 45°C must be 5-35%; got {:.1}%",
+        derating * 100.0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -494,28 +504,32 @@ fn generator_fuel_efficiency_at_half_load() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let tel = eq.telemetry();
-    let electric_kw = tel.get("electric_output_kw").unwrap_or(0.0);
-    let fuel_w = tel.get("fuel_input_w").unwrap_or(0.0);
-    let eta = tel.get("eta_electric").unwrap_or(0.0);
+    let electric_kw = tel.get("electric_output_kw").expect("electric_output_kw must exist");
+    let fuel_w = tel.get("fuel_input_w").expect("fuel_input_w must exist");
+    let eta = tel.get("eta_electric").expect("eta_electric must exist");
 
     eprintln!(
         "[der_parity] generator: electric={electric_kw:.3} kW, fuel={fuel_w:.1} W, eta={eta:.4}"
     );
 
-    if electric_kw > 0.1 {
-        // Fuel = electric / eta
-        let expected_fuel_w = electric_kw * 1000.0 / eta;
-        assert!(
-            (fuel_w - expected_fuel_w).abs() < expected_fuel_w * 0.01,
-            "fuel_input must equal electric/eta ({expected_fuel_w:.1} W ±1%); got {fuel_w:.1} W"
-        );
+    // Generator was commanded to 5 kW with fast ramp — must produce output
+    assert!(
+        electric_kw > 0.1,
+        "generator must produce output when commanded to 5 kW; got {electric_kw:.3} kW"
+    );
 
-        // Efficiency at rated eta=0.30 constant model
-        assert!(
-            (eta - 0.30).abs() < 0.001,
-            "generator eta must be 0.30 (constant model); got {eta:.4}"
-        );
-    }
+    // Fuel = electric / eta
+    let expected_fuel_w = electric_kw * 1000.0 / eta;
+    assert!(
+        (fuel_w - expected_fuel_w).abs() < expected_fuel_w * 0.01,
+        "fuel_input must equal electric/eta ({expected_fuel_w:.1} W ±1%); got {fuel_w:.1} W"
+    );
+
+    // Efficiency at rated eta=0.30 constant model
+    assert!(
+        (eta - 0.30).abs() < 0.001,
+        "generator eta must be 0.30 (constant model); got {eta:.4}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +576,7 @@ fn generator_ramp_rate_is_kw_per_second() {
     let mut ports = PortSlots::default();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    let electric_kw = eq.telemetry().get("electric_output_kw").unwrap_or(0.0);
+    let electric_kw = eq.telemetry().get("electric_output_kw").expect("electric_output_kw must exist");
 
     eprintln!(
         "[der_parity] ramp_rate: after 60s with ramp=1.0 kW/s → electric_kw={electric_kw:.3} kW \
@@ -623,7 +637,7 @@ fn generator_capacity_min_enforced() {
     // Generator must either be off (0 kW) or at/above capacity_min (2.0 kW)
     // It must NOT produce exactly 1.0 kW (the forbidden zone)
     assert!(
-        electric_kw < 0.1 || electric_kw >= 1.9,
+        !(0.1..1.9).contains(&electric_kw),
         "generator must be off or at/above capacity_min=2.0 kW; got {electric_kw:.3} kW"
     );
 }
@@ -651,7 +665,7 @@ fn battery_control_signal_not_a_stub() {
         .unwrap();
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).unwrap();
-        bat.telemetry().get("active_power_kw").unwrap_or(0.0)
+        bat.telemetry().get("active_power_kw").expect("active_power_kw must exist")
     };
 
     // Step with charge setpoint → expect positive power draw
@@ -664,7 +678,7 @@ fn battery_control_signal_not_a_stub() {
         .unwrap();
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).unwrap();
-        bat.telemetry().get("active_power_kw").unwrap_or(0.0)
+        bat.telemetry().get("active_power_kw").expect("active_power_kw must exist")
     };
 
     // Step with discharge setpoint → expect negative power
@@ -677,7 +691,7 @@ fn battery_control_signal_not_a_stub() {
         .unwrap();
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).unwrap();
-        bat.telemetry().get("active_power_kw").unwrap_or(0.0)
+        bat.telemetry().get("active_power_kw").expect("active_power_kw must exist")
     };
 
     eprintln!(

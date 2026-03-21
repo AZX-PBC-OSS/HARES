@@ -502,10 +502,16 @@ impl Equipment for GasBoiler {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        // Jacket loss: inefficiency fraction warms the equipment room.
-        let jacket_loss_w = (fuel_input_w - thermal_output_w).max(0.0);
+        // Jacket loss: fuel energy minus useful thermal output, plus pump electrical.
+        // For condensing boilers (EIR < 1), jacket loss is zero — the extra output
+        // comes from latent heat recovery, not from the room.
+        // space_fraction scales the fuel input; thermal_output_w is the fraction this
+        // boiler serves, so both sides must be in the same frame.
+        let thermal_output_sf_w = thermal_output_w * sf;
+        let jacket_loss_w =
+            (fuel_input_w + electric_kw * 1e3 - thermal_output_sf_w).max(0.0);
         if let Some(zone) = self.descriptor.zone {
-            if jacket_loss_w > f64::EPSILON {
+            if jacket_loss_w > 0.0 {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: jacket_loss_w,
