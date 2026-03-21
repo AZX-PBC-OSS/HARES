@@ -406,7 +406,7 @@ fn ashp_backup_lockout_temperature_extracted() {
   </Building>
 </HPXML>"#;
 
-    let building = parse_building(&xml).expect("should parse");
+    let building = parse_building(xml).expect("should parse");
     let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
         .expect("resolve_equipment");
 

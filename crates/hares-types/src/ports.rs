@@ -521,13 +521,89 @@ mod tests {
     }
 
     #[test]
+    fn mixed_category_contributions_route_to_correct_slots() {
+        let zone = ZoneId(1);
+        let mut slots = PortSlots {
+            thermal: vec![ThermalAccumulator::new(zone)],
+            ..Default::default()
+        };
+
+        slots
+            .accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: 100.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::HvacHeating,
+            })
+            .unwrap();
+        slots
+            .accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: -50.0,
+                latent_gain_w: -10.0,
+                category: ThermalCategory::HvacCooling,
+            })
+            .unwrap();
+        slots
+            .accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: 25.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::InternalGain,
+            })
+            .unwrap();
+        slots
+            .accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: 40.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::JacketLoss,
+            })
+            .unwrap();
+        slots
+            .accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: 15.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::DuctLoss,
+            })
+            .unwrap();
+
+        // Aggregate total is sum of all contributions.
+        approx_eq(slots.thermal[0].sensible_gain_w, 130.0); // 100 - 50 + 25 + 40 + 15
+        approx_eq(slots.thermal[0].latent_gain_w, -10.0);
+
+        // Per-category subtotals.
+        approx_eq(
+            slots.thermal[0].sensible_for_category(ThermalCategory::HvacHeating),
+            100.0,
+        );
+        approx_eq(
+            slots.thermal[0].sensible_for_category(ThermalCategory::HvacCooling),
+            -50.0,
+        );
+        approx_eq(
+            slots.thermal[0].sensible_for_category(ThermalCategory::InternalGain),
+            25.0,
+        );
+        approx_eq(
+            slots.thermal[0].sensible_for_category(ThermalCategory::JacketLoss),
+            40.0,
+        );
+        approx_eq(
+            slots.thermal[0].sensible_for_category(ThermalCategory::DuctLoss),
+            15.0,
+        );
+    }
+
+    #[test]
     fn zero_resets_all_accumulators() {
         let mut slots = PortSlots {
             thermal: vec![ThermalAccumulator {
                 zone: ZoneId(1),
                 sensible_gain_w: 10.0,
                 latent_gain_w: 5.0,
-                sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                sensible_by_category: [1.0, 2.0, 3.0, 4.0, 0.0],
             }],
             electrical: ElectricalAccumulator {
                 reactive_power_kvar: 1.0,
@@ -557,6 +633,11 @@ mod tests {
 
         approx_eq(slots.thermal[0].sensible_gain_w, 0.0);
         approx_eq(slots.thermal[0].latent_gain_w, 0.0);
+        assert_eq!(
+            slots.thermal[0].sensible_by_category,
+            [0.0; THERMAL_CATEGORY_COUNT],
+            "zero() must clear per-category array"
+        );
         approx_eq(slots.electrical.reactive_power_kvar, 0.0);
         approx_eq(slots.electrical.load_power_kw, 0.0);
         approx_eq(slots.electrical.generation_power_kw, 0.0);

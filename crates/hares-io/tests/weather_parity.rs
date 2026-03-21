@@ -65,14 +65,13 @@ fn sky_temp_clark_allen_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
 fn sky_temp_stefan_boltzmann_300_w_m2() {
     let sky_c = sky_temp_stefan_boltzmann_c(300.0);
 
-    // Reference value from Stefan-Boltzmann inversion:
-    //   T = (300 / 5.6697e-8)^0.25 - 273.15
-    //   = (5.2913e9)^0.25 - 273.15
-    //   = 269.45... K - 273.15
-    //   ≈ -3.70 °C
-    // Independently computed (not using the function under test).
+    // Reference value from Stefan-Boltzmann inversion using σ = 5.6697e-8 W/m²/K⁴
+    // (the OCHRE/EnergyPlus value defined as STEFAN_BOLTZMANN above):
+    //   T_K = (300 / 5.6697e-8)^0.25 = (5.2930e9)^0.25 ≈ 269.706 K
+    //   T_C = 269.706 - 273.15 ≈ -3.44 °C
+    // Value independently derived, not computed via the function under test.
     // Tolerance: 0.1°C to allow for minor floating-point differences across platforms.
-    let expected_c = -3.70_f64;
+    let expected_c = -3.44_f64;
     assert!(
         (sky_c - expected_c).abs() < 0.1,
         "Stefan-Boltzmann sky temp at IR=300 W/m²: got {sky_c:.3}°C, expected ≈{expected_c:.2}°C"

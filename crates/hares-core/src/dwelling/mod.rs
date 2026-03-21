@@ -1210,7 +1210,7 @@ impl Dwelling {
             ("Infiltration Heat Gain - Indoor (W)", gains.infiltration_w),
             ("Forced Ventilation Heat Gain - Indoor (W)", gains.ventilation_w),
             ("Natural Ventilation Heat Gain - Indoor (W)", gains.natural_ventilation_w),
-            ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w),
+            ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w + gains.jacket_loss_w),
             ("Radiation Heat Gain - Indoor (W)", gains.interior_lwr_w),
         ];
         for &(col_name, value) in envelope_cols {

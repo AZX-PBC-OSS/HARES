@@ -12,7 +12,6 @@
 //! 9. ResStock state fallback error
 //! 10. ColumnMapper re-export
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,7 +23,7 @@ use chrono::{Duration, Utc};
 use parquet::arrow::arrow_writer::ArrowWriter;
 use tempfile::{NamedTempFile, tempdir};
 
-use hares_io::output::metrics::{MetricsCalculator, MetricsError};
+use hares_io::output::metrics::MetricsCalculator;
 use hares_io::{
     ColumnMapper, OutputFormat, ResStockError, ResStockVersion, SimulationConfig,
     build_schema, expected_columns_at_verbosity, parse_resstock_metadata,
@@ -153,7 +152,7 @@ fn verbosity_2_produces_ochre_temperature_format() {
     );
     // Must NOT produce the old format.
     assert!(
-        !names.iter().any(|n| *n == "Indoor Temperature (C)"),
+        !names.contains(&"Indoor Temperature (C)"),
         "must not contain 'Indoor Temperature (C)' (non-OCHRE format)"
     );
 }

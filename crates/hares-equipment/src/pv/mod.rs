@@ -225,9 +225,13 @@ impl PV {
             let ghi = env.weather.ghi_w_m2.max(0.0);
             let dni = env.weather.dni_w_m2.max(0.0);
             let dhi = env.weather.dhi_w_m2.max(0.0);
+            // SAM LUTs are indexed on weather-station irradiance (GHI/DNI/DHI),
+            // not POA, so soiling can't be folded into the LUT inputs. Apply
+            // the soiling ratio as a post-LUT power derating instead.
             let ac_power_kw = lut
                 .interpolate(month, hour, ghi, dni, dhi, ambient_temp_c)
-                .max(0.0);
+                .max(0.0)
+                * soiling_ratio;
             let dc_power_kw = ac_power_kw / self.inverter_efficiency.max(1e-9);
             let cell_temp_c = cell_temperature_noct_wind(
                 ambient_temp_c,

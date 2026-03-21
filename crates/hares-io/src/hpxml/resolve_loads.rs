@@ -632,7 +632,7 @@ fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::building::{XmlNode, parse_xml_document};
+    use super::super::building::parse_xml_document;
 
     /// Verify that `parse_schedule_extension_params` emits `month_multipliers` only once.
     /// Before the fix, a duplicated code block would emit it twice.

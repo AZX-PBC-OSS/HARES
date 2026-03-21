@@ -45,6 +45,10 @@ pub struct PyPvSoilingConfig {
     pub grace_period_days: f64,
     #[pyo3(get)]
     pub max_loss: f64,
+    #[pyo3(get)]
+    pub initial_loss: f64,
+    #[pyo3(get)]
+    pub rain_accum_hours: f64,
 }
 
 #[pymethods]
@@ -55,18 +59,24 @@ impl PyPvSoilingConfig {
         loss_rate_per_day=0.0015,
         grace_period_days=14.0,
         max_loss=0.30,
+        initial_loss=0.0,
+        rain_accum_hours=24.0,
     ))]
     fn new(
         cleaning_threshold_mm: f64,
         loss_rate_per_day: f64,
         grace_period_days: f64,
         max_loss: f64,
+        initial_loss: f64,
+        rain_accum_hours: f64,
     ) -> Self {
         Self {
             cleaning_threshold_mm,
             loss_rate_per_day,
             grace_period_days,
             max_loss,
+            initial_loss,
+            rain_accum_hours,
         }
     }
 }

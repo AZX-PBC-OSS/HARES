@@ -1139,6 +1139,61 @@ mod tests {
         );
     }
 
+    /// Tank at 50°C in a 20°C zone with explicit UA=5 W/K should produce a
+    /// positive jacket loss in the thermal port after one step.
+    ///
+    /// Total UA including end-caps = 5.0 + 2×(5.0×0.1) = 6.0 W/K.
+    /// Expected loss ≈ 6.0 × (50 - 20) = 180 W (pre-step estimate; exact value
+    /// depends on the Euler step cooling the tank slightly).
+    #[test]
+    fn jacket_loss_appears_in_thermal_port_when_tank_above_zone_temp() {
+        use hares_types::ThermalCategory;
+
+        let mut cfg_map = std::collections::HashMap::new();
+        cfg_map.insert("setpoint_c".to_string(), 55.0.into());
+        cfg_map.insert("deadband_c".to_string(), 2.0.into());
+        // Start the tank at 50°C — below setpoint so elements don't interfere with the loss signal.
+        cfg_map.insert("initial_tank_temp_c".to_string(), 50.0.into());
+        cfg_map.insert("max_tank_temp_c".to_string(), 300.0.into());
+        cfg_map.insert("ua_w_per_k".to_string(), 5.0.into());
+        cfg_map.insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
+        let cfg = crate::EquipmentConfig {
+            name: "WH".to_string(),
+            ochre_class: "Resistance Water Heater".to_string(),
+            raw_config: cfg_map,
+        };
+
+        let zone_temp_c = 20.0;
+        let e = env(zone_temp_c);
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        // Thermal port must carry a positive JacketLoss sensible gain.
+        let jacket = p.thermal[0].sensible_for_category(ThermalCategory::JacketLoss);
+        assert!(
+            jacket > 0.0,
+            "expected positive jacket loss in thermal port, got {jacket}"
+        );
+
+        // Telemetry must agree with the port.
+        let telem = eq.telemetry().get("skin_loss_w").unwrap_or(0.0);
+        assert!(
+            (jacket - telem).abs() < 1e-9,
+            "thermal port jacket ({jacket:.3} W) must match telemetry skin_loss_w ({telem:.3} W)"
+        );
+
+        // Rough sanity: loss must be in the range [100, 300] W for UA=5 W/K, ΔT=30 K.
+        // Total UA with end-caps ≈ 6 W/K → ~180 W.  Allow ±50% for step dynamics.
+        assert!(
+            jacket > 100.0 && jacket < 300.0,
+            "jacket loss {jacket:.1} W is outside plausible range [100, 300] W \
+             (UA≈6 W/K × ΔT=30 K ≈ 180 W)"
+        );
+    }
+
     /// M4: LoadFraction must not corrupt dr_load_fraction.
     ///
     /// After applying DR Critical (dr_load_fraction = 0.5), sending a

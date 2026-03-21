@@ -761,7 +761,9 @@ impl Equipment for HeatPumpWH {
                     zone,
                     sensible_gain_w, // full sensible gain (zone + wall) to preserve energy balance
                     latent_gain_w,
-                    category: ThermalCategory::JacketLoss,
+                    // Net zone interaction: compressor extracts heat (can be negative),
+                    // fan and ER add waste heat. InternalGain captures the mixed character.
+                    category: ThermalCategory::InternalGain,
                 })?;
             }
         }

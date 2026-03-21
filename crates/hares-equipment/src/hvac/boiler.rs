@@ -1100,6 +1100,121 @@ mod tests {
     }
 
     #[test]
+    fn gas_boiler_jacket_loss_writes_to_thermal_port_and_conserves_energy() {
+        // Non-condensing boiler at 80% AFUE: jacket loss = fuel_input - thermal_output.
+        let mut cfg = config("GB", "Gas Boiler");
+        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config.insert("loop_id".to_string(), 1.0.into());
+        cfg.raw_config
+            .insert("capacity_w".to_string(), 10_000.0.into());
+        cfg.raw_config
+            .insert("fuel_efficiency".to_string(), 0.8.into());
+        cfg.raw_config.insert("condensing".to_string(), 0.0.into());
+        cfg.raw_config
+            .insert("flow_rate_kg_s".to_string(), 0.5.into());
+        cfg.raw_config
+            .insert("heating_setpoint_c".to_string(), 21.0.into());
+        cfg.raw_config
+            .insert("cooling_setpoint_c".to_string(), 27.0.into());
+
+        let mut eq = GasBoiler::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+
+        // Force full-load operation.
+        eq.hvac.duty_cycle = 1.0;
+        eq.hvac.mode = super::ThermostatMode::Heating;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let fuel_input_w = eq.telemetry().get("fuel_input_w").unwrap();
+        let thermal_output_w = eq.telemetry().get("thermal_output_w").unwrap();
+        let jacket_loss_w = eq.telemetry().get("jacket_loss_w").unwrap();
+
+        // Fuel > thermal output for a sub-unity efficiency boiler.
+        assert!(
+            fuel_input_w > thermal_output_w,
+            "fuel_input_w={fuel_input_w} should exceed thermal_output_w={thermal_output_w}"
+        );
+
+        // Energy conservation: jacket_loss = fuel_input - thermal_output.
+        let expected_jacket = fuel_input_w - thermal_output_w;
+        assert!(
+            (jacket_loss_w - expected_jacket).abs() < 1e-6,
+            "jacket_loss_w={jacket_loss_w} != fuel_input_w - thermal_output_w={expected_jacket}"
+        );
+
+        // Jacket loss appears in the zone thermal port under JacketLoss category.
+        use hares_types::ThermalCategory;
+        let zone_jacket =
+            ports.thermal[0].sensible_for_category(ThermalCategory::JacketLoss);
+        assert!(
+            (zone_jacket - jacket_loss_w).abs() < 1e-6,
+            "thermal port jacket loss={zone_jacket} != telemetry jacket_loss_w={jacket_loss_w}"
+        );
+
+        // Total sensible gain on the zone equals the jacket loss (only contribution).
+        assert!(
+            (ports.thermal[0].sensible_gain_w - jacket_loss_w).abs() < 1e-6,
+            "total sensible gain={} should equal jacket_loss_w={}",
+            ports.thermal[0].sensible_gain_w,
+            jacket_loss_w
+        );
+    }
+
+    #[test]
+    fn gas_boiler_no_jacket_loss_when_off() {
+        let mut cfg = config("GB off", "Gas Boiler");
+        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config.insert("loop_id".to_string(), 1.0.into());
+        cfg.raw_config
+            .insert("capacity_w".to_string(), 10_000.0.into());
+        cfg.raw_config
+            .insert("fuel_efficiency".to_string(), 0.8.into());
+        cfg.raw_config
+            .insert("flow_rate_kg_s".to_string(), 0.5.into());
+        cfg.raw_config
+            .insert("heating_setpoint_c".to_string(), 21.0.into());
+        cfg.raw_config
+            .insert("cooling_setpoint_c".to_string(), 27.0.into());
+
+        let mut eq = GasBoiler::new(cfg.clone());
+        let env = env(22.0); // above setpoint — boiler should be off
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        use hares_types::ThermalCategory;
+        assert_eq!(
+            ports.thermal[0].sensible_for_category(ThermalCategory::JacketLoss),
+            0.0,
+            "jacket loss must be zero when boiler is off"
+        );
+        assert_eq!(
+            eq.telemetry().get("jacket_loss_w").unwrap(),
+            0.0,
+            "telemetry jacket_loss_w must be zero when boiler is off"
+        );
+    }
+
+    #[test]
     fn registry_includes_boiler_aliases_and_thermal_stage() {
         let mut registry = EquipmentRegistry::new();
         register_with_registry(&mut registry);

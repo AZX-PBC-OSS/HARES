@@ -285,9 +285,12 @@ pub struct EnvelopeComponentGains {
     pub hvac_heating_w: f64,
     /// HVAC cooling contribution to the indoor zone [W].
     pub hvac_cooling_w: f64,
-    /// Non-HVAC internal gains (appliances, lighting, occupancy, jacket losses) [W].
-    /// Equals `InternalGain + JacketLoss` category totals.
+    /// Non-HVAC internal gains (appliances, lighting, occupancy) [W].
+    /// Equals `InternalGain` category total for the indoor zone.
     pub internal_gain_w: f64,
+    /// Equipment jacket/shell losses to the indoor zone [W].
+    /// Equals `JacketLoss` category total (water heater skin loss, etc.).
+    pub jacket_loss_w: f64,
     /// Duct distribution losses to the indoor zone [W].
     pub duct_loss_w: f64,
     /// Per-zone infiltration sensible heat gains [W].

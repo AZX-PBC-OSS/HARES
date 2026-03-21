@@ -136,7 +136,10 @@ impl WeatherTimeSeries {
             horizontal_infrared_w_m2: replicate_zoh(&self.horizontal_infrared_w_m2, factor),
             sky_temp_c: replicate_zoh(&self.sky_temp_c, factor),
             ground_temp_c: replicate_zoh(&self.ground_temp_c, factor),
-            liquid_precip_m: replicate_zoh(&self.liquid_precip_m, factor),
+            // Precipitation is an accumulated depth per source timestep, not an
+            // instantaneous rate. Distribute evenly across sub-hourly slots so
+            // rolling accumulators in downstream models (soiling) don't overcount.
+            liquid_precip_m: distribute_accumulated(&self.liquid_precip_m, factor),
         })
     }
 }
@@ -145,6 +148,21 @@ fn replicate_zoh(values: &[f64], factor: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(values.len().saturating_mul(factor));
     for &value in values {
         out.extend(std::iter::repeat_n(value, factor));
+    }
+    out
+}
+
+/// Distribute an accumulated quantity evenly across sub-timestep slots.
+///
+/// Unlike ZOH (which replicates an instantaneous value), accumulated fields
+/// like precipitation depth represent a total over the source interval. Dividing
+/// by `factor` preserves the integral when downstream code sums across slots.
+fn distribute_accumulated(values: &[f64], factor: usize) -> Vec<f64> {
+    let scale = 1.0 / factor as f64;
+    let mut out = Vec::with_capacity(values.len().saturating_mul(factor));
+    for &value in values {
+        let distributed = value * scale;
+        out.extend(std::iter::repeat_n(distributed, factor));
     }
     out
 }
@@ -195,6 +213,28 @@ mod tests {
         assert!(resampled.dry_bulb_c.iter().skip(60).all(|x| *x == 11.0));
         assert!(resampled.wind_dir_deg.iter().take(60).all(|x| *x == 180.0));
         assert!(resampled.wind_dir_deg.iter().skip(60).all(|x| *x == 190.0));
+    }
+
+    #[test]
+    fn resample_distributes_precipitation_across_sub_slots() {
+        let mut series = sample_series();
+        // 6mm of rain in the second hour.
+        series.liquid_precip_m = vec![0.0, 0.006];
+        let resampled = series.resample(60).expect("resample should succeed");
+        // 6mm / 60 slots = 0.1mm per minute-slot.
+        let expected_per_slot = 0.006 / 60.0;
+        for (i, &val) in resampled.liquid_precip_m.iter().enumerate().skip(60) {
+            assert!(
+                (val - expected_per_slot).abs() < 1e-15,
+                "slot {i}: expected {expected_per_slot}, got {val}"
+            );
+        }
+        // Total rainfall must be preserved.
+        let total: f64 = resampled.liquid_precip_m.iter().sum();
+        assert!(
+            (total - 0.006).abs() < 1e-12,
+            "total rainfall must be preserved: got {total}"
+        );
     }
 
     #[test]

@@ -1836,7 +1836,7 @@ mod tests {
         eprintln!("Solar zenith: {:.2}°", solar_zenith_deg);
 
         // Window orientations: 2xE, 1xN, 2xW, 1xS (per user description)
-        let orientations = vec![
+        let orientations = [
             ("East-1", 90.0),
             ("East-2", 90.0),
             ("North", 0.0),
