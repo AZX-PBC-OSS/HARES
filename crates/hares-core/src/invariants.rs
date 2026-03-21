@@ -1,0 +1,337 @@
+//! Per-timestep numerical invariant checks for the dwelling simulation loop.
+//!
+//! Checks are compiled and executed when either:
+//! - The `check_invariants` Cargo feature is enabled, or
+//! - The build has `debug_assertions` enabled (i.e., `cargo build` / `cargo test`
+//!   without `--release`).
+//!
+//! In production release builds without the feature flag all public functions
+//! compile to nothing — the compiler eliminates the bodies entirely.
+
+use hares_types::HaresError;
+
+/// Entrypoint for per-timestep numerical invariant validation.
+///
+/// Construct once per dwelling; call the `check_*` methods each timestep
+/// inside a `cfg(any(debug_assertions, feature = "check_invariants"))` block.
+/// All methods return `Ok(())` in unchecked builds.
+pub struct InvariantChecker;
+
+impl InvariantChecker {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Verifies energy conservation across the thermal domain for one zone.
+    ///
+    /// The check asserts:
+    /// `|Σ(Q_gain) − ΔE_storage − Q_loss_envelope| < max(1.0, 1e-6 · |Σ Q_gain|)`
+    ///
+    /// All values in watts [W].
+    pub fn check_thermal(
+        &self,
+        q_gains: &[f64],
+        delta_e_storage: f64,
+        q_loss: f64,
+    ) -> Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let q_sum: f64 = q_gains.iter().sum();
+            let residual = (q_sum - delta_e_storage - q_loss).abs();
+            let tolerance = f64::max(1.0, 1e-6 * q_sum.abs());
+            if residual >= tolerance {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "thermal_balance".to_string(),
+                    value: residual,
+                    tolerance,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Verifies electrical power balance across the bus.
+    ///
+    /// The check asserts:
+    /// `|P_grid + Σ P_equipment_ports| < 0.001` [kW]
+    pub fn check_electrical(
+        &self,
+        p_grid: f64,
+        p_equipment_ports: &[f64],
+    ) -> Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let p_sum: f64 = p_equipment_ports.iter().sum();
+            let residual = (p_grid + p_sum).abs();
+            const TOLERANCE: f64 = 0.001;
+            if residual >= TOLERANCE {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "electrical_balance".to_string(),
+                    value: residual,
+                    tolerance: TOLERANCE,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Verifies moisture mass conservation.
+    ///
+    /// Each term is `(Q_latent_i [W], dt_s [s])`.
+    /// `h_fg = 2_501_000 J/kg` (latent heat of vaporisation at 0°C).
+    ///
+    /// The check asserts:
+    /// `|Δm_water − Σ(Q_latent_i · dt / h_fg)| < 1e-6` [kg]
+    pub fn check_moisture(
+        &self,
+        delta_m_water: f64,
+        q_latent_terms: &[(f64, f64)],
+    ) -> Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            const H_FG_J_KG: f64 = 2_501_000.0;
+            const TOLERANCE: f64 = 1e-6;
+            let m_from_latent: f64 = q_latent_terms
+                .iter()
+                .map(|&(q_w, dt_s)| q_w * dt_s / H_FG_J_KG)
+                .sum();
+            let residual = (delta_m_water - m_from_latent).abs();
+            if residual >= TOLERANCE {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "moisture_balance".to_string(),
+                    value: residual,
+                    tolerance: TOLERANCE,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates state-of-charge is within `[0.0, 1.0]` and warns if accumulated
+    /// integration error exceeds threshold.
+    ///
+    /// Returns `Ok(())` always — SoC out-of-bounds is clamped (not a fatal error).
+    /// Emits `tracing::warn!` when `accumulated_error.abs() > 0.001`.
+    pub fn check_soc(&self, soc: f64, accumulated_error: f64) -> Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            let clamped = soc.clamp(0.0, 1.0);
+            if (clamped - soc).abs() > f64::EPSILON {
+                tracing::warn!(
+                    soc = soc,
+                    clamped = clamped,
+                    "SoC out of [0, 1] range; clamped"
+                );
+            }
+            if accumulated_error.abs() > 0.001 {
+                tracing::warn!(
+                    accumulated_error = accumulated_error,
+                    "SoC accumulated integration error exceeds 0.001"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates that zone and tank temperatures are within physically plausible bounds.
+    ///
+    /// - Zone temperatures: `[-50.0, 80.0]` °C
+    /// - Tank temperatures: `[0.0, 100.0]` °C
+    ///
+    /// Returns the first violation found, or `Ok(())`.
+    pub fn check_temperatures(
+        &self,
+        zone_temps_c: &[f64],
+        tank_temps_c: &[f64],
+    ) -> Result<(), HaresError> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            const ZONE_MIN_C: f64 = -50.0;
+            const ZONE_MAX_C: f64 = 80.0;
+            const TANK_MIN_C: f64 = 0.0;
+            const TANK_MAX_C: f64 = 100.0;
+
+            for &t in zone_temps_c {
+                if !t.is_finite() || !(ZONE_MIN_C..=ZONE_MAX_C).contains(&t) {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "zone_temperature_bounds".to_string(),
+                        value: t,
+                        tolerance: 0.0,
+                    });
+                }
+            }
+            for &t in tank_temps_c {
+                if !t.is_finite() || !(TANK_MIN_C..=TANK_MAX_C).contains(&t) {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "tank_temperature_bounds".to_string(),
+                        value: t,
+                        tolerance: 0.0,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for InvariantChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checker() -> InvariantChecker {
+        InvariantChecker::new()
+    }
+
+    // ── thermal_balance ───────────────────────────────────────────────────────
+
+    #[test]
+    fn thermal_balance_passes_when_balanced() {
+        // 1000 W gain, 200 W stored, 800 W lost → residual = 0
+        let result = checker().check_thermal(&[1000.0], 200.0, 800.0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn thermal_balance_fails_on_sign_flipped_gain() {
+        // Deliberately broken: gain reported as -1000 W instead of +1000 W.
+        // Σ = -1000, storage = 200, loss = 800 → residual = |-1000 - 200 - 800| = 2000.
+        // tolerance = max(1.0, 1e-6 * 1000) = 1.0 → should fail.
+        let result = checker().check_thermal(&[-1000.0], 200.0, 800.0);
+        assert!(
+            result.is_err(),
+            "sign-flipped gain must trigger thermal invariant"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "thermal_balance"
+        ));
+    }
+
+    #[test]
+    fn thermal_balance_uses_relative_tolerance_for_large_gains() {
+        // With Q_sum = 1e8 W, tolerance = 1e-6 * 1e8 = 100 W.
+        // Residual = 50 W → passes.
+        let result = checker().check_thermal(&[1e8], 0.0, 1e8 - 50.0);
+        assert!(result.is_ok());
+
+        // Residual = 200 W → fails (> 100 W tolerance).
+        let result = checker().check_thermal(&[1e8], 0.0, 1e8 - 200.0);
+        assert!(result.is_err());
+    }
+
+    // ── electrical_balance ────────────────────────────────────────────────────
+
+    #[test]
+    fn electrical_balance_passes_when_balanced() {
+        // Grid supplies 3 kW, equipment draws 3 kW → net = 0.
+        let result = checker().check_electrical(3.0, &[-3.0]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn electrical_balance_fails_when_imbalanced() {
+        // Grid 3 kW, equipment 2 kW → residual = 1 kW > 0.001 kW.
+        let result = checker().check_electrical(3.0, &[-2.0]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "electrical_balance"
+        ));
+    }
+
+    // ── moisture_balance ──────────────────────────────────────────────────────
+
+    #[test]
+    fn moisture_balance_passes_when_balanced() {
+        // 100 W latent for 600 s → 100 * 600 / 2_501_000 ≈ 2.399e-5 kg
+        let dt_s = 600.0_f64;
+        let q_latent_w = 100.0_f64;
+        let delta_m = q_latent_w * dt_s / 2_501_000.0;
+        let result = checker().check_moisture(delta_m, &[(q_latent_w, dt_s)]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn moisture_balance_fails_on_large_discrepancy() {
+        // 0.01 kg claimed change vs 0 latent → residual = 0.01 >> 1e-6.
+        let result = checker().check_moisture(0.01, &[]);
+        assert!(result.is_err());
+    }
+
+    // ── temperature bounds ────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_temperature_within_bounds_passes() {
+        let result = checker().check_temperatures(&[20.0, -10.0, 79.9], &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn zone_temperature_below_minimum_fails() {
+        let result = checker().check_temperatures(&[-51.0], &[]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "zone_temperature_bounds"
+        ));
+    }
+
+    #[test]
+    fn zone_temperature_above_maximum_fails() {
+        let result = checker().check_temperatures(&[80.1], &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zone_temperature_nan_fails() {
+        let result = checker().check_temperatures(&[f64::NAN], &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tank_temperature_within_bounds_passes() {
+        let result = checker().check_temperatures(&[], &[50.0, 99.9]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn tank_temperature_above_maximum_fails() {
+        let result = checker().check_temperatures(&[], &[100.1]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "tank_temperature_bounds"
+        ));
+    }
+
+    #[test]
+    fn tank_temperature_below_minimum_fails() {
+        let result = checker().check_temperatures(&[], &[-0.1]);
+        assert!(result.is_err());
+    }
+
+    // ── soc ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn soc_within_range_returns_ok() {
+        let result = checker().check_soc(0.5, 0.0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn soc_out_of_range_returns_ok_with_warning() {
+        // SoC violations warn but do not return Err.
+        let result = checker().check_soc(1.5, 0.002);
+        assert!(result.is_ok());
+    }
+}

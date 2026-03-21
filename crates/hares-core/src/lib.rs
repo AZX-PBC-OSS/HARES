@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod dwelling;
 pub mod engine;
 pub mod environment;
+pub mod invariants;
 #[cfg(feature = "observe")]
 pub mod observer;
 #[cfg(feature = "observe")]

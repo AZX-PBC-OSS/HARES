@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 profiling = []
 observe = []
+check_invariants = []
 
 [dependencies]
 hares-types = { workspace = true }

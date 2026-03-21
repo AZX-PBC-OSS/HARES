@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Top-level error grouping by subsystem domain.
-#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Error, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HaresError {
     #[error("physics error: {0}")]
     Physics(String),
@@ -16,10 +16,16 @@ pub enum HaresError {
     Io(String),
     #[error("control error: {0}")]
     Control(String),
+    #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]
+    InvariantViolation {
+        check_name: String,
+        value: f64,
+        tolerance: f64,
+    },
 }
 
 /// Per-dwelling error wrapper for fleet-level error isolation.
-#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Error, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SimError {
     #[error("simulation error: {0}")]
     Physics(HaresError),
@@ -49,6 +55,11 @@ mod tests {
             HaresError::Equipment("unknown id".to_string()),
             HaresError::Io("file not found".to_string()),
             HaresError::Control("unsupported signal".to_string()),
+            HaresError::InvariantViolation {
+                check_name: "thermal_balance".to_string(),
+                value: 1.23,
+                tolerance: 0.001,
+            },
         ];
         for err in errors {
             let json = serde_json::to_string(&err).expect("serialize error");

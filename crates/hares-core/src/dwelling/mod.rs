@@ -36,6 +36,7 @@ use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
 
 use crate::checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
+use crate::invariants::InvariantChecker;
 use crate::telemetry::DwellingTelemetry;
 use crate::{EnvironmentManager, SimClock, derive_dwelling_rng};
 
@@ -58,8 +59,6 @@ use crate::observer::{EquipmentObservation, ObserverBuffer, PhaseSnapshots, Step
 use crate::observer_capture;
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
-const DEFAULT_TEMP_SANITY_LOW_C: f64 = -80.0;
-const DEFAULT_TEMP_SANITY_HIGH_C: f64 = 90.0;
 
 /// Core result type for dwelling operations.
 pub type Result<T> = std::result::Result<T, HaresError>;
@@ -80,6 +79,7 @@ pub struct DwellingConfig {
 /// Snapshot of accumulated port totals at a stage boundary.
 #[derive(Debug, Clone)]
 struct StageSnapshot {
+    #[allow(dead_code)]
     ports: PortSlots,
 }
 
@@ -1077,7 +1077,7 @@ impl Dwelling {
         }
 
 
-        self.debug_assert_invariants(&thermal_update, dt);
+        self.check_invariants(&thermal_update, dt)?;
 
         let mut zone_temperatures_c: Vec<(ZoneId, f64)> = self
             .latest_env
@@ -1243,40 +1243,73 @@ impl Dwelling {
             .map_err(|err| HaresError::Io(format!("record push failed: {err}")))
     }
 
-    fn debug_assert_invariants(&self, thermal_update: &DomainUpdate, dt: StdDuration) {
-        debug_assert!(self.electrical_solver.net_active_kw().is_finite());
-
-        // Thermal sanity checks.
-        for &(_, temp_c) in &thermal_update.zone_temperatures_c {
-            debug_assert!(
-                (DEFAULT_TEMP_SANITY_LOW_C..=DEFAULT_TEMP_SANITY_HIGH_C).contains(&temp_c),
-                "zone temperature out of sanity range: {temp_c} C"
-            );
-        }
-
-        // Approximate electrical balance: net bus power should equal accumulated bus value.
-        let bus_power = self.ports.electrical.net_active_kw();
-        debug_assert!((self.electrical_solver.net_active_kw() - bus_power).abs() < 1e-3);
-
-        if let Some(snapshot) = &self.stage_snapshot {
-            debug_assert!(snapshot.ports.electrical.net_active_kw().is_finite());
-        }
-
-        // Moisture payload sanity: every value should be finite.
-        if let Some(update) = self
-            .latest_env
-            .custom_domains
-            .iter()
-            .find(|u| u.domain_id == hares_types::HUMIDITY)
-            && let Some(payload) = &update.custom_payload
+    /// Runs per-timestep invariant checks.
+    ///
+    /// Active when `cfg(any(debug_assertions, feature = "check_invariants"))`.
+    /// Returns `Err(HaresError::InvariantViolation { .. })` on the first violation;
+    /// the engine then quarantines this dwelling rather than propagating a panic.
+    fn check_invariants(
+        &self,
+        thermal_update: &DomainUpdate,
+        dt: StdDuration,
+    ) -> Result<()> {
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            for value in payload {
-                debug_assert!(value.is_finite());
+            let checker = InvariantChecker::new();
+
+            // Temporal sanity: dt must be positive and finite.
+            let dt_s = dt.as_secs_f64();
+            if !dt_s.is_finite() || dt_s <= 0.0 {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "timestep_dt".to_string(),
+                    value: dt_s,
+                    tolerance: 0.0,
+                });
+            }
+
+            // Zone temperature bounds.
+            let zone_temps_c: Vec<f64> = thermal_update
+                .zone_temperatures_c
+                .iter()
+                .map(|&(_, t)| t)
+                .collect();
+            checker.check_temperatures(&zone_temps_c, &[])?;
+
+            // Electrical finiteness.
+            let net_kw = self.electrical_solver.net_active_kw();
+            if !net_kw.is_finite() {
+                return Err(HaresError::InvariantViolation {
+                    check_name: "electrical_net_finite".to_string(),
+                    value: net_kw,
+                    tolerance: 0.0,
+                });
+            }
+
+            // Electrical balance: solver net must match port accumulation.
+            let bus_power = self.ports.electrical.net_active_kw();
+            checker.check_electrical(net_kw, &[-bus_power])?;
+
+            // Moisture payload: every humidity value must be finite.
+            if let Some(update) = self
+                .latest_env
+                .custom_domains
+                .iter()
+                .find(|u| u.domain_id == hares_types::HUMIDITY)
+                && let Some(payload) = &update.custom_payload
+            {
+                for &value in payload {
+                    if !value.is_finite() {
+                        return Err(HaresError::InvariantViolation {
+                            check_name: "humidity_payload_finite".to_string(),
+                            value,
+                            tolerance: 0.0,
+                        });
+                    }
+                }
             }
         }
 
-        // Temporal sanity.
-        debug_assert!(dt.as_secs_f64().is_finite() && dt.as_secs_f64() > 0.0);
+        Ok(())
     }
 }
 
