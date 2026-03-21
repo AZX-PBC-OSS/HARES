@@ -11,7 +11,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
@@ -37,7 +37,10 @@ mod tests {
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 // Denver is UTC-7. OCHRE starts at 12:00 local = 19:00 UTC.
-                start_time: Utc.with_ymd_and_hms(2019, 5, 5, 19, 0, 0).unwrap(),
+                start_time: FixedOffset::east_opt(0)
+                    .expect("UTC offset")
+                    .with_ymd_and_hms(2019, 5, 5, 19, 0, 0)
+                    .unwrap(),
                 duration: Duration::hours(1),
                 time_res: Duration::minutes(1),
                 output_verbosity: 6, // envelope component breakdown

@@ -194,8 +194,8 @@ pub struct Dwelling {
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
     /// Per-zone thermal capacitances [J/K] for lightweight gain-preview between
-    /// non-thermal and thermal equipment passes (FIX-003).
-    #[expect(dead_code, reason = "reserved for FIX-003 gain-preview")]
+    /// non-thermal and thermal equipment passes.
+    #[expect(dead_code, reason = "reserved for gain-preview pass")]
     zone_capacitances_j_k: Vec<(ZoneId, f64)>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,

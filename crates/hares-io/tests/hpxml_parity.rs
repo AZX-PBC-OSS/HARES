@@ -1,7 +1,6 @@
 //! OCHRE parity tests for HPXML config extraction.
 //!
-//! Covers gaps identified in HARES-073 that are testable against the current
-//! HARES implementation:
+//! Testable coverage against the current HARES implementation:
 //! - number_of_speeds derivation from CompressorType (variable/single stage)
 //! - number_of_speeds fallback from SEER rating when CompressorType is absent
 //! - Duct parameter extraction (surface_area, leakage, r-value)
@@ -11,8 +10,8 @@
 //! For each test, the OCHRE derivation logic is cited as a comment showing
 //! the Python expression that produces the expected value.
 //!
-//! Tests for gaps that are NOT yet implemented (noted in HARES-073 audit) are
-//! marked #[ignore] with a description of what is missing.
+//! Tests for gaps that are NOT yet implemented are marked #[ignore] with a
+//! description of what is missing.
 
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
@@ -338,12 +337,12 @@ fn electric_water_heater_ua_from_ef_matches_ochre() {
 //
 // OCHRE AC/HP equipment has startup_capacity_degradation (default 0.0 for AC).
 // This test documents whether HARES currently extracts this field.
-// Marked #[ignore] because startup_capacity_degradation is listed as a gap in
-// HARES-073 and is not yet extracted by resolve_hvac.rs.
+// Marked #[ignore] because startup_capacity_degradation is not yet extracted
+// by resolve_hvac.rs.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "HARES-073 gap: startup_capacity_degradation is not yet extracted from HPXML (OCHRE default: 0.0 for AC). Implement in resolve_hvac.rs and update this test."]
+#[ignore = "startup_capacity_degradation is not yet extracted from HPXML (OCHRE default: 0.0 for AC). Implement in resolve_hvac.rs and update this test."]
 fn ac_has_startup_capacity_degradation_default() {
     let xml = minimal_xml(
         r#"<Systems><HVAC><CoolingSystem>
@@ -378,11 +377,12 @@ fn ac_has_startup_capacity_degradation_default() {
 // Test: heat pump backup lockout temperature
 //
 // OCHRE HP backup lockout: hp_min_temp or backup_heating_lockout_temp
-// Marked #[ignore] because this is listed as a gap in HARES-073.
+// Marked #[ignore] because heat pump backup lockout temperature is not yet
+// extracted from HPXML.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "HARES-073 gap: heat pump backup lockout temperature is not yet extracted from HPXML. OCHRE reads BackupHeatingSwitchoverTemperature or BackupHeatControlTemperature. Implement in resolve_hvac.rs."]
+#[ignore = "heat pump backup lockout temperature is not yet extracted from HPXML. OCHRE reads BackupHeatingSwitchoverTemperature or BackupHeatControlTemperature. Implement in resolve_hvac.rs."]
 fn ashp_backup_lockout_temperature_extracted() {
     let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>

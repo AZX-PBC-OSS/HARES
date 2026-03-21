@@ -148,7 +148,7 @@ pub struct EquipmentDescriptor {
     ///
     /// Use `Cow::Borrowed("Literal")` for compile-time constants (zero allocation).
     /// Use `Cow::Owned(string)` for runtime-constructed names (e.g., Python adapters
-    /// or config-driven equipment — see HARES-066).
+    /// or config-driven equipment).
     pub equipment_type: Cow<'static, str>,
     pub zone: Option<ZoneId>,
     pub fuel: FuelType,

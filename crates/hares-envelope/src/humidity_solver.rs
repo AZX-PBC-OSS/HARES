@@ -176,7 +176,7 @@ fn humidity_ratio_increment(
 mod tests {
     use std::time::Duration;
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{FixedOffset, TimeZone};
     use hares_physics::psychrometrics::relative_humidity;
     use hares_types::{
         DomainSolver, DomainUpdate, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
@@ -224,7 +224,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
                 .single()
                 .expect("valid time"),

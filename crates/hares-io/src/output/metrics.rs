@@ -680,12 +680,12 @@ mod tests {
         array::ArrayRef,
         datatypes::{Field, Schema},
     };
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, FixedOffset, TimeZone};
     use std::sync::Arc;
 
     fn test_config(deadband: Option<f64>) -> SimulationConfig {
         SimulationConfig {
-            start_time: Utc::now(),
+            start_time: FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap(),
             duration: Duration::hours(1),
             time_res: Duration::hours(1),
             output_verbosity: 0,

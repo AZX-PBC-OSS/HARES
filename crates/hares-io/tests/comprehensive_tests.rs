@@ -19,7 +19,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use tempfile::{NamedTempFile, tempdir};
 
@@ -36,7 +36,7 @@ use hares_types::FuelType;
 
 fn test_config(deadband: Option<f64>) -> SimulationConfig {
     SimulationConfig {
-        start_time: Utc::now(),
+        start_time: chrono::Utc::now().fixed_offset(),
         duration: Duration::hours(1),
         time_res: Duration::hours(1),
         output_verbosity: 0,

@@ -1,4 +1,4 @@
-//! Unified regression runner (HARES-057).
+//! Unified regression runner.
 //!
 //! Aggregates all validation sub-suites into one entry point so that
 //! `cargo test --test regression -- --ignored` exercises every release gate.

@@ -1,4 +1,4 @@
-//! HARES-075: HVAC equipment step correctness tests.
+//! HVAC equipment step correctness tests.
 //!
 //! Tests physics correctness against hand-calculated OCHRE reference values.
 //! Where HARES intentionally uses better physics than OCHRE, divergences are

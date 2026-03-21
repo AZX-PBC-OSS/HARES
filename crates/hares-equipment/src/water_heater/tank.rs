@@ -1189,8 +1189,8 @@ mod tests {
 
     /// With nonzero element heat and nonzero draw in the same step, the outlet
     /// temperature must equal the pre-step top-node value (not inflated by
-    /// current-step element heat). This validates the FX-019 fix: element heat
-    /// does not leak into outlet temperature.
+    /// current-step element heat). Validates that element heat does not leak
+    /// into outlet temperature.
     #[test]
     fn outlet_temp_not_inflated_by_same_step_element_heat() {
         let mut tank = test_tank(6, 50.0);

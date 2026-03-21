@@ -5,8 +5,8 @@
 //! save_state, load_state — through the Equipment trait boundary, not via
 //! type-specific internals.
 //!
-//! Phase 2 gate: grows as each equipment type lands. Per HARES-061, each new
-//! equipment ticket must add a `test_equipment_lifecycle` call here.
+//! Phase 2 gate: grows as each equipment type lands. Each new equipment type
+//! must add a `test_equipment_lifecycle` call here.
 //!
 //! NOTE: Type-specific physics assertions (setpoint tracking, efficiency curves,
 //! etc.) live in the per-equipment test files. This harness only tests the

@@ -24,9 +24,11 @@ HPXML = str(OCHRE_INPUTS / "BEopt_example.xml")
 SCHEDULE = str(OCHRE_INPUTS / "BEopt_example_schedule.csv")
 WEATHER = str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-# Denver MDT = UTC-6 in May.  19:00 UTC = 13:00 local.
-START_UTC = dt.datetime(2019, 5, 5, 19, 0, 0, tzinfo=dt.timezone.utc)
+# Denver LST = UTC-7.  13:00 local = 20:00 UTC.
+# Both OCHRE and HARES take local standard time as the start time.
 START_LOCAL = dt.datetime(2019, 5, 5, 13, 0)  # naive local for OCHRE
+# HARES takes an ISO string; EPW timezone offset (-7h) is applied internally.
+START_HARES = "2019-05-05T13:00:00"
 DURATION_H = 1
 TIME_RES_MIN = 1
 
@@ -76,7 +78,7 @@ def _run_hares() -> dict[str, float]:
         HPXML,
         SCHEDULE,
         WEATHER,
-        start_time=START_UTC.isoformat(),
+        start_time=START_HARES,
         time_res=TIME_RES_MIN * 60,
         duration=DURATION_H * 3600,
         output_verbosity=6,
@@ -112,7 +114,7 @@ def _run_hares_simulate() -> dict[str, float]:
         HPXML,
         SCHEDULE,
         WEATHER,
-        start_time=START_UTC.isoformat(),
+        start_time=START_HARES,
         time_res=TIME_RES_MIN * 60,
         duration=DURATION_H * 3600,
         output_verbosity=6,

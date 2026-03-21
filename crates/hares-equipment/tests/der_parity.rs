@@ -1,9 +1,9 @@
-//! HARES-077: DER equipment step correctness tests.
+//! DER equipment step correctness tests.
 //!
 //! Tests battery, PV, generator, and EV physics correctness.
 //! Documents divergences from OCHRE where HARES intentionally differs.
 //!
-//! Key divergences documented in HARES-077:
+//! Key divergences:
 //! - Generator ramp rate: HARES uses kW/s, OCHRE uses kW/min (see test 6)
 //! - Battery degradation: HARES uses Smith 2017 variant, documented in test 4
 //! - External control signals: verified to be NOT stubs (see test 8)
@@ -250,7 +250,7 @@ fn battery_soc_limits_enforced() {
 // ---------------------------------------------------------------------------
 // 4. Battery degradation model: documentation test
 //
-// HARES-077: HARES uses Smith 2017 degradation variant.
+// HARES uses Smith 2017 degradation variant.
 // OCHRE uses: dq_li1 = 0.5 * b1² / q_li1
 // HARES uses: track via RainflowCounter + calendar aging.
 //
@@ -536,8 +536,8 @@ fn generator_fuel_efficiency_at_half_load() {
 // ---------------------------------------------------------------------------
 // 8. Generator ramp rate units: HARES uses kW/s, OCHRE uses kW/min
 //
-// HARES-077 documented: generator.rs DEFAULT_DELTA_KW_PER_S = 1.0 kW/s,
-// while OCHRE uses kW/min. This is a deliberate improvement — residential
+// generator.rs DEFAULT_DELTA_KW_PER_S = 1.0 kW/s, while OCHRE uses kW/min.
+// This is a deliberate improvement — residential
 // reciprocating generators ramp in seconds, not minutes.
 //
 // OCHRE at ramp_rate=1.0 kW/min → 0.0167 kW/s; HARES default = 1.0 kW/s.
@@ -646,8 +646,7 @@ fn generator_capacity_min_enforced() {
 // ---------------------------------------------------------------------------
 // 10. Control signal is NOT a stub: battery PowerSetpoint actually changes output
 //
-// HARES-077: "External control signals are stubs (silently do nothing)".
-// This test CATCHES the stub issue by verifying that applying PowerSetpoint
+// This test CATCHES a potential stub issue by verifying that applying PowerSetpoint
 // results in measurably different output power.
 // ---------------------------------------------------------------------------
 #[test]

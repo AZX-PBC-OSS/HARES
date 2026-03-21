@@ -5,9 +5,9 @@
 //! cross-type composition contracts that the inline unit tests do not cover
 //! because they have access to private internals.
 //!
-//! Phase 1 gate: passes as soon as HARES-001 through 004 are done.
+//! Phase 1 gate: passes as soon as the core type PRs are done.
 
-use chrono::{TimeZone, Utc};
+use chrono::{FixedOffset, TimeZone};
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, GridState, PortContribution,
     PortDeclaration, PortSlots, ThermalAccumulator, ThermalCategory, WeatherState, ZoneId,
@@ -56,7 +56,8 @@ fn base_env() -> EnvironmentState {
         },
         grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
         custom_domains: vec![],
-        current_time: Utc
+        current_time: FixedOffset::east_opt(0)
+            .unwrap()
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
             .single()
             .expect("valid timestamp"),

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, FixedOffset, TimeZone, Timelike};
 use hares_equipment::{Equipment, EquipmentConfig, config::ConfigValue};
 use hares_equipment::{event_load::EventBasedLoad, scheduled_load::ScheduledLoad};
 use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs};
@@ -111,10 +111,11 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
             zone_temperatures_c: Vec::new(),
             custom_payload: Some(payload),
         }],
-        current_time: Utc
+        current_time: FixedOffset::east_opt(0)
+            .unwrap()
             .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
             .single()
-            .expect("valid UTC timestamp"),
+            .expect("valid timestamp"),
         time_res: ChronoDuration::minutes(1),
     }
 }

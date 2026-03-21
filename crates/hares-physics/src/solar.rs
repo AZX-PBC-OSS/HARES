@@ -675,14 +675,15 @@ pub fn window_transmitted_solar_angular(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{NaiveDate, TimeZone, Utc};
+    use chrono::{FixedOffset, NaiveDate, TimeZone};
 
     use super::*;
 
     #[test]
     fn equatorial_equinox_noon_altitude_is_near_zenith() {
         // Find true solar noon (peak altitude) over the day to avoid clock-noon assumptions.
-        let day = Utc
+        let day = FixedOffset::east_opt(0)
+            .unwrap()
             .with_ymd_and_hms(2026, 3, 20, 0, 0, 0)
             .single()
             .expect("valid timestamp")
@@ -690,7 +691,8 @@ mod tests {
 
         let mut max_altitude = f64::NEG_INFINITY;
         for minute in 0..(24 * 60) {
-            let dt = Utc
+            let dt = FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(
                     day.year(),
                     day.month(),
@@ -878,7 +880,7 @@ mod tests {
         // 21 March at 40°N, 0° longitude.  Scan morning minutes.
         let lat = 40.0;
         let lon = 0.0;
-        let day = Utc.with_ymd_and_hms(2026, 3, 21, 0, 0, 0).single().unwrap();
+        let day = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 3, 21, 0, 0, 0).single().unwrap();
 
         // Find first minute where sun is just above horizon.
         let sunrise_pos = (0u32..(12 * 60))
@@ -918,7 +920,7 @@ mod tests {
         let expected_deg = 90.0 - lat + 23.44; // ≈ 53.44°
 
         // Scan full day and find peak altitude (true solar noon).
-        let day = Utc.with_ymd_and_hms(2026, 6, 21, 0, 0, 0).single().unwrap();
+        let day = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 6, 21, 0, 0, 0).single().unwrap();
         let max_altitude = (0u32..(24 * 60))
             .map(|m| {
                 let dt = day + chrono::Duration::minutes(m as i64);
@@ -940,7 +942,8 @@ mod tests {
         let lon = 0.0;
         let expected_deg = 90.0 - lat - 23.44; // ≈ 6.56°
 
-        let day = Utc
+        let day = FixedOffset::east_opt(0)
+            .unwrap()
             .with_ymd_and_hms(2026, 12, 21, 0, 0, 0)
             .single()
             .unwrap();
@@ -964,7 +967,8 @@ mod tests {
         let lat = 65.0;
         let lon = -18.0; // Reykjavik
         let naive = NaiveDate::from_yo_opt(2026, 172).expect("valid ordinal");
-        let base = Utc
+        let base = FixedOffset::east_opt(0)
+            .unwrap()
             .with_ymd_and_hms(naive.year(), naive.month(), naive.day(), 0, 0, 0)
             .single()
             .expect("valid timestamp");
@@ -1001,7 +1005,7 @@ mod tests {
         // Lat 39.742476°N, Lon -105.1786° (Denver)
         // SPA result: zenith = 50.11162°, azimuth = 194.34024°
         // Spencer model should be within ±1.5° of SPA
-        let dt = Utc.with_ymd_and_hms(2003, 10, 17, 19, 30, 30).unwrap();
+        let dt = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2003, 10, 17, 19, 30, 30).unwrap();
         let pos = solar_position(39.742476, -105.1786, dt);
         let zenith = 90.0 - pos.altitude_deg;
         assert!(
@@ -1017,7 +1021,8 @@ mod tests {
         let lat = 40.0;
         let lon = -105.0;
         let naive = NaiveDate::from_yo_opt(2026, 355).expect("valid ordinal");
-        let base = Utc
+        let base = FixedOffset::east_opt(0)
+            .unwrap()
             .with_ymd_and_hms(naive.year(), naive.month(), naive.day(), 0, 0, 0)
             .single()
             .expect("valid timestamp");
@@ -1049,7 +1054,7 @@ mod tests {
     fn summer_solstice_daylight_exceeds_18h_at_60n() {
         let lat = 60.0;
         let lon = 0.0;
-        let day = Utc.with_ymd_and_hms(2026, 6, 21, 0, 0, 0).single().unwrap();
+        let day = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 6, 21, 0, 0, 0).single().unwrap();
 
         let daylight_minutes = (0u32..(24 * 60))
             .filter(|&m| {
@@ -1075,7 +1080,8 @@ mod tests {
         let lon = 0.0;
         let expected_deg = 90.0 - lat - 23.44; // ≈ 43.06°
 
-        let day = Utc
+        let day = FixedOffset::east_opt(0)
+            .unwrap()
             .with_ymd_and_hms(2026, 12, 21, 0, 0, 0)
             .single()
             .unwrap();
@@ -1251,7 +1257,7 @@ mod tests {
         // Equinox at 40°N, 0° longitude: solar path is symmetric about solar noon.
         let lat = 40.0;
         let lon = 0.0;
-        let day = Utc.with_ymd_and_hms(2026, 3, 20, 0, 0, 0).single().unwrap();
+        let day = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 3, 20, 0, 0, 0).single().unwrap();
 
         let ghi = 700.0_f64;
         let dni = 800.0_f64;
@@ -1812,7 +1818,8 @@ mod tests {
     #[ignore]
     fn debug_solar_poa_at_may_5_noon_denver() {
         // May 5 noon local Denver = May 5 19:00 UTC (Denver is UTC-7 in May)
-        let utc_time = Utc
+        let utc_time = FixedOffset::east_opt(0)
+            .unwrap()
             .with_ymd_and_hms(2024, 5, 5, 19, 0, 0)
             .single()
             .unwrap();

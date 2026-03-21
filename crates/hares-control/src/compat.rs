@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn soc_all_three_keys_grouped() {
-        // HARES-011: SOC + Min SOC + Max SOC -> single SOCTarget
+        // SOC + Min SOC + Max SOC -> single SOCTarget
         let mut signals = HashMap::new();
         signals.insert("SOC".to_string(), 0.6);
         signals.insert("Min SOC".to_string(), 0.2);

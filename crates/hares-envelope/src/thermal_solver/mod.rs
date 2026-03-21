@@ -685,7 +685,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{FixedOffset, TimeZone};
     use hares_types::{
         DomainSolver, DomainUpdate, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
         ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -739,7 +739,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
                 .single()
                 .expect("valid time"),
@@ -1546,7 +1547,8 @@ mod tests {
                     frequency_hz: 60.0,
                 },
                 custom_domains: vec![],
-                current_time: Utc
+                current_time: FixedOffset::east_opt(0)
+                    .unwrap()
                     .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
                     .single()
                     .unwrap(),
@@ -1677,7 +1679,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
                 .single()
                 .unwrap(),
@@ -1817,7 +1820,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
                 .single()
                 .unwrap(),
@@ -2143,7 +2147,8 @@ mod tests {
                     frequency_hz: 60.0,
                 },
                 custom_domains: vec![],
-                current_time: Utc
+                current_time: FixedOffset::east_opt(0)
+                    .unwrap()
                     .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
                     .single()
                     .unwrap(),
@@ -2540,7 +2545,8 @@ mod tests {
                     frequency_hz: 60.0,
                 },
                 custom_domains: vec![],
-                current_time: Utc
+                current_time: FixedOffset::east_opt(0)
+                    .unwrap()
                     .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
                     .single()
                     .unwrap(),

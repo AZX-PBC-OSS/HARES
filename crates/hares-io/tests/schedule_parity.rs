@@ -1,6 +1,5 @@
 //! OCHRE parity tests for schedule loading and resolution.
 //!
-//! Covers gaps identified in HARES-072:
 //! - Time-varying schedule produces non-constant kW series
 //! - Annual energy round-trip (sum of kW × dt = annual_kwh)
 //! - duty_cycle_fraction scales resolved kW series proportionally
@@ -230,7 +229,7 @@ fn duty_cycle_fraction_parameter_is_preserved_after_injection() {
 //
 // When parse_schedule_csv is called with a required column that is absent,
 // the error must be typed MissingRequiredColumns — never a silent fallback.
-// This directly validates the "no silent fallback" requirement from HARES-072.
+// This directly validates the "no silent fallback" requirement.
 // ---------------------------------------------------------------------------
 
 #[test]

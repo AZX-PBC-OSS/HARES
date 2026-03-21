@@ -79,7 +79,7 @@ pub struct HvacMultispeedParameters {
     pub shrs: Vec<f64>,
 }
 
-/// API alias used by HARES-037 for HVAC coefficient lookups.
+/// API alias for HVAC coefficient lookups.
 pub type BiquadraticCoefficients = HvacCurveSet;
 
 /// Generic default parameters loaded from a TOML file in any equipment

@@ -914,8 +914,8 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 /// - `event_window[k]` is `1.0` when the step probability is non-zero, else `0.0`.
 /// - `event_probability[k]` is the summed/clamped probability for that step.
 ///
-/// This function is intended for ingestion layers (e.g. HARES-036) that flatten
-/// OCHRE schedule inputs into `EquipmentConfig` keys.
+/// This function is intended for ingestion layers that flatten OCHRE schedule
+/// inputs into `EquipmentConfig` keys.
 pub fn map_ochre_pdf_to_cycle_schedule(
     minute_pdf: &[f64],
     timestep_minutes: usize,
@@ -1109,8 +1109,8 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
 }
 
 fn derive_rng_seed(config: &EquipmentConfig) -> [u8; 32] {
-    // TODO(HARES-041): replace with hierarchical seeding (derive_dwelling_rng)
-    // once core RNG management lands. For now use stable master_seed + building_id + equipment name.
+    // TODO: replace with hierarchical seeding (derive_dwelling_rng) once core
+    // RNG management lands. For now use stable master_seed + building_id + equipment name.
     let master_seed = config.get_f64(KEY_MASTER_SEED).unwrap_or_default() as u64;
     let building_id = config.get_f64(KEY_BUILDING_ID).unwrap_or_default() as i64;
 
@@ -1939,7 +1939,7 @@ mod tests {
     }
 
     // =======================================================================
-    // FX-025: Gas fuel type handling
+    // Gas fuel type handling
     // =======================================================================
 
     fn gas_event_config(name: &str) -> EquipmentConfig {

@@ -1,4 +1,4 @@
-//! HARES-076: Water heater equipment step correctness tests.
+//! Water heater equipment step correctness tests.
 //!
 //! Tests physics correctness against hand-calculated OCHRE reference values.
 //! Documents divergences where HARES intentionally differs from OCHRE.
@@ -90,7 +90,7 @@ fn step_wh(wh: &mut dyn hares_equipment::Equipment, env: &EnvironmentState, port
 }
 
 // ---------------------------------------------------------------------------
-// 1. Standby loss over 24 hours (HARES-076 "standby loss" scenario)
+// 1. Standby loss over 24 hours
 //
 // OCHRE WaterHeater.py: standby loss = UA × (T_tank - T_ambient) per step.
 // At equilibrium (no draws, element off), tank temperature decays exponentially.
@@ -157,7 +157,7 @@ fn standby_loss_over_24h() {
 // OCHRE WaterHeater.py default deadband = 10°F = 5.556°C.
 // HARES resistance.rs DEFAULT_DEADBAND_C = 5.555_555_556 (10°F).
 //
-// DIVERGENCE NOTE: The HARES-076 ticket claimed a mismatch (OCHRE 5.56°C vs
+// DIVERGENCE NOTE: An earlier audit claimed a mismatch (OCHRE 5.56°C vs
 // HARES 2.0°C). Code inspection confirms HARES already uses 5.556°C as the
 // DEFAULT. Tests that pass explicit deadband_c=2.0 use a non-default value;
 // the default behaviour matches OCHRE.
@@ -301,8 +301,8 @@ fn tank_temp_never_below_mains_during_draw() {
 //
 // OCHRE WaterHeater.py: skin_loss = UA × (T_tank - T_ambient)
 // With UA=5.0 W/K and ΔT=30 K → expected ~150 W standby loss.
-// We cannot observe the skin loss directly on the thermal port without
-// FIX-031-002 applied, but we can verify the temperature drop rate
+// We cannot observe the skin loss directly on the thermal port, but we can
+// verify the temperature drop rate
 // is consistent with the expected UA×ΔT.
 //
 // Check: over one 60-second step, ΔT ≈ UA×ΔT_ambient / (m×Cp) = 5.0×30 / 791_900 ≈ 1.9 mK.
@@ -366,7 +366,7 @@ fn standby_loss_ua_magnitude() {
 // ---------------------------------------------------------------------------
 // 6. HPWH documentation: COP curves may not be fully implemented
 //
-// HARES-076 notes HPWH COP curves may be incomplete. This test documents
+// HPWH COP curves may be incomplete. This test documents
 // current behavior: initialize a HPWH and verify it either (a) computes
 // a reasonable COP or (b) fails clearly with a diagnostic message.
 //

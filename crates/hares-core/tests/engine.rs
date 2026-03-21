@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
 use hares_io::OutputFormat;
 
@@ -103,7 +103,10 @@ fn fixture_hpxml_path() -> PathBuf {
 
 fn simulation_config(output_path: PathBuf) -> SimulationConfig {
     SimulationConfig {
-        start_time: Utc::now(),
+        start_time: FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
+            .unwrap(),
         duration: Duration::hours(1),
         time_res: Duration::minutes(1),
         output_verbosity: 0,

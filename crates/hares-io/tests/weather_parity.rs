@@ -1,6 +1,5 @@
 //! OCHRE parity tests for weather data loading and processing.
 //!
-//! Covers gaps identified in HARES-074:
 //! - Sky temperature formula: Stefan-Boltzmann inversion of horizontal infrared
 //! - Clark-Allen fallback formula for low-IR conditions
 //! - EPW column parsing with SI units (requires real EPW file — marked #[ignore])

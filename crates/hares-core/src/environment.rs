@@ -653,8 +653,7 @@ mod tests {
 
     fn clock() -> SimClock {
         let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00")
-            .expect("parse")
-            .to_fixed_offset();
+            .expect("parse");
         SimClock::new(start, Duration::seconds(60), Duration::hours(2))
     }
 
@@ -741,8 +740,7 @@ mod tests {
         .expect("manager");
 
         let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00")
-            .expect("parse")
-            .to_fixed_offset();
+            .expect("parse");
         let mut clock = SimClock::new(start, Duration::seconds(60), Duration::hours(3));
 
         for _ in 0..120 {

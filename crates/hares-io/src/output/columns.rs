@@ -300,7 +300,7 @@ fn instance_qualified_names(specs: &[EquipmentSpec]) -> Vec<(String, FuelType)> 
 /// Returns a new schema containing only fields present at the given
 /// verbosity level, by filtering `full_schema` against the field list
 /// that `build_schema` would produce.
-#[allow(dead_code)] // Used by HARES-039 (Output Metrics) when filtering schemas
+#[allow(dead_code)] // Used when filtering schemas by verbosity level
 pub(crate) fn filter_schema_to_verbosity(full_schema: &Schema, verbosity: u8) -> Schema {
     let reference = build_schema(&[], verbosity);
     let ref_names: std::collections::HashSet<&str> = reference

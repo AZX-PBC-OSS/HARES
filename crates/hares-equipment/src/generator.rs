@@ -557,7 +557,7 @@ impl Equipment for Generator {
         }
 
         // Validate CHP fluid configuration.
-        // TODO(HARES-043): Validate that loop_id references an existing water heater loop.
+        // TODO: Validate that loop_id references an existing water heater loop.
         // This requires cross-equipment lookup which depends on the stage snapshot mechanism.
         // Currently only validates loop_id != 0.
         if self.eta_thermal > 0.0 {
