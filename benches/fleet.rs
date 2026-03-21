@@ -15,7 +15,7 @@ fn bench_fleet(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
 
-    for n in [10usize, 100usize, 1000usize] {
+    for n in [10usize, 100usize] {
         group.bench_with_input(BenchmarkId::new("simulate_dwellings", n), &n, |b, &n| {
             b.iter_batched(
                 || {
@@ -32,7 +32,8 @@ fn bench_fleet(c: &mut Criterion) {
                     Fleet::from_buildings(configs)
                 },
                 |fleet| {
-                    let results = fleet.simulate(0);
+                    // Use a fixed thread count for reproducible, resource-bounded benchmarks.
+                    let results = fleet.simulate(4);
                     criterion::black_box(results);
                 },
                 criterion::BatchSize::LargeInput,

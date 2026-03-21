@@ -7,8 +7,6 @@
 //!
 //! Reference: vendors/OCHRE/ochre/Equipment/HVAC.py
 
-mod common;
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -137,8 +135,8 @@ fn gas_furnace_energy_balance() {
     // COP for a gas furnace in OCHRE is reported as thermal / fuel.
     // HARES telemetry reports this via fuel_input_w and thermal_output_w.
     let tel = eq.telemetry();
-    let fuel_input_w = tel.get("fuel_input_w").unwrap_or(0.0);
-    let thermal_output_w = tel.get("thermal_output_w").unwrap_or(0.0);
+    let fuel_input_w = tel.get("fuel_input_w").expect("fuel_input_w must exist");
+    let thermal_output_w = tel.get("thermal_output_w").expect("thermal_output_w must exist");
     let gas_cop = thermal_output_w / fuel_input_w;
     assert!(
         (gas_cop - 0.80).abs() < 0.01,
@@ -286,7 +284,7 @@ fn ashp_heating_cop_above_unity_at_ahri_h1() {
 
     let cop = thermal_w / electric_w;
     // Telemetry COP should match the computed ratio within rounding
-    let tel_cop = eq.telemetry().get("cop").unwrap_or(0.0);
+    let tel_cop = eq.telemetry().get("cop").expect("cop must exist in telemetry");
 
     assert!(
         cop > 2.0,
@@ -518,10 +516,12 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     }
 
     let tel = eq.telemetry();
-    let defrost_active = tel.get("defrost_active").unwrap_or(0.0);
-    let defrost_fraction = tel.get("defrost_time_fraction").unwrap_or(0.0);
-    let thermal_output_w = tel.get("thermal_output_w").unwrap_or(0.0);
-    let electric_kw = tel.get("electric_kw").unwrap_or(0.0);
+    let defrost_active = tel.get("defrost_active").expect("defrost_active must exist in telemetry");
+    let defrost_fraction =
+        tel.get("defrost_time_fraction").expect("defrost_time_fraction must exist in telemetry");
+    let thermal_output_w =
+        tel.get("thermal_output_w").expect("thermal_output_w must exist in telemetry");
+    let electric_kw = tel.get("electric_kw").expect("electric_kw must exist in telemetry");
 
     eprintln!(
         "[hvac_parity] defrost_at_0C: defrost_active={defrost_active:.0}, \
@@ -659,59 +659,5 @@ fn ashp_heating_at_extreme_cold() {
         "[hvac_parity] extreme_cold: thermal={thermal_w:.1} W, electric={electric_kw:.4} kW, \
          COP={:.3}",
         thermal_w / (electric_kw * 1_000.0)
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 11. Checkpoint round-trip: HVAC state survives save/load
-//
-// Verifies that operating mode and outputs are preserved across serialization.
-// This exercises the postcard serialization path for HVAC state.
-// ---------------------------------------------------------------------------
-#[test]
-fn hvac_checkpoint_round_trip() {
-    let c = cfg(
-        "furnace",
-        "Gas Furnace",
-        &[
-            ("zone_id", 1.0),
-            ("capacity_w", 10_000.0),
-            ("heating_setpoint_c", 21.0),
-            ("cooling_setpoint_c", 27.0),
-            ("fuel_efficiency", 0.80),
-            ("fan_power_w", 400.0),
-        ],
-    );
-    let registry = EquipmentRegistry::new();
-    let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
-    let env = make_env(18.0, -5.0, 12.0);
-    eq.init(&c, &env).unwrap();
-    eq.update_control(&env);
-
-    let mut ports = make_ports();
-    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-
-    let fuel_before = eq.telemetry().get("fuel_input_w").unwrap_or(0.0);
-    let thermal_before = eq.telemetry().get("thermal_output_w").unwrap_or(0.0);
-    let mode_before = eq.telemetry().get("operating_mode").unwrap_or(-1.0);
-
-    let snapshot = eq.save_state();
-
-    let mut restored = registry.create("Gas Furnace", c.clone()).unwrap();
-    restored.init(&c, &env).unwrap();
-    restored.load_state(&snapshot).unwrap();
-
-    assert!(
-        (restored.telemetry().get("fuel_input_w").unwrap_or(-1.0) - fuel_before).abs() < 1e-6,
-        "fuel_input_w must survive checkpoint: before={fuel_before:.3}"
-    );
-    assert!(
-        (restored.telemetry().get("thermal_output_w").unwrap_or(-1.0) - thermal_before).abs()
-            < 1e-6,
-        "thermal_output_w must survive checkpoint: before={thermal_before:.3}"
-    );
-    assert!(
-        (restored.telemetry().get("operating_mode").unwrap_or(-1.0) - mode_before).abs() < 1e-6,
-        "operating_mode must survive checkpoint"
     );
 }

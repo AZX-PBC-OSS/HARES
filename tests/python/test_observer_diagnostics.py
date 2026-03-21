@@ -69,7 +69,6 @@ def _run_hares_observed() -> tuple[list[dict], list[dict]]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
-        initialization_duration=24 * 3600,
     )
 
     # Enable observer with capacity for all steps

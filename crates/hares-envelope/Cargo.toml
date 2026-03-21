@@ -18,4 +18,5 @@ criterion = { workspace = true }
 
 [[bench]]
 name = "rc_solver"
+path = "benches/rc_solver.rs"
 harness = false

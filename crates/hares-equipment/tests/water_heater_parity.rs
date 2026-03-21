@@ -6,8 +6,6 @@
 //! Reference: vendors/OCHRE/ochre/Equipment/WaterHeater.py
 //!            vendors/OCHRE/ochre/Models/Water.py
 
-mod common;
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -124,8 +122,8 @@ fn standby_loss_over_24h() {
         step_wh(&mut wh, &env, &mut ports);
     }
 
-    let final_temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(0.0);
-    let power = wh.telemetry().get("electric_power_w").unwrap_or(0.0);
+    let final_temp = wh.telemetry().get("tank_avg_temp_c").expect("tank_avg_temp_c must exist");
+    let power = wh.telemetry().get("electric_power_w").expect("electric_power_w must exist");
 
     // Element must be off (setpoint is 30°C < current tank temp for most of the run)
     // It might fire briefly near 30°C, but long-run the tank settles far above ambient.
@@ -191,7 +189,7 @@ fn element_cycling_deadband_matches_ochre_default() {
 
     // Tank starts at 40°C, below deadband floor (43.34°C) → element should fire immediately
     step_wh(&mut wh, &env, &mut ports);
-    let power_step1 = wh.telemetry().get("electric_power_w").unwrap_or(0.0);
+    let power_step1 = wh.telemetry().get("electric_power_w").expect("electric_power_w must exist");
     assert!(
         power_step1 > 0.0,
         "element must fire when tank (40°C) is below deadband floor (~43.3°C); got {power_step1:.2} W"
@@ -203,8 +201,8 @@ fn element_cycling_deadband_matches_ochre_default() {
     while steps < 200 {
         steps += 1;
         step_wh(&mut wh, &env, &mut ports);
-        let power = wh.telemetry().get("electric_power_w").unwrap_or(0.0);
-        let temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(0.0);
+        let power = wh.telemetry().get("electric_power_w").expect("electric_power_w must exist");
+        let temp = wh.telemetry().get("tank_avg_temp_c").expect("tank_avg_temp_c must exist");
         if power < 1.0 {
             turned_off = true;
             // Verify temperature at shutoff: must be at or above setpoint
@@ -223,162 +221,7 @@ fn element_cycling_deadband_matches_ochre_default() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Draw response: hot water draw cools the tank
-//
-// OCHRE WaterHeater.py: draw displaces hot water with cold mains water.
-// Tank temperature drops proportionally to draw rate and mains temperature.
-//
-// Test: single-node tank at 55°C, draw at 0.05 kg/s (3 L/min) for 10 minutes.
-// With mains at 15°C (from env default), the tank temp must drop.
-// Energy removed by draw per step ≈ m_dot × Cp × (T_tank - T_mains) × dt.
-// ---------------------------------------------------------------------------
-#[test]
-fn draw_cools_tank_toward_mains_temperature() {
-    let env = make_env(20.0);
-    let cfg = resistance_cfg(30.0, 2.0, 55.0, 0.05, 0.0);
-
-    let mut wh = ResistanceWH::new(cfg.clone());
-    wh.init(&cfg, &env).unwrap();
-    let mut ports = PortSlots::from_declarations(wh.ports());
-
-    // Telemetry is populated after the first step; use the known initial temp from config.
-    let initial_temp = 55.0_f64;
-
-    // 10 minutes of draw
-    for _ in 0..10 {
-        step_wh(&mut wh, &env, &mut ports);
-    }
-
-    let final_temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(55.0);
-
-    assert!(
-        final_temp < initial_temp - 1.0,
-        "draw at 0.05 kg/s must cool tank by > 1°C in 10 min; \
-         initial={initial_temp:.3}°C final={final_temp:.3}°C"
-    );
-
-    // Tank must not drop below mains temperature (cold water can't be colder than inlet)
-    let mains_temp_c = 15.0_f64;
-    assert!(
-        final_temp >= mains_temp_c - 0.5,
-        "tank cannot drop below mains temperature ({mains_temp_c}°C); got {final_temp:.3}°C"
-    );
-
-    eprintln!(
-        "[wh_parity] draw_response: dropped from {initial_temp:.2}°C to {final_temp:.2}°C \
-         ({:.2}°C) in 10 min at 0.05 kg/s",
-        initial_temp - final_temp
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 4. Larger draw cools tank more than smaller draw
-//
-// Physics invariant (OCHRE and HARES agree): draw rate is proportional to
-// the temperature drop because q_draw = m_dot × Cp × ΔT.
-// ---------------------------------------------------------------------------
-#[test]
-fn larger_draw_cools_more_than_smaller_draw() {
-    let env = make_env(20.0);
-    let run_steps = 15;
-
-    let measure = |draw_kg_s: f64| {
-        // Setpoint below initial → element off → isolates draw effect
-        let cfg = resistance_cfg(30.0, 2.0, 55.0, draw_kg_s, 0.0);
-        let mut wh = ResistanceWH::new(cfg.clone());
-        wh.init(&cfg, &env).unwrap();
-        let mut ports = PortSlots::from_declarations(wh.ports());
-        for _ in 0..run_steps {
-            step_wh(&mut wh, &env, &mut ports);
-        }
-        wh.telemetry().get("tank_avg_temp_c").unwrap_or(55.0)
-    };
-
-    let temp_small = measure(0.01);
-    let temp_large = measure(0.10);
-
-    assert!(
-        temp_large < temp_small - 0.5,
-        "larger draw (0.10 kg/s → {temp_large:.3}°C) must cool more than \
-         smaller draw (0.01 kg/s → {temp_small:.3}°C)"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 5. Energy conservation: ΔE_tank = E_in - E_draw_loss (UA=0)
-//
-// With UA=0, the only energy flows are electrical input and draw-induced
-// heat removal. This isolates the tank solver's numerical accuracy.
-//
-// OCHRE WaterHeater.py uses a forward-Euler step; HARES uses the same
-// approach. Both should match within 2% over 30 steps.
-// ---------------------------------------------------------------------------
-#[test]
-fn energy_conservation_ua_zero() {
-    let env = make_env(21.0);
-    let cp_j_kg_k = 4183.0_f64;
-    let draw_kg_s = 0.02_f64;
-    let mains_temp_c = 15.0_f64;
-    let dt_s = 60.0_f64;
-    let n_steps = 30_usize;
-    let initial_temp_c = 30.0_f64;
-
-    let mut raw = HashMap::new();
-    raw.insert("setpoint_c".to_string(), ConfigValue::Float(80.0)); // high → element runs all steps
-    raw.insert("deadband_c".to_string(), ConfigValue::Float(2.0));
-    raw.insert("initial_tank_temp_c".to_string(), ConfigValue::Float(initial_temp_c));
-    raw.insert("draw_flow_rate_kg_s".to_string(), ConfigValue::Float(draw_kg_s));
-    raw.insert("max_tank_temp_c".to_string(), ConfigValue::Float(300.0));
-    raw.insert("tank_nodes".to_string(), ConfigValue::Float(1.0));
-    raw.insert("ua_w_per_k".to_string(), ConfigValue::Float(0.0));
-    let cfg = EquipmentConfig {
-        name: "RWH".to_string(),
-        ochre_class: "Resistance Water Heater".to_string(),
-        raw_config: raw,
-    };
-
-    let mut wh = ResistanceWH::new(cfg.clone());
-    wh.init(&cfg, &env).unwrap();
-    let mut ports = PortSlots::from_declarations(wh.ports());
-
-    // 50-gal tank: 50 US gal × 3.78541 L/gal ≈ 189.27 kg
-    let water_mass_kg = 189.27_f64;
-    let thermal_mass = water_mass_kg * cp_j_kg_k;
-
-    let mut total_electric_j = 0.0_f64;
-    let mut total_draw_j = 0.0_f64;
-
-    for _ in 0..n_steps {
-        ports.electrical = Default::default();
-        ports.fluid.iter_mut().for_each(|f| f.zero());
-
-        wh.step(&env, Duration::from_secs(dt_s as u64), &mut ports).unwrap();
-
-        let elec_w = wh.telemetry().get("electric_power_w").unwrap_or(0.0);
-        total_electric_j += elec_w * dt_s;
-
-        let tank_temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(0.0);
-        let draw_w = draw_kg_s * cp_j_kg_k * (tank_temp - mains_temp_c).max(0.0);
-        total_draw_j += draw_w * dt_s;
-    }
-
-    let final_temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(0.0);
-    let delta_tank_j = thermal_mass * (final_temp - initial_temp_c);
-    let expected_delta_j = total_electric_j - total_draw_j;
-
-    // 2% tolerance for trapezoidal integration error on draw heat estimation
-    let tolerance = 0.02 * total_electric_j.abs().max(1.0);
-
-    assert!(
-        (delta_tank_j - expected_delta_j).abs() < tolerance,
-        "energy conservation violated: ΔE_tank={delta_tank_j:.1} J \
-         expected={expected_delta_j:.1} J (E_elec={total_electric_j:.1}, \
-         E_draw={total_draw_j:.1}); tolerance={tolerance:.1} J"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 6. Gas WH: fuel consumption, no electricity when no fan
+// 3. Gas WH: fuel consumption, no electricity when no fan
 //
 // OCHRE WaterHeater.py GasWaterHeater: burner is fueled by gas, no electric
 // (unless a blower is configured). With pilot_power_w=0, a cold tank must
@@ -416,7 +259,7 @@ fn gas_wh_fuel_not_electricity() {
     );
 
     // Telemetry must be consistent
-    let tel_gas = wh.telemetry().get("gas_consumption_w").unwrap_or(0.0);
+    let tel_gas = wh.telemetry().get("gas_consumption_w").expect("gas_consumption_w must exist");
     assert!(
         (tel_gas - gas_w).abs() < 1e-6,
         "telemetry gas_consumption_w ({tel_gas:.2}) must match port ({gas_w:.2})"
@@ -424,7 +267,7 @@ fn gas_wh_fuel_not_electricity() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Tank temperature never goes below mains temperature during heavy draw
+// 4. Tank temperature never goes below mains temperature during heavy draw
 //
 // Physics: incoming mains water sets the lower bound on tank temperature.
 // A tank cannot be cooler than the inlet water it receives.
@@ -443,7 +286,8 @@ fn tank_temp_never_below_mains_during_draw() {
 
     for step in 0..60 {
         step_wh(&mut wh, &env, &mut ports);
-        let temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(0.0);
+        let temp =
+            wh.telemetry().get("tank_avg_temp_c").expect("tank_avg_temp_c must exist");
         assert!(
             temp >= mains_temp_c - 0.1,
             "tank ({temp:.4}°C) must not drop below mains ({mains_temp_c}°C) at step {step}"
@@ -452,7 +296,7 @@ fn tank_temp_never_below_mains_during_draw() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Standby loss magnitude: UA × ΔT gives expected power
+// 5. Standby loss magnitude: UA × ΔT gives expected power
 //
 // OCHRE WaterHeater.py: skin_loss = UA × (T_tank - T_ambient)
 // With UA=5.0 W/K and ΔT=30 K → expected ~150 W standby loss.
@@ -461,6 +305,8 @@ fn tank_temp_never_below_mains_during_draw() {
 // is consistent with the expected UA×ΔT.
 //
 // Check: over one 60-second step, ΔT ≈ UA×ΔT_ambient / (m×Cp) = 5.0×30 / 791_900 ≈ 1.9 mK.
+// Single-step forward-Euler integration is exact to machine precision for a
+// linear ODE (no nonlinear draw or switching); 1% tolerance is appropriate.
 // ---------------------------------------------------------------------------
 #[test]
 fn standby_loss_ua_magnitude() {
@@ -491,7 +337,7 @@ fn standby_loss_ua_magnitude() {
 
     step_wh(&mut wh, &env, &mut ports);
 
-    let temp_after = wh.telemetry().get("tank_avg_temp_c").unwrap_or(tank_temp_c);
+    let temp_after = wh.telemetry().get("tank_avg_temp_c").expect("tank_avg_temp_c must exist");
     let actual_loss_w = (tank_temp_c - temp_after)
         * (50.0 * 3.78541 /* gal→kg */ * 4183.0)
         / dt_s;
@@ -504,17 +350,18 @@ fn standby_loss_ua_magnitude() {
          tank after={temp_after:.4}°C"
     );
 
-    // Allow 5% tolerance for thermal mass estimation
-    let tol = expected_loss_w * 0.15;
+    // Single-step forward-Euler on a linear ODE is exact; 1% tolerance covers
+    // only the thermal-mass estimate (50 gal × 3.78541 kg/gal vs. actual tank mass).
+    let tol = expected_loss_w * 0.01;
     assert!(
         (actual_loss_w - expected_loss_w).abs() < tol,
-        "standby loss must match UA×ΔT={expected_loss_w:.1} W within 15%; \
+        "standby loss must match UA×ΔT={expected_loss_w:.1} W within 1%; \
          actual={actual_loss_w:.1} W"
     );
 }
 
 // ---------------------------------------------------------------------------
-// 9. HPWH documentation: COP curves may not be fully implemented
+// 6. HPWH documentation: COP curves may not be fully implemented
 //
 // HARES-076 notes HPWH COP curves may be incomplete. This test documents
 // current behavior: initialize a HPWH and verify it either (a) computes

@@ -12,7 +12,7 @@ mod py_telemetry;
 
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
-use py_equipment::{PyBattery, PyEv, PyPv};
+use py_equipment::{PyBattery, PyEv, PyPv, PyPvSoilingConfig};
 use py_fleet::{PyFleet, PyFleetResults};
 use py_telemetry::PyTelemetry;
 
@@ -24,6 +24,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTelemetry>()?;
     m.add_class::<PyBattery>()?;
     m.add_class::<PyPv>()?;
+    m.add_class::<PyPvSoilingConfig>()?;
     m.add_class::<PyEv>()?;
     m.add_class::<PyFleet>()?;
     m.add_class::<PyFleetResults>()?;

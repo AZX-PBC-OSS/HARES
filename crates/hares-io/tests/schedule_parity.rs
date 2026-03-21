@@ -203,22 +203,18 @@ fn duty_cycle_fraction_parameter_is_preserved_after_injection() {
         })
         .collect();
 
-    let mut schedule_base = make_hourly_schedule(&[("lighting_interior", &fractions_24)]);
-    let mut schedule_half = make_hourly_schedule(&[("lighting_interior", &fractions_24)]);
+    let mut schedule = make_hourly_schedule(&[("lighting_interior", &fractions_24)]);
+    let mut specs = vec![make_spec_with_duty_cycle("Indoor Lighting", 1_200.0, 0.5)];
 
-    let mut spec_base = make_spec_annual_kwh("Indoor Lighting", 1_200.0);
-    let mut spec_half = make_spec_with_duty_cycle("Indoor Lighting", 1_200.0, 0.5);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None);
 
-    inject_schedule_into_specs(&mut [spec_base.clone()], &mut schedule_base, None);
-    inject_schedule_into_specs(&mut [spec_half.clone()], &mut schedule_half, None);
-
-    // Verify the parameter is preserved in spec_half.
+    // Verify the parameter survives injection in the actual mutated spec.
     assert!(
-        spec_half.parameters.contains_key("duty_cycle_fraction"),
+        specs[0].parameters.contains_key("duty_cycle_fraction"),
         "duty_cycle_fraction should be preserved after injection"
     );
 
-    let dc = spec_half
+    let dc = specs[0]
         .parameters
         .get("duty_cycle_fraction")
         .and_then(Value::as_f64)

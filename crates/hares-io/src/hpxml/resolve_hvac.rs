@@ -567,9 +567,22 @@ fn apply_default_hvac_speed_fallback(params: &mut Map<String, Value>) {
     if params.contains_key("number_of_speeds") {
         return;
     }
+    // Prefer the bare <SEER> tag path ("efficiency_seer").
+    // Fall back to HPXML 4.x AnnualCoolingEfficiency when units are SEER
+    // ("cooling_efficiency" with "cooling_efficiency_units" == "SEER").
     let seer = params
         .get("efficiency_seer")
         .and_then(Value::as_f64)
+        .or_else(|| {
+            let units = params
+                .get("cooling_efficiency_units")
+                .and_then(Value::as_str)?;
+            if units == "SEER" {
+                params.get("cooling_efficiency").and_then(Value::as_f64)
+            } else {
+                None
+            }
+        })
         .unwrap_or(0.0);
     let n_speeds = if seer > 21.0 {
         4

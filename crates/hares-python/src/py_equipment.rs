@@ -34,6 +34,43 @@ impl PyBattery {
     }
 }
 
+#[pyclass(name = "PvSoilingConfig")]
+#[derive(Debug, Clone)]
+pub struct PyPvSoilingConfig {
+    #[pyo3(get)]
+    pub cleaning_threshold_mm: f64,
+    #[pyo3(get)]
+    pub loss_rate_per_day: f64,
+    #[pyo3(get)]
+    pub grace_period_days: f64,
+    #[pyo3(get)]
+    pub max_loss: f64,
+}
+
+#[pymethods]
+impl PyPvSoilingConfig {
+    #[new]
+    #[pyo3(signature = (
+        cleaning_threshold_mm=6.0,
+        loss_rate_per_day=0.0015,
+        grace_period_days=14.0,
+        max_loss=0.30,
+    ))]
+    fn new(
+        cleaning_threshold_mm: f64,
+        loss_rate_per_day: f64,
+        grace_period_days: f64,
+        max_loss: f64,
+    ) -> Self {
+        Self {
+            cleaning_threshold_mm,
+            loss_rate_per_day,
+            grace_period_days,
+            max_loss,
+        }
+    }
+}
+
 #[pyclass(name = "PV")]
 #[derive(Debug)]
 pub struct PyPv {
@@ -45,18 +82,27 @@ pub struct PyPv {
     pub tilt: f64,
     #[pyo3(get)]
     pub azimuth: f64,
+    #[pyo3(get)]
+    pub soiling: Option<PyPvSoilingConfig>,
 }
 
 #[pymethods]
 impl PyPv {
     #[new]
-    #[pyo3(signature = (name, capacity_kw, tilt, azimuth))]
-    fn new(name: String, capacity_kw: f64, tilt: f64, azimuth: f64) -> Self {
+    #[pyo3(signature = (name, capacity_kw, tilt, azimuth, soiling=None))]
+    fn new(
+        name: String,
+        capacity_kw: f64,
+        tilt: f64,
+        azimuth: f64,
+        soiling: Option<PyPvSoilingConfig>,
+    ) -> Self {
         Self {
             name,
             capacity_kw,
             tilt,
             azimuth,
+            soiling,
         }
     }
 }

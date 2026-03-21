@@ -106,9 +106,11 @@ impl EnvironmentManager {
             Hemisphere::Northern
         };
         let surfaces = build_surface_geometry(building);
+        let init_offset =
+            compute_annual_offset_unshifted(&weather.meta, start_time, step_secs);
         let initial_outdoor_temp_c = weather
             .dry_bulb_c
-            .get(weather_start_offset)
+            .get(init_offset)
             .copied()
             .unwrap_or(DEFAULT_SETPOINT_C);
         let zones = initial_zones(building, initial_outdoor_temp_c);
@@ -330,6 +332,26 @@ fn compute_annual_offset(meta: &WeatherMeta, start_time: DateTime<Utc>, step_sec
     let shifted = (seconds_into_year + year_secs - EPW_MIDPOINT_SHIFT_SECS) % year_secs;
 
     (shifted / step_secs as u64) as usize
+}
+
+/// Un-shifted annual offset for initial-condition lookup.
+/// OCHRE reads the schedule/weather at the raw hour-ending position for init.
+fn compute_annual_offset_unshifted(
+    meta: &WeatherMeta,
+    start_time: DateTime<Utc>,
+    step_secs: u32,
+) -> usize {
+    if step_secs == 0 {
+        return 0;
+    }
+    let offset_secs = (meta.timezone_offset_h * 3600.0) as i64;
+    let local = start_time + chrono::Duration::seconds(offset_secs);
+    let doy0 = local.ordinal0() as u64;
+    let h = local.hour() as u64;
+    let m = local.minute() as u64;
+    let s = local.second() as u64;
+    let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
+    (seconds_into_year / step_secs as u64) as usize
 }
 
 /// Compute offset into the schedule time series. If the schedule has timestamps,

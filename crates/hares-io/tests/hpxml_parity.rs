@@ -126,17 +126,12 @@ fn single_stage_compressor_gives_one_speed() {
 //   SEER > 15 → 2 speeds (two-speed)
 //   else      → 1 speed  (single-speed)
 //
-// BUG: apply_default_hvac_speed_fallback() reads "efficiency_seer" but
-// insert_annual_efficiency() stores SEER from AnnualCoolingEfficiency/Units=SEER/Value
-// as "cooling_efficiency" (not "efficiency_seer"). The fallback only fires for
-// the legacy bare <SEER> tag format. Standard HPXML 4.x AnnualCoolingEfficiency
-// never reaches the SEER fallback. Tests are #[ignore] to document the bug.
-// Fix: resolve_hvac.rs apply_default_hvac_speed_fallback should also check
-// "cooling_efficiency" when "cooling_efficiency_units" == "SEER".
+// apply_default_hvac_speed_fallback() checks "efficiency_seer" (bare <SEER> tag)
+// first, then falls back to "cooling_efficiency" when "cooling_efficiency_units"
+// is "SEER" (HPXML 4.x AnnualCoolingEfficiency path).
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "HARES bug: SEER fallback reads 'efficiency_seer' but HPXML 4.x AnnualCoolingEfficiency stores as 'cooling_efficiency'. Fix apply_default_hvac_speed_fallback in resolve_hvac.rs to also check cooling_efficiency when cooling_efficiency_units=='SEER'."]
 fn seer_above_21_without_compressor_type_gives_four_speeds() {
     let xml = minimal_xml(
         r#"<Systems><HVAC><CoolingSystem>
@@ -164,7 +159,6 @@ fn seer_above_21_without_compressor_type_gives_four_speeds() {
 }
 
 #[test]
-#[ignore = "HARES bug: same as seer_above_21 — SEER fallback broken for HPXML 4.x AnnualCoolingEfficiency format. See seer_above_21_without_compressor_type_gives_four_speeds for details."]
 fn seer_above_15_without_compressor_type_gives_two_speeds() {
     let xml = minimal_xml(
         r#"<Systems><HVAC><CoolingSystem>
@@ -192,7 +186,6 @@ fn seer_above_15_without_compressor_type_gives_two_speeds() {
 }
 
 #[test]
-#[ignore = "HARES bug: SEER fallback only works with bare <SEER> tag, not AnnualCoolingEfficiency. The SEER=15 case returns 1 correctly by coincidence (default fallback) but for the wrong reason. Fix resolve_hvac.rs."]
 fn seer_at_or_below_15_without_compressor_type_gives_one_speed() {
     let xml = minimal_xml(
         r#"<Systems><HVAC><CoolingSystem>
@@ -391,8 +384,7 @@ fn ac_has_startup_capacity_degradation_default() {
 #[test]
 #[ignore = "HARES-073 gap: heat pump backup lockout temperature is not yet extracted from HPXML. OCHRE reads BackupHeatingSwitchoverTemperature or BackupHeatControlTemperature. Implement in resolve_hvac.rs."]
 fn ashp_backup_lockout_temperature_extracted() {
-    let xml = format!(
-        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+    let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
       <BuildingSummary>
@@ -412,8 +404,7 @@ fn ashp_backup_lockout_temperature_extracted() {
       </HeatPump></HVAC></Systems>
     </BuildingDetails>
   </Building>
-</HPXML>"#
-    );
+</HPXML>"#;
 
     let building = parse_building(&xml).expect("should parse");
     let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
