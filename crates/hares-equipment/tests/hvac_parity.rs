@@ -511,11 +511,10 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     eq.init(&c, &env).unwrap();
 
     // Run 30 minutes at sub-freezing to allow defrost logic to accumulate
-    let mut last_ports = make_ports();
     for _ in 0..30 {
-        last_ports = make_ports();
+        let mut ports = make_ports();
         eq.update_control(&env);
-        eq.step(&env, Duration::from_secs(60), &mut last_ports).unwrap();
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
     }
 
     let tel = eq.telemetry();

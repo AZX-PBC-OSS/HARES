@@ -270,37 +270,48 @@ mod tests {
 
     #[test]
     fn grace_period_keeps_panel_clean_after_rain() {
+        // Use a short accumulation window (1 hour) to isolate grace-period logic
+        // from buffer-clearing delays. With rain_accum_period_s = 1 hour, the rain
+        // event is evicted from the buffer after 1 step, so seconds_since_last_clean
+        // starts accumulating immediately. The 3-day grace period then expires after
+        // exactly 3*24 = 72 dry hours.
         let cfg = SoilingConfig {
             grace_period_s: 3.0 * DAY_S,
+            rain_accum_period_s: HOUR_S, // 1-hour window → buffer_capacity = 1
             ..default_config()
         };
         let mut state = SoilingState::new(&cfg, HOUR_S);
         state.seconds_since_last_clean = cfg.grace_period_s + 1.0;
 
-        // Soil the panel.
+        // Soil the panel over 240 dry hours.
         for _ in 0..240 {
             state.step(&cfg, 0.0, HOUR_S, false);
         }
-        assert!(state.soiling_ratio() < 1.0);
+        assert!(state.soiling_ratio() < 1.0, "panel must be soiled before rain");
 
-        // Rain event.
+        // Rain event clears the panel.
         state.step(&cfg, 0.010, HOUR_S, false);
-        assert_eq!(state.soiling_ratio(), 1.0);
+        assert_eq!(state.soiling_ratio(), 1.0, "rain must clean the panel");
 
-        // Panel stays clean for 3 days (grace period).
-        for _ in 0..71 {
+        // Panel stays clean for 3 days (72 hours = grace_period_s).
+        // At each step, seconds_since_last_clean starts at 3600 and grows.
+        // The grace condition holds while seconds_since_last_clean <= 259200.
+        // After 72 steps, seconds_since_last_clean = 72*3600 = 259200 = grace_period_s,
+        // which still satisfies the <= condition, so the panel is still clean.
+        for step_idx in 0..72 {
             let ratio = state.step(&cfg, 0.0, HOUR_S, false);
-            assert_eq!(ratio, 1.0, "should stay clean during grace period");
+            assert_eq!(
+                ratio, 1.0,
+                "should stay clean during grace period (step {step_idx})"
+            );
         }
 
-        // After grace period expires, soiling resumes.
-        // Advance past grace period boundary.
-        for _ in 0..24 {
-            state.step(&cfg, 0.0, HOUR_S, false);
-        }
+        // One step past grace period: seconds_since_last_clean = 73*3600 > 259200 →
+        // soiling resumes.
+        state.step(&cfg, 0.0, HOUR_S, false);
         assert!(
             state.soiling_ratio() < 1.0,
-            "soiling should resume after grace period"
+            "soiling should resume after grace period expires"
         );
     }
 

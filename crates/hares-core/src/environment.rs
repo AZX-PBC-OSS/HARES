@@ -637,48 +637,54 @@ mod tests {
 
     #[test]
     fn weather_step_0_matches_first_epw_record() {
+        // Start at 00:30 LST: midpoint shift (shifted = 1800 - 1800 = 0) maps to
+        // row 0 of the weather series (the first EPW hour-ending record).
+        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            start,
         )
         .expect("manager");
-        let clock = clock();
-        let env = manager.update(&clock, &[]);
+        let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
+        let env = manager.update(&sim_clock, &[]);
         assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
     }
 
     #[test]
     fn weather_step_59_matches_replicated_first_hour() {
+        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            start,
         )
         .expect("manager");
-        let mut clock = clock();
+        let mut sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
         for _ in 0..59 {
-            let _ = clock.next();
+            let _ = sim_clock.next();
         }
-        let env = manager.update(&clock, &[]);
+        let env = manager.update(&sim_clock, &[]);
         assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
     }
 
     #[test]
     fn wind_direction_is_populated_from_weather_series() {
+        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            start,
         )
         .expect("manager");
-        let env = manager.update(&clock(), &[]);
+        let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
+        let env = manager.update(&sim_clock, &[]);
         assert!((env.weather.wind_dir_deg - 180.0).abs() < 1.0e-6);
     }
 
