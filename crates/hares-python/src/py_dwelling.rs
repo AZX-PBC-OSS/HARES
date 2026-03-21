@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, TimeZone};
 use hares_control::PriceSignal;
 use hares_core::{Dwelling, DwellingConfig};
 use hares_io::{OutputFormat, SimulationConfig};
@@ -258,7 +258,7 @@ impl PyDwelling {
 
 #[pyclass(name = "TimestepsIter")]
 pub struct PyTimestepsIter {
-    start: DateTime<Utc>,
+    start: DateTime<FixedOffset>,
     time_res_s: i64,
     next_step: u64,
     total_steps: u64,
@@ -424,7 +424,7 @@ where
     }
 }
 
-fn extract_datetime(obj: &Bound<'_, PyAny>) -> PyResult<DateTime<Utc>> {
+fn extract_datetime(obj: &Bound<'_, PyAny>) -> PyResult<DateTime<FixedOffset>> {
     if let Ok(value) = obj.extract::<String>() {
         return parse_datetime_str(&value);
     }
@@ -433,13 +433,14 @@ fn extract_datetime(obj: &Bound<'_, PyAny>) -> PyResult<DateTime<Utc>> {
     parse_datetime_str(&iso)
 }
 
-fn parse_datetime_str(value: &str) -> PyResult<DateTime<Utc>> {
+fn parse_datetime_str(value: &str) -> PyResult<DateTime<FixedOffset>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
-        return Ok(dt.with_timezone(&Utc));
+        return Ok(dt);
     }
 
     if let Ok(naive) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S") {
-        return Ok(Utc.from_utc_datetime(&naive));
+        let utc_offset = FixedOffset::east_opt(0).expect("valid UTC offset");
+        return Ok(utc_offset.from_utc_datetime(&naive));
     }
 
     Err(PyValueError::new_err(format!(
@@ -465,13 +466,12 @@ fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     ))
 }
 
-fn default_start() -> DateTime<Utc> {
+fn default_start() -> DateTime<FixedOffset> {
     DateTime::parse_from_rfc3339(DEFAULT_START)
         .expect("valid default timestamp")
-        .with_timezone(&Utc)
 }
 
-fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<Utc>) -> PyResult<Py<PyAny>> {
+fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {
     let datetime = py.import("datetime")?.getattr("datetime")?;
     let obj = datetime.call_method1("fromisoformat", (dt.to_rfc3339(),))?;
     Ok(obj.unbind())

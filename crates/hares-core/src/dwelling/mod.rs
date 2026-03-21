@@ -12,7 +12,7 @@ use std::time::Duration as StdDuration;
 #[cfg(feature = "profiling")]
 use std::time::Instant;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::{DispatchRequest, DispatchTarget, PriceSignal};
 use hares_envelope::{
     ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver,
@@ -99,7 +99,7 @@ pub struct DwellingProfilingSummary {
 /// Single-step observable output.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepResult {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<FixedOffset>,
     pub net_electric_power_kw: f64,
     pub zone_temperatures_c: Vec<(ZoneId, f64)>,
 }
@@ -229,7 +229,7 @@ impl Dwelling {
         hpxml_path: &Path,
         schedule_path: &Path,
         weather_path: &Path,
-        start_time: DateTime<Utc>,
+        start_time: DateTime<FixedOffset>,
         time_res: Duration,
         duration: Duration,
         overrides: Option<Value>,
@@ -323,12 +323,27 @@ impl Dwelling {
         weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
     ) -> Result<Self> {
+        // Reinterpret the user's start time in the weather file's local timezone.
+        // The naive wall-clock components (year, month, day, hour, minute, second)
+        // are preserved and the offset is replaced with the EPW file's timezone.
+        let tz_offset = chrono::FixedOffset::east_opt(
+            (weather.meta.timezone_offset_h * 3600.0) as i32,
+        )
+        .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
+        let local_start = config
+            .sim_config
+            .start_time
+            .naive_local()
+            .and_local_timezone(tz_offset)
+            .single()
+            .unwrap_or_else(|| config.sim_config.start_time.with_timezone(&tz_offset));
+
         let init_chrono = config
             .initialization_duration
             .map(|d| Duration::seconds(d.as_secs() as i64))
             .unwrap_or(Duration::zero());
         let mut clock = SimClock::new(
-            config.sim_config.start_time,
+            local_start,
             config.sim_config.time_res,
             config.sim_config.duration + init_chrono,
         );
@@ -336,7 +351,7 @@ impl Dwelling {
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
         let mut environment = EnvironmentManager::new(
-            weather, schedule, &building, time_res, config.sim_config.start_time,
+            weather, schedule, &building, time_res, local_start,
         )
         .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
 
@@ -471,7 +486,7 @@ impl Dwelling {
         if let Some(init_dur) = config.initialization_duration {
             dwelling.run_warmup(init_dur)?;
             clock = SimClock::new(
-                config.sim_config.start_time,
+                local_start,
                 config.sim_config.time_res,
                 config.sim_config.duration,
             );
@@ -1132,6 +1147,8 @@ impl Dwelling {
             }
         }
 
+        // ORDERING: ports.zero() must come AFTER check_invariants() (called above)
+        // because the electrical balance check reads self.ports.electrical.net_active_kw().
         self.ports.zero();
         let _ = self.clock.next();
 

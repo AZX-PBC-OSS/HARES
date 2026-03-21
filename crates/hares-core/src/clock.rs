@@ -5,21 +5,21 @@
 //! returns `start_time + total_steps() * time_res` (one step past the last
 //! simulated timestep).
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset};
 
 /// Monotonic simulation clock over a fixed horizon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimClock {
-    pub start_time: DateTime<Utc>,
+    pub start_time: DateTime<FixedOffset>,
     pub time_res: Duration,
     pub duration: Duration,
     pub(crate) current_step: u64,
 }
 
 impl SimClock {
-    /// Create a simulation clock starting at `start_time`.
+    /// Create a simulation clock starting at `start_time` (local time).
     #[must_use]
-    pub fn new(start_time: DateTime<Utc>, time_res: Duration, duration: Duration) -> Self {
+    pub fn new(start_time: DateTime<FixedOffset>, time_res: Duration, duration: Duration) -> Self {
         Self {
             start_time,
             time_res,
@@ -34,9 +34,9 @@ impl SimClock {
         self.current_step
     }
 
-    /// Current UTC time at the active step index.
+    /// Current local time at the active step index.
     #[must_use]
-    pub fn current_time(&self) -> DateTime<Utc> {
+    pub fn current_time(&self) -> DateTime<FixedOffset> {
         let time_res_secs = self.time_res.num_seconds();
         let step_secs = i64::try_from(self.current_step).unwrap_or(i64::MAX);
         self.start_time + Duration::seconds(time_res_secs.saturating_mul(step_secs))
@@ -79,8 +79,7 @@ mod tests {
     #[test]
     fn thirty_days_at_sixty_seconds_yields_43200_steps() {
         let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .expect("parse")
-            .with_timezone(&Utc);
+            .expect("parse");
         let clock = SimClock::new(start, Duration::seconds(60), Duration::days(30));
         assert_eq!(clock.total_steps(), 43_200);
     }
@@ -88,8 +87,7 @@ mod tests {
     #[test]
     fn current_time_at_step_zero_equals_start_time() {
         let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .expect("parse")
-            .with_timezone(&Utc);
+            .expect("parse");
         let clock = SimClock::new(start, Duration::minutes(5), Duration::hours(1));
         assert_eq!(clock.current_step(), 0);
         assert_eq!(clock.current_time(), start);
@@ -98,8 +96,7 @@ mod tests {
     #[test]
     fn current_time_after_exhaustion_is_one_step_past_last_simulated_time() {
         let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .expect("parse")
-            .with_timezone(&Utc);
+            .expect("parse");
         let mut clock = SimClock::new(start, Duration::minutes(15), Duration::hours(1));
         let produced: Vec<u64> = clock.by_ref().collect();
         assert_eq!(produced, vec![0, 1, 2, 3]);
@@ -110,8 +107,7 @@ mod tests {
     #[test]
     fn supports_arbitrary_duration_lengths() {
         let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .expect("parse")
-            .with_timezone(&Utc);
+            .expect("parse");
         let clock = SimClock::new(start, Duration::minutes(30), Duration::weeks(2));
         assert_eq!(clock.total_steps(), 672);
     }

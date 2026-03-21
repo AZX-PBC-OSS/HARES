@@ -339,7 +339,7 @@ pub(super) fn resolve_draw_rate_kg_s(config: &crate::EquipmentConfig) -> f64 {
 mod tests {
     use std::collections::HashMap;
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         BoundaryPolicy, DomainUpdate, EnvironmentState, GridState, ScheduleSource, WeatherState,
         schedule_domain_id,
@@ -414,7 +414,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains,
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid timestamp"),
@@ -595,7 +596,7 @@ mod dhw_integration_tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         DomainUpdate, EnvironmentState, FluidType, GridState, PortContribution, PortSlots,
         WeatherState, ZoneId, ZoneState,
@@ -641,7 +642,8 @@ mod dhw_integration_tests {
                 zone_temperatures_c: Vec::new(),
                 custom_payload: Some(vec![1.0, 1.0]),
             }],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid UTC timestamp"),

@@ -1043,7 +1043,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
     };
@@ -1082,7 +1082,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
                 .single()
                 .expect("valid UTC timestamp"),
@@ -1141,12 +1142,14 @@ mod tests {
     #[test]
     fn day_ordinal_is_contiguous_across_year_boundary() {
         let mut env_dec31 = base_env();
-        env_dec31.current_time = Utc
+        env_dec31.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
             .with_ymd_and_hms(2025, 12, 31, 23, 59, 0)
             .single()
             .expect("valid");
         let mut env_jan1 = base_env();
-        env_jan1.current_time = Utc
+        env_jan1.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
             .single()
             .expect("valid");

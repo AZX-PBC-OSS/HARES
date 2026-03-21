@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use hares_types::HaresError;
 use hares_types::normalize_ascii;
 
@@ -10,7 +10,7 @@ use hares_types::normalize_ascii;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DwellingTelemetry {
     pub timestep_index: u64,
-    pub current_time: DateTime<Utc>,
+    pub current_time: DateTime<FixedOffset>,
     pub zone_names: Vec<String>,
     pub zone_temperatures_c: Vec<f64>,
     pub equipment_names: Vec<String>,
@@ -133,12 +133,12 @@ fn single_instance_alias(
 #[cfg(test)]
 mod tests {
     use super::DwellingTelemetry;
-    use chrono::{TimeZone, Utc};
+    use chrono::{FixedOffset, TimeZone};
 
     fn sample() -> DwellingTelemetry {
         DwellingTelemetry {
             timestep_index: 3,
-            current_time: Utc.with_ymd_and_hms(2026, 1, 1, 0, 3, 0).single().unwrap(),
+            current_time: FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 1, 1, 0, 3, 0).single().unwrap(),
             zone_names: vec!["Indoor".to_string()],
             zone_temperatures_c: vec![21.0],
             equipment_names: vec!["Battery".to_string()],

@@ -724,7 +724,7 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 mod tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
         ZoneId, ZoneState,
@@ -763,7 +763,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -1265,7 +1266,7 @@ mod tests {
 mod element_priority_tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, OperatingMode, PortSlots, ThermalAccumulator,
         WeatherState, ZoneId, ZoneState,
@@ -1304,7 +1305,8 @@ mod element_priority_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid"),

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
@@ -56,7 +56,7 @@ pub struct GasFurnace {
 struct FurnaceState {
     mode: ThermostatMode,
     duty_cycle: f64,
-    last_mode_switch_at: Option<DateTime<Utc>>,
+    last_mode_switch_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
     operating_mode: OperatingMode,
     run_time_s: f64,
@@ -503,7 +503,7 @@ fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
 mod tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
     use hares_types::{
         EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator, WeatherState,
@@ -543,7 +543,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),

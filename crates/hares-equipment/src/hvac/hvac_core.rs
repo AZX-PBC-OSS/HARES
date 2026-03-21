@@ -1,6 +1,6 @@
 //! Core HVAC equipment wrapper with thermostat state, step logic, and helpers.
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset};
 use hares_physics::biquadratic::{BiquadraticCurve, quadratic};
 use hares_physics::constants::{CFM_PER_M3_S, CFM_TO_M3_S, W_PER_TON};
 use hares_types::{
@@ -149,7 +149,7 @@ pub struct HvacEquipment {
     pub cooling_setpoint_source: Option<ScheduleSource>,
     pub schedule_setpoints: Option<ScheduleSetpoints>,
     pub runtime_setpoints: Option<RuntimeSetpointOverride>,
-    pub last_mode_switch_at: Option<DateTime<Utc>>,
+    pub last_mode_switch_at: Option<DateTime<FixedOffset>>,
     /// Timestamp when the current thermostat mode began.
     /// Used for compressor-level minimum on/off time enforcement.
     ///
@@ -158,7 +158,7 @@ pub struct HvacEquipment {
     /// `mode` directly without also updating `mode_start_at`, otherwise
     /// `can_transition_mode` will enforce constraints against a stale timestamp
     /// and the minimum on/off time protection will be silently bypassed.
-    pub mode_start_at: Option<DateTime<Utc>>,
+    pub mode_start_at: Option<DateTime<FixedOffset>>,
     /// Minimum time [s] compressor must remain On before an Off transition is
     /// allowed. Prevents short-cycle wear. 0.0 = disabled (default).
     /// OCHRE reference: 120 s for heat pump heating/cooling.
@@ -693,7 +693,7 @@ impl HvacEquipment {
     /// always reflects when the current mode began. Callers that bypass this
     /// method by assigning `mode` directly will silently break minimum on/off
     /// time enforcement in `can_transition_mode`.
-    pub fn set_mode(&mut self, mode: ThermostatMode, when: DateTime<Utc>) {
+    pub fn set_mode(&mut self, mode: ThermostatMode, when: DateTime<FixedOffset>) {
         if self.mode != mode {
             self.mode = mode;
             self.last_mode_switch_at = Some(when);
@@ -713,7 +713,7 @@ impl HvacEquipment {
     ///
     /// Returns `true` when `mode_start_at` is `None` (first transition ever) or
     /// when the minimum duration for the current mode has elapsed.
-    pub fn can_transition_mode(&self, proposed: ThermostatMode, now: DateTime<Utc>) -> bool {
+    pub fn can_transition_mode(&self, proposed: ThermostatMode, now: DateTime<FixedOffset>) -> bool {
         if self.mode == proposed {
             return true; // no transition
         }
@@ -1241,7 +1241,7 @@ impl HvacEquipment {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration as ChronoDuration, TimeZone};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
         ThermalAccumulator, WeatherState, ZoneState,
@@ -1289,7 +1289,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: chrono::Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid")
@@ -2141,7 +2142,8 @@ mod tests {
         // With defaults (min_on_time_s=0, min_off_time_s=0), all transitions
         // are always allowed regardless of elapsed time.
         let hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
-        let t0 = chrono::Utc
+        let t0 = FixedOffset::east_opt(0)
+            .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
             .single()
             .expect("valid");
@@ -2158,7 +2160,8 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.min_on_time_s = 120.0;
 
-        let t0 = chrono::Utc
+        let t0 = FixedOffset::east_opt(0)
+            .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
             .single()
             .expect("valid");
@@ -2188,7 +2191,8 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.min_off_time_s = 180.0;
 
-        let t0 = chrono::Utc
+        let t0 = FixedOffset::east_opt(0)
+            .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
             .single()
             .expect("valid");
@@ -2253,7 +2257,8 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.min_on_time_s = 9999.0;
         hvac.mode = ThermostatMode::Heating;
-        let t0 = chrono::Utc
+        let t0 = FixedOffset::east_opt(0)
+            .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
             .single()
             .expect("valid");

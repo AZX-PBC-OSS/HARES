@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
@@ -33,8 +33,8 @@ pub enum ConfigError {
 /// Simulation configuration controlling temporal loop, output, and RNG.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct SimulationConfig {
-    /// Simulation start time (UTC).
-    pub start_time: DateTime<Utc>,
+    /// Simulation start time (local standard time with timezone offset).
+    pub start_time: DateTime<FixedOffset>,
     /// Total simulation length in seconds.
     #[serde(deserialize_with = "deserialize_duration_seconds")]
     pub duration: Duration,

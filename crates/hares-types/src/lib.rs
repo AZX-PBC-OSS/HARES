@@ -28,7 +28,7 @@ pub use text::{normalize_ascii, parse_trimmed_f64};
 
 #[cfg(test)]
 pub mod test_utils {
-    use chrono::TimeZone;
+    use chrono::{FixedOffset, TimeZone};
 
     use crate::{EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState};
 
@@ -78,7 +78,8 @@ pub mod test_utils {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: chrono::Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid timestamp"),

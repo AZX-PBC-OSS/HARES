@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{DwellingConfig, SimStatus as CoreSimStatus, SimulationEngine, SimulationResults};
 use hares_io::{OutputFormat, ResStockVersion, SimulationConfig, parse_resstock_metadata};
 use rayon::ThreadPoolBuilder;
@@ -239,7 +239,8 @@ fn map_status(status: &CoreSimStatus) -> SimStatus {
 
 fn default_resstock_sim_config() -> SimulationConfig {
     SimulationConfig {
-        start_time: Utc
+        start_time: FixedOffset::east_opt(0)
+            .expect("valid UTC offset")
             .with_ymd_and_hms(2019, 1, 1, 0, 0, 0)
             .single()
             .expect("valid constant simulation start timestamp"),
@@ -396,7 +397,7 @@ mod tests {
 
     fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         SimulationConfig {
-            start_time: Utc::now(),
+            start_time: chrono::Utc::now().fixed_offset(),
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
             output_verbosity: 0,

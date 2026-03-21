@@ -1073,7 +1073,7 @@ fn parse_curve_coeffs(config: &EquipmentConfig, key: &str) -> crate::Result<Opti
 mod tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
@@ -1110,7 +1110,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -1175,7 +1176,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -1832,7 +1834,7 @@ mod tests {
 mod mutual_exclusion_tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, OperatingMode, PortSlots, ThermalAccumulator,
         WeatherState, ZoneId, ZoneState,
@@ -1870,7 +1872,8 @@ mod mutual_exclusion_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -2139,7 +2142,7 @@ mod mutual_exclusion_tests {
 mod dr_tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DRLevel, EnvironmentState, GridState, OperatingMode, PortSlots,
         ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -2177,7 +2180,8 @@ mod dr_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -2476,7 +2480,7 @@ mod dr_tests {
 mod new_feature_tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         EnvironmentState, GridState, OperatingMode, PortSlots, ThermalAccumulator, WeatherState,
         ZoneId, ZoneState,
@@ -2514,7 +2518,8 @@ mod new_feature_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid"),

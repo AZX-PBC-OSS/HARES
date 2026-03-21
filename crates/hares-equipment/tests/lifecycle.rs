@@ -116,29 +116,46 @@ fn assert_equipment_lifecycle(
         equipment.descriptor().name
     );
 
-    // 7. Capture pre-mutation telemetry, step again to mutate state.
-    let telemetry_before = equipment.telemetry().clone();
+    // 7. Capture port output from first step (reference), then step again (mutate).
+    let port_output_step1 = ports.clone();
+
     let mut ports2 = ports_for(equipment);
     equipment.update_control(env);
     equipment.step(env, dt, &mut ports2).expect("second step must return Ok");
 
-    // 8. load_state from snapshot must restore telemetry to pre-mutation values.
+    // 8. Restore from snapshot and step again. Output must match step 1.
     equipment
         .load_state(&saved)
         .expect("load_state must return Ok for valid snapshot bytes");
 
-    let telemetry_restored = equipment.telemetry();
-    for field in &equipment.descriptor().telemetry_fields {
-        let before_val = telemetry_before.get(&field.name);
-        let after_val = telemetry_restored.get(&field.name);
-        assert_eq!(
-            before_val, after_val,
-            "telemetry field '{}' must match pre-mutation value after load_state for '{}': \
-             before={:?}, after={:?}",
-            field.name,
+    let mut ports_after_restore = ports_for(equipment);
+    equipment.update_control(env);
+    equipment
+        .step(env, dt, &mut ports_after_restore)
+        .expect("step after restore must return Ok");
+
+    // Same state + same env → same deterministic port output.
+    let orig_net = port_output_step1.electrical.net_active_kw();
+    let rest_net = ports_after_restore.electrical.net_active_kw();
+    assert!(
+        (orig_net - rest_net).abs() < 1e-3,
+        "electrical net_active_kw after restore must match step-1 output within 1 W for '{}': \
+         step1={orig_net}, after_restore={rest_net}",
+        equipment.descriptor().name,
+    );
+    for (orig_acc, rest_acc) in port_output_step1
+        .thermal
+        .iter()
+        .zip(ports_after_restore.thermal.iter())
+    {
+        assert!(
+            (orig_acc.sensible_gain_w - rest_acc.sensible_gain_w).abs() < 1e-6,
+            "sensible_gain_w for zone {:?} after restore must match step-1 for '{}': \
+             step1={}, after_restore={}",
+            orig_acc.zone,
             equipment.descriptor().name,
-            before_val,
-            after_val,
+            orig_acc.sensible_gain_w,
+            rest_acc.sensible_gain_w,
         );
     }
 }

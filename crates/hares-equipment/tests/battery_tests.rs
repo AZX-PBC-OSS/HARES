@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
+use chrono::{FixedOffset, TimeZone};
 use hares_equipment::{
     Equipment, EquipmentConfig,
     battery::Battery,
@@ -46,7 +46,7 @@ fn base_env() -> EnvironmentState {
         },
         grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
         custom_domains: vec![],
-        current_time: Utc.with_ymd_and_hms(2026, 6, 21, 12, 0, 0).single().expect("valid"),
+        current_time: FixedOffset::east_opt(0).expect("UTC offset").with_ymd_and_hms(2026, 6, 21, 12, 0, 0).single().expect("valid"),
         time_res: chrono::Duration::seconds(60),
     }
 }

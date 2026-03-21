@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FLUID, FluidDomainPayload, FluidType, FuelType, HaresError, LoopId,
@@ -99,7 +99,7 @@ pub struct GasBoiler {
 struct BoilerState {
     mode: ThermostatMode,
     duty_cycle: f64,
-    last_mode_switch_at: Option<DateTime<Utc>>,
+    last_mode_switch_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
     operating_mode: OperatingMode,
     run_time_s: f64,
@@ -762,7 +762,7 @@ fn parse_coeff_string<const N: usize>(value: &str, key: &str) -> crate::Result<[
 mod tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         DomainUpdate, EnvironmentState, ExecutionStage, FLUID, FluidDomainPayload, FluidLoopState,
         FluidType, GridState, LoopId, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -804,7 +804,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),

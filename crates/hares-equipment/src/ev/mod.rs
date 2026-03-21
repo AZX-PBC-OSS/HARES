@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
@@ -519,7 +519,7 @@ impl Ev {
         self.rng.random::<f64>()
     }
 
-    fn maybe_roll_event_for_day(&mut self, now: DateTime<Utc>) {
+    fn maybe_roll_event_for_day(&mut self, now: DateTime<FixedOffset>) {
         let day_ordinal = now.date_naive().num_days_from_ce();
         if self.current_day_ordinal == Some(day_ordinal) {
             return;
@@ -641,7 +641,7 @@ impl Ev {
         cycle_day < self.shift_on_days
     }
 
-    fn update_connection(&mut self, now: DateTime<Utc>) {
+    fn update_connection(&mut self, now: DateTime<FixedOffset>) {
         let sec_of_day = i64::from(now.num_seconds_from_midnight());
         let mut connected = false;
         let mut time_until_departure_s = 0.0;
@@ -687,7 +687,7 @@ impl Ev {
     /// than the battery can accept at the derated rate.
     fn compute_power_kw_with_time(
         &self,
-        now: DateTime<Utc>,
+        now: DateTime<FixedOffset>,
         dt: Duration,
         charge_derate: f64,
     ) -> f64 {
@@ -790,7 +790,7 @@ impl Ev {
         }
     }
 
-    fn delay_hold_active(&self, now: DateTime<Utc>) -> bool {
+    fn delay_hold_active(&self, now: DateTime<FixedOffset>) -> bool {
         let Some(delay_until_hour) = self.delay_until_hour else {
             return false;
         };
@@ -805,7 +805,7 @@ impl Ev {
         now_sec < release_sec
     }
 
-    fn in_tou_block_window(&self, now: DateTime<Utc>) -> bool {
+    fn in_tou_block_window(&self, now: DateTime<FixedOffset>) -> bool {
         if !self.tou_avoid_peak {
             return false;
         }
@@ -827,7 +827,7 @@ impl Ev {
         }
     }
 
-    fn required_ready_power_kw(&self, now: DateTime<Utc>, dt: Duration, soc_limit: f64) -> f64 {
+    fn required_ready_power_kw(&self, now: DateTime<FixedOffset>, dt: Duration, soc_limit: f64) -> f64 {
         let Some(ready_by_hour) = self.ready_by_hour else {
             return 0.0;
         };
@@ -1216,13 +1216,20 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState,
         ZoneState,
     };
 
     use super::*;
+
+    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<FixedOffset> {
+        FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(y, mo, d, h, mi, s)
+            .unwrap()
+    }
 
     fn sample_env() -> EnvironmentState {
         EnvironmentState {
@@ -1263,7 +1270,7 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            current_time: dt(2026, 1, 1, 0, 0, 0),
             time_res: ChronoDuration::minutes(1),
         }
     }
@@ -1306,7 +1313,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 12, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
@@ -1326,7 +1333,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
@@ -1341,7 +1348,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
         let p_low_soc = ev.telemetry().get("active_power_kw").unwrap();
@@ -1494,7 +1501,7 @@ mod tests {
         let mut ev = Ev::new(config.clone());
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
 
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
@@ -1543,7 +1550,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -1566,7 +1573,7 @@ mod tests {
         })
         .unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         for _ in 0..100 {
             let mut ports = PortSlots::default();
             ev.step(&env, Duration::minutes(5), &mut ports).unwrap();
@@ -1617,7 +1624,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
         let p = ev.telemetry().get("active_power_kw").unwrap();
@@ -1635,7 +1642,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(30), &mut ports).unwrap();
         assert_eq!(ev.telemetry().get("active_power_kw"), Some(0.0));
@@ -1655,7 +1662,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 19, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 19, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(30), &mut ports).unwrap();
 
@@ -1683,7 +1690,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
         let power_kw = ev.telemetry().get("active_power_kw").unwrap();
@@ -1708,7 +1715,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(30), &mut ports).unwrap();
         assert_eq!(ev.telemetry().get("active_power_kw"), Some(0.0));
@@ -1735,7 +1742,7 @@ mod tests {
         ev.init(&config, &env).unwrap();
         let soc_before = ev.soc;
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
         let soc_delta_with_heater = ev.soc - soc_before;
@@ -1830,7 +1837,7 @@ mod tests {
         ev.init(&config, &env).unwrap();
 
         let temp_before = ev.battery_temp_c;
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
@@ -1855,7 +1862,7 @@ mod tests {
         ev.init(&config, &env).unwrap();
 
         // Advance to a time that triggers event rolling (mid-day after event start)
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -1893,7 +1900,7 @@ mod tests {
         );
 
         // Step at connection time and verify 1.8 kW is the actual power drawn
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
         let p = ev.telemetry().get("active_power_kw").unwrap();
@@ -1920,7 +1927,7 @@ mod tests {
         ev.init(&config, &env).unwrap();
 
         // Step at 12:00 for 100 minutes; EV is disconnected, pack should cool.
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1,12, 0, 0);
         for _ in 0..100 {
             let mut ports = PortSlots::default();
             ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
@@ -1968,7 +1975,7 @@ mod tests {
         ev.init(&config, &env).unwrap();
         let soc_before = ev.soc;
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2012,8 +2019,8 @@ mod tests {
         a.init(&config, &env).unwrap();
         b.init(&config, &env).unwrap();
 
-        for day in 0..7 {
-            env.current_time = Utc.with_ymd_and_hms(2026, 1, 1 + day, 12, 0, 0).unwrap();
+        for day in 0u32..7 {
+            env.current_time = dt(2026, 1, 1 + day, 12, 0, 0);
             let mut pa = PortSlots::default();
             let mut pb = PortSlots::default();
             a.step(&env, Duration::minutes(5), &mut pa).unwrap();
@@ -2059,7 +2066,7 @@ mod tests {
         ev_cold.init(&config_cold, &env).unwrap();
         ev_warm.init(&config_warm, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut p_cold = PortSlots::default();
         let mut p_warm = PortSlots::default();
         ev_cold
@@ -2099,7 +2106,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2122,7 +2129,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2146,7 +2153,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2168,7 +2175,7 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2200,7 +2207,7 @@ mod tests {
         })
         .unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2233,7 +2240,7 @@ mod tests {
         .unwrap();
 
         // SOC at exactly the reserve => compute_v2l_discharge returns 0
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2261,7 +2268,7 @@ mod tests {
         })
         .unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
@@ -2316,7 +2323,7 @@ mod tests {
         })
         .unwrap();
 
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 30, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2370,7 +2377,7 @@ mod tests {
         ev.init(&config, &env).unwrap();
 
         // Trigger event roll at 18:00 (arrival time from schedule)
-        env.current_time = Utc.with_ymd_and_hms(2026, 1, 1, 18, 0, 0).unwrap();
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
@@ -2540,8 +2547,8 @@ mod tests {
         ev_b.init(&config_b, &env).unwrap();
 
         let mut diverged = false;
-        for day in 0..30 {
-            env.current_time = Utc.with_ymd_and_hms(2026, 1, 1 + day, 18, 0, 0).unwrap();
+        for day in 0u32..30 {
+            env.current_time = dt(2026, 1, 1 + day, 18, 0, 0);
             let mut pa = PortSlots::default();
             let mut pb = PortSlots::default();
             ev_a.step(&env, Duration::minutes(5), &mut pa).unwrap();

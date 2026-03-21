@@ -38,7 +38,11 @@ impl InvariantChecker {
         {
             let q_sum: f64 = q_gains.iter().sum();
             let residual = (q_sum - delta_e_storage - q_loss).abs();
-            let tolerance = f64::max(1.0, 1e-6 * q_sum.abs());
+            // Use gross flux (sum of absolute values) for relative tolerance,
+            // not net sum — a balanced system with large opposed fluxes still has
+            // floating-point accumulation error proportional to gross magnitude.
+            let gross_flux: f64 = q_gains.iter().map(|q| q.abs()).sum();
+            let tolerance = f64::max(1.0, 1e-6 * gross_flux);
             if residual >= tolerance {
                 return Err(HaresError::InvariantViolation {
                     check_name: "thermal_balance".to_string(),

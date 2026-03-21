@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::DomainUpdate;
@@ -128,7 +128,7 @@ pub struct EnvironmentState {
     pub weather: WeatherState,
     pub grid: GridState,
     pub custom_domains: Vec<DomainUpdate>,
-    pub current_time: DateTime<Utc>,
+    pub current_time: DateTime<FixedOffset>,
     /// Simulation timestep.
     ///
     /// Stored as `chrono::Duration` because `current_time` arithmetic (scheduling,
@@ -223,10 +223,11 @@ mod tests {
                 zone_temperatures_c: vec![(ZoneId(1), 21.0)],
                 custom_payload: Some(vec![1.0, 2.0, 3.0]),
             }],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("offset")
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
                 .single()
-                .expect("valid UTC timestamp"),
+                .expect("valid timestamp"),
             time_res: Duration::minutes(5),
         };
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::{Array, Float64Array, Float64Builder, StringArray, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, SecondsFormat, Timelike, Utc};
+use chrono::{DateTime, FixedOffset, SecondsFormat, Timelike};
 
 use crate::fleet::{DwellingOutcome, SimStatus};
 
@@ -214,13 +214,11 @@ fn numeric_column_indexes(schema: &Schema) -> Vec<usize> {
         .collect()
 }
 
-fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|ts| ts.with_timezone(&Utc))
+fn parse_timestamp(value: &str) -> Option<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(value).ok()
 }
 
-fn bucket_start(ts: DateTime<Utc>, resolution: AggregationResolution) -> DateTime<Utc> {
+fn bucket_start(ts: DateTime<FixedOffset>, resolution: AggregationResolution) -> DateTime<FixedOffset> {
     match resolution {
         AggregationResolution::Hourly => ts
             .with_minute(0)
@@ -335,7 +333,7 @@ fn build_aggregate_batch(successful: Vec<AggregateEntry>) -> RecordBatch {
         (0..column_count).map(|_| Float64Builder::new()).collect();
 
     for bucket in bucket_intersection {
-        if let Some(dt) = DateTime::<Utc>::from_timestamp(bucket, 0) {
+        if let Some(dt) = DateTime::from_timestamp(bucket, 0).map(|dt| dt.fixed_offset()) {
             timestamps.append_value(dt.to_rfc3339_opts(SecondsFormat::Secs, true));
         } else {
             continue;

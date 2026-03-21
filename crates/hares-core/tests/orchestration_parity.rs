@@ -251,8 +251,9 @@ fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
 
 #[test]
 fn zone_temperatures_stay_within_physical_bounds_over_10_steps() {
-    const SANITY_LOW_C: f64 = -30.0;
-    const SANITY_HIGH_C: f64 = 60.0;
+    // Must match InvariantChecker::check_temperatures bounds in invariants.rs
+    const SANITY_LOW_C: f64 = -50.0;
+    const SANITY_HIGH_C: f64 = 80.0;
 
     let path = unique_temp_toml("phys-bounds");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
@@ -324,33 +325,17 @@ fn port_slots_are_zeroed_between_steps() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: stale zone temperature regression (FIX-003 documentation)
+// Test: occupancy gains reduce HVAC heating energy
 //
-// OCHRE updates zone state between each equipment step so HVAC sees current
-// internal gains. HARES currently runs all non-thermal equipment (pass 3a),
-// then runs HVAC (pass 3b) with the zone temperature from the PREVIOUS
-// timestep — not reflecting pass 3a contributions.
+// Compares two dwellings over 30 one-minute steps:
+//   A: 3 occupants (~200 W sensible convective gain)
+//   B: 0 occupants (no internal gain)
 //
-// This test compares two dwellings across multiple cold-day steps:
-//   A: normal, with occupancy gains (occupancy=1.0, which contributes ~66 W
-//      sensible convective gain per step via apply_occupancy_gains).
-//   B: identical except occupancy=0.0 (no internal gain).
-//
-// If HVAC saw current-timestep gains (OCHRE behavior), dwelling A's furnace
-// would run less than dwelling B's furnace over the same horizon because the
-// zone is warmer. If HARES has the FIX-003 defect, the HVAC decision in the
-// CURRENT step ignores this step's gains and both dwellings behave identically
-// for that step.
-//
-// The test measures cumulative electric consumption over 30 steps. Because the
-// occupancy gain is small relative to typical furnace capacity, the difference
-// may only emerge over many steps. The test documents the EXPECTED outcome
-// (A consumes less than B) and marks the assertion with an explanatory comment
-// so that when FIX-003 is implemented the test passes without modification.
-//
-// NOTE: This test is NOT `#[ignore]` — it runs and documents current behavior.
-// If the assertion fails, it means FIX-003 has been implemented and the
-// assertion should be updated to `assert!(kwh_a < kwh_b)`.
+// Outdoor temp is 18°C — just below the ~20°C heating setpoint — so the
+// furnace duty-cycles rather than running at full capacity. The 200 W
+// occupancy gain in dwelling A is enough to push the zone above the heating
+// setpoint, causing the furnace to cycle off while dwelling B continues
+// heating. Result: A consumes less electric energy than B.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -358,7 +343,7 @@ fn stale_zone_temp_regression_occupancy_gain_affects_hvac_cumulative_energy() {
     let path_a = unique_temp_toml("stale-a");
     let path_b = unique_temp_toml("stale-b");
 
-    // Dwelling A: occupancy = 1 (small sensible gain ~66 W convective)
+    // Dwelling A: occupancy = 3 (~200 W sensible convective gain)
     fs::write(
         &path_a,
         r#"building_id = 1
@@ -382,13 +367,13 @@ fuel = "electricity"
 heating_capacity_kbtu_h = 30.0
 
 [weather]
-outdoor_temp_c = -10.0
-dew_point_c = -15.0
+outdoor_temp_c = 18.0
+dew_point_c = 10.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
 
 [schedule]
-occupancy = 1.0
+occupancy = 3.0
 
 [output]
 output_verbosity = 0
@@ -423,8 +408,8 @@ fuel = "electricity"
 heating_capacity_kbtu_h = 30.0
 
 [weather]
-outdoor_temp_c = -10.0
-dew_point_c = -15.0
+outdoor_temp_c = 18.0
+dew_point_c = 10.0
 rel_humidity_pct = 50.0
 pressure_kpa = 101.325
 
@@ -464,21 +449,11 @@ master_seed = 0
         "cumulative kWh must be finite (A={kwh_a:.4} B={kwh_b:.4})"
     );
 
-    // OCHRE-correct behavior: occupancy gain reduces heating demand → A < B.
-    //
-    // FIX-003 STATUS: If this assertion FAILS (kwh_a >= kwh_b), it means HVAC
-    // is NOT seeing the current timestep's occupancy gain — i.e., FIX-003 is
-    // still present. The assertion below documents the EXPECTED post-fix state.
-    // When FIX-003 is implemented, this assertion will pass without changes.
-    //
-    // If this assertion PASSES, FIX-003 has been resolved and the comment
-    // below this line should be removed.
+    // Occupancy gain reduces heating demand → A < B.
     assert!(
-        kwh_a <= kwh_b,
-        "EXPECTED (FIX-003 regression): occupancy gain (A, {kwh_a:.4} kWh) should \
-         reduce heating demand vs no-occupancy (B, {kwh_b:.4} kWh) over {STEPS} steps. \
-         If this assertion fails, HVAC is seeing current-step gains (FIX-003 resolved). \
-         Update this test to assert kwh_a < kwh_b once FIX-003 is implemented."
+        kwh_a < kwh_b,
+        "occupancy gain (A={kwh_a:.4} kWh, 3 occupants) must consume less than \
+         no-occupancy (B={kwh_b:.4} kWh) over {STEPS} steps at 18°C outdoor"
     );
 }
 

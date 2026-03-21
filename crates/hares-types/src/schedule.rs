@@ -295,7 +295,7 @@ fn resolve_index(raw_idx: i64, len: usize, boundary: BoundaryPolicy) -> Result<u
 mod tests {
     use std::sync::Arc;
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{FixedOffset, TimeZone};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -331,20 +331,21 @@ mod tests {
             max_value: 10.0,
         };
 
-        env.current_time = Utc
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
             .with_ymd_and_hms(2026, 1, 14, 14, 0, 0)
             .single()
             .expect("valid timestamp");
         assert_eq!(source.value_at(&env).expect("weekday value"), 30.0);
 
-        env.current_time = Utc
+        env.current_time = utc
             .with_ymd_and_hms(2026, 1, 17, 14, 0, 0)
             .single()
             .expect("valid timestamp");
         assert_eq!(source.value_at(&env).expect("weekend value"), 15.0);
 
         // 2026-02-10 is a Tuesday — exercises the weekday+month_multiplier path.
-        env.current_time = Utc
+        env.current_time = utc
             .with_ymd_and_hms(2026, 2, 10, 14, 0, 0)
             .single()
             .expect("valid timestamp");

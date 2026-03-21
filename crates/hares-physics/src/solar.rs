@@ -1,6 +1,6 @@
 //! Solar position, irradiance decomposition, and surface tilting.
 
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use hares_types::SurfaceIrradiance;
 
 const MINUTES_PER_DAY: f64 = 1440.0;
@@ -83,12 +83,15 @@ pub struct SolarPosition {
     pub azimuth_deg: f64,
 }
 
-/// Solar position from UTC timestamp and site coordinates using a Spencer-style declination/EOT model.
+/// Solar position from local timestamp and site coordinates using a Spencer-style declination/EOT model.
+///
+/// Converts to UTC internally — solar geometry requires true UTC.
 pub fn solar_position(
     latitude_deg: f64,
     longitude_deg: f64,
-    utc_datetime: DateTime<Utc>,
+    local_datetime: DateTime<FixedOffset>,
 ) -> SolarPosition {
+    let utc_datetime = local_datetime.to_utc();
     let lat_rad = latitude_deg.to_radians();
     let day = f64::from(utc_datetime.ordinal() as u16);
     let hour = utc_datetime.hour() as f64;

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset};
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{EquipmentConfig, config::ConfigValue};
 use hares_io::{Building, DefaultsStore, SimulationConfig};
@@ -339,7 +339,7 @@ pub(crate) fn required_path(kwargs: &HashMap<String, Value>, key: &str) -> Resul
     Ok(PathBuf::from(value))
 }
 
-pub(crate) fn required_datetime(kwargs: &HashMap<String, Value>, key: &str) -> Result<DateTime<Utc>> {
+pub(crate) fn required_datetime(kwargs: &HashMap<String, Value>, key: &str) -> Result<DateTime<FixedOffset>> {
     let value = kwargs
         .get(key)
         .ok_or_else(|| HaresError::Io(format!("missing required kwarg `{key}`")))?;
@@ -347,10 +347,11 @@ pub(crate) fn required_datetime(kwargs: &HashMap<String, Value>, key: &str) -> R
         let dt = DateTime::parse_from_rfc3339(text).map_err(|err| {
             HaresError::Io(format!("failed parsing `{key}` as RFC3339 datetime: {err}"))
         })?;
-        return Ok(dt.with_timezone(&Utc));
+        return Ok(dt);
     }
     if let Some(epoch) = value.as_i64() {
-        let dt = DateTime::<Utc>::from_timestamp(epoch, 0)
+        let dt = DateTime::from_timestamp(epoch, 0)
+            .map(|dt| dt.fixed_offset())
             .ok_or_else(|| HaresError::Io(format!("invalid epoch timestamp for `{key}`")))?;
         return Ok(dt);
     }

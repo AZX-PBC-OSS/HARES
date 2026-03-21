@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
@@ -100,8 +100,8 @@ pub(super) struct CoolingCore {
 struct AirConditionerState {
     mode: ThermostatMode,
     duty_cycle: f64,
-    last_mode_switch_at: Option<DateTime<Utc>>,
-    mode_start_at: Option<DateTime<Utc>>,
+    last_mode_switch_at: Option<DateTime<FixedOffset>>,
+    mode_start_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
     operating_mode: OperatingMode,
     run_time_s: f64,
@@ -1040,7 +1040,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 mod tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator, WeatherState,
         ZoneId, ZoneState,
@@ -1083,7 +1083,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -1497,7 +1498,7 @@ mod tests {
 mod dr_tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DRLevel, EnvironmentState, GridState, PortSlots, ThermalAccumulator,
         WeatherState, ZoneId, ZoneState,
@@ -1536,7 +1537,8 @@ mod dr_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -1546,7 +1548,8 @@ mod dr_tests {
 
     fn hot_env_at_time(zone_temp_c: f64, second: i64) -> EnvironmentState {
         EnvironmentState {
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid")
@@ -1860,7 +1863,7 @@ mod dr_tests {
 mod crankcase_tests {
     use std::{collections::HashMap, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
@@ -1902,7 +1905,8 @@ mod crankcase_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -1958,7 +1962,8 @@ mod crankcase_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
                 .single()
                 .expect("valid"),

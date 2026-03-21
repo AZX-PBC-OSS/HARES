@@ -4,7 +4,7 @@ use std::time::Duration as StdDuration;
 
 #[cfg(test)]
 use chrono::Duration;
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use hares_io::{Building, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
@@ -74,7 +74,7 @@ impl EnvironmentManager {
         schedule: ScheduleTimeSeries,
         building: &Building,
         time_res: StdDuration,
-        start_time: DateTime<Utc>,
+        start_time: DateTime<FixedOffset>,
     ) -> Result<Self, EnvironmentManagerError> {
         let step_secs = u32::try_from(time_res.as_secs()).unwrap_or(u32::MAX);
         if step_secs == 0 {
@@ -205,19 +205,19 @@ impl EnvironmentManager {
         let outdoor_enthalpy_j_kg = moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
 
         // Step 2: per-surface solar irradiance
-        // solar_position() converts UTC → local solar time internally via longitude,
-        // so we pass raw UTC — no timezone pre-shift.
-        let utc_now = clock.current_time();
+        // solar_position() converts to UTC internally — it needs true UTC for
+        // solar geometry. We pass the local-time clock value.
+        let now = clock.current_time();
         let pos = solar_position(
             self.weather_meta.latitude,
             self.weather_meta.longitude,
-            utc_now,
+            now,
         );
         let ghi = self.weather.get(WeatherField::GhiWM2, weather_idx);
         let dni = self.weather.get(WeatherField::DniWM2, weather_idx);
         let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
         let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
-        let day_of_year = utc_now.ordinal();
+        let day_of_year = now.ordinal();
         let mains_temp_c = water_mains_temperature_c(
             self.mains_t_annual_avg_c,
             self.mains_dt_annual_range_c,
@@ -308,23 +308,25 @@ const EPW_MIDPOINT_SHIFT_SECS: u64 = 1800;
 
 /// Compute the step offset into an annual weather file for a given start time.
 ///
-/// EPW files are indexed by **local standard time** (LST), not UTC. The
-/// `timezone_offset_h` from `WeatherMeta` (parsed from the EPW header) converts
-/// the simulation's UTC timestamp to the file's local-time index.
-fn compute_annual_offset(meta: &WeatherMeta, start_time: DateTime<Utc>, step_secs: u32) -> usize {
+/// EPW files are indexed by **local standard time** (LST). The simulation
+/// start time is already in local time (`DateTime<FixedOffset>`), so no
+/// UTC→LST conversion is needed — we extract wall-clock components directly.
+fn compute_annual_offset(
+    _meta: &WeatherMeta,
+    start_time: DateTime<FixedOffset>,
+    step_secs: u32,
+) -> usize {
     if step_secs == 0 {
         return 0;
     }
-    let offset_secs = (meta.timezone_offset_h * 3600.0) as i64;
-    let local = start_time + chrono::Duration::seconds(offset_secs);
 
-    let doy0 = local.ordinal0() as u64;
-    let h = local.hour() as u64;
-    let m = local.minute() as u64;
-    let s = local.second() as u64;
+    let doy0 = start_time.ordinal0() as u64;
+    let h = start_time.hour() as u64;
+    let m = start_time.minute() as u64;
+    let s = start_time.second() as u64;
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
 
-    let year_secs = if local.date_naive().leap_year() {
+    let year_secs = if start_time.date_naive().leap_year() {
         366 * 86400_u64
     } else {
         365 * 86400_u64
@@ -337,35 +339,31 @@ fn compute_annual_offset(meta: &WeatherMeta, start_time: DateTime<Utc>, step_sec
 /// Un-shifted annual offset for initial-condition lookup.
 /// OCHRE reads the schedule/weather at the raw hour-ending position for init.
 fn compute_annual_offset_unshifted(
-    meta: &WeatherMeta,
-    start_time: DateTime<Utc>,
+    _meta: &WeatherMeta,
+    start_time: DateTime<FixedOffset>,
     step_secs: u32,
 ) -> usize {
     if step_secs == 0 {
         return 0;
     }
-    let offset_secs = (meta.timezone_offset_h * 3600.0) as i64;
-    let local = start_time + chrono::Duration::seconds(offset_secs);
-    let doy0 = local.ordinal0() as u64;
-    let h = local.hour() as u64;
-    let m = local.minute() as u64;
-    let s = local.second() as u64;
+    let doy0 = start_time.ordinal0() as u64;
+    let h = start_time.hour() as u64;
+    let m = start_time.minute() as u64;
+    let s = start_time.second() as u64;
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
     (seconds_into_year / step_secs as u64) as usize
 }
 
-/// Compute offset into the schedule time series. If the schedule has timestamps,
-/// use elapsed seconds from the first timestamp. Otherwise treat as annual.
+/// Compute offset into the schedule time series.
+/// Schedules from ResStock/BEopt are annual, indexed from Jan 1 in local time.
 fn compute_schedule_offset(
     schedule: &ScheduleTimeSeries,
-    start_time: DateTime<Utc>,
+    start_time: DateTime<FixedOffset>,
     step_secs: u32,
 ) -> usize {
     if step_secs == 0 || schedule.is_empty() {
         return 0;
     }
-    // Use the same annual offset approach: schedules from ResStock/BEopt are
-    // annual, indexed from Jan 1.
     let doy0 = start_time.ordinal0() as u64;
     let h = start_time.hour() as u64;
     let m = start_time.minute() as u64;
@@ -505,14 +503,17 @@ fn determine_initial_indoor_temp_c(building: &Building, outdoor_temp_c: f64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+    use chrono::{DateTime, FixedOffset, TimeZone};
     use hares_io::hpxml::building::XmlNode;
     use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
     use std::collections::HashMap;
 
+    fn utc_offset() -> FixedOffset {
+        FixedOffset::east_opt(0).expect("offset")
+    }
+
     fn ts(hour: u32) -> DateTime<FixedOffset> {
-        FixedOffset::east_opt(0)
-            .expect("offset")
+        utc_offset()
             .with_ymd_and_hms(2024, 1, 1, hour, 0, 0)
             .single()
             .expect("time")
@@ -651,9 +652,9 @@ mod tests {
     }
 
     fn clock() -> SimClock {
-        let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00Z")
+        let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00")
             .expect("parse")
-            .with_timezone(&Utc);
+            .to_fixed_offset();
         SimClock::new(start, Duration::seconds(60), Duration::hours(2))
     }
 
@@ -661,7 +662,7 @@ mod tests {
     fn weather_step_0_matches_first_epw_record() {
         // Start at 00:30 LST: midpoint shift (shifted = 1800 - 1800 = 0) maps to
         // row 0 of the weather series (the first EPW hour-ending record).
-        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
@@ -677,7 +678,7 @@ mod tests {
 
     #[test]
     fn weather_step_59_matches_replicated_first_hour() {
-        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
@@ -696,7 +697,7 @@ mod tests {
 
     #[test]
     fn wind_direction_is_populated_from_weather_series() {
-        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
@@ -717,7 +718,7 @@ mod tests {
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
@@ -735,13 +736,13 @@ mod tests {
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
         )
         .expect("manager");
 
-        let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00Z")
+        let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00")
             .expect("parse")
-            .with_timezone(&Utc);
+            .to_fixed_offset();
         let mut clock = SimClock::new(start, Duration::seconds(60), Duration::hours(3));
 
         for _ in 0..120 {
@@ -762,7 +763,7 @@ mod tests {
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
@@ -779,7 +780,7 @@ mod tests {
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
         )
         .expect("manager");
         let feedback = vec![ZoneState {
@@ -801,7 +802,7 @@ mod tests {
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
         )
         .expect("manager");
 
@@ -829,7 +830,7 @@ mod tests {
             schedule_series(),
             &building(None),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
@@ -857,7 +858,7 @@ mod tests {
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
-            DateTime::<Utc>::default(),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
         )
         .expect("manager");
 
@@ -882,7 +883,7 @@ mod tests {
             schedule_series(),
             &building(Some(21.0)),
             StdDuration::from_secs(60),
-            DateTime::<Utc>::default(),
+            utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
@@ -926,7 +927,7 @@ mod tests {
 
         // Simulation starts at 02:30 LST: midpoint shift places this at row 2 (20°C).
         // seconds_into_year = 9000, shifted = 9000 - 1800 = 7200, 7200/3600 = 2.
-        let start = Utc.with_ymd_and_hms(2024, 1, 1, 2, 30, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 2, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather,
             schedule_series(),
@@ -951,7 +952,7 @@ mod tests {
     #[test]
     fn annual_offset_leap_year_may_5_noon() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2024, 5, 5, 12, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2024, 5, 5, 12, 0, 0).unwrap();
         let offset = compute_annual_offset(&meta, start, 3600);
         assert_eq!(offset, 3011);
     }
@@ -962,7 +963,7 @@ mod tests {
     #[test]
     fn annual_offset_non_leap_year_may_5_noon() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2023, 5, 5, 12, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 5, 5, 12, 0, 0).unwrap();
         let offset = compute_annual_offset(&meta, start, 3600);
         assert_eq!(offset, 2987);
     }
@@ -972,7 +973,7 @@ mod tests {
     #[test]
     fn annual_offset_leap_year_jan_1() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 3600), 8783);
     }
 
@@ -981,7 +982,7 @@ mod tests {
     #[test]
     fn annual_offset_non_leap_year_jan_1() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 3600), 8759);
     }
 
@@ -990,7 +991,7 @@ mod tests {
     #[test]
     fn annual_offset_leap_year_dec_31() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2024, 12, 31, 23, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2024, 12, 31, 23, 0, 0).unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 3600), 8782);
     }
 
@@ -999,7 +1000,7 @@ mod tests {
     #[test]
     fn annual_offset_non_leap_year_dec_31() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2023, 12, 31, 23, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 12, 31, 23, 0, 0).unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 3600), 8758);
     }
 
@@ -1008,7 +1009,7 @@ mod tests {
     #[test]
     fn annual_offset_leap_year_feb_29() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2024, 2, 29, 6, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2024, 2, 29, 6, 0, 0).unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 3600), 1421);
     }
 
@@ -1017,7 +1018,7 @@ mod tests {
     #[test]
     fn annual_offset_non_leap_year_mar_1() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2023, 3, 1, 6, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 3, 1, 6, 0, 0).unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 3600), 1421);
     }
 
@@ -1026,7 +1027,7 @@ mod tests {
     #[test]
     fn annual_offset_15min_resolution() {
         let meta = weather_series().meta;
-        let start = Utc.with_ymd_and_hms(2023, 1, 1, 1, 30, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 1, 30, 0).unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 900), 4);
     }
 
@@ -1055,7 +1056,7 @@ mod tests {
         weather.liquid_precip_m = vec![0.0; n];
 
         // Start Jan 1 00:00 → offset 0 → temp ≈ -20°C
-        let jan_start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let jan_start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let mut mgr = EnvironmentManager::new(
             weather.clone(),
             schedule_series(),
@@ -1086,7 +1087,7 @@ mod tests {
         );
 
         // Start Jul 1 00:00 → offset ~4344 → temp should be positive
-        let jul_start = Utc.with_ymd_and_hms(2024, 7, 1, 0, 0, 0).unwrap();
+        let jul_start = utc_offset().with_ymd_and_hms(2024, 7, 1, 0, 0, 0).unwrap();
         let mut mgr = EnvironmentManager::new(
             weather,
             schedule_series(),
@@ -1148,7 +1149,7 @@ mod tests {
         weather.ground_temp_c = vec![8.0; n];
         weather.liquid_precip_m = vec![0.0; n];
 
-        let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let mut mgr = EnvironmentManager::new(
             weather,
             schedule_series(),
@@ -1204,7 +1205,7 @@ mod tests {
         weather.liquid_precip_m = vec![0.0; n];
 
         // Day 1 of year (Jan 1, winter).
-        let winter_start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let winter_start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let mut mgr_winter = EnvironmentManager::new(
             weather.clone(),
             schedule_series(),
@@ -1218,7 +1219,7 @@ mod tests {
         let mains_winter = env_winter.weather.mains_temp_c;
 
         // Day 180 of year (~late June, summer).
-        let summer_start = Utc.with_ymd_and_hms(2024, 6, 28, 0, 0, 0).unwrap();
+        let summer_start = utc_offset().with_ymd_and_hms(2024, 6, 28, 0, 0, 0).unwrap();
         let mut mgr_summer = EnvironmentManager::new(
             weather,
             schedule_series(),

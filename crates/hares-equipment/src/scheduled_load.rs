@@ -984,7 +984,7 @@ fn parse_bool(config: &EquipmentConfig, key: &str) -> crate::Result<Option<bool>
 mod tests {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         BoundaryPolicy, ControlSignal, DomainUpdate, EnvironmentState, FuelType, GridState,
         PortSlots, ScheduleSource, TelemetryField, WeatherState, ZoneId, ZoneState,
@@ -1031,7 +1031,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid UTC timestamp"),
@@ -1581,7 +1582,8 @@ mod tests {
         );
         let mut env = base_env();
         // Step in January
-        env.current_time = Utc
+        env.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
             .single()
             .expect("valid UTC timestamp");
@@ -1600,7 +1602,8 @@ mod tests {
 
         // Confirm non-January still produces output
         let mut env_march = base_env();
-        env_march.current_time = Utc
+        env_march.current_time = FixedOffset::east_opt(0)
+            .expect("UTC offset")
             .with_ymd_and_hms(2026, 3, 1, 0, 0, 0)
             .single()
             .expect("valid UTC timestamp");

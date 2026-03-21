@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{
     Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries,
 };
-use hares_types::HaresError;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -33,7 +32,7 @@ pub(crate) struct SyntheticTomlConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SyntheticSimulationConfig {
-    pub(crate) start_time: DateTime<Utc>,
+    pub(crate) start_time: DateTime<FixedOffset>,
     pub(crate) time_res_s: i64,
     pub(crate) duration_s: i64,
 }
@@ -293,13 +292,11 @@ pub(crate) fn build_synthetic_weather(config: &SyntheticTomlConfig) -> WeatherTi
 }
 
 pub(crate) fn build_synthetic_schedule(config: &SyntheticTomlConfig) -> Result<ScheduleTimeSeries> {
-    use chrono::{FixedOffset, TimeDelta};
+    use chrono::TimeDelta;
 
     let step_secs = duration_to_u32_secs(Duration::seconds(config.simulation.time_res_s))?;
     let total_steps = (config.simulation.duration_s / config.simulation.time_res_s).max(1) as usize;
-    let offset = FixedOffset::east_opt(0)
-        .ok_or_else(|| HaresError::Io("failed to build UTC offset".to_string()))?;
-    let start = config.simulation.start_time.with_timezone(&offset);
+    let start = config.simulation.start_time;
 
     let mut timestamps = Vec::with_capacity(total_steps);
     for i in 0..total_steps {

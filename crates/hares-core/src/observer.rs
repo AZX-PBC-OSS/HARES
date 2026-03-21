@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use hares_envelope::EnvelopeComponentGains;
 use hares_types::{
     DomainUpdate, EndUse, FluidType, FuelType, LoopId, PortDeclaration, Telemetry, ZoneId,
@@ -17,7 +17,7 @@ use hares_types::{
 #[derive(Debug, Clone)]
 pub struct StepSnapshot {
     pub step_index: u64,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<FixedOffset>,
     pub phases: PhaseSnapshots,
 }
 

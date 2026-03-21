@@ -1,6 +1,6 @@
 //! Thermostat types and FSM logic shared across HVAC equipment.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
 use serde::{Deserialize, Serialize};
 
@@ -170,8 +170,8 @@ pub(super) fn lookup_zone_temp(env: &EnvironmentState, zone: ZoneId) -> crate::R
 
 pub(super) fn is_cycle_change_allowed(
     thermostat: &ThermostatConfig,
-    last_mode_switch_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    last_mode_switch_at: Option<DateTime<FixedOffset>>,
+    now: DateTime<FixedOffset>,
 ) -> bool {
     if thermostat.min_cycle_time_s <= 0.0 {
         return true;

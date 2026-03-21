@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
@@ -78,7 +78,7 @@ struct HeatPumpHeaterCore {
     defrost_active: bool,
     defrost_time_fraction: f64,
     defrost_accumulator_s: f64,
-    last_er_off_at: Option<DateTime<Utc>>,
+    last_er_off_at: Option<DateTime<FixedOffset>>,
     er_was_on: bool,
     /// Previous BASE heating setpoint (without DR offset) — used to detect
     /// user-initiated setpoint increases that trigger ER hard lockout. Comparing
@@ -132,8 +132,8 @@ struct HeatPumpHeaterCore {
 struct HeaterState {
     mode: ThermostatMode,
     duty_cycle: f64,
-    last_mode_switch_at: Option<DateTime<Utc>>,
-    mode_start_at: Option<DateTime<Utc>>,
+    last_mode_switch_at: Option<DateTime<FixedOffset>>,
+    mode_start_at: Option<DateTime<FixedOffset>>,
     runtime_setpoints: Option<RuntimeSetpointOverride>,
     operating_mode: OperatingMode,
     run_time_s: f64,
@@ -143,7 +143,7 @@ struct HeaterState {
     defrost_time_fraction: f64,
     defrost_accumulator_s: f64,
     pan_heater_on: bool,
-    last_er_off_at: Option<DateTime<Utc>>,
+    last_er_off_at: Option<DateTime<FixedOffset>>,
     last_speed_index: usize,
     last_speed_frac: f64,
     electric_kw: f64,
@@ -900,7 +900,7 @@ impl HeatPumpHeaterCore {
         })
     }
 
-    fn er_cycle_ready(&self, now: DateTime<Utc>) -> bool {
+    fn er_cycle_ready(&self, now: DateTime<FixedOffset>) -> bool {
         let Some(last_off) = self.last_er_off_at else {
             return true;
         };
@@ -1098,7 +1098,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DRLevel, EnvironmentState, GridState, OperatingMode, PortSlots,
         ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -1137,7 +1137,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),
@@ -1543,7 +1544,7 @@ mod tests {
     }
 
     fn make_env(zone_temp_c: f64, outdoor_c: f64, second: i64) -> EnvironmentState {
-        use chrono::{TimeZone, Utc};
+        use chrono::{FixedOffset, TimeZone};
         EnvironmentState {
             zones: vec![ZoneState {
                 id: ZoneId(1),
@@ -1573,7 +1574,8 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
-            current_time: Utc
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid")
