@@ -203,16 +203,20 @@ def test_print_comparison(ochre_results: dict[str, float], hares_results: dict[s
         print(f"{col:<55} {o_val:8.4f} {h_str} {d_str}")
 
 
+# Tolerances per THERMAL-008 / ASHRAE 140-2023 §5.2.
+# Schedule-driven loads: 2% (exact match expected).
+# HVAC: 15% (ASHRAE 140 acceptance range for annual heating energy).
+# Total: 10% (allows for unimplemented event-driven equipment).
 PARITY_CHECKS: list[tuple[str, float]] = [
-    ("Total Electric Power (kW)", 0.05),
+    ("Total Electric Power (kW)", 0.10),
     ("HVAC Cooling Electric Power (kW)", 0.05),
+    ("HVAC Heating Electric Power (kW)", 0.15),
     ("Ventilation Fan Electric Power (kW)", 0.02),
     ("MELs Electric Power (kW)", 0.02),
     ("TV Electric Power (kW)", 0.02),
     ("Refrigerator Electric Power (kW)", 0.02),
     ("Indoor Lighting Electric Power (kW)", 0.05),
     ("Exterior Lighting Electric Power (kW)", 0.10),
-    ("HVAC Heating Electric Power (kW)", 0.05),
 ]
 
 

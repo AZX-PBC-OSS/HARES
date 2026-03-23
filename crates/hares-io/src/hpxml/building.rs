@@ -434,6 +434,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 "Enclosure",
                 "AirInfiltration",
                 "AirInfiltrationMeasurement",
+                "BuildingAirLeakage",
                 "AirLeakage",
             ],
             ValueKind::Raw,
@@ -444,6 +445,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 &[
                     "AirInfiltration",
                     "AirInfiltrationMeasurement",
+                    "BuildingAirLeakage",
                     "AirLeakage",
                 ],
                 ValueKind::Raw,

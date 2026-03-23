@@ -3,7 +3,10 @@
 mod config;
 mod infiltration;
 mod initialization;
+mod longwave;
+mod ports;
 mod solar;
+mod stepping;
 
 pub(crate) use config::Result;
 pub use config::{
@@ -22,10 +25,6 @@ use hares_types::{
 };
 use nalgebra::{DMatrix, DVector};
 
-use crate::longwave_radiation::{
-    ExteriorSurface, InteriorSurface, beta_factor, exterior_longwave_w,
-    interior_longwave_linearised_w, sky_view_factor,
-};
 use crate::state_space::StateSpaceModel;
 
 use infiltration::{InfiltrationCoupling, apply_infiltration_and_ventilation};
@@ -189,142 +188,8 @@ impl ThermalSolver {
         Ok(())
     }
 
-    /// Estimate the ideal HVAC capacity needed to maintain the zone setpoint.
-    ///
-    /// Uses `last_u`, `last_coupling`, and `last_coupled_lu` (previous timestep) as
-    /// background. Called by equipment *before* `resolve()` builds the current-step
-    /// inputs, so the estimate is one-step stale. Zero allocation — the coupled LU
-    /// was cached at the end of the previous `resolve()` call.
-    pub fn solve_ideal_capacity(&self, env: &EnvironmentState, zone: ZoneId) -> f64 {
-        let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-            return 0.0;
-        };
-        let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-            return 0.0;
-        };
-        let y_target = zone_setpoint_c(&self.config, env, zone);
-
-        let result = match &self.last_coupled_lu {
-            Some(lu) => self.model.solve_for_scalar_input_coupled(
-                &self.x, &self.last_u, y_target, output_idx, input_idx,
-                lu, &self.last_coupling,
-            ),
-            None => self.model.solve_for_output_input(
-                &self.x, &self.last_u, y_target, output_idx, input_idx,
-            ),
-        };
-
-        result.unwrap_or_else(|e| {
-            tracing::debug!(?zone, ?e, "solve_ideal_capacity failed, returning 0");
-            0.0
-        })
-    }
-
     pub fn set_ideal_hvac_zones(&mut self, zones: Vec<ZoneId>) {
         self.config.ideal_hvac_zones = zones;
-    }
-
-    fn resolve_internal(
-        &mut self,
-        ports: &PortSlots,
-        env: &EnvironmentState,
-        ideal_hvac_zones: &[ZoneId],
-    ) -> DomainUpdate {
-        let (mut u, latent_by_zone, infiltration_couplings) =
-            self.build_input_vector(ports, env);
-
-        // Build per-step fully-implicit coupling tuples from infiltration.
-        //
-        // Infiltration conductance h_inf [W/K] enters the zone air heat balance as
-        // q_inf = h_inf * (T_out - T_zone). Following EnergyPlus Engineering Reference
-        // §13.3 (Predictor-Corrector algorithm), the temperature-dependent term is
-        // treated fully implicitly (backward Euler) to guarantee monotonic, oscillation-
-        // free convergence even when the infiltration time constant is much smaller
-        // than the timestep (stiff regime, dt >> C / h_inf).
-        //
-        // The coupling API adds d to M's diagonal and subtracts d from N's diagonal.
-        // For fully implicit treatment we want d on M only, so the forcing includes a
-        // compensation term `+d * x[k]` to cancel the unwanted N-side subtraction:
-        //   d     = h_inf * b_eff[(state, input)]          (full conductance, not half)
-        //   f     = h_inf * T_out * b_eff + d * x[state]   (forcing + compensation)
-        self.coupling_buf.clear();
-        for inf in &infiltration_couplings {
-            if inf.h_inf_w_k.abs() < 1e-15 {
-                continue;
-            }
-            let Some(&state_idx) = self.wiring.zone_state_indices.get(&inf.zone) else {
-                continue;
-            };
-            let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&inf.zone) else {
-                continue;
-            };
-            let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
-            let d = inf.h_inf_w_k * b_coeff;
-            // Compensation: the coupling API subtracts d*x[k] from the explicit side,
-            // but backward Euler wants zero on the explicit side, so add d*x[k] back.
-            let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
-            self.coupling_buf.push((state_idx, d, forcing));
-        }
-
-        if !self.coupling_buf.is_empty() {
-            // Coupled path: build modified LU once, reuse for HVAC solve, step, and cache.
-            let coupled_lu =
-                self.model
-                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-
-            for &zone in ideal_hvac_zones {
-                let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-                    continue;
-                };
-                let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-                    continue;
-                };
-                let target = zone_setpoint_c(&self.config, env, zone);
-
-                if let Ok(q) = self.model.solve_for_scalar_input_coupled(
-                    &self.x, &u, target, output_idx, input_idx,
-                    &coupled_lu, &self.coupling_buf,
-                ) {
-                    u[input_idx] = q;
-                }
-            }
-
-            self.model.step_with_coupled_lu_into(
-                &self.x, &u, &mut self.rhs_buf, &coupled_lu, &self.coupling_buf,
-            );
-
-            // Cache for solve_ideal_capacity (one-step stale, zero extra allocation).
-            self.last_coupled_lu = Some(coupled_lu);
-        } else {
-            for &zone in ideal_hvac_zones {
-                let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-                    continue;
-                };
-                let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-                    continue;
-                };
-                let target = zone_setpoint_c(&self.config, env, zone);
-
-                if let Ok(q) =
-                    self.model
-                        .solve_for_output_input(&self.x, &u, target, output_idx, input_idx)
-                {
-                    u[input_idx] = q;
-                }
-            }
-
-            // Standard CN step (zero allocation).
-            self.model.step_into(&self.x, &u, &mut self.rhs_buf);
-            self.last_coupled_lu = None;
-        }
-
-        std::mem::swap(&mut self.x, &mut self.rhs_buf);
-        let y_next = self.model.output(&self.x, &u);
-        self.last_u.clone_from(&u);
-        self.last_coupling.clone_from(&self.coupling_buf);
-        self.u_buf = u;
-
-        self.format_domain_update(&y_next, latent_by_zone)
     }
 
     /// Assembles the full input vector from outdoor, solar, LWR, and port
@@ -474,180 +339,6 @@ impl ThermalSolver {
         }
     }
 
-    /// Iterative exterior longwave radiation solver.
-    ///
-    /// For each exterior surface, converges on the true exterior surface temperature
-    /// by coupling the RC node temperature with an iterative LWR balance, then
-    /// injects the fraction of the net flux that reaches the RC node.
-    ///
-    /// Matches OCHRE `_solve_exterior_radiation` with heavy-ball damping.
-    fn apply_exterior_longwave_inputs_iterative(
-        &mut self,
-        u: &mut DVector<f64>,
-        env: &EnvironmentState,
-    ) {
-        use crate::longwave_radiation::{CELSIUS_TO_KELVIN, STEFAN_BOLTZMANN};
-
-        let t_ext = env.weather.outdoor_temp_c;
-        let t_sky_raw = env.weather.sky_temp_c;
-        let t_sky_valid = !t_sky_raw.is_nan();
-
-        for (i, info) in self.config.exterior_surfaces.iter().enumerate() {
-            if info.input_index >= u.len() || info.state_index >= self.x.len() {
-                continue;
-            }
-
-            // For surfaces with no film resistance in the conduction path (rad_frac == 0),
-            // fall back to the simple (non-iterative) calculation.
-            if info.rad_frac <= 0.0 {
-                let t_node_c = self.x[info.state_index];
-                let surface = ExteriorSurface {
-                    area_m2: info.area_m2,
-                    emissivity: info.emissivity,
-                    sky_view_factor: sky_view_factor(info.tilt_deg),
-                    beta: beta_factor(info.tilt_deg),
-                };
-                let q_lw = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
-                u[info.input_index] += q_lw;
-                continue;
-            }
-
-            let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
-            let f_sky = sky_view_factor(info.tilt_deg);
-            let f_gnd = 1.0 - f_sky;
-            let beta = beta_factor(info.tilt_deg);
-            let t_node_c = self.x[info.state_index];
-
-            // Per-surface solar gain [W] for the iteration (no allocation).
-            // OCHRE _solve_exterior_radiation line 154 includes solar in T_surf.
-            let solar_w = env
-                .weather
-                .solar_irradiance
-                .iter()
-                .find(|s| s.surface_id == info.surface_id)
-                .map(|irr| {
-                    info.absorptance
-                        * info.area_m2
-                        * (irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2)
-                })
-                .unwrap_or(0.0);
-
-            // Incoming LWR (environment → surface), independent of surface temp.
-            // Ground = air per E+ standard; β splits sky hemisphere.
-            let t_air_k4 = (t_ext + CELSIUS_TO_KELVIN).powi(4);
-            let h_lwr_inj = if !t_sky_valid {
-                e_factor * t_air_k4
-            } else {
-                let t_sky_k4 = (t_sky_raw + CELSIUS_TO_KELVIN).powi(4);
-                e_factor * ((f_gnd + (1.0 - beta) * f_sky) * t_air_k4 + beta * f_sky * t_sky_k4)
-            };
-
-            // Initial surface temperature estimate from linear interpolation.
-            let t_surf_init = info.rad_frac * t_node_c + (1.0 - info.rad_frac) * t_ext;
-
-            // Iterative solve with heavy-ball damping (matches OCHRE).
-            let mut t_surf = self.exterior_surface_temps[i];
-            let mut t_prev_iter = self.exterior_surface_temps[i];
-
-            for _ in 0..info.n_iter {
-                let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
-                let t_new = t_surf_init + (solar_w + lwr) * info.rad_res_k_w;
-                // Clamp step to ±2 °C per sub-iteration for stability.
-                let t_new = t_new.clamp(t_surf - 2.0, t_surf + 2.0);
-                // Heavy-ball momentum: 0.5 relaxation + 0.1 momentum.
-                let t_next = t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_prev_iter);
-                t_prev_iter = t_surf;
-                t_surf = t_next;
-                if (t_surf - t_prev_iter).abs() < 0.01 {
-                    break;
-                }
-            }
-
-            // Persist converged surface temp for next timestep.
-            self.exterior_surface_temps[i] = t_surf;
-
-            // Compute final LWR at the converged surface temperature.
-            let q_lw = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
-
-            // Inject the fraction that conducts through the exterior film to the
-            // outer RC node.  rad_frac = R_film / (R_film + R_half_layer) is a
-            // voltage-divider: only this share of the surface flux reaches the
-            // nearest capacitive node; the remainder conducts outward to ambient
-            // (already modelled by the RC film resistance).
-            let injected = (solar_w + q_lw) * info.rad_frac;
-            u[info.input_index] += injected;
-        }
-    }
-
-    fn apply_port_sensible_inputs(&self, u: &mut DVector<f64>, ports: &PortSlots) {
-        for thermal in &ports.thermal {
-            if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
-                && idx < u.len()
-            {
-                u[idx] += thermal.sensible_gain_w;
-            }
-        }
-    }
-
-    /// Applies linearised interior longwave radiation exchange for each configured zone.
-    ///
-    /// For each zone in [`ThermalSolverConfig::interior_lwr_zones`], collects current
-    /// surface temperatures from the state vector, calls [`interior_longwave_linearised_w`],
-    /// and accumulates the resulting per-surface heat fluxes into `u`.
-    ///
-    /// Returns per-zone net interior LWR heat gains [W] for diagnostics output.
-    fn apply_interior_longwave_inputs(
-        &self,
-        u: &mut DVector<f64>,
-        env: &EnvironmentState,
-    ) -> Vec<(ZoneId, f64)> {
-        let mut lwr_by_zone = Vec::with_capacity(self.config.interior_lwr_zones.len());
-        for zone_cfg in &self.config.interior_lwr_zones {
-            if zone_cfg.surfaces.len() < 2 {
-                continue;
-            }
-            let t_zone_c = env
-                .zones
-                .iter()
-                .find(|z| z.id == zone_cfg.zone_id)
-                .map(|z| z.temperature_c)
-                .unwrap_or(20.0);
-
-            let surfaces: Vec<InteriorSurface> = zone_cfg
-                .surfaces
-                .iter()
-                .map(|s| InteriorSurface {
-                    area_m2: s.area_m2,
-                    emissivity: s.emissivity,
-                })
-                .collect();
-            let t_surfaces: Vec<f64> = zone_cfg
-                .surfaces
-                .iter()
-                .map(|s| {
-                    let t_node = if s.state_index < self.x.len() {
-                        self.x[s.state_index]
-                    } else {
-                        t_zone_c
-                    };
-                    // True interior surface temp per OCHRE: interpolate between
-                    // node temp and zone air temp using the radiation fraction.
-                    s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone_c
-                })
-                .collect();
-
-            let net_lw = interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone_c);
-            let mut zone_total = 0.0_f64;
-            for (info, &q) in zone_cfg.surfaces.iter().zip(net_lw.iter()) {
-                if info.input_index < u.len() {
-                    u[info.input_index] += q;
-                }
-                zone_total += q;
-            }
-            lwr_by_zone.push((zone_cfg.zone_id, zone_total));
-        }
-        lwr_by_zone
-    }
 }
 
 impl DomainSolver for ThermalSolver {
@@ -672,7 +363,7 @@ impl DomainSolver for ThermalSolver {
 
 /// Returns the effective zone setpoint from solver config, falling back to the current zone air
 /// temperature when no static setpoint is configured.
-fn zone_setpoint_c(config: &ThermalSolverConfig, env: &EnvironmentState, zone: ZoneId) -> f64 {
+pub(super) fn zone_setpoint_c(config: &ThermalSolverConfig, env: &EnvironmentState, zone: ZoneId) -> f64 {
     config
         .ideal_setpoints_c
         .get(&zone)

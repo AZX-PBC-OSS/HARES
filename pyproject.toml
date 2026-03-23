@@ -53,3 +53,6 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]

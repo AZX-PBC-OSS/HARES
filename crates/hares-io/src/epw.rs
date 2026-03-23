@@ -507,6 +507,11 @@ pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
 ///
 /// ε_clear = 0.758 + 0.521 × (T_dp_C / 100) + 0.625 × (T_dp_C / 100)²
 ///
+/// This is the quadratic form from Martin & Berdahl (1984) Solar Energy 33(3/4)
+/// pp. 321-336, which supersedes the linear approximation in the original
+/// Berdahl & Martin (1984) Solar Energy 32(5) pp. 663-664. The quadratic form
+/// is used verbatim in EnergyPlus 9.6.
+///
 /// Cite: Martin, M. and Berdahl, P. (1984), "Characteristics of Infrared Sky
 /// Radiation in the United States", Solar Energy, 33(3/4), 321-336.
 pub(crate) fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
@@ -523,6 +528,7 @@ pub(crate) fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
 ///
 /// Cite: Brunt, D. (1932), "Notes on radiation in the atmosphere",
 /// Q.J.R. Meteorol. Soc., 58, 389-420.
+// Not wired into the compute_sky_temp_c cascade; available for future model selection.
 #[allow(dead_code)]
 pub(crate) fn brunt_sky_emissivity(t_dp_c: f64) -> f64 {
     let p_wv_hpa = magnus_saturation_pressure_hpa(t_dp_c);
@@ -531,16 +537,20 @@ pub(crate) fn brunt_sky_emissivity(t_dp_c: f64) -> f64 {
 
 /// Idso (1981) clear-sky emissivity from dry bulb and dew point temperatures.
 ///
-/// ε_clear = 0.685 + 3.2e-5 × P_wv_Pa × exp(1699 / T_db_K)
+/// ε_clear = 0.685 + 3.2e-5 × P_wv_hPa × exp(1699 / T_db_K)
+///
+/// The coefficient 3.2e-5 is calibrated for water vapour pressure in hPa
+/// (matching EnergyPlus). Do not convert to Pa before applying.
 ///
 /// Cite: Idso, S.B. (1981), "A set of equations for full spectrum and 8- to
 /// 14-μm and 10.5- to 12.5-μm thermal radiation from cloudless skies",
 /// Water Resources Research, 17(2), 295-304.
+// Not wired into the compute_sky_temp_c cascade; available for future model selection.
 #[allow(dead_code)]
 pub(crate) fn idso_sky_emissivity(t_db_c: f64, t_dp_c: f64) -> f64 {
-    let p_wv_pa = magnus_saturation_pressure_hpa(t_dp_c) * 100.0;
+    let p_wv_hpa = magnus_saturation_pressure_hpa(t_dp_c);
     let t_db_k = t_db_c + KELVIN_OFFSET_C;
-    0.685 + 3.2e-5 * p_wv_pa * (1699.0 / t_db_k).exp()
+    0.685 + 3.2e-5 * p_wv_hpa * (1699.0 / t_db_k).exp()
 }
 
 /// Walton (1983) cloud cover correction applied to clear-sky emissivity.
@@ -553,7 +563,7 @@ pub(crate) fn idso_sky_emissivity(t_db_c: f64, t_dp_c: f64) -> f64 {
 /// Manual", NBSIR 83-2655.
 pub(crate) fn walton_cloud_correction(epsilon_clear: f64, opaque_sky_cover: f64) -> f64 {
     let n = opaque_sky_cover.clamp(0.0, 10.0);
-    epsilon_clear * (1.0 + 0.0224 * n - 0.0035 * n * n + 0.00028 * n * n * n)
+    (epsilon_clear * (1.0 + 0.0224 * n - 0.0035 * n * n + 0.00028 * n * n * n)).clamp(0.0, 1.0)
 }
 
 /// Convert sky emissivity and dry bulb temperature to sky temperature.
@@ -1218,15 +1228,13 @@ mod tests {
 
     #[test]
     fn idso_emissivity_known_case() {
-        // T_db = 20 C, T_dp = 10 C
-        // P_wv_Pa = P_sat(10) * 100 ≈ 1228.3 Pa
-        // T_db_K = 293.15
-        // ε = 0.685 + 3.2e-5 * 1228.3 * exp(1699/293.15)
-        //   = 0.685 + 0.03931 * exp(5.795)
-        //   = 0.685 + 0.03931 * 328.3 ≈ 0.685 + 12.9 -- clearly > 1, which is expected
-        //   for Idso at these conditions (the model has known issues at high humidity)
+        // T_db=20C, T_dp=10C: P_wv ≈ 12.28 hPa, exp(1699/293.15) ≈ 328.9
+        // ε = 0.685 + 3.2e-5 × 12.28 × 328.9 ≈ 0.814
         let eps = idso_sky_emissivity(20.0, 10.0);
-        assert!(eps > 0.5, "Idso emissivity should be positive: got {eps}");
+        assert!(
+            (eps - 0.814).abs() < 0.01,
+            "Idso at T_db=20C, T_dp=10C: got {eps}, expected ~0.814"
+        );
     }
 
     #[test]
@@ -1301,6 +1309,17 @@ mod tests {
             (t_sky - expected).abs() < 1e-10,
             "cloud cover > 0 should use Berdahl-Martin+Walton: got {t_sky}, expected {expected}"
         );
+    }
+
+    #[test]
+    fn sky_temp_clamped_at_high_humidity_overcast() {
+        // T_dp=35°C (tropical), N=10 (overcast): ε_berdahl > 1.0 before clamping
+        let eps_clear = berdahl_martin_sky_emissivity(35.0);
+        assert!(eps_clear > 0.95, "high dew point should give high emissivity");
+        let eps_cloud = walton_cloud_correction(eps_clear, 10.0);
+        assert!(eps_cloud <= 1.0, "emissivity must be clamped to <= 1.0, got {eps_cloud}");
+        let t_sky = sky_temp_from_emissivity(38.0, eps_cloud);
+        assert!(t_sky <= 38.0, "sky temp must not exceed dry bulb: got {t_sky}");
     }
 
     #[test]
