@@ -404,6 +404,15 @@ pub(crate) fn doe2_ground_temp_monthly(dry_bulb_c: &[f64], is_leap_year: bool) -
         let annual_avg = dry_bulb_c.iter().sum::<f64>() / dry_bulb_c.len() as f64;
         [annual_avg; 12]
     });
+    doe2_ground_temp_from_monthly_avg(&monthly_avg)
+}
+
+/// Compute DOE-2 ground temperatures from pre-computed monthly averages.
+///
+/// Core formula shared by EPW and PSM3 parsers. Accepts the 12-element
+/// monthly mean dry-bulb array directly, avoiding any assumption about
+/// the temporal resolution of the source data.
+pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64; 12] {
     let t_avg = monthly_avg.iter().sum::<f64>() / 12.0;
     let t_min = monthly_avg.iter().copied().fold(f64::INFINITY, f64::min);
     let t_max = monthly_avg

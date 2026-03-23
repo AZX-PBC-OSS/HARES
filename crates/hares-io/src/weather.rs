@@ -42,9 +42,9 @@ pub enum WeatherError {
         #[source]
         source: std::io::Error,
     },
-    #[error("EPW parse error: {0}")]
+    #[error("parse error: {0}")]
     Parse(String),
-    #[error("EPW validation error: {0}")]
+    #[error("validation error: {0}")]
     Validation(String),
     #[error("weather resampling error: {0}")]
     Resample(String),
@@ -134,7 +134,7 @@ impl WeatherTimeSeries {
 
         if source > target_step_secs {
             // Upsampling: source is coarser → interpolate to finer resolution.
-            if source % target_step_secs != 0 {
+            if !source.is_multiple_of(target_step_secs) {
                 return Err(WeatherError::Resample(format!(
                     "incompatible timestep: {source} % {target_step_secs} != 0"
                 )));
@@ -179,14 +179,14 @@ impl WeatherTimeSeries {
             })
         } else {
             // Downsampling: source is finer → aggregate to coarser resolution.
-            if target_step_secs % source != 0 {
+            if !target_step_secs.is_multiple_of(source) {
                 return Err(WeatherError::Resample(format!(
                     "incompatible timestep: {target_step_secs} % {source} != 0"
                 )));
             }
             let ratio = (target_step_secs / source) as usize;
 
-            if self.len() % ratio != 0 {
+            if !self.len().is_multiple_of(ratio) {
                 return Err(WeatherError::Resample(format!(
                     "record count {} not divisible by downsample ratio {ratio}",
                     self.len()
@@ -312,7 +312,7 @@ pub(crate) fn fritsch_carlson_slopes(y: &[f64]) -> Vec<f64> {
     d
 }
 
-/// Resample hourly data to sub-hourly using PCHIP interpolation.
+/// Resample data to a finer resolution using PCHIP interpolation.
 ///
 /// Uses Piecewise Cubic Hermite Interpolating Polynomials (PCHIP)
 /// with Fritsch-Carlson monotonicity-preserving slopes.
