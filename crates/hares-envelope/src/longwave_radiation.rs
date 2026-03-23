@@ -1,19 +1,24 @@
 //! Longwave (thermal infrared) radiation exchange for building envelope surfaces.
 //!
-//! # Exterior longwave radiation
+//! # Exterior longwave radiation (4-component EnergyPlus model)
 //!
-//! Each exterior surface exchanges radiation with two sources:
-//!   - The sky hemisphere, weighted by the sky view factor F_sky
-//!   - The ground/surroundings hemisphere, weighted by (1 - F_sky)
+//! Each exterior surface exchanges radiation with four terms:
+//!   - Ground hemisphere (T_ground = T_air per E+ standard), weighted by F_gnd
+//!   - True sky radiance (cold), weighted by β × F_sky
+//!   - Near-horizon air radiance (warm), weighted by (1 − β) × F_sky
 //!
 //! The net flux onto the surface is:
-//!   Q_lw = ε × σ × A × [ F_sky × (T_sky⁴ - T_surf⁴)
-//!                        + (1 - F_sky) × (T_ground⁴ - T_surf⁴) ]
+//!   Q_lw = ε·σ·A · [ F_gnd·(T_air⁴ − T_surf⁴)
+//!                   + β·F_sky·(T_sky⁴ − T_surf⁴)
+//!                   + (1−β)·F_sky·(T_air⁴ − T_surf⁴) ]
 //!
-//! Sky view factor (EnergyPlus Engineering Reference, §External Longwave Radiation):
-//!   F_sky = ((1 + cos β) / 2)^1.5    where β is the surface tilt from horizontal
-//!   - Horizontal roof: β = 0°  → F_sky = 1.0
-//!   - Vertical wall:   β = 90° → F_sky ≈ 0.354
+//! View factors and β (EnergyPlus Engineering Reference, §External Longwave Radiation):
+//!   F_sky = 0.5·(1 + cos φ)          where φ is the surface tilt from horizontal
+//!   F_gnd = 1 − F_sky = 0.5·(1 − cos φ)
+//!   β     = √(0.5·(1 + cos φ)) = √(F_sky)
+//!
+//!   - Horizontal roof: φ = 0°  → F_sky = 1.0, β = 1.0
+//!   - Vertical wall:   φ = 90° → F_sky = 0.5, β ≈ 0.707
 //!
 //! # Interior longwave radiation
 //!
@@ -73,8 +78,8 @@ pub const SOLAR_ABSORPTANCE_RADIANT_BARRIER: f64 = 0.05;
 
 /// Sky view factor for a surface tilted at `tilt_deg` from horizontal.
 ///
-/// Uses the EnergyPlus Engineering Reference formula:
-///   F_sky = ((1 + cos β) / 2)^1.5
+/// Uses the EnergyPlus Engineering Reference linear formula:
+///   F_sky = 0.5 × (1 + cos φ)
 ///
 /// # Arguments
 /// * `tilt_deg` — surface tilt from horizontal [°]; 0 = horizontal roof, 90 = vertical wall
@@ -86,12 +91,37 @@ pub const SOLAR_ABSORPTANCE_RADIANT_BARRIER: f64 = 0.05;
 /// ```
 /// use hares_envelope::longwave_radiation::sky_view_factor;
 /// assert!((sky_view_factor(0.0) - 1.0).abs() < 1e-9);    // horizontal roof
-/// assert!((sky_view_factor(90.0) - 0.35355339).abs() < 1e-8); // vertical wall
+/// assert!((sky_view_factor(90.0) - 0.5).abs() < 1e-9);   // vertical wall
 /// ```
 #[must_use]
 pub fn sky_view_factor(tilt_deg: f64) -> f64 {
-    let cos_beta = tilt_deg.to_radians().cos();
-    ((1.0 + cos_beta) / 2.0).powf(1.5)
+    debug_assert!(
+        (-1e-6..=180.0 + 1e-6).contains(&tilt_deg),
+        "sky_view_factor: tilt_deg={tilt_deg} outside [0°, 180°]"
+    );
+    let cos_phi = tilt_deg.to_radians().cos();
+    0.5 * (1.0 + cos_phi)
+}
+
+/// β factor separating true sky radiance from near-horizon air radiance.
+///
+/// β = √(F_sky) = √(0.5 × (1 + cos φ))
+///
+/// At β = 1 (horizontal roof), the entire sky hemisphere sees true sky radiance.
+/// At β = 0 (inverted surface, φ = 180°), all sky radiance collapses to air temperature.
+///
+/// # Arguments
+/// * `tilt_deg` — surface tilt from horizontal [°]; 0 = horizontal roof, 90 = vertical wall
+///
+/// # Returns
+/// β in `[0, 1]`.
+#[must_use]
+pub fn beta_factor(tilt_deg: f64) -> f64 {
+    debug_assert!(
+        (-1e-6..=180.0 + 1e-6).contains(&tilt_deg),
+        "beta_factor: tilt_deg={tilt_deg} outside [0°, 180°]"
+    );
+    sky_view_factor(tilt_deg).sqrt()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,21 +137,28 @@ pub struct ExteriorSurface {
     pub emissivity: f64,
     /// Sky view factor [-]; use [`sky_view_factor`] or supply directly.
     pub sky_view_factor: f64,
+    /// β factor splitting sky hemisphere into true-sky and near-horizon-air radiance.
+    /// Use [`beta_factor`] or supply directly.
+    pub beta: f64,
 }
 
 /// Net longwave radiation flux onto one exterior surface [W].
 ///
 /// Positive = net heat gain onto the surface.
 ///
-/// The formula is:
-///   Q = ε·σ·A·[ F_sky·(T_sky⁴ − T_surf⁴) + (1 − F_sky)·(T_gnd⁴ − T_surf⁴) ]
+/// Implements the EnergyPlus 4-component model:
+///   Q = ε·σ·A·[ F_gnd·(T_air⁴ − T_surf⁴)
+///             + β·F_sky·(T_sky⁴ − T_surf⁴)
+///             + (1−β)·F_sky·(T_air⁴ − T_surf⁴) ]
+///
+/// Ground temperature equals outdoor air temperature per E+ standard.
 ///
 /// # Arguments
-/// * `surface`       — surface geometry and optical properties
-/// * `t_sky_c`       — effective sky temperature [°C]; if NaN (e.g. missing
-///   EPW data), falls back to `t_ground_c` (matching OCHRE's behavior)
-/// * `t_ground_c`    — ground/surroundings temperature [°C]
-/// * `t_surface_c`   — actual exterior surface temperature [°C].  The caller
+/// * `surface`     — surface geometry and optical properties (including β)
+/// * `t_sky_c`     — effective sky temperature [°C]; if NaN (e.g. missing
+///   EPW data), falls back to `t_air_c` so all terms collapse to air temperature
+/// * `t_air_c`     — outdoor air temperature [°C] (also used as ground temperature)
+/// * `t_surface_c` — actual exterior surface temperature [°C].  The caller
 ///   is responsible for converting RC-network node temperatures to true
 ///   surface temperatures by accounting for any film resistance; passing a
 ///   node temperature directly will introduce systematic error.
@@ -132,40 +169,42 @@ pub struct ExteriorSurface {
 pub fn exterior_longwave_w(
     surface: &ExteriorSurface,
     t_sky_c: f64,
-    t_ground_c: f64,
+    t_air_c: f64,
     t_surface_c: f64,
 ) -> f64 {
-    // Fall back to ground temperature when sky temperature is unavailable.
-    let t_sky_effective = if t_sky_c.is_nan() {
-        t_ground_c
-    } else {
-        t_sky_c
-    };
-    let e_factor = surface.emissivity * STEFAN_BOLTZMANN * surface.area_m2;
-    let t_sky_k4 = (t_sky_effective + CELSIUS_TO_KELVIN).powi(4);
-    let t_gnd_k4 = (t_ground_c + CELSIUS_TO_KELVIN).powi(4);
-    let t_surf_k4 = (t_surface_c + CELSIUS_TO_KELVIN).powi(4);
-    let svf = surface.sky_view_factor;
-    e_factor * (svf * (t_sky_k4 - t_surf_k4) + (1.0 - svf) * (t_gnd_k4 - t_surf_k4))
+    debug_assert!(
+        surface.area_m2 > 0.0,
+        "exterior_longwave_w: area_m2={} must be positive",
+        surface.area_m2
+    );
+    exterior_longwave_w_m2(surface, t_sky_c, t_air_c, t_surface_c) * surface.area_m2
 }
 
 /// Net longwave radiation flux density onto one exterior surface [W/m²].
 ///
-/// Same as [`exterior_longwave_w`] but per unit area (independent of area_m2
-/// field in `surface`).  NaN handling for `t_sky_c` and the surface
-/// temperature contract are identical to [`exterior_longwave_w`].
+/// Implements the EnergyPlus 4-component model per unit area:
+///   q = ε·σ·[ F_gnd·(T⁴_air − T⁴_surf) + β·F_sky·(T⁴_sky − T⁴_surf)
+///           + (1−β)·F_sky·(T⁴_air − T⁴_surf) ]
+///
+/// NaN handling for `t_sky_c` and the surface temperature contract are
+/// identical to [`exterior_longwave_w`].
 #[must_use]
 pub fn exterior_longwave_w_m2(
     surface: &ExteriorSurface,
     t_sky_c: f64,
-    t_ground_c: f64,
+    t_air_c: f64,
     t_surface_c: f64,
 ) -> f64 {
-    if surface.area_m2 > 0.0 {
-        exterior_longwave_w(surface, t_sky_c, t_ground_c, t_surface_c) / surface.area_m2
-    } else {
-        0.0
-    }
+    let t_sky_effective = if t_sky_c.is_nan() { t_air_c } else { t_sky_c };
+    let f_sky = surface.sky_view_factor;
+    let f_gnd = 1.0 - f_sky;
+    let beta = surface.beta;
+    let e = surface.emissivity * STEFAN_BOLTZMANN;
+    let t_air_k4 = (t_air_c + CELSIUS_TO_KELVIN).powi(4);
+    let t_sky_k4 = (t_sky_effective + CELSIUS_TO_KELVIN).powi(4);
+    let t_surf_k4 = (t_surface_c + CELSIUS_TO_KELVIN).powi(4);
+    e * ((f_gnd + (1.0 - beta) * f_sky) * (t_air_k4 - t_surf_k4)
+        + beta * f_sky * (t_sky_k4 - t_surf_k4))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -336,9 +375,9 @@ mod tests {
 
     #[test]
     fn sky_view_factor_vertical_matches_energyplus() {
-        // EnergyPlus: ((1 + cos(90°)) / 2)^1.5 = (0.5)^1.5 = 0.353553...
+        // EnergyPlus linear formula: 0.5 × (1 + cos(90°)) = 0.5
         let f = sky_view_factor(90.0);
-        let expected = 0.5_f64.powf(1.5);
+        let expected = 0.5_f64;
         assert!(
             (f - expected).abs() < 1e-9,
             "vertical wall SVF: {f}, expected {expected}"
@@ -376,6 +415,7 @@ mod tests {
             area_m2: 48.0, // BESTEST Case 600 roof area
             emissivity: 0.90,
             sky_view_factor: sky_view_factor(0.0), // horizontal roof
+            beta: beta_factor(0.0),
         }
     }
 
@@ -408,12 +448,13 @@ mod tests {
 
     #[test]
     fn exterior_lw_flux_magnitude_physically_reasonable() {
-        // Clear night: surface at 20 °C, sky at -10 °C, ground at 10 °C
+        // Clear night: surface at 20 °C, sky at -10 °C, air at 10 °C
         // Expected: ~50–150 W/m² net emission (negative flux)
         let surf = ExteriorSurface {
             area_m2: 1.0,
             emissivity: 0.90,
             sky_view_factor: sky_view_factor(0.0), // horizontal
+            beta: beta_factor(0.0),
         };
         let q_m2 = exterior_longwave_w_m2(&surf, -10.0, 10.0, 20.0);
         assert!(
@@ -428,6 +469,7 @@ mod tests {
             area_m2: 10.0,
             emissivity: 0.90,
             sky_view_factor: 0.5,
+            beta: 0.5_f64.sqrt(),
         };
         let double = ExteriorSurface {
             area_m2: 20.0,
@@ -447,6 +489,7 @@ mod tests {
             area_m2: 10.0,
             emissivity: 0.45,
             sky_view_factor: 0.5,
+            beta: 0.5_f64.sqrt(),
         };
         let double_e = ExteriorSurface {
             emissivity: 0.90,
@@ -466,11 +509,12 @@ mod tests {
             area_m2: 10.0,
             emissivity: 0.90,
             sky_view_factor: sky_view_factor(0.0),
+            beta: beta_factor(0.0),
         };
         let t_sky = 0.0;
-        let t_gnd = 5.0;
-        let q_warm = exterior_longwave_w(&surf, t_sky, t_gnd, 40.0);
-        let q_cool = exterior_longwave_w(&surf, t_sky, t_gnd, 20.0);
+        let t_air = 5.0;
+        let q_warm = exterior_longwave_w(&surf, t_sky, t_air, 40.0);
+        let q_cool = exterior_longwave_w(&surf, t_sky, t_air, 20.0);
         // Warm surface emits more → more negative flux (larger magnitude loss)
         assert!(
             q_warm < q_cool,
@@ -485,6 +529,7 @@ mod tests {
             area_m2: 1.0,
             emissivity: 0.90,
             sky_view_factor: 1.0,
+            beta: 1.0,
         };
         let q = exterior_longwave_w(&surf, -40.0, 0.0, 20.0);
         // Should be a sizeable cooling flux
@@ -505,31 +550,35 @@ mod tests {
             area_m2: 1.0,
             emissivity: 0.90,
             sky_view_factor: sky_view_factor(0.0),
+            beta: beta_factor(0.0),
         };
         let wall = ExteriorSurface {
             area_m2: 1.0,
             emissivity: 0.90,
             sky_view_factor: sky_view_factor(90.0),
+            beta: beta_factor(90.0),
         };
-        let q_roof = exterior_longwave_w(&roof, t_sky, t_gnd, t_surf);
-        let q_wall = exterior_longwave_w(&wall, t_sky, t_gnd, t_surf);
+        let t_air = t_gnd; // ground = air per E+ standard
+        let q_roof = exterior_longwave_w(&roof, t_sky, t_air, t_surf);
+        let q_wall = exterior_longwave_w(&wall, t_sky, t_air, t_surf);
         // Roof sees a colder effective sky → more net emission (more negative)
         assert!(
             q_roof < q_wall,
-            "roof (SVF=1) should lose more heat than wall (SVF≈0.35): roof={q_roof:.1}, wall={q_wall:.1}"
+            "roof (SVF=1) should lose more heat than wall (SVF=0.5): roof={q_roof:.1}, wall={q_wall:.1}"
         );
     }
 
     #[test]
     fn exterior_lw_clear_night_regression() {
         // Regression: known input → known output
-        // Surface: 1 m², ε=0.90, horizontal (SVF=1.0)
-        // T_surf=20°C, T_sky=-10°C, T_gnd=10°C
-        // Q = 0.90 × 5.670374419e-8 × 1.0 × [1.0×(263.15⁴ - 293.15⁴) + 0.0×(283.15⁴ - 293.15⁴)]
+        // Surface: 1 m², ε=0.90, horizontal (SVF=1.0, β=1.0, F_gnd=0)
+        // T_surf=20°C, T_sky=-10°C, T_air=10°C
+        // With β=1 and F_gnd=0: Q = 0.90 × σ × (T_sky⁴ − T_surf⁴)
         let surf = ExteriorSurface {
             area_m2: 1.0,
             emissivity: 0.90,
             sky_view_factor: 1.0,
+            beta: 1.0,
         };
         let q = exterior_longwave_w(&surf, -10.0, 10.0, 20.0);
         let t_sky_k = 263.15_f64;
@@ -809,7 +858,7 @@ mod tests {
     #[test]
     fn sky_view_factor_downward_floor_is_zero() {
         // A downward-facing floor (tilt = 180°) faces away from the sky entirely.
-        // ((1 + cos 180°) / 2)^1.5 = ((1 − 1) / 2)^1.5 = 0.0
+        // 0.5 × (1 + cos(180°)) = 0.5 × (1 − 1) = 0.0
         let f = sky_view_factor(180.0);
         assert!(
             f.abs() < 1e-9,
@@ -831,5 +880,151 @@ mod tests {
                 window[1]
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // β factor
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_beta_factor_horizontal() {
+        // Horizontal roof: φ=0° → F_sky=1 → β=√1=1
+        let b = beta_factor(0.0);
+        assert!(
+            (b - 1.0).abs() < 1e-9,
+            "horizontal roof β should be 1.0, got {b}"
+        );
+    }
+
+    #[test]
+    fn test_beta_factor_vertical() {
+        // Vertical wall: φ=90° → F_sky=0.5 → β=√0.5≈0.7071
+        let b = beta_factor(90.0);
+        let expected = 0.5_f64.sqrt();
+        assert!(
+            (b - expected).abs() < 1e-9,
+            "vertical wall β should be √0.5≈{expected:.6}, got {b}"
+        );
+    }
+
+    #[test]
+    fn test_beta_factor_obtuse_tilt() {
+        // Overhang/ceiling at 135°: F_sky=0.5*(1+cos135°)=0.5*(1-√2/2)≈0.1464 → β≈0.3827
+        let b = beta_factor(135.0);
+        let f_sky = 0.5 * (1.0 + 135.0_f64.to_radians().cos());
+        let expected = f_sky.sqrt();
+        assert!(
+            (b - expected).abs() < 1e-9,
+            "135° tilt β should be ≈{expected:.4}, got {b}"
+        );
+        assert!(b > 0.35 && b < 0.42, "135° β should be ≈0.38, got {b}");
+    }
+
+    #[test]
+    fn test_beta_factor_inverted() {
+        // Fully inverted (facing down, φ=180°): F_sky=0 → β=0
+        let b = beta_factor(180.0);
+        assert!(b.abs() < 1e-9, "inverted surface β should be 0.0, got {b}");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 4-component model
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_view_factors_sum_to_one() {
+        // The 4-component formula's outgoing-emission coefficient is:
+        //   F_gnd + (1−β)·F_sky + β·F_sky = F_gnd + F_sky = 1.0
+        // This ensures no energy leakage regardless of β.
+        for tilt in [
+            0.0_f64, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 120.0, 135.0, 180.0,
+        ] {
+            let f_sky = sky_view_factor(tilt);
+            let f_gnd = 1.0 - f_sky;
+            let beta = beta_factor(tilt);
+            let sum = f_gnd + (1.0 - beta) * f_sky + beta * f_sky;
+            assert!(
+                (sum - 1.0).abs() < 1e-12,
+                "4-component coefficients must sum to 1 at tilt={tilt}°: got {sum:.15}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_4component_horizontal_degenerates() {
+        // Horizontal roof: F_gnd=0, F_sky=1, β=1 → all exchange with sky only.
+        // Q = ε·σ·A·(T_sky⁴ − T_surf⁴) regardless of T_air.
+        let t_sky = -10.0_f64;
+        let t_air = 15.0_f64;
+        let t_surf = 20.0_f64;
+        let surf = ExteriorSurface {
+            area_m2: 1.0,
+            emissivity: 0.90,
+            sky_view_factor: 1.0,
+            beta: 1.0,
+        };
+        let q = exterior_longwave_w(&surf, t_sky, t_air, t_surf);
+        // With β=1, F_gnd=0: collapses to pure sky-only model
+        let t_sky_k = (t_sky + CELSIUS_TO_KELVIN).powi(4);
+        let t_surf_k = (t_surf + CELSIUS_TO_KELVIN).powi(4);
+        let expected = 0.90 * STEFAN_BOLTZMANN * (t_sky_k - t_surf_k);
+        assert!(
+            (q - expected).abs() < 1e-6,
+            "horizontal 4-component should match pure sky model: got {q:.6}, expected {expected:.6}"
+        );
+    }
+
+    #[test]
+    fn test_4component_matches_energyplus_reference() {
+        // Vertical wall: φ=90°, F_sky=0.5, F_gnd=0.5, β=√0.5
+        // T_air=10°C, T_sky=-5°C, T_surf=15°C, ε=0.90, A=1 m²
+        let t_air = 10.0_f64;
+        let t_sky = -5.0_f64;
+        let t_surf = 15.0_f64;
+        let f_sky = 0.5_f64;
+        let f_gnd = 0.5_f64;
+        let beta = f_sky.sqrt();
+        let surf = ExteriorSurface {
+            area_m2: 1.0,
+            emissivity: 0.90,
+            sky_view_factor: f_sky,
+            beta,
+        };
+        let q = exterior_longwave_w(&surf, t_sky, t_air, t_surf);
+
+        let e = 0.90 * STEFAN_BOLTZMANN;
+        let t_air_k4 = (t_air + CELSIUS_TO_KELVIN).powi(4);
+        let t_sky_k4 = (t_sky + CELSIUS_TO_KELVIN).powi(4);
+        let t_surf_k4 = (t_surf + CELSIUS_TO_KELVIN).powi(4);
+        let expected = e
+            * ((f_gnd + (1.0 - beta) * f_sky) * (t_air_k4 - t_surf_k4)
+                + beta * f_sky * (t_sky_k4 - t_surf_k4));
+        assert!(
+            (q - expected).abs() < 1e-9,
+            "4-component formula mismatch: got {q:.9}, expected {expected:.9}"
+        );
+    }
+
+    #[test]
+    fn test_nan_sky_falls_back_to_air_temp() {
+        // When sky temp is NaN, all terms collapse to ε·σ·A·(T_air⁴ − T_surf⁴).
+        let t_air = 10.0_f64;
+        let t_surf = 20.0_f64;
+        let surf = ExteriorSurface {
+            area_m2: 1.0,
+            emissivity: 0.90,
+            sky_view_factor: sky_view_factor(30.0),
+            beta: beta_factor(30.0),
+        };
+        let q_nan = exterior_longwave_w(&surf, f64::NAN, t_air, t_surf);
+        // NaN sky → all sky terms use T_air; ground also uses T_air → full collapse
+        let e = surf.emissivity * STEFAN_BOLTZMANN * surf.area_m2;
+        let t_air_k4 = (t_air + CELSIUS_TO_KELVIN).powi(4);
+        let t_surf_k4 = (t_surf + CELSIUS_TO_KELVIN).powi(4);
+        let expected = e * (t_air_k4 - t_surf_k4);
+        assert!(
+            (q_nan - expected).abs() < 1e-6,
+            "NaN sky should collapse to air-temp model: got {q_nan:.6}, expected {expected:.6}"
+        );
     }
 }

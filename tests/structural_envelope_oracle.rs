@@ -98,11 +98,15 @@ mod tests {
             .expect("attic zone must exist");
 
         // Zone volumes
-        let cond_vol = conditioned.volume_m3.expect("conditioned volume must be set");
+        let cond_vol = conditioned
+            .volume_m3
+            .expect("conditioned volume must be set");
         assert_within_pct(cond_vol, OCHRE_INDOOR_VOLUME_M3, 1.0, "conditioned volume");
 
         // Attic volume: computed from gable wall area + roof pitch (triangular prism).
-        let attic_vol = attic.volume_m3.expect("attic volume must be computed from gable geometry");
+        let attic_vol = attic
+            .volume_m3
+            .expect("attic volume must be computed from gable geometry");
         assert_within_pct(attic_vol, OCHRE_ATTIC_VOLUME_M3, 2.0, "attic volume");
 
         // Floor area
@@ -141,12 +145,20 @@ mod tests {
             .filter(|b| b.boundary_type == BoundaryType::Window)
             .collect();
 
-        assert_eq!(walls.len(), 6, "expected 6 walls (4 exterior + 2 attic gable)");
+        assert_eq!(
+            walls.len(),
+            6,
+            "expected 6 walls (4 exterior + 2 attic gable)"
+        );
         assert_eq!(roofs.len(), 2, "expected 2 roof surfaces");
         assert_eq!(floors.len(), 1, "expected 1 floor (attic floor / ceiling)");
         assert_eq!(slabs.len(), 1, "expected 1 slab");
         assert_eq!(doors.len(), 1, "expected 1 door");
-        assert_eq!(windows.len(), WINDOW_COUNT, "expected {WINDOW_COUNT} windows");
+        assert_eq!(
+            windows.len(),
+            WINDOW_COUNT,
+            "expected {WINDOW_COUNT} windows"
+        );
 
         // Total areas by type
         let wall_area: f64 = walls.iter().map(|b| b.area_m2).sum();
@@ -179,7 +191,10 @@ mod tests {
             .collect();
         for w in &living_walls {
             let abs = w.solar_absorptance.unwrap_or_else(|| {
-                panic!("wall {} must have solar_absorptance parsed from HPXML", w.id)
+                panic!(
+                    "wall {} must have solar_absorptance parsed from HPXML",
+                    w.id
+                )
             });
             assert!(
                 (abs - WALL_ABSORPTANCE).abs() < 0.01,
@@ -189,7 +204,10 @@ mod tests {
         }
         for r in &roofs {
             let abs = r.solar_absorptance.unwrap_or_else(|| {
-                panic!("roof {} must have solar_absorptance parsed from HPXML", r.id)
+                panic!(
+                    "roof {} must have solar_absorptance parsed from HPXML",
+                    r.id
+                )
             });
             assert!(
                 (abs - ROOF_ABSORPTANCE).abs() < 0.01,
@@ -200,10 +218,15 @@ mod tests {
 
         // Window properties — must be present and match HPXML values
         for win in &building.windows {
-            let u = win.u_factor_w_m2_k.unwrap_or_else(|| {
-                panic!("window {} must have u_factor_w_m2_k parsed", win.id)
-            });
-            assert_within_pct(u, WINDOW_U_FACTOR_SI, 2.0, &format!("window {} U-factor", win.id));
+            let u = win
+                .u_factor_w_m2_k
+                .unwrap_or_else(|| panic!("window {} must have u_factor_w_m2_k parsed", win.id));
+            assert_within_pct(
+                u,
+                WINDOW_U_FACTOR_SI,
+                2.0,
+                &format!("window {} U-factor", win.id),
+            );
 
             let shgc = win
                 .shgc
@@ -228,10 +251,18 @@ mod tests {
 
         let n_zones = building.zones.len();
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
-        let boundary_inputs = building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
+        let boundary_inputs =
+            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
 
-        assert_eq!(zone_inputs.len(), n_zones, "zone_inputs length must match n_zones");
-        assert!(!boundary_inputs.is_empty(), "boundary_inputs must not be empty");
+        assert_eq!(
+            zone_inputs.len(),
+            n_zones,
+            "zone_inputs length must match n_zones"
+        );
+        assert!(
+            !boundary_inputs.is_empty(),
+            "boundary_inputs must not be empty"
+        );
 
         // All interior_zone_idx must be in range
         for (i, bi) in boundary_inputs.iter().enumerate() {
@@ -317,7 +348,8 @@ mod tests {
 
         let n_zones = building.zones.len();
         let zone_inputs = building_to_zone_inputs(&building, n_zones);
-        let boundary_inputs = building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
+        let boundary_inputs =
+            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
         let zone_caps = derive_zone_capacitances(&zone_inputs);
 
         assert_eq!(zone_caps.len(), n_zones, "zone capacitances length");

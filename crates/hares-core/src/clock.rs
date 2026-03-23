@@ -78,16 +78,14 @@ mod tests {
 
     #[test]
     fn thirty_days_at_sixty_seconds_yields_43200_steps() {
-        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .expect("parse");
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("parse");
         let clock = SimClock::new(start, Duration::seconds(60), Duration::days(30));
         assert_eq!(clock.total_steps(), 43_200);
     }
 
     #[test]
     fn current_time_at_step_zero_equals_start_time() {
-        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .expect("parse");
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("parse");
         let clock = SimClock::new(start, Duration::minutes(5), Duration::hours(1));
         assert_eq!(clock.current_step(), 0);
         assert_eq!(clock.current_time(), start);
@@ -95,8 +93,7 @@ mod tests {
 
     #[test]
     fn current_time_after_exhaustion_is_one_step_past_last_simulated_time() {
-        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .expect("parse");
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("parse");
         let mut clock = SimClock::new(start, Duration::minutes(15), Duration::hours(1));
         let produced: Vec<u64> = clock.by_ref().collect();
         assert_eq!(produced, vec![0, 1, 2, 3]);
@@ -106,8 +103,7 @@ mod tests {
 
     #[test]
     fn supports_arbitrary_duration_lengths() {
-        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .expect("parse");
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").expect("parse");
         let clock = SimClock::new(start, Duration::minutes(30), Duration::weeks(2));
         assert_eq!(clock.total_steps(), 672);
     }

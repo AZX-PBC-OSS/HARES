@@ -267,6 +267,7 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         longitude,
         timezone_offset_h,
         elevation_m,
+        source_step_secs: 3600,
     })
 }
 
@@ -356,7 +357,7 @@ const DOE2_MID_MONTH_DAYS: [f64; 12] = [
     15.0, 46.0, 74.0, 95.0, 135.0, 166.0, 196.0, 227.0, 258.0, 288.0, 319.0, 349.0,
 ];
 
-fn monthly_day_counts(is_leap_year: bool) -> [usize; 12] {
+pub(crate) fn monthly_day_counts(is_leap_year: bool) -> [usize; 12] {
     if is_leap_year {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
@@ -364,7 +365,7 @@ fn monthly_day_counts(is_leap_year: bool) -> [usize; 12] {
     }
 }
 
-fn monthly_average_dry_bulb(dry_bulb_c: &[f64], is_leap_year: bool) -> Option<[f64; 12]> {
+pub(crate) fn monthly_average_dry_bulb(dry_bulb_c: &[f64], is_leap_year: bool) -> Option<[f64; 12]> {
     let day_counts = monthly_day_counts(is_leap_year);
     let expected_hours = day_counts.iter().sum::<usize>() * 24;
     if dry_bulb_c.len() != expected_hours {
@@ -394,7 +395,7 @@ fn monthly_average_dry_bulb(dry_bulb_c: &[f64], is_leap_year: bool) -> Option<[f
 /// - `gm`, `z` from DOE-2 GTEMP damping terms (`beta`, `x`, `y`)
 ///
 /// Returns a 12-element array of mid-month ground temperatures [°C].
-fn doe2_ground_temp_monthly(dry_bulb_c: &[f64], is_leap_year: bool) -> [f64; 12] {
+pub(crate) fn doe2_ground_temp_monthly(dry_bulb_c: &[f64], is_leap_year: bool) -> [f64; 12] {
     if dry_bulb_c.is_empty() {
         return [DEFAULT_GROUND_TEMP_C; 12];
     }
@@ -451,14 +452,14 @@ fn compute_sky_temp_c(horizontal_infrared_w_m2: f64, dry_bulb_c: f64, dew_point_
     }
 }
 
-fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
+pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
     let dry_bulb_k = dry_bulb_c + KELVIN_OFFSET_C;
     let dew_point_k = dew_point_c + KELVIN_OFFSET_C;
     let sky_k = dry_bulb_k * (0.787 + 0.764 * (dew_point_k / KELVIN_OFFSET_C).ln()).powf(0.25);
     sky_k - KELVIN_OFFSET_C
 }
 
-fn interpolate_ground_temp_c(
+pub(crate) fn interpolate_ground_temp_c(
     monthly_ground_temps: &[f64; 12],
     month: u32,
     day: u32,
@@ -519,7 +520,7 @@ fn linear_interp(x0: f64, x1: f64, y0: f64, y1: f64, x: f64) -> f64 {
     y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 }
 
-fn day_of_year(month: u32, day: u32, is_leap_year: bool) -> Result<u32, WeatherError> {
+pub(crate) fn day_of_year(month: u32, day: u32, is_leap_year: bool) -> Result<u32, WeatherError> {
     let reference_year = if is_leap_year { 2020 } else { 2021 };
     let date = NaiveDate::from_ymd_opt(reference_year, month, day).ok_or_else(|| {
         WeatherError::Validation(format!(

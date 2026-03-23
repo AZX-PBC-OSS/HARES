@@ -24,10 +24,8 @@ fn approx_eq(left: f64, right: f64) {
 /// Build a `PortSlots` wired for the given zones plus an electrical and fuel
 /// singleton — mirrors what `Dwelling::from_preparsed` does for each zone.
 fn slots_for_zones(zones: &[ZoneId]) -> PortSlots {
-    let mut decls: Vec<PortDeclaration> = zones
-        .iter()
-        .map(|&z| PortDeclaration::thermal(z))
-        .collect();
+    let mut decls: Vec<PortDeclaration> =
+        zones.iter().map(|&z| PortDeclaration::thermal(z)).collect();
     decls.push(PortDeclaration::electrical());
     decls.push(PortDeclaration::fuel());
     PortSlots::from_declarations(&decls)
@@ -74,7 +72,7 @@ fn electrical_accumulates_across_equipment() {
 #[test]
 fn generation_subtracts_from_net() {
     let mut ports = PortSlots::default();
-    ports.accumulate(&electrical(3.0)).unwrap();  // 3 kW load
+    ports.accumulate(&electrical(3.0)).unwrap(); // 3 kW load
     ports.accumulate(&electrical(-5.0)).unwrap(); // 5 kW PV
     approx_eq(ports.electrical.net_active_kw(), -2.0);
     approx_eq(ports.electrical.load_power_kw, 3.0);
@@ -174,8 +172,8 @@ fn fuel_accumulates_by_type() {
     let mut ports = slots_for_zones(&[ZoneId(1)]);
 
     // Two gas consumers (furnace + water heater)
-    ports.accumulate(&gas(8_000.0)).unwrap();  // furnace: ~8 kW
-    ports.accumulate(&gas(4_000.0)).unwrap();  // water heater: ~4 kW
+    ports.accumulate(&gas(8_000.0)).unwrap(); // furnace: ~8 kW
+    ports.accumulate(&gas(4_000.0)).unwrap(); // water heater: ~4 kW
 
     approx_eq(ports.fuel.get(FuelType::Gas), 12_000.0);
     // Other fuel types unaffected
@@ -264,7 +262,11 @@ fn from_declarations_deduplicates_zones() {
         PortDeclaration::thermal(ZoneId(2)), // duplicate
     ];
     let ports = PortSlots::from_declarations(&decls);
-    assert_eq!(ports.thermal.len(), 2, "duplicate zone declarations must be collapsed to one accumulator each");
+    assert_eq!(
+        ports.thermal.len(),
+        2,
+        "duplicate zone declarations must be collapsed to one accumulator each"
+    );
     assert!(ports.thermal.iter().any(|t| t.zone == ZoneId(1)));
     assert!(ports.thermal.iter().any(|t| t.zone == ZoneId(2)));
 }
@@ -470,7 +472,11 @@ fn full_timestep_scenario_all_port_types() {
     let main = ports.thermal.iter().find(|t| t.zone == zone_main).unwrap();
     approx_eq(main.sensible_gain_w, 6_000.0);
     approx_eq(main.latent_gain_w, 0.0);
-    let garage = ports.thermal.iter().find(|t| t.zone == zone_garage).unwrap();
+    let garage = ports
+        .thermal
+        .iter()
+        .find(|t| t.zone == zone_garage)
+        .unwrap();
     approx_eq(garage.sensible_gain_w, 0.0);
 
     // Verify fuel

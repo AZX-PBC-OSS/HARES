@@ -37,6 +37,7 @@ dev = [
     "pytest>=8",
     "maturin>=1.7",
     "ruff>=0.8",
+    "psychrolib>=2.5.0",
 ]
 
 [tool.uv]

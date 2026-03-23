@@ -162,24 +162,56 @@ mod tests {
             eprintln!("\n  === OCHRE reference (kWh) ===");
             let ochre_ref: &[(&str, f64, &[&str])] = &[
                 ("Total Electric Power (kW)", 1.3395, &[]),
-                ("HVAC Heating Electric Power (kW)", 0.9113, &[
-                    "ASHP Heater Electric Power (kW)",
-                    "MSHP Heater Electric Power (kW)",
-                    "Gas Furnace Electric Power (kW)",
-                    "Electric Furnace Electric Power (kW)",
-                ]),
-                ("HVAC Cooling Electric Power (kW)", 0.0500, &[
-                    "ASHP Cooler Electric Power (kW)",
-                    "MSHP Cooler Electric Power (kW)",
-                    "Air Conditioner Electric Power (kW)",
-                    "Room Air Conditioner Electric Power (kW)",
-                ]),
-                ("Indoor Lighting Electric Power (kW)", 0.0879, &["Indoor Lighting Electric Power (kW)"]),
-                ("Exterior Lighting Electric Power (kW)", 0.0064, &["Exterior Lighting Electric Power (kW)"]),
-                ("MELs Electric Power (kW)", 0.1340, &["MELs Electric Power (kW)"]),
-                ("TV Electric Power (kW)", 0.0761, &["TV Electric Power (kW)"]),
-                ("Refrigerator Electric Power (kW)", 0.0540, &["Refrigerator Electric Power (kW)"]),
-                ("Ventilation Fan Electric Power (kW)", 0.0199, &["Ventilation Fan Electric Power (kW)"]),
+                (
+                    "HVAC Heating Electric Power (kW)",
+                    0.9113,
+                    &[
+                        "ASHP Heater Electric Power (kW)",
+                        "MSHP Heater Electric Power (kW)",
+                        "Gas Furnace Electric Power (kW)",
+                        "Electric Furnace Electric Power (kW)",
+                    ],
+                ),
+                (
+                    "HVAC Cooling Electric Power (kW)",
+                    0.0500,
+                    &[
+                        "ASHP Cooler Electric Power (kW)",
+                        "MSHP Cooler Electric Power (kW)",
+                        "Air Conditioner Electric Power (kW)",
+                        "Room Air Conditioner Electric Power (kW)",
+                    ],
+                ),
+                (
+                    "Indoor Lighting Electric Power (kW)",
+                    0.0879,
+                    &["Indoor Lighting Electric Power (kW)"],
+                ),
+                (
+                    "Exterior Lighting Electric Power (kW)",
+                    0.0064,
+                    &["Exterior Lighting Electric Power (kW)"],
+                ),
+                (
+                    "MELs Electric Power (kW)",
+                    0.1340,
+                    &["MELs Electric Power (kW)"],
+                ),
+                (
+                    "TV Electric Power (kW)",
+                    0.0761,
+                    &["TV Electric Power (kW)"],
+                ),
+                (
+                    "Refrigerator Electric Power (kW)",
+                    0.0540,
+                    &["Refrigerator Electric Power (kW)"],
+                ),
+                (
+                    "Ventilation Fan Electric Power (kW)",
+                    0.0199,
+                    &["Ventilation Fan Electric Power (kW)"],
+                ),
             ];
             for (ochre_name, ochre_kwh, aliases) in ochre_ref {
                 // Try OCHRE name first, then each alias; sum all matches
@@ -187,10 +219,7 @@ mod tests {
                 let hares_kwh = if let Some(&v) = breakdown.get(*ochre_name) {
                     v
                 } else {
-                    let sum: f64 = aliases
-                        .iter()
-                        .filter_map(|a| breakdown.get(*a))
-                        .sum();
+                    let sum: f64 = aliases.iter().filter_map(|a| breakdown.get(*a)).sum();
                     if aliases.iter().any(|a| breakdown.contains_key(*a)) {
                         sum
                     } else {
@@ -232,7 +261,9 @@ mod tests {
             let heater_mode_idx = find_col("ASHP Heater Mode (-)");
             let heater_setpoint_idx = find_col("ASHP Heater Setpoint (C)");
             eprintln!("\n  === Heater debug (first 10 + last 5 timesteps) ===");
-            eprintln!("    heater_kw_col={heater_kw_idx:?} zone_temp_col={zone_temp_idx:?} outdoor_col={outdoor_idx:?} mode_col={heater_mode_idx:?} setpoint_col={heater_setpoint_idx:?}");
+            eprintln!(
+                "    heater_kw_col={heater_kw_idx:?} zone_temp_col={zone_temp_idx:?} outdoor_col={outdoor_idx:?} mode_col={heater_mode_idx:?} setpoint_col={heater_setpoint_idx:?}"
+            );
             let data_lines: Vec<&str> = csv_lines.filter(|l| !l.trim().is_empty()).collect();
             let get = |line: &str, idx: Option<usize>| -> String {
                 idx.and_then(|i| line.split(',').nth(i))

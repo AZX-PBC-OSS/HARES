@@ -56,12 +56,18 @@ fn independent_precedes_thermal() {
 
 #[test]
 fn independent_precedes_envelope_resolution() {
-    assert_strictly_before(ExecutionStage::Independent, ExecutionStage::EnvelopeResolution);
+    assert_strictly_before(
+        ExecutionStage::Independent,
+        ExecutionStage::EnvelopeResolution,
+    );
 }
 
 #[test]
 fn electrical_precedes_envelope_resolution() {
-    assert_strictly_before(ExecutionStage::Electrical, ExecutionStage::EnvelopeResolution);
+    assert_strictly_before(
+        ExecutionStage::Electrical,
+        ExecutionStage::EnvelopeResolution,
+    );
 }
 
 #[test]

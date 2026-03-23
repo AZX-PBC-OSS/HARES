@@ -184,7 +184,10 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
         let equipment = match resolve_equipment(&building, &DefaultsStore::empty(), &json!({})) {
             Ok(specs) => specs,
             Err(err) => {
-                failures.push(format!("fixture={} equipment resolution failed: {err}", fixture_id));
+                failures.push(format!(
+                    "fixture={} equipment resolution failed: {err}",
+                    fixture_id
+                ));
                 continue;
             }
         };

@@ -109,11 +109,7 @@ mod tests {
             equipment_states: vec![],
             rng_state: [0; 32],
             envelope_state: vec![],
-            humidity_states: vec![
-                (ZoneId(1), 0.008),
-                (ZoneId(2), 0.012),
-                (ZoneId(3), 0.006),
-            ],
+            humidity_states: vec![(ZoneId(1), 0.008), (ZoneId(2), 0.012), (ZoneId(3), 0.006)],
             fluid_states: vec![],
             rng_stream: 0,
             rng_word_pos: 0,
@@ -153,8 +149,11 @@ mod tests {
 
         // Tamper: write a v1 checkpoint
         let bytes = std::fs::read(&path).unwrap();
-        let tampered = String::from_utf8(bytes).unwrap()
-            .replacen(&format!("\"format_version\":{CHECKPOINT_VERSION}"), "\"format_version\":1", 1);
+        let tampered = String::from_utf8(bytes).unwrap().replacen(
+            &format!("\"format_version\":{CHECKPOINT_VERSION}"),
+            "\"format_version\":1",
+            1,
+        );
         std::fs::write(&path, tampered).unwrap();
 
         let err = DwellingCheckpoint::load(&path).unwrap_err();

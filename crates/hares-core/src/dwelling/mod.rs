@@ -14,14 +14,11 @@ use std::time::Instant;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::{DispatchRequest, DispatchTarget, PriceSignal};
-use hares_envelope::{
-    ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver,
-};
+use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
 use hares_equipment::{Equipment, EquipmentRegistry};
 use hares_io::{
-    Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig,
-    StreamingRecorder, WeatherTimeSeries, build_schema, parse_epw, parse_hpxml,
-    parse_schedule_csv, resolve_equipment,
+    Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig, StreamingRecorder,
+    WeatherTimeSeries, build_schema, parse_epw, parse_hpxml, parse_schedule_csv, resolve_equipment,
 };
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
@@ -40,11 +37,15 @@ use crate::invariants::InvariantChecker;
 use crate::telemetry::DwellingTelemetry;
 use crate::{EnvironmentManager, SimClock, derive_dwelling_rng};
 
+#[cfg(feature = "observe")]
+use crate::observer::{EquipmentObservation, ObserverBuffer, PhaseSnapshots, StepSnapshot};
+#[cfg(feature = "observe")]
+use crate::observer_capture;
 use conversions::{
     apply_humidity_update_to_zones, apply_thermal_update_to_zones, build_output_column_index,
-    chrono_to_std_duration, default_output_path, duration_to_u32_secs,
-    equipment_config_from_spec, merged_equipment_config,
-    required_datetime, required_duration, required_path, validate_sim_config,
+    chrono_to_std_duration, default_output_path, duration_to_u32_secs, equipment_config_from_spec,
+    merged_equipment_config, required_datetime, required_duration, required_path,
+    validate_sim_config,
 };
 use solver_builder::{build_default_solvers, compute_weather_averages};
 use synthetic::{
@@ -53,10 +54,6 @@ use synthetic::{
 };
 #[cfg(feature = "profiling")]
 use synthetic::{current_process_hwm_kb, hot_path_alloc_counter};
-#[cfg(feature = "observe")]
-use crate::observer::{EquipmentObservation, ObserverBuffer, PhaseSnapshots, StepSnapshot};
-#[cfg(feature = "observe")]
-use crate::observer_capture;
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 
@@ -326,10 +323,9 @@ impl Dwelling {
         // Reinterpret the user's start time in the weather file's local timezone.
         // The naive wall-clock components (year, month, day, hour, minute, second)
         // are preserved and the offset is replaced with the EPW file's timezone.
-        let tz_offset = chrono::FixedOffset::east_opt(
-            (weather.meta.timezone_offset_h * 3600.0) as i32,
-        )
-        .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
+        let tz_offset =
+            chrono::FixedOffset::east_opt((weather.meta.timezone_offset_h * 3600.0) as i32)
+                .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC offset"));
         let local_start = config
             .sim_config
             .start_time
@@ -350,10 +346,10 @@ impl Dwelling {
 
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
-        let mut environment = EnvironmentManager::new(
-            weather, schedule, &building, time_res, local_start,
-        )
-        .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
+        let mut environment =
+            EnvironmentManager::new(weather, schedule, &building, time_res, local_start).map_err(
+                |err| HaresError::Io(format!("environment initialization failed: {err}")),
+            )?;
 
         let occupancy_column_idx = environment.occupancy_column_idx();
 
@@ -374,13 +370,28 @@ impl Dwelling {
             }
         };
 
-        let (thermal_solver, humidity_solver, electrical_solver, fluid_solver, zone_capacitances_j_k) =
-            build_default_solvers(&initial_env, &config.sim_config, &building, &defaults, &weather_avgs)?;
+        let (
+            thermal_solver,
+            humidity_solver,
+            electrical_solver,
+            fluid_solver,
+            zone_capacitances_j_k,
+        ) = build_default_solvers(
+            &initial_env,
+            &config.sim_config,
+            &building,
+            &defaults,
+            &weather_avgs,
+        )?;
 
         let empty_overrides = Value::Object(Map::new());
         let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
             .map_err(|e| HaresError::Io(e.to_string()))?;
-        hares_io::inject_schedule_into_specs(&mut equipment_specs, environment.schedule_mut(), Some(&defaults_dir));
+        hares_io::inject_schedule_into_specs(
+            &mut equipment_specs,
+            environment.schedule_mut(),
+            Some(&defaults_dir),
+        );
         let override_root = config
             .overrides
             .clone()
@@ -419,7 +430,6 @@ impl Dwelling {
                 }
             }
         }
-
 
         let mut declarations: Vec<PortDeclaration> = Vec::new();
         for eq in &equipment {
@@ -692,8 +702,7 @@ impl Dwelling {
     /// Snapshot current simulation state to an in-memory checkpoint struct.
     #[must_use]
     pub fn save_checkpoint(&self) -> DwellingCheckpoint {
-        let (envelope_state, thermal_last_u, lwr_t_prev_c) =
-            self.thermal_solver.snapshot_state();
+        let (envelope_state, thermal_last_u, lwr_t_prev_c) = self.thermal_solver.snapshot_state();
         let humidity_states: Vec<(ZoneId, f64)> = self
             .humidity_solver
             .humidity_ratios
@@ -880,7 +889,6 @@ impl Dwelling {
 
         let dt = chrono_to_std_duration(self.clock.time_res)?;
 
-
         // Step 2b: apply occupancy-driven internal heat gains.
         // OCHRE Envelope.py:904-908: 400 BTU/h total; sensible=66 W, latent=51 W.
         // Gains go to the primary (indoor) zone only per OCHRE's single-zone approach.
@@ -909,9 +917,7 @@ impl Dwelling {
                 continue;
             }
             #[cfg(feature = "observe")]
-            let pre_ports = pre_snapshot
-                .as_ref()
-                .map(observer_capture::capture_ports);
+            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
@@ -941,8 +947,10 @@ impl Dwelling {
 
         #[cfg(feature = "observe")]
         if observing {
-            obs_phases.post_nonthermal_equipment =
-                Some(observer_capture::capture_equipment_phase(nonthermal_obs, &self.ports));
+            obs_phases.post_nonthermal_equipment = Some(observer_capture::capture_equipment_phase(
+                nonthermal_obs,
+                &self.ports,
+            ));
         }
 
         // Step 3b: thermal stage equipment.
@@ -962,9 +970,7 @@ impl Dwelling {
                 continue;
             }
             #[cfg(feature = "observe")]
-            let pre_ports = pre_snapshot
-                .as_ref()
-                .map(observer_capture::capture_ports);
+            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
@@ -988,8 +994,10 @@ impl Dwelling {
 
         #[cfg(feature = "observe")]
         if observing {
-            obs_phases.post_thermal_equipment =
-                Some(observer_capture::capture_equipment_phase(thermal_obs, &self.ports));
+            obs_phases.post_thermal_equipment = Some(observer_capture::capture_equipment_phase(
+                thermal_obs,
+                &self.ports,
+            ));
         }
 
         #[cfg(feature = "profiling")]
@@ -1091,7 +1099,6 @@ impl Dwelling {
                 .max(current_process_hwm_kb());
         }
 
-
         self.check_invariants(&thermal_update, dt)?;
 
         let mut zone_temperatures_c: Vec<(ZoneId, f64)> = self
@@ -1168,10 +1175,7 @@ impl Dwelling {
             let gas_w = self.ports.fuel.get(hares_types::FuelType::Gas);
             row[idx] = gas_w / GAS_THERMS_PER_HOUR_TO_W;
         }
-        if let Some(&idx) = self
-            .output_column_index
-            .get("Total Reactive Power (kVAR)")
-        {
+        if let Some(&idx) = self.output_column_index.get("Total Reactive Power (kVAR)") {
             row[idx] = self.electrical_solver.net_reactive_kvar();
         }
 
@@ -1205,9 +1209,9 @@ impl Dwelling {
         }
 
         // Zone temperature columns.
-        // ZoneId(1) is the primary conditioned zone ("Indoor" in OCHRE convention).
+        let indoor_zone = self.thermal_solver.config().indoor_zone_id;
         for (zone_id, temp_c) in &step.zone_temperatures_c {
-            let zone_label = if zone_id.0 == 1 { "Indoor" } else { &format!("Zone_{}", zone_id.0) };
+            let zone_label = zone_display_name(*zone_id, indoor_zone);
             let col_key = format!("Temperature - {zone_label} (C)");
             if let Some(&idx) = self.output_column_index.get(&col_key) {
                 row[idx] = *temp_c;
@@ -1225,9 +1229,18 @@ impl Dwelling {
         let envelope_cols: &[(&str, f64)] = &[
             ("Window Transmitted Solar Gain (W)", gains.window_solar_w),
             ("Infiltration Heat Gain - Indoor (W)", gains.infiltration_w),
-            ("Forced Ventilation Heat Gain - Indoor (W)", gains.ventilation_w),
-            ("Natural Ventilation Heat Gain - Indoor (W)", gains.natural_ventilation_w),
-            ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w + gains.jacket_loss_w),
+            (
+                "Forced Ventilation Heat Gain - Indoor (W)",
+                gains.ventilation_w,
+            ),
+            (
+                "Natural Ventilation Heat Gain - Indoor (W)",
+                gains.natural_ventilation_w,
+            ),
+            (
+                "Internal Heat Gain - Indoor (W)",
+                gains.internal_gain_w + gains.jacket_loss_w,
+            ),
             ("Radiation Heat Gain - Indoor (W)", gains.interior_lwr_w),
         ];
         for &(col_name, value) in envelope_cols {
@@ -1238,10 +1251,13 @@ impl Dwelling {
 
         // Per-zone infiltration columns (e.g., attic zone).
         for &(zone, value) in &gains.infiltration_by_zone {
-            if zone == ZoneId(1) {
+            if zone == indoor_zone {
                 continue; // already written as "Infiltration Heat Gain - Indoor (W)"
             }
-            let col_name = format!("Infiltration Heat Gain - {} (W)", zone_display_name(zone));
+            let col_name = format!(
+                "Infiltration Heat Gain - {} (W)",
+                zone_display_name(zone, indoor_zone)
+            );
             if let Some(&idx) = self.output_column_index.get(col_name.as_str()) {
                 row[idx] = value;
             }
@@ -1249,7 +1265,10 @@ impl Dwelling {
 
         // Per-zone interior LWR columns.
         for &(zone, value) in &gains.interior_lwr_by_zone {
-            let col_name = format!("Radiation Heat Gain - {} (W)", zone_display_name(zone));
+            let col_name = format!(
+                "Radiation Heat Gain - {} (W)",
+                zone_display_name(zone, indoor_zone)
+            );
             if let Some(&idx) = self.output_column_index.get(col_name.as_str()) {
                 row[idx] = value;
             }
@@ -1265,11 +1284,7 @@ impl Dwelling {
     /// Active when `cfg(any(debug_assertions, feature = "check_invariants"))`.
     /// Returns `Err(HaresError::InvariantViolation { .. })` on the first violation;
     /// the engine then quarantines this dwelling rather than propagating a panic.
-    fn check_invariants(
-        &self,
-        thermal_update: &DomainUpdate,
-        dt: StdDuration,
-    ) -> Result<()> {
+    fn check_invariants(&self, thermal_update: &DomainUpdate, dt: StdDuration) -> Result<()> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             let checker = InvariantChecker::new();
@@ -1331,12 +1346,15 @@ impl Dwelling {
 }
 
 /// Maps a ZoneId to its display name for output column labels.
-/// ZoneId(1) = "Indoor", ZoneId(2) = "Attic", others = "Zone_{id}".
-fn zone_display_name(zone: ZoneId) -> String {
-    match zone.0 {
-        1 => "Indoor".to_string(),
-        2 => "Attic".to_string(),
-        n => format!("Zone_{n}"),
+/// The configured indoor zone = "Indoor", ZoneId(2) = "Attic", others = "Zone_{id}".
+fn zone_display_name(zone: ZoneId, indoor_zone: ZoneId) -> String {
+    if zone == indoor_zone {
+        "Indoor".to_string()
+    } else {
+        match zone.0 {
+            2 => "Attic".to_string(),
+            n => format!("Zone_{n}"),
+        }
     }
 }
 

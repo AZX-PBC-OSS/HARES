@@ -3,14 +3,12 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, FixedOffset};
-use hares_io::{
-    Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries,
-};
+use hares_io::{Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::conversions::duration_to_u32_secs;
 use super::Result;
+use super::conversions::duration_to_u32_secs;
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SyntheticTomlConfig {
@@ -271,6 +269,7 @@ pub(crate) fn build_synthetic_weather(config: &SyntheticTomlConfig) -> WeatherTi
         longitude: -105.0,
         timezone_offset_h: 0.0,
         elevation_m: 0.0,
+        source_step_secs: 3600,
     };
     WeatherTimeSeries {
         meta,

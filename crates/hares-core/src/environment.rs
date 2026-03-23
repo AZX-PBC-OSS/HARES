@@ -106,8 +106,7 @@ impl EnvironmentManager {
             Hemisphere::Northern
         };
         let surfaces = build_surface_geometry(building);
-        let init_offset =
-            compute_annual_offset_unshifted(&weather.meta, start_time, step_secs);
+        let init_offset = compute_annual_offset_unshifted(&weather.meta, start_time, step_secs);
         let initial_outdoor_temp_c = weather
             .dry_bulb_c
             .get(init_offset)
@@ -208,11 +207,7 @@ impl EnvironmentManager {
         // solar_position() converts to UTC internally — it needs true UTC for
         // solar geometry. We pass the local-time clock value.
         let now = clock.current_time();
-        let pos = solar_position(
-            self.weather_meta.latitude,
-            self.weather_meta.longitude,
-            now,
-        );
+        let pos = solar_position(self.weather_meta.latitude, self.weather_meta.longitude, now);
         let ghi = self.weather.get(WeatherField::GhiWM2, weather_idx);
         let dni = self.weather.get(WeatherField::DniWM2, weather_idx);
         let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
@@ -527,6 +522,7 @@ mod tests {
                 longitude: 0.0,
                 timezone_offset_h: 0.0,
                 elevation_m: 1000.0,
+                source_step_secs: 3600,
             },
             dry_bulb_c: vec![10.0, 20.0],
             dew_point_c: vec![2.0, 3.0],
@@ -652,8 +648,7 @@ mod tests {
     }
 
     fn clock() -> SimClock {
-        let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00")
-            .expect("parse");
+        let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00").expect("parse");
         SimClock::new(start, Duration::seconds(60), Duration::hours(2))
     }
 
@@ -676,7 +671,9 @@ mod tests {
     }
 
     #[test]
-    fn weather_step_59_matches_replicated_first_hour() {
+    fn weather_step_59_uses_pchip_interpolation() {
+        // With 2-element [10.0, 20.0] input and PCHIP (linear for 2-pt),
+        // step 59 of 60 sub-hour slots ≈ 10.0 + (59/60)*10.0 ≈ 19.833.
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
@@ -691,7 +688,13 @@ mod tests {
             let _ = sim_clock.next();
         }
         let env = manager.update(&sim_clock, &[]);
-        assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
+        // PCHIP linearly interpolates between 10.0 and 20.0 for 2-element input.
+        let expected = 10.0 + (59.0 / 60.0) * 10.0;
+        assert!(
+            (env.weather.outdoor_temp_c - expected).abs() < 0.1,
+            "expected ~{expected}, got {}",
+            env.weather.outdoor_temp_c
+        );
     }
 
     #[test]
@@ -739,8 +742,7 @@ mod tests {
         )
         .expect("manager");
 
-        let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00")
-            .expect("parse");
+        let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00").expect("parse");
         let mut clock = SimClock::new(start, Duration::seconds(60), Duration::hours(3));
 
         for _ in 0..120 {
@@ -989,7 +991,9 @@ mod tests {
     #[test]
     fn annual_offset_leap_year_dec_31() {
         let meta = weather_series().meta;
-        let start = utc_offset().with_ymd_and_hms(2024, 12, 31, 23, 0, 0).unwrap();
+        let start = utc_offset()
+            .with_ymd_and_hms(2024, 12, 31, 23, 0, 0)
+            .unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 3600), 8782);
     }
 
@@ -998,7 +1002,9 @@ mod tests {
     #[test]
     fn annual_offset_non_leap_year_dec_31() {
         let meta = weather_series().meta;
-        let start = utc_offset().with_ymd_and_hms(2023, 12, 31, 23, 0, 0).unwrap();
+        let start = utc_offset()
+            .with_ymd_and_hms(2023, 12, 31, 23, 0, 0)
+            .unwrap();
         assert_eq!(compute_annual_offset(&meta, start, 3600), 8758);
     }
 

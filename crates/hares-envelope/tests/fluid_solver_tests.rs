@@ -103,7 +103,9 @@ fn net_power_from_flow_and_temp_delta() {
     let expected_w = flow * cp * delta_t;
 
     let mut solver = FluidSolver::new(
-        FluidSolverConfig { cp_water_j_kg_k: cp },
+        FluidSolverConfig {
+            cp_water_j_kg_k: cp,
+        },
         &[(LoopId(1), FluidType::Water)],
     )
     .expect("FluidSolver::new must succeed for valid config");
@@ -111,7 +113,9 @@ fn net_power_from_flow_and_temp_delta() {
     let ports = make_ports_with_flow(LoopId(1), FluidType::Water, flow, 70.0, 50.0);
     let update = solver.resolve(&ports, &env(), Duration::from_secs(60));
 
-    let payload = update.custom_payload.expect("payload must be Some when flow > 0");
+    let payload = update
+        .custom_payload
+        .expect("payload must be Some when flow > 0");
     let states = FluidDomainPayload::decode(&payload).expect("payload must decode");
     assert_eq!(states.len(), 1, "exactly one loop state expected");
 
@@ -141,7 +145,9 @@ fn zero_flow_zero_power() {
     };
 
     let update = solver.resolve(&ports, &env(), Duration::from_secs(60));
-    let payload = update.custom_payload.expect("payload must be Some: accumulator is present");
+    let payload = update
+        .custom_payload
+        .expect("payload must be Some: accumulator is present");
     let states = FluidDomainPayload::decode(&payload).expect("payload must decode");
     assert_eq!(states.len(), 1);
 
@@ -167,13 +173,15 @@ fn checkpoint_round_trip() {
     .expect("FluidSolver::new must succeed");
 
     // Prime the solver: one step with real flow so last_known_temps is populated.
-    let ports_with_flow =
-        make_ports_with_flow(LoopId(3), FluidType::Water, 1.0, supply, ret);
+    let ports_with_flow = make_ports_with_flow(LoopId(3), FluidType::Water, 1.0, supply, ret);
     solver.resolve(&ports_with_flow, &env(), Duration::from_secs(60));
 
     // Snapshot.
     let payload = solver.snapshot_payload();
-    assert!(!payload.is_empty(), "snapshot must be non-empty after flow step");
+    assert!(
+        !payload.is_empty(),
+        "snapshot must be non-empty after flow step"
+    );
 
     // Build a fresh solver and restore.
     let mut restored = FluidSolver::new(
@@ -195,11 +203,17 @@ fn checkpoint_round_trip() {
     let update_restored = restored.resolve(&zero_ports, &env(), Duration::from_secs(60));
 
     let states_orig = FluidDomainPayload::decode(
-        update_orig.custom_payload.as_deref().expect("orig payload Some"),
+        update_orig
+            .custom_payload
+            .as_deref()
+            .expect("orig payload Some"),
     )
     .expect("orig decode");
     let states_restored = FluidDomainPayload::decode(
-        update_restored.custom_payload.as_deref().expect("restored payload Some"),
+        update_restored
+            .custom_payload
+            .as_deref()
+            .expect("restored payload Some"),
     )
     .expect("restored decode");
 
@@ -207,13 +221,11 @@ fn checkpoint_round_trip() {
     assert_eq!(states_restored.len(), 1);
 
     assert_eq!(
-        states_orig[0].mean_supply_temp_c,
-        states_restored[0].mean_supply_temp_c,
+        states_orig[0].mean_supply_temp_c, states_restored[0].mean_supply_temp_c,
         "supply temp after restore must match original"
     );
     assert_eq!(
-        states_orig[0].mean_return_temp_c,
-        states_restored[0].mean_return_temp_c,
+        states_orig[0].mean_return_temp_c, states_restored[0].mean_return_temp_c,
         "return temp after restore must match original"
     );
 

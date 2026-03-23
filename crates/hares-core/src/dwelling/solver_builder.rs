@@ -2,19 +2,19 @@
 
 use hares_envelope::{
     BuildingRC, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, ElectricalSolver,
-    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
-    ElectricalSolverConfig, ExteriorSurfaceInfo, FluidSolver, FluidSolverConfig,
-    HumiditySolver, HumiditySolverConfig, ThermalSolver, ThermalSolverConfig,
-    WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
+    ElectricalSolverConfig, ExteriorSurfaceInfo, FluidSolver, FluidSolverConfig, HumiditySolver,
+    HumiditySolverConfig, SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
+    StateSpaceWiring, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
+    assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, SimulationConfig, WeatherTimeSeries};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
 
+use super::Result;
 use super::conversions::{
     boundary_zone_index, building_to_boundary_inputs, building_to_zone_inputs,
     has_vented_crawlspace, shielding_str_to_class, site_type_to_terrain,
 };
-use super::Result;
 
 /// Annual weather averages needed for film coefficient computation.
 pub(crate) struct WeatherAverages {
@@ -33,7 +33,13 @@ pub(crate) fn compute_weather_averages(weather: &WeatherTimeSeries) -> WeatherAv
 }
 
 /// Solvers plus per-zone thermal capacitances [J/K] for gain preview.
-pub(crate) type SolverBundle = (ThermalSolver, HumiditySolver, ElectricalSolver, FluidSolver, Vec<(ZoneId, f64)>);
+pub(crate) type SolverBundle = (
+    ThermalSolver,
+    HumiditySolver,
+    ElectricalSolver,
+    FluidSolver,
+    Vec<(ZoneId, f64)>,
+);
 
 pub(crate) fn build_default_solvers(
     env: &EnvironmentState,
@@ -50,8 +56,12 @@ pub(crate) fn build_default_solvers(
     // Convert building data to envelope-crate input types.
     let zone_inputs = building_to_zone_inputs(building, n_zones);
     let boundary_inputs = building_to_boundary_inputs(
-        building, n_zones, defaults,
-        weather_avgs.avg_wind_m_s, weather_avgs.avg_ambient_c, weather_avgs.avg_ground_c,
+        building,
+        n_zones,
+        defaults,
+        weather_avgs.avg_wind_m_s,
+        weather_avgs.avg_ambient_c,
+        weather_avgs.avg_ground_c,
     );
 
     // Zone air node capacitances [J/K].
@@ -156,13 +166,21 @@ pub(crate) fn build_default_solvers(
     // Collect the unique external nodes actually used, sorted.
     // outdoor_col already computed by assemble_building_rc.
 
-    let mut thermal_cfg = ThermalSolverConfig::default();
+    let mut wiring = StateSpaceWiring::default();
+    let mut thermal_cfg = ThermalSolverConfig {
+        indoor_zone_id: env
+            .zones
+            .first()
+            .map(|z| z.id)
+            .unwrap_or(hares_types::ZoneId(1)),
+        ..ThermalSolverConfig::default()
+    };
     for (zone_idx, zone) in env.zones.iter().enumerate() {
-        thermal_cfg
+        wiring
             .zone_state_indices
             .insert(zone.id, zone_state_rows[zone_idx]);
-        thermal_cfg.zone_output_indices.insert(zone.id, zone_idx);
-        thermal_cfg
+        wiring.zone_output_indices.insert(zone.id, zone_idx);
+        wiring
             .zone_sensible_input_indices
             .insert(zone.id, zone_input_offset + zone_idx);
         thermal_cfg
@@ -170,9 +188,9 @@ pub(crate) fn build_default_solvers(
             .insert(zone.id, zone.temperature_c);
     }
     if let Some(col) = outdoor_col {
-        thermal_cfg.outdoor_temp_input_indices = vec![col];
+        wiring.outdoor_temp_input_indices = vec![col];
     } else {
-        thermal_cfg.outdoor_temp_input_indices = vec![];
+        wiring.outdoor_temp_input_indices = vec![];
     }
 
     // Build window lookup: boundary id → Window, for matching windows to their
@@ -200,21 +218,20 @@ pub(crate) fn build_default_solvers(
             .zones
             .get(zone_idx)
             .map(|z| z.id)
-            .unwrap_or(hares_types::ZoneId(1));
+            .unwrap_or(thermal_cfg.indoor_zone_id);
 
         // Use the outermost layer node if this boundary has material layers.
         // Surfaces with RC layers get a dedicated B-matrix input column that
         // injects heat at the exterior node (gain = 1/C_outer_node), so solar/LWR
         // conducts inward through the wall resistance chain.
         // Surfaces without layers fall back to the zone air node + zone column.
-        let (state_index, input_index) = if let Some(&col) = ext_surface_col_map.get(&surface_idx)
-        {
+        let (state_index, input_index) = if let Some(&col) = ext_surface_col_map.get(&surface_idx) {
             let info = &layer_info[&surface_idx];
             let state_row = node_index.get(&info.outer_node).copied().unwrap_or(0);
             (state_row, col)
         } else {
-            let si = *thermal_cfg.zone_state_indices.get(&zone_id).unwrap_or(&0);
-            let ii = *thermal_cfg
+            let si = *wiring.zone_state_indices.get(&zone_id).unwrap_or(&0);
+            let ii = *wiring
                 .zone_sensible_input_indices
                 .get(&zone_id)
                 .unwrap_or(&(zone_input_offset + zone_idx));
@@ -224,20 +241,18 @@ pub(crate) fn build_default_solvers(
         // OCHRE Envelope.py:221-222 gates radiant-barrier defaults on attic zone.
         let is_attic_radiant_barrier = boundary.has_radiant_barrier
             && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic);
-        let emissivity = boundary.emittance.unwrap_or(
-            if is_attic_radiant_barrier {
-                EMISSIVITY_RADIANT_BARRIER
-            } else {
-                EMISSIVITY_DEFAULT
-            },
-        );
-        let solar_absorptance = boundary.solar_absorptance.unwrap_or(
-            if is_attic_radiant_barrier {
+        let emissivity = boundary.emittance.unwrap_or(if is_attic_radiant_barrier {
+            EMISSIVITY_RADIANT_BARRIER
+        } else {
+            EMISSIVITY_DEFAULT
+        });
+        let solar_absorptance = boundary
+            .solar_absorptance
+            .unwrap_or(if is_attic_radiant_barrier {
                 SOLAR_ABSORPTANCE_RADIANT_BARRIER
             } else {
                 SOLAR_ABSORPTANCE_DEFAULT
-            },
-        );
+            });
         let tilt_deg = match boundary.boundary_type {
             hares_io::hpxml::BoundaryType::Roof => 0.0,
             hares_io::hpxml::BoundaryType::Slab | hares_io::hpxml::BoundaryType::Floor => 180.0,
@@ -249,7 +264,11 @@ pub(crate) fn build_default_solvers(
         let bd_input = &boundary_inputs[surface_idx];
         let r_film = bd_input.r_film_exterior_m2_k_w;
         let r_outermost_half = if !bd_input.precomputed_rc.is_empty() {
-            bd_input.precomputed_rc.last().map(|l| l.resistance_m2_k_w / 2.0).unwrap_or(0.0)
+            bd_input
+                .precomputed_rc
+                .last()
+                .map(|l| l.resistance_m2_k_w / 2.0)
+                .unwrap_or(0.0)
         } else {
             let valid_layers: Vec<&hares_envelope::LayerInput> = bd_input
                 .material_layers
@@ -273,8 +292,6 @@ pub(crate) fn build_default_solvers(
         };
         // OCHRE Envelope.py:207: iterations = ceil(time_res / 5 min).max(1)
         let n_iter = ((dt_s / 300.0).ceil() as u32).max(1);
-        let outdoor_temp_c = env.weather.outdoor_temp_c;
-
         let surface_id = u32::try_from(surface_idx).unwrap_or(u32::MAX);
         thermal_cfg.exterior_surfaces.push(ExteriorSurfaceInfo {
             surface_id,
@@ -286,11 +303,10 @@ pub(crate) fn build_default_solvers(
             rad_frac,
             rad_res_k_w,
             n_iter,
-            t_prev_c: outdoor_temp_c,
             absorptance: solar_absorptance,
         });
         // Route solar irradiance to the zone's sensible heat input column.
-        thermal_cfg.solar_input_indices.insert(surface_id, input_index);
+        wiring.solar_input_indices.insert(surface_id, input_index);
 
         // Windows use the IAM-corrected path via solar_input_indices + window_properties.
         // Opaque surfaces receive solar gain via apply_exterior_solar_inputs (ExteriorSurfaceInfo.absorptance).
@@ -301,16 +317,14 @@ pub(crate) fn build_default_solvers(
             // For simple glazing, approximate from U-factor:
             //   R_total = 1/U, R_glass ≈ R_total - R_film_int - R_film_ext
             let r_total = 1.0 / u_factor.max(0.01);
-            let r_glass = (r_total
-                - bd_input.r_film_interior_m2_k_w
-                - bd_input.r_film_exterior_m2_k_w)
-                .max(0.0);
-            let (transmittance, radiation_frac) =
-                hares_physics::solar::calculate_window_parameters(
-                    effective_shgc,
-                    u_factor,
-                    r_glass,
-                );
+            let r_glass =
+                (r_total - bd_input.r_film_interior_m2_k_w - bd_input.r_film_exterior_m2_k_w)
+                    .max(0.0);
+            let (transmittance, radiation_frac) = hares_physics::solar::calculate_window_parameters(
+                effective_shgc,
+                u_factor,
+                r_glass,
+            );
             thermal_cfg.window_properties.insert(
                 surface_id,
                 WindowSolarProperties {
@@ -331,8 +345,8 @@ pub(crate) fn build_default_solvers(
         use hares_envelope::InfiltrationMethod;
         use hares_io::hpxml::ZoneType;
         use hares_physics::infiltration::{
-            Aim2Params, FoundationLeakageClass, N_I_DEFAULT,
-            aim2_coefficients_from_ach50, attic_ela_coefficients,
+            Aim2Params, FoundationLeakageClass, N_I_DEFAULT, aim2_coefficients_from_ach50,
+            attic_ela_coefficients,
         };
 
         let default_ceiling_height_m = building.ceiling_height_m.unwrap_or(2.5);
@@ -363,8 +377,7 @@ pub(crate) fn build_default_solvers(
                             FoundationLeakageClass::Other
                         };
                         let h = building.infiltration_height_m.unwrap_or(
-                            default_ceiling_height_m
-                                * building.floors_above_grade.unwrap_or(1.0),
+                            default_ceiling_height_m * building.floors_above_grade.unwrap_or(1.0),
                         );
                         let coeffs = aim2_coefficients_from_ach50(&Aim2Params {
                             ach50,
@@ -436,7 +449,7 @@ pub(crate) fn build_default_solvers(
     }
 
     let initial_temp = env.zones.first().map(|z| z.temperature_c).unwrap_or(21.0);
-    let thermal_solver = ThermalSolver::new(model, thermal_cfg, dt_s, env, initial_temp)
+    let thermal_solver = ThermalSolver::new(model, wiring, thermal_cfg, dt_s, env, initial_temp)
         .map_err(|err| HaresError::Envelope(format!("thermal solver init failed: {err}")))?;
 
     let humidity_solver = HumiditySolver::new(HumiditySolverConfig::default(), env);
@@ -454,7 +467,10 @@ pub(crate) fn build_default_solvers(
                 .get(i)
                 .copied()
                 .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
-            (z.id, cap.max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K))
+            (
+                z.id,
+                cap.max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K),
+            )
         })
         .collect();
 

@@ -97,7 +97,10 @@ fn single_node_rc_passive_decay() {
     // ZOH discretization is algebraically exact for piecewise-constant inputs,
     // so the accumulated error should be near machine epsilon.
     assert_close(x[0], expected, 1e-6, "temperature after decay");
-    assert!(x[0] > 0.0, "temperature must still be positive (decaying not reversed)");
+    assert!(
+        x[0] > 0.0,
+        "temperature must still be positive (decaying not reversed)"
+    );
     assert!(x[0] < t0, "temperature must be lower than initial");
 }
 
@@ -198,8 +201,14 @@ fn eigenvalue_check_stable_model() {
     let (a_d, _) = discretize_zoh(&a_c, &b_c, dt).expect("ZOH discretization");
     let result = eigenvalue_check(&a_c, &a_d).expect("stable 1R-1C must pass eigenvalue_check");
 
-    assert!(result.continuous_stable, "continuous eigenvalue must be negative real");
-    assert!(result.discrete_stable, "discrete eigenvalue must have |λ| < 1");
+    assert!(
+        result.continuous_stable,
+        "continuous eigenvalue must be negative real"
+    );
+    assert!(
+        result.discrete_stable,
+        "discrete eigenvalue must have |λ| < 1"
+    );
 }
 
 /// For a 2-node RC network (two internal nodes sharing a resistor, each
@@ -222,11 +231,16 @@ fn two_node_rc_both_eigenvalues_stable() {
 
     let dt = 30.0;
     let (a_d, _) = discretize_zoh(&a_c, &b_c, dt).expect("ZOH discretization");
-    let result =
-        eigenvalue_check(&a_c, &a_d).expect("2-node stable RC must pass eigenvalue_check");
+    let result = eigenvalue_check(&a_c, &a_d).expect("2-node stable RC must pass eigenvalue_check");
 
-    assert!(result.continuous_stable, "all continuous eigenvalues must be negative real");
-    assert!(result.discrete_stable, "all discrete eigenvalues must have |λ| < 1");
+    assert!(
+        result.continuous_stable,
+        "all continuous eigenvalues must be negative real"
+    );
+    assert!(
+        result.discrete_stable,
+        "all discrete eigenvalues must have |λ| < 1"
+    );
 
     let eigs = a_d.complex_eigenvalues();
     for (i, lambda) in eigs.iter().enumerate() {
@@ -249,10 +263,20 @@ fn two_node_rc_both_eigenvalues_stable() {
 #[test]
 fn parallel_resistance_calculation() {
     // Exact rational: 3 ∥ 6 = 18/9 = 2
-    assert_close(parallel_resistance(3.0, 6.0), 2.0, f64::EPSILON * 4.0, "3 ∥ 6");
+    assert_close(
+        parallel_resistance(3.0, 6.0),
+        2.0,
+        f64::EPSILON * 4.0,
+        "3 ∥ 6",
+    );
 
     // 1 ∥ 1 = 0.5
-    assert_close(parallel_resistance(1.0, 1.0), 0.5, f64::EPSILON * 2.0, "1 ∥ 1");
+    assert_close(
+        parallel_resistance(1.0, 1.0),
+        0.5,
+        f64::EPSILON * 2.0,
+        "1 ∥ 1",
+    );
 
     // Very different values: 1 ∥ 1000 ≈ 0.999
     let expected_asymmetric = 1.0 * 1_000.0 / (1.0 + 1_000.0);
@@ -277,13 +301,13 @@ fn parallel_resistance_calculation() {
 #[test]
 fn matrix_exponential_identity() {
     let zero_2x2 = DMatrix::<f64>::zeros(2, 2);
-    let result = matrix_exp(&zero_2x2);
+    let result = matrix_exp(&zero_2x2).unwrap();
     let expected = DMatrix::<f64>::identity(2, 2);
     assert_matrix_close(&result, &expected, f64::EPSILON * 4.0);
 
     // Larger zero matrix
     let zero_4x4 = DMatrix::<f64>::zeros(4, 4);
-    let result4 = matrix_exp(&zero_4x4);
+    let result4 = matrix_exp(&zero_4x4).unwrap();
     let expected4 = DMatrix::<f64>::identity(4, 4);
     assert_matrix_close(&result4, &expected4, f64::EPSILON * 4.0);
 }

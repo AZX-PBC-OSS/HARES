@@ -61,7 +61,11 @@ pub struct LayerInput {
 
 impl LayerInput {
     fn effective_area(&self, fallback: f64) -> f64 {
-        if self.area_m2 > 0.0 { self.area_m2 } else { fallback }
+        if self.area_m2 > 0.0 {
+            self.area_m2
+        } else {
+            fallback
+        }
     }
 }
 
@@ -436,8 +440,11 @@ impl RcGraphState {
             let layer_area = layer.effective_area(params.boundary_area);
             let raw_cap =
                 layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m * layer_area;
-            let halved =
-                if halve_last_cap && i == n_layers - 1 { raw_cap / 2.0 } else { raw_cap };
+            let halved = if halve_last_cap && i == n_layers - 1 {
+                raw_cap / 2.0
+            } else {
+                raw_cap
+            };
             let cap = halved.max(MIN_CAPACITANCE_J_K);
             layer_nodes.push(self.alloc_node(cap));
         }
@@ -587,7 +594,11 @@ impl RcGraphState {
             }
         }
         if !params.same_zone && res_abs.len() > n_caps {
-            self.add_resistance(layer_nodes[n_caps - 1], params.exterior_node, res_abs[n_caps]);
+            self.add_resistance(
+                layer_nodes[n_caps - 1],
+                params.exterior_node,
+                res_abs[n_caps],
+            );
         }
 
         Some(layer_nodes[n_caps - 1])
@@ -668,8 +679,7 @@ mod tests {
         }];
         let caps = derive_zone_capacitances(&zones);
         // Should use 300 m³ (explicit), not 100 × 2.5 = 250 m³ (derived from area)
-        let expected =
-            AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 300.0 * INTERIOR_MASS_MULTIPLIER;
+        let expected = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * 300.0 * INTERIOR_MASS_MULTIPLIER;
         assert!((caps[0] - expected).abs() < 1e-6);
     }
 

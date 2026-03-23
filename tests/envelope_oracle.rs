@@ -70,101 +70,145 @@ mod tests {
     // Zone temperatures
     const OCHRE_TEMP_INDOOR: OracleValue = OracleValue {
         name: "Temperature - Indoor (C)",
-        mean: 21.3, min: 20.8, max: 22.0,
+        mean: 21.3,
+        min: 20.8,
+        max: 22.0,
     };
     const OCHRE_TEMP_ATTIC: OracleValue = OracleValue {
         name: "Temperature - Attic (C)",
-        mean: 14.5, min: 12.0, max: 18.2,
+        mean: 14.5,
+        min: 12.0,
+        max: 18.2,
     };
 
     // Exterior surface solar gains [W] (absorbed at exterior surface)
     const OCHRE_EXT_WALL_SOLAR: OracleValue = OracleValue {
         name: "Exterior Wall Ext. Solar Gain (W)",
-        mean: 18_572.5, min: 16_329.1, max: 20_765.3,
+        mean: 18_572.5,
+        min: 16_329.1,
+        max: 20_765.3,
     };
     const OCHRE_ATTIC_WALL_SOLAR: OracleValue = OracleValue {
         name: "Attic Wall Ext. Solar Gain (W)",
-        mean: 4_306.4, min: 2_929.5, max: 5_717.6,
+        mean: 4_306.4,
+        min: 2_929.5,
+        max: 5_717.6,
     };
     const OCHRE_ATTIC_ROOF_SOLAR: OracleValue = OracleValue {
         name: "Attic Roof Ext. Solar Gain (W)",
-        mean: 92_799.5, min: 89_911.1, max: 96_054.7,
+        mean: 92_799.5,
+        min: 89_911.1,
+        max: 96_054.7,
     };
     const OCHRE_WINDOW_EXT_SOLAR: OracleValue = OracleValue {
         name: "Window Ext. Solar Gain (W)",
-        mean: 536.8, min: 503.2, max: 583.7,
+        mean: 536.8,
+        min: 503.2,
+        max: 583.7,
     };
     const OCHRE_DOOR_EXT_SOLAR: OracleValue = OracleValue {
         name: "Door Ext. Solar Gain (W)",
-        mean: 159.5, min: 151.7, max: 168.1,
+        mean: 159.5,
+        min: 151.7,
+        max: 168.1,
     };
 
     // Exterior surface LWR gains [W] (net LW radiation, always negative = cooling)
     const OCHRE_EXT_WALL_LWR: OracleValue = OracleValue {
         name: "Exterior Wall Ext. LWR Gain (W)",
-        mean: -7_007.4, min: -8_303.2, max: -2_285.6,
+        mean: -7_007.4,
+        min: -8_303.2,
+        max: -2_285.6,
     };
     const OCHRE_ATTIC_ROOF_LWR: OracleValue = OracleValue {
         name: "Attic Roof Ext. LWR Gain (W)",
-        mean: -29_359.3, min: -43_591.9, max: -7_719.4,
+        mean: -29_359.3,
+        min: -43_591.9,
+        max: -7_719.4,
     };
 
     // Exterior surface temperatures [C]
     const OCHRE_EXT_WALL_SURF_TEMP: OracleValue = OracleValue {
         name: "Exterior Wall Ext. Surface Temperature (C)",
-        mean: 23.4, min: 12.1, max: 26.8,
+        mean: 23.4,
+        min: 12.1,
+        max: 26.8,
     };
     const OCHRE_ATTIC_ROOF_SURF_TEMP: OracleValue = OracleValue {
         name: "Attic Roof Ext. Surface Temperature (C)",
-        mean: 42.3, min: 12.1, max: 60.0,
+        mean: 42.3,
+        min: 12.1,
+        max: 60.0,
     };
 
     // Indoor zone heat gains [W] (positive = heating the zone)
     const OCHRE_WALL_HEAT_GAIN: OracleValue = OracleValue {
         name: "Wall Heat Gain - Indoor (W)",
-        mean: -344.8, min: -520.3, max: 9.5,
+        mean: -344.8,
+        min: -520.3,
+        max: 9.5,
     };
     const OCHRE_ROOF_HEAT_GAIN: OracleValue = OracleValue {
         name: "Roof Heat Gain - Indoor (W)",
-        mean: -171.1, min: -295.7, max: -2.3,
+        mean: -171.1,
+        min: -295.7,
+        max: -2.3,
     };
     const OCHRE_FLOOR_HEAT_GAIN: OracleValue = OracleValue {
         name: "Floor Heat Gain - Indoor (W)",
-        mean: -758.7, min: -931.7, max: 107.5,
+        mean: -758.7,
+        min: -931.7,
+        max: 107.5,
     };
     const OCHRE_WINDOW_HEAT_GAIN: OracleValue = OracleValue {
         name: "Window Heat Gain - Indoor (W)",
-        mean: -52.5, min: -68.5, max: 1.2,
+        mean: -52.5,
+        min: -68.5,
+        max: 1.2,
     };
     const OCHRE_WINDOW_SOLAR_TRANSMITTED: OracleValue = OracleValue {
         name: "Window Transmitted Solar Gain (W)",
-        mean: 356.1, min: 333.9, max: 387.3,
+        mean: 356.1,
+        min: 333.9,
+        max: 387.3,
     };
     const OCHRE_INFILTRATION_INDOOR: OracleValue = OracleValue {
         name: "Infiltration Heat Gain - Indoor (W)",
-        mean: -11.7, min: -14.3, max: -9.7,
+        mean: -11.7,
+        min: -14.3,
+        max: -9.7,
     };
     const OCHRE_VENTILATION_INDOOR: OracleValue = OracleValue {
         name: "Forced Ventilation Heat Gain - Indoor (W)",
-        mean: -267.6, min: -300.5, max: -238.5,
+        mean: -267.6,
+        min: -300.5,
+        max: -238.5,
     };
     const OCHRE_INTERNAL_GAIN: OracleValue = OracleValue {
         name: "Internal Heat Gain - Indoor (W)",
-        mean: 341.9, min: 341.9, max: 341.9,
+        mean: 341.9,
+        min: 341.9,
+        max: 341.9,
     };
     const OCHRE_RADIATION_INDOOR: OracleValue = OracleValue {
         name: "Radiation Heat Gain - Indoor (W)",
-        mean: 95.7, min: 59.4, max: 120.8,
+        mean: 95.7,
+        min: 59.4,
+        max: 120.8,
     };
 
     // Attic zone
     const OCHRE_INFILTRATION_ATTIC: OracleValue = OracleValue {
         name: "Infiltration Heat Gain - Attic (W)",
-        mean: -376.1, min: -933.9, max: -81.3,
+        mean: -376.1,
+        min: -933.9,
+        max: -81.3,
     };
     const OCHRE_RADIATION_ATTIC: OracleValue = OracleValue {
         name: "Radiation Heat Gain - Attic (W)",
-        mean: 380.1, min: -72.5, max: 590.1,
+        mean: 380.1,
+        min: -72.5,
+        max: 590.1,
     };
 
     // ── OCHRE RC circuit structure ──────────────────────────────────────────
@@ -174,16 +218,46 @@ mod tests {
         name: &'static str,
         count: usize,
         total_area_m2: f64,
-        tilt_deg: f64,        // 0=horizontal roof, 90=wall, 180=floor
-        absorptance: f64,     // solar absorptance (0.6 opaque, 0.75 shingle)
+        tilt_deg: f64,    // 0=horizontal roof, 90=wall, 180=floor
+        absorptance: f64, // solar absorptance (0.6 opaque, 0.75 shingle)
     }
 
     const OCHRE_SURFACES: &[OchreSurface] = &[
-        OchreSurface { name: "Exterior Wall", count: 4, total_area_m2: 86.59, tilt_deg: 90.0, absorptance: 0.60 },
-        OchreSurface { name: "Attic Wall",    count: 2, total_area_m2: 26.85, tilt_deg: 90.0, absorptance: 0.60 },
-        OchreSurface { name: "Attic Roof",    count: 2, total_area_m2: 124.64, tilt_deg: 26.57, absorptance: 0.75 }, // pitched, not horizontal!
-        OchreSurface { name: "Window",         count: 4, total_area_m2: 15.61, tilt_deg: 90.0, absorptance: 0.0 },
-        OchreSurface { name: "Door",           count: 1, total_area_m2: 1.86,  tilt_deg: 90.0, absorptance: 0.60 },
+        OchreSurface {
+            name: "Exterior Wall",
+            count: 4,
+            total_area_m2: 86.59,
+            tilt_deg: 90.0,
+            absorptance: 0.60,
+        },
+        OchreSurface {
+            name: "Attic Wall",
+            count: 2,
+            total_area_m2: 26.85,
+            tilt_deg: 90.0,
+            absorptance: 0.60,
+        },
+        OchreSurface {
+            name: "Attic Roof",
+            count: 2,
+            total_area_m2: 124.64,
+            tilt_deg: 26.57,
+            absorptance: 0.75,
+        }, // pitched, not horizontal!
+        OchreSurface {
+            name: "Window",
+            count: 4,
+            total_area_m2: 15.61,
+            tilt_deg: 90.0,
+            absorptance: 0.0,
+        },
+        OchreSurface {
+            name: "Door",
+            count: 1,
+            total_area_m2: 1.86,
+            tilt_deg: 90.0,
+            absorptance: 0.60,
+        },
     ];
 
     // OCHRE zone capacitances [J/K]
@@ -191,7 +265,7 @@ mod tests {
     const OCHRE_INDOOR_VOLUME_M3: f64 = 271.84;
     const OCHRE_ATTIC_VOLUME_M3: f64 = 144.42;
     const OCHRE_INDOOR_CAPACITANCE_JK: f64 = 1.2041 * 1006.0 * 271.84 * 7.0; // ~2.3 MJ/K
-    const OCHRE_ATTIC_CAPACITANCE_JK: f64 = 1.2041 * 1006.0 * 144.42 * 7.0;  // ~1.2 MJ/K
+    const OCHRE_ATTIC_CAPACITANCE_JK: f64 = 1.2041 * 1006.0 * 144.42 * 7.0; // ~1.2 MJ/K
 
     // ── Parse helpers ───────────────────────────────────────────────────────
 
@@ -224,15 +298,19 @@ mod tests {
 
     fn col_mean(data: &BTreeMap<String, Vec<f64>>, col: &str) -> Option<f64> {
         data.get(col).and_then(|v| {
-            if v.is_empty() { None }
-            else { Some(v.iter().sum::<f64>() / v.len() as f64) }
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.iter().sum::<f64>() / v.len() as f64)
+            }
         })
     }
 
     fn col_range(data: &BTreeMap<String, Vec<f64>>, col: &str) -> Option<(f64, f64)> {
         data.get(col).and_then(|v| {
-            if v.is_empty() { None }
-            else {
+            if v.is_empty() {
+                None
+            } else {
                 let mn = v.iter().copied().fold(f64::INFINITY, f64::min);
                 let mx = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 Some((mn, mx))
@@ -318,7 +396,11 @@ mod tests {
             .cloned()
             .unwrap_or(output_path.clone());
 
-        assert!(actual_path.exists(), "output CSV not found at {}", actual_path.display());
+        assert!(
+            actual_path.exists(),
+            "output CSV not found at {}",
+            actual_path.display()
+        );
         let hares = parse_csv_columns(&actual_path);
         let _ = fs::remove_file(&actual_path);
 
@@ -327,7 +409,10 @@ mod tests {
         let ochre_ts = if ochre_csv.exists() {
             Some(parse_csv_columns(&ochre_csv))
         } else {
-            eprintln!("[oracle] OCHRE reference CSV not found at {}", ochre_csv.display());
+            eprintln!(
+                "[oracle] OCHRE reference CSV not found at {}",
+                ochre_csv.display()
+            );
             None
         };
 
@@ -356,13 +441,13 @@ mod tests {
         checks.push(Check::compare_mean(
             "Attic zone temperature",
             &OCHRE_TEMP_ATTIC,
-            col_mean(&hares, "Temperature - Attic (C)")
-                .or_else(|| {
-                    // HARES may use different zone naming; try zone 2
-                    hares.keys()
-                        .find(|k| k.contains("Attic") && k.contains("(C)"))
-                        .and_then(|k| col_mean(&hares, k))
-                }),
+            col_mean(&hares, "Temperature - Attic (C)").or_else(|| {
+                // HARES may use different zone naming; try zone 2
+                hares
+                    .keys()
+                    .find(|k| k.contains("Attic") && k.contains("(C)"))
+                    .and_then(|k| col_mean(&hares, k))
+            }),
             50.0, // wide — attic coupling is complex
             "attic insulation, roof solar, infiltration",
         ));
@@ -456,7 +541,10 @@ mod tests {
         eprintln!("  OCHRE total opaque solar: {ochre_total_opaque_solar:.0} W");
         eprintln!("    Ext walls:  {:.0} W", OCHRE_EXT_WALL_SOLAR.mean);
         eprintln!("    Attic walls: {:.0} W", OCHRE_ATTIC_WALL_SOLAR.mean);
-        eprintln!("    Attic roof:  {:.0} W (absorptance=0.75, pitched ~27deg)", OCHRE_ATTIC_ROOF_SOLAR.mean);
+        eprintln!(
+            "    Attic roof:  {:.0} W (absorptance=0.75, pitched ~27deg)",
+            OCHRE_ATTIC_ROOF_SOLAR.mean
+        );
         eprintln!("    Doors:       {:.0} W", OCHRE_DOOR_EXT_SOLAR.mean);
         eprintln!("  OCHRE total ext LWR: {ochre_total_ext_lwr:.0} W");
 
@@ -464,17 +552,29 @@ mod tests {
         eprintln!("\n=== HVAC Energy ===");
 
         // HARES uses "ASHP Heater" not "HVAC Heating"
-        let heater_kw_col = hares.keys()
-            .find(|k| k.to_ascii_lowercase().contains("heater") && k.contains("(kW)") && !k.contains("mean"))
+        let heater_kw_col = hares
+            .keys()
+            .find(|k| {
+                k.to_ascii_lowercase().contains("heater")
+                    && k.contains("(kW)")
+                    && !k.contains("mean")
+            })
             .cloned();
-        let cooler_kw_col = hares.keys()
-            .find(|k| k.to_ascii_lowercase().contains("cooler") && k.contains("(kW)") && !k.contains("mean"))
+        let cooler_kw_col = hares
+            .keys()
+            .find(|k| {
+                k.to_ascii_lowercase().contains("cooler")
+                    && k.contains("(kW)")
+                    && !k.contains("mean")
+            })
             .cloned();
 
-        let heater_kwh = heater_kw_col.as_ref()
+        let heater_kwh = heater_kw_col
+            .as_ref()
             .and_then(|col| hares.get(col.as_str()))
             .map(|v| v.iter().sum::<f64>() / 60.0); // kW * (1/60 h) per minute step
-        let cooler_kwh = cooler_kw_col.as_ref()
+        let cooler_kwh = cooler_kw_col
+            .as_ref()
             .and_then(|col| hares.get(col.as_str()))
             .map(|v| v.iter().sum::<f64>() / 60.0);
 
@@ -483,7 +583,9 @@ mod tests {
 
         if let Some(h) = heater_kwh {
             let pct = ((h - ochre_heater_kwh) / ochre_heater_kwh * 100.0).abs();
-            eprintln!("  Heater: HARES={h:.4} kWh  OCHRE={ochre_heater_kwh:.4} kWh  diff={pct:.1}%");
+            eprintln!(
+                "  Heater: HARES={h:.4} kWh  OCHRE={ochre_heater_kwh:.4} kWh  diff={pct:.1}%"
+            );
             checks.push(Check {
                 name: "ASHP Heater energy".to_string(),
                 ochre: ochre_heater_kwh,
@@ -498,20 +600,30 @@ mod tests {
 
         if let Some(c) = cooler_kwh {
             let pct = ((c - ochre_cooler_kwh) / ochre_cooler_kwh * 100.0).abs();
-            eprintln!("  Cooler: HARES={c:.4} kWh  OCHRE={ochre_cooler_kwh:.4} kWh  diff={pct:.1}%");
+            eprintln!(
+                "  Cooler: HARES={c:.4} kWh  OCHRE={ochre_cooler_kwh:.4} kWh  diff={pct:.1}%"
+            );
         }
 
         // ── Zone structure comparison ───────────────────────────────────
         eprintln!("\n=== Zone Structure ===");
-        eprintln!("  OCHRE: 2 zones (Indoor V={OCHRE_INDOOR_VOLUME_M3:.0}m3, Attic V={OCHRE_ATTIC_VOLUME_M3:.0}m3)");
-        eprintln!("  OCHRE capacitances: Indoor={:.0} J/K, Attic={:.0} J/K",
-            OCHRE_INDOOR_CAPACITANCE_JK, OCHRE_ATTIC_CAPACITANCE_JK);
-        eprintln!("  OCHRE surfaces: {} types, {} total surfaces",
+        eprintln!(
+            "  OCHRE: 2 zones (Indoor V={OCHRE_INDOOR_VOLUME_M3:.0}m3, Attic V={OCHRE_ATTIC_VOLUME_M3:.0}m3)"
+        );
+        eprintln!(
+            "  OCHRE capacitances: Indoor={:.0} J/K, Attic={:.0} J/K",
+            OCHRE_INDOOR_CAPACITANCE_JK, OCHRE_ATTIC_CAPACITANCE_JK
+        );
+        eprintln!(
+            "  OCHRE surfaces: {} types, {} total surfaces",
             OCHRE_SURFACES.len(),
-            OCHRE_SURFACES.iter().map(|s| s.count).sum::<usize>());
+            OCHRE_SURFACES.iter().map(|s| s.count).sum::<usize>()
+        );
         for s in OCHRE_SURFACES {
-            eprintln!("    {}: {} surfaces, {:.1}m2 total, tilt={:.0}deg, absorptance={:.2}",
-                s.name, s.count, s.total_area_m2, s.tilt_deg, s.absorptance);
+            eprintln!(
+                "    {}: {} surfaces, {:.1}m2 total, tilt={:.0}deg, absorptance={:.2}",
+                s.name, s.count, s.total_area_m2, s.tilt_deg, s.absorptance
+            );
         }
 
         // ── Timeseries comparison (if OCHRE reference available) ────────
@@ -524,14 +636,21 @@ mod tests {
             ) {
                 let n = h_vals.len().min(o_vals.len());
                 if n > 0 {
-                    let mae: f64 = h_vals.iter().zip(o_vals.iter())
+                    let mae: f64 = h_vals
+                        .iter()
+                        .zip(o_vals.iter())
                         .take(n)
                         .map(|(h, o)| (h - o).abs())
-                        .sum::<f64>() / n as f64;
-                    let rmse: f64 = (h_vals.iter().zip(o_vals.iter())
+                        .sum::<f64>()
+                        / n as f64;
+                    let rmse: f64 = (h_vals
+                        .iter()
+                        .zip(o_vals.iter())
                         .take(n)
                         .map(|(h, o)| (h - o).powi(2))
-                        .sum::<f64>() / n as f64).sqrt();
+                        .sum::<f64>()
+                        / n as f64)
+                        .sqrt();
                     eprintln!("  Indoor temp: MAE={mae:.2}C  RMSE={rmse:.2}C  (n={n} steps)");
 
                     checks.push(Check {
@@ -539,7 +658,7 @@ mod tests {
                         ochre: 0.0,
                         hares: mae,
                         tolerance_pct: 100.0, // not a percentage; just tracking
-                        passed: mae < 5.0, // hard fail if > 5 C mean deviation
+                        passed: mae < 5.0,    // hard fail if > 5 C mean deviation
                         note: format!("MAE={mae:.2}C RMSE={rmse:.2}C"),
                     });
                 }
@@ -652,12 +771,36 @@ mod tests {
         }
 
         let refs = [
-            OchreRef { pattern: "Indoor Lighting",  ochre_mean_w: 62.0,  tolerance_frac: 0.30 },
-            OchreRef { pattern: "MEL",              ochre_mean_w: 98.0,  tolerance_frac: 0.30 },
-            OchreRef { pattern: "TV",               ochre_mean_w: 56.0,  tolerance_frac: 0.30 },
-            OchreRef { pattern: "Refrigerator",     ochre_mean_w: 54.0,  tolerance_frac: 0.30 },
-            OchreRef { pattern: "Ventilation Fan",  ochre_mean_w: 20.0,  tolerance_frac: 0.50 },
-            OchreRef { pattern: "Water Heater",     ochre_mean_w: 39.0,  tolerance_frac: 0.50 },
+            OchreRef {
+                pattern: "Indoor Lighting",
+                ochre_mean_w: 62.0,
+                tolerance_frac: 0.30,
+            },
+            OchreRef {
+                pattern: "MEL",
+                ochre_mean_w: 98.0,
+                tolerance_frac: 0.30,
+            },
+            OchreRef {
+                pattern: "TV",
+                ochre_mean_w: 56.0,
+                tolerance_frac: 0.30,
+            },
+            OchreRef {
+                pattern: "Refrigerator",
+                ochre_mean_w: 54.0,
+                tolerance_frac: 0.30,
+            },
+            OchreRef {
+                pattern: "Ventilation Fan",
+                ochre_mean_w: 20.0,
+                tolerance_frac: 0.50,
+            },
+            OchreRef {
+                pattern: "Water Heater",
+                ochre_mean_w: 39.0,
+                tolerance_frac: 0.50,
+            },
         ];
 
         let mut total_non_hvac_w = 0.0_f64;
@@ -667,7 +810,10 @@ mod tests {
             let mean = total / n_steps;
             let ochre_str = refs
                 .iter()
-                .find(|r| name.to_ascii_lowercase().contains(&r.pattern.to_ascii_lowercase()))
+                .find(|r| {
+                    name.to_ascii_lowercase()
+                        .contains(&r.pattern.to_ascii_lowercase())
+                })
                 .map(|r| format!("{:.1}", r.ochre_mean_w))
                 .unwrap_or_else(|| "—".to_string());
             eprintln!("{:<35} {:>10.1} {:>12}", name, mean, ochre_str);
@@ -683,7 +829,10 @@ mod tests {
         }
 
         eprintln!("{:-<60}", "");
-        eprintln!("{:<35} {:>10.1} {:>12}", "Total non-HVAC", total_non_hvac_w, "342.0");
+        eprintln!(
+            "{:<35} {:>10.1} {:>12}",
+            "Total non-HVAC", total_non_hvac_w, "342.0"
+        );
 
         // Per-equipment checks
         for r in &refs {
@@ -714,7 +863,9 @@ mod tests {
         // Tighten after per-equipment schedule gains are validated.
         let ochre_total = 342.0;
         let deviation_pct = ((total_non_hvac_w - ochre_total) / ochre_total * 100.0).abs();
-        eprintln!("\n  Total non-HVAC: {total_non_hvac_w:.1} W vs OCHRE {ochre_total:.1} W ({deviation_pct:.1}%)");
+        eprintln!(
+            "\n  Total non-HVAC: {total_non_hvac_w:.1} W vs OCHRE {ochre_total:.1} W ({deviation_pct:.1}%)"
+        );
         assert!(
             deviation_pct < 60.0,
             "Total non-HVAC internal gains {total_non_hvac_w:.1}W deviates from OCHRE {ochre_total:.1}W by {deviation_pct:.1}% (> 60%)"

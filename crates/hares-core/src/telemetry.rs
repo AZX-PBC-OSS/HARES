@@ -138,7 +138,11 @@ mod tests {
     fn sample() -> DwellingTelemetry {
         DwellingTelemetry {
             timestep_index: 3,
-            current_time: FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 1, 1, 0, 3, 0).single().unwrap(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 1, 1, 0, 3, 0)
+                .single()
+                .unwrap(),
             zone_names: vec!["Indoor".to_string()],
             zone_temperatures_c: vec![21.0],
             equipment_names: vec!["Battery".to_string()],

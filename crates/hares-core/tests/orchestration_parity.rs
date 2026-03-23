@@ -174,8 +174,8 @@ fn net_electric_power_is_positive_with_active_electric_furnace() {
     // -10 C outdoor: furnace almost certainly fires at step 1.
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
-    let mut dwelling = Dwelling::from_toml_config(&path)
-        .expect("Dwelling::from_toml_config must succeed");
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
     let _ = fs::remove_file(&path);
 
     // Run enough steps that at least one furnace firing is guaranteed.
@@ -213,8 +213,8 @@ fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
     // Cold day: natural gas furnace will heat.
     write_synthetic_toml(&path, -10.0, "natural gas", 30.0, 600);
 
-    let mut dwelling = Dwelling::from_toml_config(&path)
-        .expect("Dwelling::from_toml_config must succeed");
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
     let _ = fs::remove_file(&path);
 
     // Run several steps to allow the thermostat to fire the furnace.
@@ -258,8 +258,8 @@ fn zone_temperatures_stay_within_physical_bounds_over_10_steps() {
     let path = unique_temp_toml("phys-bounds");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
-    let mut dwelling = Dwelling::from_toml_config(&path)
-        .expect("Dwelling::from_toml_config must succeed");
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
     let _ = fs::remove_file(&path);
 
     for step_idx in 1..=10u32 {
@@ -296,8 +296,8 @@ fn port_slots_are_zeroed_between_steps() {
     let path = unique_temp_toml("port-zero");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
-    let mut dwelling = Dwelling::from_toml_config(&path)
-        .expect("Dwelling::from_toml_config must succeed");
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
     let _ = fs::remove_file(&path);
 
     for step_idx in 1..=5u32 {
@@ -305,13 +305,11 @@ fn port_slots_are_zeroed_between_steps() {
 
         // After step() returns, ports must be zeroed (run_timestep line ~1135).
         assert_eq!(
-            dwelling.ports.electrical.load_power_kw,
-            0.0,
+            dwelling.ports.electrical.load_power_kw, 0.0,
             "electrical load_power_kw must be 0.0 after step {step_idx} (ports.zero() not called)"
         );
         assert_eq!(
-            dwelling.ports.electrical.generation_power_kw,
-            0.0,
+            dwelling.ports.electrical.generation_power_kw, 0.0,
             "electrical generation_power_kw must be 0.0 after step {step_idx}"
         );
         for acc in &dwelling.ports.thermal {
@@ -437,10 +435,10 @@ master_seed = 0
     )
     .expect("write dwelling B toml");
 
-    let mut dwelling_a = Dwelling::from_toml_config(&path_a)
-        .expect("Dwelling A from_toml_config must succeed");
-    let mut dwelling_b = Dwelling::from_toml_config(&path_b)
-        .expect("Dwelling B from_toml_config must succeed");
+    let mut dwelling_a =
+        Dwelling::from_toml_config(&path_a).expect("Dwelling A from_toml_config must succeed");
+    let mut dwelling_b =
+        Dwelling::from_toml_config(&path_b).expect("Dwelling B from_toml_config must succeed");
     let _ = fs::remove_file(&path_a);
     let _ = fs::remove_file(&path_b);
 
@@ -491,8 +489,8 @@ fn step_result_zone_temperatures_are_sorted_by_zone_id() {
     let path = unique_temp_toml("zone-sort");
     write_synthetic_toml(&path, 5.0, "electricity", 20.0, 600);
 
-    let mut dwelling = Dwelling::from_toml_config(&path)
-        .expect("Dwelling::from_toml_config must succeed");
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
     let _ = fs::remove_file(&path);
 
     for step_idx in 1..=5u32 {
@@ -523,8 +521,8 @@ fn step_result_timestamps_advance_monotonically() {
     let path = unique_temp_toml("ts-mono");
     write_synthetic_toml(&path, 5.0, "electricity", 20.0, 600);
 
-    let mut dwelling = Dwelling::from_toml_config(&path)
-        .expect("Dwelling::from_toml_config must succeed");
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
     let _ = fs::remove_file(&path);
 
     let mut prev_ts = dwelling.step().expect("step 1").timestamp;

@@ -46,6 +46,13 @@ pub enum StateSpaceError {
         output_index: usize,
         output_dim: usize,
     },
+    #[error("output index {output_index} is out of bounds for {output_dim} outputs")]
+    OutputIndexOutOfBounds {
+        output_index: usize,
+        output_dim: usize,
+    },
+    #[error("Padé denominator matrix is singular in matrix_exp")]
+    SingularPadeMatrix,
     #[error("state-space stability check failed: {0:?}")]
     UnstableSystem(StabilityResult),
 }
@@ -73,6 +80,15 @@ pub struct StabilityResult {
     pub continuous_stable: bool,
     pub discrete_stable: bool,
     pub near_unity_eigenvalues: Vec<(usize, Complex<f64>)>,
+}
+
+/// Verdict from [`StateSpaceModel::verify_stability`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum StabilityVerdict {
+    /// All discrete eigenvalue magnitudes are within the unit circle.
+    Stable,
+    /// At least one eigenvalue magnitude exceeds 1 + epsilon.
+    MarginallyUnstable { max_eigenvalue_magnitude: f64 },
 }
 
 impl StateSpaceModel {
@@ -104,7 +120,6 @@ impl StateSpaceModel {
 
         // Eigenvalue stability check is O(n³) via Schur decomposition and
         // prohibitively slow for large RC networks (n > 20) in debug builds.
-        // Skip for large matrices — the discretization is still correct.
         if a_c.nrows() <= 20 {
             let a_c_singular = is_singular(a_c);
             if let Err(stability) = eigenvalue_check(a_c, &a_d) {
@@ -116,6 +131,19 @@ impl StateSpaceModel {
                 if !(a_c_singular && discrete_marginally_stable) {
                     return Err(StateSpaceError::UnstableSystem(stability));
                 }
+            }
+        } else {
+            tracing::debug!(
+                n = a_c.nrows(),
+                "skipping full eigenvalue check for large matrix; using Gershgorin bound"
+            );
+            let bound = gershgorin_spectral_radius(&a_d);
+            if bound > 1.0 + 1e-10 {
+                return Err(StateSpaceError::UnstableSystem(StabilityResult {
+                    continuous_stable: false,
+                    discrete_stable: false,
+                    near_unity_eigenvalues: Vec::new(),
+                }));
             }
         }
 
@@ -132,6 +160,23 @@ impl StateSpaceModel {
         &self.c * x + &self.d * u
     }
 
+    /// Full eigenvalue stability check on the discrete state matrix, regardless of size.
+    ///
+    /// Returns [`StabilityVerdict::Stable`] when all eigenvalue magnitudes are within
+    /// the unit circle (1 + 1e-10 tolerance), or [`StabilityVerdict::MarginallyUnstable`]
+    /// with the worst magnitude otherwise.
+    pub fn verify_stability(&self) -> Result<StabilityVerdict> {
+        let eigs = self.a_d.clone().complex_eigenvalues();
+        let max_mag = eigs.iter().map(|l| l.norm()).fold(0.0_f64, f64::max);
+        if max_mag <= 1.0 + 1e-10 {
+            Ok(StabilityVerdict::Stable)
+        } else {
+            Ok(StabilityVerdict::MarginallyUnstable {
+                max_eigenvalue_magnitude: max_mag,
+            })
+        }
+    }
+
     /// Solves for a scalar input that drives a specific output row to `y_target`
     /// after one step, without cloning A_d or B_d.
     pub fn solve_for_output_input(
@@ -142,6 +187,37 @@ impl StateSpaceModel {
         output_index: usize,
         input_index: usize,
     ) -> Result<f64> {
+        self.solve_for_scalar_input(x, u, y_target, output_index, input_index)
+    }
+
+    /// Solves for one scalar input value to hit a scalar output target after one step.
+    pub fn solve_for_input(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        input_index: usize,
+    ) -> Result<f64> {
+        if self.c.nrows() != 1 {
+            return Err(StateSpaceError::UnsupportedOutputCount(self.c.nrows()));
+        }
+        self.solve_for_scalar_input(x, u, y_target, 0, input_index)
+    }
+
+    fn solve_for_scalar_input(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        output_index: usize,
+        input_index: usize,
+    ) -> Result<f64> {
+        if output_index >= self.c.nrows() {
+            return Err(StateSpaceError::OutputIndexOutOfBounds {
+                output_index,
+                output_dim: self.c.nrows(),
+            });
+        }
         if input_index >= self.b_d.ncols() {
             return Err(StateSpaceError::InputIndexOutOfBounds {
                 index: input_index,
@@ -168,44 +244,6 @@ impl StateSpaceModel {
         }
 
         Ok((y_target - y_fixed) / effective_gain)
-    }
-
-    /// Solves for one scalar input value to hit a scalar output target after one step.
-    pub fn solve_for_input(
-        &self,
-        x: &DVector<f64>,
-        u: &DVector<f64>,
-        y_target: f64,
-        input_index: usize,
-    ) -> Result<f64> {
-        if self.c.nrows() != 1 {
-            return Err(StateSpaceError::UnsupportedOutputCount(self.c.nrows()));
-        }
-        if input_index >= self.b_d.ncols() {
-            return Err(StateSpaceError::InputIndexOutOfBounds {
-                index: input_index,
-                input_dim: self.b_d.ncols(),
-            });
-        }
-
-        let mut u_fixed = u.clone();
-        u_fixed[input_index] = 0.0;
-
-        let x_next_fixed = &self.a_d * x + &self.b_d * &u_fixed;
-        let y_fixed = &self.c * x_next_fixed + &self.d * &u_fixed;
-
-        let b_col = self.b_d.column(input_index).into_owned();
-        let d_col = self.d.column(input_index).into_owned();
-
-        let gain_vec = &self.c * b_col + d_col;
-        let effective_gain = gain_vec[0];
-
-        if effective_gain.abs() <= ZERO_GAIN_EPSILON {
-            return Err(StateSpaceError::ZeroEffectiveGain { input_index });
-        }
-
-        let solved = (y_target - y_fixed[0]) / effective_gain;
-        Ok(solved)
     }
 }
 
@@ -368,7 +406,7 @@ pub fn discretize_zoh(
         ));
     }
 
-    let a_d = matrix_exp(&(a_c * dt));
+    let a_d = matrix_exp(&(a_c * dt))?;
     let identity = DMatrix::<f64>::identity(a_c.nrows(), a_c.ncols());
     let rhs = (&a_d - identity) * b_c;
     let lu = a_c.clone().lu();
@@ -408,7 +446,7 @@ pub fn van_loan_discretize(
         }
     }
 
-    let expm = matrix_exp(&(block * dt));
+    let expm = matrix_exp(&(block * dt))?;
 
     let mut a_d = DMatrix::<f64>::zeros(n, n);
     let mut b_d = DMatrix::<f64>::zeros(n, m);
@@ -426,17 +464,23 @@ pub fn van_loan_discretize(
 }
 
 /// Matrix exponential via Padé (order-13) scaling-and-squaring.
-pub fn matrix_exp(m: &DMatrix<f64>) -> DMatrix<f64> {
-    assert_eq!(m.nrows(), m.ncols(), "matrix_exp requires a square matrix");
+pub fn matrix_exp(m: &DMatrix<f64>) -> Result<DMatrix<f64>> {
+    if m.nrows() != m.ncols() {
+        return Err(StateSpaceError::DimensionMismatch(format!(
+            "matrix_exp requires a square matrix, got {}x{}",
+            m.nrows(),
+            m.ncols()
+        )));
+    }
 
     let n = m.nrows();
     if n == 0 {
-        return DMatrix::zeros(0, 0);
+        return Ok(DMatrix::zeros(0, 0));
     }
 
     let norm_1 = matrix_one_norm(m);
     if norm_1 == 0.0 {
-        return DMatrix::<f64>::identity(n, n);
+        return Ok(DMatrix::<f64>::identity(n, n));
     }
 
     let theta_13 = 5.371_920_351_148_152_f64;
@@ -483,15 +527,13 @@ pub fn matrix_exp(m: &DMatrix<f64>) -> DMatrix<f64> {
     let q = &v - &u;
 
     let lu = q.lu();
-    let mut r = lu
-        .solve(&p)
-        .expect("Padé denominator unexpectedly singular in matrix_exp");
+    let mut r = lu.solve(&p).ok_or(StateSpaceError::SingularPadeMatrix)?;
 
     for _ in 0..s {
         r = &r * &r;
     }
 
-    r
+    Ok(r)
 }
 
 /// Checks RC stability; returns `Err(StabilityResult)` for recoverable failure.
@@ -535,6 +577,22 @@ pub fn eigenvalue_check(
     }
 }
 
+/// Conservative upper bound on the spectral radius via Gershgorin circle theorem.
+///
+/// Computes max over rows of `|a_ii| + Σ_{j≠i} |a_ij|` (the matrix infinity-norm).
+/// This is always ≥ the true spectral radius; equality holds for diagonal matrices.
+/// Runs in O(n²) time.
+pub fn gershgorin_spectral_radius(a: &DMatrix<f64>) -> f64 {
+    let n = a.nrows();
+    let mut max_row_sum = 0.0_f64;
+    for i in 0..n {
+        let center = a[(i, i)].abs();
+        let radius: f64 = (0..n).filter(|&j| j != i).map(|j| a[(i, j)].abs()).sum();
+        max_row_sum = max_row_sum.max(center + radius);
+    }
+    max_row_sum
+}
+
 fn matrix_one_norm(m: &DMatrix<f64>) -> f64 {
     (0..m.ncols())
         .map(|col| (0..m.nrows()).map(|row| m[(row, col)].abs()).sum::<f64>())
@@ -574,7 +632,7 @@ mod tests {
     #[test]
     fn matrix_exp_matches_known_rotation_case() {
         let m = DMatrix::from_row_slice(2, 2, &[0.0, 1.0, -1.0, 0.0]);
-        let expm = matrix_exp(&m);
+        let expm = matrix_exp(&m).unwrap();
         let expected = DMatrix::from_row_slice(
             2,
             2,
@@ -688,7 +746,7 @@ mod tests {
     #[test]
     fn unstable_continuous_system_returns_err_stability_result() {
         let a_c = DMatrix::from_row_slice(1, 1, &[0.1]);
-        let a_d = matrix_exp(&(&a_c * 1.0));
+        let a_d = matrix_exp(&(&a_c * 1.0)).unwrap();
 
         let stability = eigenvalue_check(&a_c, &a_d)
             .expect_err("positive continuous eigenvalue should fail stability");
@@ -759,7 +817,7 @@ mod tests {
     fn matrix_exp_2x2_diagonal_matches_scalar_exp() {
         // For diagonal matrix, expm(diag(a,b)) = diag(exp(a), exp(b))
         let m = DMatrix::from_row_slice(2, 2, &[-0.5, 0.0, 0.0, -2.0]);
-        let result = matrix_exp(&m);
+        let result = matrix_exp(&m).unwrap();
         assert!((result[(0, 0)] - (-0.5_f64).exp()).abs() < 1e-14);
         assert!((result[(1, 1)] - (-2.0_f64).exp()).abs() < 1e-14);
         assert!(result[(0, 1)].abs() < 1e-14);
@@ -790,5 +848,49 @@ mod tests {
 
         assert_matrix_close(&model.a_d, &a_expected, 1.0e-12);
         assert_matrix_close(&model.b_d, &b_expected, 1.0e-12);
+    }
+
+    #[test]
+    fn verify_stability_returns_stable_for_known_stable_system() {
+        let model = StateSpaceModel::from_discrete(
+            DMatrix::from_row_slice(2, 2, &[0.5, 0.0, 0.0, 0.3]),
+            DMatrix::from_row_slice(2, 1, &[0.1, 0.2]),
+            DMatrix::from_row_slice(1, 2, &[1.0, 0.0]),
+            DMatrix::from_row_slice(1, 1, &[0.0]),
+        )
+        .unwrap();
+
+        let verdict = model.verify_stability().unwrap();
+        assert_eq!(verdict, StabilityVerdict::Stable);
+    }
+
+    #[test]
+    fn verify_stability_returns_marginally_unstable_for_eigenvalue_gt_one() {
+        let model = StateSpaceModel::from_discrete(
+            DMatrix::from_row_slice(2, 2, &[1.5, 0.0, 0.0, 0.3]),
+            DMatrix::from_row_slice(2, 1, &[0.1, 0.2]),
+            DMatrix::from_row_slice(1, 2, &[1.0, 0.0]),
+            DMatrix::from_row_slice(1, 1, &[0.0]),
+        )
+        .unwrap();
+
+        let verdict = model.verify_stability().unwrap();
+        match verdict {
+            StabilityVerdict::MarginallyUnstable {
+                max_eigenvalue_magnitude,
+            } => {
+                assert!((max_eigenvalue_magnitude - 1.5).abs() < 1e-10);
+            }
+            other => panic!("expected MarginallyUnstable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gershgorin_bound_is_tight_for_diagonal_matrix() {
+        // For a diagonal matrix, Gershgorin radii are zero so the bound equals
+        // the max absolute diagonal entry — exactly the spectral radius.
+        let diag = DMatrix::from_row_slice(3, 3, &[0.8, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.9]);
+        let bound = gershgorin_spectral_radius(&diag);
+        assert!((bound - 0.9).abs() < 1e-14, "expected 0.9, got {bound}");
     }
 }

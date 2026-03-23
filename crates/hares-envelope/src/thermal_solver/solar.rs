@@ -7,7 +7,7 @@ use super::ThermalSolver;
 impl ThermalSolver {
     pub(super) fn apply_solar_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
         for irr in &env.weather.solar_irradiance {
-            let Some(&idx) = self.config.solar_input_indices.get(&irr.surface_id) else {
+            let Some(&idx) = self.wiring.solar_input_indices.get(&irr.surface_id) else {
                 continue;
             };
             if idx >= u.len() {

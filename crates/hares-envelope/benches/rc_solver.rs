@@ -58,18 +58,18 @@ fn build_12node_network() -> RCNetwork {
     // External boundary:    NodeId(200)
 
     let caps = HashMap::from([
-        (NodeId(1), 160_000.0),  // zone 1 wall outer
-        (NodeId(2), 85_000.0),   // zone 1 wall inner
-        (NodeId(3), 200_000.0),  // zone 1 slab
-        (NodeId(4), 50_000.0),   // zone 1 air
-        (NodeId(5), 70_000.0),   // ceiling outer (shared)
-        (NodeId(6), 40_000.0),   // ceiling inner
-        (NodeId(7), 130_000.0),  // attic roof outer
-        (NodeId(8), 65_000.0),   // attic roof inner
-        (NodeId(9), 180_000.0),  // attic floor / deck
-        (NodeId(10), 55_000.0),  // attic wall outer
-        (NodeId(11), 30_000.0),  // attic wall inner
-        (NodeId(12), 25_000.0),  // attic air
+        (NodeId(1), 160_000.0), // zone 1 wall outer
+        (NodeId(2), 85_000.0),  // zone 1 wall inner
+        (NodeId(3), 200_000.0), // zone 1 slab
+        (NodeId(4), 50_000.0),  // zone 1 air
+        (NodeId(5), 70_000.0),  // ceiling outer (shared)
+        (NodeId(6), 40_000.0),  // ceiling inner
+        (NodeId(7), 130_000.0), // attic roof outer
+        (NodeId(8), 65_000.0),  // attic roof inner
+        (NodeId(9), 180_000.0), // attic floor / deck
+        (NodeId(10), 55_000.0), // attic wall outer
+        (NodeId(11), 30_000.0), // attic wall inner
+        (NodeId(12), 25_000.0), // attic air
     ]);
 
     let res = HashMap::from([
@@ -242,8 +242,7 @@ fn bench_full_construction(c: &mut Criterion) {
                 node_to_output: vec![(0, n - 1, 1.0)],
                 input_to_output: vec![],
             };
-            let model =
-                StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping).expect("model");
+            let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping).expect("model");
             let x = DVector::from_element(n, 20.0);
             let u = DVector::from_element(b_c.ncols(), 5.0);
             let x_next = model.step(&x, &u);

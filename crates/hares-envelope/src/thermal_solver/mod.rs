@@ -2,14 +2,15 @@
 
 mod config;
 mod infiltration;
+mod initialization;
 mod solar;
 
+pub(crate) use config::Result;
 pub use config::{
     EnvelopeComponentGains, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
-    InteriorSurfaceInfo, NaturalVentilationConfig, ThermalSolverConfig, ThermalSolverError,
-    VentilationConfig, WindowSolarProperties,
+    InteriorSurfaceInfo, NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig,
+    ThermalSolverError, VentilationConfig, WindowSolarProperties,
 };
-pub(crate) use config::Result;
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -19,21 +20,23 @@ use hares_types::{
     DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots, THERMAL, ThermalCategory,
     ZoneId,
 };
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DVector;
 
 use crate::longwave_radiation::{
-    ExteriorSurface, InteriorSurface, exterior_longwave_w, interior_longwave_linearised_w,
-    sky_view_factor,
+    ExteriorSurface, InteriorSurface, beta_factor, exterior_longwave_w,
+    interior_longwave_linearised_w, sky_view_factor,
 };
 use crate::state_space::StateSpaceModel;
 
 use infiltration::apply_infiltration_and_ventilation;
+use initialization::initialize_steady_state;
 
 const H_FG_J_PER_KG: f64 = LATENT_HEAT_VAPORISATION_0C_KJ_KG * KJ_TO_J;
 
 #[derive(Debug, Clone)]
 pub struct ThermalSolver {
     model: StateSpaceModel,
+    wiring: StateSpaceWiring,
     config: ThermalSolverConfig,
     /// Timestep in seconds that the model was discretized for; runtime dt must match.
     dt_s: f64,
@@ -43,6 +46,9 @@ pub struct ThermalSolver {
     u_buf: DVector<f64>,
     /// Reusable latent-load accumulator: cleared at the start of each infiltration pass.
     latent_buf: HashMap<ZoneId, f64>,
+    /// Per-exterior-surface converged surface temperatures [°C] for LWR continuity.
+    /// Indexed parallel to `config.exterior_surfaces`.
+    exterior_surface_temps: Vec<f64>,
     /// Last-step component gains for output/diagnostics.
     component_gains: EnvelopeComponentGains,
 }
@@ -85,25 +91,29 @@ impl ThermalSolver {
 
     pub fn new(
         model: StateSpaceModel,
+        wiring: StateSpaceWiring,
         config: ThermalSolverConfig,
         dt_s: f64,
         env: &EnvironmentState,
         indoor_temp_c: f64,
     ) -> Result<Self> {
-        let x = initialize_steady_state(&model, &config, env, indoor_temp_c)?;
+        let x = initialize_steady_state(&model, &wiring, env, indoor_temp_c)?;
         let n_inputs = model.b_d.ncols();
         let last_u = DVector::<f64>::zeros(n_inputs);
         let u_buf = DVector::<f64>::zeros(n_inputs);
         let latent_buf = HashMap::new();
+        let exterior_surface_temps = vec![env.weather.outdoor_temp_c; config.exterior_surfaces.len()];
 
         Ok(Self {
             model,
+            wiring,
             config,
             dt_s,
             x,
             last_u,
             u_buf,
             latent_buf,
+            exterior_surface_temps,
             component_gains: EnvelopeComponentGains::default(),
         })
     }
@@ -122,11 +132,7 @@ impl ThermalSolver {
         (
             self.x.iter().copied().collect(),
             self.last_u.iter().copied().collect(),
-            self.config
-                .exterior_surfaces
-                .iter()
-                .map(|s| s.t_prev_c)
-                .collect(),
+            self.exterior_surface_temps.clone(),
         )
     }
 
@@ -159,16 +165,21 @@ impl ThermalSolver {
             self.last_u = DVector::from_column_slice(last_u_state);
         }
 
-        if lwr_t_prev_c.len() != self.config.exterior_surfaces.len() {
+        if lwr_t_prev_c.len() != self.exterior_surface_temps.len() {
             return Err(ThermalSolverError::Initialization(format!(
                 "invalid lwr_t_prev_c length: got {}, expected {}",
                 lwr_t_prev_c.len(),
-                self.config.exterior_surfaces.len()
+                self.exterior_surface_temps.len()
             )));
         }
-        for (info, &t) in self.config.exterior_surfaces.iter_mut().zip(lwr_t_prev_c) {
-            info.t_prev_c = t;
+        for (i, &t) in lwr_t_prev_c.iter().enumerate() {
+            if !t.is_finite() {
+                return Err(ThermalSolverError::Initialization(format!(
+                    "non-finite surface temperature at index {i}: {t}"
+                )));
+            }
         }
+        self.exterior_surface_temps.copy_from_slice(lwr_t_prev_c);
         Ok(())
     }
 
@@ -181,16 +192,19 @@ impl ThermalSolver {
     /// drift on transient days. A future improvement could split `resolve_internal`
     /// into background-build and solve phases.
     pub fn solve_ideal_capacity(&self, env: &EnvironmentState, zone: ZoneId) -> f64 {
-        let Some(&input_idx) = self.config.zone_sensible_input_indices.get(&zone) else {
+        let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
         };
-        let Some(&output_idx) = self.config.zone_output_indices.get(&zone) else {
+        let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
             return 0.0;
         };
         let y_target = zone_setpoint_c(&self.config, env, zone);
         self.model
             .solve_for_output_input(&self.x, &self.last_u, y_target, output_idx, input_idx)
-            .unwrap_or(0.0)
+            .unwrap_or_else(|e| {
+                tracing::debug!(?zone, ?e, "solve_ideal_capacity failed, returning 0");
+                0.0
+            })
     }
 
     pub fn set_ideal_hvac_zones(&mut self, zones: Vec<ZoneId>) {
@@ -203,7 +217,45 @@ impl ThermalSolver {
         env: &EnvironmentState,
         ideal_hvac_zones: &[ZoneId],
     ) -> DomainUpdate {
-        // Swap out the reusable buffer so we can call &self methods on the rest of the struct.
+        let (mut u, latent_by_zone) = self.build_input_vector(ports, env);
+
+        // Ideal HVAC: solve for the heat injection that hits each zone's setpoint.
+        for &zone in ideal_hvac_zones {
+            let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
+                continue;
+            };
+            let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
+                continue;
+            };
+            let target = zone_setpoint_c(&self.config, env, zone);
+
+            if let Ok(q) = self
+                .model
+                .solve_for_output_input(&self.x, &u, target, output_idx, input_idx)
+            {
+                u[input_idx] = q;
+            }
+        }
+
+        // State-space step: x[k+1] = A_d·x[k] + B_d·u[k].
+        let x_next = self.model.step(&self.x, &u);
+        let y_next = self.model.output(&x_next, &u);
+        self.x = x_next;
+        self.last_u.clone_from(&u);
+        self.u_buf = u;
+
+        self.format_domain_update(&y_next, latent_by_zone)
+    }
+
+    /// Assembles the full input vector from outdoor, solar, LWR, port, and
+    /// infiltration contributions. Updates `self.component_gains` for diagnostics.
+    ///
+    /// Returns the input vector and the per-zone latent loads map.
+    fn build_input_vector(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+    ) -> (DVector<f64>, HashMap<ZoneId, f64>) {
         let mut u = std::mem::replace(&mut self.u_buf, DVector::zeros(0));
         let n = self.model.b_d.ncols();
         if u.len() == n {
@@ -228,30 +280,29 @@ impl ThermalSolver {
         let interior_lwr_w = u.iter().sum::<f64>() - u_pre;
 
         self.apply_port_sensible_inputs(&mut u, ports);
-        // Per-zone port sensible gains directly from the thermal accumulators.
+
+        let indoor_zone = self.config.indoor_zone_id;
         let port_sensible_indoor_w = ports
             .thermal
             .iter()
-            .find(|t| t.zone == ZoneId(1))
+            .find(|t| t.zone == indoor_zone)
             .map(|t| t.sensible_gain_w)
             .unwrap_or(0.0);
 
-        // Swap out the latent buffer so we can call &self methods on the rest of the struct.
         let mut latent_by_zone = std::mem::take(&mut self.latent_buf);
         latent_by_zone.clear();
 
-        let infiltration_by_zone =
-            apply_infiltration_and_ventilation(&self.config, &mut u, env, &mut latent_by_zone);
+        let infiltration_by_zone = apply_infiltration_and_ventilation(
+            &self.config,
+            &self.wiring,
+            &mut u,
+            env,
+            &mut latent_by_zone,
+        );
 
-        // Report conditioned zone (ZoneId(1)) infiltration for oracle comparison.
-        // Total across all zones is available by summing the map.
-        let infiltration_indoor_w = infiltration_by_zone
-            .get(&ZoneId(1))
-            .copied()
-            .unwrap_or(0.0);
+        let infiltration_indoor_w = infiltration_by_zone.get(&indoor_zone).copied().unwrap_or(0.0);
 
-        // Read per-category subtotals from the indoor zone thermal accumulator.
-        let indoor_acc = ports.thermal.iter().find(|t| t.zone == ZoneId(1));
+        let indoor_acc = ports.thermal.iter().find(|t| t.zone == indoor_zone);
         let hvac_heating_w = indoor_acc
             .map(|a| a.sensible_for_category(ThermalCategory::HvacHeating))
             .unwrap_or(0.0);
@@ -268,7 +319,6 @@ impl ThermalSolver {
             .map(|a| a.sensible_for_category(ThermalCategory::DuctLoss))
             .unwrap_or(0.0);
 
-        // Build sorted per-zone infiltration Vec from the HashMap.
         let mut infiltration_by_zone_vec: Vec<(ZoneId, f64)> =
             infiltration_by_zone.iter().map(|(&z, &v)| (z, v)).collect();
         infiltration_by_zone_vec.sort_by_key(|(z, _)| *z);
@@ -290,30 +340,18 @@ impl ThermalSolver {
             interior_lwr_by_zone,
         };
 
-        for &zone in ideal_hvac_zones {
-            let Some(&input_idx) = self.config.zone_sensible_input_indices.get(&zone) else {
-                continue;
-            };
-            let Some(&output_idx) = self.config.zone_output_indices.get(&zone) else {
-                continue;
-            };
-            let target = zone_setpoint_c(&self.config, env, zone);
+        (u, latent_by_zone)
+    }
 
-            if let Ok(q) =
-                self.model.solve_for_output_input(&self.x, &u, target, output_idx, input_idx)
-            {
-                u[input_idx] = q;
-            }
-        }
-
-        let x_next = self.model.step(&self.x, &u);
-        let y_next = self.model.output(&x_next, &u);
-        self.x = x_next;
-        self.last_u.clone_from(&u);
-        self.u_buf = u;
-
+    /// Formats solver outputs into a `DomainUpdate` and returns the latent buffer
+    /// for reuse.
+    fn format_domain_update(
+        &mut self,
+        y_next: &DVector<f64>,
+        latent_by_zone: HashMap<ZoneId, f64>,
+    ) -> DomainUpdate {
         let mut zone_temperatures_c: Vec<(ZoneId, f64)> = self
-            .config
+            .wiring
             .zone_output_indices
             .iter()
             .map(|(zone, output_idx)| (*zone, y_next[*output_idx]))
@@ -329,7 +367,6 @@ impl ThermalSolver {
             custom_payload.push(latent);
         }
 
-        // Return the latent buffer for reuse next step.
         self.latent_buf = latent_by_zone;
 
         DomainUpdate {
@@ -344,7 +381,7 @@ impl ThermalSolver {
     }
 
     fn apply_outdoor_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
-        for &idx in &self.config.outdoor_temp_input_indices {
+        for &idx in &self.wiring.outdoor_temp_input_indices {
             if idx < u.len() {
                 u[idx] = env.weather.outdoor_temp_c;
             }
@@ -367,10 +404,9 @@ impl ThermalSolver {
 
         let t_ext = env.weather.outdoor_temp_c;
         let t_sky_raw = env.weather.sky_temp_c;
-        let t_gnd = env.weather.ground_temp_c;
         let t_sky_valid = !t_sky_raw.is_nan();
 
-        for info in &mut self.config.exterior_surfaces {
+        for (i, info) in self.config.exterior_surfaces.iter().enumerate() {
             if info.input_index >= u.len() || info.state_index >= self.x.len() {
                 continue;
             }
@@ -383,19 +419,17 @@ impl ThermalSolver {
                     area_m2: info.area_m2,
                     emissivity: info.emissivity,
                     sky_view_factor: sky_view_factor(info.tilt_deg),
+                    beta: beta_factor(info.tilt_deg),
                 };
-                let q_lw = exterior_longwave_w(
-                    &surface,
-                    t_sky_raw,
-                    t_gnd,
-                    t_node_c,
-                );
+                let q_lw = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
                 u[info.input_index] += q_lw;
                 continue;
             }
 
             let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
-            let svf = sky_view_factor(info.tilt_deg);
+            let f_sky = sky_view_factor(info.tilt_deg);
+            let f_gnd = 1.0 - f_sky;
+            let beta = beta_factor(info.tilt_deg);
             let t_node_c = self.x[info.state_index];
 
             // Per-surface solar gain [W] for the iteration (no allocation).
@@ -413,21 +447,21 @@ impl ThermalSolver {
                 .unwrap_or(0.0);
 
             // Incoming LWR (environment → surface), independent of surface temp.
+            // Ground = air per E+ standard; β splits sky hemisphere.
+            let t_air_k4 = (t_ext + CELSIUS_TO_KELVIN).powi(4);
             let h_lwr_inj = if !t_sky_valid {
-                e_factor * (t_ext + CELSIUS_TO_KELVIN).powi(4)
+                e_factor * t_air_k4
             } else {
                 let t_sky_k4 = (t_sky_raw + CELSIUS_TO_KELVIN).powi(4);
-                let t_gnd_k4 = (t_gnd + CELSIUS_TO_KELVIN).powi(4);
-                e_factor * ((1.0 - svf) * t_gnd_k4 + svf * t_sky_k4)
+                e_factor * ((f_gnd + (1.0 - beta) * f_sky) * t_air_k4 + beta * f_sky * t_sky_k4)
             };
 
             // Initial surface temperature estimate from linear interpolation.
-            let t_surf_init =
-                info.rad_frac * t_node_c + (1.0 - info.rad_frac) * t_ext;
+            let t_surf_init = info.rad_frac * t_node_c + (1.0 - info.rad_frac) * t_ext;
 
             // Iterative solve with heavy-ball damping (matches OCHRE).
-            let mut t_surf = info.t_prev_c;
-            let mut t_prev_iter = info.t_prev_c;
+            let mut t_surf = self.exterior_surface_temps[i];
+            let mut t_prev_iter = self.exterior_surface_temps[i];
 
             for _ in 0..info.n_iter {
                 let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
@@ -435,8 +469,7 @@ impl ThermalSolver {
                 // Clamp step to ±2 °C per sub-iteration for stability.
                 let t_new = t_new.clamp(t_surf - 2.0, t_surf + 2.0);
                 // Heavy-ball momentum: 0.5 relaxation + 0.1 momentum.
-                let t_next =
-                    t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_prev_iter);
+                let t_next = t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_prev_iter);
                 t_prev_iter = t_surf;
                 t_surf = t_next;
                 if (t_surf - t_prev_iter).abs() < 0.01 {
@@ -445,7 +478,7 @@ impl ThermalSolver {
             }
 
             // Persist converged surface temp for next timestep.
-            info.t_prev_c = t_surf;
+            self.exterior_surface_temps[i] = t_surf;
 
             // Compute final LWR at the converged surface temperature.
             let q_lw = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
@@ -457,13 +490,12 @@ impl ThermalSolver {
             // (already modelled by the RC film resistance).
             let injected = (solar_w + q_lw) * info.rad_frac;
             u[info.input_index] += injected;
-
         }
     }
 
     fn apply_port_sensible_inputs(&self, u: &mut DVector<f64>, ports: &PortSlots) {
         for thermal in &ports.thermal {
-            if let Some(&idx) = self.config.zone_sensible_input_indices.get(&thermal.zone)
+            if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
                 && idx < u.len()
             {
                 u[idx] += thermal.sensible_gain_w;
@@ -568,117 +600,6 @@ fn zone_setpoint_c(config: &ThermalSolverConfig, env: &EnvironmentState, zone: Z
         .unwrap_or_default()
 }
 
-/// Solves for the true conditioned steady-state temperature profile.
-///
-/// Treats each conditioned zone as a fixed boundary condition (held at
-/// `indoor_temp_c`), then solves `(I - A_d_reduced) * x = B_d_reduced * u`
-/// for the remaining RC nodes. This yields the correct temperature gradient
-/// across walls/roofs — outer nodes near outdoor temp, inner nodes near
-/// indoor temp — avoiding the first-step discontinuity that occurs when all
-/// nodes start at indoor temp.
-///
-/// Falls back to uniform indoor-temp initialization if the reduced system
-/// is singular (e.g., a floating thermal node with no resistive path).
-///
-/// Ref: OCHRE `Envelope.py:1013–1033`.
-fn initialize_steady_state(
-    model: &StateSpaceModel,
-    config: &ThermalSolverConfig,
-    env: &EnvironmentState,
-    indoor_temp_c: f64,
-) -> Result<DVector<f64>> {
-    let n = model.a_d.nrows();
-    let m = model.b_d.ncols();
-
-    // Build u_initial: outdoor temps + indoor temps (no HVAC heat, no solar).
-    let mut u = DVector::<f64>::zeros(m);
-    for &idx in &config.outdoor_temp_input_indices {
-        if idx < m {
-            u[idx] = env.weather.outdoor_temp_c;
-        }
-    }
-    for &idx in &config.indoor_temp_input_indices {
-        if idx < m {
-            u[idx] = indoor_temp_c;
-        }
-    }
-
-    // Collect zone state indices to fix as boundary conditions.
-    // Sort descending so we can remove rows/cols without invalidating earlier indices.
-    let mut zone_fixes: Vec<(usize, f64)> = config
-        .zone_state_indices
-        .values()
-        .filter(|&&idx| idx < n)
-        .map(|&idx| (idx, indoor_temp_c))
-        .collect();
-    zone_fixes.sort_by(|a, b| b.0.cmp(&a.0));
-    zone_fixes.dedup_by_key(|f| f.0);
-
-    if zone_fixes.is_empty() {
-        // No zone states to fix — just solve the full system.
-        let eye = DMatrix::<f64>::identity(n, n);
-        let lhs = eye - &model.a_d;
-        let rhs = &model.b_d * &u;
-        return match lhs.try_inverse() {
-            Some(inv) => Ok(inv * rhs),
-            None => Ok(DVector::from_element(n, indoor_temp_c)),
-        };
-    }
-
-    // Partition the system: remove zone states from the state vector and
-    // move their coupling columns from A_d into B_d as fixed-value inputs.
-    //
-    // For each zone state j at temperature T_j:
-    //   Original: x[k+1] = A_d * x[k] + B_d * u[k]
-    //   Column j of A_d couples x_j into all other states.
-    //   Since x_j = T_j (fixed), move A_d[:,j] * T_j into the input side.
-    let mut a_reduced = model.a_d.clone();
-    let mut b_rhs = &model.b_d * &u; // RHS contribution from original inputs
-
-    // Add coupling from fixed zone states to RHS, then remove those rows/cols.
-    for &(j, t_fixed) in &zone_fixes {
-        // Accumulate the coupling: A_d[:,j] * t_fixed contributes to all states.
-        let col_j = a_reduced.column(j).into_owned();
-        b_rhs += &col_j * t_fixed;
-    }
-
-    // Remove rows and columns for fixed states (indices are sorted descending).
-    for &(j, _) in &zone_fixes {
-        a_reduced = a_reduced.remove_row(j).remove_column(j);
-        b_rhs = b_rhs.remove_row(j);
-    }
-
-    let n_reduced = a_reduced.nrows();
-    if n_reduced == 0 {
-        // All states are zone states — nothing to solve.
-        let mut x_full = DVector::zeros(0);
-        for &(j, t_fixed) in zone_fixes.iter().rev() {
-            x_full = x_full.insert_row(j, t_fixed);
-        }
-        return Ok(x_full);
-    }
-
-    let eye = DMatrix::<f64>::identity(n_reduced, n_reduced);
-    let lhs = eye - a_reduced;
-
-    // Use try_inverse instead of LU solve — nalgebra's LU can panic on
-    // certain matrix configurations in both debug and release builds.
-    let x_reduced = match lhs.try_inverse() {
-        Some(inv) => inv * b_rhs,
-        None => {
-            return Ok(DVector::from_element(n, indoor_temp_c));
-        }
-    };
-
-    // Re-insert zone temperatures at their fixed values.
-    // zone_fixes is sorted descending, so insert in ascending order.
-    let mut x_full = x_reduced;
-    for &(j, t_fixed) in zone_fixes.iter().rev() {
-        x_full = x_full.insert_row(j, t_fixed);
-    }
-
-    Ok(x_full)
-}
 
 #[cfg(test)]
 mod tests {
@@ -692,11 +613,11 @@ mod tests {
     };
     use nalgebra::{DMatrix, DVector};
 
+    use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
-    use crate::longwave_radiation::SOLAR_ABSORPTANCE_DEFAULT;
     use crate::thermal_solver::{
-        ExteriorSurfaceInfo, InfiltrationMethod, InteriorSurfaceInfo,
-        NaturalVentilationConfig, ThermalSolver, ThermalSolverConfig, VentilationConfig,
+        ExteriorSurfaceInfo, InfiltrationMethod, InteriorSurfaceInfo, NaturalVentilationConfig,
+        StateSpaceWiring, ThermalSolver, ThermalSolverConfig, VentilationConfig,
         WindowSolarProperties,
     };
 
@@ -760,13 +681,16 @@ mod tests {
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
 
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
 
             exterior_surfaces: vec![],
@@ -778,7 +702,7 @@ mod tests {
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
         };
-        ThermalSolver::new(model, config, 60.0, env, env.zones[0].temperature_c).unwrap()
+        ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
     }
 
     #[test]
@@ -880,13 +804,16 @@ mod tests {
             input_to_output: vec![],
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![1],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -897,7 +824,7 @@ mod tests {
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
         };
-        let solver = ThermalSolver::new(model, config, 60.0, &env, indoor).unwrap();
+        let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
         let state = solver.state();
 
         // Zone air (state 0) should be at indoor temp (fixed boundary).
@@ -961,13 +888,16 @@ mod tests {
             crate::state_space::StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
                 .unwrap();
 
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
 
             exterior_surfaces: vec![],
@@ -979,7 +909,7 @@ mod tests {
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
         };
-        let mut solver = ThermalSolver::new(model, config, 60.0, &env, 20.0).unwrap();
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
         solver.x[0] = 20.0;
 
         let ports = PortSlots {
@@ -1311,13 +1241,16 @@ mod tests {
             input_to_output: vec![],
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
 
             exterior_surfaces: vec![],
@@ -1330,7 +1263,8 @@ mod tests {
             natural_ventilation: None,
         };
         let mut solver =
-            ThermalSolver::new(model, config, 60.0, env, env.zones[0].temperature_c).unwrap();
+            ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
+                .unwrap();
         // Pin state to zone temp so the infiltration delta-T is deterministic.
         solver.x[0] = env.zones[0].temperature_c;
         solver
@@ -1445,13 +1379,16 @@ mod tests {
             input_to_output: vec![],
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
 
             exterior_surfaces: vec![],
@@ -1463,7 +1400,7 @@ mod tests {
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
         };
-        let mut solver = ThermalSolver::new(model, config, 60.0, &env, zone_temp).unwrap();
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
 
         let q_ideal = solver.solve_ideal_capacity(&env, ZoneId(1));
@@ -1557,13 +1494,16 @@ mod tests {
         };
 
         let make_solver = |env: &EnvironmentState| -> ThermalSolver {
-            let cfg = ThermalSolverConfig {
+            let wiring = StateSpaceWiring {
                 zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+            };
+            let cfg = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 42,
@@ -1575,7 +1515,6 @@ mod tests {
                     rad_frac: 0.0,
                     rad_res_k_w: 0.0,
                     n_iter: 1,
-                    t_prev_c: zone_temp,
                     absorptance: 1.0,
                 }],
                 interior_lwr_zones: vec![],
@@ -1586,7 +1525,9 @@ mod tests {
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
             };
-            let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, env, zone_temp).unwrap();
+            let mut s =
+                ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
+                    .unwrap();
             s.x[0] = zone_temp;
             s
         };
@@ -1688,13 +1629,16 @@ mod tests {
         };
 
         let make_solver = |absorptance: f64| -> ThermalSolver {
-            let cfg = ThermalSolverConfig {
+            let wiring = StateSpaceWiring {
                 zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+            };
+            let cfg = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 1,
@@ -1706,7 +1650,6 @@ mod tests {
                     rad_frac: 0.0,
                     rad_res_k_w: 0.0,
                     n_iter: 1,
-                    t_prev_c: zone_temp,
                     absorptance,
                 }],
                 interior_lwr_zones: vec![],
@@ -1717,7 +1660,9 @@ mod tests {
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
             };
-            let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, &env, zone_temp).unwrap();
+            let mut s =
+                ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, &env, zone_temp)
+                    .unwrap();
             s.x[0] = zone_temp;
             s
         };
@@ -1829,13 +1774,16 @@ mod tests {
         };
 
         let make_solver = |absorptance: f64| -> ThermalSolver {
-            let cfg = ThermalSolverConfig {
+            let wiring = StateSpaceWiring {
                 zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+            };
+            let cfg = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
 
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
@@ -1848,7 +1796,6 @@ mod tests {
                     rad_frac: 0.0,
                     rad_res_k_w: 0.0,
                     n_iter: 1,
-                    t_prev_c: outdoor_temp,
                     absorptance,
                 }],
                 interior_lwr_zones: vec![],
@@ -1860,7 +1807,9 @@ mod tests {
                 natural_ventilation: None,
             };
             let env = make_env();
-            let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, &env, zone_temp).unwrap();
+            let mut s =
+                ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, &env, zone_temp)
+                    .unwrap();
             s.x[0] = zone_temp;
             s
         };
@@ -2157,13 +2106,16 @@ mod tests {
         };
 
         let make_solver = |env: &EnvironmentState| -> ThermalSolver {
-            let cfg = ThermalSolverConfig {
+            let wiring = StateSpaceWiring {
                 zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+            };
+            let cfg = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 7,
@@ -2175,7 +2127,6 @@ mod tests {
                     rad_frac: 0.0,
                     rad_res_k_w: 0.0,
                     n_iter: 1,
-                    t_prev_c: zone_temp,
                     absorptance: 1.0,
                 }],
                 interior_lwr_zones: vec![],
@@ -2186,7 +2137,9 @@ mod tests {
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
             };
-            let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, env, zone_temp).unwrap();
+            let mut s =
+                ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
+                    .unwrap();
             s.x[0] = zone_temp;
             s
         };
@@ -2267,13 +2220,16 @@ mod tests {
             input_to_output: vec![],
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
 
             exterior_surfaces: vec![],
@@ -2289,7 +2245,8 @@ mod tests {
                 0.000_143, // ELA wind coeff
             )),
         };
-        let mut solver_nv = ThermalSolver::new(model, config, 60.0, &env, zone_temp).unwrap();
+        let mut solver_nv =
+            ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver_nv.x[0] = zone_temp;
 
         let t_nv = solver_nv
@@ -2341,13 +2298,16 @@ mod tests {
             input_to_output: vec![],
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
 
             exterior_surfaces: vec![],
@@ -2361,7 +2321,8 @@ mod tests {
                 12.0, 0.000_106, 0.000_143,
             )),
         };
-        let mut solver_nv = ThermalSolver::new(model, config, 60.0, &env, zone_temp).unwrap();
+        let mut solver_nv =
+            ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver_nv.x[0] = zone_temp;
 
         let t_nv = solver_nv
@@ -2420,19 +2381,21 @@ mod tests {
                     rad_frac: 0.0,  // no film resistance → use node temp directly
                     rad_res_k_w: 0.0,
                     n_iter: 1,
-                    t_prev_c: outdoor_temp,
                     absorptance: SOLAR_ABSORPTANCE_DEFAULT,
                 }]
             } else {
                 vec![]
             };
-            let cfg = ThermalSolverConfig {
+            let wiring = StateSpaceWiring {
                 zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
                 outdoor_temp_input_indices: vec![0],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
+            };
+            let cfg = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
 
                 exterior_surfaces,
@@ -2444,7 +2407,9 @@ mod tests {
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
             };
-            let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, env, zone_temp).unwrap();
+            let mut s =
+                ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
+                    .unwrap();
             s.x[0] = zone_temp;
             s
         };
@@ -2555,13 +2520,16 @@ mod tests {
         };
 
         let make_solver = |env: &EnvironmentState| -> ThermalSolver {
-            let cfg = ThermalSolverConfig {
+            let wiring = StateSpaceWiring {
                 zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
+            };
+            let cfg = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::from([(window_surface_id, win_props)]),
 
                 exterior_surfaces: vec![],
@@ -2573,7 +2541,9 @@ mod tests {
                 ventilation: VentilationConfig::default(),
                 natural_ventilation: None,
             };
-            let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, env, zone_temp).unwrap();
+            let mut s =
+                ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
+                    .unwrap();
             s.x[0] = zone_temp;
             s
         };
@@ -2617,7 +2587,7 @@ mod tests {
     }
 
     /// Iterative LWR solver with rad_frac produces a different zone temperature
-    /// than the simple node-temp-only approach, and the t_prev_c state is updated.
+    /// than the simple node-temp-only approach, and exterior_surface_temps is updated.
     #[test]
     fn iterative_lwr_updates_surface_state_and_differs_from_simple() {
         let zone_temp = 25.0;
@@ -2653,16 +2623,18 @@ mod tests {
                     rad_frac,
                     rad_res_k_w,
                     n_iter: 4,
-                    t_prev_c: outdoor_temp,
                     absorptance: SOLAR_ABSORPTANCE_DEFAULT,
                 }];
-                let cfg = ThermalSolverConfig {
+                let wiring = StateSpaceWiring {
                     zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
                     zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                     zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
                     outdoor_temp_input_indices: vec![0],
                     indoor_temp_input_indices: vec![],
                     solar_input_indices: HashMap::new(),
+                };
+                let cfg = ThermalSolverConfig {
+                    indoor_zone_id: ZoneId(1),
                     window_properties: HashMap::new(),
 
                     exterior_surfaces,
@@ -2674,7 +2646,9 @@ mod tests {
                     ventilation: VentilationConfig::default(),
                     natural_ventilation: None,
                 };
-                let mut s = ThermalSolver::new(model.clone(), cfg, 60.0, env, zone_temp).unwrap();
+                let mut s =
+                    ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
+                        .unwrap();
                 s.x[0] = zone_temp;
                 s
             };
@@ -2686,29 +2660,27 @@ mod tests {
 
         // rad_frac > 0: iterative solver estimates true surface temp
         let mut solver = make_solver(0.375, 0.0015, &env);
-        let initial_t_prev = solver.config.exterior_surfaces[0].t_prev_c;
+        let initial_t_prev = solver.exterior_surface_temps[0];
         let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
-        let updated_t_prev = solver.config.exterior_surfaces[0].t_prev_c;
+        let updated_t_prev = solver.exterior_surface_temps[0];
 
-        // t_prev_c must be updated from its initial value (outdoor temp)
+        // exterior_surface_temps must be updated from its initial value (outdoor temp)
         assert!(
             (updated_t_prev - initial_t_prev).abs() > 0.01,
-            "t_prev_c should be updated by iteration: initial={initial_t_prev:.4}, after={updated_t_prev:.4}"
+            "exterior_surface_temps should be updated by iteration: initial={initial_t_prev:.4}, after={updated_t_prev:.4}"
         );
 
         // Converged surface temp should be physically reasonable
         assert!(
             updated_t_prev > outdoor_temp - 30.0 && updated_t_prev < zone_temp + 30.0,
-            "converged t_prev_c={updated_t_prev:.2} out of physical range"
+            "converged surface temp={updated_t_prev:.2} out of physical range"
         );
     }
 
     /// Converged surface temperature should be between outdoor temp and node temp.
     #[test]
     fn iterative_lwr_surface_temp_is_bounded() {
-        use crate::longwave_radiation::{
-            CELSIUS_TO_KELVIN, STEFAN_BOLTZMANN, sky_view_factor,
-        };
+        use crate::longwave_radiation::{CELSIUS_TO_KELVIN, STEFAN_BOLTZMANN, sky_view_factor};
 
         let t_node = 25.0;
         let t_ext = 10.0;
@@ -2719,11 +2691,14 @@ mod tests {
         let rad_res_k_w = 0.0015; // R_film / area
 
         let e_factor = emissivity * STEFAN_BOLTZMANN * area;
-        let svf = sky_view_factor(0.0); // horizontal roof
+        let f_sky = sky_view_factor(0.0); // horizontal roof
+        let f_gnd = 1.0 - f_sky;
+        let beta = beta_factor(0.0);
 
         let t_sky_k4 = (t_sky + CELSIUS_TO_KELVIN).powi(4);
         let t_ext_k4 = (t_ext + CELSIUS_TO_KELVIN).powi(4);
-        let h_lwr_inj = e_factor * ((1.0 - svf) * t_ext_k4 + svf * t_sky_k4);
+        let h_lwr_inj =
+            e_factor * ((f_gnd + (1.0 - beta) * f_sky) * t_ext_k4 + beta * f_sky * t_sky_k4);
 
         let t_surf_init = rad_frac * t_node + (1.0 - rad_frac) * t_ext;
 
@@ -2752,6 +2727,64 @@ mod tests {
             t_surf < t_surf_init,
             "LWR should cool surface below no-radiation init: \
              t_surf={t_surf:.4}, t_surf_init={t_surf_init:.4}"
+        );
+    }
+
+    #[test]
+    fn iterative_lwr_nan_sky_collapses_to_air_temp() {
+        use crate::longwave_radiation::{CELSIUS_TO_KELVIN, STEFAN_BOLTZMANN, sky_view_factor};
+
+        let t_node = 25.0;
+        let t_ext = 10.0;
+        let area = 20.0;
+        let emissivity = 0.90;
+        let rad_frac = 0.375;
+        let rad_res_k_w = 0.0015;
+
+        let e_factor = emissivity * STEFAN_BOLTZMANN * area;
+        let t_ext_k4 = (t_ext + CELSIUS_TO_KELVIN).powi(4);
+
+        // NaN sky → h_lwr_inj collapses to e_factor * T_air⁴ (all terms use air temp)
+        let h_lwr_inj_nan = e_factor * t_ext_k4;
+
+        // Valid sky at air temp → should produce the same h_lwr_inj via 4-component formula
+        let f_sky = sky_view_factor(45.0); // non-trivial tilt to exercise β
+        let f_gnd = 1.0 - f_sky;
+        let beta = beta_factor(45.0);
+        let h_lwr_inj_air =
+            e_factor * ((f_gnd + (1.0 - beta) * f_sky) * t_ext_k4 + beta * f_sky * t_ext_k4);
+
+        // Both must equal e_factor * T_air⁴ since sky = air
+        assert!(
+            (h_lwr_inj_nan - h_lwr_inj_air).abs() < 1e-6,
+            "NaN sky path ({h_lwr_inj_nan:.6}) must match sky=air path ({h_lwr_inj_air:.6})"
+        );
+
+        // Run the iterative loop for both and confirm converged temps match
+        let run_loop = |h_lwr_inj: f64| -> f64 {
+            let t_surf_init = rad_frac * t_node + (1.0 - rad_frac) * t_ext;
+            let mut t_surf = t_ext;
+            let mut t_prev = t_ext;
+            for _ in 0..20 {
+                let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
+                let t_new = t_surf_init + lwr * rad_res_k_w;
+                let t_new = t_new.clamp(t_surf - 2.0, t_surf + 2.0);
+                let t_next = t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_prev);
+                t_prev = t_surf;
+                t_surf = t_next;
+                if (t_surf - t_prev).abs() < 0.01 {
+                    break;
+                }
+            }
+            t_surf
+        };
+
+        let t_surf_nan = run_loop(h_lwr_inj_nan);
+        let t_surf_air = run_loop(h_lwr_inj_air);
+        assert!(
+            (t_surf_nan - t_surf_air).abs() < 0.01,
+            "NaN sky converged temp ({t_surf_nan:.4}) must match \
+             sky=air converged temp ({t_surf_air:.4})"
         );
     }
 
@@ -2886,13 +2919,16 @@ mod tests {
             input_to_output: vec![],
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -2904,7 +2940,8 @@ mod tests {
             natural_ventilation: None,
         };
         let mut solver =
-            ThermalSolver::new(model, config, 60.0, env, env.zones[0].temperature_c).unwrap();
+            ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
+                .unwrap();
         solver.x[0] = env.zones[0].temperature_c;
         solver
     }
@@ -2953,7 +2990,10 @@ mod tests {
             .1;
 
         // Both should cool below zone_temp (outdoor is colder).
-        assert!(t_no_recovery < zone_temp, "ventilation should cool the zone");
+        assert!(
+            t_no_recovery < zone_temp,
+            "ventilation should cool the zone"
+        );
         assert!(t_hrv < zone_temp, "HRV should still cool the zone");
 
         // HRV should be significantly warmer (less cooling).
@@ -2991,11 +3031,7 @@ mod tests {
         };
 
         // No recovery
-        let mut solver_no = solver_with_ventilation(
-            &env,
-            VentilationConfig::default(),
-            vent_flow,
-        );
+        let mut solver_no = solver_with_ventilation(&env, VentilationConfig::default(), vent_flow);
         let update_no = solver_no.resolve(&ports, &env, Duration::from_secs(60));
         let latent_no = extract_latent(&update_no);
 
@@ -3058,13 +3094,16 @@ mod tests {
             input_to_output: vec![],
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
-        let config = ThermalSolverConfig {
+        let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -3078,8 +3117,15 @@ mod tests {
             },
             natural_ventilation: None,
         };
-        let mut solver_combined =
-            ThermalSolver::new(model, config, 60.0, &env, env.zones[0].temperature_c).unwrap();
+        let mut solver_combined = ThermalSolver::new(
+            model,
+            wiring,
+            config,
+            60.0,
+            &env,
+            env.zones[0].temperature_c,
+        )
+        .unwrap();
         solver_combined.x[0] = env.zones[0].temperature_c;
         let t_combined = solver_combined
             .resolve(&ports, &env, Duration::from_secs(60))

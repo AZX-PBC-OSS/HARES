@@ -8,8 +8,8 @@ use hares_physics::infiltration::{
 use hares_types::{EnvironmentState, ZoneId};
 use nalgebra::DVector;
 
-use super::config::{InfiltrationMethod, ThermalSolverConfig};
 use super::H_FG_J_PER_KG;
+use super::config::{InfiltrationMethod, StateSpaceWiring, ThermalSolverConfig};
 
 /// Populates `u` with infiltration and ventilation sensible gains and accumulates latent loads
 /// into `latent_out` (which the caller has already cleared).
@@ -17,6 +17,7 @@ use super::H_FG_J_PER_KG;
 /// Returns per-zone sensible infiltration+ventilation gains [W] for diagnostics.
 pub(crate) fn apply_infiltration_and_ventilation(
     config: &ThermalSolverConfig,
+    wiring: &StateSpaceWiring,
     u: &mut DVector<f64>,
     env: &EnvironmentState,
     latent_out: &mut HashMap<ZoneId, f64>,
@@ -25,9 +26,8 @@ pub(crate) fn apply_infiltration_and_ventilation(
     let p_pa = env.weather.pressure_pa();
     let t_out = env.weather.outdoor_temp_c;
     let w_out = env.weather.outdoor_humidity_ratio;
-    // Outdoor density is physically correct here: infiltration mass flow = Q * rho_outdoor
-    // because the incoming air has outdoor properties (ASHRAE HOF 2021). The humidity solver
-    // separately uses zone-side density for its moisture balance (see humidity_solver.rs).
+    // moist_air_density_kg_m3 inverts ASHRAE HOF 2021 Ch.1 Eq.28 specific volume
+    // (v = R_da·T·(1+W/ε)/p [m³/kg_da]), so it already yields kg_da/m³.
     let rho = moist_air_density_kg_m3(p_pa, t_out, w_out);
 
     for zone in &env.zones {
@@ -105,11 +105,9 @@ pub(crate) fn apply_infiltration_and_ventilation(
         let (sensible_flow_m3_s, latent_flow_m3_s) = if config.ventilation.balanced {
             (
                 total_nat_flow
-                    + forced_flow_m3_s
-                        * (1.0 - config.ventilation.sensible_recovery_efficiency),
+                    + forced_flow_m3_s * (1.0 - config.ventilation.sensible_recovery_efficiency),
                 total_nat_flow
-                    + forced_flow_m3_s
-                        * (1.0 - config.ventilation.latent_recovery_efficiency),
+                    + forced_flow_m3_s * (1.0 - config.ventilation.latent_recovery_efficiency),
             )
         } else {
             let combined =
@@ -125,7 +123,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
         let q_sensible = m_dot_sens * CP_DRY_AIR_J_KG_K * (t_out - zone.temperature_c);
         let q_latent = m_dot_lat * H_FG_J_PER_KG * (w_out - zone.humidity_ratio);
 
-        if let Some(&idx) = config.zone_sensible_input_indices.get(&zone.id)
+        if let Some(&idx) = wiring.zone_sensible_input_indices.get(&zone.id)
             && idx < u.len()
         {
             u[idx] += q_sensible;
@@ -134,4 +132,20 @@ pub(crate) fn apply_infiltration_and_ventilation(
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
     sensible_by_zone
+}
+
+#[cfg(test)]
+mod tests {
+    use hares_physics::air_properties::moist_air_density_kg_m3;
+
+    #[test]
+    fn density_is_dry_air_basis_kg_da_per_m3() {
+        // psychrolib.GetMoistAirVolume(20, 0.010, 101325) = 0.84380 m³/kg_da
+        // → 1/v = 1.18510 kg_da/m³   (reference from psychrolib 2.5)
+        let rho = moist_air_density_kg_m3(101_325.0, 20.0, 0.010);
+        assert!(
+            (rho - 1.18510).abs() < 0.001,
+            "expected ~1.185 kg_da/m³, got {rho}",
+        );
+    }
 }

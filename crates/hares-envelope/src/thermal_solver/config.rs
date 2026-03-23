@@ -175,8 +175,7 @@ pub struct InteriorLwrZoneConfig {
 /// The sky view factor is derived from `tilt_deg` on each call via [`sky_view_factor`];
 /// it is not cached here so that the struct remains free of init ordering.
 ///
-/// `t_prev_c` is mutable persistent state updated each timestep, so `Copy` is not derived.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExteriorSurfaceInfo {
     /// Unique surface identifier matching [`SurfaceIrradiance::surface_id`] in weather data.
     pub surface_id: u32,
@@ -203,23 +202,36 @@ pub struct ExteriorSurfaceInfo {
     pub rad_res_k_w: f64,
     /// Number of sub-iterations per timestep: `ceil(dt_s / 300.0).max(1)`.
     pub n_iter: u32,
-    /// Previous-timestep converged exterior surface temperature [°C].
-    ///
-    /// Persistent state updated each timestep for heavy-ball damping.
-    pub t_prev_c: f64,
     /// Solar absorptance [-] (0–1). Default 0.60 for opaque surfaces, 0.05 for
     /// radiant barriers. Ref: OCHRE `Envelope.py:222`.
     pub absorptance: f64,
 }
 
+/// Index mappings derived from the state-space model structure.
+///
+/// These map zone IDs to row/column indices in the discretized A_d, B_d, C, D
+/// matrices. Constructed by `build_default_solvers` from the RC network topology
+/// during model assembly — not user-supplied configuration.
 #[derive(Debug, Clone, Default)]
-pub struct ThermalSolverConfig {
+pub struct StateSpaceWiring {
     pub zone_state_indices: HashMap<ZoneId, usize>,
     pub zone_output_indices: HashMap<ZoneId, usize>,
     pub zone_sensible_input_indices: HashMap<ZoneId, usize>,
     pub outdoor_temp_input_indices: Vec<usize>,
+    /// B-matrix columns carrying indoor air temperature [°C] as an external input.
+    ///
+    /// Empty in the standard RC topology where zone air nodes are internal states
+    /// (coupled through the A-matrix). Only populated when a model routes indoor
+    /// temperature as a fixed external boundary via B-matrix columns.
+    /// Used by `initialize_steady_state()` to set initial boundary conditions.
     pub indoor_temp_input_indices: Vec<usize>,
     pub solar_input_indices: HashMap<u32, usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThermalSolverConfig {
+    /// Primary conditioned zone for diagnostics and HVAC port lookups.
+    pub indoor_zone_id: ZoneId,
     /// Window solar properties keyed by surface_id.
     ///
     /// When a surface_id appears in both `solar_input_indices` and `window_properties`,
@@ -248,6 +260,23 @@ pub struct ThermalSolverConfig {
     pub ventilation: VentilationConfig,
     /// Natural ventilation through operable windows. `None` disables the feature (default).
     pub natural_ventilation: Option<NaturalVentilationConfig>,
+}
+
+impl Default for ThermalSolverConfig {
+    fn default() -> Self {
+        Self {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            exterior_surfaces: Vec::new(),
+            interior_lwr_zones: Vec::new(),
+            ideal_setpoints_c: HashMap::new(),
+            ideal_hvac_zones: Vec::new(),
+            infiltration: Vec::new(),
+            ventilation_flow_m3_s: 0.0,
+            ventilation: VentilationConfig::default(),
+            natural_ventilation: None,
+        }
+    }
 }
 
 #[derive(Debug, Error)]

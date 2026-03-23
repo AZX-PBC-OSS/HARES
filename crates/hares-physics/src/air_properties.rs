@@ -1,4 +1,4 @@
-//! Moist air thermodynamic properties.
+//! Moist-air thermodynamic properties (dry-air basis).
 
 use crate::constants::{
     CELSIUS_TO_KELVIN, DRY_AIR_GAS_CONSTANT_J_KG_K, HUMIDITY_DENSITY_CORRECTION,
@@ -13,8 +13,10 @@ pub fn standard_pressure_pa(elevation_m: f64) -> f64 {
     SEA_LEVEL_PRESSURE_PA * (1.0 - ISA_LAPSE_COEFFICIENT * elevation_m).powf(ISA_PRESSURE_EXPONENT)
 }
 
-/// Moist-air density [kg/m^3].
+/// Dry-air-basis density of moist air [kg_da/m³].
 ///
+/// Inverts ASHRAE HOF 2021 Ch.1 Eq.28 moist-air specific volume
+/// `v = R_da·T·(1 + W·M_da/M_w) / p  [m³/kg_da]`, yielding kg_da per m³.
 /// Uses the EnergyPlus `PsyRhoAirFnPbTdbW` style humidity floor guard.
 pub fn moist_air_density_kg_m3(p_pa: f64, t_db_c: f64, w: f64) -> f64 {
     let w_eff = w.max(MIN_HUMIDITY_RATIO_DENSITY);
@@ -36,7 +38,7 @@ pub fn standard_pressure(elevation: Length) -> Pressure {
     pressure_from_pascal(result_pa)
 }
 
-/// Moist-air density [kg/m³] (typed wrapper).
+/// Dry-air-basis density of moist air [kg_da/m³] (typed wrapper).
 ///
 /// Returns raw `f64` because density lacks a type alias.
 pub fn moist_air_density(p: Pressure, t_db: Temperature, w: f64) -> f64 {

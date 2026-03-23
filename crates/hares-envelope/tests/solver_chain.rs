@@ -13,7 +13,9 @@
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
-use hares_envelope::{ElectricalSolver, ElectricalSolverConfig, HumiditySolver, HumiditySolverConfig};
+use hares_envelope::{
+    ElectricalSolver, ElectricalSolverConfig, HumiditySolver, HumiditySolverConfig,
+};
 use hares_types::{
     DomainSolver, EnvironmentState, GridState, PortContribution, PortSlots, ThermalAccumulator,
     ThermalCategory, WeatherState, ZoneId, ZoneState,
@@ -59,7 +61,10 @@ fn env_with_zone(zone_temp_c: f64, outdoor_temp_c: f64, humidity_ratio: f64) -> 
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
         },
-        grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
         custom_domains: vec![],
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -123,7 +128,9 @@ fn electrical_solver_net_with_load_and_pv() {
 
     let update = solver.resolve(&ports, &env, dt);
 
-    let payload = update.custom_payload.expect("electrical solver must return a payload");
+    let payload = update
+        .custom_payload
+        .expect("electrical solver must return a payload");
     let net_kw = payload[0];
 
     // Numerical invariant: |P_grid + ΣP_equipment| < 0.001 kW
@@ -131,7 +138,12 @@ fn electrical_solver_net_with_load_and_pv() {
     // net_kw - 0.5 < 0.001
     let expected_net = 0.5; // 2.0 load + (-1.5) generation
     approx_eq(net_kw, expected_net, 0.001, "net active power (load + PV)");
-    approx_eq(solver.net_active_kw(), expected_net, 0.001, "accessor matches payload");
+    approx_eq(
+        solver.net_active_kw(),
+        expected_net,
+        0.001,
+        "accessor matches payload",
+    );
 
     // Balance invariant: net must equal load_power + generation_power
     let balance_error = (net_kw - ports.electrical.net_active_kw()).abs();
@@ -152,7 +164,10 @@ fn electrical_solver_generation_only_produces_negative_net() {
     let update = solver.resolve(&ports, &env, Duration::from_secs(60));
     let net_kw = update.custom_payload.expect("payload must be Some")[0];
 
-    assert!(net_kw < 0.0, "net must be negative for pure generation, got {net_kw}");
+    assert!(
+        net_kw < 0.0,
+        "net must be negative for pure generation, got {net_kw}"
+    );
     approx_eq(net_kw, -3.0, 0.001, "pure generation net");
 }
 
@@ -167,7 +182,10 @@ fn electrical_solver_zero_load_zero_generation_is_zero_net() {
     let update = solver.resolve(&ports, &env, Duration::from_secs(60));
     let net_kw = update.custom_payload.expect("payload")[0];
 
-    assert_eq!(net_kw, 0.0, "zero load + zero gen must produce exactly 0 kW net, got {net_kw}");
+    assert_eq!(
+        net_kw, 0.0,
+        "zero load + zero gen must produce exactly 0 kW net, got {net_kw}"
+    );
 }
 
 /// ElectricalSolver.net_active_kw() must return the balance invariant:
@@ -181,10 +199,20 @@ fn electrical_balance_invariant_holds_for_multiple_sources() {
     // Three loads and two generators.
     let mut ports = PortSlots::default();
     for &kw in &[1.2_f64, 0.8, 0.5] {
-        ports.accumulate(&PortContribution::Electrical { active_power_kw: kw, reactive_power_kvar: 0.0 }).expect("load");
+        ports
+            .accumulate(&PortContribution::Electrical {
+                active_power_kw: kw,
+                reactive_power_kvar: 0.0,
+            })
+            .expect("load");
     }
     for &kw in &[-2.1_f64, -0.7] {
-        ports.accumulate(&PortContribution::Electrical { active_power_kw: kw, reactive_power_kvar: 0.0 }).expect("gen");
+        ports
+            .accumulate(&PortContribution::Electrical {
+                active_power_kw: kw,
+                reactive_power_kvar: 0.0,
+            })
+            .expect("gen");
     }
 
     let update = solver.resolve(&ports, &env, Duration::from_secs(60));
@@ -210,8 +238,7 @@ fn humidity_solver_latent_gain_increases_humidity_ratio() {
     let zone = ZoneId(1);
     let initial_w = 0.006; // kg/kg
     let env = env_with_zone(22.0, 10.0, initial_w);
-    let mut solver =
-        HumiditySolver::new(HumiditySolverConfig::default(), &env);
+    let mut solver = HumiditySolver::new(HumiditySolverConfig::default(), &env);
 
     let ports = ports_with_latent(zone, 500.0); // 500 W latent gain
     let dt = Duration::from_secs(60);
@@ -237,7 +264,12 @@ fn humidity_solver_zero_latent_gain_no_change() {
     let _update = solver.resolve(&ports, &env, Duration::from_secs(60));
 
     let w_new = solver.humidity_ratio(zone);
-    approx_eq(w_new, initial_w, 1e-12, "humidity ratio must not change with zero latent gain");
+    approx_eq(
+        w_new,
+        initial_w,
+        1e-12,
+        "humidity ratio must not change with zero latent gain",
+    );
 }
 
 /// Moisture balance invariant:
@@ -274,7 +306,10 @@ fn humidity_moisture_mass_balance_invariant() {
     let expected_delta_w = (latent_w * dt_s) / (h_fg_j_kg * effective_mass_kg);
 
     // Direction must be correct: gain must increase w.
-    assert!(delta_w >= 0.0, "latent gain must not decrease humidity ratio: delta_w={delta_w}");
+    assert!(
+        delta_w >= 0.0,
+        "latent gain must not decrease humidity ratio: delta_w={delta_w}"
+    );
 
     // Upper bound: delta_w must not exceed unclamped expectation by more than 10%
     // (the solver applies saturation clamping but should not exceed the physics).
@@ -340,7 +375,12 @@ fn electrical_and_humidity_resolvers_are_independent() {
 
     // Electrical result must still be correct after humidity resolved.
     let net_kw = elec_update.custom_payload.expect("elec payload")[0];
-    approx_eq(net_kw, 1.5, 0.001, "electrical net unchanged after humidity resolution");
+    approx_eq(
+        net_kw,
+        1.5,
+        0.001,
+        "electrical net unchanged after humidity resolution",
+    );
 
     // Humidity must have increased due to latent gain.
     assert!(

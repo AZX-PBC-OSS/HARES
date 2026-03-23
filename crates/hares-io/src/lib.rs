@@ -7,6 +7,7 @@ pub mod envelope_lut;
 pub mod epw;
 pub mod hpxml;
 pub mod output;
+pub mod psm3;
 pub mod resstock;
 pub mod schedule;
 pub mod schedule_resolve;
@@ -26,6 +27,7 @@ pub use envelope_lut::{
     EnvelopeLookup, EnvelopeLookupResult, EnvelopeLutError, PrecomputedLayer, resolve_boundary_name,
 };
 pub use epw::parse_epw;
+pub use psm3::parse_psm3;
 pub use hpxml::{Building, EquipmentSpec, ValidationReport, parse_hpxml, resolve_equipment};
 pub use output::{
     OutputSummary, StreamingRecorder, build_schema, expected_columns_at_verbosity, mode_to_ordinal,

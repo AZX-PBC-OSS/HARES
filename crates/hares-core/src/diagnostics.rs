@@ -99,13 +99,10 @@ pub fn write_row(w: &mut impl Write, d: &StepDiagnostics, n_zones: usize) {
 }
 
 /// Capture diagnostics from the current environment and port state.
-pub fn capture(
-    step: u64,
-    env: &EnvironmentState,
-    ports: &PortSlots,
-) -> StepDiagnostics {
+pub fn capture(step: u64, env: &EnvironmentState, ports: &PortSlots) -> StepDiagnostics {
     let timestamp_s = env.current_time.timestamp() as f64;
-    let zone_temps_c: Vec<(ZoneId, f64)> = env.zones.iter().map(|z| (z.id, z.temperature_c)).collect();
+    let zone_temps_c: Vec<(ZoneId, f64)> =
+        env.zones.iter().map(|z| (z.id, z.temperature_c)).collect();
     let thermal_gains_w: Vec<(ZoneId, f64)> = ports
         .thermal
         .iter()

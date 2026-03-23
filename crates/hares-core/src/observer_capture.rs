@@ -194,10 +194,7 @@ mod tests {
     };
 
     fn approx_eq(left: f64, right: f64) {
-        assert!(
-            (left - right).abs() < 1e-9,
-            "left={left}, right={right}"
-        );
+        assert!((left - right).abs() < 1e-9, "left={left}, right={right}");
     }
 
     #[test]
@@ -308,9 +305,15 @@ mod tests {
         };
         let contrib = diff_ports(&before, &after);
         assert_eq!(contrib.fuel_consumption_w.len(), 2);
-        let gas = contrib.fuel_consumption_w.iter().find(|(ft, _)| *ft == FuelType::Gas);
+        let gas = contrib
+            .fuel_consumption_w
+            .iter()
+            .find(|(ft, _)| *ft == FuelType::Gas);
         approx_eq(gas.unwrap().1, 250.0);
-        let propane = contrib.fuel_consumption_w.iter().find(|(ft, _)| *ft == FuelType::Propane);
+        let propane = contrib
+            .fuel_consumption_w
+            .iter()
+            .find(|(ft, _)| *ft == FuelType::Propane);
         approx_eq(propane.unwrap().1, 50.0);
     }
 

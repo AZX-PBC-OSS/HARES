@@ -8,9 +8,7 @@ use chrono::{DateTime, Duration, FixedOffset};
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{EquipmentConfig, config::ConfigValue};
 use hares_io::{Building, DefaultsStore, SimulationConfig};
-use hares_types::{
-    DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId,
-};
+use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
 
 use super::{DwellingConfig, Result};
@@ -50,8 +48,7 @@ pub fn building_to_boundary_inputs(
         .boundaries
         .iter()
         .map(|bd| {
-            let interior_zone_idx =
-                find_zone_idx(building, bd.interior_zone.as_ref(), n_zones);
+            let interior_zone_idx = find_zone_idx(building, bd.interior_zone.as_ref(), n_zones);
             let exterior = resolve_exterior(building, bd, n_zones);
             let fallback_r = bd
                 .assembly_r_value_m2_k_w
@@ -132,7 +129,9 @@ pub fn building_to_boundary_inputs(
 }
 
 /// Map HPXML ZoneType to film-coefficient ZoneLabel.
-pub(crate) fn zone_type_to_label(zt: Option<&hares_io::hpxml::ZoneType>) -> hares_physics::film_coefficients::ZoneLabel {
+pub(crate) fn zone_type_to_label(
+    zt: Option<&hares_io::hpxml::ZoneType>,
+) -> hares_physics::film_coefficients::ZoneLabel {
     use hares_io::hpxml::ZoneType;
     use hares_physics::film_coefficients::ZoneLabel;
     match zt {
@@ -186,7 +185,9 @@ pub(crate) fn resolve_exterior(
     }
 }
 
-pub(crate) fn build_output_column_index(schema: &arrow::datatypes::Schema) -> HashMap<String, usize> {
+pub(crate) fn build_output_column_index(
+    schema: &arrow::datatypes::Schema,
+) -> HashMap<String, usize> {
     // Recorder rows exclude the timestamp column.
     schema
         .fields()
@@ -280,7 +281,10 @@ pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> Equi
     }
 }
 
-pub(crate) fn merged_equipment_config(spec: &hares_io::EquipmentSpec, overrides: &Value) -> EquipmentConfig {
+pub(crate) fn merged_equipment_config(
+    spec: &hares_io::EquipmentSpec,
+    overrides: &Value,
+) -> EquipmentConfig {
     let mut merged = spec.parameters.clone();
     apply_equipment_overrides(&mut merged, overrides, &spec.name);
     let merged_spec = hares_io::EquipmentSpec {
@@ -339,7 +343,10 @@ pub(crate) fn required_path(kwargs: &HashMap<String, Value>, key: &str) -> Resul
     Ok(PathBuf::from(value))
 }
 
-pub(crate) fn required_datetime(kwargs: &HashMap<String, Value>, key: &str) -> Result<DateTime<FixedOffset>> {
+pub(crate) fn required_datetime(
+    kwargs: &HashMap<String, Value>,
+    key: &str,
+) -> Result<DateTime<FixedOffset>> {
     let value = kwargs
         .get(key)
         .ok_or_else(|| HaresError::Io(format!("missing required kwarg `{key}`")))?;
