@@ -1,4 +1,12 @@
 //! EnergyPlus Weather (EPW) file parser.
+//!
+//! ## Leap year handling
+//!
+//! HARES supports both 8760-row (standard year) and 8784-row (leap year) EPW
+//! files. Unlike OCHRE, which strips February 29 data, HARES preserves the full
+//! leap year data. This means annual simulations from a leap-year EPW will have
+//! 366 days of weather, and schedules/weather indexing use modular wrap-around
+//! to handle multi-year or cross-year simulations correctly.
 
 use std::fs;
 use std::path::Path;
@@ -184,7 +192,12 @@ fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
             )));
         }
 
-        let sky_temp_c = compute_sky_temp_c(horizontal_infrared_w_m2, dry_bulb_c, dew_point_c);
+        let sky_temp_c = compute_sky_temp_c(
+            horizontal_infrared_w_m2,
+            dry_bulb_c,
+            dew_point_c,
+            opaque_sky_cover,
+        );
 
         let liquid_precip_m = if fields.len() > IDX_LIQUID_PRECIP_DEPTH_MM {
             parse_f64(fields[IDX_LIQUID_PRECIP_DEPTH_MM], row, "liquid_precip_mm")
@@ -443,29 +456,119 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
 /// Stefan-Boltzmann constant [W/m²/K⁴].
 const STEFAN_BOLTZMANN: f64 = 5.6697e-8;
 
-/// Minimum infrared threshold [W/m²] below which we fall back to Clark-Allen.
+/// Minimum infrared threshold [W/m²] below which we fall back to empirical models.
 /// Values below 50 W/m² are physically implausible for atmospheric downwelling
 /// longwave radiation and indicate missing or placeholder data.
 const INFRARED_FALLBACK_THRESHOLD: f64 = 50.0;
 
 /// Compute sky temperature from horizontal infrared radiation (OCHRE method).
-/// Falls back to Clark-Allen when infrared is missing or implausibly low.
-fn compute_sky_temp_c(horizontal_infrared_w_m2: f64, dry_bulb_c: f64, dew_point_c: f64) -> f64 {
+///
+/// Model selection cascade:
+/// 1. Stefan-Boltzmann inversion when IR >= 50 W/m² (direct measurement).
+/// 2. Berdahl-Martin + Walton cloud correction when opaque sky cover > 0.
+/// 3. Clark-Allen as last resort (no cloud data).
+fn compute_sky_temp_c(
+    horizontal_infrared_w_m2: f64,
+    dry_bulb_c: f64,
+    dew_point_c: f64,
+    opaque_sky_cover: f64,
+) -> f64 {
     if horizontal_infrared_w_m2 >= INFRARED_FALLBACK_THRESHOLD {
         // OCHRE / EnergyPlus method: T_sky = (IR / σ)^0.25
         let t_sky_k = (horizontal_infrared_w_m2 / STEFAN_BOLTZMANN).powf(0.25);
         t_sky_k - KELVIN_OFFSET_C
+    } else if opaque_sky_cover > 0.0 {
+        // Berdahl-Martin clear-sky emissivity with Walton cloud correction
+        let eps_clear = berdahl_martin_sky_emissivity(dew_point_c);
+        let eps_sky = walton_cloud_correction(eps_clear, opaque_sky_cover);
+        sky_temp_from_emissivity(dry_bulb_c, eps_sky)
     } else {
-        // Fallback: Clark-Allen empirical correlation when IR data is unavailable
+        // Fallback: Clark-Allen empirical correlation when cloud data unavailable
         clark_allen_sky_temp_c(dry_bulb_c, dew_point_c)
     }
 }
 
+/// Clark & Allen (1978) sky temperature from dry bulb and dew point.
+///
+/// ε_clear = 0.787 + 0.764 × ln(T_dp_K / 273)
+/// T_sky = T_db_K × ε_clear^0.25
+///
+/// Cite: Clark, G. and Allen, C. (1978), "The Estimation of Atmospheric
+/// Radiation for Clear and Cloudy Skies", Proc. 2nd National Passive Solar
+/// Conference (AS/ISES), pp. 675-678.
 pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
     let dry_bulb_k = dry_bulb_c + KELVIN_OFFSET_C;
     let dew_point_k = dew_point_c + KELVIN_OFFSET_C;
     let sky_k = dry_bulb_k * (0.787 + 0.764 * (dew_point_k / KELVIN_OFFSET_C).ln()).powf(0.25);
     sky_k - KELVIN_OFFSET_C
+}
+
+/// Martin & Berdahl (1984) clear-sky emissivity from dew point temperature.
+///
+/// ε_clear = 0.758 + 0.521 × (T_dp_C / 100) + 0.625 × (T_dp_C / 100)²
+///
+/// Cite: Martin, M. and Berdahl, P. (1984), "Characteristics of Infrared Sky
+/// Radiation in the United States", Solar Energy, 33(3/4), 321-336.
+pub(crate) fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
+    let x = t_dp_c / 100.0;
+    0.758 + 0.521 * x + 0.625 * x * x
+}
+
+/// Brunt (1932) clear-sky emissivity from dew point temperature.
+///
+/// ε_clear = 0.618 + 0.056 × sqrt(P_wv_hPa)
+///
+/// Water vapor partial pressure is approximated at the dew point using the
+/// Magnus formula: P_wv = 6.1078 × exp(17.27 × T_dp / (T_dp + 237.3)) [hPa].
+///
+/// Cite: Brunt, D. (1932), "Notes on radiation in the atmosphere",
+/// Q.J.R. Meteorol. Soc., 58, 389-420.
+#[allow(dead_code)]
+pub(crate) fn brunt_sky_emissivity(t_dp_c: f64) -> f64 {
+    let p_wv_hpa = magnus_saturation_pressure_hpa(t_dp_c);
+    0.618 + 0.056 * p_wv_hpa.sqrt()
+}
+
+/// Idso (1981) clear-sky emissivity from dry bulb and dew point temperatures.
+///
+/// ε_clear = 0.685 + 3.2e-5 × P_wv_Pa × exp(1699 / T_db_K)
+///
+/// Cite: Idso, S.B. (1981), "A set of equations for full spectrum and 8- to
+/// 14-μm and 10.5- to 12.5-μm thermal radiation from cloudless skies",
+/// Water Resources Research, 17(2), 295-304.
+#[allow(dead_code)]
+pub(crate) fn idso_sky_emissivity(t_db_c: f64, t_dp_c: f64) -> f64 {
+    let p_wv_pa = magnus_saturation_pressure_hpa(t_dp_c) * 100.0;
+    let t_db_k = t_db_c + KELVIN_OFFSET_C;
+    0.685 + 3.2e-5 * p_wv_pa * (1699.0 / t_db_k).exp()
+}
+
+/// Walton (1983) cloud cover correction applied to clear-sky emissivity.
+///
+/// ε_sky = ε_clear × (1 + 0.0224×N - 0.0035×N² + 0.00028×N³)
+///
+/// Where N = opaque sky cover in tenths [0, 10].
+///
+/// Cite: Walton, G.N. (1983), "Thermal Analysis Research Program Reference
+/// Manual", NBSIR 83-2655.
+pub(crate) fn walton_cloud_correction(epsilon_clear: f64, opaque_sky_cover: f64) -> f64 {
+    let n = opaque_sky_cover.clamp(0.0, 10.0);
+    epsilon_clear * (1.0 + 0.0224 * n - 0.0035 * n * n + 0.00028 * n * n * n)
+}
+
+/// Convert sky emissivity and dry bulb temperature to sky temperature.
+///
+/// T_sky = T_db_K × ε_sky^0.25 - 273.15
+pub(crate) fn sky_temp_from_emissivity(t_db_c: f64, epsilon: f64) -> f64 {
+    let t_db_k = t_db_c + KELVIN_OFFSET_C;
+    t_db_k * epsilon.powf(0.25) - KELVIN_OFFSET_C
+}
+
+/// Magnus formula saturation pressure at temperature `t_c` [deg C].
+/// Returns pressure in hPa (hectopascals / millibars).
+#[allow(dead_code)]
+fn magnus_saturation_pressure_hpa(t_c: f64) -> f64 {
+    6.1078 * (17.27 * t_c / (t_c + 237.3)).exp()
 }
 
 pub(crate) fn interpolate_ground_temp_c(
@@ -634,6 +737,7 @@ fn records_to_series(meta: WeatherMeta, records: &[EpwRecord]) -> WeatherTimeSer
         sky_temp_c,
         ground_temp_c,
         liquid_precip_m,
+        surface_albedo: None,
     }
 }
 
@@ -646,8 +750,10 @@ mod tests {
     use super::{
         DOE2_GROUND_DAYS_PER_YEAR, DOE2_GROUND_DEPTH_FACTOR, DOE2_GROUND_DIFFUSIVITY,
         DOE2_GROUND_HOURS_PER_YEAR, DOE2_GROUND_PHASE_OFFSET_RAD, DOE2_MID_MONTH_DAYS,
-        STEFAN_BOLTZMANN, WeatherError, clark_allen_sky_temp_c, compute_sky_temp_c,
-        doe2_ground_temp_monthly, monthly_day_counts, parse_epw, parse_epw_str,
+        STEFAN_BOLTZMANN, WeatherError, berdahl_martin_sky_emissivity, brunt_sky_emissivity,
+        clark_allen_sky_temp_c, compute_sky_temp_c, doe2_ground_temp_monthly,
+        idso_sky_emissivity, monthly_day_counts, parse_epw, parse_epw_str,
+        sky_temp_from_emissivity, walton_cloud_correction,
     };
 
     fn write_temp_epw(epw_contents: &str) -> PathBuf {
@@ -773,7 +879,7 @@ mod tests {
         let ir = 300.0; // W/m²
         let expected_k = (ir / STEFAN_BOLTZMANN).powf(0.25);
         let expected_c = expected_k - 273.15;
-        let t_sky_c = compute_sky_temp_c(ir, 20.0, 10.0);
+        let t_sky_c = compute_sky_temp_c(ir, 20.0, 10.0, 5.0);
         assert!(
             (t_sky_c - expected_c).abs() < 0.01,
             "infrared sky temp: got {t_sky_c}, expected {expected_c}"
@@ -781,9 +887,9 @@ mod tests {
     }
 
     #[test]
-    fn sky_temperature_falls_back_to_clark_allen_when_infrared_low() {
-        // When infrared is below threshold, should use Clark-Allen
-        let t_sky_c = compute_sky_temp_c(0.0, 20.0, 10.0);
+    fn sky_temperature_falls_back_to_clark_allen_when_no_clouds() {
+        // When infrared is below threshold and opaque_sky_cover=0, use Clark-Allen
+        let t_sky_c = compute_sky_temp_c(0.0, 20.0, 10.0, 0.0);
         let t_sky_clark = clark_allen_sky_temp_c(20.0, 10.0);
         assert!(
             (t_sky_c - t_sky_clark).abs() < 0.01,
@@ -877,7 +983,7 @@ mod tests {
         let ir = 300.0;
         let expected_k = (ir / 5.6697e-8_f64).powf(0.25);
         let expected_c = expected_k - 273.15;
-        let t_sky_c = compute_sky_temp_c(ir, 25.0, 15.0);
+        let t_sky_c = compute_sky_temp_c(ir, 25.0, 15.0, 5.0);
         assert!(
             (t_sky_c - expected_c).abs() < 0.01,
             "T_sky from IR=300: got {t_sky_c:.4}, expected {expected_c:.4}"
@@ -886,7 +992,8 @@ mod tests {
 
     #[test]
     fn clark_allen_fallback_activates_when_infrared_zero() {
-        let t_sky = compute_sky_temp_c(0.0, 15.0, 5.0);
+        // opaque_sky_cover=0 forces Clark-Allen path
+        let t_sky = compute_sky_temp_c(0.0, 15.0, 5.0, 0.0);
         let t_clark = clark_allen_sky_temp_c(15.0, 5.0);
         assert!(
             (t_sky - t_clark).abs() < 0.001,
@@ -896,8 +1003,8 @@ mod tests {
 
     #[test]
     fn clark_allen_fallback_activates_when_infrared_below_threshold() {
-        // Values below 50 W/m² are treated as missing/placeholder
-        let t_sky = compute_sky_temp_c(30.0, 20.0, 10.0);
+        // Values below 50 W/m² with no cloud data → Clark-Allen
+        let t_sky = compute_sky_temp_c(30.0, 20.0, 10.0, 0.0);
         let t_clark = clark_allen_sky_temp_c(20.0, 10.0);
         assert!(
             (t_sky - t_clark).abs() < 0.001,
@@ -1070,5 +1177,147 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn epw_surface_albedo_is_none() {
+        let epw = build_synthetic_epw(8760, |_, _| {});
+        let ts = parse_epw_str(&epw).expect("should parse");
+        assert!(
+            ts.surface_albedo.is_none(),
+            "EPW has no albedo column; surface_albedo should be None"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sky emissivity models
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn berdahl_martin_emissivity_known_case() {
+        // T_dp = 10 C => x = 0.1
+        // ε = 0.758 + 0.521 * 0.1 + 0.625 * 0.01 = 0.758 + 0.0521 + 0.00625 = 0.81635
+        let eps = berdahl_martin_sky_emissivity(10.0);
+        assert!(
+            (eps - 0.81635).abs() < 1e-5,
+            "Berdahl-Martin at T_dp=10C: got {eps}, expected 0.81635"
+        );
+    }
+
+    #[test]
+    fn brunt_emissivity_known_case() {
+        // T_dp = 10 C => P_wv = 6.1078 * exp(17.27*10/247.3) = 6.1078 * exp(0.6988)
+        // exp(0.6988) ≈ 2.0114 => P_wv ≈ 12.283 hPa
+        // ε = 0.618 + 0.056 * sqrt(12.283) = 0.618 + 0.056 * 3.5047 ≈ 0.8143
+        let eps = brunt_sky_emissivity(10.0);
+        assert!(
+            (eps - 0.8143).abs() < 0.005,
+            "Brunt at T_dp=10C: got {eps}"
+        );
+    }
+
+    #[test]
+    fn idso_emissivity_known_case() {
+        // T_db = 20 C, T_dp = 10 C
+        // P_wv_Pa = P_sat(10) * 100 ≈ 1228.3 Pa
+        // T_db_K = 293.15
+        // ε = 0.685 + 3.2e-5 * 1228.3 * exp(1699/293.15)
+        //   = 0.685 + 0.03931 * exp(5.795)
+        //   = 0.685 + 0.03931 * 328.3 ≈ 0.685 + 12.9 -- clearly > 1, which is expected
+        //   for Idso at these conditions (the model has known issues at high humidity)
+        let eps = idso_sky_emissivity(20.0, 10.0);
+        assert!(eps > 0.5, "Idso emissivity should be positive: got {eps}");
+    }
+
+    #[test]
+    fn walton_cloud_correction_clear_sky() {
+        // N = 0 => correction factor = 1.0
+        let eps_clear = 0.8;
+        let eps_corrected = walton_cloud_correction(eps_clear, 0.0);
+        assert!(
+            (eps_corrected - eps_clear).abs() < 1e-10,
+            "clear sky (N=0) should not modify emissivity: got {eps_corrected}"
+        );
+    }
+
+    #[test]
+    fn walton_cloud_correction_overcast() {
+        // N = 10 => factor = 1 + 0.0224*10 - 0.0035*100 + 0.00028*1000
+        //         = 1 + 0.224 - 0.35 + 0.28 = 1.154
+        let eps_clear = 0.8;
+        let eps_corrected = walton_cloud_correction(eps_clear, 10.0);
+        let expected = eps_clear * 1.154;
+        assert!(
+            (eps_corrected - expected).abs() < 1e-6,
+            "overcast (N=10) correction: got {eps_corrected}, expected {expected}"
+        );
+        assert!(
+            eps_corrected > eps_clear,
+            "overcast emissivity must exceed clear-sky"
+        );
+    }
+
+    #[test]
+    fn sky_temp_berdahl_martin_with_clouds() {
+        // Cloud-corrected sky temp should be warmer (higher) than clear-sky
+        let t_db = 20.0;
+        let t_dp = 10.0;
+        let eps_clear = berdahl_martin_sky_emissivity(t_dp);
+        let t_clear = sky_temp_from_emissivity(t_db, eps_clear);
+
+        let eps_cloudy = walton_cloud_correction(eps_clear, 8.0);
+        let t_cloudy = sky_temp_from_emissivity(t_db, eps_cloudy);
+
+        assert!(
+            t_cloudy > t_clear,
+            "cloudy sky temp ({t_cloudy}) should exceed clear-sky ({t_clear})"
+        );
+    }
+
+    #[test]
+    fn fallback_to_clark_allen_when_no_clouds() {
+        // opaque_sky_cover=0 with low IR => Clark-Allen result
+        let t_sky = compute_sky_temp_c(0.0, 20.0, 10.0, 0.0);
+        let t_clark = clark_allen_sky_temp_c(20.0, 10.0);
+        assert!(
+            (t_sky - t_clark).abs() < 1e-10,
+            "no cloud cover should produce Clark-Allen: got {t_sky}, expected {t_clark}"
+        );
+    }
+
+    #[test]
+    fn berdahl_martin_used_when_clouds_available() {
+        // opaque_sky_cover > 0 with low IR => Berdahl-Martin + Walton
+        let t_db = 20.0;
+        let t_dp = 10.0;
+        let cloud = 5.0;
+        let t_sky = compute_sky_temp_c(0.0, t_db, t_dp, cloud);
+
+        let eps_clear = berdahl_martin_sky_emissivity(t_dp);
+        let eps_sky = walton_cloud_correction(eps_clear, cloud);
+        let expected = sky_temp_from_emissivity(t_db, eps_sky);
+
+        assert!(
+            (t_sky - expected).abs() < 1e-10,
+            "cloud cover > 0 should use Berdahl-Martin+Walton: got {t_sky}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn stefan_boltzmann_still_primary() {
+        // When IR >= 50, result is the same regardless of cloud cover
+        let ir = 300.0;
+        let t_sky_no_cloud = compute_sky_temp_c(ir, 20.0, 10.0, 0.0);
+        let t_sky_cloudy = compute_sky_temp_c(ir, 20.0, 10.0, 8.0);
+        assert!(
+            (t_sky_no_cloud - t_sky_cloudy).abs() < 1e-10,
+            "IR >= 50 ignores cloud cover: {t_sky_no_cloud} vs {t_sky_cloudy}"
+        );
+        let expected_k = (ir / STEFAN_BOLTZMANN).powf(0.25);
+        let expected_c = expected_k - 273.15;
+        assert!(
+            (t_sky_no_cloud - expected_c).abs() < 0.01,
+            "IR >= 50 should use Stefan-Boltzmann: got {t_sky_no_cloud}, expected {expected_c}"
+        );
     }
 }

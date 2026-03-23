@@ -44,10 +44,12 @@ confirm it's actually PSM3 format.
 
 - [ ] Add `pub fn detect_weather_format(path: impl AsRef<Path>) -> Result<WeatherFormat, WeatherError>`:
   - `.epw` extension → `WeatherFormat::Epw`
-  - `.csv` extension → two-stage header sniffing:
-    1. Read first line: must start with `Source` AND contain 10+ comma-separated fields
-    2. Read second line: must contain `Year,Month,Day,Hour,Minute,GHI,DNI,DHI`
-    If both match → `WeatherFormat::Psm3`. If not → return descriptive error
+  - `.csv` extension → three-line header sniffing (PSM3 has 3 header lines):
+    1. Read line 1 (field names): must start with `Source` AND contain 10+ comma-separated fields
+    2. Skip line 2 (field values)
+    3. Read line 3 (column names): must contain `Year,Month,Day,Hour,Minute` and at
+       least one of `GHI,DNI,DHI`
+    If checks pass → `WeatherFormat::Psm3`. If not → return descriptive error
     ("CSV file does not appear to be PSM3/SAM format; expected NSRDB header")
   - Other extensions → return error listing supported formats
 

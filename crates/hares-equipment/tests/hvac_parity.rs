@@ -48,6 +48,7 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, zone_wb_c: f64) -> Environmen
             solar_altitude_deg: 0.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
+                ground_albedo: 0.2,
         },
         grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
         custom_domains: vec![],

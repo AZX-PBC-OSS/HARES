@@ -46,6 +46,10 @@ pub enum EnvironmentManagerError {
     EmptyWeather,
     #[error("schedule time series is empty")]
     EmptySchedule,
+    #[error("invalid IANA timezone: {0}")]
+    InvalidTimezone(String),
+    #[error("civil_timezone requires the 'dst' cargo feature")]
+    DstNotEnabled,
 }
 
 /// Produces a complete [`EnvironmentState`] at each timestep.
@@ -65,16 +69,27 @@ pub struct EnvironmentManager {
     mains_t_annual_avg_c: f64,
     mains_dt_annual_range_c: f64,
     mains_hemisphere: Hemisphere,
+    /// When set, schedule indexing uses DST-aware civil time from this IANA
+    /// timezone instead of the fixed UTC offset. Weather indexing is unaffected.
+    #[cfg(feature = "dst")]
+    civil_tz: Option<chrono_tz::Tz>,
 }
 
 impl EnvironmentManager {
     /// Build an environment manager from weather/schedule series and parsed HPXML building.
+    ///
+    /// `civil_timezone` optionally specifies an IANA timezone string (e.g.
+    /// `"America/New_York"`) for DST-aware schedule indexing. When `None`,
+    /// schedules are indexed by the fixed UTC offset from `start_time`.
+    /// Requires the `dst` cargo feature; returns [`EnvironmentManagerError::DstNotEnabled`]
+    /// if a timezone is supplied without the feature.
     pub fn new(
         weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
         building: &Building,
         time_res: StdDuration,
         start_time: DateTime<FixedOffset>,
+        civil_timezone: Option<&str>,
     ) -> Result<Self, EnvironmentManagerError> {
         let step_secs = u32::try_from(time_res.as_secs()).unwrap_or(u32::MAX);
         if step_secs == 0 {
@@ -89,6 +104,20 @@ impl EnvironmentManager {
         let schedule = schedule.resample(step_secs)?;
         if schedule.is_empty() {
             return Err(EnvironmentManagerError::EmptySchedule);
+        }
+
+        // Parse civil timezone for DST-aware schedule indexing.
+        #[cfg(feature = "dst")]
+        let civil_tz: Option<chrono_tz::Tz> = match civil_timezone {
+            Some(name) => Some(
+                name.parse::<chrono_tz::Tz>()
+                    .map_err(|_| EnvironmentManagerError::InvalidTimezone(name.to_owned()))?,
+            ),
+            None => None,
+        };
+        #[cfg(not(feature = "dst"))]
+        if civil_timezone.is_some() {
+            return Err(EnvironmentManagerError::DstNotEnabled);
         }
 
         // Compute start offsets: EPW files are annual starting Jan 1.
@@ -126,6 +155,8 @@ impl EnvironmentManager {
             mains_t_annual_avg_c,
             mains_dt_annual_range_c,
             mains_hemisphere,
+            #[cfg(feature = "dst")]
+            civil_tz,
         })
     }
 
@@ -137,6 +168,37 @@ impl EnvironmentManager {
     /// Clear any active grid override and restore defaults.
     pub fn clear_grid_override(&mut self) {
         self.grid_override = None;
+    }
+
+    /// Compute the schedule array index for the current timestep.
+    ///
+    /// When a DST-aware civil timezone is configured, the schedule is indexed
+    /// by civil (wall-clock) time so that occupancy/rate schedules follow local
+    /// DST transitions naturally. Weather indexing is **not** affected — solar
+    /// position and meteorological data are physical quantities tied to UTC, not
+    /// civil time.
+    #[allow(unused_variables)]
+    fn compute_schedule_idx(&self, clock: &SimClock, step: usize) -> usize {
+        let schedule_len = self.schedule.len();
+
+        #[cfg(feature = "dst")]
+        if let Some(tz) = self.civil_tz {
+            let sim_time = clock.current_time();
+            let civil = sim_time.with_timezone(&tz);
+            let doy0 = civil.ordinal0() as u64;
+            let h = civil.hour() as u64;
+            let m = civil.minute() as u64;
+            let s = civil.second() as u64;
+            let civil_secs = doy0 * 86400 + h * 3600 + m * 60 + s;
+            let step_secs = clock.time_res.num_seconds().unsigned_abs();
+            if step_secs == 0 {
+                return 0;
+            }
+            return (civil_secs / step_secs) as usize % schedule_len;
+        }
+
+        // Fixed-offset fallback: use precomputed start offset.
+        (step + self.schedule_start_offset) % schedule_len
     }
 
     /// Borrow the parsed schedule time series.
@@ -190,7 +252,7 @@ impl EnvironmentManager {
         let schedule_idx = if self.schedule.is_empty() {
             0
         } else {
-            (step + self.schedule_start_offset) % self.schedule.len()
+            self.compute_schedule_idx(clock, step)
         };
 
         // Step 1: weather lookup and psychrometric derivations
@@ -219,6 +281,7 @@ impl EnvironmentManager {
             u16::try_from(day_of_year).unwrap_or(366),
             self.mains_hemisphere,
         );
+        let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
         let solar_irradiance = self
             .surfaces
             .iter()
@@ -233,6 +296,7 @@ impl EnvironmentManager {
                     surface.tilt_deg,
                     surface.azimuth_deg,
                     day_of_year,
+                    ground_albedo,
                 )
             })
             .collect();
@@ -275,6 +339,7 @@ impl EnvironmentManager {
                 solar_altitude_deg: pos.altitude_deg,
                 mains_temp_c,
                 rainfall_m: self.weather.get(WeatherField::LiquidPrecipM, weather_idx),
+                ground_albedo,
             },
             grid,
             custom_domains: vec![
@@ -538,6 +603,7 @@ mod tests {
             sky_temp_c: vec![5.0, 6.0],
             ground_temp_c: vec![8.0, 9.0],
             liquid_precip_m: vec![0.0, 0.0],
+            surface_albedo: None,
         }
     }
 
@@ -663,6 +729,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             start,
+            None,
         )
         .expect("manager");
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
@@ -681,6 +748,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             start,
+            None,
         )
         .expect("manager");
         let mut sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
@@ -706,6 +774,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             start,
+            None,
         )
         .expect("manager");
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
@@ -721,6 +790,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
@@ -739,6 +809,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
         )
         .expect("manager");
 
@@ -764,6 +835,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
@@ -781,6 +853,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
         )
         .expect("manager");
         let feedback = vec![ZoneState {
@@ -803,6 +876,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
         )
         .expect("manager");
 
@@ -831,6 +905,7 @@ mod tests {
             &building(None),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
@@ -859,6 +934,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
             utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
         )
         .expect("manager");
 
@@ -884,6 +960,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(60),
             utc_offset().with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            None,
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
@@ -924,6 +1001,7 @@ mod tests {
         weather.sky_temp_c = vec![5.0; 4];
         weather.ground_temp_c = vec![8.0; 4];
         weather.liquid_precip_m = vec![0.0; 4];
+        weather.surface_albedo = None;
 
         // Simulation starts at 02:30 LST: midpoint shift places this at row 2 (20°C).
         // seconds_into_year = 9000, shifted = 9000 - 1800 = 7200, 7200/3600 = 2.
@@ -934,6 +1012,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
             start,
+            None,
         )
         .expect("manager");
 
@@ -1058,6 +1137,7 @@ mod tests {
         weather.sky_temp_c = vec![5.0; n];
         weather.ground_temp_c = vec![8.0; n];
         weather.liquid_precip_m = vec![0.0; n];
+        weather.surface_albedo = None;
 
         // Start Jan 1 00:00 → offset 0 → temp ≈ -20°C
         let jan_start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -1067,6 +1147,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
             jan_start,
+            None,
         )
         .expect("jan");
         let clock_jan = SimClock::new(jan_start, Duration::hours(1), Duration::hours(1));
@@ -1098,6 +1179,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
             jul_start,
+            None,
         )
         .expect("jul");
         let clock_jul = SimClock::new(jul_start, Duration::hours(1), Duration::hours(1));
@@ -1152,6 +1234,7 @@ mod tests {
         weather.sky_temp_c = vec![5.0; n];
         weather.ground_temp_c = vec![8.0; n];
         weather.liquid_precip_m = vec![0.0; n];
+        weather.surface_albedo = None;
 
         let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let mut mgr = EnvironmentManager::new(
@@ -1160,6 +1243,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
             start,
+            None,
         )
         .expect("manager");
 
@@ -1207,6 +1291,7 @@ mod tests {
         weather.sky_temp_c = vec![5.0; n];
         weather.ground_temp_c = vec![8.0; n];
         weather.liquid_precip_m = vec![0.0; n];
+        weather.surface_albedo = None;
 
         // Day 1 of year (Jan 1, winter).
         let winter_start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -1216,6 +1301,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
             winter_start,
+            None,
         )
         .expect("winter manager");
         let clock_winter = SimClock::new(winter_start, Duration::hours(1), Duration::hours(1));
@@ -1230,6 +1316,7 @@ mod tests {
             &building(Some(21.0)),
             StdDuration::from_secs(3600),
             summer_start,
+            None,
         )
         .expect("summer manager");
         let clock_summer = SimClock::new(summer_start, Duration::hours(1), Duration::hours(1));
@@ -1241,5 +1328,295 @@ mod tests {
             "Northern hemisphere: winter mains ({mains_winter:.2}°C) must be \
              lower than summer mains ({mains_summer:.2}°C)"
         );
+    }
+
+    // ---- DST-aware schedule tests (require `dst` feature) ----
+
+    #[cfg(feature = "dst")]
+    mod dst_tests {
+        use super::*;
+
+        /// Build an annual hourly schedule (8760 rows) where column 0 holds
+        /// `value = hour_of_year` (0..8759), making it easy to verify which
+        /// schedule row was selected.
+        fn annual_hourly_schedule() -> ScheduleTimeSeries {
+            let n = 8760;
+            let start = utc_offset()
+                .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+                .unwrap();
+            let timestamps: Vec<DateTime<FixedOffset>> = (0..n)
+                .map(|i| start + Duration::hours(i as i64))
+                .collect();
+            let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
+            let mut index = HashMap::new();
+            index.insert("hour_idx".to_string(), 0);
+            ScheduleTimeSeries {
+                timestamps,
+                column_names: vec!["hour_idx".to_string()],
+                columns: vec![values],
+                column_index: index,
+                source_step_secs: 3600,
+                column_aggregations: vec![],
+            }
+        }
+
+        /// Build an annual hourly weather series (8760 rows) with constant
+        /// values. Only the dry-bulb field varies so we can verify weather
+        /// indexing is independent of DST.
+        fn annual_hourly_weather() -> WeatherTimeSeries {
+            let n = 8760;
+            WeatherTimeSeries {
+                meta: WeatherMeta {
+                    location: "Test".to_string(),
+                    latitude: 40.0,
+                    longitude: -74.0,
+                    timezone_offset_h: -5.0,
+                    elevation_m: 10.0,
+                    source_step_secs: 3600,
+                },
+                dry_bulb_c: (0..n).map(|i| i as f64 * 0.01).collect(),
+                dew_point_c: vec![2.0; n],
+                rel_humidity_pct: vec![50.0; n],
+                pressure_kpa: vec![101.3; n],
+                ghi_w_m2: vec![0.0; n],
+                dni_w_m2: vec![0.0; n],
+                dhi_w_m2: vec![0.0; n],
+                wind_speed_m_s: vec![3.0; n],
+                wind_dir_deg: vec![180.0; n],
+                opaque_sky_cover: vec![2.0; n],
+                horizontal_infrared_w_m2: vec![300.0; n],
+                sky_temp_c: vec![5.0; n],
+                ground_temp_c: vec![8.0; n],
+                liquid_precip_m: vec![0.0; n],
+                surface_albedo: None,
+            }
+        }
+
+        /// Helper: extract the first schedule value from an EnvironmentState.
+        fn schedule_val(env: &EnvironmentState) -> f64 {
+            env.custom_domains
+                .iter()
+                .find(|d| d.domain_id == schedule_domain_id())
+                .and_then(|d| d.custom_payload.as_ref())
+                .and_then(|p| p.first())
+                .copied()
+                .expect("schedule domain payload")
+        }
+
+        /// `None` civil_timezone produces the same schedule index as the
+        /// pre-DST fixed-offset behavior.
+        #[test]
+        fn schedule_without_dst_unchanged() {
+            let start = utc_offset()
+                .with_ymd_and_hms(2024, 3, 10, 6, 0, 0)
+                .unwrap();
+            let mut mgr_no_dst = EnvironmentManager::new(
+                annual_hourly_weather(),
+                annual_hourly_schedule(),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                start,
+                None,
+            )
+            .expect("no-dst manager");
+            let clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
+            let env = mgr_no_dst.update(&clock, &[]);
+            // Hour 6 of day 69 (March 10, leap year 2024): schedule row =
+            // 69 * 24 + 6 = 1662.
+            let val = schedule_val(&env);
+            assert!(
+                (val - 1662.0).abs() < 1e-6,
+                "expected schedule row 1662, got {val}"
+            );
+        }
+
+        /// Spring forward (America/New_York, 2024-03-10 at 2:00 AM EST → 3:00 AM EDT):
+        /// Civil time jumps from 1:59:59 to 3:00:00. Schedule row for civil
+        /// hour 2 AM is never accessed; hour 3 AM is used instead.
+        #[test]
+        fn schedule_spring_forward_skips_civil_hour() {
+            // EST = UTC-5. At 2024-03-10T07:00:00Z the wall clock is 2:00 AM EST,
+            // which is the instant of spring-forward → becomes 3:00 AM EDT.
+            let est = FixedOffset::west_opt(5 * 3600).expect("offset");
+            let start = est.with_ymd_and_hms(2024, 3, 10, 1, 0, 0).unwrap();
+
+            let mut mgr = EnvironmentManager::new(
+                annual_hourly_weather(),
+                annual_hourly_schedule(),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                start,
+                Some("America/New_York"),
+            )
+            .expect("dst manager");
+
+            // Step 0 → civil 1:00 AM EST, Step 1 → civil 3:00 AM EDT (skips 2 AM).
+            let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
+            let env0 = mgr.update(&clock, &[]);
+            let val0 = schedule_val(&env0);
+            // Day 69 (March 10), hour 1: row = 69*24 + 1 = 1657.
+            assert!(
+                (val0 - 1657.0).abs() < 1e-6,
+                "step 0: expected civil hour 1 (row 1657), got {val0}"
+            );
+
+            let _ = clock.next(); // advance to step 1
+            let env1 = mgr.update(&clock, &[]);
+            let val1 = schedule_val(&env1);
+            // Civil time is now 3:00 AM EDT (skipped 2 AM). Row = 69*24 + 3 = 1659.
+            assert!(
+                (val1 - 1659.0).abs() < 1e-6,
+                "step 1: expected civil hour 3 (row 1659, spring-forward skip), got {val1}"
+            );
+        }
+
+        /// Fall back (America/New_York, 2024-11-03 at 2:00 AM EDT → 1:00 AM EST):
+        /// Civil time 1:00 AM occurs twice. The schedule row for civil hour 1 AM
+        /// is reused for both occurrences.
+        #[test]
+        fn schedule_fall_back_reuses_civil_hour() {
+            // EDT = UTC-4. At 2024-11-03T05:00:00Z the wall clock is 1:00 AM EDT.
+            // One hour later (06:00Z), clocks fall back: 1:00 AM EST again.
+            let edt = FixedOffset::west_opt(4 * 3600).expect("offset");
+            let start = edt.with_ymd_and_hms(2024, 11, 3, 0, 0, 0).unwrap();
+
+            let mut mgr = EnvironmentManager::new(
+                annual_hourly_weather(),
+                annual_hourly_schedule(),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                start,
+                Some("America/New_York"),
+            )
+            .expect("dst manager");
+
+            // Step 1 → civil 1:00 AM EDT (first occurrence).
+            let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(6));
+            let _ = clock.next(); // step 1
+            let env1 = mgr.update(&clock, &[]);
+            let val1 = schedule_val(&env1);
+            // Nov 3, 2024 = day 307 (ordinal0). Hour 1: row = 307*24 + 1 = 7369.
+            assert!(
+                (val1 - 7369.0).abs() < 1e-6,
+                "first 1 AM: expected row 7369, got {val1}"
+            );
+
+            let _ = clock.next(); // step 2 → civil 2:00 AM EDT → falls back to 1:00 AM EST
+            let env2 = mgr.update(&clock, &[]);
+            let val2 = schedule_val(&env2);
+            // Civil time is 1:00 AM EST (second occurrence). Same row 7369.
+            assert!(
+                (val2 - 7369.0).abs() < 1e-6,
+                "second 1 AM (fall-back): expected row 7369, got {val2}"
+            );
+        }
+
+        /// Weather state is identical regardless of whether DST is enabled.
+        /// DST only affects schedule indexing, never weather.
+        #[test]
+        fn weather_unaffected_by_dst_setting() {
+            let est = FixedOffset::west_opt(5 * 3600).expect("offset");
+            let start = est.with_ymd_and_hms(2024, 6, 21, 12, 0, 0).unwrap();
+            let weather = annual_hourly_weather();
+
+            let mut mgr_no_dst = EnvironmentManager::new(
+                weather.clone(),
+                annual_hourly_schedule(),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                start,
+                None,
+            )
+            .expect("no-dst");
+
+            let mut mgr_dst = EnvironmentManager::new(
+                weather,
+                annual_hourly_schedule(),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                start,
+                Some("America/Denver"),
+            )
+            .expect("dst");
+
+            let clock = SimClock::new(start, Duration::hours(1), Duration::hours(4));
+            let env_no = mgr_no_dst.update(&clock, &[]);
+            let env_yes = mgr_dst.update(&clock, &[]);
+
+            assert_eq!(
+                env_no.weather.outdoor_temp_c, env_yes.weather.outdoor_temp_c,
+                "dry-bulb must match"
+            );
+            assert_eq!(
+                env_no.weather.pressure_kpa, env_yes.weather.pressure_kpa,
+                "pressure must match"
+            );
+            assert_eq!(
+                env_no.weather.wind_speed_m_s, env_yes.weather.wind_speed_m_s,
+                "wind speed must match"
+            );
+        }
+
+        /// A full-year simulation with DST verifies that schedule rows align
+        /// with civil time at every hour.
+        #[test]
+        fn year_round_schedule_alignment() {
+            // Use 2023 (non-leap year = 8760 hours) so the loop covers the full year.
+            let est = FixedOffset::west_opt(5 * 3600).expect("offset");
+            let start = est.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+
+            let mut mgr = EnvironmentManager::new(
+                annual_hourly_weather(),
+                annual_hourly_schedule(),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                start,
+                Some("America/New_York"),
+            )
+            .expect("year-round manager");
+
+            let mut clock = SimClock::new(
+                start,
+                Duration::hours(1),
+                Duration::hours(8760),
+            );
+
+            let tz: chrono_tz::Tz = "America/New_York".parse().unwrap();
+            for step in 0..8760u64 {
+                let sim_time = clock.current_time();
+                let civil = sim_time.with_timezone(&tz);
+                let expected_row = civil.ordinal0() as u64 * 24 + civil.hour() as u64;
+                let env = mgr.update(&clock, &[]);
+                let got = schedule_val(&env);
+                let expected = (expected_row as usize % 8760) as f64;
+                assert!(
+                    (got - expected).abs() < 1e-6,
+                    "step {step}: civil {civil}, expected row {expected}, got {got}"
+                );
+                if clock.next().is_none() {
+                    break;
+                }
+            }
+        }
+
+        /// Invalid timezone string returns an error.
+        #[test]
+        fn invalid_timezone_returns_error() {
+            let start = utc_offset()
+                .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+                .unwrap();
+            let result = EnvironmentManager::new(
+                annual_hourly_weather(),
+                annual_hourly_schedule(),
+                &building(Some(21.0)),
+                StdDuration::from_secs(3600),
+                start,
+                Some("Not/A/Timezone"),
+            );
+            assert!(
+                matches!(result, Err(EnvironmentManagerError::InvalidTimezone(_))),
+                "expected InvalidTimezone error, got {result:?}"
+            );
+        }
     }
 }

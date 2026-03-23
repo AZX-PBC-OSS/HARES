@@ -9,7 +9,6 @@ const EOT_SCALE_FACTOR: f64 = 229.18;
 const MINUTES_PER_DEGREE_LONGITUDE: f64 = 4.0;
 const DEGREES_HALF_CIRCLE: f64 = 180.0;
 const DEGREES_FULL_CIRCLE: f64 = 360.0;
-const DEFAULT_GROUND_ALBEDO: f64 = 0.2;
 const ISOTROPIC_VIEW_FACTOR: f64 = 0.5;
 
 /// Solar constant [W/m²].
@@ -285,6 +284,7 @@ pub fn perez_tilted_irradiance(
     surface_tilt_deg: f64,
     surface_azimuth_deg: f64,
     day_of_year: u32,
+    ground_albedo: f64,
 ) -> SurfaceIrradiance {
     // Nighttime: all components zero
     if ghi <= 0.0 && dni <= 0.0 && dhi <= 0.0 {
@@ -307,7 +307,15 @@ pub fn perez_tilted_irradiance(
 
     // Fall back to isotropic when Perez is undefined
     if dhi < PEREZ_MIN_DHI || solar_zenith_deg > PEREZ_ZENITH_LIMIT_DEG {
-        return isotropic_tilted_irradiance(surface_id, ghi, dni, dhi, aoi, surface_tilt_deg);
+        return isotropic_tilted_irradiance(
+            surface_id,
+            ghi,
+            dni,
+            dhi,
+            aoi,
+            surface_tilt_deg,
+            ground_albedo,
+        );
     }
 
     let zenith_rad = solar_zenith_deg.to_radians();
@@ -348,7 +356,7 @@ pub fn perez_tilted_irradiance(
 
     // Ground-reflected (same as isotropic)
     let reflected =
-        (ghi * DEFAULT_GROUND_ALBEDO * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
+        (ghi * ground_albedo * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
 
     SurfaceIrradiance {
         surface_id,
@@ -357,21 +365,6 @@ pub fn perez_tilted_irradiance(
         reflected_w_m2: reflected,
         angle_of_incidence_rad: aoi_rad,
     }
-}
-
-/// Isotropic (Liu & Jordan 1963) plane-of-surface irradiance decomposition.
-///
-/// This is a convenience wrapper kept for backward compatibility with callers
-/// that already have AOI computed. For new code, prefer [`perez_tilted_irradiance`].
-pub fn surface_irradiance(
-    surface_id: u32,
-    ghi: f64,
-    dni: f64,
-    dhi: f64,
-    aoi: f64,
-    surface_tilt: f64,
-) -> SurfaceIrradiance {
-    isotropic_tilted_irradiance(surface_id, ghi, dni, dhi, aoi, surface_tilt)
 }
 
 /// Isotropic (Liu & Jordan 1963) diffuse sky model.
@@ -385,6 +378,7 @@ pub fn isotropic_tilted_irradiance(
     dhi: f64,
     aoi: f64,
     surface_tilt: f64,
+    ground_albedo: f64,
 ) -> SurfaceIrradiance {
     if ghi <= 0.0 && dni <= 0.0 && dhi <= 0.0 {
         return SurfaceIrradiance {
@@ -402,7 +396,7 @@ pub fn isotropic_tilted_irradiance(
     let direct = (dni * aoi_rad.cos()).max(0.0);
     let diffuse = (dhi * (1.0 + tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
     let reflected =
-        (ghi * DEFAULT_GROUND_ALBEDO * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
+        (ghi * ground_albedo * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
 
     SurfaceIrradiance {
         surface_id,
@@ -676,6 +670,7 @@ pub fn window_transmitted_solar_angular(
 #[cfg(test)]
 mod tests {
     use chrono::{FixedOffset, NaiveDate, TimeZone};
+    use hares_types::DEFAULT_GROUND_ALBEDO;
 
     use super::*;
 
@@ -721,7 +716,7 @@ mod tests {
 
     #[test]
     fn nighttime_irradiance_is_exactly_zero() {
-        let irr = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 90.0, 180.0, 45.0, 180.0, 1);
+        let irr = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 90.0, 180.0, 45.0, 180.0, 1, DEFAULT_GROUND_ALBEDO);
         assert_eq!(irr.direct_w_m2, 0.0);
         assert_eq!(irr.diffuse_w_m2, 0.0);
         assert_eq!(irr.reflected_w_m2, 0.0);
@@ -731,7 +726,7 @@ mod tests {
     fn isotropic_horizontal_receives_full_diffuse() {
         // Liu & Jordan (1963): horizontal surface (tilt=0°) receives full diffuse sky
         // and zero ground-reflected. Diffuse = DHI * (1+cos(0))/2 = DHI
-        let irr = isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 0.0, 0.0);
+        let irr = isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 0.0, 0.0, DEFAULT_GROUND_ALBEDO);
         assert!(
             (irr.diffuse_w_m2 - 200.0).abs() < 0.01,
             "horizontal diffuse: {}",
@@ -748,7 +743,7 @@ mod tests {
     fn isotropic_vertical_receives_half_diffuse() {
         // Liu & Jordan (1963): vertical surface (tilt=90°) receives half diffuse
         // Diffuse = DHI * (1+cos(90°))/2 = DHI/2
-        let irr = isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 45.0, 90.0);
+        let irr = isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 45.0, 90.0, DEFAULT_GROUND_ALBEDO);
         assert!(
             (irr.diffuse_w_m2 - 100.0).abs() < 0.5,
             "vertical diffuse: {}",
@@ -797,9 +792,9 @@ mod tests {
         let surf_az = 180.0;
         let doy = 172; // summer solstice
 
-        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy);
+        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
-        let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt);
+        let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
 
         let perez_total = perez.direct_w_m2 + perez.diffuse_w_m2 + perez.reflected_w_m2;
         let iso_total = iso.direct_w_m2 + iso.diffuse_w_m2 + iso.reflected_w_m2;
@@ -822,9 +817,9 @@ mod tests {
         let surf_az = 180.0;
         let doy = 80;
 
-        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy);
+        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
-        let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt);
+        let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
 
         // Diffuse should be within 20% for overcast conditions
         let ratio = perez.diffuse_w_m2 / iso.diffuse_w_m2;
@@ -847,11 +842,60 @@ mod tests {
         let doy = 172;
 
         let result =
-            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy);
+            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
         // Should not panic and all components should be >= 0
         assert!(result.direct_w_m2 >= 0.0);
         assert!(result.diffuse_w_m2 >= 0.0);
         assert!(result.reflected_w_m2 >= 0.0);
+    }
+
+    #[test]
+    fn higher_ground_albedo_increases_reflected_solar() {
+        let ghi = 800.0;
+        let dni = 700.0;
+        let dhi = 100.0;
+        let zenith = 30.0;
+        let solar_az = 180.0;
+        let tilt = 90.0; // vertical surface maximises ground-view factor
+        let surf_az = 180.0;
+        let doy = 172;
+
+        let bare = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.2);
+        let snow = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.8);
+
+        assert!(
+            snow.reflected_w_m2 > bare.reflected_w_m2,
+            "snow albedo (0.8) reflected {:.1} should exceed bare (0.2) reflected {:.1}",
+            snow.reflected_w_m2,
+            bare.reflected_w_m2
+        );
+        // Snow albedo is 4x bare albedo, so reflected should scale linearly.
+        let ratio = snow.reflected_w_m2 / bare.reflected_w_m2;
+        assert!(
+            (ratio - 4.0).abs() < 0.01,
+            "reflected ratio should be 4.0, got {ratio:.3}"
+        );
+        // Direct and diffuse should be unchanged by albedo.
+        assert!(
+            (bare.direct_w_m2 - snow.direct_w_m2).abs() < 1e-12,
+            "direct should not change with albedo"
+        );
+        assert!(
+            (bare.diffuse_w_m2 - snow.diffuse_w_m2).abs() < 1e-12,
+            "diffuse should not change with albedo"
+        );
+    }
+
+    #[test]
+    fn isotropic_higher_albedo_increases_reflected() {
+        let bare = isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 45.0, 90.0, 0.2);
+        let snow = isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 45.0, 90.0, 0.8);
+        assert!(
+            snow.reflected_w_m2 > bare.reflected_w_m2,
+            "snow albedo reflected {:.1} should exceed bare {:.1}",
+            snow.reflected_w_m2,
+            bare.reflected_w_m2
+        );
     }
 
     #[test]
@@ -1128,7 +1172,7 @@ mod tests {
     fn perez_nighttime_zenith_above_90_returns_zero() {
         // When solar zenith > 90 degrees (sun below horizon), GHI/DNI/DHI
         // should be zero and the model must return zero for all components
-        let result = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 100.0, 180.0, 30.0, 180.0, 172);
+        let result = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 100.0, 180.0, 30.0, 180.0, 172, DEFAULT_GROUND_ALBEDO);
         assert_eq!(result.direct_w_m2, 0.0);
         assert_eq!(result.diffuse_w_m2, 0.0);
         assert_eq!(result.reflected_w_m2, 0.0);
@@ -1140,7 +1184,7 @@ mod tests {
         // without producing NaN or infinity
         for zenith in [87.5, 88.0, 89.0, 89.5, 89.9] {
             let result =
-                perez_tilted_irradiance(0, 50.0, 20.0, 30.0, zenith, 180.0, 30.0, 180.0, 172);
+                perez_tilted_irradiance(0, 50.0, 20.0, 30.0, zenith, 180.0, 30.0, 180.0, 172, DEFAULT_GROUND_ALBEDO);
             assert!(
                 result.direct_w_m2.is_finite(),
                 "direct NaN/Inf at zenith={zenith}"
@@ -1177,7 +1221,7 @@ mod tests {
         let doy = 172;
 
         let result =
-            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy);
+            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
 
         // Direct beam on a 30-degree tilted surface facing the sun at 30-degree zenith
         // should be approximately DNI * cos(0) = 700 (AOI ~ 0)
@@ -1236,9 +1280,9 @@ mod tests {
         let surf_az = 180.0;
         let doy = 172;
 
-        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy);
+        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
-        let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt);
+        let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
 
         assert!(
             perez.diffuse_w_m2 > iso.diffuse_w_m2,
@@ -1285,6 +1329,7 @@ mod tests {
                     surface_tilt,
                     surface_az,
                     doy,
+                    DEFAULT_GROUND_ALBEDO,
                 )
                 .direct_w_m2
             })
@@ -1309,6 +1354,7 @@ mod tests {
                     surface_tilt,
                     surface_az,
                     doy,
+                    DEFAULT_GROUND_ALBEDO,
                 )
                 .direct_w_m2
             })
@@ -1872,6 +1918,7 @@ mod tests {
                 tilt,
                 *azimuth,
                 day_of_year,
+                DEFAULT_GROUND_ALBEDO,
             );
 
             let total_poa_window = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;

@@ -56,6 +56,8 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let names_line = lines
         .next()
         .ok_or_else(|| WeatherError::Parse("missing PSM3 field names header (line 1)".into()))?;
+    // Strip UTF-8 BOM if present (Windows/Excel exports may prepend \xEF\xBB\xBF).
+    let names_line = names_line.trim_start_matches('\u{FEFF}');
     let field_names: Vec<&str> = names_line.split(',').map(str::trim).collect();
 
     // --- Line 2: field values ---
@@ -128,6 +130,12 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let mut dhi_w_m2 = Vec::with_capacity(n);
     let mut wind_speed_m_s = Vec::with_capacity(n);
     let mut wind_dir_deg = Vec::with_capacity(n);
+    let has_albedo_col = col_map.surface_albedo.is_some();
+    let mut surface_albedo = if has_albedo_col {
+        Some(Vec::with_capacity(n))
+    } else {
+        None
+    };
     let mut timestamps: Vec<(u32, u32, u32)> = Vec::with_capacity(n); // (month, day, hour)
 
     for (data_idx, line) in data_lines.iter().enumerate() {
@@ -186,6 +194,11 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         let month = parse_data_u32(&fields, col_map.month, row, "Month")?;
         let day = parse_data_u32(&fields, col_map.day, row, "Day")?;
         let hour = parse_data_u32(&fields, col_map.hour, row, "Hour")?;
+
+        if let Some(idx) = col_map.surface_albedo {
+            let val = parse_data_f64(&fields, idx, row, "Surface Albedo")?;
+            surface_albedo.as_mut().expect("pre-allocated").push(val.clamp(0.0, 1.0));
+        }
 
         dry_bulb_c.push(db);
         dew_point_c.push(dp);
@@ -264,6 +277,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         sky_temp_c,
         ground_temp_c,
         liquid_precip_m,
+        surface_albedo,
     })
 }
 
@@ -283,6 +297,8 @@ struct Psm3ColumnMap {
     dhi: usize,
     wind_speed: usize,
     wind_direction: usize,
+    /// Optional: not all PSM3 files include Surface Albedo.
+    surface_albedo: Option<usize>,
 }
 
 fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
@@ -294,6 +310,11 @@ fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
                 WeatherError::Parse(format!("PSM3 missing required column: {name}"))
             })
     };
+
+    // Surface Albedo is optional — not all PSM3 files include it.
+    let surface_albedo = col_names
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case("Surface Albedo"));
 
     Ok(Psm3ColumnMap {
         year: find("Year")?,
@@ -310,6 +331,7 @@ fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
         dhi: find("DHI")?,
         wind_speed: find("Wind Speed")?,
         wind_direction: find("Wind Direction")?,
+        surface_albedo,
     })
 }
 
@@ -586,5 +608,65 @@ mod tests {
         assert!((hourly.dry_bulb_c[0] - 20.0).abs() < 1e-12);
         // GHI mean of 4x 100 = 100.
         assert!((hourly.ghi_w_m2[0] - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn psm3_default_albedo_when_column_absent() {
+        let csv = make_psm3_csv(60, false);
+        let ts = parse_psm3_str(&csv).expect("should parse");
+        assert!(
+            ts.surface_albedo.is_none(),
+            "surface_albedo should be None when Surface Albedo column is absent"
+        );
+    }
+
+    #[test]
+    fn psm3_parses_surface_albedo_column() {
+        // Build a minimal PSM3 CSV with a Surface Albedo column.
+        let day_counts = monthly_day_counts(false);
+        let total_records: usize = day_counts.iter().sum::<usize>() * 24;
+
+        let mut lines = Vec::with_capacity(total_records + 3);
+        lines.push(
+            "Source,Location ID,City,State,Country,Latitude,Longitude,Time Zone,Elevation,Local Time Zone"
+                .to_string(),
+        );
+        lines.push("NSRDB,12345,TestCity,-,-,39.74,-104.99,-7,1609.0,-7".to_string());
+        lines.push(
+            "Year,Month,Day,Hour,Minute,GHI,DNI,DHI,Temperature,Pressure,Dew Point,Relative Humidity,Wind Speed,Wind Direction,Surface Albedo"
+                .to_string(),
+        );
+
+        for (mi, &days) in day_counts.iter().enumerate() {
+            let month = mi as u32 + 1;
+            let albedo = if month <= 3 || month >= 11 { 0.7 } else { 0.15 };
+            for day in 1..=days as u32 {
+                for hour in 0..24u32 {
+                    lines.push(format!(
+                        "2021,{month},{day},{hour},0,\
+                         100,200,50,20.0,1013.25,10.0,50.0,3.0,180,{albedo}"
+                    ));
+                }
+            }
+        }
+
+        let csv = lines.join("\n");
+        let ts = parse_psm3_str(&csv).expect("should parse PSM3 with albedo");
+        let albedo = ts.surface_albedo.as_ref().expect("should be Some when column present");
+        assert_eq!(albedo.len(), ts.len());
+
+        // January row should have snow albedo (0.7).
+        assert!(
+            (albedo[0] - 0.7).abs() < 1e-12,
+            "January albedo should be 0.7, got {}",
+            albedo[0]
+        );
+        // June row (hour 0 of June 1 = 151 * 24 = row 3624 for non-leap).
+        let june_idx = (31 + 28 + 31 + 30 + 31) * 24; // May end
+        assert!(
+            (albedo[june_idx] - 0.15).abs() < 1e-12,
+            "June albedo should be 0.15, got {}",
+            albedo[june_idx]
+        );
     }
 }

@@ -94,9 +94,9 @@ fn single_node_rc_passive_decay() {
     let tau = r * c;
     let expected = t0 * (-t_elapsed / tau).exp();
 
-    // ZOH discretization is algebraically exact for piecewise-constant inputs,
-    // so the accumulated error should be near machine epsilon.
-    assert_close(x[0], expected, 1e-6, "temperature after decay");
+    // Crank-Nicolson is O(dt²) per step, so accumulated error over 200 steps
+    // is small but not at machine epsilon. For dt=30, tau=1000: error ~ O(dt²/tau²) per step.
+    assert_close(x[0], expected, 1e-4, "temperature after decay");
     assert!(
         x[0] > 0.0,
         "temperature must still be positive (decaying not reversed)"

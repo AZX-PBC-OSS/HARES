@@ -6,23 +6,44 @@ use hares_physics::infiltration::{
     ach_infiltration, ashrae_wind_stack, ela_infiltration, natural_ventilation_flow_m3_s,
 };
 use hares_types::{EnvironmentState, ZoneId};
-use nalgebra::DVector;
 
 use super::H_FG_J_PER_KG;
-use super::config::{InfiltrationMethod, StateSpaceWiring, ThermalSolverConfig};
+use super::config::{InfiltrationMethod, ThermalSolverConfig};
 
-/// Populates `u` with infiltration and ventilation sensible gains and accumulates latent loads
+/// Per-zone infiltration/ventilation coupling for semi-implicit treatment.
+///
+/// The sensible infiltration load `q = h_inf * (T_out - T_zone)` is split:
+///   - Implicit part: `-h_inf * T_zone` added to the A-matrix diagonal
+///   - Explicit part: `h_inf * T_out` added as forcing
+///
+/// This makes infiltration unconditionally stable regardless of ACH or timestep,
+/// following the EnergyPlus zone air heat balance (Engineering Reference §13.3,
+/// Predictor-Corrector algorithm: `C_z dT/dt = ... + m_inf*cp*(T_out - T_z)`
+/// where `m_inf*cp` enters the implicit denominator coefficient).
+pub(crate) struct InfiltrationCoupling {
+    pub zone: ZoneId,
+    /// Infiltration+ventilation sensible conductance [W/K] = m_dot_sens * cp.
+    pub h_inf_w_k: f64,
+    /// Outdoor temperature driving the sensible forcing [°C].
+    pub t_forcing_c: f64,
+    /// Latent gain [W] — stays fully explicit (not temperature-dependent).
+    /// Retained for diagnostic parity with q_sensible_diagnostic_w.
+    #[allow(dead_code)]
+    pub q_latent_w: f64,
+    /// Diagnostic sensible gain [W] = h_inf * (T_out - T_zone) for reporting.
+    pub q_sensible_diagnostic_w: f64,
+}
+
+/// Computes infiltration and ventilation coupling terms and accumulates latent loads
 /// into `latent_out` (which the caller has already cleared).
 ///
-/// Returns per-zone sensible infiltration+ventilation gains [W] for diagnostics.
+/// Returns per-zone `InfiltrationCoupling` structs for semi-implicit treatment.
 pub(crate) fn apply_infiltration_and_ventilation(
     config: &ThermalSolverConfig,
-    wiring: &StateSpaceWiring,
-    u: &mut DVector<f64>,
     env: &EnvironmentState,
     latent_out: &mut HashMap<ZoneId, f64>,
-) -> HashMap<ZoneId, f64> {
-    let mut sensible_by_zone = HashMap::new();
+) -> Vec<InfiltrationCoupling> {
+    let mut couplings = Vec::new();
     let p_pa = env.weather.pressure_pa();
     let t_out = env.weather.outdoor_temp_c;
     let w_out = env.weather.outdoor_humidity_ratio;
@@ -120,18 +141,20 @@ pub(crate) fn apply_infiltration_and_ventilation(
         // reducing the effective flow rate (OCHRE model).
         let m_dot_sens = rho * sensible_flow_m3_s;
         let m_dot_lat = rho * latent_flow_m3_s;
-        let q_sensible = m_dot_sens * CP_DRY_AIR_J_KG_K * (t_out - zone.temperature_c);
+        let h_inf = m_dot_sens * CP_DRY_AIR_J_KG_K;
+        let q_sensible_diagnostic = h_inf * (t_out - zone.temperature_c);
         let q_latent = m_dot_lat * H_FG_J_PER_KG * (w_out - zone.humidity_ratio);
 
-        if let Some(&idx) = wiring.zone_sensible_input_indices.get(&zone.id)
-            && idx < u.len()
-        {
-            u[idx] += q_sensible;
-        }
-        *sensible_by_zone.entry(zone.id).or_insert(0.0) += q_sensible;
+        couplings.push(InfiltrationCoupling {
+            zone: zone.id,
+            h_inf_w_k: h_inf,
+            t_forcing_c: t_out,
+            q_latent_w: q_latent,
+            q_sensible_diagnostic_w: q_sensible_diagnostic,
+        });
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
-    sensible_by_zone
+    couplings
 }
 
 #[cfg(test)]

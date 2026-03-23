@@ -20,7 +20,7 @@ verification:
 
 ## Prerequisites
 
-THERMAL-003 (pre-refactor cleanup) and THERMAL-005 (Crank-Nicolson implicit solver) will have completed before this ticket. THERMAL-003 already splits `resolve_internal()` into phases, fixes Padé panic handling, removes hardcoded ZoneId(1), and eliminates LWR duplication. THERMAL-005 replaces the explicit matrix-exponential stepper with implicit Crank-Nicolson and a zero-allocation `step_into()` method. After both complete, `thermal_solver/mod.rs` will be cleaner but still oversized.
+THERMAL-003 (pre-refactor cleanup), THERMAL-005 (Crank-Nicolson implicit solver), and THERMAL-006a (semi-implicit infiltration) will have completed before this ticket. THERMAL-003 splits `resolve_internal()` into phases and fixes structural issues. THERMAL-005 replaces the explicit stepper with Crank-Nicolson `step_into()`. THERMAL-006a changes infiltration from explicit q-injection to semi-implicit conductance coupling (h_inf modifies the CN step matrices per-timestep). After all three, `thermal_solver/mod.rs` will be cleaner but still oversized.
 
 ## Background/Context
 
@@ -48,11 +48,14 @@ Extract into focused modules while preserving the zero-allocation hot-path patte
   - `fn apply_port_sensible_inputs(ports, config, u)` — read thermal accumulators, write to u
   - `fn apply_occupancy_gains(ports, config, occupancy)`
 
-- [ ] **`thermal_solver/infiltration.rs`** (already exists, ~137 lines): Keep as-is
+- [ ] **`thermal_solver/infiltration.rs`** (already exists, will be modified by THERMAL-006a):
+  - After THERMAL-006a: returns per-zone `(h_inf_w_k, q_forcing_w)` instead of injecting into u
+  - Keep as standalone module; verify semi-implicit interface is clean
 
 - [ ] **`thermal_solver/mod.rs`** (~400 lines): Orchestrator only
   - `ThermalSolver` struct with buffer ownership
-  - `resolve_internal()` orchestrates: build_input → apply_outdoor → apply_solar → apply_lwr → apply_ports → apply_infiltration → step → output
+  - `resolve_internal()` orchestrates: build_input → apply_outdoor → apply_solar → apply_lwr → apply_ports → collect_infiltration_conductances → step_with_infiltration → output
+  - Note: after THERMAL-006a, the step includes implicit infiltration coupling (diagonal perturbation of CN matrices), not just a simple `step(u)` call
   - No physics equations — only sequencing and buffer management
 
 ### Quality Requirements

@@ -8,6 +8,13 @@ use std::fmt;
 use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Default ground albedo for bare ground (EnergyPlus default: 0.2).
+///
+/// Used as the fallback when weather data does not include measured surface
+/// albedo (e.g. EPW and ResStock CSV formats). PSM3 files may provide
+/// satellite-derived albedo via the `Surface Albedo` column.
+pub const DEFAULT_GROUND_ALBEDO: f64 = 0.2;
+
 use crate::DomainUpdate;
 
 /// Stable zone identifier.
@@ -100,10 +107,18 @@ pub struct WeatherState {
     /// Zero when data is unavailable.
     #[serde(default)]
     pub rainfall_m: f64,
+    /// Ground surface albedo (reflectance) [dimensionless, 0–1].
+    /// From PSM3 satellite data when available; defaults to 0.2 (bare ground).
+    #[serde(default = "default_ground_albedo")]
+    pub ground_albedo: f64,
 }
 
 fn default_mains_temp_c() -> f64 {
     15.0
+}
+
+fn default_ground_albedo() -> f64 {
+    0.2
 }
 
 impl WeatherState {
@@ -213,6 +228,7 @@ mod tests {
                 solar_altitude_deg: 30.0,
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
+                ground_albedo: 0.2,
             },
             grid: GridState {
                 voltage_pu: 1.0,

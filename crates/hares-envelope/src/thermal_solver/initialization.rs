@@ -15,8 +15,8 @@ pub(crate) fn initialize_steady_state(
     env: &EnvironmentState,
     indoor_temp_c: f64,
 ) -> Result<DVector<f64>> {
-    let n = model.a_d.nrows();
-    let m = model.b_d.ncols();
+    let n = model.state_dim();
+    let m = model.input_dim();
 
     // Build u_initial: outdoor temps + indoor temps (no HVAC heat, no solar).
     let mut u = DVector::<f64>::zeros(m);
@@ -43,29 +43,33 @@ pub(crate) fn initialize_steady_state(
     zone_fixes.dedup_by_key(|f| f.0);
 
     if zone_fixes.is_empty() {
-        // No zone states to fix — just solve the full system.
-        let eye = DMatrix::<f64>::identity(n, n);
-        let lhs = eye - &model.a_d;
-        let rhs = &model.b_d * &u;
-        return match lhs.try_inverse() {
-            Some(inv) => Ok(inv * rhs),
-            None => Ok(DVector::from_element(n, indoor_temp_c)),
+        return match model.steady_state(&u) {
+            Some(x) => Ok(x),
+            None => Ok(DVector::from_element(model.state_dim(), indoor_temp_c)),
         };
     }
 
     // Partition the system: remove zone states from the state vector and
-    // move their coupling columns from A_d into B_d as fixed-value inputs.
+    // move their coupling into the RHS as fixed boundary conditions.
     //
-    // For each zone state j at temperature T_j:
-    //   Original: x[k+1] = A_d * x[k] + B_d * u[k]
-    //   Column j of A_d couples x_j into all other states.
-    //   Since x_j = T_j (fixed), move A_d[:,j] * T_j into the input side.
-    let mut a_reduced = model.a_d.clone();
-    let mut b_rhs = &model.b_d * &u; // RHS contribution from original inputs
+    // Continuous path (from_continuous): solve A_c·x = -B_c·u with zone states pinned.
+    //   Partitioned: -A_c_reduced·x_reduced = B_c·u + A_c[:,j]·T_j for each fixed j.
+    //
+    // Discrete path (from_discrete): solve (I - A_d)·x = B_d·u with zone states pinned.
+    //   Partitioned: (I - A_d_reduced)·x_reduced = B_d·u + A_d[:,j]·T_j for each fixed j.
+    let use_continuous = model.a_c().is_some() && model.b_c().is_some();
+    let (mut a_reduced, mut b_rhs) = if use_continuous {
+        let a_c = model.a_c().unwrap();
+        let b_c = model.b_c().unwrap();
+        (a_c.clone(), b_c * &u)
+    } else {
+        // n_mat = A_d and b_eff = B_d only for from_discrete() models.
+        debug_assert!(model.a_c().is_none(), "discrete init path reached with a_c present");
+        (model.n_mat().clone(), model.b_eff() * &u)
+    };
 
     // Add coupling from fixed zone states to RHS, then remove those rows/cols.
     for &(j, t_fixed) in &zone_fixes {
-        // Accumulate the coupling: A_d[:,j] * t_fixed contributes to all states.
         let col_j = a_reduced.column(j).into_owned();
         b_rhs += &col_j * t_fixed;
     }
@@ -78,7 +82,6 @@ pub(crate) fn initialize_steady_state(
 
     let n_reduced = a_reduced.nrows();
     if n_reduced == 0 {
-        // All states are zone states — nothing to solve.
         let mut x_full = DVector::zeros(0);
         for &(j, t_fixed) in zone_fixes.iter().rev() {
             x_full = x_full.insert_row(j, t_fixed);
@@ -86,15 +89,24 @@ pub(crate) fn initialize_steady_state(
         return Ok(x_full);
     }
 
-    let eye = DMatrix::<f64>::identity(n_reduced, n_reduced);
-    let lhs = eye - a_reduced;
-
-    // Use try_inverse instead of LU solve — nalgebra's LU can panic on
-    // certain matrix configurations in both debug and release builds.
-    let x_reduced = match lhs.try_inverse() {
-        Some(inv) => inv * b_rhs,
-        None => {
-            return Ok(DVector::from_element(n, indoor_temp_c));
+    let x_reduced = if use_continuous {
+        // Continuous: 0 = A_c·x + B_c·u → -A_c·x = B_c·u (b_rhs already = B_c·u + couplings)
+        let neg_a = -&a_reduced;
+        match neg_a.try_inverse() {
+            Some(inv) => inv * b_rhs,
+            None => {
+                return Ok(DVector::from_element(n, indoor_temp_c));
+            }
+        }
+    } else {
+        // Discrete: (I - N)·x = B_eff·u
+        let eye = DMatrix::<f64>::identity(n_reduced, n_reduced);
+        let lhs = eye - a_reduced;
+        match lhs.try_inverse() {
+            Some(inv) => inv * b_rhs,
+            None => {
+                return Ok(DVector::from_element(n, indoor_temp_c));
+            }
         }
     };
 
@@ -155,6 +167,8 @@ mod tests {
                 solar_altitude_deg: 0.0,
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
+                ground_albedo: 0.2,
+
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -179,7 +193,7 @@ mod tests {
         let c = DMatrix::from_element(1, 1, 1.0);
         let d = DMatrix::zeros(1, 1);
 
-        let model = StateSpaceModel { a_d, b_d, c, d };
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
 
         let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::new(), // no zone state pinning
@@ -228,7 +242,7 @@ mod tests {
         let c = DMatrix::identity(2, 2);
         let d = DMatrix::zeros(2, 1);
 
-        let model = StateSpaceModel { a_d, b_d, c, d };
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
 
         let mut zone_state_indices = HashMap::new();
         zone_state_indices.insert(ZoneId(1), 0_usize);
@@ -276,7 +290,7 @@ mod tests {
         let c = DMatrix::identity(2, 2);
         let d = DMatrix::zeros(2, 1);
 
-        let model = StateSpaceModel { a_d, b_d, c, d };
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
 
         let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::new(),

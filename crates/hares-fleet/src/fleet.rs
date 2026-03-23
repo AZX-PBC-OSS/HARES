@@ -252,6 +252,7 @@ fn default_resstock_sim_config() -> SimulationConfig {
         output_chunk_size: 10_000,
         setpoint_deadband_c: None,
         master_seed: 0,
+        civil_timezone: None,
     }
 }
 
@@ -406,6 +407,7 @@ mod tests {
             output_chunk_size: 128,
             setpoint_deadband_c: None,
             master_seed: 0,
+            civil_timezone: None,
         }
     }
 

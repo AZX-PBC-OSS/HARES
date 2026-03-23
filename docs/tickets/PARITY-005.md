@@ -20,7 +20,7 @@ verification:
 
 ## Prerequisites
 
-THERMAL-001 (dry air density for infiltration) and THERMAL-002 (4-component exterior LWR with sky temp) will have completed. WEATHER-001 (sub-hourly interpolation) and WEATHER-003 (PSM3 parser) may also be done, improving weather data quality. This ticket is primarily an **audit and gap-fill** — verifying that all derived fields now use EnergyPlus-grade computation after the THERMAL/WEATHER work.
+THERMAL-001 (dry air density for infiltration) and THERMAL-002 (4-component exterior LWR with sky temp) will have completed. WEATHER-001 (sub-hourly interpolation), WEATHER-003 (PSM3 parser), WEATHER-008 (dynamic ground albedo), WEATHER-009 (Berdahl-Martin sky emissivity), and WEATHER-010 (full-pipeline integration test) will also be done. This means sky temperature is now handled by multiple models (Stefan-Boltzmann primary, Berdahl-Martin fallback, Clark-Allen last resort), ground albedo is dynamic (PSM3 or monthly config), and the full weather pipeline is integration-tested. This ticket is now primarily a **verification pass** — confirming that ground temperature (Kusuda-Achenbach or DOE-2), mains water temperature (Burch-Christensen), and zone wet-bulb are all EnergyPlus-grade after the WEATHER chain.
 
 ## Background/Context
 
@@ -30,20 +30,13 @@ OCHRE computes several derived weather fields. After THERMAL-001/002, sky temper
 
 ## Work to Do
 
-- [ ] Audit `EnvironmentManager::update()` in `environment.rs`:
-  - Is `sky_temp_c` computed from horizontal infrared radiation per EnergyPlus formula, or just set to outdoor temp?
-  - Is `ground_temp_c` time-varying (Kusuda-Achenbach or DOE-2 sinusoidal), or constant?
-  - Is `mains_temp_c` computed from Burch-Christensen with annual lag, or simplified?
-  - Is `outdoor_wet_bulb_c` computed from psychrometric functions, or from EPW directly?
-- [ ] For each field that is simplified, implement EnergyPlus-grade computation:
-  - **Sky temp** (EnergyPlus Clark & Allen 1978):
-    - If horizontal IR available from EPW: `T_sky = (IRH / sigma)^0.25 - 273.15`
-    - If not: compute sky emissivity: `eps_clear = 0.787 + 0.764 * ln(T_dp_K / 273)`
-    - Cloud correction (Walton 1983): `eps = eps_clear * (1 + 0.0224*N - 0.0035*N^2 + 0.00028*N^3)` where N = opaque sky cover tenths
-    - Then: `IRH = eps * sigma * T_db_K^4`, `T_sky = (IRH / sigma)^0.25 - 273.15`
-  - **Ground temp**: Kusuda-Achenbach (see PARITY-004 for formula; this ticket just wires the time-varying value into EnvironmentState)
-  - **Mains temp**: Burch-Christensen with 35-day lag and annual statistics (verify existing implementation)
-  - **Wet-bulb**: psychrometric calculation from dry-bulb, humidity ratio, pressure (verify existing)
+- [ ] Verify `EnvironmentManager::update()` in `environment.rs` — after WEATHER chain:
+  - **Sky temp**: WEATHER-009 added Berdahl-Martin + Clark-Allen fallback. Verify the model selection logic is correct (Stefan-Boltzmann primary when IR >= 50, Berdahl-Martin when cloud cover available, Clark-Allen last resort). No implementation needed — just verify.
+  - **Ground albedo**: WEATHER-008 added dynamic albedo from PSM3 or monthly config. Verify it flows through to `perez_tilted_irradiance()` calls. No implementation needed — just verify.
+  - **Ground temp**: Is it time-varying (Kusuda-Achenbach or DOE-2)? If still constant, wire Kusuda-Achenbach from PARITY-014 into EnvironmentState. If PARITY-014 hasn't landed yet, add the time-varying ground temp here.
+  - **Mains temp**: Verify Burch-Christensen with 35-day lag and annual statistics is correctly implemented.
+  - **Wet-bulb**: Verify psychrometric calculation from dry-bulb, humidity ratio, pressure.
+  - **Zone wet-bulb**: Verify `ZoneState.wet_bulb_c` is updated from zone temperature + humidity ratio each timestep (needed by PARITY-017 HPWH).
 - [ ] Ensure `ZoneState.wet_bulb_c` is updated from zone temperature + humidity ratio each timestep
 - [ ] Add tests: verify sky temp < outdoor temp at night, ground temp lags air temp by ~6 weeks
 

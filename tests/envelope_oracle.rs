@@ -49,6 +49,7 @@ mod tests {
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
                 master_seed: 42,
+                civil_timezone: None,
             },
             overrides: None,
             bldg_id: 1,

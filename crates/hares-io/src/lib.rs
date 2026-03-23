@@ -9,6 +9,7 @@ pub mod hpxml;
 pub mod output;
 pub mod psm3;
 pub mod resstock;
+pub mod resstock_csv;
 pub mod schedule;
 pub mod schedule_resolve;
 pub mod weather;
@@ -28,6 +29,8 @@ pub use envelope_lut::{
 };
 pub use epw::parse_epw;
 pub use psm3::parse_psm3;
+pub use resstock_csv::parse_resstock_csv;
+pub use weather::{WeatherFormat, parse_weather, parse_weather_with_elevation, parse_weather_with_location};
 pub use hpxml::{Building, EquipmentSpec, ValidationReport, parse_hpxml, resolve_equipment};
 pub use output::{
     OutputSummary, StreamingRecorder, build_schema, expected_columns_at_verbosity, mode_to_ordinal,

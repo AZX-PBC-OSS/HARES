@@ -193,6 +193,7 @@ fn poa_total_irradiance_is_physically_plausible_south_facing_30_tilt() {
         surface_tilt_deg,
         surface_azimuth_deg,
         day_of_year,
+        0.2,
     );
 
     let poa_total = result.direct_w_m2 + result.diffuse_w_m2 + result.reflected_w_m2;
@@ -226,7 +227,7 @@ fn poa_total_irradiance_is_physically_plausible_south_facing_30_tilt() {
 #[test]
 fn poa_total_zero_at_night() {
     // Nighttime: all irradiance inputs zero. All POA components must be zero.
-    let result = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 90.0, 180.0, 30.0, 180.0, 172);
+    let result = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 90.0, 180.0, 30.0, 180.0, 172, 0.2);
     assert_eq!(result.direct_w_m2, 0.0, "nighttime beam must be 0");
     assert_eq!(result.diffuse_w_m2, 0.0, "nighttime diffuse must be 0");
     assert_eq!(result.reflected_w_m2, 0.0, "nighttime reflected must be 0");

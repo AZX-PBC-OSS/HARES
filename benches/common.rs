@@ -125,6 +125,7 @@ pub fn build_dwelling_config(
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
             master_seed: 0,
+            civil_timezone: None,
         },
         defaults_path: None,
         overrides: None,

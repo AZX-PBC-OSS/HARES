@@ -23,8 +23,10 @@ verification:
 
 Audit found all 324 tests are in `tests/` directories (integration/parity tests). There are zero `#[test]` functions inside `src/` files. Physics modules like solar position, psychrometrics, film coefficients, and longwave radiation have no unit tests verifying individual functions against known analytical solutions.
 
+Note: WEATHER-010 (full-pipeline weather integration test) and THERMAL-004/006 (thermal solver tests) add integration-level coverage. This ticket focuses on **unit tests for individual physics functions** — complementary, not overlapping.
+
 Unit tests are critical for:
-- Catching regressions when refactoring (PARITY-100, 101)
+- Catching regressions when refactoring (PARITY-001, 002)
 - Validating individual physics functions before integration
 - Documenting expected behavior at boundary conditions
 

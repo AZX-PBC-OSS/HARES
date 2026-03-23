@@ -1,6 +1,7 @@
-//! State-space representation and zero-order hold discretization.
+//! State-space representation and Crank-Nicolson implicit discretization.
 
-use nalgebra::{Complex, DMatrix, DVector};
+use nalgebra::{Complex, DMatrix, DVector, Dyn};
+use nalgebra::linalg::LU;
 use thiserror::Error;
 
 const RCOND_THRESHOLD: f64 = 1.0e-12;
@@ -53,6 +54,8 @@ pub enum StateSpaceError {
     },
     #[error("Padé denominator matrix is singular in matrix_exp")]
     SingularPadeMatrix,
+    #[error("implicit system matrix (I - dt/2 * A_c) is singular")]
+    ImplicitMatrixSingular,
     #[error("state-space stability check failed: {0:?}")]
     UnstableSystem(StabilityResult),
 }
@@ -65,13 +68,36 @@ pub struct OutputMapping {
     pub input_to_output: Vec<(usize, usize, f64)>,
 }
 
-/// Discrete-time state-space model.
-#[derive(Debug, Clone)]
+/// Implicit (Crank-Nicolson) state-space model.
+///
+/// Each step solves: `x[k+1] = M⁻¹ · (N · x[k] + B_eff · u[k])`
+/// where `M = I - dt/2·A_c`, `N = I + dt/2·A_c`, `B_eff = dt·B_c`.
+/// For discrete-path models (`from_discrete`), M = I so the solve is a no-op.
+#[derive(Clone)]
 pub struct StateSpaceModel {
-    pub a_d: DMatrix<f64>,
-    pub b_d: DMatrix<f64>,
+    a_c: Option<DMatrix<f64>>,
+    b_c: Option<DMatrix<f64>>,
+    m_mat: DMatrix<f64>,
+    m_lu: LU<f64, Dyn, Dyn>,
+    n_mat: DMatrix<f64>,
+    b_eff: DMatrix<f64>,
     pub c: DMatrix<f64>,
     pub d: DMatrix<f64>,
+}
+
+impl std::fmt::Debug for StateSpaceModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateSpaceModel")
+            .field("a_c", &self.a_c)
+            .field("b_c", &self.b_c)
+            .field("m_mat", &self.m_mat)
+            .field("m_lu", &"LU{...}")
+            .field("n_mat", &self.n_mat)
+            .field("b_eff", &self.b_eff)
+            .field("c", &self.c)
+            .field("d", &self.d)
+            .finish()
+    }
 }
 
 /// Stability diagnostic payload returned by eigenvalue checks.
@@ -92,7 +118,9 @@ pub enum StabilityVerdict {
 }
 
 impl StateSpaceModel {
-    /// Constructs a fully-discrete model from matrix terms that are already discretized.
+    /// Constructs a fully-discrete model from pre-discretized matrices.
+    ///
+    /// Sets M = I (identity) so that `step()` degenerates to `A_d·x + B_d·u`.
     pub fn from_discrete(
         a_d: DMatrix<f64>,
         b_d: DMatrix<f64>,
@@ -100,10 +128,86 @@ impl StateSpaceModel {
         d: DMatrix<f64>,
     ) -> Result<Self> {
         validate_state_space_dimensions(&a_d, &b_d, &c, &d)?;
-        Ok(Self { a_d, b_d, c, d })
+        let n = a_d.nrows();
+        let eye = DMatrix::<f64>::identity(n, n);
+        let m_lu = eye.clone().lu();
+
+        Ok(Self {
+            a_c: None,
+            b_c: None,
+            m_mat: eye,
+            m_lu,
+            n_mat: a_d,
+            b_eff: b_d,
+            c,
+            d,
+        })
     }
 
-    /// Constructs from continuous-time matrices, computing C/D from mapping and discretizing A/B.
+    /// Number of state variables.
+    pub fn state_dim(&self) -> usize {
+        self.n_mat.nrows()
+    }
+
+    /// Number of inputs.
+    pub fn input_dim(&self) -> usize {
+        self.b_eff.ncols()
+    }
+
+    /// Number of outputs (rows of C).
+    pub fn output_dim(&self) -> usize {
+        self.c.nrows()
+    }
+
+    /// Implicit-half matrix M = I - dt/2·A_c (or I for discrete-path).
+    pub fn m_mat(&self) -> &DMatrix<f64> {
+        &self.m_mat
+    }
+
+    /// Explicit-half matrix N = I + dt/2·A_c (or A_d for discrete-path).
+    pub fn n_mat(&self) -> &DMatrix<f64> {
+        &self.n_mat
+    }
+
+    /// Effective input matrix B_eff = dt·B_c (or B_d for discrete-path).
+    pub fn b_eff(&self) -> &DMatrix<f64> {
+        &self.b_eff
+    }
+
+    /// Continuous-time system matrix, if built from `from_continuous()`.
+    pub fn a_c(&self) -> Option<&DMatrix<f64>> {
+        self.a_c.as_ref()
+    }
+
+    /// Continuous-time input matrix, if built from `from_continuous()`.
+    pub fn b_c(&self) -> Option<&DMatrix<f64>> {
+        self.b_c.as_ref()
+    }
+
+    /// Computes the steady-state solution for constant input u.
+    ///
+    /// Continuous path: solves `A_c·x = -B_c·u`.
+    /// Discrete path: solves `(I - N)·x = B_eff·u`.
+    /// Returns None if the system matrix is singular (e.g., integrating system).
+    pub fn steady_state(&self, u: &DVector<f64>) -> Option<DVector<f64>> {
+        if let (Some(a_c), Some(b_c)) = (&self.a_c, &self.b_c) {
+            let rhs = -(b_c * u);
+            a_c.clone().try_inverse().map(|inv| inv * rhs)
+        } else {
+            // This branch is only correct when n_mat = A_d (from_discrete path).
+            // For from_continuous models, a_c/b_c are always Some and the branch above handles it.
+            debug_assert!(self.a_c.is_none(), "discrete steady_state branch reached with a_c present");
+            let n = self.state_dim();
+            let eye = DMatrix::<f64>::identity(n, n);
+            let lhs = eye - &self.n_mat;
+            let rhs = &self.b_eff * u;
+            lhs.try_inverse().map(|inv| inv * rhs)
+        }
+    }
+
+    /// Constructs from continuous-time matrices using Crank-Nicolson discretization.
+    ///
+    /// Pre-computes M = I - dt/2·A_c (LU-factored), N = I + dt/2·A_c, B_eff = dt·B_c.
     pub fn from_continuous(
         a_c: &DMatrix<f64>,
         b_c: &DMatrix<f64>,
@@ -115,16 +219,29 @@ impl StateSpaceModel {
             return Err(StateSpaceError::InvalidTimestep(dt));
         }
 
-        let (c, d) = build_output_matrices(a_c.nrows(), b_c.ncols(), output_mapping)?;
-        let (a_d, b_d) = discretize_auto(a_c, b_c, dt)?;
+        let n = a_c.nrows();
+        let (c, d) = build_output_matrices(n, b_c.ncols(), output_mapping)?;
 
-        // Eigenvalue stability check is O(n³) via Schur decomposition and
-        // prohibitively slow for large RC networks (n > 20) in debug builds.
-        if a_c.nrows() <= 20 {
+        let eye = DMatrix::<f64>::identity(n, n);
+        let half_dt_a = a_c * (dt / 2.0);
+        let m = &eye - &half_dt_a;
+        let n_mat = &eye + &half_dt_a;
+        let b_eff = b_c * dt;
+
+        let m_mat = m.clone();
+        let m_lu = m.lu();
+        if m_lu.solve(&eye).is_none() {
+            return Err(StateSpaceError::ImplicitMatrixSingular);
+        }
+
+        // Stability check on equivalent A_d = M⁻¹·N
+        if n <= 20 {
+            let a_d_equiv = m_lu
+                .solve(&n_mat)
+                .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
             let a_c_singular = is_singular(a_c);
-            if let Err(stability) = eigenvalue_check(a_c, &a_d) {
-                let discrete_marginally_stable = a_d
-                    .clone()
+            if let Err(stability) = eigenvalue_check(a_c, &a_d_equiv) {
+                let discrete_marginally_stable = a_d_equiv
                     .complex_eigenvalues()
                     .iter()
                     .all(|lambda| lambda.norm() <= 1.0 + 1e-10);
@@ -134,11 +251,15 @@ impl StateSpaceModel {
             }
         } else {
             tracing::debug!(
-                n = a_c.nrows(),
-                "skipping full eigenvalue check for large matrix; using Gershgorin bound"
+                n,
+                "skipping full eigenvalue check for large matrix; using continuous Gershgorin bound"
             );
-            let bound = gershgorin_spectral_radius(&a_d);
-            if bound > 1.0 + 1e-10 {
+            // CN is A-stable: if all continuous eigenvalues have Re(lambda) <= 0,
+            // the discrete system is guaranteed stable. Check via continuous
+            // Gershgorin discs — cheaper O(n²) and not overly conservative like
+            // the discrete Gershgorin bound on M⁻¹·N.
+            let continuous_stable = gershgorin_continuous_stable(a_c);
+            if !continuous_stable {
                 return Err(StateSpaceError::UnstableSystem(StabilityResult {
                     continuous_stable: false,
                     discrete_stable: false,
@@ -147,12 +268,30 @@ impl StateSpaceModel {
             }
         }
 
-        Self::from_discrete(a_d, b_d, c, d)
+        Ok(Self {
+            a_c: Some(a_c.clone()),
+            b_c: Some(b_c.clone()),
+            m_mat,
+            m_lu,
+            n_mat: n_mat.into_owned(),
+            b_eff,
+            c,
+            d,
+        })
     }
 
-    /// Steps one time increment: x[k+1] = A_d * x[k] + B_d * u[k].
+    /// Zero-allocation step: x[k+1] = M⁻¹·(N·x[k] + B_eff·u[k]).
+    pub fn step_into(&self, x: &DVector<f64>, u: &DVector<f64>, buf: &mut DVector<f64>) {
+        buf.gemv(1.0, &self.n_mat, x, 0.0); // buf = N·x
+        buf.gemv(1.0, &self.b_eff, u, 1.0); // buf += B_eff·u
+        self.m_lu.solve_mut(buf);
+    }
+
+    /// Convenience step that allocates a new vector (use `step_into` for hot paths).
     pub fn step(&self, x: &DVector<f64>, u: &DVector<f64>) -> DVector<f64> {
-        &self.a_d * x + &self.b_d * u
+        let mut buf = DVector::zeros(x.len());
+        self.step_into(x, u, &mut buf);
+        buf
     }
 
     /// Computes output from current state/input: y[k] = C * x[k] + D * u[k].
@@ -160,13 +299,18 @@ impl StateSpaceModel {
         &self.c * x + &self.d * u
     }
 
-    /// Full eigenvalue stability check on the discrete state matrix, regardless of size.
+    /// Full eigenvalue stability check on the equivalent discrete state matrix.
     ///
-    /// Returns [`StabilityVerdict::Stable`] when all eigenvalue magnitudes are within
-    /// the unit circle (1 + 1e-10 tolerance), or [`StabilityVerdict::MarginallyUnstable`]
-    /// with the worst magnitude otherwise.
+    /// Computes A_d = M⁻¹·N and checks all eigenvalue magnitudes.
     pub fn verify_stability(&self) -> Result<StabilityVerdict> {
-        let eigs = self.a_d.clone().complex_eigenvalues();
+        let n = self.state_dim();
+        let eye = DMatrix::<f64>::identity(n, n);
+        let m_inv = self
+            .m_lu
+            .solve(&eye)
+            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
+        let a_d_equiv = m_inv * &self.n_mat;
+        let eigs = a_d_equiv.complex_eigenvalues();
         let max_mag = eigs.iter().map(|l| l.norm()).fold(0.0_f64, f64::max);
         if max_mag <= 1.0 + 1e-10 {
             Ok(StabilityVerdict::Stable)
@@ -178,7 +322,7 @@ impl StateSpaceModel {
     }
 
     /// Solves for a scalar input that drives a specific output row to `y_target`
-    /// after one step, without cloning A_d or B_d.
+    /// after one implicit step.
     pub fn solve_for_output_input(
         &self,
         x: &DVector<f64>,
@@ -204,6 +348,148 @@ impl StateSpaceModel {
         self.solve_for_scalar_input(x, u, y_target, 0, input_index)
     }
 
+    /// Builds the coupled RHS into `buf`: `(N - D)·x + B_eff·u + f`.
+    ///
+    /// Each coupling entry `(state_idx, d, forcing)` subtracts `d * x[idx]`
+    /// from the explicit half and adds `forcing` to the RHS.
+    pub fn build_coupled_rhs(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        buf: &mut DVector<f64>,
+        couplings: &[(usize, f64, f64)],
+    ) {
+        buf.gemv(1.0, &self.n_mat, x, 0.0); // buf = N·x
+        for &(idx, d, _) in couplings {
+            debug_assert!(idx < self.state_dim(), "coupling index {idx} out of bounds");
+            buf[idx] -= d * x[idx]; // subtract D·x from explicit half
+        }
+        buf.gemv(1.0, &self.b_eff, u, 1.0); // buf += B_eff·u
+        for &(idx, _, forcing) in couplings {
+            buf[idx] += forcing; // add forcing
+        }
+    }
+
+    /// CN step with per-step diagonal coupling, using a pre-built LU.
+    ///
+    /// Builds the RHS `(N - D)·x + B_eff·u + f` into `buf`, then solves
+    /// `(M + D)·x[k+1] = buf` using the provided LU factorization.
+    ///
+    /// Use `build_coupled_lu` to create `coupled_lu` once per step, then
+    /// pass it to both this method and `solve_for_scalar_input_coupled`.
+    pub fn step_with_coupled_lu_into(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        buf: &mut DVector<f64>,
+        coupled_lu: &LU<f64, Dyn, Dyn>,
+        couplings: &[(usize, f64, f64)],
+    ) {
+        self.build_coupled_rhs(x, u, buf, couplings);
+        coupled_lu.solve_mut(buf);
+    }
+
+    /// CN step with per-step diagonal coupling (convenience: builds LU internally).
+    ///
+    /// Equivalent to calling `build_coupled_lu` then `step_with_coupled_lu_into`.
+    /// For one-shot use when the LU doesn't need to be shared with the HVAC solve.
+    pub fn step_with_coupling_into(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        buf: &mut DVector<f64>,
+        m_scratch: &mut DMatrix<f64>,
+        couplings: &[(usize, f64, f64)],
+    ) {
+        let lu = self.build_coupled_lu(m_scratch, couplings);
+        self.step_with_coupled_lu_into(x, u, buf, &lu, couplings);
+    }
+
+    /// Builds the LU factorization of the coupled implicit matrix M + D.
+    ///
+    /// Used when the same coupling needs to be applied to both the step and the
+    /// HVAC solve in the same timestep. Reuses `m_scratch` as working storage.
+    pub fn build_coupled_lu(
+        &self,
+        m_scratch: &mut DMatrix<f64>,
+        couplings: &[(usize, f64, f64)],
+    ) -> LU<f64, Dyn, Dyn> {
+        debug_assert_eq!(m_scratch.nrows(), self.state_dim());
+        debug_assert_eq!(m_scratch.ncols(), self.state_dim());
+
+        m_scratch.clone_from(&self.m_mat);
+        for &(idx, d_diag, _) in couplings {
+            debug_assert!(idx < self.state_dim(), "coupling index {idx} out of bounds");
+            m_scratch[(idx, idx)] += d_diag;
+        }
+        m_scratch.clone().lu()
+    }
+
+    /// Like `solve_for_scalar_input` but with per-step diagonal coupling.
+    ///
+    /// Applies the same D perturbation and forcing as `step_with_coupling_into`:
+    ///   RHS uses (N - D)·x instead of N·x, plus forcing terms.
+    ///   LHS uses the pre-built coupled LU factorization of (M + D).
+    ///
+    /// `couplings` entries are `(state_idx, d_diag, forcing)` — same format as
+    /// `step_with_coupling_into`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_for_scalar_input_coupled(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        output_index: usize,
+        input_index: usize,
+        m_coupled_lu: &LU<f64, Dyn, Dyn>,
+        couplings: &[(usize, f64, f64)],
+    ) -> Result<f64> {
+        if output_index >= self.c.nrows() {
+            return Err(StateSpaceError::OutputIndexOutOfBounds {
+                output_index,
+                output_dim: self.c.nrows(),
+            });
+        }
+        if input_index >= self.b_eff.ncols() {
+            return Err(StateSpaceError::InputIndexOutOfBounds {
+                index: input_index,
+                input_dim: self.b_eff.ncols(),
+            });
+        }
+
+        let u_i_original = u[input_index];
+
+        // Build RHS with coupling: (N - D)·x + B_eff·u_fixed + f
+        let mut rhs_fixed = &self.n_mat * x + &self.b_eff * u
+            - self.b_eff.column(input_index) * u_i_original;
+        for &(idx, d_diag, forcing) in couplings {
+            rhs_fixed[idx] -= d_diag * x[idx]; // subtract D·x
+            rhs_fixed[idx] += forcing; // add forcing
+        }
+
+        let x_next_fixed = m_coupled_lu
+            .solve(&rhs_fixed)
+            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
+
+        // Gain: how much does x_next change per unit of u[input_index]?
+        let g = m_coupled_lu
+            .solve(&self.b_eff.column(input_index).into_owned())
+            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
+
+        let c_row = self.c.row(output_index);
+        let d_row = self.d.row(output_index);
+        let y_fixed = (c_row * &x_next_fixed)[0] + (d_row * u)[0]
+            - d_row[input_index] * u_i_original;
+
+        let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
+
+        if effective_gain.abs() <= ZERO_GAIN_EPSILON {
+            return Err(StateSpaceError::ZeroEffectiveGain { input_index });
+        }
+
+        Ok((y_target - y_fixed) / effective_gain)
+    }
+
     fn solve_for_scalar_input(
         &self,
         x: &DVector<f64>,
@@ -218,26 +504,35 @@ impl StateSpaceModel {
                 output_dim: self.c.nrows(),
             });
         }
-        if input_index >= self.b_d.ncols() {
+        if input_index >= self.b_eff.ncols() {
             return Err(StateSpaceError::InputIndexOutOfBounds {
                 index: input_index,
-                input_dim: self.b_d.ncols(),
+                input_dim: self.b_eff.ncols(),
             });
         }
 
         let u_i_original = u[input_index];
 
-        // x_next_fixed = A_d * x + B_d * u - B_d[:,input_index] * u_i
-        let x_next_fixed =
-            &self.a_d * x + &self.b_d * u - self.b_d.column(input_index) * u_i_original;
+        // Compute rhs without the variable input contribution
+        let rhs_fixed = &self.n_mat * x + &self.b_eff * u
+            - self.b_eff.column(input_index) * u_i_original;
+        let x_next_fixed = self
+            .m_lu
+            .solve(&rhs_fixed)
+            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
+
+        // Gain: how much does x_next change per unit of u[input_index]?
+        let g = self
+            .m_lu
+            .solve(&self.b_eff.column(input_index).into_owned())
+            .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
-        let y_fixed =
-            (c_row * &x_next_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
+        let y_fixed = (c_row * &x_next_fixed)[0] + (d_row * u)[0]
+            - d_row[input_index] * u_i_original;
 
-        let b_col = self.b_d.column(input_index);
-        let effective_gain = (c_row * b_col)[0] + self.d[(output_index, input_index)];
+        let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
 
         if effective_gain.abs() <= ZERO_GAIN_EPSILON {
             return Err(StateSpaceError::ZeroEffectiveGain { input_index });
@@ -362,7 +657,7 @@ fn is_singular(a: &DMatrix<f64>) -> bool {
     }
 }
 
-fn discretize_auto(
+pub fn discretize_auto(
     a_c: &DMatrix<f64>,
     b_c: &DMatrix<f64>,
     dt: f64,
@@ -593,6 +888,24 @@ pub fn gershgorin_spectral_radius(a: &DMatrix<f64>) -> f64 {
     max_row_sum
 }
 
+/// Checks if all Gershgorin discs of a matrix lie in the closed left half-plane.
+///
+/// For each row i, the disc is centered at `a_ii` with radius `Σ_{j≠i} |a_ij|`.
+/// If `a_ii + radius <= 0` for all rows, all eigenvalues have `Re(lambda) <= 0`.
+/// This is sufficient (but not necessary) for continuous-time stability, and
+/// combined with CN A-stability, guarantees discrete stability.
+fn gershgorin_continuous_stable(a: &DMatrix<f64>) -> bool {
+    let n = a.nrows();
+    for i in 0..n {
+        let center = a[(i, i)];
+        let radius: f64 = (0..n).filter(|&j| j != i).map(|j| a[(i, j)].abs()).sum();
+        if center + radius > 1e-10 {
+            return false;
+        }
+    }
+    true
+}
+
 fn matrix_one_norm(m: &DMatrix<f64>) -> f64 {
     (0..m.ncols())
         .map(|col| (0..m.nrows()).map(|row| m[(row, col)].abs()).sum::<f64>())
@@ -671,8 +984,10 @@ mod tests {
     }
 
     #[test]
-    fn three_r_two_c_reference_matches_expected_discretization_and_output_mappings() {
-        // Reference values from scipy.signal.cont2discrete(method='zoh') for this A_c/B_c.
+    fn three_r_two_c_cn_stepping_matches_zoh_reference_within_tolerance() {
+        // CN discretization gives different internal matrices than ZOH, but
+        // stepping behavior converges to the same steady state and tracks
+        // the analytical solution within O(dt²) per step.
         let a_c = DMatrix::from_row_slice(2, 2, &[-0.020, 0.0, 0.0, -0.010]);
         let b_c = DMatrix::from_row_slice(
             2,
@@ -689,32 +1004,37 @@ mod tests {
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
             .expect("state-space model should build");
 
-        let ad_expected = DMatrix::from_row_slice(
-            2,
-            2,
-            &[0.301_194_211_912_202, 0.0, 0.0, 0.548_811_636_094_026],
-        );
-        let bd_expected = DMatrix::from_row_slice(
-            2,
-            4,
-            &[
-                0.349_402_894_043_899,
-                0.174_701_447_021_949,
-                0.0,
-                0.069_880_578_808_780,
-                0.0,
-                0.180_475_345_562_389,
-                0.270_713_018_343_583,
-                0.045_118_836_390_597,
-            ],
-        );
+        // C and D matrices are independent of discretization method
         let c_expected = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
-        let d_expected = DMatrix::from_row_slice(2, 4, &[0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.10]);
-
-        assert_matrix_close(&model.a_d, &ad_expected, 1.0e-12);
-        assert_matrix_close(&model.b_d, &bd_expected, 1.0e-12);
+        let d_expected =
+            DMatrix::from_row_slice(2, 4, &[0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.10]);
         assert_matrix_close(&model.c, &c_expected, 1.0e-12);
         assert_matrix_close(&model.d, &d_expected, 1.0e-12);
+
+        // Step the CN model and ZOH reference to compare behavior
+        let (a_d_zoh, b_d_zoh) = discretize_zoh(&a_c, &b_c, 60.0).unwrap();
+        let zoh_model =
+            StateSpaceModel::from_discrete(a_d_zoh, b_d_zoh, c_expected.clone(), d_expected)
+                .unwrap();
+
+        let mut x_cn = DVector::from_row_slice(&[20.0, 15.0]);
+        let mut x_zoh = x_cn.clone();
+        let u = DVector::from_row_slice(&[30.0, 25.0, 10.0, 5.0]);
+
+        for _ in 0..100 {
+            x_cn = model.step(&x_cn, &u);
+            x_zoh = zoh_model.step(&x_zoh, &u);
+        }
+
+        // After 100 steps (100 min), both should be close to the same steady state
+        for i in 0..2 {
+            assert!(
+                (x_cn[i] - x_zoh[i]).abs() < 0.1,
+                "CN vs ZOH diverged at state {i}: cn={}, zoh={}",
+                x_cn[i],
+                x_zoh[i]
+            );
+        }
     }
 
     #[test]
@@ -825,12 +1145,11 @@ mod tests {
     }
 
     #[test]
-    fn from_continuous_accepts_singular_a_c_via_van_loan() {
+    fn from_continuous_accepts_singular_a_c() {
         // A_c has a zero eigenvalue (row 0 is all zeros), making it singular.
-        // The Van Loan fallback produces a valid A_d with eigenvalue 1.0 for
-        // that mode, but the second mode (decay at rate -1.0) is strictly
-        // stable.  `from_continuous` must accept this because discrete
-        // stability holds (|lambda| <= 1.0).
+        // CN discretization should still succeed: M = I - dt/2·A_c is non-singular
+        // even when A_c is singular. The equivalent A_d = M⁻¹·N has eigenvalue 1.0
+        // for the zero-eigenvalue mode, which is marginally stable.
         let a_c = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.0, -1.0]);
         let b_c = DMatrix::from_row_slice(2, 1, &[1.0, 2.0]);
 
@@ -841,13 +1160,22 @@ mod tests {
         };
 
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 1.0, &mapping)
-            .expect("from_continuous should succeed for singular A_c with discrete-stable A_d");
+            .expect("from_continuous should succeed for singular A_c");
 
-        let a_expected = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, (-1.0_f64).exp()]);
-        let b_expected = DMatrix::from_row_slice(2, 1, &[1.0, 2.0 * (1.0 - (-1.0_f64).exp())]);
+        // Verify stepping behavior: state 0 should integrate input,
+        // state 1 should decay toward steady state
+        let mut x = DVector::from_row_slice(&[0.0, 0.0]);
+        let u = DVector::from_row_slice(&[1.0]);
 
-        assert_matrix_close(&model.a_d, &a_expected, 1.0e-12);
-        assert_matrix_close(&model.b_d, &b_expected, 1.0e-12);
+        x = model.step(&x, &u);
+        // State 0: with A_c=0, CN gives x[k+1] = x[k] + dt*b_c[0]*u = 0 + 1*1*1 = 1.0
+        assert!(
+            (x[0] - 1.0).abs() < 1e-10,
+            "state 0 should integrate: got {}",
+            x[0]
+        );
+        // State 1: should move toward steady state (positive, since b_c[1]=2 and a_c[1,1]=-1)
+        assert!(x[1] > 0.0, "state 1 should increase from 0: got {}", x[1]);
     }
 
     #[test]
@@ -892,5 +1220,301 @@ mod tests {
         let diag = DMatrix::from_row_slice(3, 3, &[0.8, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.9]);
         let bound = gershgorin_spectral_radius(&diag);
         assert!((bound - 0.9).abs() < 1e-14, "expected 0.9, got {bound}");
+    }
+
+    #[test]
+    fn cn_1r1c_24h_decay_matches_analytical() {
+        // 1R1C thermal network: C=500kJ/K, UA=100W/K, τ=5000s
+        // Zone starts at 20°C, outdoor at 0°C, free decay for 24h
+        let c_th = 500_000.0; // J/K
+        let ua = 100.0; // W/K
+        let dt = 60.0; // s
+        let steps = 1440; // 24h
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-ua / c_th]);
+        let b_c = DMatrix::from_row_slice(1, 1, &[ua / c_th]);
+
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
+            .expect("1R1C model should build");
+
+        let mut x = DVector::from_row_slice(&[20.0]);
+        let u = DVector::from_row_slice(&[0.0]);
+
+        for _ in 0..steps {
+            x = model.step(&x, &u);
+        }
+
+        let t = (steps as f64) * dt;
+        let t_analytical = 20.0 * (-ua / c_th * t).exp();
+        assert!(
+            (x[0] - t_analytical).abs() < 0.05,
+            "CN result {:.6} should match analytical {:.6} within 0.05°C",
+            x[0],
+            t_analytical
+        );
+    }
+
+    #[test]
+    fn cn_no_overshoot_where_explicit_overshoots() {
+        // Massively stiff system: τ=0.1s with dt=60s (dt/τ=600)
+        // Explicit Euler would wildly overshoot; CN (A-stable) stays bounded.
+        let a_c = DMatrix::from_row_slice(1, 1, &[-10.0]);
+        let b_c = DMatrix::from_row_slice(1, 1, &[10.0]);
+        let dt = 60.0;
+
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+
+        let cn_model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
+            .expect("CN model should build for stiff system");
+
+        let x0 = DVector::from_row_slice(&[20.0]);
+        let u = DVector::from_row_slice(&[0.0]);
+        let x_cn = cn_model.step(&x0, &u);
+
+        // CN is A-stable: the discrete eigenvalue magnitude is always ≤ 1,
+        // so the state magnitude never exceeds the initial condition.
+        // (CN does allow sign oscillation for very stiff systems, unlike L-stable
+        // methods, but the amplitude is strictly bounded.)
+        assert!(
+            x_cn[0].abs() <= 20.0,
+            "CN magnitude should not exceed initial: |T|={}, expected ≤ 20",
+            x_cn[0].abs()
+        );
+        // Bilinear transform maps eigenvalue -10 with dt=60 to (1-300)/(1+300) ≈ -0.993,
+        // so the first step must produce a negative value (sign oscillation for extreme stiffness).
+        assert!(
+            x_cn[0] < 0.0,
+            "CN step must flip sign for extreme stiffness (dt/tau=600): got {}",
+            x_cn[0]
+        );
+
+        // Explicit ZOH: for this extreme stiffness, discretize_zoh may succeed
+        // but the resulting A_d = exp(-10*60) ≈ 0 (no overshoot either for
+        // exact ZOH). Use van_loan as a more general fallback.
+        // Instead, manually construct the explicit (forward Euler) discrete model:
+        // A_d_fe = I + dt*A_c, B_d_fe = dt*B_c
+        let a_d_fe = DMatrix::from_row_slice(1, 1, &[1.0 + dt * (-10.0)]);
+        let b_d_fe = DMatrix::from_row_slice(1, 1, &[dt * 10.0]);
+        let c_mat = DMatrix::from_row_slice(1, 1, &[1.0]);
+        let d_mat = DMatrix::from_row_slice(1, 1, &[0.0]);
+
+        let explicit_model =
+            StateSpaceModel::from_discrete(a_d_fe, b_d_fe, c_mat, d_mat)
+                .expect("explicit model should build");
+
+        let x_explicit = explicit_model.step(&x0, &u);
+        let overshoots = x_explicit[0] < 0.0 || x_explicit[0] > 20.0;
+        assert!(
+            overshoots,
+            "explicit forward Euler should overshoot: T={}, expected outside [0, 20]",
+            x_explicit[0]
+        );
+    }
+
+    #[test]
+    fn step_into_produces_same_result_as_step() {
+        let a_c = DMatrix::from_row_slice(2, 2, &[-0.02, 0.01, 0.005, -0.015]);
+        let b_c = DMatrix::from_row_slice(2, 2, &[0.01, 0.005, 0.003, 0.007]);
+
+        let mapping = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
+            .expect("model should build");
+
+        let x = DVector::from_row_slice(&[20.0, 15.0]);
+        let u = DVector::from_row_slice(&[30.0, 25.0]);
+
+        let x_step = model.step(&x, &u);
+
+        let mut x_into = DVector::zeros(2);
+        model.step_into(&x, &u, &mut x_into);
+
+        for i in 0..2 {
+            assert!(
+                (x_step[i] - x_into[i]).abs() == 0.0,
+                "step and step_into differ at index {i}: step={}, step_into={}",
+                x_step[i],
+                x_into[i]
+            );
+        }
+    }
+
+    #[test]
+    fn from_discrete_backward_compat() {
+        // Verify that from_discrete degenerates to x[k+1] = A_d*x + B_d*u
+        let a_d = DMatrix::from_row_slice(2, 2, &[0.9, 0.05, 0.0, 0.85]);
+        let b_d = DMatrix::from_row_slice(2, 2, &[0.1, 0.0, 0.0, 0.15]);
+        let c_mat = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+        let d_mat = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.0, 0.0]);
+
+        let model = StateSpaceModel::from_discrete(
+            a_d.clone(),
+            b_d.clone(),
+            c_mat,
+            d_mat,
+        )
+        .expect("discrete model should build");
+
+        let mut x = DVector::from_row_slice(&[20.0, 15.0]);
+        let u = DVector::from_row_slice(&[5.0, 3.0]);
+
+        for _ in 0..10 {
+            let x_model = model.step(&x, &u);
+            let x_manual = &a_d * &x + &b_d * &u;
+
+            for i in 0..2 {
+                assert!(
+                    (x_model[i] - x_manual[i]).abs() == 0.0,
+                    "from_discrete should exactly match A_d*x + B_d*u at index {i}: \
+                     model={}, manual={}",
+                    x_model[i],
+                    x_manual[i]
+                );
+            }
+            x = x_model;
+        }
+    }
+
+    #[test]
+    fn step_with_coupling_no_coupling_matches_step_into() {
+        let a_c = DMatrix::from_row_slice(2, 2, &[-0.02, 0.01, 0.005, -0.015]);
+        let b_c = DMatrix::from_row_slice(2, 2, &[0.01, 0.005, 0.003, 0.007]);
+
+        let mapping = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping)
+            .expect("model should build");
+
+        let x = DVector::from_row_slice(&[20.0, 15.0]);
+        let u = DVector::from_row_slice(&[30.0, 25.0]);
+
+        let mut buf_step = DVector::zeros(2);
+        model.step_into(&x, &u, &mut buf_step);
+
+        let mut buf_coupled = DVector::zeros(2);
+        let mut m_scratch = DMatrix::zeros(2, 2);
+        model.step_with_coupling_into(&x, &u, &mut buf_coupled, &mut m_scratch, &[]);
+
+        for i in 0..2 {
+            assert!(
+                (buf_step[i] - buf_coupled[i]).abs() < 1e-12,
+                "step_into and step_with_coupling_into differ at index {i}: \
+                 step={}, coupled={}",
+                buf_step[i],
+                buf_coupled[i]
+            );
+        }
+    }
+
+    #[test]
+    fn step_with_coupling_large_diagonal_damps_state() {
+        // Multi-step test: large coupling should damp state faster than uncoupled.
+        // We run enough steps for CN oscillations to settle and compare final magnitudes.
+        let a_c = DMatrix::from_row_slice(1, 1, &[-0.001]);
+        let b_c = DMatrix::from_row_slice(1, 1, &[0.001]);
+
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+
+        let dt = 60.0;
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
+            .expect("model should build");
+
+        let x0 = DVector::from_row_slice(&[20.0]);
+        let u = DVector::from_row_slice(&[0.0]);
+
+        // Uncoupled: run 10 steps
+        let mut x_uncoupled = x0.clone();
+        let mut buf = DVector::zeros(1);
+        for _ in 0..10 {
+            model.step_into(&x_uncoupled, &u, &mut buf);
+            x_uncoupled.copy_from(&buf);
+        }
+
+        // Coupled: run 10 steps with large diagonal
+        let mut x_coupled = x0;
+        let mut m_scratch = DMatrix::zeros(1, 1);
+        let large_d = 5.0;
+        for _ in 0..10 {
+            model.step_with_coupling_into(
+                &x_coupled,
+                &u,
+                &mut buf,
+                &mut m_scratch,
+                &[(0, large_d, 0.0)],
+            );
+            x_coupled.copy_from(&buf);
+        }
+
+        assert!(
+            x_coupled[0].abs() < x_uncoupled[0].abs(),
+            "after 10 steps, coupled state {} should be closer to zero than uncoupled {}",
+            x_coupled[0],
+            x_uncoupled[0]
+        );
+    }
+
+    #[test]
+    fn solve_coupled_matches_step_coupled() {
+        let a_c = DMatrix::from_row_slice(1, 1, &[-0.01]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[0.01, 0.005]);
+
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+
+        let dt = 60.0;
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
+            .expect("model should build");
+
+        let x = DVector::from_row_slice(&[20.0]);
+        let u = DVector::from_row_slice(&[30.0, 0.0]);
+        let y_target = 22.0;
+        let d_diag = 0.5;
+        let forcing = 1.0;
+
+        let couplings = [(0_usize, d_diag, forcing)];
+        let mut m_scratch = DMatrix::zeros(1, 1);
+        let lu = model.build_coupled_lu(&mut m_scratch, &couplings);
+
+        // Solve for input_index=1 to hit y_target
+        let solved_u = model
+            .solve_for_scalar_input_coupled(&x, &u, y_target, 0, 1, &lu, &couplings)
+            .expect("coupled solve should succeed");
+
+        // Step with the solved input and verify output matches target
+        let mut u_solved = u.clone();
+        u_solved[1] = solved_u;
+        let mut buf = DVector::zeros(1);
+        model.step_with_coupling_into(&x, &u_solved, &mut buf, &mut m_scratch, &couplings);
+        let y_actual = model.output(&buf, &u_solved)[0];
+
+        assert!(
+            (y_actual - y_target).abs() < 1.0e-9,
+            "output {y_actual} should match target {y_target}",
+        );
     }
 }

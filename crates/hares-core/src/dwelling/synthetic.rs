@@ -287,6 +287,7 @@ pub(crate) fn build_synthetic_weather(config: &SyntheticTomlConfig) -> WeatherTi
         sky_temp_c: vec![config.weather.outdoor_temp_c; n],
         ground_temp_c: vec![config.weather.outdoor_temp_c; n],
         liquid_precip_m: vec![0.0; n],
+        surface_albedo: None,
     }
 }
 

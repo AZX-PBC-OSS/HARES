@@ -19,6 +19,10 @@ verification:
   - cargo clippy --workspace -- -D warnings
 ---
 
+## Prerequisites
+
+WEATHER-008 (dynamic ground albedo) will have modified `solar.rs` to accept `ground_albedo: f64` as a parameter in `perez_tilted_irradiance()` and `liu_jordan_isotropic()`. This ticket modifies the same file to add window transmittance polynomials — coordinate to avoid conflicts.
+
 ## Background/Context
 
 HARES already has 6 `GlazingCurve` variants (A, B/D, D, E, F, J) with IAM polynomials and curve selection by U-factor/SHGC. However, the current SHGC decomposition uses a simple split (`absorbed_inward = max(0, SHGC - transmittance)`) rather than the EnergyPlus polynomial transmittance calculation. OCHRE uses 5th-order polynomial fits per curve family and a 0.854× diffuse correction factor.

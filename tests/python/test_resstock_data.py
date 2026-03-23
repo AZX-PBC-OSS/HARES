@@ -168,10 +168,18 @@ class TestFetchResStockBuilding:
         from ochre_next.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
 
-        with mock.patch(
-            "ochre_next.data.resstock._download_file",
-            side_effect=_fake_download(zip_bytes, tmp_path),
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=_fake_download(zip_bytes, tmp_path),
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
         ):
             result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
 
@@ -185,9 +193,18 @@ class TestFetchResStockBuilding:
         from ochre_next.data.resstock import ResStockBuilding, fetch_resstock_building
 
         zip_bytes = _make_zip()
-        with mock.patch(
-            "ochre_next.data.resstock._download_file",
-            side_effect=_fake_download(zip_bytes, tmp_path),
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
+
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=_fake_download(zip_bytes, tmp_path),
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
         ):
             result = fetch_resstock_building(5, version="2024.2", cache_dir=tmp_path)
 
@@ -197,9 +214,18 @@ class TestFetchResStockBuilding:
         from ochre_next.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
-        with mock.patch(
-            "ochre_next.data.resstock._download_file",
-            side_effect=_fake_download(zip_bytes, tmp_path),
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
+
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=_fake_download(zip_bytes, tmp_path),
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
         ):
             result = fetch_resstock_building(1, cache_dir=tmp_path)
 
@@ -209,17 +235,25 @@ class TestFetchResStockBuilding:
         from ochre_next.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
         download_calls: list[str] = []
 
         def recording_download(url: str, dest: Path) -> None:
             download_calls.append(url)
             _fake_download(zip_bytes, tmp_path)(url, dest)
 
-        with mock.patch("ochre_next.data.resstock._download_file", side_effect=recording_download):
+        with (
+            mock.patch("ochre_next.data.resstock._download_file", side_effect=recording_download),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+        ):
             fetch_resstock_building(1, cache_dir=tmp_path)
             fetch_resstock_building(1, cache_dir=tmp_path)
 
-        # ZIP download should only happen once (weather CSV also once = 2 total first call)
+        # ZIP download should only happen once
         zip_urls = [u for u in download_calls if u.endswith(".zip")]
         assert len(zip_urls) == 1
 
@@ -251,32 +285,46 @@ class TestFetchResStockBuilding:
         from ochre_next.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip(hpxml_content=_minimal_hpxml("G0800130"))
-        download_calls: list[str] = []
 
-        def recording_download(url: str, dest: Path) -> None:
-            download_calls.append(url)
-            _fake_download(zip_bytes, tmp_path)(url, dest)
+        # V2024.2 uses EPW format (TMY3) — weather is fetched via get_epw_for_fips
+        dummy_epw = tmp_path / "weather" / "BuildStock_TMY3_FIPS" / "G0800130.epw"
+        dummy_epw.parent.mkdir(parents=True, exist_ok=True)
+        dummy_epw.write_text("fake EPW data")
 
-        with mock.patch("ochre_next.data.resstock._download_file", side_effect=recording_download):
+        with (
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=_fake_download(zip_bytes, tmp_path),
+            ),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+        ):
             result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
 
-        weather_urls = [u for u in download_calls if "weather" in u and ".csv" in u]
-        assert len(weather_urls) == 1
-        assert "G0800130" in weather_urls[0]
-        assert "state=CO" in weather_urls[0]
-        assert result.weather_path.name == "G0800130_TMY3.csv"
+        assert result.weather_path.suffix == ".epw"
+        assert "G0800130" in result.weather_path.name
 
     def test_upgrade_id_in_url(self, tmp_path: Path):
         from ochre_next.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
+        dummy_epw = tmp_path / "dummy.epw"
+        dummy_epw.write_text("fake EPW")
         captured_urls: list[str] = []
 
         def recording_download(url: str, dest: Path) -> None:
             captured_urls.append(url)
             _fake_download(zip_bytes, tmp_path)(url, dest)
 
-        with mock.patch("ochre_next.data.resstock._download_file", side_effect=recording_download):
+        with (
+            mock.patch("ochre_next.data.resstock._download_file", side_effect=recording_download),
+            mock.patch(
+                "ochre_next.data.weather.get_epw_for_fips",
+                return_value=dummy_epw,
+            ),
+        ):
             fetch_resstock_building(1, upgrade_id=3, cache_dir=tmp_path)
 
         zip_urls = [u for u in captured_urls if u.endswith(".zip")]

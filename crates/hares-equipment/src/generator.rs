@@ -949,6 +949,7 @@ mod tests {
                 mains_temp_c: 15.0,
                 solar_irradiance: vec![],
                 rainfall_m: 0.0,
+                ground_albedo: 0.2,
             },
             grid: GridState {
                 voltage_pu: 1.0,

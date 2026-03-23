@@ -16,7 +16,7 @@ verification:
 
 ## Prerequisites
 
-THERMAL-005 (Crank-Nicolson implicit solver) will have completed. THERMAL-005 implements a zero-allocation `step_into()` hot-loop that supersedes most of the thermal solver allocation concerns. This ticket becomes a **final sweep** to catch any remaining allocations introduced by PARITY tickets 005-018.
+THERMAL-005 (Crank-Nicolson implicit solver) and THERMAL-006a (semi-implicit infiltration) will have completed. THERMAL-005 implements a zero-allocation `step_into()` hot-loop. THERMAL-006a adds per-step diagonal perturbation of the CN matrices for implicit infiltration coupling — this introduces a per-step LU factorization that must be verified allocation-free. This ticket is a **final sweep** to catch any remaining allocations from both the THERMAL chain and PARITY tickets 005-018.
 
 ## Background/Context
 
@@ -25,6 +25,7 @@ After THERMAL-005, the core state-space stepping is zero-allocation. However, ot
 ## Work to Do
 
 - [ ] **Post-PARITY audit of thermal_solver resolve pipeline:**
+  - Verify THERMAL-006a's per-step LU factorization reuses pre-allocated workspace (no alloc per step)
   - Verify PARITY-015 (interior LWR ScriptF) uses pre-allocated surface temperature buffers
   - Verify PARITY-018 (solar distribution) uses pre-allocated surface gain buffers
   - Verify any remaining `.collect()` calls from resolve_internal() are eliminated

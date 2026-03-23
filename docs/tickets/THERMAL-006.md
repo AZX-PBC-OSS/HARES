@@ -2,7 +2,7 @@
 id: THERMAL-006
 title: Synthetic box analytical validation tests
 kind: implement
-depends_on: [THERMAL-005]
+depends_on: [THERMAL-005, THERMAL-006a]
 files_to_touch:
   - crates/hares-envelope/tests/synthetic_box.rs
 references:
@@ -44,15 +44,18 @@ Tests use the existing `one_zone_solver()` helper pattern from
       Assert HARES reaches 25°C ± 0.1°C within 5τ (50000s ≈ 14h).
 
 - [ ] `test_1r1c_with_moderate_infiltration`:
-      ACH=0.05, V=400 m³ (low enough that infiltration is well below any
-      stability limits — verifies analytical formula holds).
-      Steady-state HVAC = (UA + ρ·cp·ACH·V/3600) × ΔT.
+      ACH=0.05, V=400 m³ with HVAC setpoint 20°C, outdoor 0°C.
+      With semi-implicit infiltration (THERMAL-006a), the infiltration
+      coupling is part of the implicit solve, so the ideal HVAC correctly
+      compensates for both conduction and infiltration losses.
+      Steady-state HVAC = (UA + ρ·cp·ACH·V/3600) × ΔT ≈ 534 W.
       Assert HVAC converges to analytical within 2%.
 
 - [ ] `test_implicit_stability_extreme_ach`:
-      Zone at 20°C, outdoor at -10°C, ACH=50 (vented attic), dt=60s.
-      This would cause massive overshoot with explicit stepping.
-      Assert implicit solver keeps zone in [-10, 20]°C after one step.
+      Zone at 20°C, outdoor at -10°C, ACH=50 (vented attic), C=50kJ/K, dt=60s.
+      With semi-implicit infiltration (THERMAL-006a), the infiltration coupling
+      coefficient is part of the implicit solve, making this unconditionally stable.
+      Assert solver keeps zone in [-10, 20]°C after one step.
       Assert zone converges toward outdoor temp monotonically (no oscillation).
 
 - [ ] `test_implicit_vs_explicit_agreement_stable_case`:

@@ -380,6 +380,12 @@ fn build_config(
             }
         });
 
+    let civil_timezone = kwargs
+        .as_ref()
+        .and_then(|k| k.get_item("civil_timezone").ok().flatten())
+        .map(|obj| obj.extract::<String>())
+        .transpose()?;
+
     let sim_config = SimulationConfig {
         start_time,
         duration,
@@ -394,6 +400,7 @@ fn build_config(
         output_chunk_size,
         setpoint_deadband_c: None,
         master_seed,
+        civil_timezone,
     };
 
     Ok(DwellingConfig {

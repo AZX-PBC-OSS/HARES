@@ -120,9 +120,9 @@ fn bench_state_space_step(c: &mut Criterion) {
     let dt = 60.0; // 1-minute timestep (SI: seconds)
     let net = build_6node_network();
     let model = build_state_space(&net, dt);
-    let n = model.a_d.nrows();
+    let n = model.state_dim();
     let x = DVector::from_element(n, 20.0); // 20°C initial state
-    let u = DVector::from_element(model.b_d.ncols(), 5.0); // 5°C outdoor
+    let u = DVector::from_element(model.input_dim(), 5.0); // 5°C outdoor
 
     c.bench_function("state_space_step_6node", |b| {
         b.iter(|| {
@@ -136,9 +136,9 @@ fn bench_state_space_step_12node(c: &mut Criterion) {
     let dt = 60.0;
     let net = build_12node_network();
     let model = build_state_space(&net, dt);
-    let n = model.a_d.nrows();
+    let n = model.state_dim();
     let x = DVector::from_element(n, 20.0);
-    let u = DVector::from_element(model.b_d.ncols(), 5.0);
+    let u = DVector::from_element(model.input_dim(), 5.0);
 
     c.bench_function("state_space_step_12node", |b| {
         b.iter(|| {

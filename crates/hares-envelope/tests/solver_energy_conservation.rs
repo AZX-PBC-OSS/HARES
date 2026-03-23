@@ -62,6 +62,8 @@ fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             solar_altitude_deg: 0.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
+                ground_albedo: 0.2,
+
         },
         grid: GridState {
             voltage_pu: 1.0,

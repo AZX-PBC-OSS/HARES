@@ -45,6 +45,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         output_chunk_size: 16,
         master_seed: 0,
         setpoint_deadband_c: deadband,
+        civil_timezone: None,
     }
 }
 

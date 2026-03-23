@@ -1,6 +1,197 @@
 //! Weather data processing and time-series handling.
 
+use std::io::BufRead;
+use std::path::Path;
+
 use thiserror::Error;
+
+// Re-export from hares-types for use in this crate's fallback logic.
+use hares_types::DEFAULT_GROUND_ALBEDO;
+
+/// Supported weather file formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeatherFormat {
+    /// EnergyPlus Weather file (.epw), hourly data.
+    Epw,
+    /// NREL NSRDB PSM3 file (.csv), SAM CSV format at 5/15/30/60-min resolution.
+    /// Reference: <https://developer.nrel.gov/docs/solar/nsrdb/psm3-download/>
+    Psm3,
+    /// ResStock simplified 8-column CSV (AMY 2018, etc.).
+    /// Contains only dry bulb, RH, wind, and solar — missing pressure, dew point,
+    /// infrared, sky cover, and precipitation, which are estimated at parse time.
+    ResStockCsv,
+}
+
+/// Detect the weather file format from its path extension and (for CSV) header content.
+///
+/// - `.epw` extension maps to [`WeatherFormat::Epw`].
+/// - `.csv` extension triggers header sniffing:
+///   - **PSM3**: line 1 starts with `Source` and has 10+ fields; line 3 contains
+///     `Year`, `Month`, `Day`, `Hour`, `Minute` and at least one of `GHI`/`DNI`/`DHI`.
+///   - **ResStock CSV**: line 1 contains both `Dry Bulb Temperature` and
+///     `Global Horizontal Radiation` (case-insensitive).
+/// - Other extensions produce an error listing supported formats.
+pub fn detect_weather_format(path: impl AsRef<Path>) -> Result<WeatherFormat, WeatherError> {
+    let path = path.as_ref();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    match ext.as_str() {
+        "epw" => Ok(WeatherFormat::Epw),
+        "csv" => sniff_csv_header(path),
+        _ => {
+            let ext_display = if ext.is_empty() {
+                "(none)".to_string()
+            } else {
+                format!(".{ext}")
+            };
+            Err(WeatherError::Parse(format!(
+                "unsupported weather file extension {ext_display}; supported formats: .epw, .csv (PSM3/ResStock)"
+            )))
+        }
+    }
+}
+
+/// Read the first line(s) of a CSV file and detect whether it is PSM3 or ResStock format.
+fn sniff_csv_header(path: &Path) -> Result<WeatherFormat, WeatherError> {
+    let file = std::fs::File::open(path).map_err(|source| WeatherError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let reader = std::io::BufReader::new(file);
+    let mut lines_iter = reader.lines();
+
+    // Line 1: check PSM3 first (starts with "Source", 10+ fields).
+    let line1 = next_line(&mut lines_iter, path, 1)?;
+    let fields: Vec<&str> = line1.split(',').collect();
+    let looks_like_psm3_line1 = fields
+        .first()
+        .is_some_and(|f| {
+            f.trim()
+                .trim_start_matches('\u{FEFF}')
+                .eq_ignore_ascii_case("Source")
+        })
+        && fields.len() >= 10;
+
+    if looks_like_psm3_line1 {
+        // Line 2: field values — skip (we only need lines 1 and 3 for detection).
+        let _line2 = next_line(&mut lines_iter, path, 2)?;
+
+        // Line 3: column names — must contain temporal and at least one solar column.
+        let line3 = next_line(&mut lines_iter, path, 3)?;
+        let cols: Vec<&str> = line3.split(',').map(str::trim).collect();
+        let has = |name: &str| cols.iter().any(|c| c.eq_ignore_ascii_case(name));
+
+        let has_temporal =
+            has("Year") && has("Month") && has("Day") && has("Hour") && has("Minute");
+        let has_solar = has("GHI") || has("DNI") || has("DHI");
+
+        if has_temporal && has_solar {
+            return Ok(WeatherFormat::Psm3);
+        }
+    }
+
+    // Not PSM3 — try ResStock CSV detection on line 1.
+    if crate::resstock_csv::is_resstock_csv_header(&line1) {
+        return Ok(WeatherFormat::ResStockCsv);
+    }
+
+    Err(WeatherError::Parse(
+        "CSV file does not appear to be PSM3/SAM or ResStock format; \
+         expected NSRDB header or ResStock columns"
+            .to_string(),
+    ))
+}
+
+/// Read the next line from a buffered reader, mapping I/O errors.
+fn next_line(
+    lines: &mut std::io::Lines<std::io::BufReader<std::fs::File>>,
+    path: &Path,
+    line_num: usize,
+) -> Result<String, WeatherError> {
+    lines
+        .next()
+        .ok_or_else(|| {
+            WeatherError::Parse(format!(
+                "CSV file has fewer than {line_num} lines; cannot detect format"
+            ))
+        })?
+        .map_err(|source| WeatherError::Io {
+            path: path.display().to_string(),
+            source,
+        })
+}
+
+/// Parse a weather file, auto-detecting the format from its extension and header.
+///
+/// Supported formats:
+/// - **EPW** (`.epw`): EnergyPlus Weather files, hourly data.
+/// - **PSM3** (`.csv`): NREL NSRDB SAM CSV files at 5/15/30/60-min resolution.
+///
+/// Format detection is performed by [`detect_weather_format`], then the file is
+/// dispatched to the appropriate parser.
+pub fn parse_weather(path: impl AsRef<Path>) -> Result<WeatherTimeSeries, WeatherError> {
+    let path = path.as_ref();
+    match detect_weather_format(path)? {
+        WeatherFormat::Epw => crate::epw::parse_epw(path),
+        WeatherFormat::Psm3 => crate::psm3::parse_psm3(path),
+        WeatherFormat::ResStockCsv => {
+            // Default to sea-level elevation and equator when called through the
+            // generic interface. Callers who know the site location should use
+            // `parse_resstock_csv` or `parse_weather_with_location` directly.
+            tracing::warn!(
+                "ResStock CSV parsed with default sea-level elevation and equator location; \
+                 use parse_weather_with_location for correct pressure and solar calculations"
+            );
+            crate::resstock_csv::parse_resstock_csv(path, 0.0, 0.0, 0.0, 0.0)
+        }
+    }
+}
+
+/// Parse a weather file with a known site elevation.
+///
+/// Behaves identically to [`parse_weather`] for EPW and PSM3 formats
+/// (which carry their own elevation metadata). For ResStock CSV files,
+/// the provided `elevation_m` is used to estimate atmospheric pressure
+/// via the ISA standard atmosphere model, and lat/lon/tz default to 0.0.
+pub fn parse_weather_with_elevation(
+    path: impl AsRef<Path>,
+    elevation_m: f64,
+) -> Result<WeatherTimeSeries, WeatherError> {
+    parse_weather_with_location(path, elevation_m, 0.0, 0.0, 0.0)
+}
+
+/// Parse a weather file with full site location metadata.
+///
+/// Behaves identically to [`parse_weather`] for EPW and PSM3 formats
+/// (which carry their own location metadata). For ResStock CSV files,
+/// `elevation_m`, `latitude`, `longitude`, and `timezone_offset_h` are used
+/// to populate [`WeatherMeta`] for downstream solar and pressure calculations.
+pub fn parse_weather_with_location(
+    path: impl AsRef<Path>,
+    elevation_m: f64,
+    latitude: f64,
+    longitude: f64,
+    timezone_offset_h: f64,
+) -> Result<WeatherTimeSeries, WeatherError> {
+    let path = path.as_ref();
+    match detect_weather_format(path)? {
+        WeatherFormat::Epw => crate::epw::parse_epw(path),
+        WeatherFormat::Psm3 => crate::psm3::parse_psm3(path),
+        WeatherFormat::ResStockCsv => {
+            crate::resstock_csv::parse_resstock_csv(
+                path,
+                elevation_m,
+                latitude,
+                longitude,
+                timezone_offset_h,
+            )
+        }
+    }
+}
 
 /// Metadata extracted from an EPW header.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +222,7 @@ pub enum WeatherField {
     SkyTempC,
     GroundTempC,
     LiquidPrecipM,
+    SurfaceAlbedo,
 }
 
 /// Error type for weather I/O and time-series operations.
@@ -70,6 +262,11 @@ pub struct WeatherTimeSeries {
     /// Liquid precipitation depth per timestep [m].
     /// Parsed from EPW field 33; zero when data is unavailable.
     pub liquid_precip_m: Vec<f64>,
+    /// Surface albedo (ground reflectance) [dimensionless, 0–1].
+    /// `Some(vec)` when the source file provides per-timestep albedo (e.g. PSM3
+    /// `Surface Albedo` column); `None` for formats that lack it (EPW, ResStock CSV).
+    /// Consumers should fall back to `DEFAULT_GROUND_ALBEDO` (0.2) when `None`.
+    pub surface_albedo: Option<Vec<f64>>,
 }
 
 impl WeatherTimeSeries {
@@ -106,6 +303,10 @@ impl WeatherTimeSeries {
             WeatherField::SkyTempC => self.sky_temp_c[timestep_index],
             WeatherField::GroundTempC => self.ground_temp_c[timestep_index],
             WeatherField::LiquidPrecipM => self.liquid_precip_m[timestep_index],
+            WeatherField::SurfaceAlbedo => self
+                .surface_albedo
+                .as_ref()
+                .map_or(DEFAULT_GROUND_ALBEDO, |v| v[timestep_index]),
         }
     }
 
@@ -176,6 +377,8 @@ impl WeatherTimeSeries {
                 wind_dir_deg: replicate_zoh(&self.wind_dir_deg, factor),
                 // Accumulated depth → distribute evenly so downstream sums are preserved.
                 liquid_precip_m: distribute_accumulated(&self.liquid_precip_m, factor),
+                // Surface property → ZOH (not interpolatable).
+                surface_albedo: self.surface_albedo.as_ref().map(|v| replicate_zoh(v, factor)),
             })
         } else {
             // Downsampling: source is finer → aggregate to coarser resolution.
@@ -218,6 +421,10 @@ impl WeatherTimeSeries {
                 dhi_w_m2: mean_downsample(&self.dhi_w_m2, ratio),
                 // Accumulated depth → sum.
                 liquid_precip_m: sum_downsample(&self.liquid_precip_m, ratio),
+                // Surface property → mean. Mean is acceptable for downsampling albedo
+                // because reflected solar is linear in albedo: mean(albedo) × GHI equals
+                // mean(albedo × GHI) when GHI is constant within the block.
+                surface_albedo: self.surface_albedo.as_ref().map(|v| mean_downsample(v, ratio)),
             })
         }
     }
@@ -460,6 +667,7 @@ mod tests {
             sky_temp_c: vec![2.0, 3.0],
             ground_temp_c: vec![10.0, 10.1],
             liquid_precip_m: vec![0.0, 0.0],
+            surface_albedo: None,
         }
     }
 
@@ -488,6 +696,7 @@ mod tests {
             sky_temp_c: vec![2.0, 3.0, 4.0, 3.0, 2.0],
             ground_temp_c: vec![10.0, 10.1, 10.2, 10.1, 10.0],
             liquid_precip_m: vec![0.0, 0.0, 0.001, 0.0, 0.0],
+            surface_albedo: None,
         }
     }
 
@@ -582,6 +791,44 @@ mod tests {
         // Precipitation is summed, not averaged.
         assert!((down.liquid_precip_m[0] - 0.01).abs() < 1e-12);
         assert_eq!(down.meta.source_step_secs, 3600);
+    }
+
+    #[test]
+    fn resample_upsample_with_some_albedo() {
+        let mut series = sample_series_5pt();
+        series.surface_albedo = Some(vec![0.2, 0.7, 0.5, 0.3, 0.2]);
+        let resampled = series.resample(600).expect("resample should succeed");
+        let albedo = resampled.surface_albedo.as_ref().expect("albedo should be Some");
+        // ZOH: each source value replicated 6 times
+        assert_eq!(albedo.len(), 5 * 6);
+        assert!(albedo[..6].iter().all(|&v| (v - 0.2).abs() < 1e-12));
+        assert!(albedo[6..12].iter().all(|&v| (v - 0.7).abs() < 1e-12));
+    }
+
+    #[test]
+    fn resample_downsample_with_some_albedo() {
+        let mut series = sample_series();
+        series.meta.source_step_secs = 900;
+        series.dry_bulb_c = vec![10.0, 12.0, 14.0, 16.0];
+        series.dew_point_c = vec![5.0, 6.0, 7.0, 8.0];
+        series.rel_humidity_pct = vec![40.0, 50.0, 60.0, 70.0];
+        series.pressure_kpa = vec![90.0, 91.0, 92.0, 93.0];
+        series.ghi_w_m2 = vec![100.0, 200.0, 300.0, 400.0];
+        series.dni_w_m2 = vec![0.0; 4];
+        series.dhi_w_m2 = vec![0.0; 4];
+        series.wind_speed_m_s = vec![2.0; 4];
+        series.wind_dir_deg = vec![180.0; 4];
+        series.opaque_sky_cover = vec![5.0; 4];
+        series.horizontal_infrared_w_m2 = vec![300.0; 4];
+        series.sky_temp_c = vec![2.0; 4];
+        series.ground_temp_c = vec![10.0; 4];
+        series.liquid_precip_m = vec![0.0; 4];
+        series.surface_albedo = Some(vec![0.2, 0.7, 0.7, 0.3]);
+        let down = series.resample(3600).expect("downsample should succeed");
+        let albedo = down.surface_albedo.as_ref().expect("albedo should be Some");
+        assert_eq!(albedo.len(), 1);
+        // Mean of [0.2, 0.7, 0.7, 0.3] = 0.475
+        assert!((albedo[0] - 0.475).abs() < 1e-12);
     }
 
     // --- PCHIP unit tests ---
@@ -717,5 +964,51 @@ mod tests {
         // GHI uses ZOH: first 60 slots are 0.0, next 60 are 500.0.
         assert!(resampled.ghi_w_m2.iter().take(60).all(|&x| x == 0.0));
         assert!(resampled.ghi_w_m2.iter().skip(60).all(|&x| x == 500.0));
+    }
+
+    #[test]
+    fn detect_epw_by_extension() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.epw");
+        std::fs::write(&path, "dummy").expect("write temp file");
+        let fmt = super::detect_weather_format(&path).expect("should detect EPW");
+        assert_eq!(fmt, super::WeatherFormat::Epw);
+    }
+
+    #[test]
+    fn detect_psm3_csv() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("weather.csv");
+        let header = "\
+Source,Location ID,City,State,Country,Latitude,Longitude,Time Zone,Elevation,Local Time Zone\n\
+NSRDB,155561,-,-,-,40.53,-105.06,-7,1525,-7\n\
+Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative Humidity,Wind Speed,Wind Direction\n";
+        std::fs::write(&path, header).expect("write temp file");
+        let fmt = super::detect_weather_format(&path).expect("should detect PSM3");
+        assert_eq!(fmt, super::WeatherFormat::Psm3);
+    }
+
+    #[test]
+    fn reject_unknown_csv() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("data.csv");
+        std::fs::write(&path, "col1,col2,col3\n1,2,3\n").expect("write temp file");
+        let err = super::detect_weather_format(&path).expect_err("should reject non-PSM3 CSV");
+        assert!(
+            err.to_string().contains("PSM3"),
+            "error should mention PSM3: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_unknown_extension() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, "{}").expect("write temp file");
+        let err = super::detect_weather_format(&path).expect_err("should reject .json");
+        assert!(
+            err.to_string().contains("supported formats"),
+            "error should list supported formats: {err}"
+        );
     }
 }

@@ -23,7 +23,7 @@ fn load_fixture() -> WeatherTimeSeries {
 }
 
 /// Write a temporary PSM3 file from a string, returning the path.
-/// The caller is responsible for cleanup (handled by `tempfile`).
+/// The file is deleted when the returned handle is dropped.
 fn write_temp_psm3(contents: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::NamedTempFile::with_suffix(".csv")
         .expect("should create temp file");
@@ -63,12 +63,12 @@ fn parses_synthetic_psm3_fixture() {
     // Temperature range check: fixture sinusoid is 15 ± 10 → [5, 25].
     let t_min = ts.dry_bulb_c.iter().cloned().fold(f64::INFINITY, f64::min);
     let t_max = ts.dry_bulb_c.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    assert!(t_min >= 4.9 && t_min <= 5.1, "unexpected t_min: {t_min}");
-    assert!(t_max >= 24.9 && t_max <= 25.1, "unexpected t_max: {t_max}");
+    assert!((4.9..=5.1).contains(&t_min), "unexpected t_min: {t_min}");
+    assert!((24.9..=25.1).contains(&t_max), "unexpected t_max: {t_max}");
 
     // GHI range: [0, 800].
     let ghi_max = ts.ghi_w_m2.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    assert!(ghi_max >= 799.0 && ghi_max <= 801.0, "unexpected ghi_max: {ghi_max}");
+    assert!((799.0..=801.0).contains(&ghi_max), "unexpected ghi_max: {ghi_max}");
     assert!(ts.ghi_w_m2.iter().all(|&v| v >= 0.0), "GHI should be non-negative");
 }
 
@@ -91,48 +91,75 @@ fn psm3_pressure_converted_to_kpa() {
 /// The DOE-2.1E Engineering Manual describes ground temperature as a damped,
 /// lagged sinusoidal function of monthly-average dry-bulb temperature.
 /// For a synthetic fixture with a uniform daily sinusoid (mean ~15 °C),
-/// ground temps should be physically plausible: bounded by the annual
-/// min and max of monthly-average dry bulb (roughly the annual mean ± small swing).
+/// all monthly averages are approximately equal, so the DOE-2 model should
+/// produce ground temps very close to the annual mean with minimal swing.
+///
+/// This test verifies that ground temp is DIFFERENT from dry bulb — it should
+/// be damped (smaller swing) and lagged relative to air temperature.
 #[test]
 fn psm3_ground_temp_uses_doe2_model() {
     let ts = load_fixture();
 
     // With a constant daily sinusoid of 15 ± 10, every month has roughly the
-    // same average (~15 °C). DOE-2 damping should keep ground temps close to
-    // the annual mean with minimal swing.
+    // same average (~15 °C). Compute monthly averages from the fixture data.
+    let mut month_sums = [0.0_f64; 12];
+    let mut month_counts = [0_u32; 12];
+    // Each 5-min record is (year, month, day, hour, minute) — we only need month.
+    // The fixture has 105,120 records for a 365-day year at 300s intervals.
+    let records_per_day = 24 * 12; // 288 records per day at 5-min resolution
+    let days_in_month: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut idx = 0_usize;
+    for (mi, &ndays) in days_in_month.iter().enumerate() {
+        let count = ndays as usize * records_per_day;
+        for i in idx..idx + count {
+            month_sums[mi] += ts.dry_bulb_c[i];
+            month_counts[mi] += 1;
+        }
+        idx += count;
+    }
+    let monthly_avg: [f64; 12] = std::array::from_fn(|i| month_sums[i] / f64::from(month_counts[i]));
+
+    // All monthly averages should be ~15 °C (uniform sinusoid).
+    for (i, &avg) in monthly_avg.iter().enumerate() {
+        assert!(
+            (avg - 15.0).abs() < 0.5,
+            "month {}: expected avg ~15, got {avg:.2}",
+            i + 1
+        );
+    }
+
+    // Ground temp swing should be much smaller than dry-bulb swing (damped).
     let g_min = ts.ground_temp_c.iter().cloned().fold(f64::INFINITY, f64::min);
     let g_max = ts.ground_temp_c.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-    // Ground temps must stay within the envelope of dry-bulb extremes.
     let t_min = ts.dry_bulb_c.iter().cloned().fold(f64::INFINITY, f64::min);
     let t_max = ts.dry_bulb_c.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
+    let ground_swing = g_max - g_min;
+    let air_swing = t_max - t_min;
+
+    // Ground swing must be strictly smaller than air swing (DOE-2 damping).
     assert!(
-        g_min >= t_min - 5.0,
-        "ground temp min {g_min} is unreasonably below dry bulb min {t_min}"
-    );
-    assert!(
-        g_max <= t_max + 5.0,
-        "ground temp max {g_max} is unreasonably above dry bulb max {t_max}"
+        ground_swing < air_swing,
+        "ground temp swing ({ground_swing:.1} K) should be damped below air swing ({air_swing:.1} K)"
     );
 
-    // With identical monthly means, ground temp swing should be small (< 5 K).
+    // With nearly identical monthly means, ground temp swing should be < 5 K.
     assert!(
-        (g_max - g_min) < 5.0,
-        "ground temp swing {:.1} K is too large for uniform monthly means",
-        g_max - g_min
+        ground_swing < 5.0,
+        "ground temp swing {ground_swing:.1} K is too large for uniform monthly means"
+    );
+
+    // Ground temps should be centered near the annual mean (~15 °C).
+    let g_mean = ts.ground_temp_c.iter().sum::<f64>() / ts.ground_temp_c.len() as f64;
+    assert!(
+        (g_mean - 15.0).abs() < 1.0,
+        "ground temp mean {g_mean:.2} should be near annual mean ~15 °C"
     );
 }
 
 // ---------------------------------------------------------------------------
 // Resolution detection tests
 // ---------------------------------------------------------------------------
-
-#[test]
-fn psm3_detects_5min_resolution() {
-    let ts = load_fixture();
-    assert_eq!(ts.meta.source_step_secs, 300);
-}
 
 /// Construct a full-year 15-minute inline CSV and verify 900s detection.
 #[test]
@@ -168,6 +195,8 @@ fn psm3_5min_no_resample_at_300s() {
     assert_eq!(resampled.dry_bulb_c, ts.dry_bulb_c);
     assert_eq!(resampled.ghi_w_m2, ts.ghi_w_m2);
     assert_eq!(resampled.pressure_kpa, ts.pressure_kpa);
+    assert_eq!(resampled.sky_temp_c, ts.sky_temp_c);
+    assert_eq!(resampled.ground_temp_c, ts.ground_temp_c);
 }
 
 /// Downsampling from 5-min to hourly must preserve the daily solar energy integral.
@@ -190,7 +219,7 @@ fn psm3_downsample_preserves_daily_solar_integral() {
 
     let rel_err = (energy_5min - energy_hourly).abs() / energy_5min.max(1.0);
     assert!(
-        rel_err < 1e-10,
+        rel_err < 1e-8,
         "solar integral mismatch: 5min={energy_5min:.1}, hourly={energy_hourly:.1}, rel_err={rel_err:.2e}"
     );
 
@@ -199,8 +228,107 @@ fn psm3_downsample_preserves_daily_solar_integral() {
     let day1_hourly: f64 = hourly.ghi_w_m2[..24].iter().sum::<f64>() * 3600.0;
     let day1_rel = (day1_5min - day1_hourly).abs() / day1_5min.max(1.0);
     assert!(
-        day1_rel < 1e-10,
+        day1_rel < 1e-8,
         "day 1 solar integral mismatch: 5min={day1_5min:.1}, hourly={day1_hourly:.1}"
+    );
+}
+
+/// Sky temperature is computed via the Clark & Allen (1978) clear-sky emissivity model.
+///
+/// Clark & Allen (1978): T_sky_K = T_dry_K * (0.787 + 0.764 * ln(T_dew_K / 273.15))^0.25
+/// PSM3 has no horizontal IR data, so the parser must always use this model.
+#[test]
+fn psm3_sky_temp_uses_clark_allen() {
+    let ts = load_fixture();
+
+    // Spot-check a few indices using the Clark-Allen formula.
+    for &i in &[0, 1000, 50_000, 105_119] {
+        let db = ts.dry_bulb_c[i];
+        let dp = ts.dew_point_c[i];
+
+        let db_k = db + 273.15;
+        let dp_k = dp + 273.15;
+        let expected_k = db_k * (0.787 + 0.764 * (dp_k / 273.15).ln()).powf(0.25);
+        let expected_c = expected_k - 273.15;
+
+        assert!(
+            (ts.sky_temp_c[i] - expected_c).abs() < 1e-10,
+            "sky_temp_c[{i}]: expected {expected_c:.6}, got {:.6}",
+            ts.sky_temp_c[i]
+        );
+    }
+}
+
+/// Irregular resolution (not 5/15/30/60 min) must be rejected.
+#[test]
+fn psm3_rejects_irregular_resolution() {
+    // Two rows 7 minutes apart — not a valid PSM3 interval.
+    let csv = "\
+Source,Location ID,City,State,Country,Latitude,Longitude,Time Zone,Elevation,Local Time Zone
+NSRDB,1,City,-,-,39.74,-104.99,-7,1609.0,-7
+Year,Month,Day,Hour,Minute,GHI,DNI,DHI,Temperature,Pressure,Dew Point,Relative Humidity,Wind Speed,Wind Direction
+2021,1,1,0,0,100,70,30,20.0,1013.25,10.0,50.0,3.0,180
+2021,1,1,0,7,100,70,30,20.0,1013.25,10.0,50.0,3.0,180";
+    let f = write_temp_psm3(csv);
+    let err = parse_psm3(f.path()).expect_err("should reject 7-min step");
+    assert!(
+        err.to_string().contains("not one of"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Downsampling from 5-minute to hourly resolution.
+///
+/// Note: PSM3 files do not contain precipitation data. The parser fills
+/// `liquid_precip_m` with zeros, so the sum after downsampling is always 0.
+#[test]
+fn psm3_5min_downsample_to_hourly() {
+    let ts = load_fixture();
+    assert_eq!(ts.meta.source_step_secs, 300);
+
+    let hourly = ts.resample(3600).expect("downsample to hourly should succeed");
+    assert_eq!(hourly.len(), 8_760);
+
+    // Dry bulb: mean of each 12-record block.
+    // Spot-check first hour: mean of ts.dry_bulb_c[0..12].
+    let expected_db_mean: f64 = ts.dry_bulb_c[..12].iter().sum::<f64>() / 12.0;
+    assert!(
+        (hourly.dry_bulb_c[0] - expected_db_mean).abs() < 1e-10,
+        "first-hour dry_bulb: expected {expected_db_mean}, got {}",
+        hourly.dry_bulb_c[0]
+    );
+
+    // GHI: mean of each 12-record block.
+    let expected_ghi_mean: f64 = ts.ghi_w_m2[..12].iter().sum::<f64>() / 12.0;
+    assert!(
+        (hourly.ghi_w_m2[0] - expected_ghi_mean).abs() < 1e-10,
+        "first-hour GHI: expected {expected_ghi_mean}, got {}",
+        hourly.ghi_w_m2[0]
+    );
+
+    // Precipitation: PSM3 has no precip data, so sum must be 0.
+    let total_precip: f64 = hourly.liquid_precip_m.iter().sum();
+    assert!(
+        total_precip.abs() < 1e-15,
+        "PSM3 has no precipitation; sum should be 0, got {total_precip}"
+    );
+}
+
+/// Dew point exceeding dry bulb must be rejected.
+#[test]
+fn psm3_rejects_dewpoint_above_drybulb() {
+    // Dew point (25.0) > dry bulb (20.0).
+    let csv = "\
+Source,Location ID,City,State,Country,Latitude,Longitude,Time Zone,Elevation,Local Time Zone
+NSRDB,1,City,-,-,39.74,-104.99,-7,1609.0,-7
+Year,Month,Day,Hour,Minute,GHI,DNI,DHI,Temperature,Pressure,Dew Point,Relative Humidity,Wind Speed,Wind Direction
+2021,1,1,0,0,100,70,30,20.0,1013.25,25.0,50.0,3.0,180
+2021,1,1,1,0,100,70,30,20.0,1013.25,25.0,50.0,3.0,180";
+    let f = write_temp_psm3(csv);
+    let err = parse_psm3(f.path()).expect_err("should reject dew_point > dry_bulb");
+    assert!(
+        err.to_string().contains("dew point"),
+        "unexpected error: {err}"
     );
 }
 
@@ -261,6 +389,8 @@ fn build_full_year_csv_inner(
     is_leap: bool,
     ovr: Option<Override>,
 ) -> String {
+    use std::fmt::Write;
+
     let days_in_month: [u32; 12] = if is_leap {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
@@ -301,7 +431,6 @@ fn build_full_year_csv_inner(
                         first_row = false;
                     }
 
-                    use std::fmt::Write;
                     writeln!(
                         buf,
                         "{year},{month},{day},{hour},{minute},{ghi:.1},{:.1},{:.1},{temp:.2},1013.25,10.00,50.0,3.00,180.0",

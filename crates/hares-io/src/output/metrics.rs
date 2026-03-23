@@ -694,6 +694,7 @@ mod tests {
             output_chunk_size: 16,
             master_seed: 0,
             setpoint_deadband_c: deadband,
+            civil_timezone: None,
         }
     }
 

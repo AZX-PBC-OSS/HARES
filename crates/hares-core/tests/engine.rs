@@ -115,6 +115,7 @@ fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         output_chunk_size: 128,
         setpoint_deadband_c: None,
         master_seed: 0,
+        civil_timezone: None,
     }
 }
 

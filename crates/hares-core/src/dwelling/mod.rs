@@ -18,7 +18,8 @@ use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolve
 use hares_equipment::{Equipment, EquipmentRegistry};
 use hares_io::{
     Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig, StreamingRecorder,
-    WeatherTimeSeries, build_schema, parse_epw, parse_hpxml, parse_schedule_csv, resolve_equipment,
+    WeatherTimeSeries, build_schema, parse_hpxml, parse_schedule_csv, parse_weather,
+    resolve_equipment,
 };
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
@@ -206,7 +207,7 @@ impl Dwelling {
         let building = parse_hpxml(&config.hpxml_path)
             .map_err(|err| HaresError::Io(format!("HPXML parse failed: {err}")))?;
 
-        let weather = parse_epw(&config.weather_path)
+        let weather = parse_weather(&config.weather_path)
             .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
 
         let schedule_raw =
@@ -241,6 +242,7 @@ impl Dwelling {
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
             master_seed: 0,
+            civil_timezone: None,
         };
 
         let config = DwellingConfig {
@@ -294,6 +296,7 @@ impl Dwelling {
             output_chunk_size: config.output.output_chunk_size,
             setpoint_deadband_c: None,
             master_seed: config.output.master_seed,
+            civil_timezone: None,
         };
         validate_sim_config(&sim_config)?;
 
@@ -347,9 +350,17 @@ impl Dwelling {
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
         let mut environment =
-            EnvironmentManager::new(weather, schedule, &building, time_res, local_start).map_err(
-                |err| HaresError::Io(format!("environment initialization failed: {err}")),
-            )?;
+            EnvironmentManager::new(
+                weather,
+                schedule,
+                &building,
+                time_res,
+                local_start,
+                config.sim_config.civil_timezone.as_deref(),
+            )
+                .map_err(|err| {
+                    HaresError::Io(format!("environment initialization failed: {err}"))
+                })?;
 
         let occupancy_column_idx = environment.occupancy_column_idx();
 

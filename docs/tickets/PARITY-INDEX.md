@@ -13,9 +13,13 @@ All THERMAL-001 through THERMAL-008 and WEATHER-001 through WEATHER-006 complete
 | THERMAL-002 (4-component exterior LWR) | PARITY-015 builds on improved `longwave_radiation.rs` |
 | THERMAL-003 (pre-refactor cleanup) | PARITY-001 has less cleanup work; `resolve_internal()` already phased |
 | THERMAL-005 (Crank-Nicolson implicit solver) | PARITY-019 reduced to a final sweep (stepping is already zero-alloc) |
+| THERMAL-006a (semi-implicit infiltration) | PARITY-001 must account for new resolve flow (h_inf conductances → modified CN step); PARITY-019 must verify per-step LU alloc-free |
 | THERMAL-004 (interior LWR tests) | PARITY-015 has baseline tests to extend |
 | THERMAL-001 (dry air density) | PARITY-005 becomes audit-only for infiltration |
 | WEATHER-006 (DST scheduling) | No PARITY impact (independent) |
+| WEATHER-008 (dynamic ground albedo) | PARITY-016 must coordinate with modified `solar.rs` (albedo parameter added to Perez/Liu-Jordan) |
+| WEATHER-009 (Berdahl-Martin sky emissivity) | PARITY-005 sky temp audit is now verification-only (models already implemented) |
+| WEATHER-010 (full-pipeline integration test) | PARITY-004 focuses on unit tests only (integration coverage already handled) |
 
 ## Sequential Execution Order
 

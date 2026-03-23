@@ -52,6 +52,9 @@ class _VersionConfig:
     metadata_upgrade: str
     weather_template: str
     weather_suffix: str
+    # "epw" = fetch full EPW from BuildStock_TMY3_FIPS.zip (preferred)
+    # "csv" = fall back to ResStock simplified CSV (AMY, no EPW source)
+    weather_format: str = "epw"
 
 
 _VERSION_CONFIGS: dict[ResStockVersion, _VersionConfig] = {
@@ -78,6 +81,7 @@ _VERSION_CONFIGS: dict[ResStockVersion, _VersionConfig] = {
         metadata_upgrade="metadata_and_annual_results/national/full/parquet/upgrade{upgrade}.parquet",
         weather_template="weather/state={state}/{fips}_2018.csv",
         weather_suffix="2018",
+        weather_format="csv",  # No EPW source for AMY 2018; use ResStock CSV fallback
     ),
 }
 
@@ -172,7 +176,14 @@ def _try_download(url: str, dest: Path) -> None:
 def _extract_zip(zip_path: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(dest)
+        for member in zf.namelist():
+            # Sanitize member paths to prevent zip-slip (path traversal).
+            safe_name = Path(member).name
+            if not safe_name:
+                continue
+            target = dest / safe_name
+            with zf.open(member) as src, target.open("wb") as dst:
+                dst.write(src.read())
 
 
 def _parse_weather_station(hpxml_path: Path) -> tuple[str, str] | None:
@@ -241,6 +252,17 @@ def _fetch_weather(
     if station is None:
         return Path("")
     state, fips = station
+
+    if cfg.weather_format == "epw":
+        # TMY3 versions: fetch full EPW from BuildStock_TMY3_FIPS.zip.
+        # All TMY3 versions share the same EPW dataset, so use a
+        # version-independent cache directory.
+        from ochre_next.data.weather import get_epw_for_fips
+
+        weather_cache = cache_dir / "weather"
+        return get_epw_for_fips(fips, cache_dir=weather_cache)
+
+    # AMY / CSV fallback: download the simplified ResStock CSV
     weather_dest = cache_dir / version / "weather" / f"{fips}_{cfg.weather_suffix}.csv"
     if weather_dest.exists() and weather_dest.stat().st_size > 0:
         return weather_dest
