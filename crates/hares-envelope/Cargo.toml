@@ -12,6 +12,9 @@ nalgebra = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[features]
+thermal_diagnostics = []
+
 [dev-dependencies]
 approx = "0.5"
 chrono = { workspace = true }

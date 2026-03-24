@@ -82,6 +82,12 @@ pub struct ThermalSolver {
     ideal_heating_w: f64,
     /// Ideal HVAC cooling load [W] from the most recent resolve (negative = cooling).
     ideal_cooling_w: f64,
+    /// Per-exterior-surface diagnostic buffer (compiled out in release).
+    #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+    ext_surface_diag_buf: Vec<config::ExtSurfaceDiag>,
+    /// Per-interior-surface diagnostic buffer (compiled out in release).
+    #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+    int_surface_diag_buf: Vec<config::IntSurfaceDiag>,
 }
 
 impl ThermalSolver {
@@ -134,6 +140,8 @@ impl ThermalSolver {
             .max()
             .unwrap_or(0);
 
+        let n_ext_surfaces = config.exterior_surfaces.len();
+
         Ok(Self {
             model,
             wiring,
@@ -160,6 +168,10 @@ impl ThermalSolver {
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             ideal_heating_w: 0.0,
             ideal_cooling_w: 0.0,
+            #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+            ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
+            #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+            int_surface_diag_buf: Vec::with_capacity(max_interior_surfaces),
         })
     }
 
@@ -263,10 +275,14 @@ impl ThermalSolver {
         self.apply_exterior_solar_inputs(&mut u, env);
         let opaque_solar_w = u.iter().sum::<f64>() - u_pre;
         let u_pre = u.iter().sum::<f64>();
+        #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+        self.ext_surface_diag_buf.clear();
         self.apply_exterior_longwave_inputs_iterative(&mut u, env);
         let exterior_lwr_w = u.iter().sum::<f64>() - u_pre;
         let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w;
 
+        #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+        self.int_surface_diag_buf.clear();
         self.apply_interior_longwave_inputs(&mut u, env);
         // Interior LWR redistributes heat between surfaces (zero-sum on u).
         // Use the per-zone total from lwr_by_zone_buf for the indoor zone.
@@ -325,6 +341,11 @@ impl ThermalSolver {
             .find(|c| c.zone == indoor_zone)
             .map(|c| c.q_natural_vent_w)
             .unwrap_or(0.0);
+        let combined_airflow_sensible_w = self.infiltration_buf
+            .iter()
+            .find(|c| c.zone == indoor_zone)
+            .map(|c| c.q_sensible_diagnostic_w)
+            .unwrap_or(0.0);
 
         let indoor_acc = ports.thermal.iter().find(|t| t.zone == indoor_zone);
         let hvac_heating_w = indoor_acc
@@ -356,6 +377,7 @@ impl ThermalSolver {
             infiltration_w: infiltration_indoor_w,
             ventilation_w,
             natural_ventilation_w,
+            combined_airflow_sensible_w,
             port_sensible_w: port_sensible_indoor_w,
             hvac_heating_w,
             hvac_cooling_w,
@@ -371,6 +393,28 @@ impl ThermalSolver {
             internal_mass_heat_gain_w: 0.0,
             opaque_solar_w,
             exterior_lwr_w,
+            total_airflow_m3_s: self.infiltration_buf
+                .iter()
+                .find(|c| c.zone == indoor_zone)
+                .map(|c| c.combined_flow_m3_s)
+                .unwrap_or(0.0),
+            raw_infiltration_m3_s: self.infiltration_buf
+                .iter()
+                .find(|c| c.zone == indoor_zone)
+                .map(|c| c.raw_inf_m3_s)
+                .unwrap_or(0.0),
+            forced_vent_m3_s: self.infiltration_buf
+                .iter()
+                .find(|c| c.zone == indoor_zone)
+                .map(|c| c.forced_flow_m3_s)
+                .unwrap_or(0.0),
+            natural_vent_m3_s: self.infiltration_buf
+                .iter()
+                .find(|c| c.zone == indoor_zone)
+                .map(|c| c.nat_flow_m3_s)
+                .unwrap_or(0.0),
+            ext_surface_diag: self.ext_surface_diag_buf.clone(),
+            int_surface_diag: self.int_surface_diag_buf.clone(),
         };
 
         (u, latent_by_zone)

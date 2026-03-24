@@ -641,6 +641,7 @@ mod tests {
                 timezone_offset_h: 0.0,
                 elevation_m: 1000.0,
                 source_step_secs: 3600,
+                midpoint_offset_secs: 0,
             },
             dry_bulb_c: vec![10.0, 20.0],
             dew_point_c: vec![2.0, 3.0],
@@ -1415,6 +1416,7 @@ mod tests {
                 columns: vec![values],
                 column_index: index,
                 source_step_secs: 3600,
+                midpoint_offset_secs: 0,
                 column_aggregations: vec![],
             }
         }
@@ -1432,6 +1434,7 @@ mod tests {
                     timezone_offset_h: -5.0,
                     elevation_m: 10.0,
                     source_step_secs: 3600,
+                midpoint_offset_secs: 0,
                 },
                 dry_bulb_c: (0..n).map(|i| i as f64 * 0.01).collect(),
                 dew_point_c: vec![2.0; n],

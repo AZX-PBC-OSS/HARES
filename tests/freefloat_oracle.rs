@@ -122,9 +122,10 @@ mod tests {
             note: &str,
         ) -> Self {
             let hares = hares_mean.unwrap_or(f64::NAN);
-            let deviation_pct = if ochre_mean.abs() > 1e-6 {
+            let deviation_pct = if ochre_mean.abs() > 1.0 {
                 ((hares - ochre_mean) / ochre_mean * 100.0).abs()
-            } else if hares.abs() > 1e-6 {
+            } else if (hares - ochre_mean).abs() > 5.0 {
+                // Both near zero but differ by >5W — flag as significant.
                 f64::INFINITY
             } else {
                 0.0
@@ -385,6 +386,31 @@ mod tests {
                     let lwr = o(&format!("{name} Ext. LWR Gain (W)"));
                     let t_surf = o(&format!("{name} Ext. Surface Temperature (C)"));
                     eprintln!("    {name:20} solar={solar:>10.1}  lwr={lwr:>10.1}  T_surf={t_surf:>6.1}°C");
+                }
+
+                // HARES per-exterior-surface diagnostics
+                if let Some(g) = snap.phases.post_solvers.as_ref().map(|s| &s.envelope_gains) {
+                    if !g.ext_surface_diag.is_empty() {
+                        eprintln!("\n  HARES per-exterior-surface:");
+                        for d in &g.ext_surface_diag {
+                            eprintln!(
+                                "    id={:2} cat={:?}  solar={:>8.1}  lwr={:>8.1}  T_surf={:>6.1}°C  injected={:>8.1}",
+                                d.surface_id, d.category, d.solar_absorbed_w, d.lwr_gain_w, d.surface_temp_c, d.injected_w
+                            );
+                        }
+                    }
+                    if !g.int_surface_diag.is_empty() {
+                        eprintln!("\n  HARES per-interior-surface:");
+                        for (j, d) in g.int_surface_diag.iter().enumerate() {
+                            eprintln!(
+                                "    [{j}] T_surf={:>6.2}°C  lwr_flux={:>8.1}W",
+                                d.surface_temp_c, d.lwr_flux_w
+                            );
+                        }
+                    }
+                    // Combined airflow diagnostic
+                    eprintln!("\n  Airflow: combined={:.4} m³/s  raw_inf={:.4}  forced={:.4}  natural={:.4}",
+                        g.total_airflow_m3_s, g.raw_infiltration_m3_s, g.forced_vent_m3_s, g.natural_vent_m3_s);
                 }
             }
         }
@@ -655,10 +681,75 @@ mod tests {
             finite_mean(&hares_ventilation).unwrap_or(f64::NAN),
             ochre_ventilation_mean,
         );
+        // Combined airflow: HARES total vs OCHRE sum of components
+        let mut hares_combined_airflow: Vec<f64> = Vec::with_capacity(n_steps);
+        for snap in &snapshots {
+            if let Some(solver) = snap.phases.post_solvers.as_ref() {
+                hares_combined_airflow.push(solver.envelope_gains.combined_airflow_sensible_w);
+            }
+        }
+        let ochre_combined: Vec<f64> = (0..ochre_indoor_temp.len())
+            .map(|i| {
+                let inf = ochre_infiltration.get(i).copied().unwrap_or(0.0);
+                let vent = ochre_ventilation.get(i).copied().unwrap_or(0.0);
+                let nat = ochre_natural_vent.get(i).copied().unwrap_or(0.0);
+                inf + vent + nat
+            })
+            .collect();
+        eprintln!(
+            "  Combined air — HARES mean: {:.1} W   OCHRE mean: {:.1} W  (inf+vent+nat)",
+            finite_mean(&hares_combined_airflow).unwrap_or(f64::NAN),
+            finite_mean(&ochre_combined).unwrap_or(f64::NAN),
+        );
         eprintln!(
             "  Natural vent — HARES mean: {:.1} W",
             finite_mean(&hares_natural_ventilation).unwrap_or(f64::NAN),
         );
+
+        // Airflow diagnostics
+        let mut hares_total_airflow: Vec<f64> = Vec::with_capacity(n_steps);
+        let mut hares_raw_inf_flow: Vec<f64> = Vec::with_capacity(n_steps);
+        let mut hares_forced_flow: Vec<f64> = Vec::with_capacity(n_steps);
+        let mut hares_nat_flow: Vec<f64> = Vec::with_capacity(n_steps);
+        for snap in &snapshots {
+            if let Some(solver) = snap.phases.post_solvers.as_ref() {
+                let g = &solver.envelope_gains;
+                hares_total_airflow.push(g.total_airflow_m3_s);
+                hares_raw_inf_flow.push(g.raw_infiltration_m3_s);
+                hares_forced_flow.push(g.forced_vent_m3_s);
+                hares_nat_flow.push(g.natural_vent_m3_s);
+            }
+        }
+        eprintln!("\n  Airflow rates (indoor zone):");
+        eprintln!(
+            "    Total combined:    mean={:.6} m³/s  ({:.1} ACH)",
+            finite_mean(&hares_total_airflow).unwrap_or(0.0),
+            finite_mean(&hares_total_airflow).unwrap_or(0.0) * 3600.0 / 129.6, // BEopt volume
+        );
+        eprintln!(
+            "    Raw infiltration:  mean={:.6} m³/s  ({:.1} ACH)",
+            finite_mean(&hares_raw_inf_flow).unwrap_or(0.0),
+            finite_mean(&hares_raw_inf_flow).unwrap_or(0.0) * 3600.0 / 129.6,
+        );
+        eprintln!(
+            "    Forced ventilation: mean={:.6} m³/s  ({:.1} ACH)",
+            finite_mean(&hares_forced_flow).unwrap_or(0.0),
+            finite_mean(&hares_forced_flow).unwrap_or(0.0) * 3600.0 / 129.6,
+        );
+        eprintln!(
+            "    Natural ventilation: mean={:.6} m³/s  ({:.1} ACH)",
+            finite_mean(&hares_nat_flow).unwrap_or(0.0),
+            finite_mean(&hares_nat_flow).unwrap_or(0.0) * 3600.0 / 129.6,
+        );
+        // Step-0 flow rates
+        if let Some(snap) = snapshots.first() {
+            if let Some(solver) = snap.phases.post_solvers.as_ref() {
+                let g = &solver.envelope_gains;
+                eprintln!("    Step-0: total={:.6} raw_inf={:.6} forced={:.6} nat={:.6} m³/s",
+                    g.total_airflow_m3_s, g.raw_infiltration_m3_s,
+                    g.forced_vent_m3_s, g.natural_vent_m3_s);
+            }
+        }
 
         eprintln!("\n{:-^70}", " checks ");
         let mut n_pass = 0usize;

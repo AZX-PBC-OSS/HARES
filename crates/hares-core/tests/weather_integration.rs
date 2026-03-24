@@ -104,6 +104,7 @@ fn synthetic_weather() -> WeatherTimeSeries {
             timezone_offset_h: -7.0,
             elevation_m: 1609.0,
             source_step_secs: 3600,
+            midpoint_offset_secs: 0,
         },
         dry_bulb_c,
         dew_point_c,

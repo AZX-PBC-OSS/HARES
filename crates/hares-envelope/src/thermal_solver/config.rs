@@ -399,11 +399,18 @@ pub struct EnvelopeComponentGains {
     /// Interior longwave radiation exchange net to indoor zone [W].
     pub interior_lwr_w: f64,
     /// Infiltration sensible heat gain (indoor zone only) [W].
+    /// After unbalanced ventilation scaling: `raw_inf × nat_flow_ratio`.
     pub infiltration_w: f64,
     /// Forced mechanical ventilation sensible heat gain (indoor zone only) [W].
+    /// For unbalanced systems this is the forced component of the quadrature
+    /// combination `sqrt(nat² + forced²)`. OCHRE may report this differently.
     pub ventilation_w: f64,
     /// Natural ventilation sensible heat gain [W].
     pub natural_ventilation_w: f64,
+    /// Combined infiltration + ventilation sensible gain [W].
+    /// `= ρ × sqrt(nat² + forced²) × cp × ΔT` for unbalanced systems.
+    /// Compare this to OCHRE's sum of infiltration + forced + natural ventilation.
+    pub combined_airflow_sensible_w: f64,
     /// Total sensible gains from all equipment ports (HVAC + appliances) [W].
     pub port_sensible_w: f64,
     /// HVAC heating contribution to the indoor zone [W].
@@ -437,4 +444,42 @@ pub struct EnvelopeComponentGains {
     pub opaque_solar_w: f64,
     /// Exterior longwave radiation exchange only [W].
     pub exterior_lwr_w: f64,
+    /// Total combined air flow rate (infiltration + ventilation) [m³/s].
+    pub total_airflow_m3_s: f64,
+    /// Raw AIM-2 infiltration flow rate before ventilation interaction [m³/s].
+    pub raw_infiltration_m3_s: f64,
+    /// Forced mechanical ventilation flow rate [m³/s].
+    pub forced_vent_m3_s: f64,
+    /// Natural ventilation flow rate [m³/s].
+    pub natural_vent_m3_s: f64,
+    /// Per-exterior-surface energy diagnostics (solar absorbed, LWR, surface temp).
+    /// Parallel to `ThermalSolverConfig::exterior_surfaces`.
+    pub ext_surface_diag: Vec<ExtSurfaceDiag>,
+    /// Per-interior-surface diagnostics (surface temp, LWR flux).
+    pub int_surface_diag: Vec<IntSurfaceDiag>,
+}
+
+/// Per-exterior-surface energy diagnostic snapshot.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExtSurfaceDiag {
+    pub surface_id: u32,
+    pub category: Option<BoundaryCategory>,
+    /// Solar absorbed at the exterior face [W] = absorptance × area × POA.
+    pub solar_absorbed_w: f64,
+    /// Net exterior longwave radiation gain [W] (negative = cooling to sky).
+    pub lwr_gain_w: f64,
+    /// Converged exterior surface temperature [°C].
+    pub surface_temp_c: f64,
+    /// Heat actually injected into the RC node [W] = (solar + lwr) × rad_frac.
+    pub injected_w: f64,
+}
+
+/// Per-interior-surface diagnostic snapshot.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IntSurfaceDiag {
+    /// Interpolated interior surface temperature [°C].
+    /// = radiation_frac × T_node + (1 - radiation_frac) × T_zone.
+    pub surface_temp_c: f64,
+    /// Net interior LWR flux for this surface [W].
+    pub lwr_flux_w: f64,
 }

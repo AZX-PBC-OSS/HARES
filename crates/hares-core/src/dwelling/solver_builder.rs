@@ -730,7 +730,11 @@ pub(crate) fn build_default_solvers(
                             .or(conditioned_area)
                             .unwrap_or(100.0);
                         let ela_m2 = sla * floor_area_m2;
-                        let attic_height_m = 1.5; // default triangular attic
+                        // Attic height from volume: V = 0.5 × A × h → h = 2V/A.
+                        let attic_height_m = bz.volume_m3
+                            .filter(|&v| v > 0.0)
+                            .map(|v| 2.0 * v / floor_area_m2)
+                            .unwrap_or(1.5);
                         let (stack_coeff, wind_coeff) =
                             attic_ela_coefficients(attic_height_m, building_height_m);
                         InfiltrationMethod::Ela {

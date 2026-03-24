@@ -41,6 +41,14 @@ pub(crate) struct InfiltrationCoupling {
     pub q_forced_vent_w: f64,
     /// Natural ventilation sensible gain [W] — operable window stack/wind flow.
     pub q_natural_vent_w: f64,
+    /// Combined sensible flow [m³/s] — infiltration + ventilation after quadrature.
+    pub combined_flow_m3_s: f64,
+    /// Raw AIM-2 infiltration flow before ventilation interaction [m³/s].
+    pub raw_inf_m3_s: f64,
+    /// Forced ventilation flow [m³/s].
+    pub forced_flow_m3_s: f64,
+    /// Natural ventilation flow [m³/s].
+    pub nat_flow_m3_s: f64,
 }
 
 /// Computes infiltration and ventilation coupling terms and accumulates latent loads
@@ -138,13 +146,18 @@ pub(crate) fn apply_infiltration_and_ventilation(
             })
             .unwrap_or(0.0);
 
-        // Forced mechanical ventilation flow.
+        // Forced mechanical ventilation flow — only for zones with explicit flow
+        // or the indoor zone (which gets the global ventilation rate).
         let forced_flow_m3_s = config
             .ventilation
             .zone_flow_m3_s
             .get(&zone.id)
             .copied()
-            .unwrap_or(config.ventilation_flow_m3_s);
+            .unwrap_or(if zone.id == config.indoor_zone_id {
+                config.ventilation_flow_m3_s
+            } else {
+                0.0
+            });
 
         // Compute per-component diagnostic gains before flow combination.
         let delta_t = t_out - zone.temperature_c;
@@ -224,6 +237,10 @@ pub(crate) fn apply_infiltration_and_ventilation(
             q_infiltration_w: q_infiltration_w_scaled,
             q_forced_vent_w: q_forced_vent_w_scaled,
             q_natural_vent_w: q_natural_vent_w_scaled,
+            combined_flow_m3_s: sensible_flow_m3_s,
+            raw_inf_m3_s: q_inf_m3_s,
+            forced_flow_m3_s: forced_flow_m3_s,
+            nat_flow_m3_s: q_nat_m3_s,
         });
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
