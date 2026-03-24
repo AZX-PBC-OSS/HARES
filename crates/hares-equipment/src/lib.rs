@@ -13,6 +13,7 @@ pub mod pv;
 pub mod registry;
 pub(crate) mod schedule_helpers;
 pub mod scheduled_load;
+pub mod ventilation;
 pub mod water_heater;
 
 use std::time::Duration;

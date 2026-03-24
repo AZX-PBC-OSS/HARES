@@ -2668,4 +2668,89 @@ mod tests {
             .expect("EV should be registered");
         assert_eq!(eq.descriptor().equipment_type, "EV");
     }
+
+    // ── PARITY-007: V2G tests ──────────────────────────────────────
+
+    #[test]
+    fn v2g_allows_negative_power_when_enabled() {
+        let mut raw = base_raw();
+        raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+        raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.3.into());
+        raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let env = sample_env();
+        ev.init(&config, &env).expect("init");
+
+        ev.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -3.0,
+            reactive_power_kvar: None,
+        })
+        .expect("V2G negative setpoint should be accepted");
+    }
+
+    #[test]
+    fn v2g_discharge_produces_negative_power() {
+        let mut raw = base_raw();
+        raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+        raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
+        raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+        raw.insert(KEY_INITIAL_SOC.to_string(), 0.8.into());
+        raw.insert("schedule_start_soc_0".to_string(), 0.8.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let mut env = sample_env();
+        ev.init(&config, &env).expect("init");
+
+        ev.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -3.0,
+            reactive_power_kvar: None,
+        })
+        .expect("setpoint");
+
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(15), &mut ports).expect("step");
+        let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
+        assert!(
+            power < -0.1,
+            "V2G should produce negative active_power_kw, got {power}"
+        );
+    }
+
+    #[test]
+    fn v2g_respects_soc_reserve() {
+        let mut raw = base_raw();
+        raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
+        raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.5.into());
+        raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+        raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+        raw.insert("schedule_start_soc_0".to_string(), 0.5.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let mut env = sample_env();
+        ev.init(&config, &env).expect("init");
+
+        ev.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+        })
+        .expect("setpoint");
+
+        env.current_time = dt(2026, 1, 1, 18, 30, 0);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(15), &mut ports).expect("step");
+        let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
+        assert!(
+            power.abs() < 0.01,
+            "V2G must not discharge when SOC at reserve, got {power}"
+        );
+    }
+
+    #[test]
+    fn v2g_disabled_by_default() {
+        let config = ev_config(base_raw());
+        let ev = Ev::new(config);
+        assert!(!ev.v2g_enabled, "V2G should be disabled by default");
+    }
 }

@@ -15,11 +15,23 @@ verification:
   - cargo clippy --workspace -- -D warnings
 ---
 
+## Status: COMPLETE (verified — already fully implemented)
+
+Audit confirms all boiler EIR functionality is implemented and tested:
+
+| Check | Result |
+|-------|--------|
+| `current_eir()` called in step() | Line 463, every step when running |
+| Condensing 6-coeff formula | Lines 341-346: `c0+c1*PLR+c2*PLR²+c3*T_in+c4*T_in²+c5*PLR*T_in` |
+| Non-condensing 10-coeff formula | Lines 348-358: includes PLR³, T_out³, interaction terms |
+| Default coefficients match OCHRE | Lines 41-60 vs OCHRE HVAC.py — exact match |
+| PLR=0.5 test | `gas_boiler_condensing_curve_matches_expected_at_plr_half` (1e-4 tol) |
+| Condensing vs non-condensing diverge | `condensing_is_more_efficient_than_non_condensing_at_partial_load` |
+| OCHRE reference test | `non_condensing_eir_at_plr_half_matches_ochre_reference` |
+
 ## Background/Context
 
-The exploration agent found that `GasBoiler` already has `condensing_eir_coeffs: [f64; 6]` and `non_condensing_eir_coeffs: [f64; 10]` fields and a `current_eir()` method at line 339. The gap analysis claimed constant efficiency, but the code already has the infrastructure. This ticket should verify the implementation is complete and wired correctly, fix any issues, and ensure default coefficients match OCHRE/EnergyPlus.
-
-**Target**: Verify and complete — ensure biquadratic condensing and 10-coeff non-condensing curves are fully functional with OCHRE-matched defaults.
+Implemented during prior work. The gap analysis was based on an earlier state of the code.
 
 ## Work to Do
 

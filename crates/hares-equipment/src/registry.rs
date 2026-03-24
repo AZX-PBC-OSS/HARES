@@ -36,6 +36,7 @@ impl EquipmentRegistry {
         crate::ev::register_with_registry(&mut registry);
         crate::generator::register_with_registry(&mut registry);
         crate::event_load::register_with_registry(&mut registry);
+        crate::ventilation::register_with_registry(&mut registry);
         registry
     }
 

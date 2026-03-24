@@ -246,11 +246,12 @@ impl HvacEquipment {
         let plr = plr.clamp(0.0, 1.0);
 
         let plf_raw = if let Some(ref curves) = self.eir_plr_coefficients {
-            let coeffs = curves
-                .get(stage_index)
-                .copied()
-                .or_else(|| curves.last().copied())
-                .unwrap_or([1.0, 0.0, 0.0]);
+            let coeffs = if let Some(&c) = curves.get(stage_index) {
+                c
+            } else {
+                tracing::debug!(stage_index, n_curves = curves.len(), "PLF stage index out of range, using last curve");
+                curves.last().copied().unwrap_or([1.0, 0.0, 0.0])
+            };
             quadratic(&coeffs, plr)
         } else {
             let cd = self.plf_cooling_degradation_coeff.clamp(0.0, 1.0);

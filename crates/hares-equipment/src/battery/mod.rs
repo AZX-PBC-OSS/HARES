@@ -232,6 +232,9 @@ struct BatteryCheckpoint {
     last_daily_update_day: i32,
     import_limit_kw: Option<f64>,
     export_limit_kw: Option<f64>,
+    dr_level: DRLevel,
+    dr_duration_remaining_s: Option<f64>,
+    external_power_limit_kw: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,6 +1031,9 @@ impl Equipment for Battery {
             last_daily_update_day: self.last_daily_update_day,
             import_limit_kw: self.import_limit_kw,
             export_limit_kw: self.export_limit_kw,
+            dr_level: self.dr_level,
+            dr_duration_remaining_s: self.dr_duration_remaining_s,
+            external_power_limit_kw: self.external_power_limit_kw,
         })
     }
 
@@ -1049,6 +1055,9 @@ impl Equipment for Battery {
         self.last_daily_update_day = cp.last_daily_update_day;
         self.import_limit_kw = cp.import_limit_kw;
         self.export_limit_kw = cp.export_limit_kw;
+        self.dr_level = cp.dr_level;
+        self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
+        self.external_power_limit_kw = cp.external_power_limit_kw;
 
         // Recompute all derived telemetry from restored state so no fields are stale.
         self.telemetry.set("soc", self.soc);
@@ -3076,5 +3085,129 @@ mod tests {
         let config = battery_config(&[(KEY_EXPORT_LIMIT_W, -100.0)]);
         let mut bat = Battery::new(config.clone());
         assert!(bat.init(&config, &base_env()).is_err());
+    }
+
+    // ── PARITY-007: PowerLimit + DemandResponse tests ──────────────
+
+    #[test]
+    fn power_limit_caps_discharge_power() {
+        let env = warm_env();
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+
+        bat.apply_control(&ControlSignal::PowerLimit {
+            max_power_kw: 2.0,
+            ramp_rate_kw_per_s: None,
+        })
+        .expect("PowerLimit accepted");
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+        })
+        .expect("setpoint");
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+        let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        assert!(
+            power.abs() <= 2.0 + 0.01,
+            "discharge should be capped at 2 kW by PowerLimit, got {power}"
+        );
+    }
+
+    #[test]
+    fn demand_response_reduces_available_power() {
+        let env = warm_env();
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::Critical,
+            duration_s: Some(600.0),
+        })
+        .expect("DR accepted");
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+        })
+        .expect("setpoint");
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+        let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        // Critical = 25% of max, so max discharge ≈ 1.25 kW
+        assert!(
+            power.abs() <= 1.3,
+            "Critical DR should limit discharge to ~25% of max, got {power}"
+        );
+    }
+
+    #[test]
+    fn grid_emergency_blocks_all_power() {
+        let env = warm_env();
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: None,
+        })
+        .expect("DR accepted");
+
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+        })
+        .expect("setpoint");
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+        let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        let standby = DEFAULT_STANDBY_POWER_W / 1000.0;
+        assert!(
+            (power - standby).abs() < 0.01,
+            "GridEmergency should block all discharge, got power={power}"
+        );
+    }
+
+    #[test]
+    fn dr_auto_reverts_after_duration_expires() {
+        let env = warm_env();
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.5)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(120.0),
+        })
+        .expect("DR accepted");
+
+        // Step through 3 minutes (180s > 120s duration)
+        let mut ports = default_ports();
+        for _ in 0..3 {
+            bat.update_control(&env);
+            bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+            ports = default_ports();
+        }
+
+        // DR should have reverted to Normal — full power available
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: -5.0,
+            reactive_power_kvar: None,
+        })
+        .expect("setpoint");
+
+        bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+        let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        assert!(
+            power < -1.0,
+            "after DR expiry, discharge should be available again, got {power}"
+        );
     }
 }
