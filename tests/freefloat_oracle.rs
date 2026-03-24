@@ -177,8 +177,9 @@ mod tests {
 
         let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
 
-        // Remove all equipment — free-floating envelope only.
+        // Remove all equipment and disable ideal HVAC — free-floating envelope only.
         dwelling.equipment.clear();
+        dwelling.thermal_solver.set_ideal_hvac_zones(vec![]);
 
         dwelling.enable_observer(n_steps);
 
@@ -254,54 +255,120 @@ mod tests {
             }
         }
 
-        // Diagnostic: initial conditions and first few steps.
-        eprintln!("\n--- DIAGNOSTIC: {scenario} first 5 steps ---");
-        for (i, snap) in snapshots.iter().enumerate().take(5) {
-            let t_ind = hares_indoor_temp[i];
-            let t_att = hares_attic_temp[i];
-            let t_out = snap
-                .phases
-                .post_environment
-                .as_ref()
-                .map(|e| e.outdoor_temp_c)
-                .unwrap_or(f64::NAN);
-            let g = snap
-                .phases
-                .post_solvers
-                .as_ref()
-                .map(|s| &s.envelope_gains);
+        // Load OCHRE reference CSV.
+        let ochre_csv = fixture_dir(scenario).join("ochre_reference.csv");
+        assert!(ochre_csv.exists(), "OCHRE reference fixture not found: {}", ochre_csv.display());
+        let ochre = parse_csv_columns(&ochre_csv);
+
+        // Solver config diagnostics.
+        let n_int_zones = dwelling.thermal_solver.config().interior_lwr_zones.len();
+        let n_int_surfaces: usize = dwelling.thermal_solver.config().interior_lwr_zones.iter()
+            .map(|z| z.surfaces.len()).sum();
+        let n_bd_diag = dwelling.thermal_solver.config().boundary_diagnostics.len();
+        let n_windows = dwelling.thermal_solver.config().window_properties.len();
+        let n_window_zone_ids = dwelling.thermal_solver.config().window_zone_ids.len();
+        eprintln!("\n--- SOLVER CONFIG: {scenario} ---");
+        eprintln!("  interior_lwr_zones: {n_int_zones} zones, {n_int_surfaces} total surfaces");
+        eprintln!("  boundary_diagnostics: {n_bd_diag} entries");
+        eprintln!("  window_properties: {n_windows}, window_zone_ids: {n_window_zone_ids}");
+        for (i, z) in dwelling.thermal_solver.config().interior_lwr_zones.iter().enumerate() {
+            let has_scriptf = z.scriptf.is_some();
+            eprintln!("  zone {i}: zone_id={:?}, surfaces={}, scriptf={has_scriptf}", z.zone_id, z.surfaces.len());
+            for (j, s) in z.surfaces.iter().enumerate() {
+                eprintln!(
+                    "    [{j}] state={} input={} area={:.1}m² e={:.3} abs={:.3} rad_frac={:.4} floor={}",
+                    s.state_index, s.input_index, s.area_m2, s.emissivity, s.solar_absorptance, s.radiation_frac, s.is_floor
+                );
+            }
+        }
+        // Boundary diagnostics
+        for (i, bd) in dwelling.thermal_solver.config().boundary_diagnostics.iter().enumerate() {
             eprintln!(
-                "  step {i}: indoor={t_ind:.2}  attic={t_att:.2}  outdoor={t_out:.2}  \
-                 solar={:.0}  opaque_lwr={:.0}  inf={:.1}  vent={:.1}  int_lwr={:.1}  \
-                 port={:.1}  internal={:.1}",
-                g.map(|g| g.window_solar_w).unwrap_or(0.0),
-                g.map(|g| g.opaque_solar_lwr_w).unwrap_or(0.0),
-                g.map(|g| g.infiltration_w).unwrap_or(0.0),
-                g.map(|g| g.ventilation_w).unwrap_or(0.0),
-                g.map(|g| g.interior_lwr_w).unwrap_or(0.0),
-                g.map(|g| g.port_sensible_w).unwrap_or(0.0),
-                g.map(|g| g.internal_gain_w).unwrap_or(0.0),
+                "  bd_diag[{i}]: state={} area={:.1}m² r_film={:.4} rad_frac={:.4} cat={:?}",
+                bd.inner_state_index, bd.area_m2, bd.r_film_int_m2_k_w, bd.radiation_frac, bd.category
             );
+        }
+        // State vector at init
+        let (x_state, _, _) = dwelling.thermal_solver.snapshot_state();
+        eprintln!("  state vector ({} entries):", x_state.len());
+        for (i, &t) in x_state.iter().enumerate().take(25) {
+            eprintln!("    x[{i:2}] = {t:.4}°C");
+        }
+
+        // Step-0 comprehensive heat balance: HARES vs OCHRE side-by-side.
+        eprintln!("\n--- STEP-0 HEAT BALANCE: {scenario} ---");
+        if let Some(snap) = snapshots.first() {
+            let g = snap.phases.post_solvers.as_ref().map(|s| &s.envelope_gains);
+            // OCHRE step-0 values from fixture CSV (row index 0)
+            let o = |col: &str| -> f64 {
+                ochre.get(col).and_then(|v| v.first().copied()).unwrap_or(f64::NAN)
+            };
+
+            eprintln!("  {:40} {:>10} {:>10} {:>10}", "Component", "HARES", "OCHRE", "Δ");
+            eprintln!("  {:40} {:>10} {:>10} {:>10}", "─".repeat(40), "─".repeat(10), "─".repeat(10), "─".repeat(10));
+
+            let row = |name: &str, h: f64, ochre_val: f64| {
+                let delta = h - ochre_val;
+                eprintln!("  {name:40} {h:>10.1} {ochre_val:>10.1} {delta:>+10.1}");
+            };
+
+            // Temperatures
+            row("Temperature - Indoor (C)", hares_indoor_temp[0], o("Temperature - Indoor (C)"));
+            row("Temperature - Attic (C)", hares_attic_temp[0], o("Temperature - Attic (C)"));
+            let t_out = snap.phases.post_environment.as_ref().map(|e| e.outdoor_temp_c).unwrap_or(f64::NAN);
+            row("Temperature - Outdoor (C)", t_out, o("Temperature - Outdoor (C)"));
+
+            // Zone heat gains (indoor)
             if let Some(g) = g {
-                if !g.infiltration_by_zone.is_empty() {
-                    let zones: Vec<String> = g
-                        .infiltration_by_zone
-                        .iter()
-                        .map(|(z, w)| format!("z{}={w:.1}", z.0))
-                        .collect();
-                    eprintln!("         inf_by_zone: {}", zones.join(", "));
+                row("Window Transmitted Solar (W)", g.window_solar_w, o("Window Transmitted Solar Gain (W)"));
+                row("Infiltration - Indoor (W)", g.infiltration_w, o("Infiltration Heat Gain - Indoor (W)"));
+                row("Forced Ventilation - Indoor (W)", g.ventilation_w, o("Forced Ventilation Heat Gain - Indoor (W)"));
+                row("Natural Ventilation - Indoor (W)", g.natural_ventilation_w, o("Natural Ventilation Heat Gain - Indoor (W)"));
+                row("Internal Heat Gain - Indoor (W)", g.internal_gain_w, o("Internal Heat Gain - Indoor (W)"));
+                row("Interior LWR - Indoor (W)", g.interior_lwr_w, o("Radiation Heat Gain - Indoor (W)"));
+                row("Opaque Solar (W)", g.opaque_solar_w, f64::NAN);
+                row("Exterior LWR (W)", g.exterior_lwr_w, f64::NAN);
+                row("Opaque Solar+LWR combined (W)", g.opaque_solar_lwr_w, f64::NAN);
+                row("HVAC Heating (W)", g.hvac_heating_w, 0.0);
+                row("HVAC Cooling (W)", g.hvac_cooling_w, 0.0);
+
+                // Per-boundary conduction
+                row("Wall Heat Gain - Indoor (W)", g.wall_heat_gain_w, o("Wall Heat Gain - Indoor (W)"));
+                row("Floor Heat Gain - Indoor (W)", g.floor_heat_gain_w, o("Floor Heat Gain - Indoor (W)"));
+                row("Roof Heat Gain - Indoor (W)", g.roof_heat_gain_w, o("Roof Heat Gain - Indoor (W)"));
+                row("Window Heat Gain - Indoor (W)", g.window_heat_gain_w, o("Window Heat Gain - Indoor (W)"));
+                row("Internal Mass Heat Gain (W)", g.internal_mass_heat_gain_w, o("Internal Mass Heat Gain - Indoor (W)"));
+
+                // Net sensible
+                let hares_net = g.window_solar_w + g.infiltration_w + g.ventilation_w
+                    + g.natural_ventilation_w + g.internal_gain_w + g.interior_lwr_w
+                    + g.wall_heat_gain_w + g.floor_heat_gain_w + g.roof_heat_gain_w
+                    + g.window_heat_gain_w + g.internal_mass_heat_gain_w;
+                row("Net Sensible (sum of above) (W)", hares_net, o("Net Sensible Heat Gain - Indoor (W)"));
+
+                // Per-zone infiltration
+                for (z, w) in &g.infiltration_by_zone {
+                    let ochre_col = if z.0 == 1 {
+                        "Infiltration Heat Gain - Indoor (W)"
+                    } else {
+                        "Infiltration Heat Gain - Attic (W)"
+                    };
+                    row(&format!("Infiltration z{} (W)", z.0), *w, o(ochre_col));
+                }
+
+                // Exterior surface solar (OCHRE per-boundary)
+                eprintln!("\n  Exterior surface solar+LWR (OCHRE gross absorbed):");
+                let ext_surfaces = [
+                    "Exterior Wall", "Attic Wall", "Attic Roof", "Window", "Door",
+                ];
+                for name in ext_surfaces {
+                    let solar = o(&format!("{name} Ext. Solar Gain (W)"));
+                    let lwr = o(&format!("{name} Ext. LWR Gain (W)"));
+                    let t_surf = o(&format!("{name} Ext. Surface Temperature (C)"));
+                    eprintln!("    {name:20} solar={solar:>10.1}  lwr={lwr:>10.1}  T_surf={t_surf:>6.1}°C");
                 }
             }
         }
-
-        // Load OCHRE reference CSV.
-        let ochre_csv = fixture_dir(scenario).join("ochre_reference.csv");
-        assert!(
-            ochre_csv.exists(),
-            "OCHRE reference fixture not found: {}",
-            ochre_csv.display()
-        );
-        let ochre = parse_csv_columns(&ochre_csv);
 
         let ochre_indoor_temp = ochre
             .get("Temperature - Indoor (C)")

@@ -10,9 +10,10 @@ mod stepping;
 
 pub(crate) use config::Result;
 pub use config::{
-    BoundaryCategory, EnvelopeComponentGains, ExteriorSurfaceInfo, InfiltrationMethod,
-    InteriorLwrZoneConfig, InteriorSurfaceInfo, NaturalVentilationConfig, StateSpaceWiring,
-    ThermalSolverConfig, ThermalSolverError, VentilationConfig, WindowSolarProperties,
+    BoundaryCategory, BoundaryDiagnosticInfo, EnvelopeComponentGains, ExteriorSurfaceInfo,
+    InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo, NaturalVentilationConfig,
+    StateSpaceWiring, ThermalSolverConfig, ThermalSolverError, VentilationConfig,
+    WindowSolarProperties,
 };
 
 use std::collections::HashMap;
@@ -266,9 +267,15 @@ impl ThermalSolver {
         let exterior_lwr_w = u.iter().sum::<f64>() - u_pre;
         let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w;
 
-        let u_pre = u.iter().sum::<f64>();
         self.apply_interior_longwave_inputs(&mut u, env);
-        let interior_lwr_w = u.iter().sum::<f64>() - u_pre;
+        // Interior LWR redistributes heat between surfaces (zero-sum on u).
+        // Use the per-zone total from lwr_by_zone_buf for the indoor zone.
+        let interior_lwr_w = self
+            .lwr_by_zone_buf
+            .iter()
+            .find(|(z, _)| *z == self.config.indoor_zone_id)
+            .map(|(_, w)| *w)
+            .unwrap_or(0.0);
 
         self.apply_port_sensible_inputs(&mut u, ports);
 
@@ -412,6 +419,11 @@ impl ThermalSolver {
                 u[idx] = env.weather.outdoor_temp_c;
             }
         }
+        for &idx in &self.wiring.ground_temp_input_indices {
+            if idx < u.len() {
+                u[idx] = env.weather.ground_temp_c;
+            }
+        }
     }
 
 }
@@ -541,6 +553,7 @@ mod tests {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -559,6 +572,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
     }
@@ -670,6 +684,7 @@ mod tests {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![1],
             solar_input_indices: HashMap::new(),
         };
@@ -687,6 +702,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
         let state = solver.state();
@@ -758,6 +774,7 @@ mod tests {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -776,6 +793,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
         solver.x[0] = 20.0;
@@ -1114,6 +1132,7 @@ mod tests {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -1132,6 +1151,7 @@ mod tests {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -1255,6 +1275,7 @@ fn ela_infiltration_changes_zone_temperature() {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -1273,6 +1294,7 @@ fn ela_infiltration_changes_zone_temperature() {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
@@ -1376,6 +1398,7 @@ fn ela_infiltration_changes_zone_temperature() {
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
+                ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
             };
@@ -1405,6 +1428,7 @@ fn ela_infiltration_changes_zone_temperature() {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+                boundary_diagnostics: Vec::new(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -1518,6 +1542,7 @@ fn ela_infiltration_changes_zone_temperature() {
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
+                ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
             };
@@ -1547,6 +1572,7 @@ fn ela_infiltration_changes_zone_temperature() {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+                boundary_diagnostics: Vec::new(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, &env, zone_temp)
@@ -1670,6 +1696,7 @@ fn ela_infiltration_changes_zone_temperature() {
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
+                ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
             };
@@ -1700,6 +1727,7 @@ fn ela_infiltration_changes_zone_temperature() {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+                boundary_diagnostics: Vec::new(),
             };
             let env = make_env();
             let mut s =
@@ -2009,6 +2037,7 @@ fn ela_higher_wind_produces_more_cooling() {
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
+                ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
             };
@@ -2038,6 +2067,7 @@ fn ela_higher_wind_produces_more_cooling() {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+                boundary_diagnostics: Vec::new(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -2127,6 +2157,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -2149,6 +2180,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             )),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         let mut solver_nv =
             ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
@@ -2208,6 +2240,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -2228,6 +2261,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             )),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         let mut solver_nv =
             ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
@@ -2300,6 +2334,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
                 outdoor_temp_input_indices: vec![0],
+                ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::new(),
             };
@@ -2318,6 +2353,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+                boundary_diagnostics: Vec::new(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -2442,6 +2478,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                 zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
                 outdoor_temp_input_indices: vec![0],
+                ground_temp_input_indices: vec![],
                 indoor_temp_input_indices: vec![],
                 solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
             };
@@ -2459,6 +2496,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
+                boundary_diagnostics: Vec::new(),
             };
             let mut s =
                 ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -2550,6 +2588,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                     zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
                     zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
                     outdoor_temp_input_indices: vec![0],
+                    ground_temp_input_indices: vec![],
                     indoor_temp_input_indices: vec![],
                     solar_input_indices: HashMap::new(),
                 };
@@ -2568,6 +2607,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                     natural_ventilation: None,
                     supply_duct_leakage_m3_s: 0.0,
                     return_duct_leakage_m3_s: 0.0,
+                    boundary_diagnostics: Vec::new(),
                 };
                 let mut s =
                     ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
@@ -2853,6 +2893,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -2870,6 +2911,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         let mut solver =
             ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
@@ -3031,6 +3073,7 @@ fn unbalanced_fan_uses_quadrature_not_linear_addition() {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -3051,6 +3094,7 @@ fn unbalanced_fan_uses_quadrature_not_linear_addition() {
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
         };
         let mut solver_combined = ThermalSolver::new(
             model,

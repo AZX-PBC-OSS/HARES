@@ -3,7 +3,7 @@ mod reference_bands;
 
 use std::collections::BTreeMap;
 
-use cases::{core_cases, extended_cases};
+use cases::{core_cases, extended_cases, BestestCase};
 use hares_core::Dwelling;
 use reference_bands::{BestestMetric, ReferenceBand, core_reference_bands};
 
@@ -23,43 +23,72 @@ struct BandCheck {
     passed: bool,
 }
 
-#[test]
-#[ignore = "long-running BESTEST/ASHRAE Standard 140 validation"]
-fn bestest_core_cases_within_reference_bands() {
+fn run_single_case(case: &BestestCase) {
+    let observation = run_case(case);
+    let bands = core_reference_bands(case.id);
+    if bands.is_empty() {
+        panic!("case={} has no reference bands", case.id);
+    }
+
+    eprintln!(
+        "[bestest] case={} tier={:?} {}",
+        case.id, case.tier, case.description
+    );
     let mut failures = Vec::new();
-
-    for case in core_cases() {
-        let observation = run_case(&case);
-        let bands = core_reference_bands(case.id);
-        if bands.is_empty() {
-            failures.push(format!("case={} has no reference bands", case.id));
-            continue;
-        }
-
+    for check in evaluate_bands(&observation, &bands) {
+        let status = if check.passed { "PASS" } else { "FAIL" };
         eprintln!(
-            "[bestest] case={} tier={:?} {}",
-            case.id, case.tier, case.description
+            "  {} metric={} value={:.6} ref_min={:.6} ref_max={:.6}",
+            status, check.metric, check.value, check.min, check.max
         );
-        for check in evaluate_bands(&observation, &bands) {
-            let status = if check.passed { "PASS" } else { "FAIL" };
-            eprintln!(
-                "  {} metric={} value={:.6} ref_min={:.6} ref_max={:.6}",
-                status, check.metric, check.value, check.min, check.max
-            );
-            if !check.passed {
-                failures.push(format!(
-                    "case={} metric={} value={:.6} outside [{:.6}, {:.6}]",
-                    check.case_id, check.metric, check.value, check.min, check.max
-                ));
-            }
+        if !check.passed {
+            failures.push(format!(
+                "case={} metric={} value={:.6} outside [{:.6}, {:.6}]",
+                check.case_id, check.metric, check.value, check.min, check.max
+            ));
         }
     }
 
     assert!(
         failures.is_empty(),
-        "BESTEST core band violations:\n{}",
+        "BESTEST band violations:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+#[ignore = "long-running BESTEST case"]
+fn bestest_case_600() {
+    let case = core_cases().into_iter().find(|c| c.id == "600").unwrap();
+    run_single_case(&case);
+}
+
+#[test]
+#[ignore = "long-running BESTEST case"]
+fn bestest_case_900() {
+    let case = core_cases().into_iter().find(|c| c.id == "900").unwrap();
+    run_single_case(&case);
+}
+
+#[test]
+#[ignore = "long-running BESTEST case"]
+fn bestest_case_600ff() {
+    let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
+    run_single_case(&case);
+}
+
+#[test]
+#[ignore = "long-running BESTEST case"]
+fn bestest_case_900ff() {
+    let case = core_cases().into_iter().find(|c| c.id == "900FF").unwrap();
+    run_single_case(&case);
+}
+
+#[test]
+#[ignore = "long-running BESTEST case"]
+fn bestest_case_640() {
+    let case = core_cases().into_iter().find(|c| c.id == "640").unwrap();
+    run_single_case(&case);
 }
 
 #[test]
@@ -78,7 +107,7 @@ fn bestest_extended_cases_are_tracked() {
     }
 }
 
-fn run_case(case: &cases::BestestCase) -> CaseObservation {
+fn run_case(case: &BestestCase) -> CaseObservation {
     let t0 = std::time::Instant::now();
     let mut dwelling = Dwelling::from_toml_config(&case.fixture_path())
         .unwrap_or_else(|err| panic!("failed to load BESTEST case {}: {err}", case.id));

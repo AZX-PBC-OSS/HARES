@@ -104,6 +104,7 @@ fn build_1r1c_solver(env: &EnvironmentState, indoor_temp_c: f64, config: Thermal
         zone_output_indices: HashMap::from([(ZONE, 0)]),
         zone_sensible_input_indices: HashMap::from([(ZONE, 1)]),
         outdoor_temp_input_indices: vec![0],
+        ground_temp_input_indices: vec![],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
     };

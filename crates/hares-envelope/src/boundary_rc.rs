@@ -147,7 +147,14 @@ pub struct BoundaryDiagnostic {
     pub area_m2: f64,
     pub r_film_int_m2_k_w: f64,
     pub r_film_ext_m2_k_w: f64,
+    /// Total resistance from zone air to innermost RC node [m²·K/W].
+    /// Includes film resistance plus half the innermost layer's conduction.
+    /// `None` for fallback-R boundaries with no RC nodes.
+    pub r_zone_to_inner_m2_k_w: Option<f64>,
     pub path: RCPath,
+    /// NodeId of the innermost RC node (closest to zone air).
+    /// `None` for fallback-R boundaries with no RC nodes.
+    pub inner_node: Option<NodeId>,
 }
 
 /// Diagnostics captured during RC network construction.
@@ -165,6 +172,8 @@ pub struct EnvelopeDiagnostics {
 pub struct SurfaceLayerInfo {
     /// NodeId of the outermost material-layer node for this boundary.
     pub outer_node: NodeId,
+    /// NodeId of the innermost material-layer node (closest to zone air).
+    pub inner_node: NodeId,
     /// Interior zone index (0-based) that this boundary belongs to.
     pub interior_zone_idx: usize,
 }
@@ -185,6 +194,8 @@ pub struct BuildingRC {
     pub layer_info: HashMap<usize, SurfaceLayerInfo>,
     /// Column index of outdoor temperature in B_ext (if present).
     pub outdoor_col: Option<usize>,
+    /// Column index of ground temperature in B_ext (if present).
+    pub ground_col: Option<usize>,
     /// Number of external driving columns in B_ext.
     pub n_ext: usize,
     /// NodeId → thermal capacitance [J/K] for all internal nodes.
@@ -294,11 +305,12 @@ pub fn assemble_building_rc(
         // Precomputed RC path (OCHRE LUT) takes priority over raw material layers.
         if !bd.precomputed_rc.is_empty() {
             let nodes_before = graph.next_layer_id;
-            if let Some(outer) = graph.build_precomputed_boundary(&bd.precomputed_rc, &bp) {
+            if let Some((inner, outer)) = graph.build_precomputed_boundary(&bd.precomputed_rc, &bp) {
                 layer_info.insert(
                     bd_idx,
                     SurfaceLayerInfo {
                         outer_node: outer,
+                        inner_node: inner,
                         interior_zone_idx: bd.interior_zone_idx,
                     },
                 );
@@ -317,6 +329,13 @@ pub fn assemble_building_rc(
                 .map(|l| l.capacitance_kj_m2_k * 1000.0 * bd.area_m2)
                 .sum();
             debug_assert!(cap_total >= 0.0, "boundary {bd_idx}: capacitance must be >= 0");
+            let inner_node = if n_nodes > 0 { Some(NodeId(nodes_before)) } else { None };
+            let r_zone_to_inner = if n_nodes > 0 {
+                let r_inner_half = bd.precomputed_rc.first()
+                    .map(|l| l.resistance_m2_k_w / 2.0)
+                    .unwrap_or(0.0);
+                Some(bd.r_film_interior_m2_k_w + r_inner_half)
+            } else { None };
             boundary_diagnostics.push(BoundaryDiagnostic {
                 boundary_idx: bd_idx,
                 ua_w_per_k: bd.area_m2 / r_total.max(1e-6),
@@ -328,7 +347,9 @@ pub fn assemble_building_rc(
                 area_m2: bd.area_m2,
                 r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
                 r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
+                r_zone_to_inner_m2_k_w: r_zone_to_inner,
                 path: RCPath::Precomputed,
+                inner_node,
             });
             continue;
         }
@@ -341,11 +362,12 @@ pub fn assemble_building_rc(
 
         if !valid_layers.is_empty() {
             let nodes_before = graph.next_layer_id;
-            if let Some(outer) = graph.build_layered_boundary(&valid_layers, &bp) {
+            if let Some((inner, outer)) = graph.build_layered_boundary(&valid_layers, &bp) {
                 layer_info.insert(
                     bd_idx,
                     SurfaceLayerInfo {
                         outer_node: outer,
+                        inner_node: inner,
                         interior_zone_idx: bd.interior_zone_idx,
                     },
                 );
@@ -369,6 +391,12 @@ pub fn assemble_building_rc(
                 })
                 .sum();
             debug_assert!(cap_total >= 0.0, "boundary {bd_idx}: capacitance must be >= 0");
+            let inner_node = if n_nodes > 0 { Some(NodeId(nodes_before)) } else { None };
+            let r_zone_to_inner = if n_nodes > 0 {
+                let inner_layer = valid_layers[0];
+                let k = parallel_path_conductivity(inner_layer.conductivity_w_m_k, bd.framing_factor);
+                Some(bd.r_film_interior_m2_k_w + inner_layer.thickness_m / (2.0 * k))
+            } else { None };
             boundary_diagnostics.push(BoundaryDiagnostic {
                 boundary_idx: bd_idx,
                 ua_w_per_k: bd.area_m2 / r_total.max(1e-6),
@@ -380,7 +408,9 @@ pub fn assemble_building_rc(
                 area_m2: bd.area_m2,
                 r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
                 r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
+                r_zone_to_inner_m2_k_w: r_zone_to_inner,
                 path: RCPath::MaterialLayer,
+                inner_node,
             });
         } else if !same_zone {
             // Fallback: single lumped resistance. fallback_r_m2_k_w is typically
@@ -403,7 +433,9 @@ pub fn assemble_building_rc(
                 area_m2: bd.area_m2,
                 r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
                 r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
+                r_zone_to_inner_m2_k_w: None,
                 path: RCPath::FallbackR,
+                inner_node: None,
             });
         }
     }
@@ -456,6 +488,7 @@ pub fn assemble_building_rc(
 
     // Look up outdoor column by node ID in the sorted external_nodes list.
     let outdoor_col = rc.external_nodes.iter().position(|&n| n == outdoor_node);
+    let ground_col = rc.external_nodes.iter().position(|&n| n == ground_node);
 
     let (a_c, b_ext) = rc
         .build_matrices()
@@ -505,6 +538,7 @@ pub fn assemble_building_rc(
             zone_state_rows,
             layer_info,
             outdoor_col,
+            ground_col,
             n_ext,
             node_capacitances,
         },
@@ -559,12 +593,13 @@ impl RcGraphState {
     /// When `same_zone` is true (adjacent/party wall), keep only the inner half
     /// of layers as a dead-end "fin" of thermal mass (matches OCHRE's halving).
     /// For odd layer counts, the middle layer is kept with halved capacitance.
-    /// Returns `None` if no capacitor nodes remain.
+    /// Returns `None` if no capacitor nodes remain, or `Some((inner, outer))`
+    /// where inner is closest to zone air and outer is closest to exterior.
     fn build_layered_boundary(
         &mut self,
         layers: &[&LayerInput],
         params: &BoundaryParams,
-    ) -> Option<NodeId> {
+    ) -> Option<(NodeId, NodeId)> {
         let mut effective_layers: Vec<&LayerInput> = layers.to_vec();
         let mut halve_last_cap = false;
 
@@ -629,7 +664,7 @@ impl RcGraphState {
             self.add_resistance(layer_nodes[n_layers - 1], params.exterior_node, r_ext);
         }
 
-        Some(layer_nodes[n_layers - 1])
+        Some((layer_nodes[0], layer_nodes[n_layers - 1]))
     }
 
     /// Build RC nodes from pre-computed OCHRE layer data.
@@ -641,12 +676,13 @@ impl RcGraphState {
     /// 4. Scale to absolute values using boundary area
     /// 5. Add film resistances, create nodes, wire resistances
     ///
-    /// Returns the outermost layer NodeId, or None if no capacitor nodes remain.
+    /// Returns `None` if no capacitor nodes remain, or `Some((inner, outer))`
+    /// where inner is closest to zone air and outer is closest to exterior.
     fn build_precomputed_boundary(
         &mut self,
         layers: &[PrecomputedRCLayer],
         params: &BoundaryParams,
-    ) -> Option<NodeId> {
+    ) -> Option<(NodeId, NodeId)> {
         if layers.is_empty() {
             return None;
         }
@@ -756,7 +792,7 @@ impl RcGraphState {
             );
         }
 
-        Some(layer_nodes[n_caps - 1])
+        Some((layer_nodes[0], layer_nodes[n_caps - 1]))
     }
 }
 
@@ -781,7 +817,7 @@ const SOFTWOOD_CONDUCTIVITY_W_M_K: f64 = 0.144;
 ///
 /// This is the area-weighted conductivity for a layer with fraction `ff` of wood studs
 /// and `(1 - ff)` of insulation cavity. Reference: ASHRAE Handbook of Fundamentals Ch. 27.3.
-fn parallel_path_conductivity(k_cavity_w_m_k: f64, framing_factor: Option<f64>) -> f64 {
+pub fn parallel_path_conductivity(k_cavity_w_m_k: f64, framing_factor: Option<f64>) -> f64 {
     match framing_factor {
         Some(ff) if ff > 0.0 && ff < 1.0 => {
             ff * SOFTWOOD_CONDUCTIVITY_W_M_K + (1.0 - ff) * k_cavity_w_m_k

@@ -12,6 +12,29 @@ pub enum BoundaryCategory {
     InternalMass,
 }
 
+/// Per-boundary info needed for conduction heat flow diagnostics.
+///
+/// Computes convective heat transfer from the interior surface to zone air:
+///   `T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
+///   `Q_conv = (T_surface - T_zone) × area_m2 / r_film_int_m2_k_w`
+///
+/// This matches OCHRE's `H_{surface}_{zone}` energy flow variable.
+#[derive(Debug, Clone)]
+pub struct BoundaryDiagnosticInfo {
+    /// State vector index of the innermost RC node for this boundary.
+    pub inner_state_index: usize,
+    /// Boundary area [m²].
+    pub area_m2: f64,
+    /// Interior film resistance [m²·K/W].
+    pub r_film_int_m2_k_w: f64,
+    /// Fraction of node temperature in the surface temperature estimate.
+    /// `T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
+    /// where `radiation_frac = R_film / (R_film + R_inner_half_layer)`.
+    pub radiation_frac: f64,
+    /// Category for accumulation.
+    pub category: BoundaryCategory,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InfiltrationMethod {
     AshraeWindStack {
@@ -269,6 +292,8 @@ pub struct StateSpaceWiring {
     pub zone_output_indices: HashMap<ZoneId, usize>,
     pub zone_sensible_input_indices: HashMap<ZoneId, usize>,
     pub outdoor_temp_input_indices: Vec<usize>,
+    /// B-matrix columns driving ground-connected boundaries [°C].
+    pub ground_temp_input_indices: Vec<usize>,
     /// B-matrix columns carrying indoor air temperature [°C] as an external input.
     ///
     /// Empty in the standard RC topology where zone air nodes are internal states
@@ -325,6 +350,8 @@ pub struct ThermalSolverConfig {
     pub ventilation: VentilationConfig,
     /// Natural ventilation through operable windows. `None` disables the feature (default).
     pub natural_ventilation: Option<NaturalVentilationConfig>,
+    /// Per-boundary conduction diagnostics for BESTEST per-component heat gain tracking.
+    pub boundary_diagnostics: Vec<BoundaryDiagnosticInfo>,
 }
 
 impl Default for ThermalSolverConfig {
@@ -343,6 +370,7 @@ impl Default for ThermalSolverConfig {
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
+            boundary_diagnostics: Vec::new(),
         }
     }
 }

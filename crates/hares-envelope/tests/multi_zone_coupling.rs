@@ -130,6 +130,7 @@ fn build_two_zone_solver(
         zone_output_indices: HashMap::from([(ZONE1, 0), (ZONE2, 1)]),
         zone_sensible_input_indices: HashMap::from([(ZONE1, 1), (ZONE2, 2)]),
         outdoor_temp_input_indices: vec![0],
+        ground_temp_input_indices: vec![],
         indoor_temp_input_indices: vec![],
         solar_input_indices: HashMap::new(),
     };

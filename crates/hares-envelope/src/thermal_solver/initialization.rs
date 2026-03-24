@@ -25,6 +25,11 @@ pub(crate) fn initialize_steady_state(
             u[idx] = env.weather.outdoor_temp_c;
         }
     }
+    for &idx in &wiring.ground_temp_input_indices {
+        if idx < m {
+            u[idx] = env.weather.ground_temp_c;
+        }
+    }
     for &idx in &wiring.indoor_temp_input_indices {
         if idx < m {
             u[idx] = indoor_temp_c;
@@ -33,11 +38,23 @@ pub(crate) fn initialize_steady_state(
 
     // Collect zone state indices to fix as boundary conditions.
     // Sort descending so we can remove rows/cols without invalidating earlier indices.
+    // Pin each zone air node to its initial temperature from the environment.
+    // Conditioned zones use the HVAC setpoint (indoor_temp_c).
+    // Unconditioned zones (attic, garage) use their env temperature (near outdoor).
     let mut zone_fixes: Vec<(usize, f64)> = wiring
         .zone_state_indices
-        .values()
-        .filter(|&&idx| idx < n)
-        .map(|&idx| (idx, indoor_temp_c))
+        .iter()
+        .filter(|(_, idx)| **idx < n)
+        .map(|(zone_id, idx)| {
+            let idx = *idx;
+            let t = env
+                .zones
+                .iter()
+                .find(|z| z.id == *zone_id)
+                .map(|z| z.temperature_c)
+                .unwrap_or(indoor_temp_c);
+            (idx, t)
+        })
         .collect();
     zone_fixes.sort_by(|a, b| b.0.cmp(&a.0));
     zone_fixes.dedup_by_key(|f| f.0);
@@ -198,6 +215,7 @@ mod tests {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::new(),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -250,6 +268,7 @@ mod tests {
             zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
             zone_sensible_input_indices: HashMap::new(),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };
@@ -295,6 +314,7 @@ mod tests {
             zone_output_indices: HashMap::new(),
             zone_sensible_input_indices: HashMap::new(),
             outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
             indoor_temp_input_indices: vec![],
             solar_input_indices: HashMap::new(),
         };

@@ -174,6 +174,31 @@ impl ThermalSolver {
 
         std::mem::swap(&mut self.x, &mut self.rhs_buf);
         let y_next = self.model.output(&self.x, &u);
+
+        // Per-boundary convective heat gain diagnostics.
+        // T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone
+        // Q_conv = (T_surface - T_zone) × A / R_film_int
+        if !self.config.boundary_diagnostics.is_empty() {
+            let zone_output_idx = self.wiring.zone_output_indices
+                .get(&self.config.indoor_zone_id)
+                .copied()
+                .unwrap_or(0);
+            let t_zone = y_next[zone_output_idx];
+            for diag in &self.config.boundary_diagnostics {
+                let t_node = self.x[diag.inner_state_index];
+                let t_surface = diag.radiation_frac * t_node
+                    + (1.0 - diag.radiation_frac) * t_zone;
+                let q = (t_surface - t_zone) * diag.area_m2 / diag.r_film_int_m2_k_w;
+                match diag.category {
+                    super::config::BoundaryCategory::Wall => self.component_gains.wall_heat_gain_w += q,
+                    super::config::BoundaryCategory::Floor => self.component_gains.floor_heat_gain_w += q,
+                    super::config::BoundaryCategory::Roof => self.component_gains.roof_heat_gain_w += q,
+                    super::config::BoundaryCategory::Window => self.component_gains.window_heat_gain_w += q,
+                    super::config::BoundaryCategory::InternalMass => self.component_gains.internal_mass_heat_gain_w += q,
+                }
+            }
+        }
+
         self.last_u.clone_from(&u);
         self.last_coupling.clone_from(&self.coupling_buf);
         self.u_buf = u;

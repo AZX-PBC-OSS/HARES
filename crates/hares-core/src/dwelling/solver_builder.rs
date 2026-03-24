@@ -1,10 +1,13 @@
 //! Solver construction for the dwelling orchestrator.
 
+use std::collections::HashMap;
+
 use hares_envelope::{
-    BoundaryCategory, BuildingRC, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, ElectricalSolver,
-    ElectricalSolverConfig, ExteriorSurfaceInfo, FluidSolver, FluidSolverConfig, HumiditySolver,
-    HumiditySolverConfig, SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
-    StateSpaceWiring, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
+    BoundaryCategory, BoundaryDiagnostic, BoundaryDiagnosticInfo, BoundaryInput, BuildingRC,
+    EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, ElectricalSolver, ElectricalSolverConfig,
+    EnvelopeDiagnostics, ExteriorSurfaceInfo, FluidSolver, FluidSolverConfig, HumiditySolver,
+    HumiditySolverConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
+    StateSpaceWiring, SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
     assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
@@ -15,6 +18,326 @@ use super::conversions::{
     boundary_zone_index, building_to_boundary_inputs, building_to_zone_inputs,
     has_vented_crawlspace, shielding_str_to_class, site_type_to_terrain,
 };
+
+// ── Intermediate representation ─────────────────────────────────────────────
+
+struct NodeWiring {
+    state_row: usize,
+    b_col: usize,
+}
+
+struct WindowSolarData {
+    shgc_summer: f64,
+    shgc_winter: f64,
+    u_factor_w_m2_k: f64,
+    window_area_m2: f64,
+    transmittance_summer: f64,
+    transmittance_winter: f64,
+    radiation_frac: f64,
+}
+
+struct SolverBoundary {
+    surface_idx: usize,
+    surface_id: u32,
+    area_m2: f64,
+    boundary_category: Option<BoundaryCategory>,
+    tilt_deg: f64,
+    zone_id: ZoneId,
+    zone_idx: usize,
+    is_exterior: bool,
+    is_conditioned_interior: bool,
+    emissivity: f64,
+    solar_absorptance: f64,
+    outer_wiring: Option<NodeWiring>,
+    inner_wiring: Option<NodeWiring>,
+    exterior_rad_frac: f64,
+    exterior_rad_res_k_w: f64,
+    interior_rad_frac: f64,
+    r_film_int_m2_k_w: f64,
+    window_solar: Option<WindowSolarData>,
+    diagnostic_r_zone_to_inner: Option<f64>,
+}
+
+/// Build the intermediate `SolverBoundary` representations from building data.
+///
+/// Returns `(solver_boundaries, n_ext_surface_inputs, n_int_surface_inputs)`.
+fn build_solver_boundaries(
+    building: &Building,
+    boundary_inputs: &[BoundaryInput],
+    layer_info: &HashMap<usize, SurfaceLayerInfo>,
+    node_index: &HashMap<NodeId, usize>,
+    _: &HashMap<NodeId, f64>,
+    envelope_diagnostics: &EnvelopeDiagnostics,
+    env: &EnvironmentState,
+    n_zones: usize,
+    n_ext: usize,
+) -> (Vec<SolverBoundary>, usize, usize) {
+    // Group windows by wall they're attached to (for wall→window aggregation).
+    let mut windows_by_wall: HashMap<&str, Vec<&hares_io::hpxml::building::Window>> =
+        HashMap::new();
+    for w in &building.windows {
+        if let Some(wall_id) = w.attached_to_wall_id.as_deref() {
+            windows_by_wall.entry(wall_id).or_default().push(w);
+        }
+    }
+
+    // Index diagnostics by boundary_idx for O(1) lookup.
+    let diag_by_idx: HashMap<usize, &BoundaryDiagnostic> = envelope_diagnostics
+        .boundaries
+        .iter()
+        .map(|d| (d.boundary_idx, d))
+        .collect();
+
+    let indoor_zone_id = env.zones.first().map(|z| z.id).unwrap_or(ZoneId(1));
+
+    // Pre-count exterior surface columns so inner column offsets can be computed in one pass.
+    let n_ext_surface_inputs: usize = building
+        .boundaries
+        .iter()
+        .enumerate()
+        .filter(|(idx, bd)| {
+            bd.exterior_zone
+                .as_ref()
+                .map(|z| *z == hares_io::hpxml::ZoneType::Outdoor)
+                .unwrap_or(false)
+                && layer_info.get(idx).is_some()
+        })
+        .count();
+
+    let mut solver_boundaries = Vec::with_capacity(building.boundaries.len());
+    let mut ext_col_counter = 0_usize;
+    let mut int_col_counter = 0_usize;
+
+    for (surface_idx, boundary) in building.boundaries.iter().enumerate() {
+        let surface_id = u32::try_from(surface_idx).unwrap_or(u32::MAX);
+
+        let is_exterior = boundary
+            .exterior_zone
+            .as_ref()
+            .map(|z| *z == hares_io::hpxml::ZoneType::Outdoor)
+            .unwrap_or(false);
+
+        let is_conditioned_interior = boundary
+            .interior_zone
+            .as_ref()
+            .map(|z| *z == hares_io::hpxml::ZoneType::Conditioned)
+            .unwrap_or(false);
+
+        let zone_idx = boundary_zone_index(building, boundary.interior_zone.as_ref(), n_zones);
+        let zone_id = env
+            .zones
+            .get(zone_idx)
+            .map(|z| z.id)
+            .unwrap_or(indoor_zone_id);
+
+        // Outer wiring: exterior boundaries with RC layers.
+        let outer_wiring = if is_exterior {
+            layer_info.get(&surface_idx).and_then(|info| {
+                node_index.get(&info.outer_node).map(|&state_row| {
+                    let b_col = n_ext + ext_col_counter;
+                    ext_col_counter += 1;
+                    NodeWiring { state_row, b_col }
+                })
+            })
+        } else {
+            None
+        };
+
+        // Inner wiring: conditioned-interior boundaries with RC layers.
+        let inner_wiring = if is_conditioned_interior {
+            layer_info.get(&surface_idx).and_then(|info| {
+                node_index.get(&info.inner_node).map(|&state_row| {
+                    let b_col = n_ext + n_ext_surface_inputs + int_col_counter;
+                    int_col_counter += 1;
+                    NodeWiring { state_row, b_col }
+                })
+            })
+        } else {
+            None
+        };
+
+        // Boundary category.
+        let boundary_category = match boundary.boundary_type {
+            hares_io::hpxml::BoundaryType::Wall
+            | hares_io::hpxml::BoundaryType::FoundationWall
+            | hares_io::hpxml::BoundaryType::RimJoist => Some(BoundaryCategory::Wall),
+            hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
+            hares_io::hpxml::BoundaryType::Floor | hares_io::hpxml::BoundaryType::Slab => {
+                Some(BoundaryCategory::Floor)
+            }
+            hares_io::hpxml::BoundaryType::Window => Some(BoundaryCategory::Window),
+            hares_io::hpxml::BoundaryType::Door | hares_io::hpxml::BoundaryType::Other(_) => None,
+        };
+
+        // Tilt.
+        let tilt_deg = match boundary.boundary_type {
+            hares_io::hpxml::BoundaryType::Roof => 0.0,
+            hares_io::hpxml::BoundaryType::Slab | hares_io::hpxml::BoundaryType::Floor => 180.0,
+            _ => 90.0,
+        };
+
+        // Emissivity / absorptance (radiant barrier logic).
+        let is_attic_radiant_barrier = boundary.has_radiant_barrier
+            && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic);
+        let emissivity = boundary.emittance.unwrap_or(if is_attic_radiant_barrier {
+            EMISSIVITY_RADIANT_BARRIER
+        } else {
+            EMISSIVITY_DEFAULT
+        });
+        let solar_absorptance = boundary
+            .solar_absorptance
+            .unwrap_or(if is_attic_radiant_barrier {
+                SOLAR_ABSORPTANCE_RADIANT_BARRIER
+            } else {
+                SOLAR_ABSORPTANCE_DEFAULT
+            });
+
+        let bd_input = &boundary_inputs[surface_idx];
+        let r_film_ext = bd_input.r_film_exterior_m2_k_w;
+        let r_film_int = bd_input.r_film_interior_m2_k_w;
+
+        // Exterior radiation fraction: R_film_ext / (R_film_ext + R_outermost_half).
+        let r_outermost_half = if !bd_input.precomputed_rc.is_empty() {
+            bd_input
+                .precomputed_rc
+                .last()
+                .map(|l| l.resistance_m2_k_w / 2.0)
+                .unwrap_or(0.0)
+        } else {
+            let valid_layers: Vec<&hares_envelope::LayerInput> = bd_input
+                .material_layers
+                .iter()
+                .filter(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
+                .collect();
+            if let Some(outer) = valid_layers.last() {
+                let k = hares_envelope::parallel_path_conductivity(
+                    outer.conductivity_w_m_k,
+                    bd_input.framing_factor,
+                );
+                outer.thickness_m / (2.0 * k)
+            } else {
+                0.0
+            }
+        };
+        let (exterior_rad_frac, exterior_rad_res_k_w) =
+            if r_outermost_half > 0.0 && boundary.area_m2 > 0.0 {
+                (
+                    r_film_ext / (r_film_ext + r_outermost_half),
+                    r_film_ext / boundary.area_m2,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+
+        // Interior radiation fraction: R_film_int / (R_film_int + R_inner_half).
+        let r_inner_half = if !bd_input.precomputed_rc.is_empty() {
+            bd_input
+                .precomputed_rc
+                .first()
+                .map(|l| l.resistance_m2_k_w / 2.0)
+                .unwrap_or(0.0)
+        } else {
+            bd_input
+                .material_layers
+                .iter()
+                .find(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
+                .map(|l| {
+                    let k = hares_envelope::parallel_path_conductivity(
+                        l.conductivity_w_m_k,
+                        bd_input.framing_factor,
+                    );
+                    l.thickness_m / (2.0 * k)
+                })
+                .unwrap_or(0.0)
+        };
+        let interior_rad_frac = if r_inner_half > 0.0 {
+            r_film_int / (r_film_int + r_inner_half)
+        } else {
+            1.0
+        };
+
+        // Window solar data — only for Window boundary types.
+        // Wall boundaries receive opaque solar via ExteriorSurfaceInfo.absorptance.
+        let window_solar = if is_exterior
+            && boundary.boundary_type == hares_io::hpxml::BoundaryType::Window
+        {
+            let win_match = building.windows.iter().find(|w| w.id == boundary.id);
+            win_match.map(|win| {
+                let u_factor = win.u_factor_w_m2_k.unwrap_or(5.0);
+                let base_shgc = win.shgc.unwrap_or(0.4);
+                let shgc_summer = base_shgc * win.interior_shading_fraction;
+                let shgc_winter = base_shgc * win.winter_shading_fraction;
+                let r_total = 1.0 / u_factor.max(0.01);
+                let r_glass = (r_total - r_film_int - r_film_ext).max(0.0);
+                let (transmittance_summer, radiation_frac) =
+                    hares_physics::solar::calculate_window_parameters(
+                        shgc_summer,
+                        u_factor,
+                        r_glass,
+                    );
+                let (transmittance_winter, _) = hares_physics::solar::calculate_window_parameters(
+                    shgc_winter,
+                    u_factor,
+                    r_glass,
+                );
+                let total_window_area: f64 = if boundary.boundary_type
+                    == hares_io::hpxml::BoundaryType::Window
+                {
+                    // Window boundary: use its own area directly.
+                    boundary.area_m2
+                } else {
+                    // Wall boundary: sum all attached windows' areas.
+                    building
+                        .windows
+                        .iter()
+                        .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
+                        .map(|w| w.area_m2)
+                        .sum()
+                };
+                WindowSolarData {
+                    shgc_summer,
+                    shgc_winter,
+                    u_factor_w_m2_k: u_factor,
+                    window_area_m2: total_window_area,
+                    transmittance_summer,
+                    transmittance_winter,
+                    radiation_frac,
+                }
+            })
+        } else {
+            None
+        };
+
+        // Diagnostic r_zone_to_inner from envelope diagnostics.
+        let diagnostic_r_zone_to_inner = diag_by_idx
+            .get(&surface_idx)
+            .and_then(|d| d.r_zone_to_inner_m2_k_w);
+
+        solver_boundaries.push(SolverBoundary {
+            surface_idx,
+            surface_id,
+            area_m2: boundary.area_m2,
+            boundary_category,
+            tilt_deg,
+            zone_id,
+            zone_idx,
+            is_exterior,
+            is_conditioned_interior,
+            emissivity,
+            solar_absorptance,
+            outer_wiring,
+            inner_wiring,
+            exterior_rad_frac,
+            exterior_rad_res_k_w,
+            interior_rad_frac,
+            r_film_int_m2_k_w: r_film_int,
+            window_solar,
+            diagnostic_r_zone_to_inner,
+        });
+    }
+
+    (solver_boundaries, n_ext_surface_inputs, int_col_counter)
+}
 
 /// Annual weather averages needed for film coefficient computation.
 pub(crate) struct WeatherAverages {
@@ -69,7 +392,7 @@ pub(crate) fn build_default_solvers(
     let zone_capacitances = derive_zone_capacitances(&zone_inputs);
 
     // Build the RC network from material layers where available.
-    let (rc, _envelope_diagnostics) =
+    let (rc, envelope_diagnostics) =
         assemble_building_rc(&boundary_inputs, n_zones, &zone_capacitances)
             .map_err(HaresError::Envelope)?;
 
@@ -80,48 +403,28 @@ pub(crate) fn build_default_solvers(
         zone_state_rows,
         layer_info,
         outdoor_col,
+        ground_col,
         n_ext,
         node_capacitances,
         ..
     } = rc;
     let n_states = a_c.nrows();
 
-    // Pre-scan: identify exterior surfaces with RC layers that need per-surface
-    // B-matrix input columns for solar/LWR injection at the outer node.
-    let mut ext_surface_columns: Vec<(usize, hares_envelope::NodeId, usize)> = Vec::new();
-    for (surface_idx, boundary) in building.boundaries.iter().enumerate() {
-        let is_exterior = boundary
-            .exterior_zone
-            .as_ref()
-            .map(|z| *z == hares_io::hpxml::ZoneType::Outdoor)
-            .unwrap_or(false);
-        if !is_exterior {
-            continue;
-        }
-        if let Some(info) = layer_info.get(&surface_idx) {
-            if let Some(&state_row) = node_index.get(&info.outer_node) {
-                let col_offset = ext_surface_columns.len();
-                ext_surface_columns.push((surface_idx, info.outer_node, state_row));
-                let _ = col_offset; // used below when building B_c
-            }
-        }
-    }
-    let n_ext_surface_inputs = ext_surface_columns.len();
+    // Build the intermediate SolverBoundary representations.
+    let (solver_boundaries, n_ext_surface_inputs, n_int_surface_inputs) = build_solver_boundaries(
+        building,
+        &boundary_inputs,
+        &layer_info,
+        &node_index,
+        &node_capacitances,
+        &envelope_diagnostics,
+        env,
+        n_zones,
+        n_ext,
+    );
 
-    // Build surface_idx → B-matrix column index map.
-    let ext_surface_col_map: std::collections::HashMap<usize, usize> = ext_surface_columns
-        .iter()
-        .enumerate()
-        .map(|(i, &(surface_idx, _, _))| (surface_idx, n_ext + i))
-        .collect();
-
-    // Augment B_c: [B_ext | per-surface solar/LWR columns | zone sensible heat columns].
-    //
-    // Column layout:
-    //   [0..n_ext)                                         External driving (outdoor, ground temps)
-    //   [n_ext..n_ext+n_ext_surface_inputs)                Per-exterior-surface solar/LWR injection
-    //   [n_ext+n_ext_surface_inputs..n_ext+n_ext_surface_inputs+n_zones)  Zone sensible heat
-    let n_total_inputs = n_ext + n_ext_surface_inputs + n_zones;
+    // Augment B_c: [B_ext | ext-surface columns | int-surface columns | zone sensible heat].
+    let n_total_inputs = n_ext + n_ext_surface_inputs + n_int_surface_inputs + n_zones;
     let mut b_c = DMatrix::<f64>::zeros(n_states, n_total_inputs);
 
     // Copy B_ext columns.
@@ -131,18 +434,34 @@ pub(crate) fn build_default_solvers(
         }
     }
 
-    // Per-surface injection columns: gain = 1/C_outer_node.
-    for (i, &(_, outer_node, state_row)) in ext_surface_columns.iter().enumerate() {
-        let c_node = node_capacitances
-            .get(&outer_node)
-            .copied()
-            .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K)
-            .max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
-        b_c[(state_row, n_ext + i)] = 1.0 / c_node;
+    // Per-exterior-surface injection columns: gain = 1/C_outer_node.
+    for sb in &solver_boundaries {
+        if let Some(ref ow) = sb.outer_wiring {
+            let info = &layer_info[&sb.surface_idx];
+            let c_node = node_capacitances
+                .get(&info.outer_node)
+                .copied()
+                .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K)
+                .max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
+            b_c[(ow.state_row, ow.b_col)] = 1.0 / c_node;
+        }
     }
 
-    // Zone sensible heat columns (shifted by n_ext_surface_inputs).
-    let zone_input_offset = n_ext + n_ext_surface_inputs;
+    // Per-interior-surface injection columns: gain = 1/C_inner_node.
+    for sb in &solver_boundaries {
+        if let Some(ref iw) = sb.inner_wiring {
+            let info = &layer_info[&sb.surface_idx];
+            let c_node = node_capacitances
+                .get(&info.inner_node)
+                .copied()
+                .unwrap_or(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K)
+                .max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
+            b_c[(iw.state_row, iw.b_col)] = 1.0 / c_node;
+        }
+    }
+
+    // Zone sensible heat columns.
+    let zone_input_offset = n_ext + n_ext_surface_inputs + n_int_surface_inputs;
     for (zone_idx, &state_row) in zone_state_rows.iter().enumerate() {
         b_c[(state_row, zone_input_offset + zone_idx)] =
             1.0 / zone_capacitances[zone_idx].max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
@@ -163,11 +482,6 @@ pub(crate) fn build_default_solvers(
         .map_err(|err| HaresError::Envelope(format!("state-space setup failed: {err}")))?;
 
     // --- ThermalSolverConfig ---
-    // Determine outdoor node column index in B_ext (external nodes sorted ascending by NodeId).
-    // OUTDOOR_NODE = NodeId(10_000), GROUND_NODE = NodeId(10_001).
-    // Collect the unique external nodes actually used, sorted.
-    // outdoor_col already computed by assemble_building_rc.
-
     let mut wiring = StateSpaceWiring::default();
     let mut thermal_cfg = ThermalSolverConfig {
         indoor_zone_id: env
@@ -194,175 +508,127 @@ pub(crate) fn build_default_solvers(
     } else {
         wiring.outdoor_temp_input_indices = vec![];
     }
+    if let Some(col) = ground_col {
+        wiring.ground_temp_input_indices = vec![col];
+    } else {
+        wiring.ground_temp_input_indices = vec![];
+    }
 
-    // Build window lookup: wall_id → first Window attached to that wall.
-    // For solar properties we need window SHGC/U-factor matched to the boundary
-    // that the window is mounted on (via attached_to_wall_id).
-    let window_by_wall_id: std::collections::HashMap<&str, &hares_io::hpxml::building::Window> =
-        building
-            .windows
-            .iter()
-            .filter_map(|w| w.attached_to_wall_id.as_deref().map(|wall_id| (wall_id, w)))
-            .collect();
+    let n_iter = ((dt_s / 300.0).ceil() as u32).max(1);
 
-    // Populate exterior surfaces for longwave radiation; use outermost layer node
-    // (or zone air node for boundaries without material layers) as the surface node.
-    for (surface_idx, boundary) in building.boundaries.iter().enumerate() {
-        let is_exterior = boundary
-            .exterior_zone
-            .as_ref()
-            .map(|z| *z == hares_io::hpxml::ZoneType::Outdoor)
-            .unwrap_or(false);
-        if !is_exterior {
-            continue;
-        }
-        let zone_idx = boundary_zone_index(building, boundary.interior_zone.as_ref(), n_zones);
-        let zone_id = env
-            .zones
-            .get(zone_idx)
-            .map(|z| z.id)
-            .unwrap_or(thermal_cfg.indoor_zone_id);
+    // Single pass: populate exterior surfaces, window properties, interior surfaces, diagnostics.
+    let mut surfaces_by_zone: HashMap<ZoneId, Vec<hares_envelope::InteriorSurfaceInfo>> =
+        HashMap::new();
 
-        // Use the outermost layer node if this boundary has material layers.
-        // Surfaces with RC layers get a dedicated B-matrix input column that
-        // injects heat at the exterior node (gain = 1/C_outer_node), so solar/LWR
-        // conducts inward through the wall resistance chain.
-        // Surfaces without layers fall back to the zone air node + zone column.
-        let (state_index, input_index) = if let Some(&col) = ext_surface_col_map.get(&surface_idx) {
-            let info = &layer_info[&surface_idx];
-            let state_row = node_index.get(&info.outer_node).copied().unwrap_or(0);
-            (state_row, col)
-        } else {
-            let si = *wiring.zone_state_indices.get(&zone_id).unwrap_or(&0);
-            let ii = *wiring
-                .zone_sensible_input_indices
-                .get(&zone_id)
-                .unwrap_or(&(zone_input_offset + zone_idx));
-            (si, ii)
-        };
-
-        // OCHRE Envelope.py:221-222 gates radiant-barrier defaults on attic zone.
-        let is_attic_radiant_barrier = boundary.has_radiant_barrier
-            && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic);
-        let emissivity = boundary.emittance.unwrap_or(if is_attic_radiant_barrier {
-            EMISSIVITY_RADIANT_BARRIER
-        } else {
-            EMISSIVITY_DEFAULT
-        });
-        let solar_absorptance = boundary
-            .solar_absorptance
-            .unwrap_or(if is_attic_radiant_barrier {
-                SOLAR_ABSORPTANCE_RADIANT_BARRIER
+    for sb in &solver_boundaries {
+        if sb.is_exterior {
+            // Resolve state/input indices: use outer wiring if available, else zone air.
+            let (state_index, input_index) = if let Some(ref ow) = sb.outer_wiring {
+                (ow.state_row, ow.b_col)
             } else {
-                SOLAR_ABSORPTANCE_DEFAULT
+                let si = *wiring.zone_state_indices.get(&sb.zone_id).unwrap_or(&0);
+                let ii = *wiring
+                    .zone_sensible_input_indices
+                    .get(&sb.zone_id)
+                    .unwrap_or(&(zone_input_offset + sb.zone_idx));
+                (si, ii)
+            };
+
+            thermal_cfg.exterior_surfaces.push(ExteriorSurfaceInfo {
+                surface_id: sb.surface_id,
+                state_index,
+                input_index,
+                area_m2: sb.area_m2,
+                emissivity: sb.emissivity,
+                tilt_deg: sb.tilt_deg,
+                rad_frac: sb.exterior_rad_frac,
+                rad_res_k_w: sb.exterior_rad_res_k_w,
+                n_iter,
+                absorptance: sb.solar_absorptance,
+                boundary_category: sb.boundary_category,
             });
-        let tilt_deg = match boundary.boundary_type {
-            hares_io::hpxml::BoundaryType::Roof => 0.0,
-            hares_io::hpxml::BoundaryType::Slab | hares_io::hpxml::BoundaryType::Floor => 180.0,
-            _ => 90.0,
-        };
-        // Compute radiation fraction and resistance for iterative LWR solver.
-        // rad_frac = R_film / (R_film + R_outermost_half) [m²·K/W]
-        // rad_res  = R_film / area [K/W]
-        let bd_input = &boundary_inputs[surface_idx];
-        let r_film = bd_input.r_film_exterior_m2_k_w;
-        let r_outermost_half = if !bd_input.precomputed_rc.is_empty() {
-            bd_input
-                .precomputed_rc
-                .last()
-                .map(|l| l.resistance_m2_k_w / 2.0)
-                .unwrap_or(0.0)
-        } else {
-            let valid_layers: Vec<&hares_envelope::LayerInput> = bd_input
-                .material_layers
-                .iter()
-                .filter(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
-                .collect();
-            if let Some(outer) = valid_layers.last() {
-                outer.thickness_m / (2.0 * outer.conductivity_w_m_k)
-            } else {
-                // No material layers: single-resistance boundary, skip iteration.
-                0.0
-            }
-        };
-        let (rad_frac, rad_res_k_w) = if r_outermost_half > 0.0 {
-            (
-                r_film / (r_film + r_outermost_half),
-                r_film / boundary.area_m2,
-            )
-        } else {
-            (0.0, 0.0)
-        };
-        // OCHRE Envelope.py:207: iterations = ceil(time_res / 5 min).max(1)
-        let n_iter = ((dt_s / 300.0).ceil() as u32).max(1);
-        let surface_id = u32::try_from(surface_idx).unwrap_or(u32::MAX);
-        let boundary_category = match boundary.boundary_type {
-            hares_io::hpxml::BoundaryType::Wall
-            | hares_io::hpxml::BoundaryType::FoundationWall
-            | hares_io::hpxml::BoundaryType::RimJoist => Some(BoundaryCategory::Wall),
-            hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
-            hares_io::hpxml::BoundaryType::Floor
-            | hares_io::hpxml::BoundaryType::Slab => Some(BoundaryCategory::Floor),
-            hares_io::hpxml::BoundaryType::Window => Some(BoundaryCategory::Window),
-            hares_io::hpxml::BoundaryType::Door
-            | hares_io::hpxml::BoundaryType::Other(_) => None,
-        };
-        thermal_cfg.exterior_surfaces.push(ExteriorSurfaceInfo {
-            surface_id,
-            state_index,
-            input_index,
-            area_m2: boundary.area_m2,
-            emissivity,
-            tilt_deg,
-            rad_frac,
-            rad_res_k_w,
-            n_iter,
-            absorptance: solar_absorptance,
-            boundary_category,
-        });
-        // Route solar irradiance to the zone's sensible heat input column.
-        wiring.solar_input_indices.insert(surface_id, input_index);
+            wiring
+                .solar_input_indices
+                .insert(sb.surface_id, input_index);
 
-        // Windows use the IAM-corrected path via solar_input_indices + window_properties.
-        // Opaque surfaces receive solar gain via apply_exterior_solar_inputs (ExteriorSurfaceInfo.absorptance).
-        if let Some(win) = window_by_wall_id.get(boundary.id.as_str()) {
-            let u_factor = win.u_factor_w_m2_k.unwrap_or(5.0);
-            let base_shgc = win.shgc.unwrap_or(0.4);
-            let summer_shgc = base_shgc * win.interior_shading_fraction;
-            let winter_shgc = base_shgc * win.winter_shading_fraction;
-            let r_total = 1.0 / u_factor.max(0.01);
-            let r_glass =
-                (r_total - bd_input.r_film_interior_m2_k_w - bd_input.r_film_exterior_m2_k_w)
-                    .max(0.0);
-            let (transmittance, radiation_frac) = hares_physics::solar::calculate_window_parameters(
-                summer_shgc,
-                u_factor,
-                r_glass,
-            );
-            let (winter_transmittance, _) = hares_physics::solar::calculate_window_parameters(
-                winter_shgc,
-                u_factor,
-                r_glass,
-            );
-            // Total window area on this wall (sum of all attached windows).
-            let total_window_area: f64 = building
-                .windows
-                .iter()
-                .filter(|w| w.attached_to_wall_id.as_deref() == Some(boundary.id.as_str()))
-                .map(|w| w.area_m2)
-                .sum();
-            thermal_cfg.window_properties.insert(
-                surface_id,
-                WindowSolarProperties {
-                    shgc: summer_shgc,
-                    winter_shgc,
-                    u_factor_w_m2_k: u_factor,
-                    area_m2: total_window_area,
-                    transmittance,
-                    winter_transmittance,
-                    radiation_frac,
+            if let Some(ref ws) = sb.window_solar {
+                thermal_cfg.window_properties.insert(
+                    sb.surface_id,
+                    WindowSolarProperties {
+                        shgc: ws.shgc_summer,
+                        winter_shgc: ws.shgc_winter,
+                        u_factor_w_m2_k: ws.u_factor_w_m2_k,
+                        area_m2: ws.window_area_m2,
+                        transmittance: ws.transmittance_summer,
+                        winter_transmittance: ws.transmittance_winter,
+                        radiation_frac: ws.radiation_frac,
+                    },
+                );
+                thermal_cfg
+                    .window_zone_ids
+                    .insert(sb.surface_id, sb.zone_id);
+            }
+        }
+
+        if sb.is_conditioned_interior && sb.area_m2 > 0.0 {
+            let (state_idx, input_idx) = if let Some(ref iw) = sb.inner_wiring {
+                (iw.state_row, iw.b_col)
+            } else {
+                let si = *wiring.zone_state_indices.get(&sb.zone_id).unwrap_or(&0);
+                let ii = *wiring
+                    .zone_sensible_input_indices
+                    .get(&sb.zone_id)
+                    .unwrap_or(&(zone_input_offset + sb.zone_idx));
+                (si, ii)
+            };
+
+            let is_floor = sb.boundary_category == Some(BoundaryCategory::Floor);
+
+            surfaces_by_zone.entry(sb.zone_id).or_default().push(
+                hares_envelope::InteriorSurfaceInfo {
+                    state_index: state_idx,
+                    input_index: input_idx,
+                    area_m2: sb.area_m2,
+                    emissivity: sb.emissivity,
+                    radiation_frac: sb.interior_rad_frac,
+                    solar_absorptance: if is_floor { 0.6 } else { 0.5 },
+                    is_floor,
                 },
             );
+        }
+
+        if let Some(cat) = sb.boundary_category {
+            if let Some(ref iw) = sb.inner_wiring {
+                let r_film = sb.r_film_int_m2_k_w;
+                let r_zone_to_inner = sb.diagnostic_r_zone_to_inner.unwrap_or(r_film);
+                let radiation_frac = if r_zone_to_inner > 0.0 {
+                    r_film / r_zone_to_inner
+                } else {
+                    1.0
+                };
+                thermal_cfg
+                    .boundary_diagnostics
+                    .push(BoundaryDiagnosticInfo {
+                        inner_state_index: iw.state_row,
+                        area_m2: sb.area_m2,
+                        r_film_int_m2_k_w: r_film,
+                        radiation_frac,
+                        category: cat,
+                    });
+            }
+        }
+    }
+
+    // Group surfaces_by_zone into interior_lwr_zones.
+    for (zid, surfaces) in surfaces_by_zone {
+        if surfaces.len() >= 2 {
+            let mut zone_cfg = hares_envelope::InteriorLwrZoneConfig {
+                zone_id: zid,
+                surfaces,
+                scriptf: None,
+            };
+            zone_cfg.compute_scriptf();
+            thermal_cfg.interior_lwr_zones.push(zone_cfg);
         }
     }
 
@@ -387,9 +653,9 @@ pub(crate) fn build_default_solvers(
         let resolved_ach50: Option<f64> = building.infiltration_ach50.or_else(|| {
             let volume_m3 = building.conditioned_volume_m3.unwrap_or(400.0);
             let cfm50 = building.infiltration_cfm50.or_else(|| {
-                building.infiltration_ela_cm2.map(|ela_cm2| {
-                    ela_cm2 * 0.0524 * 50.0_f64.powf(N_I_DEFAULT)
-                })
+                building
+                    .infiltration_ela_cm2
+                    .map(|ela_cm2| ela_cm2 * 0.0524 * 50.0_f64.powf(N_I_DEFAULT))
             })?;
             // 1 ft³ = 0.0283168 m³  →  volume_ft3 = volume_m3 / 0.0283168 = volume_m3 × 35.3147
             let volume_ft3 = volume_m3 * 35.3147;
@@ -555,12 +821,9 @@ pub(crate) fn build_default_solvers(
         if supply_leakage_frac > 0.0 || return_leakage_frac > 0.0 {
             let capacity_w = building.hvac_capacity_w.unwrap_or(0.0);
             if capacity_w > 0.0 {
-                let fan_flow_m3_s =
-                    (capacity_w / W_PER_TON) * AIRFLOW_CFM_PER_TON * CFM_TO_M3_S;
-                thermal_cfg.supply_duct_leakage_m3_s =
-                    supply_leakage_frac * fan_flow_m3_s;
-                thermal_cfg.return_duct_leakage_m3_s =
-                    return_leakage_frac * fan_flow_m3_s;
+                let fan_flow_m3_s = (capacity_w / W_PER_TON) * AIRFLOW_CFM_PER_TON * CFM_TO_M3_S;
+                thermal_cfg.supply_duct_leakage_m3_s = supply_leakage_frac * fan_flow_m3_s;
+                thermal_cfg.return_duct_leakage_m3_s = return_leakage_frac * fan_flow_m3_s;
             }
         }
     }
@@ -579,7 +842,9 @@ pub(crate) fn build_default_solvers(
                 w.attached_to_wall_id
                     .as_ref()
                     .and_then(|wall_id| building.boundaries.iter().find(|b| b.id == *wall_id))
-                    .map(|b| b.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Conditioned))
+                    .map(|b| {
+                        b.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Conditioned)
+                    })
                     .unwrap_or(false)
             })
             .map(|w| w.area_m2 * w.fraction_operable)
@@ -588,7 +853,9 @@ pub(crate) fn build_default_solvers(
             let open_area = total_operable_area * 0.5 * 0.2;
             let ceiling_h = building.ceiling_height_m.unwrap_or(2.5);
             let bldg_h = ceiling_h
-                * building.zones.iter()
+                * building
+                    .zones
+                    .iter()
                     .filter(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
                     .count()
                     .max(1) as f64;
@@ -598,7 +865,8 @@ pub(crate) fn build_default_solvers(
                 stack_coeff: stack,
                 wind_coeff: wind,
                 t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
-                max_outdoor_humidity_ratio: NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                max_outdoor_humidity_ratio:
+                    NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
             });
         }
     }
@@ -717,18 +985,20 @@ mod tests {
         let ela_cm2 = Some(200.0_f64);
 
         let resolved = ach50_direct.or_else(|| {
-            let cfm50_val = cfm50.or_else(|| {
-                ela_cm2.map(|ela| ela * 0.0524 * 50.0_f64.powf(N_I_DEFAULT))
-            })?;
+            let cfm50_val =
+                cfm50.or_else(|| ela_cm2.map(|ela| ela * 0.0524 * 50.0_f64.powf(N_I_DEFAULT)))?;
             Some((cfm50_val * 60.0) / volume_ft3)
         });
-        assert_eq!(resolved, Some(7.0), "ACH50 should win when all three are present");
+        assert_eq!(
+            resolved,
+            Some(7.0),
+            "ACH50 should win when all three are present"
+        );
 
         // Only CFM50 provided.
         let resolved_cfm = None::<f64>.or_else(|| {
-            let cfm50_val = Some(600.0_f64).or_else(|| {
-                None::<f64>.map(|ela| ela * 0.0524 * 50.0_f64.powf(N_I_DEFAULT))
-            })?;
+            let cfm50_val = Some(600.0_f64)
+                .or_else(|| None::<f64>.map(|ela| ela * 0.0524 * 50.0_f64.powf(N_I_DEFAULT)))?;
             Some((cfm50_val * 60.0) / volume_ft3)
         });
         let expected_from_cfm = (600.0 * 60.0) / volume_ft3;
@@ -739,9 +1009,8 @@ mod tests {
 
         // Only ELA provided.
         let resolved_ela = None::<f64>.or_else(|| {
-            let cfm50_val = None::<f64>.or_else(|| {
-                Some(150.0_f64).map(|ela| ela * 0.0524 * 50.0_f64.powf(N_I_DEFAULT))
-            })?;
+            let cfm50_val = None::<f64>
+                .or_else(|| Some(150.0_f64).map(|ela| ela * 0.0524 * 50.0_f64.powf(N_I_DEFAULT)))?;
             Some((cfm50_val * 60.0) / volume_ft3)
         });
         let cfm50_from_ela = 150.0_f64 * 0.0524 * 50.0_f64.powf(N_I_DEFAULT);

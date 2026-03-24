@@ -81,59 +81,69 @@ pub fn building_to_boundary_inputs(
                 .unwrap_or(DEFAULT_R_M2_K_W)
                 .max(1e-6);
 
-            // Try LUT lookup for precomputed RC layers.
-            let precomputed_rc = envelope_lut
-                .and_then(|lut| {
-                    let boundary_name = bd
-                        .lut_boundary_name
-                        .as_deref()
-                        .or_else(|| {
-                            resolve_boundary_name(
-                                &bd.boundary_type,
-                                bd.interior_zone.as_ref(),
-                                bd.exterior_zone.as_ref(),
-                            )
-                        })?;
-                    let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
-                        let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
-                        if sum > 0.0 { Some(sum) } else { None }
-                    });
-                    let result = lut.lookup(
-                        boundary_name,
-                        bd.construction_type.as_deref(),
-                        bd.finish_type.as_deref(),
-                        bd.insulation_details.as_deref(),
-                        r_value,
-                    );
-                    if result.is_none() {
+            // Try LUT lookup for precomputed RC layers — skip when the boundary
+            // has explicit material layers (BESTEST synthetic configs define their own
+            // layer stack which must not be overridden by the LUT).
+            // Skip LUT when the boundary has explicit material layers (BESTEST
+            // synthetic configs define their own layer stack).
+            let precomputed_rc = if !bd.material_layers.is_empty() {
+                Vec::new()
+            } else {
+                envelope_lut
+                    .and_then(|lut| {
+                        let boundary_name = bd
+                            .lut_boundary_name
+                            .as_deref()
+                            .or_else(|| {
+                                resolve_boundary_name(
+                                    &bd.boundary_type,
+                                    bd.interior_zone.as_ref(),
+                                    bd.exterior_zone.as_ref(),
+                                )
+                            })?;
+                        let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
+                            let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
+                            if sum > 0.0 { Some(sum) } else { None }
+                        });
+                        let result = lut.lookup(
+                            boundary_name,
+                            bd.construction_type.as_deref(),
+                            bd.finish_type.as_deref(),
+                            bd.insulation_details.as_deref(),
+                            r_value,
+                        );
+                        if result.is_none() {
+                            tracing::debug!(
+                                boundary = boundary_name,
+                                construction = ?bd.construction_type,
+                                finish = ?bd.finish_type,
+                                insulation = ?bd.insulation_details,
+                                r_value = ?r_value,
+                                "envelope LUT lookup miss"
+                            );
+                        }
+                        let result = result?;
                         tracing::debug!(
                             boundary = boundary_name,
-                            construction = ?bd.construction_type,
-                            finish = ?bd.finish_type,
-                            insulation = ?bd.insulation_details,
-                            r_value = ?r_value,
-                            "envelope LUT lookup miss"
+                            layers = result.layers.len(),
+                            matched_type = %result.matched_boundary_type,
+                            "envelope LUT match"
                         );
-                    }
-                    let result = result?;
-                    tracing::debug!(
-                        boundary = boundary_name,
-                        layers = result.layers.len(),
-                        matched_type = %result.matched_boundary_type,
-                        "envelope LUT match"
-                    );
-                    Some(
-                        result
+                        // LUT layers are exterior→interior (OCHRE CSV convention).
+                        // RC builder expects interior→exterior, so reverse.
+                        let mut layers: Vec<_> = result
                             .layers
                             .into_iter()
                             .map(|l| PrecomputedRCLayer {
                                 resistance_m2_k_w: l.resistance_m2_k_w,
                                 capacitance_kj_m2_k: l.capacitance_kj_m2_k,
                             })
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default();
+                            .collect();
+                        layers.reverse();
+                        Some(layers)
+                    })
+                    .unwrap_or_default()
+            };
 
             // Window U-factor decomposition: EnergyPlus Simple Window Model Step 1.
             // Overrides fallback_r and film resistances for window boundaries.

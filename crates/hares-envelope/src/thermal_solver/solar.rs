@@ -34,7 +34,6 @@ impl ThermalSolver {
                 let transmitted_total_w = transmitted_beam_w + transmitted_diffuse_w;
 
                 // Absorbed glass heat (inward-flowing fraction) → zone air node.
-                // This is convective heat from the glass pane, not radiation to surfaces.
                 debug_assert!(
                     win.shgc >= win.transmittance - 1e-6,
                     "SHGC ({}) < transmittance ({}): check window config",
@@ -42,11 +41,20 @@ impl ThermalSolver {
                 );
                 let absorbed_inward = (win.shgc - win.transmittance).max(0.0);
                 let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
-                u[idx] += absorbed_zone_w;
+
+                // Window solar (absorbed + transmitted) → zone air node directly.
+                // Unlike opaque solar (which goes to the wall's exterior RC node),
+                // window gains bypass the wall assembly and heat zone air.
+                // Find the zone air input index for this window's zone.
+                let zone_id = self.config.window_zone_ids.get(&irr.surface_id).copied();
+                let air_idx = zone_id
+                    .and_then(|zid| self.wiring.zone_sensible_input_indices.get(&zid).copied())
+                    .unwrap_or(idx);
+
+                u[air_idx] += absorbed_zone_w;
 
                 // Distribute transmitted solar to interior surfaces if configured,
-                // otherwise inject directly into zone air (backward-compatible).
-                let zone_id = self.config.window_zone_ids.get(&irr.surface_id).copied();
+                // otherwise inject directly into zone air.
                 let distributed = match zone_id {
                     Some(zid) => self.distribute_transmitted_solar(
                         u,
@@ -58,7 +66,7 @@ impl ThermalSolver {
                 };
 
                 if !distributed {
-                    u[idx] += transmitted_total_w;
+                    u[air_idx] += transmitted_total_w;
                 }
             }
         }
@@ -100,19 +108,22 @@ impl ThermalSolver {
             &mut self.solar_absorbed_buf,
         );
 
-        // Inject absorbed solar into each surface's input vector slot.
-        for (s, &q) in zone_cfg.surfaces.iter().zip(self.solar_absorbed_buf.iter()) {
-            if s.input_index < u.len() && q > 0.0 {
-                u[s.input_index] += q;
+        // Split absorbed solar via radiation_frac (OCHRE RC voltage-divider model):
+        //   to_surface_node = absorbed × radiation_frac     (heat into RC mass node)
+        //   to_zone_air     = absorbed × (1 - radiation_frac) (bypasses to zone air)
+        // For thin interior surfaces (drywall), radiation_frac ≈ 0.15 → ~85% to air.
+        let mut zone_air_gain = reflected_w;
+        for (s, &absorbed) in zone_cfg.surfaces.iter().zip(self.solar_absorbed_buf.iter()) {
+            let to_node = absorbed * s.radiation_frac;
+            let to_air = absorbed * (1.0 - s.radiation_frac);
+            if s.input_index < u.len() && to_node > 0.0 {
+                u[s.input_index] += to_node;
             }
+            zone_air_gain += to_air;
         }
-
-        // Reflected remainder → zone air node.
-        if reflected_w > 0.0 {
-            if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
-                if air_idx < u.len() {
-                    u[air_idx] += reflected_w;
-                }
+        if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
+            if air_idx < u.len() && zone_air_gain > 0.0 {
+                u[air_idx] += zone_air_gain;
             }
         }
 

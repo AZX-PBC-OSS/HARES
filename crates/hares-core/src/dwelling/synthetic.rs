@@ -315,9 +315,12 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         boundary_configs
             .iter()
             .map(|bc| {
+                // TOML layers are exterior→interior (ASHRAE convention).
+                // RC assembly expects interior→exterior, so reverse.
                 let layers: Vec<MaterialLayer> = bc
                     .material_layers
                     .iter()
+                    .rev()
                     .map(|ml| MaterialLayer {
                         thickness_m: ml.thickness_m,
                         conductivity_w_m_k: ml.conductivity_w_m_k,

@@ -555,13 +555,23 @@ fn initial_zones(building: &Building, outdoor_temp_c: f64, start_hour: usize) ->
         .zones
         .iter()
         .enumerate()
-        .map(|(idx, zone)| ZoneState {
-            id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
-            temperature_c: default_temp,
-            humidity_ratio: 0.008,
-            relative_humidity: 0.45,
-            wet_bulb_c: default_temp,
-            volume_m3: zone.volume_m3.unwrap_or(DEFAULT_ZONE_VOLUME_M3),
+        .map(|(idx, zone)| {
+            use hares_io::hpxml::ZoneType;
+            // Conditioned zones start at the HVAC setpoint.
+            // Unconditioned zones (attic, garage, foundation) start near outdoor temp.
+            // Matches OCHRE Envelope.initialize_state() behavior.
+            let temp = match zone.zone_type {
+                ZoneType::Conditioned => default_temp,
+                _ => outdoor_temp_c,
+            };
+            ZoneState {
+                id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
+                temperature_c: temp,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: temp,
+                volume_m3: zone.volume_m3.unwrap_or(DEFAULT_ZONE_VOLUME_M3),
+            }
         })
         .collect()
 }
