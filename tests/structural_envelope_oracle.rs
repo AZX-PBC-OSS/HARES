@@ -12,6 +12,7 @@ mod tests {
     use hares_envelope::{
         ExteriorTarget, RCPath, assemble_building_rc, derive_zone_capacitances,
     };
+    use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use hares_io::{DefaultsStore, parse_hpxml};
 
@@ -51,6 +52,29 @@ mod tests {
     // Solar absorptance from HPXML <SolarAbsorptance> elements
     const WALL_ABSORPTANCE: f64 = 0.75;
     const ROOF_ABSORPTANCE: f64 = 0.85;
+
+    // OCHRE effective UA values [W/K] — computed with TARP/DOE-2 film R (wind=2 m/s,
+    // T_ambient=10°C, T_ground=10°C) and same-zone halving. Like-for-like with HARES.
+    #[allow(dead_code)]
+    const OCHRE_EXTERIOR_WALL_UA: f64 = 34.34;
+    #[allow(dead_code)]
+    const OCHRE_ATTIC_WALL_UA: f64 = 27.14;
+    #[allow(dead_code)]
+    const OCHRE_ATTIC_FLOOR_UA: f64 = 17.37;
+    #[allow(dead_code)]
+    const OCHRE_FLOOR_SLAB_UA: f64 = 72.81;
+    #[allow(dead_code)]
+    const OCHRE_ATTIC_ROOF_UA: f64 = 139.31;
+    #[allow(dead_code)]
+    const OCHRE_WINDOW_UA: f64 = 5.77;
+    #[allow(dead_code)]
+    const OCHRE_DOOR_UA: f64 = 1.59;
+    #[allow(dead_code)]
+    const OCHRE_INTERIOR_WALL_UA: f64 = 215.15;
+    #[allow(dead_code)]
+    const OCHRE_INDOOR_FURNITURE_UA: f64 = 45.25;
+    #[allow(dead_code)]
+    const OCHRE_TOTAL_UA: f64 = 558.74;
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -147,10 +171,16 @@ mod tests {
             .filter(|b| b.boundary_type == BoundaryType::Window)
             .collect();
 
+        // HPXML-parsed walls: 4 exterior + 2 attic gable = 6.
+        // Auto-generated: interior_wall, conditioned_furniture, garage_furniture, foundation_furniture.
+        let hpxml_walls: Vec<_> = walls
+            .iter()
+            .filter(|b| !b.id.contains("furniture") && b.id != "interior_wall")
+            .collect();
         assert_eq!(
-            walls.len(),
+            hpxml_walls.len(),
             6,
-            "expected 6 walls (4 exterior + 2 attic gable)"
+            "expected 6 HPXML walls (4 exterior + 2 attic gable)"
         );
         assert_eq!(roofs.len(), 2, "expected 2 roof surfaces");
         assert_eq!(floors.len(), 1, "expected 1 floor (attic floor / ceiling)");
@@ -162,13 +192,15 @@ mod tests {
             "expected {WINDOW_COUNT} windows"
         );
 
-        // Total areas by type
-        let wall_area: f64 = walls.iter().map(|b| b.area_m2).sum();
+        // HPXML wall areas (net of window/door subtraction).
+        let wall_area: f64 = hpxml_walls.iter().map(|b| b.area_m2).sum();
+        let expected_net_wall_area =
+            EXTERIOR_WALL_TOTAL_M2 + ATTIC_WALL_TOTAL_M2 - WINDOW_TOTAL_M2 - DOOR_M2;
         assert_within_pct(
             wall_area,
-            EXTERIOR_WALL_TOTAL_M2 + ATTIC_WALL_TOTAL_M2,
+            expected_net_wall_area,
             1.0,
-            "total wall area",
+            "total wall area (net of openings)",
         );
 
         let roof_area: f64 = roofs.iter().map(|b| b.area_m2).sum();
@@ -186,8 +218,8 @@ mod tests {
         let window_area: f64 = windows.iter().map(|b| b.area_m2).sum();
         assert_within_pct(window_area, WINDOW_TOTAL_M2, 1.0, "window area");
 
-        // Solar absorptance — must be present and match HPXML values
-        let living_walls: Vec<_> = walls
+        // Solar absorptance — must be present on HPXML-parsed exterior walls.
+        let living_walls: Vec<_> = hpxml_walls
             .iter()
             .filter(|b| b.interior_zone.as_ref() == Some(&ZoneType::Conditioned))
             .collect();
@@ -517,7 +549,52 @@ mod tests {
                 .map(|c| c / 1000.0)
                 .collect::<Vec<_>>()
         );
-        eprintln!("OCHRE reference total UA: ~568 W/K");
+        eprintln!("OCHRE effective total UA: ~559 W/K (with film + halving)");
+
+        // LUT resolution per boundary
+        let lut = defaults.envelope_lut().expect("envelope LUT must be loaded");
+        eprintln!("\n=== LUT Resolution per Boundary ===");
+        for bd in &building.boundaries {
+            let name = bd
+                .lut_boundary_name
+                .as_deref()
+                .or_else(|| {
+                    resolve_boundary_name(
+                        &bd.boundary_type,
+                        bd.interior_zone.as_ref(),
+                        bd.exterior_zone.as_ref(),
+                    )
+                });
+            let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
+                let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
+                if sum > 0.0 { Some(sum) } else { None }
+            });
+            let result = name.and_then(|n| {
+                lut.lookup(
+                    n,
+                    bd.construction_type.as_deref(),
+                    bd.finish_type.as_deref(),
+                    bd.insulation_details.as_deref(),
+                    r_value,
+                )
+            });
+            let (matched_type, matched_r) = match &result {
+                Some(r) => (r.matched_boundary_type.as_str(), r.matched_r_value),
+                None => ("MISS", 0.0),
+            };
+            eprintln!(
+                "  {} ({:?}) → name={:?} ct={:?} ft={:?} ins={:?} r={:?} → {} R={:.4}",
+                bd.id,
+                bd.boundary_type,
+                name,
+                bd.construction_type,
+                bd.finish_type,
+                bd.insulation_details,
+                r_value,
+                matched_type,
+                matched_r,
+            );
+        }
         eprintln!(
             "Boundaries: {} total, {} LUT, {} layers, {} fallback",
             diag.boundaries.len(),

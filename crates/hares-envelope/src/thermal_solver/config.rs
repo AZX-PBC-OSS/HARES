@@ -157,6 +157,17 @@ pub struct InteriorSurfaceInfo {
     ///
     /// Range: `[0, 1]`.  Default: `1.0`.
     pub radiation_frac: f64,
+    /// Solar absorptance [-] for interior solar distribution.
+    ///
+    /// Fraction of incident solar radiation absorbed by this surface.
+    /// Default: 0.6 for floors (darker), 0.5 for walls/ceilings per EnergyPlus.
+    /// `0.0` means the surface is excluded from solar distribution.
+    pub solar_absorptance: f64,
+    /// Whether this surface is a floor (receives beam solar preferentially).
+    ///
+    /// Per EnergyPlus FullInteriorAndExterior: beam solar strikes floors first
+    /// (60% default for residential single-storey), remainder goes to walls/ceiling.
+    pub is_floor: bool,
 }
 
 /// Interior longwave radiation configuration for one zone.
@@ -269,6 +280,10 @@ pub struct ThermalSolverConfig {
     /// Surfaces absent from this map are treated as opaque; opaque solar gain
     /// is delivered via [`ExteriorSurfaceInfo::absorptance`] in `exterior_surfaces`.
     pub window_properties: HashMap<u32, WindowSolarProperties>,
+    /// Map from window surface_id to the zone it belongs to.
+    /// Used by the interior solar distribution to route transmitted solar
+    /// to the correct zone's interior surfaces.
+    pub window_zone_ids: HashMap<u32, ZoneId>,
     /// Exterior surfaces for LWR and opaque solar gain.
     pub exterior_surfaces: Vec<ExteriorSurfaceInfo>,
     /// Per-zone interior surface configurations for intra-zone LW radiation.
@@ -294,6 +309,7 @@ impl Default for ThermalSolverConfig {
         Self {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
             exterior_surfaces: Vec::new(),
             interior_lwr_zones: Vec::new(),
             ideal_setpoints_c: HashMap::new(),

@@ -84,11 +84,16 @@ pub fn building_to_boundary_inputs(
             // Try LUT lookup for precomputed RC layers.
             let precomputed_rc = envelope_lut
                 .and_then(|lut| {
-                    let boundary_name = resolve_boundary_name(
-                        &bd.boundary_type,
-                        bd.interior_zone.as_ref(),
-                        bd.exterior_zone.as_ref(),
-                    )?;
+                    let boundary_name = bd
+                        .lut_boundary_name
+                        .as_deref()
+                        .or_else(|| {
+                            resolve_boundary_name(
+                                &bd.boundary_type,
+                                bd.interior_zone.as_ref(),
+                                bd.exterior_zone.as_ref(),
+                            )
+                        })?;
                     let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
                         let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
                         if sum > 0.0 { Some(sum) } else { None }
@@ -107,7 +112,7 @@ pub fn building_to_boundary_inputs(
                             finish = ?bd.finish_type,
                             insulation = ?bd.insulation_details,
                             r_value = ?r_value,
-                            "envelope LUT lookup miss — falling back to single-resistance"
+                            "envelope LUT lookup miss"
                         );
                     }
                     let result = result?;

@@ -15,13 +15,21 @@ verification:
   - cargo clippy --workspace -- -D warnings
 ---
 
+## Status: COMPLETE (verified — already correctly implemented)
+
+Audit confirms zone wet-bulb is correctly used for HPWH COP/capacity curves:
+
+| Check | Result |
+|-------|--------|
+| `zone_wet_bulb_c()` reads `env.zones[zone_id].wet_bulb_c` | Line 283-293: reads zone wet-bulb, falls back to zone dry-bulb |
+| COP curve input | Line 680: `cop_curve.evaluate(wet_bulb_c, tank_avg_temp_c)` ✓ |
+| Capacity curve input | Line 687: `capacity_curve.evaluate(wet_bulb_c, tank_avg_temp_c)` ✓ |
+| Zone wet-bulb updated each step | Humidity solver → `apply_humidity_update_to_zones()` → `zone.wet_bulb_c` |
+| Test: COP varies with humidity | `wet_bulb_cop_differs_with_same_dry_bulb_different_humidity` (line 1260) |
+
 ## Background/Context
 
-HPWH COP/capacity biquadratic curves should be evaluated at (wet-bulb, tank_temp). The exploration agent found that `heat_pump_wh.rs:664-668` already uses `wet_bulb_c` as input to the COP curve. However, the gap analysis flagged that the wet-bulb value may come from dry-bulb ambient rather than true zone wet-bulb.
-
-**Target**: Verify that zone wet-bulb temperature (computed from zone temperature + humidity ratio) is actually used as the COP curve input, not dry-bulb. If it's already correct, close as verified. If not, wire the correct value.
-
-Depends on PARITY-011 (weather derived fields audit) to ensure wet-bulb is reliably computed.
+Implemented during prior work. The gap analysis was based on an earlier state of the code.
 
 ## Work to Do
 

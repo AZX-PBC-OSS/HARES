@@ -23,9 +23,27 @@ verification:
 
 WEATHER-008 (dynamic ground albedo) will have modified `solar.rs` to accept `ground_albedo: f64` as a parameter in `perez_tilted_irradiance()` and `liu_jordan_isotropic()`. This ticket modifies the same file to add window transmittance polynomials — coordinate to avoid conflicts.
 
+## Status: COMPLETE (verified — already fully implemented)
+
+Audit confirms the full EnergyPlus window transmittance model is already implemented:
+
+| Feature | Implementation | Tests |
+|---------|---------------|-------|
+| Angular IAM polynomials | `window_iam()` with 6 GlazingCurve variants (A, B/D, D, E, F, J) | `window_iam_is_unity_at_normal_incidence`, `window_iam_is_zero_at_grazing_incidence`, `window_iam_decreases_monotonically_with_theta`, `window_iam_curve_e_at_60deg_is_in_expected_range` |
+| Curve selection from U/SHGC | `GlazingCurve::from_u_shgc()` | `glazing_curve_selection_matches_energyplus_table` |
+| Diffuse hemispherical IAM | `GlazingCurve::diffuse_iam()` — pre-computed per curve | `window_diffuse_iam_is_in_physical_range` |
+| SHGC decomposition | `calculate_window_parameters()` — EnergyPlus Steps 4-5 | Tests for transmittance + radiation_frac computation |
+| Inward-flowing fraction | `N_i = (R_ext + R_glass/2) / (R_ext + R_glass + R_int)` — computed in `calculate_window_parameters()` | Stored as `radiation_frac` in `WindowSolarProperties` |
+| Solar gain formula | `apply_solar_inputs()`: beam×IAM + diffuse×diffuse_IAM, then transmitted + absorbed-inward | Full pipeline tested in solver tests |
+
+The gap analysis claimed "simple SHGC-based split" but the actual code uses:
+- Degree-4 polynomial IAM per EnergyPlus curve family
+- Separate beam and diffuse IAM corrections
+- `(SHGC - transmittance) × POA` for absorbed-inward, which equals `A_sol × N_i × POA` by ASHRAE decomposition
+
 ## Background/Context
 
-HARES already has 6 `GlazingCurve` variants (A, B/D, D, E, F, J) with IAM polynomials and curve selection by U-factor/SHGC. However, the current SHGC decomposition uses a simple split (`absorbed_inward = max(0, SHGC - transmittance)`) rather than the EnergyPlus polynomial transmittance calculation. OCHRE uses 5th-order polynomial fits per curve family and a 0.854× diffuse correction factor.
+Implemented during prior work. The gap analysis was based on an earlier state of the code.
 
 **Target**: EnergyPlus-grade — implement the full angular transmittance/absorptance decomposition per EnergyPlus Engineering Reference, not just the OCHRE simplification. This includes:
 - Per-angle beam transmittance T(θ) via polynomial

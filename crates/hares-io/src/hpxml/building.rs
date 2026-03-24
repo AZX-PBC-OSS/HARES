@@ -101,6 +101,11 @@ pub struct Boundary {
     /// radiant barriers.  Ref: OCHRE `Envelope.py:222`.
     /// Valid range: 0.0–1.0.
     pub emittance: Option<f64>,
+    /// Override for LUT boundary name resolution. When set, `resolve_boundary_name`
+    /// is bypassed and this name is used directly for LUT lookup. Used for
+    /// auto-generated boundaries (interior walls, furniture) whose LUT name
+    /// can't be derived from zone types alone.
+    pub lut_boundary_name: Option<String>,
     /// Surface tilt angle [degrees].
     ///
     /// 0 = horizontal facing up (flat roof), 90 = vertical (wall),
@@ -446,6 +451,49 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     let mut boundaries = parse_boundaries(details)?;
     let windows = parse_windows(details, &mut boundaries)?;
 
+    // Subtract window and door areas from their attached walls.
+    // OCHRE hpxml.py:118-126: ext_walls[wall]["Area"] -= boundary["Area"]
+    {
+        let mut wall_reductions: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for win in &windows {
+            if let Some(ref wall_id) = win.attached_to_wall_id {
+                *wall_reductions.entry(wall_id.clone()).or_default() += win.area_m2;
+            }
+        }
+        // Doors also have AttachedToWall in HPXML.
+        if let Some(enclosure) = details.child("Enclosure") {
+            if let Some(doors) = enclosure.child("Doors") {
+                for door in doors.children_named("Door") {
+                    if let Some(wall_id) = door
+                        .child("AttachedToWall")
+                        .and_then(|n| n.attrs.get("idref"))
+                    {
+                        let area = parse_value_with_units(door.child("Area"), ValueKind::Area)
+                            .unwrap_or(0.0);
+                        if area > 0.0 {
+                            *wall_reductions.entry(wall_id.clone()).or_default() += area;
+                        }
+                    }
+                }
+            }
+        }
+        for bd in &mut boundaries {
+            if let Some(&reduction) = wall_reductions.get(&bd.id) {
+                let new_area = (bd.area_m2 - reduction).max(0.0);
+                if new_area <= 0.0 {
+                    tracing::warn!(
+                        wall = %bd.id,
+                        original = bd.area_m2,
+                        reduction,
+                        "wall area reduced to zero by window/door subtraction"
+                    );
+                }
+                bd.area_m2 = new_area;
+            }
+        }
+    }
+
     // Post-process foundation wall boundaries: override construction_type with
     // foundation_name, apply insulation details and area scaling.
     // OCHRE hpxml.py:408-410: boundaries["Foundation Wall"]["Construction Type"] = foundation_name
@@ -482,8 +530,36 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     assign_walls_to_zones(&boundaries, &mut zones);
     parse_duct_systems(details, &mut zones);
 
+    // Auto-generate interior wall boundary (partition thermal mass).
+    // Area = conditioned floor area, same-zone (Conditioned→Conditioned).
+    if let Some(cond_zone) = zones.values().find(|z| z.zone_type == ZoneType::Conditioned) {
+        if let Some(area) = cond_zone.floor_area_m2 {
+            if area > 0.0 {
+                boundaries.push(Boundary {
+                    id: "interior_wall".to_string(),
+                    boundary_type: BoundaryType::Wall,
+                    area_m2: area,
+                    azimuth_deg: None,
+                    assembly_r_value_m2_k_w: None,
+                    r_value_layers_m2_k_w: Vec::new(),
+                    interior_zone: Some(ZoneType::Conditioned),
+                    exterior_zone: Some(ZoneType::Conditioned),
+                    material_layers: Vec::new(),
+                    framing_factor: None,
+                    construction_type: None,
+                    finish_type: None,
+                    insulation_details: Some("Standard".to_string()),
+                    has_radiant_barrier: false,
+                    solar_absorptance: None,
+                    emittance: None,
+                    tilt_deg: Some(90.0),
+                    lut_boundary_name: Some("Interior Wall".to_string()),
+                });
+            }
+        }
+    }
+
     // Auto-generate furniture boundaries per zone (same-zone thermal mass).
-    // OCHRE hpxml.py:763-777: area = zone_floor_area × fraction, interior == exterior.
     const FURNITURE_FRACTIONS: &[(ZoneType, f64)] = &[
         (ZoneType::Conditioned, 0.4),
         (ZoneType::Foundation, 0.4),
@@ -495,9 +571,15 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             if let Some(area) = zone.floor_area_m2 {
                 let furniture_area = area * fraction;
                 if furniture_area > 0.0 {
+                    let lut_name = match zone_type {
+                        ZoneType::Conditioned => "Indoor Furniture",
+                        ZoneType::Foundation => "Foundation Furniture",
+                        ZoneType::Garage => "Garage Furniture",
+                        _ => "Indoor Furniture",
+                    };
                     boundaries.push(Boundary {
                         id: format!("{}_furniture", zone_key(zone_type)),
-                        boundary_type: BoundaryType::Wall, // same-zone thermal mass
+                        boundary_type: BoundaryType::Wall,
                         area_m2: furniture_area,
                         azimuth_deg: None,
                         assembly_r_value_m2_k_w: None,
@@ -513,6 +595,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         solar_absorptance: None,
                         emittance: None,
                         tilt_deg: Some(90.0),
+                        lut_boundary_name: Some(lut_name.to_string()),
                     });
                 }
             }
@@ -733,6 +816,7 @@ fn parse_windows(
             emittance: None,
             tilt_deg: Some(90.0),
             framing_factor: None,
+            lut_boundary_name: None,
         });
     }
 
@@ -809,6 +893,7 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         solar_absorptance,
         emittance,
         tilt_deg,
+        lut_boundary_name: None,
     })
 }
 
@@ -1883,7 +1968,13 @@ mod tests {
             .iter()
             .find(|b| matches!(b.boundary_type, BoundaryType::Wall))
             .expect("wall boundary expected");
-        assert!((wall.area_m2 - 9.290_304).abs() < 1.0e-6);
+        // Wall1 = 100 ft² minus Window1 = 15 ft² → 85 ft² = 7.896758 m²
+        let expected_wall_area = (100.0 - 15.0) * 0.092_903_04;
+        assert!(
+            (wall.area_m2 - expected_wall_area).abs() < 1.0e-4,
+            "wall area should be net of window: got {}, expected {}",
+            wall.area_m2, expected_wall_area
+        );
 
         let layer = wall
             .material_layers
@@ -2528,6 +2619,101 @@ mod tests {
                 assert!(
                     bd.insulation_details.is_none(),
                     "doors should not have insulation_details"
+                );
+            }
+        }
+    }
+
+    // ── Wall area reduction tests ───────────────────────────────────────
+
+    #[test]
+    fn wall_area_reduced_by_window() {
+        // SAMPLE_XML: Wall1 = 100 ft² = 9.290304 m², Window1 = 15 ft² = 1.393546 m²
+        // Wall area should be reduced by window area.
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Wall && b.id == "Wall1")
+            .expect("wall expected");
+        let original = 100.0 * 0.092_903_04;
+        let window = 15.0 * 0.092_903_04;
+        assert!(
+            (wall.area_m2 - (original - window)).abs() < 0.01,
+            "wall area should be reduced: got {}, expected {}",
+            wall.area_m2,
+            original - window
+        );
+    }
+
+    #[test]
+    fn wall_without_openings_keeps_area() {
+        // Remove the window from SAMPLE_XML entirely.
+        let xml = SAMPLE_XML.replace(
+            "        <Windows>\n          <Window>\n            <SystemIdentifier id=\"Window1\"/>\n            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>\n            <Area units=\"ft2\">15</Area>\n            <Azimuth>180</Azimuth>\n            <UFactor>0.31</UFactor>\n            <SHGC>0.25</SHGC>\n            <FrameType>vinyl</FrameType>\n            <AttachedToWall idref=\"Wall1\"/>\n          </Window>\n        </Windows>",
+            "",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Wall && b.id == "Wall1")
+            .expect("wall expected");
+        let original = 100.0 * 0.092_903_04;
+        assert!(
+            (wall.area_m2 - original).abs() < 0.01,
+            "wall area unchanged without windows: got {}, expected {}",
+            wall.area_m2, original
+        );
+    }
+
+    #[test]
+    fn interior_wall_has_correct_lut_name() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let iw = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "interior_wall")
+            .expect("interior wall expected");
+        assert_eq!(iw.lut_boundary_name.as_deref(), Some("Interior Wall"));
+        assert_eq!(iw.interior_zone, Some(ZoneType::Conditioned));
+        assert_eq!(iw.exterior_zone, Some(ZoneType::Conditioned));
+    }
+
+    #[test]
+    fn furniture_has_correct_lut_name() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let cf = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "conditioned_furniture")
+            .expect("conditioned furniture expected");
+        assert_eq!(cf.lut_boundary_name.as_deref(), Some("Indoor Furniture"));
+
+        let gf = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "garage_furniture")
+            .expect("garage furniture expected");
+        assert_eq!(gf.lut_boundary_name.as_deref(), Some("Garage Furniture"));
+
+        let ff = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "foundation_furniture")
+            .expect("foundation furniture expected");
+        assert_eq!(ff.lut_boundary_name.as_deref(), Some("Foundation Furniture"));
+    }
+
+    #[test]
+    fn hpxml_boundaries_have_no_lut_override() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        for bd in &building.boundaries {
+            if !bd.id.contains("furniture") && bd.id != "interior_wall" {
+                assert!(
+                    bd.lut_boundary_name.is_none(),
+                    "HPXML boundary {} should not have lut_boundary_name override",
+                    bd.id
                 );
             }
         }

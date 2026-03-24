@@ -1,0 +1,147 @@
+{
+  "hpxml_file": "BEopt_example.xml",
+  "location": {
+    "Average Wind Speed (m/s)": 2,
+    "Average Ambient Temperature (C)": 10,
+    "Average Ground Temperature (C)": 10
+  },
+  "boundaries": [
+    {
+      "name": "Exterior Wall",
+      "area_m2": 86.5856,
+      "r_layer_m2_k_w": 2.08173,
+      "r_film_int_m2_k_w": 0.325486,
+      "r_film_ext_m2_k_w": 0.113871,
+      "r_total_m2_k_w": 2.521087,
+      "ua_w_k": 34.34,
+      "capacitance_kj_k": 3543.52,
+      "n_nodes": 4,
+      "interior_zone": "LIV",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Attic Wall",
+      "area_m2": 26.849,
+      "r_layer_m2_k_w": 0.5499,
+      "r_film_int_m2_k_w": 0.325486,
+      "r_film_ext_m2_k_w": 0.113871,
+      "r_total_m2_k_w": 0.989257,
+      "ua_w_k": 27.14,
+      "capacitance_kj_k": 870.08,
+      "n_nodes": 3,
+      "interior_zone": "ATC",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Attic Floor",
+      "area_m2": 111.4836,
+      "r_layer_m2_k_w": 5.29523,
+      "r_film_int_m2_k_w": 0.561134,
+      "r_film_ext_m2_k_w": 0.561134,
+      "r_total_m2_k_w": 6.417498,
+      "ua_w_k": 17.37,
+      "capacitance_kj_k": 2470.67,
+      "n_nodes": 3,
+      "interior_zone": "LIV",
+      "exterior_zone": "ATC",
+      "same_zone": false
+    },
+    {
+      "name": "Floor",
+      "area_m2": 111.4836,
+      "r_layer_m2_k_w": 0.970233,
+      "r_film_int_m2_k_w": 0.28051,
+      "r_film_ext_m2_k_w": 0.28051,
+      "r_total_m2_k_w": 1.531254,
+      "ua_w_k": 72.81,
+      "capacitance_kj_k": 47627.95,
+      "n_nodes": 4,
+      "interior_zone": "LIV",
+      "exterior_zone": "GND",
+      "same_zone": false
+    },
+    {
+      "name": "Attic Roof",
+      "area_m2": 124.6425,
+      "r_layer_m2_k_w": 0.24474,
+      "r_film_int_m2_k_w": 0.536264,
+      "r_film_ext_m2_k_w": 0.113704,
+      "r_total_m2_k_w": 0.894708,
+      "ua_w_k": 139.31,
+      "capacitance_kj_k": 2289.35,
+      "n_nodes": 3,
+      "interior_zone": "ATC",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Window",
+      "area_m2": 15.6077,
+      "r_layer_m2_k_w": 0,
+      "r_film_int_m2_k_w": 0.151678,
+      "r_film_ext_m2_k_w": 0.0,
+      "r_total_m2_k_w": 2.702703,
+      "ua_w_k": 5.77,
+      "capacitance_kj_k": 0,
+      "n_nodes": 0,
+      "interior_zone": "LIV",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Door",
+      "area_m2": 1.8581,
+      "r_layer_m2_k_w": 0.726,
+      "r_film_int_m2_k_w": 0.325486,
+      "r_film_ext_m2_k_w": 0.113871,
+      "r_total_m2_k_w": 1.165357,
+      "ua_w_k": 1.59,
+      "capacitance_kj_k": 51.47,
+      "n_nodes": 1,
+      "interior_zone": "LIV",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Interior Wall",
+      "area_m2": 111.4836,
+      "r_layer_m2_k_w": 0.38536,
+      "r_film_int_m2_k_w": 0.325486,
+      "r_film_ext_m2_k_w": 0.325486,
+      "r_total_m2_k_w": 0.518166,
+      "ua_w_k": 215.15,
+      "capacitance_kj_k": 2896.51,
+      "n_nodes": 3,
+      "interior_zone": "LIV",
+      "exterior_zone": "LIV",
+      "same_zone": true
+    },
+    {
+      "name": "Indoor Furniture",
+      "area_m2": 44.5935,
+      "r_layer_m2_k_w": 1.32,
+      "r_film_int_m2_k_w": 0.325486,
+      "r_film_ext_m2_k_w": 0.325486,
+      "r_total_m2_k_w": 0.985486,
+      "ua_w_k": 45.25,
+      "capacitance_kj_k": 5287.86,
+      "n_nodes": 1,
+      "interior_zone": "LIV",
+      "exterior_zone": "LIV",
+      "same_zone": true
+    }
+  ],
+  "zones": [
+    {
+      "name": "Indoor",
+      "volume_m3": 271.8417
+    },
+    {
+      "name": "Attic",
+      "volume_m3": 144.4159
+    }
+  ],
+  "total_ua_w_k": 558.74
+}

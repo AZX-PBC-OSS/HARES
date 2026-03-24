@@ -474,6 +474,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -600,6 +601,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),
@@ -685,6 +687,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -1038,6 +1041,7 @@ mod tests {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -1176,6 +1180,7 @@ fn ela_infiltration_changes_zone_temperature() {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -1294,6 +1299,7 @@ fn ela_infiltration_changes_zone_temperature() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 42,
                     state_index: 0,
@@ -1432,6 +1438,7 @@ fn ela_infiltration_changes_zone_temperature() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 1,
                     state_index: 0,
@@ -1580,6 +1587,7 @@ fn ela_infiltration_changes_zone_temperature() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 0,
@@ -1915,6 +1923,7 @@ fn ela_higher_wind_produces_more_cooling() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 7,
                     state_index: 0,
@@ -2029,6 +2038,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -2107,6 +2117,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
@@ -2195,6 +2206,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
                 exterior_surfaces,
                 interior_lwr_zones: vec![],
@@ -2332,7 +2344,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::from([(window_surface_id, win_props)]),
-
+                window_zone_ids: HashMap::new(),
                 exterior_surfaces: vec![],
                 interior_lwr_zones: vec![],
                 ideal_setpoints_c: HashMap::new(),
@@ -2437,6 +2449,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 let cfg = ThermalSolverConfig {
                     indoor_zone_id: ZoneId(1),
                     window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
 
                     exterior_surfaces,
                     interior_lwr_zones: vec![],
@@ -2666,6 +2679,8 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 area_m2: 40.0,
                 emissivity: 0.90,
                 radiation_frac: 0.7, // lightweight wall
+                solar_absorptance: 0.5,
+                is_floor: false,
             },
             InteriorSurfaceInfo {
                 state_index: 1,
@@ -2673,6 +2688,8 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 area_m2: 40.0,
                 emissivity: 0.90,
                 radiation_frac: 1.0, // massive floor (node ≈ surface)
+                solar_absorptance: 0.6,
+                is_floor: true,
             },
             InteriorSurfaceInfo {
                 state_index: 2,
@@ -2680,6 +2697,8 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 area_m2: 60.0,
                 emissivity: 0.90,
                 radiation_frac: 0.85,
+                solar_absorptance: 0.5,
+                is_floor: false,
             },
         ];
         let t_nodes = [28.0, 19.0, 24.0];
@@ -2731,6 +2750,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),
@@ -2906,6 +2926,7 @@ fn unbalanced_fan_uses_quadrature_not_linear_addition() {
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
             ideal_setpoints_c: HashMap::new(),

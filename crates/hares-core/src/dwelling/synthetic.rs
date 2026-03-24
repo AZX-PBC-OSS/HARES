@@ -240,6 +240,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
             emittance: None,
             tilt_deg: Some(90.0),
             framing_factor: None,
+            lut_boundary_name: None,
         }],
         windows: Vec::new(),
         infiltration_ach50: None,

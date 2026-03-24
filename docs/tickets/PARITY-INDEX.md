@@ -53,7 +53,7 @@ No cross-ticket dependencies. Each closes one gap from the parity analysis.
 | [013](PARITY-013.md) | Framing factor / parallel-path U-value | Medium-14 | hares-envelope, hares-io | DONE |
 | [014](PARITY-014.md) | Ground coupling: RC-based foundation model | Critical-4 | hares-physics, hares-envelope, hares-io | DONE |
 | [015](PARITY-015.md) | Interior LWR: Iterative T^4 ScriptF solver | Critical-1 | hares-envelope | DONE |
-| [016](PARITY-016.md) | Window transmittance: EnergyPlus polynomial curves | Critical-2 | hares-physics, hares-envelope | — |
+| [016](PARITY-016.md) | Window transmittance: EnergyPlus polynomial curves | Critical-2 | hares-physics, hares-envelope | DONE (verified, already implemented) |
 
 ### Phase 2: Integration (017–019)
 
@@ -61,8 +61,8 @@ Depend on Phase 1 outputs.
 
 | # | Title | Gap | Scope | Depends On |
 |---|-------|-----|-------|------------|
-| [017](PARITY-017.md) | HPWH wet-bulb COP input | High-9 | hares-equipment | 005 |
-| [018](PARITY-018.md) | Solar distribution to interior surfaces | Critical-3 | hares-envelope | 015, 016 |
+| [017](PARITY-017.md) | HPWH wet-bulb COP input | High-9 | hares-equipment | DONE (verified, already implemented) |
+| [018](PARITY-018.md) | Solar distribution to interior surfaces | Critical-3 | hares-envelope | DONE |
 | [019](PARITY-019.md) | Eliminate hot-path allocations in thermal solver | Quality | hares-envelope, hares-core | 001 |
 
 ### Phase 3: Validation (020–021)
