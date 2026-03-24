@@ -29,28 +29,28 @@ Tickets are numbered in the order they should be executed. Dependencies are expl
 
 Refactor oversized files and establish quality baseline before adding new physics.
 
-| # | Title | Scope | Depends On |
-|---|-------|-------|------------|
-| [001](PARITY-001.md) | Split thermal_solver/mod.rs (3107→5 files) | hares-envelope | — |
-| [002](PARITY-002.md) | Extract hvac_core.rs sub-modules (2749→3 files) | hares-equipment | — |
-| [003](PARITY-003.md) | Audit unwrap() calls, add proper error handling | all crates | — |
-| [004](PARITY-004.md) | Unit test coverage for physics modules (50+ tests) | hares-physics, hares-envelope | — |
+| # | Title | Scope | Status |
+|---|-------|-------|--------|
+| [001](PARITY-001.md) | Split thermal_solver/mod.rs (3107→5 files) | hares-envelope | DONE |
+| [002](PARITY-002.md) | Extract hvac_core.rs sub-modules (2749→3 files) | hares-equipment | DONE |
+| [003](PARITY-003.md) | Audit unwrap() calls, add proper error handling | all crates | DONE |
+| [004](PARITY-004.md) | Unit test coverage for physics modules (50+ tests) | hares-physics, hares-envelope | DONE (superseded by THERMAL/WEATHER) |
 
 ### Phase 1: Independent Feature Work (005–016)
 
 No cross-ticket dependencies. Each closes one gap from the parity analysis.
 
-| # | Title | Gap | Scope | Depends On |
-|---|-------|-----|-------|------------|
-| [005](PARITY-005.md) | Weather derived fields audit & fixes | High-11 | hares-core, hares-io | — |
-| [006](PARITY-006.md) | Battery temperature-dependent capacity derating | Critical-5 | hares-equipment | — |
-| [007](PARITY-007.md) | V2G / V2H enablement (battery + EV) | Critical-6 | hares-equipment | — |
-| [008](PARITY-008.md) | Boiler dynamic EIR curves (verify/complete) | High-7 | hares-equipment | — |
-| [009](PARITY-009.md) | Ventilation fan / HRV / ERV equipment | High-8 | hares-equipment, hares-io | — |
-| [010](PARITY-010.md) | PV near-shading model | High-10 | hares-equipment | — |
-| [011](PARITY-011.md) | ASHP backup ER control FSM | Medium-15 | hares-equipment | 002 |
-| [012](PARITY-012.md) | HPWH HP/ER independent duty cycle control | Medium-16 | hares-equipment, hares-types | — |
-| [013](PARITY-013.md) | Framing factor / parallel-path U-value | Medium-14 | hares-envelope, hares-io | — |
+| # | Title | Gap | Scope | Status |
+|---|-------|-----|-------|--------|
+| [005](PARITY-005.md) | Weather derived fields audit & fixes | High-11 | hares-core, hares-io | DONE (verified, superseded by THERMAL/WEATHER) |
+| [006](PARITY-006.md) | Battery temperature-dependent capacity derating | Critical-5 | hares-equipment | DONE |
+| [007](PARITY-007.md) | V2G / V2H enablement (battery + EV) | Critical-6 | hares-equipment | DONE |
+| [008](PARITY-008.md) | Boiler dynamic EIR curves (verify/complete) | High-7 | hares-equipment | DONE (verified, already implemented) |
+| [009](PARITY-009.md) | Ventilation fan / HRV / ERV equipment | High-8 | hares-equipment, hares-io | DONE |
+| [010](PARITY-010.md) | PV near-shading model | High-10 | hares-equipment | DONE |
+| [011](PARITY-011.md) | ASHP backup ER control FSM | Medium-15 | hares-equipment | DONE (verified, already implemented) |
+| [012](PARITY-012.md) | HPWH HP/ER independent duty cycle control | Medium-16 | hares-equipment, hares-types | DONE |
+| [013](PARITY-013.md) | Framing factor / parallel-path U-value | Medium-14 | hares-envelope, hares-io | DONE |
 | [014](PARITY-014.md) | Ground coupling: RC-based foundation model | Critical-4 | hares-physics, hares-envelope, hares-io | — |
 | [015](PARITY-015.md) | Interior LWR: Iterative T^4 ScriptF solver | Critical-1 | hares-envelope | 001 |
 | [016](PARITY-016.md) | Window transmittance: EnergyPlus polynomial curves | Critical-2 | hares-physics, hares-envelope | — |

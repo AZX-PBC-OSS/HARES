@@ -70,6 +70,7 @@ pub mod test_utils {
                 dni_w_m2: 0.0,
                 dhi_w_m2: 0.0,
                 solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,

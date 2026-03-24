@@ -292,7 +292,7 @@ pub fn resolve_boundary_name(
         BoundaryType::Roof | BoundaryType::Wall | BoundaryType::Door | BoundaryType::RimJoist => {
             ZoneType::Outdoor
         }
-        BoundaryType::Slab | BoundaryType::FoundationWall => ZoneType::Outdoor,
+        BoundaryType::Slab | BoundaryType::FoundationWall => ZoneType::Ground,
         BoundaryType::Floor => ZoneType::Attic,
         _ => ZoneType::Outdoor,
     };
@@ -324,6 +324,7 @@ pub fn resolve_boundary_name(
                 (ZoneType::Conditioned, ZoneType::Foundation) => Some("Foundation Ceiling"),
                 (ZoneType::Conditioned, ZoneType::Garage) => Some("Garage Interior Ceiling"),
                 (ZoneType::Garage, ZoneType::Attic) => Some("Garage Ceiling"),
+                (ZoneType::Conditioned, ZoneType::Outdoor) => Some("Raised Floor"),
                 _ => Some("Attic Floor"),
             }
         }
@@ -337,5 +338,83 @@ pub fn resolve_boundary_name(
         BoundaryType::RimJoist => Some("Rim Joist"),
         BoundaryType::Door => Some("Door"),
         BoundaryType::Window | BoundaryType::Other(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hpxml::{BoundaryType, ZoneType};
+
+    #[test]
+    fn raised_floor_boundary_name() {
+        assert_eq!(
+            resolve_boundary_name(
+                &BoundaryType::Floor,
+                Some(&ZoneType::Conditioned),
+                Some(&ZoneType::Outdoor),
+            ),
+            Some("Raised Floor")
+        );
+    }
+
+    #[test]
+    fn attic_floor_boundary_name() {
+        assert_eq!(
+            resolve_boundary_name(
+                &BoundaryType::Floor,
+                Some(&ZoneType::Conditioned),
+                Some(&ZoneType::Attic),
+            ),
+            Some("Attic Floor")
+        );
+    }
+
+    #[test]
+    fn foundation_ceiling_boundary_name() {
+        assert_eq!(
+            resolve_boundary_name(
+                &BoundaryType::Floor,
+                Some(&ZoneType::Conditioned),
+                Some(&ZoneType::Foundation),
+            ),
+            Some("Foundation Ceiling")
+        );
+    }
+
+    #[test]
+    fn slab_on_grade_boundary_name() {
+        assert_eq!(
+            resolve_boundary_name(
+                &BoundaryType::Slab,
+                Some(&ZoneType::Conditioned),
+                Some(&ZoneType::Ground),
+            ),
+            Some("Floor")
+        );
+    }
+
+    #[test]
+    fn foundation_wall_boundary_name() {
+        assert_eq!(
+            resolve_boundary_name(
+                &BoundaryType::FoundationWall,
+                Some(&ZoneType::Foundation),
+                Some(&ZoneType::Ground),
+            ),
+            Some("Foundation Wall")
+        );
+    }
+
+    #[test]
+    fn window_returns_none() {
+        assert_eq!(
+            resolve_boundary_name(
+                &BoundaryType::Window,
+                Some(&ZoneType::Conditioned),
+                Some(&ZoneType::Outdoor),
+            ),
+            None
+        );
     }
 }

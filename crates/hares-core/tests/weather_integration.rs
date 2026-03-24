@@ -189,6 +189,7 @@ fn minimal_building() -> hares_io::Building {
                 solar_absorptance: None,
                 emittance: None,
                 tilt_deg: Some(90.0),
+                framing_factor: None,
             },
             Boundary {
                 id: "north-wall".to_string(),
@@ -207,6 +208,7 @@ fn minimal_building() -> hares_io::Building {
                 solar_absorptance: None,
                 emittance: None,
                 tilt_deg: Some(90.0),
+                framing_factor: None,
             },
         ],
         windows: Vec::<Window>::new(),

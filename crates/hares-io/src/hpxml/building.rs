@@ -37,6 +37,8 @@ pub enum ZoneType {
     Garage,
     Foundation,
     Outdoor,
+    /// Earth/soil boundary condition (not a thermal zone).
+    Ground,
     Other(String),
 }
 
@@ -103,6 +105,12 @@ pub struct Boundary {
     /// For roofs, computed from `<Pitch>` as `atan(pitch / 12)` in degrees.
     /// Ref: OCHRE `hpxml.py` `pitch2deg()`.
     pub tilt_deg: Option<f64>,
+    /// Framing factor [-] — fraction of wall area occupied by structural framing.
+    ///
+    /// Used by the ASHRAE parallel-path method to compute effective R-value.
+    /// Typical values: 0.23 for 2x4 @ 16" OC, 0.22 for 2x6 @ 16" OC.
+    /// `None` means no framing correction (insulation R-value used uniformly).
+    pub framing_factor: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,7 +413,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // OCHRE only creates thermal zones for Conditioned, Attic, Garage, Foundation.
     let mut zones_vec: Vec<Zone> = zones
         .into_values()
-        .filter(|z| !matches!(z.zone_type, ZoneType::Outdoor))
+        .filter(|z| !matches!(z.zone_type, ZoneType::Outdoor | ZoneType::Ground))
         .collect();
     zones_vec.sort_by_key(|zone| zone_sort_key(&zone.zone_type));
 
@@ -418,7 +426,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             ZoneType::Garage | ZoneType::Foundation => {
                 zone.floor_area_m2.map(|a| a * default_height_m)
             }
-            _ => None,
+            // Outdoor and Ground are filtered above; Other has no volume model.
+            ZoneType::Outdoor | ZoneType::Ground | ZoneType::Other(_) => None,
         };
     }
 
@@ -612,6 +621,7 @@ fn parse_windows(
             solar_absorptance: None,
             emittance: None,
             tilt_deg: Some(90.0),
+            framing_factor: None,
         });
     }
 
@@ -680,6 +690,7 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         interior_zone,
         exterior_zone,
         material_layers,
+        framing_factor: parse_framing_factor(node, construction_type.as_deref()),
         construction_type,
         finish_type,
         insulation_details,
@@ -688,6 +699,41 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         emittance,
         tilt_deg,
     })
+}
+
+/// Parse framing factor from HPXML `<FramingFactor>` element, or derive from
+/// `<StudSpacing>` and `<StudWidth>`, or default by construction type.
+///
+/// ASHRAE Handbook of Fundamentals Ch. 27.3: parallel-path method requires
+/// the fraction of wall area that is structural framing.
+fn parse_framing_factor(node: &XmlNode, construction_type: Option<&str>) -> Option<f64> {
+    // Explicit FramingFactor from HPXML
+    // Range (0, 1) excludes boundaries: 0.0 = no framing (equivalent to None),
+    // 1.0 = all framing (physically impossible for an insulated wall).
+    if let Some(ff) = find_descendant_f64(node, "FramingFactor", ValueKind::Raw) {
+        if ff > 0.0 && ff < 1.0 {
+            return Some(ff);
+        }
+    }
+
+    // Derive from stud spacing and width: ff = stud_width / stud_spacing
+    if let (Some(spacing_in), Some(width_in)) = (
+        find_descendant_f64(node, "StudSpacing", ValueKind::Raw),
+        find_descendant_f64(node, "StudWidth", ValueKind::Raw),
+    ) {
+        if spacing_in > 0.0 && width_in > 0.0 && width_in < spacing_in {
+            return Some(width_in / spacing_in);
+        }
+    }
+
+    // Default by construction type per ASHRAE Handbook of Fundamentals.
+    // 25% for 16" OC (standard), 22% for 24" OC (advanced framing).
+    // HPXML WallType first-child element names.
+    match construction_type {
+        Some("WoodStud") => Some(0.25),
+        Some("SteelFrame") => Some(0.25),
+        _ => None,
+    }
 }
 
 fn parse_boundary_area(
@@ -742,7 +788,7 @@ fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
         BoundaryType::Roof | BoundaryType::RimJoist | BoundaryType::Window => {
             Some(ZoneType::Outdoor)
         }
-        BoundaryType::Slab => Some(ZoneType::Outdoor), // ground handled later by resolve_exterior
+        BoundaryType::Slab => Some(ZoneType::Ground),
         // Floor/FrameFloor: HPXML requires <ExteriorAdjacentTo>, so exterior
         // zone is always parsed from the element rather than inferred here.
         _ => None,
@@ -1304,8 +1350,9 @@ fn parse_zone_label(text: &str) -> ZoneType {
         || norm.contains("crawl")
     {
         ZoneType::Foundation
-    } else if norm.contains("out") || norm.contains("ambient") || norm == "ground"
-    {
+    } else if norm == "ground" {
+        ZoneType::Ground
+    } else if norm.contains("out") || norm.contains("ambient") {
         ZoneType::Outdoor
     } else {
         ZoneType::Other(text.trim().to_string())
@@ -1335,6 +1382,7 @@ fn zone_key(zone_type: &ZoneType) -> String {
         ZoneType::Garage => "garage".to_string(),
         ZoneType::Foundation => "foundation".to_string(),
         ZoneType::Outdoor => "outdoor".to_string(),
+        ZoneType::Ground => "ground".to_string(),
         ZoneType::Other(label) => label.to_ascii_lowercase(),
     }
 }
@@ -1424,7 +1472,7 @@ fn zone_sort_key(zone_type: &ZoneType) -> u8 {
         ZoneType::Attic => 1,
         ZoneType::Garage => 2,
         ZoneType::Foundation => 3,
-        ZoneType::Outdoor => 4,
+        ZoneType::Outdoor | ZoneType::Ground => 4,
         ZoneType::Other(_) => 5,
     }
 }
@@ -1572,7 +1620,9 @@ mod tests {
     fn parses_zones_boundaries_windows_and_ducts() {
         let building = parse_building(SAMPLE_XML).expect("expected parser success");
 
-        assert_eq!(building.zones.len(), 5);
+        // 4 thermal zones: Conditioned, Attic, Garage, Foundation.
+        // Outdoor and Ground are boundary conditions, not thermal zones — filtered out.
+        assert_eq!(building.zones.len(), 4);
         assert!(
             building
                 .zones

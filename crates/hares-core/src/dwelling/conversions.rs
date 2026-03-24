@@ -40,7 +40,9 @@ pub fn building_to_boundary_inputs(
 ) -> Vec<BoundaryInput> {
     use hares_envelope::PrecomputedRCLayer;
     use hares_io::envelope_lut::resolve_boundary_name;
+    use hares_io::hpxml::BoundaryType;
     use hares_physics::film_coefficients::{SurfaceRoughness, film_resistances};
+    use hares_physics::solar::window_u_factor_decomposition;
 
     let envelope_lut = defaults.envelope_lut();
 
@@ -50,8 +52,28 @@ pub fn building_to_boundary_inputs(
         .map(|bd| {
             let interior_zone_idx = find_zone_idx(building, bd.interior_zone.as_ref(), n_zones);
             let exterior = resolve_exterior(building, bd, n_zones);
+
+            // Film resistances first — needed to strip from assembly R-value.
+            let tilt_deg = bd.tilt_deg.unwrap_or(90.0);
+            let interior_label = zone_type_to_label(bd.interior_zone.as_ref());
+            let exterior_label = zone_type_to_label(bd.exterior_zone.as_ref());
+            let (r_film_int, r_film_ext) = film_resistances(
+                tilt_deg,
+                interior_label,
+                exterior_label,
+                avg_wind_m_s,
+                avg_ground_c,
+                avg_ambient_c,
+                SurfaceRoughness::Rough,
+            );
+
+            // fallback_r is material-only R (no film). HPXML AssemblyEffectiveRValue
+            // includes film per spec, so subtract computed film R to get material-only.
+            // NominalRValue layers are already material-only. Film R is added back in
+            // boundary_rc.rs for all three construction paths.
             let fallback_r = bd
                 .assembly_r_value_m2_k_w
+                .map(|r| (r - r_film_int - r_film_ext).max(1e-6))
                 .or_else(|| {
                     let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
                     if sum > 0.0 { Some(sum) } else { None }
@@ -108,18 +130,28 @@ pub fn building_to_boundary_inputs(
                 })
                 .unwrap_or_default();
 
-            let tilt_deg = bd.tilt_deg.unwrap_or(90.0);
-            let interior_label = zone_type_to_label(bd.interior_zone.as_ref());
-            let exterior_label = zone_type_to_label(bd.exterior_zone.as_ref());
-            let (r_film_int, r_film_ext) = film_resistances(
-                tilt_deg,
-                interior_label,
-                exterior_label,
-                avg_wind_m_s,
-                avg_ground_c,
-                avg_ambient_c,
-                SurfaceRoughness::Rough,
-            );
+            // Window U-factor decomposition: EnergyPlus Simple Window Model Step 1.
+            // Overrides fallback_r and film resistances for window boundaries.
+            let (fallback_r, r_film_int, r_film_ext) =
+                if bd.boundary_type == BoundaryType::Window {
+                    let u_factor = building
+                        .windows
+                        .iter()
+                        .find(|w| w.id == bd.id)
+                        .and_then(|w| w.u_factor_w_m2_k);
+                    if let Some(u) = u_factor.filter(|&u| u > 0.0) {
+                        let (r_glass, r_int) = window_u_factor_decomposition(u);
+                        (r_glass, r_int, 0.0)
+                    } else {
+                        tracing::warn!(
+                            boundary = %bd.id,
+                            "window boundary has no U-factor — using generic film resistances"
+                        );
+                        (fallback_r, r_film_int, r_film_ext)
+                    }
+                } else {
+                    (fallback_r, r_film_int, r_film_ext)
+                };
 
             BoundaryInput {
                 area_m2: bd.area_m2,
@@ -140,6 +172,7 @@ pub fn building_to_boundary_inputs(
                 fallback_r_m2_k_w: fallback_r,
                 r_film_interior_m2_k_w: r_film_int,
                 r_film_exterior_m2_k_w: r_film_ext,
+                framing_factor: bd.framing_factor,
             }
         })
         .collect()
@@ -156,6 +189,7 @@ pub(crate) fn zone_type_to_label(
         Some(ZoneType::Attic) => ZoneLabel::Attic,
         Some(ZoneType::Garage) => ZoneLabel::Garage,
         Some(ZoneType::Foundation) => ZoneLabel::Foundation,
+        Some(ZoneType::Ground) => ZoneLabel::Ground,
         Some(ZoneType::Outdoor) | None => ZoneLabel::Outdoor,
         Some(ZoneType::Other(_)) => ZoneLabel::Outdoor,
     }
@@ -189,11 +223,7 @@ pub(crate) fn resolve_exterior(
 ) -> ExteriorTarget {
     match boundary.exterior_zone.as_ref() {
         Some(hares_io::hpxml::ZoneType::Outdoor) => ExteriorTarget::Outdoor,
-        Some(hares_io::hpxml::ZoneType::Foundation)
-            if boundary.boundary_type == hares_io::hpxml::BoundaryType::Slab =>
-        {
-            ExteriorTarget::Ground
-        }
+        Some(hares_io::hpxml::ZoneType::Ground) => ExteriorTarget::Ground,
         Some(zt) => {
             let idx = find_zone_idx(building, Some(zt), n_zones);
             ExteriorTarget::Zone(idx)

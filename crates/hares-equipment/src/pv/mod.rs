@@ -2,6 +2,7 @@
 
 mod array_config;
 mod lut;
+pub mod shading;
 pub mod soiling;
 
 pub use array_config::{ModuleType, PvArray, surface_id_for_orientation};
@@ -92,8 +93,8 @@ fn cell_temperature_noct_wind(
     wind_speed_m_s: f64,
 ) -> f64 {
     let noct_factor = (noct_c - NOCT_REFERENCE_TEMP_C) / NOCT_REFERENCE_IRRADIANCE_W_M2;
-    let wind_correction =
-        NOCT_WIND_NUMERATOR / (NOCT_WIND_CONSTANT + NOCT_WIND_COEFFICIENT * wind_speed_m_s.max(0.0));
+    let wind_correction = NOCT_WIND_NUMERATOR
+        / (NOCT_WIND_CONSTANT + NOCT_WIND_COEFFICIENT * wind_speed_m_s.max(0.0));
     ambient_temp_c + irradiance_w_m2 * noct_factor * wind_correction
 }
 
@@ -114,6 +115,7 @@ struct PvCheckpoint {
     power_factor: f64,
     soiling_config: Option<soiling::SoilingConfig>,
     soiling_state: Option<soiling::SoilingState>,
+    shading_model: shading::ShadingModel,
 }
 
 pub struct PV {
@@ -136,6 +138,7 @@ pub struct PV {
     last_ac_power_kw: f64,
     soiling_config: Option<soiling::SoilingConfig>,
     soiling_state: Option<soiling::SoilingState>,
+    shading_model: shading::ShadingModel,
     init_error: Option<HaresError>,
 }
 
@@ -147,6 +150,8 @@ impl PV {
             Ok(a) => (a, None),
             Err(e) => (vec![], Some(e)),
         };
+        let shading_model = shading::parse_shading_config(&config);
+
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(id),
             name: config.name,
@@ -174,6 +179,7 @@ impl PV {
         telemetry.insert("curtailment_kw", 0.0);
         telemetry.insert("inverter_clipping_kw", 0.0);
         telemetry.insert("soiling_ratio", 1.0);
+        telemetry.insert("shading_factor", 1.0);
 
         Self {
             descriptor,
@@ -194,6 +200,7 @@ impl PV {
             last_ac_power_kw: 0.0,
             soiling_config: None,
             soiling_state: None,
+            shading_model,
             init_error,
         }
     }
@@ -204,12 +211,14 @@ impl PV {
         irr: &SurfaceIrradiance,
         array: &PvArray,
         soiling_ratio: f64,
+        shading_factor: f64,
     ) -> ArrayStepOutput {
-        // Soiling reduces effective irradiance reaching the cells.
+        // Soiling and shading reduce effective irradiance reaching the cells.
         // Applied before cell temperature and power calculations so that a
-        // soiled panel also runs cooler (less absorbed irradiance as heat).
-        let irradiance_w_m2 =
-            (irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2).max(0.0) * soiling_ratio;
+        // shaded/soiled panel also runs cooler (less absorbed irradiance as heat).
+        let irradiance_w_m2 = (irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2).max(0.0)
+            * soiling_ratio
+            * shading_factor;
         let ambient_temp_c = env.weather.outdoor_temp_c;
 
         if let Some(lut) = array
@@ -227,11 +236,12 @@ impl PV {
             let dhi = env.weather.dhi_w_m2.max(0.0);
             // SAM LUTs are indexed on weather-station irradiance (GHI/DNI/DHI),
             // not POA, so soiling can't be folded into the LUT inputs. Apply
-            // the soiling ratio as a post-LUT power derating instead.
+            // the soiling/shading ratios as a post-LUT power derating instead.
             let ac_power_kw = lut
                 .interpolate(month, hour, ghi, dni, dhi, ambient_temp_c)
                 .max(0.0)
-                * soiling_ratio;
+                * soiling_ratio
+                * shading_factor;
             let dc_power_kw = ac_power_kw / self.inverter_efficiency.max(1e-9);
             let cell_temp_c = cell_temperature_noct_wind(
                 ambient_temp_c,
@@ -306,7 +316,11 @@ impl PV {
                 } else {
                     q_abs = q_abs.min(inv_cap);
                 }
-                let q_out = if self.q_setpoint_kvar >= 0.0 { q_abs } else { -q_abs };
+                let q_out = if self.q_setpoint_kvar >= 0.0 {
+                    q_abs
+                } else {
+                    -q_abs
+                };
                 let p_max = (inv_cap * inv_cap - q_out * q_out).max(0.0).sqrt();
                 let p_out = p_kw.min(p_max);
                 (p_out, q_out)
@@ -494,6 +508,13 @@ impl Equipment for PV {
             _ => 1.0,
         };
 
+        // Compute shading factor from current solar position.
+        let shading_factor = self.shading_model.shading_factor(
+            env.weather.solar_altitude_deg,
+            env.weather.solar_azimuth_deg,
+            env.current_time.month(),
+        );
+
         let mut total_dc_power_kw = 0.0;
         let mut total_ac_power_kw = 0.0;
         let mut total_irradiance_weighted = 0.0;
@@ -518,7 +539,7 @@ impl Equipment for PV {
                     ))
                 })?;
 
-            let output = self.step_one_array(env, irr, array, soiling_ratio);
+            let output = self.step_one_array(env, irr, array, soiling_ratio, shading_factor);
             total_dc_power_kw += output.dc_power_kw;
             total_ac_power_kw += output.ac_power_kw;
             total_irradiance_weighted += output.irradiance_w_m2 * array.capacity_kw;
@@ -568,8 +589,7 @@ impl Equipment for PV {
         self.last_ac_power_kw = final_p_kw;
         self.telemetry.set("dc_power_kw", total_dc_power_kw);
         self.telemetry.set("ac_power_kw", final_p_kw);
-        self.telemetry
-            .set("reactive_power_kvar", final_q_kvar);
+        self.telemetry.set("reactive_power_kvar", final_q_kvar);
         self.telemetry.set("cell_temp_c", mean_cell_temp_c);
         self.telemetry.set("irradiance_w_m2", mean_irradiance_w_m2);
         self.telemetry
@@ -578,6 +598,7 @@ impl Equipment for PV {
         self.telemetry
             .set("inverter_clipping_kw", inverter_clipping_kw);
         self.telemetry.set("soiling_ratio", soiling_ratio);
+        self.telemetry.set("shading_factor", shading_factor);
 
         Ok(())
     }
@@ -595,6 +616,7 @@ impl Equipment for PV {
             power_factor: self.power_factor,
             soiling_config: self.soiling_config.clone(),
             soiling_state: self.soiling_state.clone(),
+            shading_model: self.shading_model.clone(),
         })
     }
 
@@ -607,6 +629,7 @@ impl Equipment for PV {
         self.power_factor = decoded.power_factor;
         self.soiling_config = decoded.soiling_config;
         self.soiling_state = decoded.soiling_state;
+        self.shading_model = decoded.shading_model;
         Ok(())
     }
 
@@ -740,6 +763,11 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             description: "PV soiling ratio (1.0 = clean, < 1.0 = soiled). Kimber model."
                 .to_string(),
         },
+        TelemetryField {
+            name: "shading_factor".to_string(),
+            unit: "-".to_string(),
+            description: "PV shading factor (1.0 = unshaded, 0.0 = fully shaded)".to_string(),
+        },
     ]
 }
 
@@ -750,16 +778,16 @@ mod tests {
 
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, GridState, InverterPriority, PortSlots,
-        SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+        ControlSignal, EnvironmentState, GridState, InverterPriority, PortSlots, SurfaceIrradiance,
+        WeatherState, ZoneId, ZoneState,
     };
 
+    use super::lut::PvLut;
     use super::{
         DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_SYSTEM_LOSSES_FRACTION, Equipment,
         EquipmentConfig, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV,
         cell_temperature_noct_wind, register_with_registry, surface_id_for_orientation,
     };
-    use super::lut::PvLut;
 
     fn env_with_surfaces(
         surfaces: Vec<SurfaceIrradiance>,
@@ -888,7 +916,8 @@ mod tests {
     #[test]
     fn temperature_derating_matches_expected_fraction() {
         let mut cfg = config_single();
-        cfg.raw_config.insert("system_losses_fraction".to_string(), 0.0.into());
+        cfg.raw_config
+            .insert("system_losses_fraction".to_string(), 0.0.into());
         let mut pv = PV::new(cfg.clone());
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
 
@@ -1077,7 +1106,10 @@ mod tests {
         let t_windy = cell_temperature_noct_wind(t_amb, irr, noct, 10.0);
         // Cell temp must decrease monotonically with increasing wind speed.
         assert!(t_calm > t_moderate, "calm {t_calm} > moderate {t_moderate}");
-        assert!(t_moderate > t_windy, "moderate {t_moderate} > windy {t_windy}");
+        assert!(
+            t_moderate > t_windy,
+            "moderate {t_moderate} > windy {t_windy}"
+        );
         // At 10 m/s the wind correction is 9.5/(5.7+38) = ~0.217, so cell temp
         // rise above ambient should be ~22% of the no-wind rise.
         let rise_calm = t_calm - t_amb;
@@ -1150,7 +1182,6 @@ mod tests {
             "windy power {power_windy} should exceed calm power {power_calm}"
         );
     }
-
 
     // --- Regression tests for code-review fixes ---
 
@@ -1368,12 +1399,16 @@ mod tests {
 
         // Zero losses config.
         let mut cfg_zero = config_single();
-        cfg_zero.raw_config.insert("system_losses_fraction".to_string(), 0.0.into());
+        cfg_zero
+            .raw_config
+            .insert("system_losses_fraction".to_string(), 0.0.into());
         let env = env_with_surfaces_full(surfaces.clone(), 25.0, 1.0);
         let mut pv_zero = PV::new(cfg_zero.clone());
         pv_zero.init(&cfg_zero, &env).unwrap();
         let mut ports = PortSlots::default();
-        pv_zero.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        pv_zero
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .unwrap();
         let dc_zero = pv_zero.telemetry().get("dc_power_kw").unwrap();
 
         // Default 14% losses config.
@@ -1381,7 +1416,9 @@ mod tests {
         let mut pv_default = PV::new(cfg_default.clone());
         pv_default.init(&cfg_default, &env).unwrap();
         let mut ports2 = PortSlots::default();
-        pv_default.step(&env, Duration::from_secs(60), &mut ports2).unwrap();
+        pv_default
+            .step(&env, Duration::from_secs(60), &mut ports2)
+            .unwrap();
         let dc_default = pv_default.telemetry().get("dc_power_kw").unwrap();
 
         approx_eq(dc_default, dc_zero * (1.0 - DEFAULT_SYSTEM_LOSSES_FRACTION));
@@ -1402,7 +1439,13 @@ mod tests {
         };
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
-            vec![SurfaceIrradiance { surface_id: sid, direct_w_m2: 0.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0, angle_of_incidence_rad: 0.0 }],
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
             25.0,
         );
         let mut pv = PV::new(cfg.clone());
@@ -1425,7 +1468,13 @@ mod tests {
         };
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
-            vec![SurfaceIrradiance { surface_id: sid, direct_w_m2: 0.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0, angle_of_incidence_rad: 0.0 }],
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
             25.0,
         );
         let mut pv = PV::new(cfg.clone());
@@ -1490,9 +1539,14 @@ mod tests {
         };
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
-                surface_id: sid, direct_w_m2: 1_000.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0, angle_of_incidence_rad: 0.0,
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
             }],
-            25.0, 1.0,
+            25.0,
+            1.0,
         );
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
@@ -1554,13 +1608,16 @@ mod tests {
             let (mut pv2, env2) = make_inverter_pv(100.0);
             pv2.q_setpoint_kvar = 2.0;
             let mut ports2 = PortSlots::default();
-            pv2.step(&env2, Duration::from_secs(60), &mut ports2).unwrap();
+            pv2.step(&env2, Duration::from_secs(60), &mut ports2)
+                .unwrap();
             let p2 = pv2.telemetry().get("ac_power_kw").unwrap();
             let q2 = pv2.telemetry().get("reactive_power_kvar").unwrap();
             p2 / (p2 * p2 + q2 * q2).sqrt()
         };
-        assert!((pf_out - original_s).abs() < 0.01,
-            "CPF should preserve power factor: got {pf_out}, expected {original_s}");
+        assert!(
+            (pf_out - original_s).abs() < 0.01,
+            "CPF should preserve power factor: got {pf_out}, expected {original_s}"
+        );
     }
 
     #[test]
@@ -1580,7 +1637,11 @@ mod tests {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
-                surface_id: sid, direct_w_m2: 1_000.0, diffuse_w_m2: 0.0, reflected_w_m2: 0.0, angle_of_incidence_rad: 0.0,
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
             }],
             25.0,
         );
@@ -1589,23 +1650,30 @@ mod tests {
         pv.init(&cfg, &env).unwrap();
 
         let mut ports_full = PortSlots::default();
-        pv.step(&env, Duration::from_secs(60), &mut ports_full).unwrap();
+        pv.step(&env, Duration::from_secs(60), &mut ports_full)
+            .unwrap();
         let ac_full = pv.telemetry().get("ac_power_kw").unwrap();
 
-        pv.apply_control(&ControlSignal::CurtailmentPercent { percent: 50.0 }).unwrap();
+        pv.apply_control(&ControlSignal::CurtailmentPercent { percent: 50.0 })
+            .unwrap();
         let mut ports_half = PortSlots::default();
-        pv.step(&env, Duration::from_secs(60), &mut ports_half).unwrap();
+        pv.step(&env, Duration::from_secs(60), &mut ports_half)
+            .unwrap();
         let ac_half = pv.telemetry().get("ac_power_kw").unwrap();
 
-        assert!((ac_half - ac_full * 0.5).abs() < 0.01,
-            "50% curtailment: got {ac_half}, expected ~{}", ac_full * 0.5);
+        assert!(
+            (ac_half - ac_full * 0.5).abs() < 0.01,
+            "50% curtailment: got {ac_half}, expected ~{}",
+            ac_full * 0.5
+        );
     }
 
     #[test]
     fn reactive_setpoint_signal_sets_q() {
         let (mut pv, env) = make_inverter_pv(10.0);
         pv.inverter_min_pf = None;
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 }).unwrap();
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+            .unwrap();
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let q = pv.telemetry().get("reactive_power_kvar").unwrap();
@@ -1616,13 +1684,17 @@ mod tests {
     fn power_factor_setpoint_signal_computes_q() {
         let (mut pv, env) = make_inverter_pv(10.0);
         pv.inverter_min_pf = None;
-        pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.9 }).unwrap();
+        pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.9 })
+            .unwrap();
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get("ac_power_kw").unwrap();
         let q = pv.telemetry().get("reactive_power_kvar").unwrap();
         let expected_q = p * (0.9_f64.acos().tan());
-        assert!((q - expected_q).abs() < 1e-6, "q={q}, expected {expected_q}");
+        assert!(
+            (q - expected_q).abs() < 1e-6,
+            "q={q}, expected {expected_q}"
+        );
     }
 
     #[test]
@@ -1631,11 +1703,13 @@ mod tests {
         assert_eq!(pv.inverter_priority, InverterPriority::Var);
         pv.apply_control(&ControlSignal::InverterPriorityMode {
             priority: InverterPriority::Watt,
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(pv.inverter_priority, InverterPriority::Watt);
         pv.apply_control(&ControlSignal::InverterPriorityMode {
             priority: InverterPriority::Cpf,
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(pv.inverter_priority, InverterPriority::Cpf);
     }
 
@@ -1644,7 +1718,12 @@ mod tests {
     #[test]
     fn telemetry_fields_include_all_set_channels() {
         let pv = PV::new(config_single());
-        let field_names: Vec<&str> = pv.descriptor().telemetry_fields.iter().map(|f| f.name.as_str()).collect();
+        let field_names: Vec<&str> = pv
+            .descriptor()
+            .telemetry_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         assert!(field_names.contains(&"inverter_clipping_kw"));
         assert!(field_names.contains(&"reactive_power_kvar"));
         assert!(field_names.contains(&"dc_power_kw"));
@@ -1743,7 +1822,8 @@ mod tests {
         let mut pv2 = PV::new(cfg2.clone());
         pv2.init(&cfg2, &env).unwrap();
         let mut ports2 = PortSlots::default();
-        pv2.step(&env, Duration::from_secs(60), &mut ports2).unwrap();
+        pv2.step(&env, Duration::from_secs(60), &mut ports2)
+            .unwrap();
         let dc_20pct = pv2.telemetry().get("dc_power_kw").unwrap();
 
         // 5% losses should give more power than 20% losses.
@@ -1823,6 +1903,85 @@ mod tests {
             -ports_limited.electrical.generation_power_kw <= 2.0 + 1e-9,
             "port generation_power_kw must be ≤ 2.0 kW, got {}",
             -ports_limited.electrical.generation_power_kw
+        );
+    }
+
+    /// Verify that shading_model is properly saved and restored in checkpoints.
+    #[test]
+    fn checkpoint_round_trip_preserves_shading_model() {
+        use super::shading::ShadingModel;
+        let mut pv = PV::new(config_single());
+        pv.shading_model = ShadingModel::FixedLoss {
+            annual_fraction: 0.15,
+        };
+
+        let state = pv.save_state();
+        let mut restored = PV::new(config_single());
+        restored.load_state(&state).unwrap();
+
+        match restored.shading_model {
+            ShadingModel::FixedLoss { annual_fraction } => {
+                approx_eq(annual_fraction, 0.15);
+            }
+            _ => panic!(
+                "expected FixedLoss shading model, got {:?}",
+                restored.shading_model
+            ),
+        }
+
+        // Verify state bytes are identical after round-trip
+        assert_eq!(state, restored.save_state());
+    }
+
+    /// Verify that shading_factor telemetry is present and reflects the model.
+    #[test]
+    fn shading_factor_appears_in_telemetry() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+
+        let mut raw = HashMap::new();
+        raw.insert("equipment_id".to_string(), 1.0.into());
+        raw.insert("capacity_kw".to_string(), 5.0.into());
+        raw.insert("tilt_deg".to_string(), 30.0.into());
+        raw.insert("azimuth_deg".to_string(), 180.0.into());
+        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
+        raw.insert("shading_model".to_string(), "fixed".into());
+        raw.insert("shading_annual_fraction".to_string(), 0.20.into());
+        let cfg = EquipmentConfig {
+            name: "PV Shading".to_string(),
+            ochre_class: "PV".to_string(),
+            raw_config: raw,
+        };
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        // Verify telemetry field exists and equals expected value (1.0 - 0.20 = 0.80)
+        let shading_factor = pv.telemetry().get("shading_factor").unwrap_or(-1.0);
+        approx_eq(shading_factor, 0.80);
+
+        // Verify the field is declared in descriptor
+        let field_names: Vec<&str> = pv
+            .descriptor()
+            .telemetry_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(
+            field_names.contains(&"shading_factor"),
+            "shading_factor must be in telemetry_fields"
         );
     }
 }

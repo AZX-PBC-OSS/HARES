@@ -153,14 +153,28 @@ impl PvLut {
         let mut nn_entries = Vec::with_capacity(rows.len());
         for &(month, hour, ghi, dni, dhi, temp, ac) in &rows {
             let indices = [
-                *month_idx.get(&quantize_lut_axis(month)).expect("month index exists"),
-                *hour_idx.get(&quantize_lut_axis(hour)).expect("hour index exists"),
-                *ghi_idx.get(&quantize_lut_axis(ghi)).expect("ghi index exists"),
-                *dni_idx.get(&quantize_lut_axis(dni)).expect("dni index exists"),
-                *dhi_idx.get(&quantize_lut_axis(dhi)).expect("dhi index exists"),
-                *temp_idx.get(&quantize_lut_axis(temp)).expect("temp index exists"),
+                *month_idx
+                    .get(&quantize_lut_axis(month))
+                    .expect("month index exists"),
+                *hour_idx
+                    .get(&quantize_lut_axis(hour))
+                    .expect("hour index exists"),
+                *ghi_idx
+                    .get(&quantize_lut_axis(ghi))
+                    .expect("ghi index exists"),
+                *dni_idx
+                    .get(&quantize_lut_axis(dni))
+                    .expect("dni index exists"),
+                *dhi_idx
+                    .get(&quantize_lut_axis(dhi))
+                    .expect("dhi index exists"),
+                *temp_idx
+                    .get(&quantize_lut_axis(temp))
+                    .expect("temp index exists"),
             ];
-            let key = (indices[0], indices[1], indices[2], indices[3], indices[4], indices[5]);
+            let key = (
+                indices[0], indices[1], indices[2], indices[3], indices[4], indices[5],
+            );
             values.insert(key, ac);
             nn_entries.push((indices, ac));
         }
@@ -187,7 +201,15 @@ impl PvLut {
         })
     }
 
-    pub(crate) fn interpolate(&self, month: f64, hour: f64, ghi: f64, dni: f64, dhi: f64, temp_c: f64) -> f64 {
+    pub(crate) fn interpolate(
+        &self,
+        month: f64,
+        hour: f64,
+        ghi: f64,
+        dni: f64,
+        dhi: f64,
+        temp_c: f64,
+    ) -> f64 {
         let month = month.clamp(
             *self.month_values.first().expect("month axis non-empty"),
             *self.month_values.last().expect("month axis non-empty"),
@@ -253,8 +275,12 @@ impl PvLut {
 
         // Sparse-grid fallback: nearest-neighbor with normalized distance.
         let axes: [&[f64]; 6] = [
-            &self.month_values, &self.hour_values, &self.ghi_values,
-            &self.dni_values, &self.dhi_values, &self.temp_values,
+            &self.month_values,
+            &self.hour_values,
+            &self.ghi_values,
+            &self.dni_values,
+            &self.dhi_values,
+            &self.temp_values,
         ];
         let query = [month, hour, ghi, dni, dhi, temp_c];
         let query_norm: [f64; 6] = std::array::from_fn(|i| self.nn_norms[i].normalize(query[i]));
@@ -290,7 +316,9 @@ impl PvLut {
     ) -> Self {
         let mut values = HashMap::with_capacity(entries.len());
         for &(indices, ac) in &entries {
-            let key = (indices[0], indices[1], indices[2], indices[3], indices[4], indices[5]);
+            let key = (
+                indices[0], indices[1], indices[2], indices[3], indices[4], indices[5],
+            );
             values.insert(key, ac);
         }
         let nn_norms = [
@@ -302,8 +330,15 @@ impl PvLut {
             AxisNorm::from_values(&temp_values),
         ];
         Self {
-            month_values, hour_values, ghi_values, dni_values, dhi_values, temp_values,
-            values, nn_entries: entries, nn_norms,
+            month_values,
+            hour_values,
+            ghi_values,
+            dni_values,
+            dhi_values,
+            temp_values,
+            values,
+            nn_entries: entries,
+            nn_norms,
         }
     }
 }

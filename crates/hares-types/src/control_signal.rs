@@ -8,6 +8,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HaresError, OperatingMode, ProtocolId};
 
+/// Target component for split duty cycle control (HPWH compressor vs backup element).
+///
+/// When `None`, the duty cycle applies to the entire equipment (default, backward-compatible).
+/// When `Some(Compressor)` or `Some(BackupElement)`, the duty cycle targets only that component,
+/// enabling fine-grained demand response (e.g., curtail compressor during peak but allow backup
+/// for freeze protection).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DutyCycleComponent {
+    /// Heat pump compressor (HPWH, ASHP).
+    Compressor,
+    /// Backup electric resistance element.
+    BackupElement,
+}
+
 /// Demand response severity levels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DRLevel {
@@ -50,6 +64,11 @@ pub enum ControlSignal {
     DutyCycle {
         on_fraction: f64,
         period_s: Option<f64>,
+        /// Optional component target for split duty cycle control.
+        /// `None` = apply to entire equipment (default). `Some(Compressor)` or
+        /// `Some(BackupElement)` targets a single component (HPWH/ASHP).
+        #[serde(default)]
+        component: Option<DutyCycleComponent>,
     },
     LoadFraction {
         fraction: f64,
@@ -199,6 +218,7 @@ mod tests {
             ControlSignal::DutyCycle {
                 on_fraction: 0.5,
                 period_s: Some(900.0),
+                component: None,
             },
             ControlSignal::LoadFraction { fraction: 0.8 },
             ControlSignal::GridConnect { connected: true },

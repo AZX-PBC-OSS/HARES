@@ -337,6 +337,7 @@ impl EnvironmentManager {
                 dni_w_m2: dni,
                 dhi_w_m2: dhi,
                 solar_altitude_deg: pos.altitude_deg,
+                solar_azimuth_deg: pos.azimuth_deg,
                 mains_temp_c,
                 rainfall_m: self.weather.get(WeatherField::LiquidPrecipM, weather_idx),
                 ground_albedo,
@@ -672,6 +673,7 @@ mod tests {
                     solar_absorptance: None,
                     emittance: None,
                     tilt_deg: Some(90.0),
+                    framing_factor: None,
                 },
                 Boundary {
                     id: "north-wall".to_string(),
@@ -690,6 +692,7 @@ mod tests {
                     solar_absorptance: None,
                     emittance: None,
                     tilt_deg: Some(90.0),
+                    framing_factor: None,
                 },
             ],
             windows: Vec::<Window>::new(),

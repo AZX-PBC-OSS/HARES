@@ -100,6 +100,10 @@ pub struct WeatherState {
     /// Computed from `solar_position()` each timestep.
     #[serde(default)]
     pub solar_altitude_deg: f64,
+    /// Solar azimuth angle [degrees, 0=N, 90=E, 180=S, 270=W].
+    /// Computed from `solar_position()` each timestep.
+    #[serde(default)]
+    pub solar_azimuth_deg: f64,
     /// Municipal cold-water supply temperature [°C], computed each step using
     /// the Burch-Christensen (2007) model with annual climate statistics.
     /// Defaults to 15.0 when environment data is unavailable.
@@ -229,6 +233,7 @@ mod tests {
                 dni_w_m2: 300.0,
                 dhi_w_m2: 100.0,
                 solar_altitude_deg: 30.0,
+                solar_azimuth_deg: 180.0,
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,

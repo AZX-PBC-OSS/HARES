@@ -9,7 +9,9 @@ mod tests {
     use std::path::PathBuf;
 
     use hares_core::{building_to_boundary_inputs, building_to_zone_inputs};
-    use hares_envelope::{ExteriorTarget, assemble_building_rc, derive_zone_capacitances};
+    use hares_envelope::{
+        ExteriorTarget, RCPath, assemble_building_rc, derive_zone_capacitances,
+    };
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use hares_io::{DefaultsStore, parse_hpxml};
 
@@ -324,18 +326,10 @@ mod tests {
             "[structural] boundary targets: outdoor={outdoor_count}, ground={ground_count}, zone={zone_count}"
         );
 
-        // BUG DOCUMENTATION: The BEopt slab has <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>
-        // which parse_zone_label maps to ZoneType::Outdoor (the "ground" string matches the
-        // Outdoor branch). resolve_exterior then yields ExteriorTarget::Outdoor instead of Ground.
-        // When this is fixed, update this assertion to: assert!(ground_count >= 1).
-        if ground_count == 0 {
-            eprintln!(
-                "[structural] KNOWN ISSUE: slab routes to ExteriorTarget::Outdoor instead of Ground. \
-                 See resolve_exterior / parse_zone_label for 'ground' → ZoneType::Outdoor mapping."
-            );
-        }
-
-        eprintln!("[structural] beopt_boundary_inputs: all assertions passed");
+        assert!(
+            ground_count >= 1,
+            "slab must connect to ExteriorTarget::Ground, got ground_count={ground_count}"
+        );
     }
 
     // ── Test 3: RC network topology ──────────────────────────────────────
@@ -379,7 +373,7 @@ mod tests {
         );
 
         // Assemble the RC network
-        let rc = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps)
+        let (rc, _diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps)
             .expect("assemble_building_rc must succeed");
 
         // Zone state rows
@@ -463,5 +457,105 @@ mod tests {
         );
 
         eprintln!("[structural] beopt_rc_network_topology: all assertions passed");
+    }
+
+    // ── Test 4: Boundary-by-boundary UA diagnostics ────────────────────
+
+    #[test]
+    fn beopt_boundary_ua_diagnostics() {
+        let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
+        let defaults_path = project_root().join("defaults");
+        let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
+
+        let n_zones = building.zones.len();
+        let zone_inputs = building_to_zone_inputs(&building, n_zones);
+        let boundary_inputs =
+            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
+        let zone_caps = derive_zone_capacitances(&zone_inputs);
+
+        let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps)
+            .expect("assemble_building_rc must succeed");
+
+        eprintln!("\n=== Boundary-by-Boundary UA Diagnostics ===");
+        eprintln!(
+            "{:<4} {:<8} {:>10} {:>10} {:>10} {:>6} {:>6} {:<12} {:<10}",
+            "idx", "path", "area_m2", "R_total", "UA_W/K", "nodes", "zone", "exterior", "C_kJ/K"
+        );
+        eprintln!("{}", "-".repeat(90));
+
+        for d in &diag.boundaries {
+            let path_str = match d.path {
+                RCPath::Precomputed => "LUT",
+                RCPath::MaterialLayer => "layers",
+                RCPath::FallbackR => "fallbk",
+            };
+            let ext_str = match d.exterior_target {
+                ExteriorTarget::Outdoor => "Outdoor".to_string(),
+                ExteriorTarget::Ground => "Ground".to_string(),
+                ExteriorTarget::Zone(i) => format!("Zone({i})"),
+            };
+            eprintln!(
+                "{:<4} {:<8} {:>10.2} {:>10.4} {:>10.2} {:>6} {:>6} {:<12} {:>10.2}",
+                d.boundary_idx,
+                path_str,
+                d.area_m2,
+                d.r_total_m2_k_w,
+                d.ua_w_per_k,
+                d.n_rc_nodes,
+                d.interior_zone_idx,
+                ext_str,
+                d.capacitance_j_k / 1000.0,
+            );
+        }
+
+        eprintln!("{}", "-".repeat(90));
+        eprintln!("Total UA: {:.2} W/K", diag.total_ua_w_per_k);
+        eprintln!(
+            "Zone capacitances [kJ/K]: {:?}",
+            diag.zone_capacitances_j_k
+                .iter()
+                .map(|c| c / 1000.0)
+                .collect::<Vec<_>>()
+        );
+        eprintln!("OCHRE reference total UA: ~568 W/K");
+        eprintln!(
+            "Boundaries: {} total, {} LUT, {} layers, {} fallback",
+            diag.boundaries.len(),
+            diag.boundaries
+                .iter()
+                .filter(|d| d.path == RCPath::Precomputed)
+                .count(),
+            diag.boundaries
+                .iter()
+                .filter(|d| d.path == RCPath::MaterialLayer)
+                .count(),
+            diag.boundaries
+                .iter()
+                .filter(|d| d.path == RCPath::FallbackR)
+                .count(),
+        );
+
+        assert!(
+            !diag.boundaries.is_empty(),
+            "diagnostics must contain at least one boundary"
+        );
+        assert!(
+            diag.total_ua_w_per_k > 0.0,
+            "total UA must be positive, got {}",
+            diag.total_ua_w_per_k
+        );
+        for d in &diag.boundaries {
+            assert!(d.area_m2 > 0.0, "boundary {} area must be > 0", d.boundary_idx);
+            assert!(
+                d.r_total_m2_k_w > 0.0,
+                "boundary {} R_total must be > 0, got {}",
+                d.boundary_idx, d.r_total_m2_k_w
+            );
+            assert!(
+                d.ua_w_per_k > 0.0,
+                "boundary {} UA must be > 0, got {}",
+                d.boundary_idx, d.ua_w_per_k
+            );
+        }
     }
 }

@@ -2,12 +2,19 @@
 
 ## Context
 
-HARES cools 1.8x faster than OCHRE for the same building (BEopt example). The effective UA is ~1000+ W/K vs OCHRE's 568 W/K. Root causes identified through code exploration and cross-validated by Kimi K2.5 review:
+HARES cools 1.8x faster than OCHRE for the same building (BEopt example). The effective UA is ~1000+ W/K vs OCHRE's 568 W/K. Root causes identified through code exploration and cross-validated by Kimi K2.5 and GLM-5 reviews:
 
 1. **Slab connects to outdoor air instead of ground** (known bug, documented in test)
-2. **Window U-factor not decomposed** — generic film R used instead of EnergyPlus Simple Window Model Step 1
+2. **Window U-factor not decomposed** — generic film R used instead of EnergyPlus Simple Window Model Step 1; window R defaults to 2.5 m²K/W (5x too high)
 3. **Raised floor maps to wrong LUT boundary name** ("Attic Floor" instead of "Raised Floor")
 4. **Foundation wall/slab insulation details not parsed** from HPXML (DepthBelowGrade, PerimeterInsulation, UnderSlabInsulation)
+5. **Foundation wall construction_type uses WallType** instead of building-level foundation_name — LUT miss
+6. **Wall area not reduced by window/door area** — OCHRE subtracts opening areas from attached walls
+7. **Insulation details string generated for regular walls** when OCHRE doesn't pass them (LUT mismatch)
+
+## Execution
+
+Decomposed into 10 atomic tickets: see [ENV-INDEX](docs/tickets/ENV-INDEX.md) for dependency graph, execution order, and parallelism notes.
 5. **Insulation details string generated for regular walls** when OCHRE doesn't pass them (could cause LUT mismatch)
 
 ### Clarification: Film Resistance Handling (from Kimi review)

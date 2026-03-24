@@ -946,6 +946,7 @@ mod tests {
                 dni_w_m2: 300.0,
                 dhi_w_m2: 100.0,
                 solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
                 mains_temp_c: 15.0,
                 solar_irradiance: vec![],
                 rainfall_m: 0.0,

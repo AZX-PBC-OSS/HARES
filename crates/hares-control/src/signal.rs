@@ -85,6 +85,7 @@ impl ControlSignalConstructors for ControlSignal {
         ControlSignal::DutyCycle {
             on_fraction,
             period_s,
+            component: None,
         }
     }
 
@@ -177,6 +178,7 @@ mod tests {
             ControlSignal::DutyCycle {
                 on_fraction: 0.6,
                 period_s: Some(600.0),
+                component: None,
             }
         );
 

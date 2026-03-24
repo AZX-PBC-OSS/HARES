@@ -550,6 +550,30 @@ pub fn window_iam(theta_rad: f64, curve: GlazingCurve) -> f64 {
     (raw / curve.normal_incidence_raw()).clamp(0.0, 1.0)
 }
 
+/// EnergyPlus Simple Window Model Step 1: decompose U-factor into glass and film R.
+///
+/// Returns `(r_glass, r_film_interior)` in m²·K/W.
+/// Exterior film resistance is 0 for windows per EnergyPlus convention.
+///
+/// # References
+/// - EnergyPlus Engineering Reference, Window Calculation Module, Step 1.
+/// - OCHRE `ochre/utils/envelope.py:294–304` (`create_rc_data` with `u_window`).
+#[must_use]
+pub fn window_u_factor_decomposition(u_factor_w_m2_k: f64) -> (f64, f64) {
+    if !u_factor_w_m2_k.is_finite() || u_factor_w_m2_k <= 0.0 {
+        return (0.0, 0.12); // safe defaults: no glass R, standard interior film
+    }
+    let r_int = if u_factor_w_m2_k < 5.85 {
+        1.0 / (0.359073 * u_factor_w_m2_k.ln() + 6.949915)
+    } else {
+        1.0 / (1.788041 * u_factor_w_m2_k - 2.886625)
+    };
+    let r_glass = (1.0 / u_factor_w_m2_k - r_int).max(0.0);
+    debug_assert!(r_glass >= 0.0, "r_glass must be non-negative");
+    debug_assert!(r_int > 0.0, "r_film_int must be positive");
+    (r_glass, r_int)
+}
+
 /// Pre-computed window optical parameters from EnergyPlus Simple Window Model.
 ///
 /// Decomposes SHGC into transmittance and absorbed fractions using the

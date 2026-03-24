@@ -284,7 +284,10 @@ mod tests {
         for _ in 0..240 {
             state.step(&cfg, 0.0, HOUR_S, false);
         }
-        assert!(state.soiling_ratio() < 1.0, "panel must be soiled before rain");
+        assert!(
+            state.soiling_ratio() < 1.0,
+            "panel must be soiled before rain"
+        );
 
         // Rain event.
         state.step(&cfg, 0.010, HOUR_S, false);

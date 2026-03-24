@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::EquipmentConfig;
 
 use super::{
-    DEFAULT_NOCT_C, KEY_ARRAY_AZIMUTH_DEG, KEY_ARRAY_COUNT, KEY_ARRAY_TILT_DEG,
-    KEY_AZIMUTH_DEG, KEY_CAPACITY_KW, KEY_MODULE_TYPE, KEY_NOCT_C, KEY_SAM_LUT_PATH,
-    KEY_SYSTEM_SIZE_KW, KEY_TILT_DEG,
+    DEFAULT_NOCT_C, KEY_ARRAY_AZIMUTH_DEG, KEY_ARRAY_COUNT, KEY_ARRAY_TILT_DEG, KEY_AZIMUTH_DEG,
+    KEY_CAPACITY_KW, KEY_MODULE_TYPE, KEY_NOCT_C, KEY_SAM_LUT_PATH, KEY_SYSTEM_SIZE_KW,
+    KEY_TILT_DEG,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,9 +60,11 @@ impl PvArray {
         let capacity_kw = config
             .get_f64(KEY_CAPACITY_KW)
             .or_else(|| config.get_f64(KEY_SYSTEM_SIZE_KW))
-            .ok_or_else(|| HaresError::Equipment(
-                "PV array requires capacity_kw or system_size_kw (must be > 0)".into(),
-            ))?;
+            .ok_or_else(|| {
+                HaresError::Equipment(
+                    "PV array requires capacity_kw or system_size_kw (must be > 0)".into(),
+                )
+            })?;
         let tilt_deg = config
             .get_f64(KEY_TILT_DEG)
             .or_else(|| config.get_f64(KEY_ARRAY_TILT_DEG))
@@ -86,14 +88,19 @@ impl PvArray {
         })
     }
 
-    pub(crate) fn from_indexed_config(config: &EquipmentConfig, idx: usize) -> Result<Self, HaresError> {
+    pub(crate) fn from_indexed_config(
+        config: &EquipmentConfig,
+        idx: usize,
+    ) -> Result<Self, HaresError> {
         let key = |base: &str| format!("array_{idx}_{base}");
         let capacity_kw = config
             .get_f64(&key(KEY_CAPACITY_KW))
             .or_else(|| config.get_f64(&key(KEY_SYSTEM_SIZE_KW)))
-            .ok_or_else(|| HaresError::Equipment(
-                format!("PV array {idx} requires capacity_kw or system_size_kw (must be > 0)"),
-            ))?;
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "PV array {idx} requires capacity_kw or system_size_kw (must be > 0)"
+                ))
+            })?;
         let tilt_deg = config
             .get_f64(&key(KEY_TILT_DEG))
             .or_else(|| config.get_f64(&key(KEY_ARRAY_TILT_DEG)))
@@ -156,7 +163,9 @@ impl PvArray {
     }
 }
 
-pub(crate) fn parse_arrays_from_config(config: &EquipmentConfig) -> Result<Vec<PvArray>, HaresError> {
+pub(crate) fn parse_arrays_from_config(
+    config: &EquipmentConfig,
+) -> Result<Vec<PvArray>, HaresError> {
     let count = parse_usize_from_f64(config.get_f64(KEY_ARRAY_COUNT))?.unwrap_or(0);
     if count == 0 {
         return PvArray::from_single_config(config).map(|arr| vec![arr]);

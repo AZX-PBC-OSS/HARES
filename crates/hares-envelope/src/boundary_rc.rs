@@ -99,6 +99,15 @@ pub struct BoundaryInput {
     pub r_film_interior_m2_k_w: f64,
     /// Exterior air-film resistance [m²·K/W] for this boundary.
     pub r_film_exterior_m2_k_w: f64,
+    /// Framing factor [-] for ASHRAE parallel-path conductivity correction.
+    ///
+    /// When `Some(ff)`, insulation layer conductivities are corrected:
+    /// `k_eff = ff * k_wood + (1 - ff) * k_cavity` where k_wood = 0.144 W/(m·K).
+    /// `None` = no correction (use raw layer conductivities uniformly).
+    ///
+    /// Only applied to raw material layers (`build_layered_boundary`). Precomputed RC
+    /// layers from the OCHRE LUT already bake framing effects into their resistance values.
+    pub framing_factor: Option<f64>,
 }
 
 /// Zone input: floor area and volume for capacitance derivation.
@@ -106,6 +115,47 @@ pub struct BoundaryInput {
 pub struct ZoneInput {
     pub floor_area_m2: Option<f64>,
     pub volume_m3: Option<f64>,
+}
+
+// ── Diagnostics ─────────────────────────────────────────────────────────────
+
+/// Which RC construction path was used for a boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RCPath {
+    /// Pre-computed layers from OCHRE LUT.
+    Precomputed,
+    /// Raw material layers from HPXML.
+    MaterialLayer,
+    /// Single-resistance fallback from assembly R-value.
+    FallbackR,
+}
+
+/// Per-boundary diagnostic data captured during RC construction.
+#[derive(Debug, Clone)]
+pub struct BoundaryDiagnostic {
+    pub boundary_idx: usize,
+    /// Effective steady-state UA [W/K]: area / R_total.
+    pub ua_w_per_k: f64,
+    /// Total thermal resistance including film [m²·K/W].
+    pub r_total_m2_k_w: f64,
+    /// Total thermal capacitance of all layer nodes [J/K].
+    pub capacitance_j_k: f64,
+    /// Number of RC nodes created for this boundary.
+    pub n_rc_nodes: usize,
+    pub interior_zone_idx: usize,
+    pub exterior_target: ExteriorTarget,
+    pub area_m2: f64,
+    pub r_film_int_m2_k_w: f64,
+    pub r_film_ext_m2_k_w: f64,
+    pub path: RCPath,
+}
+
+/// Diagnostics captured during RC network construction.
+#[derive(Debug, Clone)]
+pub struct EnvelopeDiagnostics {
+    pub boundaries: Vec<BoundaryDiagnostic>,
+    pub zone_capacitances_j_k: Vec<f64>,
+    pub total_ua_w_per_k: f64,
 }
 
 // ── Output ──────────────────────────────────────────────────────────────────
@@ -185,7 +235,7 @@ pub fn assemble_building_rc(
     boundaries: &[BoundaryInput],
     n_zones: usize,
     zone_capacitances: &[f64],
-) -> Result<BuildingRC, String> {
+) -> Result<(BuildingRC, EnvelopeDiagnostics), String> {
     let outdoor_node = NodeId(OUTDOOR_NODE_ID);
     let ground_node = NodeId(GROUND_NODE_ID);
 
@@ -209,6 +259,7 @@ pub fn assemble_building_rc(
     let mut layer_info: HashMap<usize, SurfaceLayerInfo> = HashMap::new();
     let mut outdoor_connected = false;
     let mut ground_connected = false;
+    let mut boundary_diagnostics: Vec<BoundaryDiagnostic> = Vec::with_capacity(boundaries.len());
 
     for (bd_idx, bd) in boundaries.iter().enumerate() {
         if bd.area_m2 <= 0.0 {
@@ -237,10 +288,12 @@ pub fn assemble_building_rc(
             same_zone,
             r_film_interior: bd.r_film_interior_m2_k_w,
             r_film_exterior: bd.r_film_exterior_m2_k_w,
+            framing_factor: bd.framing_factor,
         };
 
         // Precomputed RC path (OCHRE LUT) takes priority over raw material layers.
         if !bd.precomputed_rc.is_empty() {
+            let nodes_before = graph.next_layer_id;
             if let Some(outer) = graph.build_precomputed_boundary(&bd.precomputed_rc, &bp) {
                 layer_info.insert(
                     bd_idx,
@@ -250,6 +303,33 @@ pub fn assemble_building_rc(
                     },
                 );
             }
+            let n_nodes = (graph.next_layer_id - nodes_before) as usize;
+            let r_layers: f64 = bd.precomputed_rc.iter().map(|l| l.resistance_m2_k_w).sum();
+            // Same-zone boundaries use only inner half of layers and no exterior film.
+            let r_effective = if same_zone { r_layers / 2.0 } else { r_layers };
+            let r_total = r_effective
+                + bd.r_film_interior_m2_k_w
+                + if same_zone { 0.0 } else { bd.r_film_exterior_m2_k_w };
+            debug_assert!(r_total > 0.0, "boundary {bd_idx}: precomputed R_total must be > 0");
+            let cap_total: f64 = bd
+                .precomputed_rc
+                .iter()
+                .map(|l| l.capacitance_kj_m2_k * 1000.0 * bd.area_m2)
+                .sum();
+            debug_assert!(cap_total >= 0.0, "boundary {bd_idx}: capacitance must be >= 0");
+            boundary_diagnostics.push(BoundaryDiagnostic {
+                boundary_idx: bd_idx,
+                ua_w_per_k: bd.area_m2 / r_total.max(1e-6),
+                r_total_m2_k_w: r_total,
+                capacitance_j_k: cap_total,
+                n_rc_nodes: n_nodes,
+                interior_zone_idx: bd.interior_zone_idx,
+                exterior_target: bd.exterior,
+                area_m2: bd.area_m2,
+                r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
+                r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
+                path: RCPath::Precomputed,
+            });
             continue;
         }
 
@@ -260,6 +340,7 @@ pub fn assemble_building_rc(
             .collect();
 
         if !valid_layers.is_empty() {
+            let nodes_before = graph.next_layer_id;
             if let Some(outer) = graph.build_layered_boundary(&valid_layers, &bp) {
                 layer_info.insert(
                     bd_idx,
@@ -269,9 +350,61 @@ pub fn assemble_building_rc(
                     },
                 );
             }
+            let n_nodes = (graph.next_layer_id - nodes_before) as usize;
+            let r_layers: f64 = valid_layers
+                .iter()
+                .map(|l| l.thickness_m / l.conductivity_w_m_k)
+                .sum();
+            // Same-zone boundaries use only inner half of layers and no exterior film.
+            let r_effective = if same_zone { r_layers / 2.0 } else { r_layers };
+            let r_total = r_effective
+                + bd.r_film_interior_m2_k_w
+                + if same_zone { 0.0 } else { bd.r_film_exterior_m2_k_w };
+            debug_assert!(r_total > 0.0, "boundary {bd_idx}: material-layer R_total must be > 0");
+            let cap_total: f64 = valid_layers
+                .iter()
+                .map(|l| {
+                    let a = l.effective_area(bd.area_m2);
+                    l.density_kg_m3 * l.specific_heat_j_kg_k * l.thickness_m * a
+                })
+                .sum();
+            debug_assert!(cap_total >= 0.0, "boundary {bd_idx}: capacitance must be >= 0");
+            boundary_diagnostics.push(BoundaryDiagnostic {
+                boundary_idx: bd_idx,
+                ua_w_per_k: bd.area_m2 / r_total.max(1e-6),
+                r_total_m2_k_w: r_total,
+                capacitance_j_k: cap_total,
+                n_rc_nodes: n_nodes,
+                interior_zone_idx: bd.interior_zone_idx,
+                exterior_target: bd.exterior,
+                area_m2: bd.area_m2,
+                r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
+                r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
+                path: RCPath::MaterialLayer,
+            });
         } else if !same_zone {
-            let r_ohm = bd.fallback_r_m2_k_w.max(1e-6) / bd.area_m2;
+            // Fallback: single lumped resistance. fallback_r_m2_k_w is typically
+            // from HPXML AssemblyEffectiveRValue which includes film resistances,
+            // but we add them explicitly for consistency with the other paths
+            // (the RC graph also doesn't add films separately here).
+            let r_total =
+                bd.fallback_r_m2_k_w + bd.r_film_interior_m2_k_w + bd.r_film_exterior_m2_k_w;
+            debug_assert!(r_total > 0.0, "boundary {bd_idx}: fallback R_total must be > 0");
+            let r_ohm = r_total.max(1e-6) / bd.area_m2;
             graph.add_resistance(interior_node, exterior_node, r_ohm);
+            boundary_diagnostics.push(BoundaryDiagnostic {
+                boundary_idx: bd_idx,
+                ua_w_per_k: bd.area_m2 / r_total.max(1e-6),
+                r_total_m2_k_w: r_total,
+                capacitance_j_k: 0.0,
+                n_rc_nodes: 0,
+                interior_zone_idx: bd.interior_zone_idx,
+                exterior_target: bd.exterior,
+                area_m2: bd.area_m2,
+                r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
+                r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
+                path: RCPath::FallbackR,
+            });
         }
     }
 
@@ -283,12 +416,14 @@ pub fn assemble_building_rc(
         .collect();
 
     // Ensure every zone air node participates in at least one resistance.
+    let mut fallback_ua = 0.0_f64;
     for zone_idx in 0..n_zones {
         let zone_node = NodeId((zone_idx + 1) as u32);
         if !connected.contains(&zone_node) {
             let fallback_r = DEFAULT_R_M2_K_W * 100.0;
             graph.add_resistance(zone_node, outdoor_node, fallback_r);
             outdoor_connected = true;
+            fallback_ua += 1.0 / fallback_r;
         }
     }
 
@@ -299,6 +434,7 @@ pub fn assemble_building_rc(
             let zone_node = NodeId((i + 1) as u32);
             let r = 1.0 / ua.max(1e-6);
             graph.add_resistance(zone_node, outdoor_node, r);
+            fallback_ua += ua;
         }
         outdoor_connected = true;
     }
@@ -353,17 +489,27 @@ pub fn assemble_building_rc(
 
     let node_capacitances = rc.capacitances.clone();
 
-    Ok(BuildingRC {
-        a_c,
-        b_ext,
-        internal_node_order,
-        node_index,
-        zone_state_rows,
-        layer_info,
-        outdoor_col,
-        n_ext,
-        node_capacitances,
-    })
+    let boundary_ua: f64 = boundary_diagnostics.iter().map(|d| d.ua_w_per_k).sum();
+    let diagnostics = EnvelopeDiagnostics {
+        boundaries: boundary_diagnostics,
+        zone_capacitances_j_k: zone_capacitances.to_vec(),
+        total_ua_w_per_k: boundary_ua + fallback_ua,
+    };
+
+    Ok((
+        BuildingRC {
+            a_c,
+            b_ext,
+            internal_node_order,
+            node_index,
+            zone_state_rows,
+            layer_info,
+            outdoor_col,
+            n_ext,
+            node_capacitances,
+        },
+        diagnostics,
+    ))
 }
 
 // ── Private helpers ─────────────────────────────────────────────────────────
@@ -449,11 +595,15 @@ impl RcGraphState {
             layer_nodes.push(self.alloc_node(cap));
         }
 
-        // Interior zone → innermost layer.
+        // Interior zone → innermost layer (film R + half-layer R).
+        // Film R folded into the edge, matching OCHRE's Boundary.__init__ which
+        // prepends/appends film R to the resistance list.
+        let ff = params.framing_factor;
         let inner = effective_layers[0];
         let inner_area = inner.effective_area(params.boundary_area);
-        let r_int = inner.thickness_m / (2.0 * inner.conductivity_w_m_k * inner_area)
-            + params.r_film_interior / inner_area;
+        let k_inner = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
+        let r_int = params.r_film_interior / inner_area
+            + inner.thickness_m / (2.0 * k_inner * inner_area);
         self.add_resistance(params.interior_node, layer_nodes[0], r_int);
 
         // Adjacent layer connections.
@@ -462,8 +612,10 @@ impl RcGraphState {
             let lj = effective_layers[i + 1];
             let ai = li.effective_area(params.boundary_area);
             let aj = lj.effective_area(params.boundary_area);
-            let r = li.thickness_m / (2.0 * li.conductivity_w_m_k * ai)
-                + lj.thickness_m / (2.0 * lj.conductivity_w_m_k * aj);
+            let ki = parallel_path_conductivity(li.conductivity_w_m_k, ff);
+            let kj = parallel_path_conductivity(lj.conductivity_w_m_k, ff);
+            let r = li.thickness_m / (2.0 * ki * ai)
+                + lj.thickness_m / (2.0 * kj * aj);
             self.add_resistance(layer_nodes[i], layer_nodes[i + 1], r);
         }
 
@@ -471,8 +623,9 @@ impl RcGraphState {
         if !params.same_zone {
             let outer = effective_layers[n_layers - 1];
             let outer_area = outer.effective_area(params.boundary_area);
-            let r_ext = outer.thickness_m / (2.0 * outer.conductivity_w_m_k * outer_area)
-                + params.r_film_exterior / outer_area;
+            let k_outer = parallel_path_conductivity(outer.conductivity_w_m_k, ff);
+            let r_ext = params.r_film_exterior / outer_area
+                + outer.thickness_m / (2.0 * k_outer * outer_area);
             self.add_resistance(layer_nodes[n_layers - 1], params.exterior_node, r_ext);
         }
 
@@ -568,7 +721,9 @@ impl RcGraphState {
             .map(|r| (r / params.boundary_area).max(1e-6))
             .collect();
 
-        // Step 6: add film resistances
+        // Step 6: fold film resistances into first/last layer resistors.
+        // Matches OCHRE Boundary.__init__ (lines 396-401) which prepends/appends
+        // film R to the resistance list as edges between zone and outermost layer.
         if !res_abs.is_empty() {
             res_abs[0] += params.r_film_interior / params.boundary_area;
         }
@@ -613,6 +768,26 @@ struct BoundaryParams {
     same_zone: bool,
     r_film_interior: f64,
     r_film_exterior: f64,
+    framing_factor: Option<f64>,
+}
+
+/// Softwood thermal conductivity [W/(m·K)] for framing studs.
+/// ASHRAE Handbook of Fundamentals, Table 1, Chapter 26.
+const SOFTWOOD_CONDUCTIVITY_W_M_K: f64 = 0.144;
+
+/// Compute effective conductivity using ASHRAE parallel-path method.
+///
+/// `k_eff = ff * k_wood + (1 - ff) * k_cavity`
+///
+/// This is the area-weighted conductivity for a layer with fraction `ff` of wood studs
+/// and `(1 - ff)` of insulation cavity. Reference: ASHRAE Handbook of Fundamentals Ch. 27.3.
+fn parallel_path_conductivity(k_cavity_w_m_k: f64, framing_factor: Option<f64>) -> f64 {
+    match framing_factor {
+        Some(ff) if ff > 0.0 && ff < 1.0 => {
+            ff * SOFTWOOD_CONDUCTIVITY_W_M_K + (1.0 - ff) * k_cavity_w_m_k
+        }
+        _ => k_cavity_w_m_k,
+    }
 }
 
 #[cfg(test)]
@@ -651,6 +826,7 @@ mod tests {
             fallback_r_m2_k_w: fallback_r,
             r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: None,
         }
     }
 
@@ -716,7 +892,7 @@ mod tests {
         }];
         let caps = derive_zone_capacitances(&zones);
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
         assert_eq!(rc.a_c.nrows(), 1);
         assert_eq!(rc.a_c.ncols(), 1);
@@ -724,6 +900,12 @@ mod tests {
         assert_eq!(rc.outdoor_col, Some(0));
         assert_eq!(rc.n_ext, 1);
         assert!(rc.layer_info.is_empty());
+
+        // Diagnostics: single fallback boundary.
+        assert_eq!(diag.boundaries.len(), 1);
+        assert_eq!(diag.boundaries[0].path, RCPath::FallbackR);
+        assert_eq!(diag.boundaries[0].n_rc_nodes, 0);
+        assert!(diag.total_ua_w_per_k > 0.0);
     }
 
     // ── Single zone with material layers ────────────────────────────────
@@ -740,10 +922,16 @@ mod tests {
             make_layer(0.05, 1.0, 2000.0, 900.0, 50.0),
         ];
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
         // 1 zone air + 2 layer nodes = 3 states.
         assert_eq!(rc.a_c.nrows(), 3);
+
+        // Diagnostics: single material-layer boundary with 2 RC nodes.
+        assert_eq!(diag.boundaries.len(), 1);
+        assert_eq!(diag.boundaries[0].path, RCPath::MaterialLayer);
+        assert_eq!(diag.boundaries[0].n_rc_nodes, 2);
+        assert!(diag.boundaries[0].capacitance_j_k > 0.0);
         assert_eq!(rc.a_c.ncols(), 3);
         // Layer info present for boundary 0.
         assert!(rc.layer_info.contains_key(&0));
@@ -772,7 +960,7 @@ mod tests {
             make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5),
             make_boundary(30.0, 1, ExteriorTarget::Ground, vec![], 3.0),
         ];
-        let rc = assemble_building_rc(&boundaries, 2, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps).unwrap();
 
         assert_eq!(rc.zone_state_rows.len(), 2);
         assert_eq!(rc.n_ext, 2); // outdoor + ground
@@ -790,7 +978,7 @@ mod tests {
         let caps = derive_zone_capacitances(&zones);
         // Only a slab boundary connecting zone 0 to ground.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Ground, vec![], 2.5)];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
         // Ground is the only external node; outdoor_col should be None.
         assert_eq!(rc.outdoor_col, None);
@@ -808,7 +996,7 @@ mod tests {
         let caps = derive_zone_capacitances(&zones);
         // Same-zone boundary with no material layers — no thermal mass to model.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), vec![], 2.5)];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         // Only the zone air node; pure-resistance self-loop is skipped.
         assert_eq!(rc.a_c.nrows(), 1);
     }
@@ -830,7 +1018,7 @@ mod tests {
         ];
         // Same-zone boundary with 4 layers → halved to 2 internal mass nodes.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         // 1 zone air node + 2 layer nodes (inner half of 4 layers).
         assert_eq!(rc.a_c.nrows(), 3);
     }
@@ -852,7 +1040,7 @@ mod tests {
         ];
         // 3 layers → keep 2 (n/2+1), with layer[1]'s cap halved.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         assert_eq!(rc.a_c.nrows(), 3);
 
         // Verify middle layer (second kept, NodeId 1001) has halved capacitance.
@@ -875,7 +1063,7 @@ mod tests {
         let layers = vec![make_layer(0.10, 1.0, 2000.0, 900.0, 0.0)];
         // 1 layer → keep 1 (n/2+1=1), with halved capacitance.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         assert_eq!(rc.a_c.nrows(), 2);
 
         // Verify layer node (NodeId 1000) has halved capacitance.
@@ -907,7 +1095,7 @@ mod tests {
             .map(|_| make_boundary(10.0, 0, ExteriorTarget::Outdoor, layers.clone(), 2.5))
             .collect();
 
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         // 1 zone + 60 layer nodes = 61 internal nodes.
         assert_eq!(rc.a_c.nrows(), 61);
         // All node IDs should be distinct from OUTDOOR_NODE_ID and GROUND_NODE_ID.
@@ -934,7 +1122,7 @@ mod tests {
         let caps = derive_zone_capacitances(&zones);
         // Only zone 0 has a boundary; zone 1 is disconnected.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
-        let rc = assemble_building_rc(&boundaries, 2, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps).unwrap();
 
         assert_eq!(rc.zone_state_rows.len(), 2);
         // Both zones should appear in the network (zone 1 via fallback).
@@ -951,7 +1139,7 @@ mod tests {
             volume_m3: None,
         }];
         let caps = derive_zone_capacitances(&zones);
-        let rc = assemble_building_rc(&[], 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&[], 1, &caps).unwrap();
 
         assert_eq!(rc.a_c.nrows(), 1);
         assert_eq!(rc.outdoor_col, Some(0));
@@ -974,7 +1162,7 @@ mod tests {
         let caps = derive_zone_capacitances(&zones);
         // Zone 0 ↔ Zone 1 internal boundary (no outdoor/ground).
         let boundaries = vec![make_boundary(30.0, 0, ExteriorTarget::Zone(1), vec![], 2.5)];
-        let rc = assemble_building_rc(&boundaries, 2, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps).unwrap();
 
         // Should still succeed (zones get fallback to outdoor since
         // !outdoor_connected && !ground_connected triggers UA fallback).
@@ -1002,7 +1190,7 @@ mod tests {
             make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers.clone(), 2.5),
             make_boundary(40.0, 1, ExteriorTarget::Outdoor, layers, 2.5),
         ];
-        let rc = assemble_building_rc(&boundaries, 2, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps).unwrap();
 
         assert_eq!(rc.layer_info[&0].interior_zone_idx, 0);
         assert_eq!(rc.layer_info[&1].interior_zone_idx, 1);
@@ -1019,7 +1207,7 @@ mod tests {
         let caps = derive_zone_capacitances(&zones);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 50.0)];
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
         for i in 0..rc.a_c.nrows() {
             assert!(
@@ -1041,7 +1229,7 @@ mod tests {
         let caps = derive_zone_capacitances(&zones);
         let boundaries = vec![make_boundary(0.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
         // Zone gets fallback; zero-area boundary is ignored.
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         assert_eq!(rc.a_c.nrows(), 1);
     }
 
@@ -1063,6 +1251,7 @@ mod tests {
             fallback_r_m2_k_w: fallback_r,
             r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: None,
         }
     }
 
@@ -1084,7 +1273,7 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
         // 1 zone air + 1 precomputed layer = 2 states.
         assert_eq!(rc.a_c.nrows(), 2);
@@ -1124,7 +1313,7 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
         // 1 zone air + 3 precomputed layers = 4 states.
         assert_eq!(rc.a_c.nrows(), 4);
@@ -1160,7 +1349,7 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
         // 1 zone air + 2 remaining layers (one pruned) = 3 states.
         assert_eq!(rc.a_c.nrows(), 3);
@@ -1199,7 +1388,7 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         // 1 zone + 4 layers = 5 states.
         assert_eq!(rc.a_c.nrows(), 5);
     }
@@ -1243,7 +1432,7 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let rc = assemble_building_rc(&boundaries, 2, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 2, &caps).unwrap();
         // 2 zones + 4 layers = 6 states.
         assert_eq!(rc.a_c.nrows(), 6);
     }
@@ -1273,7 +1462,7 @@ mod tests {
             precomputed,
             2.5,
         )];
-        let rc = assemble_building_rc(&boundaries, 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
         // No layer nodes created; just zone air node.
         assert_eq!(rc.a_c.nrows(), 1);
@@ -1305,10 +1494,79 @@ mod tests {
             fallback_r_m2_k_w: 2.5,
             r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
             r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: None,
         };
-        let rc = assemble_building_rc(&[bd], 1, &caps).unwrap();
+        let (rc, _diag) = assemble_building_rc(&[bd], 1, &caps).unwrap();
 
         // 1 zone + 1 precomputed layer (not 2 raw layers).
         assert_eq!(rc.a_c.nrows(), 2);
+    }
+
+    // ── PARITY-013: Framing factor parallel-path tests ─────────────
+
+    #[test]
+    fn parallel_path_conductivity_no_framing_returns_cavity() {
+        let k = parallel_path_conductivity(0.04, None);
+        assert!((k - 0.04).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parallel_path_conductivity_with_framing_increases_k() {
+        // ff=0.25, k_cavity=0.04 (R-13 fiberglass), k_wood=0.144
+        let k_eff = parallel_path_conductivity(0.04, Some(0.25));
+        let expected = 0.25 * SOFTWOOD_CONDUCTIVITY_W_M_K + 0.75 * 0.04;
+        assert!((k_eff - expected).abs() < 1e-12);
+        assert!(k_eff > 0.04, "framing should increase effective conductivity");
+    }
+
+    #[test]
+    fn framing_factor_reduces_wall_effective_r_value() {
+        // 2x4 R-13 wall: insulation layer 0.089m thick, k=0.04 W/(m·K)
+        // Without framing: R_layer = 0.089 / 0.04 = 2.225 m²·K/W
+        // With 25% framing: k_eff = 0.25*0.144 + 0.75*0.04 = 0.066
+        //                   R_layer = 0.089 / 0.066 = 1.348 m²·K/W
+        // Effective R reduced by ~39%
+        let layer = make_layer(0.089, 0.04, 50.0, 840.0, 10.0);
+        let caps = vec![derive_zone_capacitances(&[ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+        }])[0]];
+
+        // Without framing
+        let bd_no_ff = BoundaryInput {
+            area_m2: 10.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![layer.clone()],
+            precomputed_rc: Vec::new(),
+            fallback_r_m2_k_w: 2.5,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: None,
+        };
+        let (rc_no_ff, _) = assemble_building_rc(&[bd_no_ff], 1, &caps).expect("no ff");
+
+        // With 25% framing
+        let bd_ff = BoundaryInput {
+            area_m2: 10.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![layer],
+            precomputed_rc: Vec::new(),
+            fallback_r_m2_k_w: 2.5,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: Some(0.25),
+        };
+        let (rc_ff, _) = assemble_building_rc(&[bd_ff], 1, &caps).expect("with ff");
+
+        // The A matrix diagonal for the zone node should be more negative with framing
+        // (higher conductance → faster heat loss → more negative diagonal).
+        let zone_diag_no_ff = rc_no_ff.a_c[(0, 0)];
+        let zone_diag_ff = rc_ff.a_c[(0, 0)];
+        assert!(
+            zone_diag_ff < zone_diag_no_ff,
+            "framing should increase heat loss (more negative A diagonal): no_ff={zone_diag_no_ff}, ff={zone_diag_ff}"
+        );
     }
 }

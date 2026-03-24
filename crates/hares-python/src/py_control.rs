@@ -85,10 +85,23 @@ impl PyControlSignal {
                 min_soc: dict_optional(d, "min_soc")?,
                 max_soc: dict_optional(d, "max_soc")?,
             },
-            "DutyCycle" => ControlSignal::DutyCycle {
-                on_fraction: dict_required(d, "on_fraction")?,
-                period_s: dict_optional(d, "period_s")?,
-            },
+            "DutyCycle" => {
+                let component_str: Option<String> = dict_optional(d, "component")?;
+                let component = component_str.as_deref().and_then(|s| match s {
+                    "Compressor" | "compressor" | "hp" => {
+                        Some(hares_types::DutyCycleComponent::Compressor)
+                    }
+                    "BackupElement" | "backup" | "er" => {
+                        Some(hares_types::DutyCycleComponent::BackupElement)
+                    }
+                    _ => None,
+                });
+                ControlSignal::DutyCycle {
+                    on_fraction: dict_required(d, "on_fraction")?,
+                    period_s: dict_optional(d, "period_s")?,
+                    component,
+                }
+            }
             "LoadFraction" => ControlSignal::LoadFraction {
                 fraction: dict_required(d, "fraction")?,
             },

@@ -133,7 +133,8 @@ mod tests {
             x,
             ControlSignal::DutyCycle {
                 on_fraction: 0.4,
-                period_s: None
+                period_s: None,
+                component: None
             }
         )));
         assert!(

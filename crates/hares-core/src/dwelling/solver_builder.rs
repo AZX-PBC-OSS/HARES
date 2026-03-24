@@ -69,8 +69,9 @@ pub(crate) fn build_default_solvers(
     let zone_capacitances = derive_zone_capacitances(&zone_inputs);
 
     // Build the RC network from material layers where available.
-    let rc = assemble_building_rc(&boundary_inputs, n_zones, &zone_capacitances)
-        .map_err(HaresError::Envelope)?;
+    let (rc, _envelope_diagnostics) =
+        assemble_building_rc(&boundary_inputs, n_zones, &zone_capacitances)
+            .map_err(HaresError::Envelope)?;
 
     let BuildingRC {
         a_c,
@@ -442,7 +443,7 @@ pub(crate) fn build_default_solvers(
                         InfiltrationMethod::Ach { ach: 0.0 }
                     }
                 }
-                ZoneType::Outdoor | ZoneType::Other(_) => continue,
+                ZoneType::Outdoor | ZoneType::Ground | ZoneType::Other(_) => continue,
             };
 
             thermal_cfg.infiltration.push((zone_id, method));

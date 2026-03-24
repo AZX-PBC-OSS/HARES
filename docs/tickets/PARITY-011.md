@@ -15,11 +15,22 @@ verification:
   - cargo clippy --workspace -- -D warnings
 ---
 
+## Status: COMPLETE (verified — already fully implemented)
+
+Audit confirms the full OCHRE-parity ER backup FSM is already implemented in heater.rs with 13 dedicated tests:
+
+| Feature | Implementation | Tests |
+|---------|---------------|-------|
+| Hard lockout (setpoint change) | `er_lockout_remaining_s`, `er_hard_lockout_time_s` | `er_hard_lockout_blocks_er_for_configured_duration`, `actual_setpoint_raise_triggers_er_lockout` |
+| Soft lockout (zone temp rising) | `er_soft_lockout`, `prev_zone_temp_c` | `er_soft_lockout_blocks_er_while_zone_temp_is_rising` |
+| 4-mode FSM | HeatingHP/HeatingER/HeatingHPAndER/Off at lines 558-565 | `default_lockout_below_hp_threshold_runs_er_only`, `default_lockout_above_er_threshold_runs_hp_only` |
+| ER fan power | `er_capacity_w * backup_eir` at line 760 | `er_backup_capacity_modulated_by_plr` |
+| Config parsing | 6 config keys with OCHRE-matched defaults | `er_hard_lockout_defaults_to_ochre_parity_zero`, `er_hard_lockout_uses_explicit_config_value` |
+| DR edge case | DR expiry doesn't trigger ER lockout | `dr_expiry_does_not_trigger_er_lockout` |
+
 ## Background/Context
 
-HARES has backup ER capacity/EIR fields but lacks OCHRE's sophisticated lockout logic: hard lockout after setpoint changes, soft lockout while HP is winning (zone temp rising), setpoint change detection, and ER fan power adjustment.
-
-**Target**: Match OCHRE's 4-mode FSM (HP On, HP+ER, ER Only, Off) with full lockout timing.
+Implemented during prior work. The gap analysis was based on an earlier state of the code.
 
 ## Work to Do
 

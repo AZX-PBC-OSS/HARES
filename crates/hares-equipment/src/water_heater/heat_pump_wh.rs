@@ -6,9 +6,10 @@ use std::time::Duration;
 use super::apply_jacket_r_value;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
-    ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, DRLevel, DutyCycleComponent, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,8 @@ struct HpwhState {
     compressor_on: bool,
     backup_on: bool,
     duty_cycle: f64,
+    hp_duty_cycle: f64,
+    er_duty_cycle: f64,
     mode_override: Option<OperatingMode>,
     element_hp_control: ElementHpControlMode,
     tank_state: Vec<u8>,
@@ -89,6 +92,10 @@ pub struct HeatPumpWH {
     setpoint_c: f64,
     deadband_c: f64,
     duty_cycle: f64,
+    /// Per-component duty cycle override for compressor (1.0 = full, 0.0 = off).
+    hp_duty_cycle: f64,
+    /// Per-component duty cycle override for backup element (1.0 = full, 0.0 = off).
+    er_duty_cycle: f64,
     mode_override: Option<OperatingMode>,
     compressor_on: bool,
     backup_on: bool,
@@ -211,6 +218,8 @@ impl HeatPumpWH {
             setpoint_c: DEFAULT_SETPOINT_C,
             deadband_c: DEFAULT_DEADBAND_C,
             duty_cycle: 1.0,
+            hp_duty_cycle: 1.0,
+            er_duty_cycle: 1.0,
             mode_override: None,
             compressor_on: false,
             backup_on: false,
@@ -391,6 +400,8 @@ impl Equipment for HeatPumpWH {
             .unwrap_or(DEFAULT_DEADBAND_C)
             .max(0.0);
         self.duty_cycle = 1.0;
+        self.hp_duty_cycle = 1.0;
+        self.er_duty_cycle = 1.0;
         self.mode_override = None;
         self.compressor_on = false;
         self.backup_on = false;
@@ -643,8 +654,10 @@ impl Equipment for HeatPumpWH {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let mode = self.update_control(env);
-        let duty =
+        let base_fraction =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
+        let hp_duty = (base_fraction * self.hp_duty_cycle).clamp(0.0, 1.0);
+        let er_duty = (base_fraction * self.er_duty_cycle).clamp(0.0, 1.0);
 
         // Update compressor on/off timers for min-on-time and min-off-time enforcement.
         if self.compressor_on {
@@ -677,12 +690,12 @@ impl Equipment for HeatPumpWH {
         // power_input_w = capacity_actual_w / cop_actual (electrical input required).
         let capacity_actual_w = self.compressor_power_w * cap_mult;
         let compressor_power_w = if self.compressor_on {
-            (capacity_actual_w / cop) * duty
+            (capacity_actual_w / cop) * hp_duty
         } else {
             0.0
         };
         let backup_power_w = if self.backup_on {
-            self.backup_element_power_w * duty
+            self.backup_element_power_w * er_duty
         } else {
             0.0
         };
@@ -828,6 +841,8 @@ impl Equipment for HeatPumpWH {
             compressor_on: self.compressor_on,
             backup_on: self.backup_on,
             duty_cycle: self.duty_cycle,
+            hp_duty_cycle: self.hp_duty_cycle,
+            er_duty_cycle: self.er_duty_cycle,
             mode_override: self.mode_override,
             element_hp_control: self.element_hp_control,
             tank_state: self.tank.save_state(),
@@ -856,6 +871,8 @@ impl Equipment for HeatPumpWH {
         self.compressor_on = decoded.compressor_on;
         self.backup_on = decoded.backup_on;
         self.duty_cycle = decoded.duty_cycle;
+        self.hp_duty_cycle = decoded.hp_duty_cycle;
+        self.er_duty_cycle = decoded.er_duty_cycle;
         self.mode_override = decoded.mode_override;
         self.element_hp_control = decoded.element_hp_control;
         self.compressor_on_since_s = decoded.compressor_on_since_s;
@@ -917,13 +934,27 @@ impl Equipment for HeatPumpWH {
                     self.deadband_c = *db;
                 }
             }
-            ControlSignal::DutyCycle { on_fraction, .. } => {
+            ControlSignal::DutyCycle {
+                on_fraction,
+                component,
+                ..
+            } => {
                 if !on_fraction.is_finite() || !(0.0..=1.0).contains(on_fraction) {
                     return Err(HaresError::Control(format!(
                         "invalid duty cycle for HeatPumpWH: {on_fraction}"
                     )));
                 }
-                self.duty_cycle = *on_fraction;
+                match component {
+                    Some(DutyCycleComponent::Compressor) => {
+                        self.hp_duty_cycle = *on_fraction;
+                    }
+                    Some(DutyCycleComponent::BackupElement) => {
+                        self.er_duty_cycle = *on_fraction;
+                    }
+                    None => {
+                        self.duty_cycle = *on_fraction;
+                    }
+                }
             }
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
@@ -2482,8 +2513,8 @@ mod new_feature_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, OperatingMode, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState,
+        ControlSignal, DutyCycleComponent, EnvironmentState, GridState, OperatingMode, PortSlots,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
     use super::HeatPumpWH;
@@ -2766,6 +2797,113 @@ mod new_feature_tests {
         assert!(
             eq.compressor_off_since_s.is_none(),
             "compressor_off_since_s must be None while compressor is running"
+        );
+    }
+
+    // ── PARITY-012: Split duty cycle tests ─────────────────────────
+
+    #[test]
+    fn split_duty_cycle_curtails_compressor_independently() {
+        let cfg = {
+            let mut raw = HashMap::new();
+            raw.insert("zone_id".to_string(), 1.0.into());
+            raw.insert("setpoint_c".to_string(), 50.0.into());
+            EquipmentConfig {
+                name: "HPWH".to_string(),
+                ochre_class: "HPWH".to_string(),
+                raw_config: raw,
+            }
+        };
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(20.0)).expect("init");
+
+        eq.apply_control(&ControlSignal::DutyCycle {
+            on_fraction: 0.5,
+            period_s: None,
+            component: Some(DutyCycleComponent::Compressor),
+        })
+        .expect("compressor duty cycle accepted");
+
+        assert!(
+            (eq.hp_duty_cycle - 0.5).abs() < 1e-10,
+            "hp_duty_cycle should be 0.5, got {}",
+            eq.hp_duty_cycle
+        );
+        assert!(
+            (eq.er_duty_cycle - 1.0).abs() < 1e-10,
+            "er_duty_cycle should remain 1.0, got {}",
+            eq.er_duty_cycle
+        );
+    }
+
+    #[test]
+    fn split_duty_cycle_curtails_backup_independently() {
+        let cfg = {
+            let mut raw = HashMap::new();
+            raw.insert("zone_id".to_string(), 1.0.into());
+            raw.insert("setpoint_c".to_string(), 50.0.into());
+            EquipmentConfig {
+                name: "HPWH".to_string(),
+                ochre_class: "HPWH".to_string(),
+                raw_config: raw,
+            }
+        };
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(20.0)).expect("init");
+
+        eq.apply_control(&ControlSignal::DutyCycle {
+            on_fraction: 0.0,
+            period_s: None,
+            component: Some(DutyCycleComponent::BackupElement),
+        })
+        .expect("backup duty cycle accepted");
+
+        assert!(
+            (eq.er_duty_cycle - 0.0).abs() < 1e-10,
+            "er_duty_cycle should be 0.0, got {}",
+            eq.er_duty_cycle
+        );
+        assert!(
+            (eq.hp_duty_cycle - 1.0).abs() < 1e-10,
+            "hp_duty_cycle should remain 1.0, got {}",
+            eq.hp_duty_cycle
+        );
+    }
+
+    #[test]
+    fn whole_equipment_duty_cycle_backward_compatible() {
+        let cfg = {
+            let mut raw = HashMap::new();
+            raw.insert("zone_id".to_string(), 1.0.into());
+            raw.insert("setpoint_c".to_string(), 50.0.into());
+            EquipmentConfig {
+                name: "HPWH".to_string(),
+                ochre_class: "HPWH".to_string(),
+                raw_config: raw,
+            }
+        };
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(20.0)).expect("init");
+
+        eq.apply_control(&ControlSignal::DutyCycle {
+            on_fraction: 0.3,
+            period_s: None,
+            component: None,
+        })
+        .expect("whole-equipment duty cycle accepted");
+
+        assert!(
+            (eq.duty_cycle - 0.3).abs() < 1e-10,
+            "duty_cycle should be 0.3, got {}",
+            eq.duty_cycle
+        );
+        assert!(
+            (eq.hp_duty_cycle - 1.0).abs() < 1e-10,
+            "hp_duty_cycle should remain 1.0"
+        );
+        assert!(
+            (eq.er_duty_cycle - 1.0).abs() < 1e-10,
+            "er_duty_cycle should remain 1.0"
         );
     }
 }

@@ -336,3 +336,89 @@ fn extraterrestrial_irradiance_peaks_near_perihelion() {
         "ETR at perihelion (Jan: {etr_jan:.2}) must exceed aphelion (Jul: {etr_jul:.2})"
     );
 }
+
+// ── Window U-factor decomposition (EnergyPlus Simple Window Model Step 1) ──
+
+use hares_physics::solar::window_u_factor_decomposition;
+
+/// BEopt example window: U=2.1 W/m²K (low-e double-pane).
+/// OCHRE: res_int_w = 1/(0.359073*ln(2.1) + 6.949915) ≈ 0.1318 m²K/W
+///        r_window  = 1/2.1 - 0.1318 ≈ 0.3443 m²K/W
+#[test]
+fn window_decomposition_low_e_double_pane() {
+    let (r_glass, r_int) = window_u_factor_decomposition(2.1);
+    let r_total = r_glass + r_int;
+    assert!(
+        (r_total - 1.0 / 2.1).abs() < 1e-10,
+        "r_glass + r_int must equal 1/U: {r_total:.6} vs {:.6}",
+        1.0 / 2.1
+    );
+    assert!(r_glass > 0.0, "r_glass must be positive: {r_glass}");
+    assert!(r_int > 0.0, "r_int must be positive: {r_int}");
+    // Cross-check against OCHRE computed value.
+    let ochre_r_int = 1.0 / (0.359073 * 2.1_f64.ln() + 6.949915);
+    assert!(
+        (r_int - ochre_r_int).abs() < 1e-10,
+        "r_int must match OCHRE: {r_int:.6} vs {ochre_r_int:.6}"
+    );
+}
+
+/// Single-pane window: U=5.5 W/m²K (above 5.85 threshold uses linear fit).
+#[test]
+fn window_decomposition_single_pane() {
+    let (r_glass, r_int) = window_u_factor_decomposition(5.5);
+    let r_total = r_glass + r_int;
+    assert!(
+        (r_total - 1.0 / 5.5).abs() < 1e-10,
+        "r_glass + r_int must equal 1/U"
+    );
+    assert!(r_glass > 0.0);
+    // U=5.5 < 5.85 so uses logarithmic fit.
+    let ochre_r_int = 1.0 / (0.359073 * 5.5_f64.ln() + 6.949915);
+    assert!((r_int - ochre_r_int).abs() < 1e-10);
+}
+
+/// High-U single-pane: U=6.5 W/m²K (above 5.85 threshold uses linear fit).
+#[test]
+fn window_decomposition_high_u_linear_fit() {
+    let (r_glass, r_int) = window_u_factor_decomposition(6.5);
+    let r_total = r_glass + r_int;
+    assert!(
+        (r_total - 1.0 / 6.5).abs() < 1e-10,
+        "r_glass + r_int must equal 1/U"
+    );
+    // U=6.5 >= 5.85 so uses linear fit.
+    let ochre_r_int = 1.0 / (1.788041 * 6.5 - 2.886625);
+    assert!((r_int - ochre_r_int).abs() < 1e-10);
+}
+
+/// Triple-pane: U=1.0 W/m²K.
+#[test]
+fn window_decomposition_triple_pane() {
+    let (r_glass, r_int) = window_u_factor_decomposition(1.0);
+    assert!(r_glass > 0.5, "triple-pane glass R should be substantial: {r_glass}");
+    assert!((r_glass + r_int - 1.0).abs() < 1e-10, "must equal 1/U=1.0");
+}
+
+/// U=0 and negative U must not panic or produce NaN/infinity.
+#[test]
+fn window_decomposition_zero_and_negative_u() {
+    let (r_glass, r_int) = window_u_factor_decomposition(0.0);
+    assert!(r_glass.is_finite(), "r_glass must be finite for U=0");
+    assert!(r_int.is_finite(), "r_int must be finite for U=0");
+
+    let (r_glass, r_int) = window_u_factor_decomposition(-1.0);
+    assert!(r_glass.is_finite(), "r_glass must be finite for U<0");
+    assert!(r_int.is_finite(), "r_int must be finite for U<0");
+}
+
+/// Log/linear fit should be approximately continuous at U=5.85 threshold.
+#[test]
+fn window_decomposition_continuity_at_threshold() {
+    let (_, r_int_below) = window_u_factor_decomposition(5.8499);
+    let (_, r_int_above) = window_u_factor_decomposition(5.85);
+    assert!(
+        (r_int_below - r_int_above).abs() < 0.005,
+        "film R should be continuous at threshold: below={r_int_below:.4} above={r_int_above:.4}"
+    );
+}

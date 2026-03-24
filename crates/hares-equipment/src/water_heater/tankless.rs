@@ -1053,6 +1053,7 @@ mod tests {
         eq.apply_control(&ControlSignal::DutyCycle {
             on_fraction: 0.5,
             period_s: None,
+            component: None,
         })
         .unwrap();
 
