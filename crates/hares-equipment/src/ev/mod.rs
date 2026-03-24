@@ -2670,7 +2670,7 @@ mod tests {
         assert_eq!(eq.descriptor().equipment_type, "EV");
     }
 
-    // ── PARITY-007: V2G tests ──────────────────────────────────────
+    // ── V2G tests ──────────────────────────────────────────────────
 
     #[test]
     fn v2g_allows_negative_power_when_enabled() {

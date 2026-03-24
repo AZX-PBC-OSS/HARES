@@ -443,7 +443,9 @@ pub(crate) fn build_default_solvers(
                         InfiltrationMethod::Ach { ach: 0.0 }
                     }
                 }
-                ZoneType::Outdoor | ZoneType::Ground | ZoneType::Other(_) => continue,
+                ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent | ZoneType::Other(_) => {
+                    continue;
+                }
             };
 
             thermal_cfg.infiltration.push((zone_id, method));

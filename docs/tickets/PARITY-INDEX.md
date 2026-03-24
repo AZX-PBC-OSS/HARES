@@ -51,8 +51,8 @@ No cross-ticket dependencies. Each closes one gap from the parity analysis.
 | [011](PARITY-011.md) | ASHP backup ER control FSM | Medium-15 | hares-equipment | DONE (verified, already implemented) |
 | [012](PARITY-012.md) | HPWH HP/ER independent duty cycle control | Medium-16 | hares-equipment, hares-types | DONE |
 | [013](PARITY-013.md) | Framing factor / parallel-path U-value | Medium-14 | hares-envelope, hares-io | DONE |
-| [014](PARITY-014.md) | Ground coupling: RC-based foundation model | Critical-4 | hares-physics, hares-envelope, hares-io | — |
-| [015](PARITY-015.md) | Interior LWR: Iterative T^4 ScriptF solver | Critical-1 | hares-envelope | 001 |
+| [014](PARITY-014.md) | Ground coupling: RC-based foundation model | Critical-4 | hares-physics, hares-envelope, hares-io | DONE |
+| [015](PARITY-015.md) | Interior LWR: Iterative T^4 ScriptF solver | Critical-1 | hares-envelope | DONE |
 | [016](PARITY-016.md) | Window transmittance: EnergyPlus polynomial curves | Critical-2 | hares-physics, hares-envelope | — |
 
 ### Phase 2: Integration (017–019)

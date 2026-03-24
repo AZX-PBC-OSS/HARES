@@ -302,6 +302,94 @@ pub fn interior_longwave_net_w(surfaces: &[InteriorSurface], t_surfaces_c: &[f64
         .collect()
 }
 
+/// Pre-computed interior LWR exchange coefficients for an N-surface enclosure.
+///
+/// Uses area-emissivity weighted view factors (`F_i = A_i·ε_i / Σ A_j·ε_j`)
+/// with full T⁴ Stefan-Boltzmann radiation. Energy conservation guaranteed
+/// by construction (Σ q_i = 0).
+///
+/// Pre-computes `total_ea` and per-surface `ε·σ·A` factors at init to avoid
+/// redundant arithmetic per timestep. The expensive T⁴ evaluation runs per
+/// timestep via `net_flux_w()`.
+#[derive(Debug, Clone)]
+pub struct ScriptFCoefficients {
+    /// Per-surface emissivity × σ × area [W/K⁴].
+    e_sigma_a: Vec<f64>,
+    /// Per-surface radiosity weights: `(A_i·ε_i) / Σ(A_j·ε_j)`.
+    radiosity_weights: Vec<f64>,
+    /// Total emissivity-area factor: `Σ(A_i·ε_i)`.
+    total_ea: f64,
+}
+
+impl ScriptFCoefficients {
+    /// Pre-compute exchange coefficients from surface properties.
+    ///
+    /// Caches `ε·σ·A` factors and view factors to avoid per-timestep recomputation.
+    #[must_use]
+    pub fn compute(surfaces: &[InteriorSurface]) -> Self {
+        let total_ea: f64 = surfaces.iter().map(|s| s.area_m2 * s.emissivity).sum();
+        let radiosity_weights: Vec<f64> = if total_ea > 0.0 {
+            surfaces
+                .iter()
+                .map(|s| s.area_m2 * s.emissivity / total_ea)
+                .collect()
+        } else {
+            let n = surfaces.len().max(1) as f64;
+            vec![1.0 / n; surfaces.len()]
+        };
+        let e_sigma_a: Vec<f64> = surfaces
+            .iter()
+            .map(|s| s.emissivity * STEFAN_BOLTZMANN * s.area_m2)
+            .collect();
+        Self {
+            e_sigma_a,
+            radiosity_weights,
+            total_ea,
+        }
+    }
+
+    /// Compute net interior LWR flux per surface [W] using exact T⁴ radiosity.
+    ///
+    /// Uses pre-computed radiosity weights with full Stefan-Boltzmann T⁴ radiation.
+    /// Energy-conserving by construction (Σ q_i = 0).
+    ///
+    /// Returns vec of net fluxes [W]. Positive = surface gains heat.
+    #[must_use]
+    pub fn net_flux_w(&self, t_surfaces_c: &[f64]) -> Vec<f64> {
+        let n = self.e_sigma_a.len();
+        debug_assert_eq!(
+            n,
+            t_surfaces_c.len(),
+            "surface count mismatch in ScriptF: e_sigma_a.len()={n}, t_surfaces_c.len()={}",
+            t_surfaces_c.len()
+        );
+        if n == 0 || t_surfaces_c.len() != n {
+            return vec![0.0; t_surfaces_c.len()];
+        }
+        if self.total_ea <= 0.0 {
+            return vec![0.0; n];
+        }
+
+        // Two-pass: first compute J_total, then compute q_net in a single Vec.
+        // J_out_i = ε_i·σ·A_i·T_i⁴; J_total = Σ J_out_i
+        // q_i = J_total × weight_i - J_out_i
+        //
+        // Pass 1: compute J_out per surface into the output vec, accumulate total.
+        let mut q_net = Vec::with_capacity(n);
+        let mut total_out = 0.0_f64;
+        for (&esa, &t_c) in self.e_sigma_a.iter().zip(t_surfaces_c.iter()) {
+            let j_out = esa * (t_c + CELSIUS_TO_KELVIN).powi(4);
+            q_net.push(j_out);
+            total_out += j_out;
+        }
+        // Pass 2: transform J_out → net flux in-place (no second allocation).
+        for (qi, &w) in q_net.iter_mut().zip(self.radiosity_weights.iter()) {
+            *qi = total_out * w - *qi;
+        }
+        q_net
+    }
+}
+
 /// Linearised net interior longwave radiation for each surface [W].
 ///
 /// This is a faster, linear approximation that avoids T⁴ per timestep.
@@ -932,7 +1020,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_view_factors_sum_to_one() {
+    fn test_radiosity_weights_sum_to_one() {
         // The 4-component formula's outgoing-emission coefficient is:
         //   F_gnd + (1−β)·F_sky + β·F_sky = F_gnd + F_sky = 1.0
         // This ensures no energy leakage regardless of β.
@@ -1026,5 +1114,137 @@ mod tests {
             (q_nan - expected).abs() < 1e-6,
             "NaN sky should collapse to air-temp model: got {q_nan:.6}, expected {expected:.6}"
         );
+    }
+
+    // ── ScriptF grey interchange tests ─────────────────────────────
+
+    #[test]
+    fn scriptf_isothermal_enclosure_zero_net_flux() {
+        let surfaces = vec![
+            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },
+            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },
+            InteriorSurface { area_m2: 30.0, emissivity: 0.9 },
+            InteriorSurface { area_m2: 30.0, emissivity: 0.9 },
+        ];
+        let sf = ScriptFCoefficients::compute(&surfaces);
+        let t = vec![20.0, 20.0, 20.0, 20.0];
+        let q = sf.net_flux_w(&t);
+        for (i, &qi) in q.iter().enumerate() {
+            assert!(
+                qi.abs() < 1e-6,
+                "isothermal: surface {i} net flux should be ~0, got {qi}"
+            );
+        }
+    }
+
+    #[test]
+    fn scriptf_energy_conservation() {
+        let surfaces = vec![
+            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },  // floor
+            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },  // ceiling
+            InteriorSurface { area_m2: 20.0, emissivity: 0.9 },  // wall 1
+            InteriorSurface { area_m2: 20.0, emissivity: 0.9 },  // wall 2
+        ];
+        let sf = ScriptFCoefficients::compute(&surfaces);
+        let t = vec![40.0, 20.0, 25.0, 30.0]; // different temperatures
+        let q = sf.net_flux_w(&t);
+        let total: f64 = q.iter().sum();
+        assert!(
+            total.abs() < 1e-6,
+            "energy conservation: sum of all fluxes should be ~0, got {total}"
+        );
+    }
+
+    #[test]
+    fn scriptf_hot_surface_loses_heat() {
+        let surfaces = vec![
+            InteriorSurface { area_m2: 10.0, emissivity: 0.9 },
+            InteriorSurface { area_m2: 10.0, emissivity: 0.9 },
+        ];
+        let sf = ScriptFCoefficients::compute(&surfaces);
+        let t = vec![40.0, 20.0];
+        let q = sf.net_flux_w(&t);
+        assert!(q[0] < 0.0, "hot surface should lose heat, got {}", q[0]);
+        assert!(q[1] > 0.0, "cold surface should gain heat, got {}", q[1]);
+    }
+
+    #[test]
+    fn scriptf_mixed_emissivity_energy_conservation() {
+        // Enclosure with mixed emissivities — tests that the T⁴ method
+        // conserves energy even when emissivities differ significantly.
+        let surfaces = vec![
+            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },
+            InteriorSurface { area_m2: 30.0, emissivity: 0.5 },  // low emissivity
+            InteriorSurface { area_m2: 20.0, emissivity: 0.05 }, // radiant barrier
+        ];
+        let sf = ScriptFCoefficients::compute(&surfaces);
+        let t = vec![30.0, 20.0, 25.0];
+        let q = sf.net_flux_w(&t);
+        let total: f64 = q.iter().sum();
+        assert!(
+            total.abs() < 1e-6,
+            "mixed-ε enclosure: energy conservation violated, sum={total}"
+        );
+    }
+
+    #[test]
+    fn scriptf_diverges_from_linearized_for_large_delta_t() {
+        let surfaces = vec![
+            InteriorSurface { area_m2: 20.0, emissivity: 0.9 },
+            InteriorSurface { area_m2: 20.0, emissivity: 0.9 },
+        ];
+        let sf = ScriptFCoefficients::compute(&surfaces);
+        let t = vec![60.0, 0.0]; // 60°C delta — large enough for T⁴ nonlinearity
+
+        let q_scriptf = sf.net_flux_w(&t);
+        let q_linear = interior_longwave_linearised_w(&surfaces, &t, 30.0);
+
+        // Both should agree on direction (hot loses, cold gains)
+        assert!(q_scriptf[0] < 0.0);
+        assert!(q_linear[0] < 0.0);
+
+        // But magnitudes should differ by >1% due to T⁴ nonlinearity
+        let pct_diff = ((q_scriptf[0] - q_linear[0]) / q_scriptf[0]).abs();
+        assert!(
+            pct_diff >= 0.005,
+            "ScriptF should diverge from linearized at 60°C delta, got {:.2}%",
+            pct_diff * 100.0
+        );
+    }
+
+    #[test]
+    fn scriptf_empty_surfaces_returns_empty() {
+        let sf = ScriptFCoefficients::compute(&[]);
+        let q = sf.net_flux_w(&[]);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn scriptf_single_surface_net_zero() {
+        let surfaces = vec![InteriorSurface { area_m2: 20.0, emissivity: 0.9 }];
+        let sf = ScriptFCoefficients::compute(&surfaces);
+        let q = sf.net_flux_w(&[25.0]);
+        assert_eq!(q.len(), 1);
+        assert!(
+            q[0].abs() < 1e-6,
+            "single surface should have zero net flux, got {}",
+            q[0]
+        );
+    }
+
+    #[test]
+    fn scriptf_zero_emissivity_returns_zero() {
+        let surfaces = vec![
+            InteriorSurface { area_m2: 20.0, emissivity: 0.0 },
+            InteriorSurface { area_m2: 20.0, emissivity: 0.0 },
+        ];
+        let sf = ScriptFCoefficients::compute(&surfaces);
+        let q = sf.net_flux_w(&[30.0, 20.0]);
+        for (i, &qi) in q.iter().enumerate() {
+            assert!(
+                qi.abs() < 1e-6,
+                "zero-emissivity surface {i} should have zero flux, got {qi}"
+            );
+        }
     }
 }

@@ -258,6 +258,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         infiltration_height_m: None,
         floors_above_grade: None,
         has_flue_or_chimney: None,
+        foundation_name: None,
         details_xml,
     }
 }

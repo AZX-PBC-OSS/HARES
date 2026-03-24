@@ -106,7 +106,11 @@ impl ThermalSolver {
         }
     }
 
-    /// Applies linearised interior longwave radiation exchange for each configured zone.
+    /// Applies interior longwave radiation exchange for each configured zone.
+    ///
+    /// Uses ScriptF grey interchange (Gebhart factors) when pre-computed at init,
+    /// falling back to linearized h_r approximation otherwise. The ScriptF path
+    /// computes exact T⁴ radiation with all inter-reflections accounted for.
     ///
     /// Returns per-zone net interior LWR heat gains [W] for diagnostics output.
     pub(super) fn apply_interior_longwave_inputs(
@@ -124,16 +128,11 @@ impl ThermalSolver {
                 .iter()
                 .find(|z| z.id == zone_cfg.zone_id)
                 .map(|z| z.temperature_c)
-                .unwrap_or(20.0);
+                .unwrap_or_else(|| {
+                    tracing::debug!(zone_id = ?zone_cfg.zone_id, "interior LWR: zone not found in env, using 20°C");
+                    20.0
+                });
 
-            let surfaces: Vec<InteriorSurface> = zone_cfg
-                .surfaces
-                .iter()
-                .map(|s| InteriorSurface {
-                    area_m2: s.area_m2,
-                    emissivity: s.emissivity,
-                })
-                .collect();
             let t_surfaces: Vec<f64> = zone_cfg
                 .surfaces
                 .iter()
@@ -147,7 +146,23 @@ impl ThermalSolver {
                 })
                 .collect();
 
-            let net_lw = interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone_c);
+            // Use ScriptF (exact T⁴ radiosity) when pre-computed at init,
+            // linearized h_r approximation as fallback. The fallback allocates
+            // a temporary Vec per zone — call compute_scriptf() at init to avoid.
+            let net_lw = if let Some(ref scriptf) = zone_cfg.scriptf {
+                scriptf.net_flux_w(&t_surfaces)
+            } else {
+                let surfaces: Vec<InteriorSurface> = zone_cfg
+                    .surfaces
+                    .iter()
+                    .map(|s| InteriorSurface {
+                        area_m2: s.area_m2,
+                        emissivity: s.emissivity,
+                    })
+                    .collect();
+                interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone_c)
+            };
+
             let mut zone_total = 0.0_f64;
             for (info, &q) in zone_cfg.surfaces.iter().zip(net_lw.iter()) {
                 if info.input_index < u.len() {

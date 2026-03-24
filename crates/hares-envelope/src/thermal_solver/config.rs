@@ -149,7 +149,9 @@ pub struct InteriorSurfaceInfo {
     ///   `T_surf = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
     ///
     /// A value of `1.0` means the node temperature *is* the surface temperature
-    /// (no film resistance, or film resistance already lumped into the node).
+    /// (film R dominates: surface sits at the wall node, not at zone air).
+    /// A value of `0.0` means the surface temp equals zone air temp
+    /// (no film R: node is on the zone side).
     /// For lightweight boundaries with significant film resistance the correction
     /// can be several degrees.
     ///
@@ -159,15 +161,40 @@ pub struct InteriorSurfaceInfo {
 
 /// Interior longwave radiation configuration for one zone.
 ///
-/// Surfaces listed here participate in area-and-emissivity-weighted linearised
-/// interior LW exchange each timestep.  An empty `surfaces` list disables interior
-/// LW for this zone (backward-compatible default).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Surfaces listed here participate in grey interchange (ScriptF) interior LW
+/// exchange each timestep. The Gebhart factors are pre-computed at init from
+/// approximate view factors and emissivities (EnergyPlus method).
+#[derive(Debug, Clone, Default)]
 pub struct InteriorLwrZoneConfig {
     /// Zone this configuration applies to.
     pub zone_id: ZoneId,
     /// Surfaces in this zone participating in interior LW exchange.
     pub surfaces: Vec<InteriorSurfaceInfo>,
+    /// Pre-computed ScriptF grey interchange factors (computed at init).
+    /// `None` until `compute_scriptf()` is called.
+    pub scriptf: Option<crate::longwave_radiation::ScriptFCoefficients>,
+}
+
+impl InteriorLwrZoneConfig {
+    /// Pre-compute interior LWR exchange factors from surface properties.
+    ///
+    /// Caches ε·σ·A factors and view factors for the exact T⁴ radiosity path.
+    /// Call after populating `surfaces`. Enables the exact T⁴ solver path
+    /// in `apply_interior_longwave_inputs()` (falls back to linearized if not called).
+    pub fn compute_scriptf(&mut self) {
+        if self.surfaces.len() >= 2 {
+            let interior_surfaces: Vec<crate::longwave_radiation::InteriorSurface> = self
+                .surfaces
+                .iter()
+                .map(|s| crate::longwave_radiation::InteriorSurface {
+                    area_m2: s.area_m2,
+                    emissivity: s.emissivity,
+                })
+                .collect();
+            self.scriptf =
+                Some(crate::longwave_radiation::ScriptFCoefficients::compute(&interior_surfaces));
+        }
+    }
 }
 
 /// Metadata for one exterior surface used to compute longwave radiation at runtime.

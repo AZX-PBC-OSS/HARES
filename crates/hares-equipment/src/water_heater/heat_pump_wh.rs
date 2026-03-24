@@ -2800,7 +2800,7 @@ mod new_feature_tests {
         );
     }
 
-    // ── PARITY-012: Split duty cycle tests ─────────────────────────
+    // ── Split duty cycle tests ─────────────────────────────────────
 
     #[test]
     fn split_duty_cycle_curtails_compressor_independently() {

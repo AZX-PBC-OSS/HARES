@@ -3087,7 +3087,7 @@ mod tests {
         assert!(bat.init(&config, &base_env()).is_err());
     }
 
-    // ── PARITY-007: PowerLimit + DemandResponse tests ──────────────
+    // ── PowerLimit + DemandResponse tests ──────────────────────────
 
     #[test]
     fn power_limit_caps_discharge_power() {

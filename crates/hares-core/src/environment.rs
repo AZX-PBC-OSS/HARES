@@ -69,6 +69,12 @@ pub struct EnvironmentManager {
     mains_t_annual_avg_c: f64,
     mains_dt_annual_range_c: f64,
     mains_hemisphere: Hemisphere,
+    /// Annual mean ground surface temperature [°C] for Kusuda-Achenbach model.
+    ground_t_mean_c: f64,
+    /// Half-amplitude of yearly ground surface temperature variation [°C].
+    ground_t_amplitude_c: f64,
+    /// Day of minimum ground surface temperature (phase shift).
+    ground_phase_day: f64,
     /// When set, schedule indexing uses DST-aware civil time from this IANA
     /// timezone instead of the fixed UTC offset. Weather indexing is unaffected.
     #[cfg(feature = "dst")]
@@ -129,10 +135,16 @@ impl EnvironmentManager {
             compute_mains_inputs(&weather, step_secs);
 
         let weather_meta = weather.meta.clone();
-        let mains_hemisphere = if weather_meta.latitude < 0.0 {
+        let is_southern = weather_meta.latitude < 0.0;
+        let mains_hemisphere = if is_southern {
             Hemisphere::Southern
         } else {
             Hemisphere::Northern
+        };
+        let ground_phase_day = if is_southern {
+            hares_physics::ground::DEFAULT_PHASE_DAY_SOUTHERN
+        } else {
+            hares_physics::ground::DEFAULT_PHASE_DAY_NORTHERN
         };
         let surfaces = build_surface_geometry(building);
         let init_offset = compute_annual_offset_unshifted(&weather.meta, start_time, step_secs);
@@ -155,6 +167,12 @@ impl EnvironmentManager {
             mains_t_annual_avg_c,
             mains_dt_annual_range_c,
             mains_hemisphere,
+            // Kusuda-Achenbach parameters: use same annual stats as mains water model.
+            // T_mean ≈ annual average outdoor temperature.
+            // T_amplitude ≈ half of annual range (same derivation as mains model).
+            ground_t_mean_c: mains_t_annual_avg_c,
+            ground_t_amplitude_c: mains_dt_annual_range_c / 2.0,
+            ground_phase_day,
             #[cfg(feature = "dst")]
             civil_tz,
         })
@@ -168,6 +186,22 @@ impl EnvironmentManager {
     /// Clear any active grid override and restore defaults.
     pub fn clear_grid_override(&mut self) {
         self.grid_override = None;
+    }
+
+    /// Kusuda-Achenbach ground temperature at a given depth and day of year.
+    ///
+    /// Uses annual climate statistics derived from weather data. More accurate
+    /// than the surface ground temperature for foundation and slab boundaries.
+    #[must_use]
+    pub fn ground_temp_at_depth_c(&self, depth_m: f64, day_of_year: f64) -> f64 {
+        hares_physics::ground::kusuda_achenbach_temp(
+            depth_m,
+            day_of_year,
+            self.ground_t_mean_c,
+            self.ground_t_amplitude_c,
+            self.ground_phase_day,
+            hares_physics::ground::DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
+        )
     }
 
     /// Compute the schedule array index for the current timestep.
@@ -712,6 +746,7 @@ mod tests {
             infiltration_height_m: None,
             floors_above_grade: None,
             has_flue_or_chimney: None,
+            foundation_name: None,
             details_xml,
         }
     }

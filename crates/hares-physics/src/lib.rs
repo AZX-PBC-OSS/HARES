@@ -5,6 +5,7 @@ pub mod air_properties;
 pub mod film_coefficients;
 pub mod biquadratic;
 pub mod constants;
+pub mod ground;
 pub mod infiltration;
 pub mod psychrometrics;
 pub mod solar;

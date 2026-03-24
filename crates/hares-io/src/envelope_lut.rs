@@ -299,6 +299,29 @@ pub fn resolve_boundary_name(
     let int = interior_zone.unwrap_or(&default_int);
     let ext = exterior_zone.unwrap_or(&default_ext);
 
+    // Same-zone boundaries: furniture (thermal mass) or adjacent (adiabatic).
+    // OCHRE hpxml.py:763-777 (furniture), 374-380 (adjacent).
+    if int == ext {
+        return match int {
+            ZoneType::Conditioned => Some("Indoor Furniture"),
+            ZoneType::Foundation => Some("Foundation Furniture"),
+            ZoneType::Garage => Some("Garage Furniture"),
+            _ => None,
+        };
+    }
+
+    // Adjacent (adiabatic) boundaries — multifamily party walls/floors.
+    if *int == ZoneType::Adjacent || *ext == ZoneType::Adjacent {
+        return match boundary_type {
+            BoundaryType::Wall => Some("Adjacent Wall"),
+            BoundaryType::Floor => Some("Adjacent Floor"),
+            BoundaryType::Roof => Some("Adjacent Ceiling"),
+            BoundaryType::FoundationWall => Some("Adjacent Foundation Wall"),
+            BoundaryType::RimJoist => Some("Adjacent Rim Joist"),
+            _ => None,
+        };
+    }
+
     match boundary_type {
         BoundaryType::Wall => match (int, ext) {
             (ZoneType::Conditioned, ZoneType::Outdoor) => Some("Exterior Wall"),
@@ -317,8 +340,6 @@ pub fn resolve_boundary_name(
             _ => Some("Attic Roof"),
         },
         BoundaryType::Floor => {
-            // HPXML <Floor> elements represent horizontal separations.
-            // The exterior zone determines which OCHRE boundary this maps to.
             match (int, ext) {
                 (ZoneType::Conditioned, ZoneType::Attic) => Some("Attic Floor"),
                 (ZoneType::Conditioned, ZoneType::Foundation) => Some("Foundation Ceiling"),

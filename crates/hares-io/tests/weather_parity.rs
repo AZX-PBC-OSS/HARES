@@ -363,7 +363,7 @@ fn sky_temp_matches_clark_allen_for_low_ir_rows() {
 }
 
 // ===========================================================================
-// PCHIP interpolation and sub-hourly resampling tests (WEATHER-002)
+// PCHIP interpolation and sub-hourly resampling tests
 // ===========================================================================
 
 use hares_io::weather::{WeatherMeta, WeatherTimeSeries, pchip_resample};

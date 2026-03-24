@@ -1,4 +1,4 @@
-//! Full-pipeline weather integration tests (WEATHER-010).
+//! Full-pipeline weather integration tests.
 //!
 //! Verifies the complete chain: synthetic WeatherTimeSeries → resample →
 //! EnvironmentManager → update() → WeatherState with derived psychrometrics
@@ -228,6 +228,7 @@ fn minimal_building() -> hares_io::Building {
         infiltration_height_m: None,
         floors_above_grade: None,
         has_flue_or_chimney: None,
+        foundation_name: None,
         details_xml,
     }
 }

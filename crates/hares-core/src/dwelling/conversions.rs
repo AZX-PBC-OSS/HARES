@@ -190,6 +190,7 @@ pub(crate) fn zone_type_to_label(
         Some(ZoneType::Garage) => ZoneLabel::Garage,
         Some(ZoneType::Foundation) => ZoneLabel::Foundation,
         Some(ZoneType::Ground) => ZoneLabel::Ground,
+        Some(ZoneType::Adjacent) => ZoneLabel::Conditioned,
         Some(ZoneType::Outdoor) | None => ZoneLabel::Outdoor,
         Some(ZoneType::Other(_)) => ZoneLabel::Outdoor,
     }

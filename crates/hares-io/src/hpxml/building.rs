@@ -39,6 +39,9 @@ pub enum ZoneType {
     Outdoor,
     /// Earth/soil boundary condition (not a thermal zone).
     Ground,
+    /// Adiabatic boundary to another dwelling unit (multifamily).
+    /// OCHRE: "other housing unit", "other heated space", etc. → same-zone thermal mass.
+    Adjacent,
     Other(String),
 }
 
@@ -190,6 +193,9 @@ pub struct Building {
     pub floors_above_grade: Option<f64>,
     /// `<extension><HasFlueOrChimneyInConditionedSpace>` boolean.
     pub has_flue_or_chimney: Option<bool>,
+    /// Foundation type name for LUT matching (e.g. "Unfinished Basement", "Crawlspace").
+    /// Derived from `<Foundation>/<FoundationType>` per OCHRE hpxml.py:276-286.
+    pub foundation_name: Option<String>,
     // TODO: `details_xml` leaks the parse tree (`XmlNode`) into the domain model,
     // forcing `hares-core` to construct XmlNode trees. Extract remaining
     // XML-dependent fields into typed struct members and remove this field.
@@ -388,6 +394,9 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         _ => None,
     };
 
+    let total_conditioned_floors = summary
+        .path(&["BuildingConstruction", "NumberofConditionedFloors"])
+        .and_then(|node| parse_value_with_units(Some(node), ValueKind::Raw));
     let floors_above_grade = summary
         .path(&["BuildingConstruction", "NumberofConditionedFloorsAboveGrade"])
         .and_then(|node| parse_value_with_units(Some(node), ValueKind::Raw));
@@ -402,18 +411,119 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .first_descendant("HasFlueOrChimneyInConditionedSpace")
         .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
 
+    // Foundation type name for LUT matching of foundation wall boundaries.
+    // OCHRE hpxml.py:276-286: FoundationType child tag → "Crawlspace" | "Unfinished Basement" | "Finished Basement".
+    let foundation_name = details
+        .path(&["Enclosure", "Foundations", "Foundation", "FoundationType"])
+        .and_then(|ft| ft.children.first())
+        .and_then(|child| {
+            let tag = child.name.as_str();
+            match tag {
+                "Crawlspace" => Some("Crawlspace".to_string()),
+                "Basement" => {
+                    // Prefer HPXML 4.x <Conditioned> element if present.
+                    // Fall back to OCHRE heuristic: total_floors > floors_above_grade
+                    // means basement is conditioned (finished).
+                    let explicit = child
+                        .child("Conditioned")
+                        .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
+                    let inferred = match (total_conditioned_floors, floors_above_grade) {
+                        (Some(total), Some(above)) => total > above,
+                        _ => false,
+                    };
+                    let is_finished = explicit.unwrap_or(inferred);
+                    if is_finished {
+                        Some("Finished Basement".to_string())
+                    } else {
+                        Some("Unfinished Basement".to_string())
+                    }
+                }
+                "SlabOnGrade" | "Ambient" | "AboveApartment" => None,
+                _ => None,
+            }
+        });
+
     let mut boundaries = parse_boundaries(details)?;
     let windows = parse_windows(details, &mut boundaries)?;
+
+    // Post-process foundation wall boundaries: override construction_type with
+    // foundation_name, apply insulation details and area scaling.
+    // OCHRE hpxml.py:408-410: boundaries["Foundation Wall"]["Construction Type"] = foundation_name
+    if let Some(ref fnd_name) = foundation_name {
+        for bd in &mut boundaries {
+            if bd.boundary_type == BoundaryType::FoundationWall {
+                bd.construction_type = Some(fnd_name.clone());
+                let (insulation, area_scale) =
+                    extract_foundation_wall_insulation(details, &bd.id);
+                bd.insulation_details = insulation;
+                bd.area_m2 *= area_scale;
+            }
+        }
+    }
+
+    // Post-process slab boundaries: extract insulation details from PerimeterInsulation
+    // and UnderSlabInsulation elements. OCHRE envelope.py:462-485.
+    if let Some(slabs_group) = details.path(&["Enclosure", "Slabs"]) {
+        for bd in &mut boundaries {
+            if bd.boundary_type == BoundaryType::Slab {
+                if let Some(slab_node) = slabs_group.children_named("Slab").find(|n| {
+                    n.child("SystemIdentifier")
+                        .and_then(|si| si.attrs.get("id"))
+                        .map(|id| id == &bd.id)
+                        .unwrap_or(false)
+                }) {
+                    bd.insulation_details = extract_slab_insulation(slab_node);
+                }
+            }
+        }
+    }
 
     let mut zones = build_zone_map(details, conditioned_floor_area_m2);
     assign_walls_to_zones(&boundaries, &mut zones);
     parse_duct_systems(details, &mut zones);
 
+    // Auto-generate furniture boundaries per zone (same-zone thermal mass).
+    // OCHRE hpxml.py:763-777: area = zone_floor_area × fraction, interior == exterior.
+    const FURNITURE_FRACTIONS: &[(ZoneType, f64)] = &[
+        (ZoneType::Conditioned, 0.4),
+        (ZoneType::Foundation, 0.4),
+        (ZoneType::Garage, 0.1),
+        // Attic: 0 (no furniture)
+    ];
+    for (zone_type, fraction) in FURNITURE_FRACTIONS {
+        if let Some(zone) = zones.values().find(|z| z.zone_type == *zone_type) {
+            if let Some(area) = zone.floor_area_m2 {
+                let furniture_area = area * fraction;
+                if furniture_area > 0.0 {
+                    boundaries.push(Boundary {
+                        id: format!("{}_furniture", zone_key(zone_type)),
+                        boundary_type: BoundaryType::Wall, // same-zone thermal mass
+                        area_m2: furniture_area,
+                        azimuth_deg: None,
+                        assembly_r_value_m2_k_w: None,
+                        r_value_layers_m2_k_w: Vec::new(),
+                        interior_zone: Some(zone_type.clone()),
+                        exterior_zone: Some(zone_type.clone()),
+                        material_layers: Vec::new(),
+                        framing_factor: None,
+                        construction_type: None,
+                        finish_type: None,
+                        insulation_details: Some("Standard".to_string()),
+                        has_radiant_barrier: false,
+                        solar_absorptance: None,
+                        emittance: None,
+                        tilt_deg: Some(90.0),
+                    });
+                }
+            }
+        }
+    }
+
     // Filter out Outdoor — it's a boundary condition, not a thermal zone.
     // OCHRE only creates thermal zones for Conditioned, Attic, Garage, Foundation.
     let mut zones_vec: Vec<Zone> = zones
         .into_values()
-        .filter(|z| !matches!(z.zone_type, ZoneType::Outdoor | ZoneType::Ground))
+        .filter(|z| !matches!(z.zone_type, ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent))
         .collect();
     zones_vec.sort_by_key(|zone| zone_sort_key(&zone.zone_type));
 
@@ -426,8 +536,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             ZoneType::Garage | ZoneType::Foundation => {
                 zone.floor_area_m2.map(|a| a * default_height_m)
             }
-            // Outdoor and Ground are filtered above; Other has no volume model.
-            ZoneType::Outdoor | ZoneType::Ground | ZoneType::Other(_) => None,
+            // Outdoor, Ground, Adjacent are filtered above; Other has no volume model.
+            ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent | ZoneType::Other(_) => None,
         };
     }
 
@@ -501,6 +611,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         infiltration_height_m,
         floors_above_grade,
         has_flue_or_chimney,
+        foundation_name,
         details_xml: details.clone(),
     })
 }
@@ -795,6 +906,147 @@ fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
     }
 }
 
+/// Extract foundation wall insulation details and area scale factor.
+///
+/// Mirrors OCHRE `get_fnd_wall_insulation` (envelope.py:434-459):
+/// - Area scaled by `DepthBelowGrade / Height` when they differ.
+/// - Insulation details: "Half R{n}", "R{n}", or "Uninsulated".
+///
+/// `details` is the BuildingDetails node; `wall_id` identifies which FoundationWall.
+fn extract_foundation_wall_insulation(
+    details: &XmlNode,
+    wall_id: &str,
+) -> (Option<String>, f64) {
+    // Find the FoundationWall element matching this boundary's ID.
+    let wall_node = details
+        .path(&["Enclosure", "FoundationWalls"])
+        .and_then(|group| {
+            group
+                .children_named("FoundationWall")
+                .find(|n| {
+                    n.child("SystemIdentifier")
+                        .and_then(|si| si.attrs.get("id"))
+                        .map(|id| id == wall_id)
+                        .unwrap_or(false)
+                })
+        });
+    let Some(node) = wall_node else {
+        return (Some("Uninsulated".to_string()), 1.0);
+    };
+
+    // Area scaling: depth_below_grade / height.
+    let height = parse_value_with_units(node.child("Height"), ValueKind::Length).unwrap_or(1.0);
+    let depth_below_grade =
+        parse_value_with_units(node.child("DepthBelowGrade"), ValueKind::Length).unwrap_or(height);
+    let area_scale = if height > 0.0 && (depth_below_grade - height).abs() > 0.01 {
+        (depth_below_grade / height).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
+    // Sum nominal R-values from insulation layers.
+    // Read raw IP values (no unit conversion) for the LUT insulation details string,
+    // since the LUT CSV uses IP R-values ("R10", "Half R5", etc.).
+    let mut insulation_layers = Vec::new();
+    if let Some(ins) = node.child("Insulation") {
+        ins.descendants("Layer", &mut insulation_layers);
+    }
+    let r_ip: f64 = insulation_layers
+        .iter()
+        .filter_map(|layer| {
+            layer
+                .child("NominalRValue")
+                .and_then(|n| n.text_as_f64())
+        })
+        .sum();
+
+    let insulation_details = if r_ip > 0.0 {
+        // Insulation height from DistanceToBottom - DistanceToTop per layer.
+        // These are in the same units as Height (both converted to meters).
+        let insulation_height = insulation_layers
+            .iter()
+            .map(|layer| {
+                let dist_bottom = parse_value_with_units(
+                    layer.child("DistanceToBottomOfInsulation"),
+                    ValueKind::Length,
+                )
+                .unwrap_or(height);
+                let dist_top = parse_value_with_units(
+                    layer.child("DistanceToTopOfInsulation"),
+                    ValueKind::Length,
+                )
+                .unwrap_or(0.0);
+                dist_bottom - dist_top
+            })
+            .reduce(f64::min)
+            .unwrap_or(height);
+
+        let r_int = r_ip.round() as i32;
+        if insulation_height > 0.0 && insulation_height <= height / 2.0 {
+            format!("Half R{r_int}")
+        } else {
+            format!("R{r_int}")
+        }
+    } else {
+        "Uninsulated".to_string()
+    };
+
+    (Some(insulation_details), area_scale)
+}
+
+/// Extract slab insulation details for LUT matching.
+///
+/// Mirrors OCHRE `get_slab_insulation` (envelope.py:462-485).
+/// Reads `PerimeterInsulation` and `UnderSlabInsulation` from the Slab element
+/// to produce format strings like "2ft R10 Perimeter", "R10 Whole Slab", etc.
+///
+/// All numeric values are raw IP (HPXML native) — no unit conversion needed
+/// since the LUT CSV uses IP values.
+fn extract_slab_insulation(node: &XmlNode) -> Option<String> {
+    let r_perimeter = node
+        .path(&["PerimeterInsulation", "Layer", "NominalRValue"])
+        .and_then(|n| n.text_as_f64())
+        .unwrap_or(0.0);
+    let r_under = node
+        .path(&["UnderSlabInsulation", "Layer", "NominalRValue"])
+        .and_then(|n| n.text_as_f64())
+        .unwrap_or(0.0);
+
+    // R >= 100 is OCHRE's threshold for "Minimal" (essentially no insulation modeled).
+    // Ref: OCHRE envelope.py:466.
+    let insulation = if r_perimeter >= 100.0 && r_under >= 100.0 {
+        "Minimal".to_string()
+    } else if r_perimeter > 0.0 && r_under <= 0.0 {
+        let depth = node
+            .path(&["PerimeterInsulation", "Layer", "InsulationDepth"])
+            .and_then(|n| n.text_as_f64())
+            .unwrap_or(0.0);
+        let d = depth.round() as i32;
+        let r = r_perimeter.round() as i32;
+        format!("{d}ft R{r} Perimeter")
+    } else if r_perimeter <= 0.0 && r_under > 0.0 {
+        let full_width = node
+            .path(&["UnderSlabInsulation", "Layer", "InsulationSpansEntireSlab"])
+            .map(|n| n.text.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let r = r_under.round() as i32;
+        if full_width {
+            format!("R{r} Whole Slab")
+        } else {
+            let width = node
+                .path(&["UnderSlabInsulation", "Layer", "InsulationWidth"])
+                .and_then(|n| n.text_as_f64())
+                .unwrap_or(0.0);
+            let w = width.round() as i32;
+            format!("{w}ft R{r} Exterior")
+        }
+    } else {
+        "Uninsulated".to_string()
+    };
+
+    Some(insulation)
+}
+
 /// Extract construction type and finish type from HPXML boundary elements.
 fn extract_construction_metadata(
     node: &XmlNode,
@@ -847,20 +1099,11 @@ fn extract_construction_metadata(
 }
 
 /// Extract insulation details string from nominal R-value layers.
-fn extract_insulation_details(node: &XmlNode) -> Option<String> {
-    let r_layers = parse_nominal_r_layers(node);
-    if r_layers.is_empty() {
-        return None;
-    }
-    // Sum nominal R-values, format as "R-{value}" (imperial, matching OCHRE convention).
-    let total_r: f64 = r_layers.iter().sum();
-    // Convert from m²·K/W back to imperial R for LUT matching.
-    let imperial_r = total_r / conv::r_value_ip_to_si(1.0);
-    if imperial_r < 1.0 {
-        Some("Uninsulated".to_string())
-    } else {
-        Some(format!("R-{}", imperial_r.round() as i32))
-    }
+/// Insulation details are only relevant for foundation walls and slabs, which are
+/// handled by post-processing in `parse_building_from_node`. All other boundary
+/// types get `None` — OCHRE does not pass insulation_details for walls/roofs/floors.
+fn extract_insulation_details(_node: &XmlNode) -> Option<String> {
+    None
 }
 
 fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Vec<MaterialLayer> {
@@ -1354,6 +1597,10 @@ fn parse_zone_label(text: &str) -> ZoneType {
         ZoneType::Ground
     } else if norm.contains("out") || norm.contains("ambient") {
         ZoneType::Outdoor
+    } else if norm.contains("other") {
+        // OCHRE hpxml.py:78: multifamily zones ("other housing unit", "other heated space")
+        // are adiabatic same-zone boundaries.
+        ZoneType::Adjacent
     } else {
         ZoneType::Other(text.trim().to_string())
     }
@@ -1383,6 +1630,7 @@ fn zone_key(zone_type: &ZoneType) -> String {
         ZoneType::Foundation => "foundation".to_string(),
         ZoneType::Outdoor => "outdoor".to_string(),
         ZoneType::Ground => "ground".to_string(),
+        ZoneType::Adjacent => "adjacent".to_string(),
         ZoneType::Other(label) => label.to_ascii_lowercase(),
     }
 }
@@ -1472,7 +1720,7 @@ fn zone_sort_key(zone_type: &ZoneType) -> u8 {
         ZoneType::Attic => 1,
         ZoneType::Garage => 2,
         ZoneType::Foundation => 3,
-        ZoneType::Outdoor | ZoneType::Ground => 4,
+        ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent => 4,
         ZoneType::Other(_) => 5,
     }
 }
@@ -1888,5 +2136,400 @@ mod tests {
         // effective SHGC: 0.40 * 0.70 = 0.28
         let effective = w.shgc.unwrap() * w.interior_shading_fraction;
         assert!((effective - 0.28).abs() < 1e-10);
+    }
+
+    #[test]
+    fn foundation_wall_gets_construction_type_from_foundation() {
+        // Add FoundationType to the Foundation element so foundation_name is parsed.
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><Basement/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(
+            building.foundation_name.as_deref(),
+            Some("Unfinished Basement"),
+        );
+        let fnd_wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::FoundationWall)
+            .expect("foundation wall expected");
+        assert_eq!(
+            fnd_wall.construction_type.as_deref(),
+            Some("Unfinished Basement"),
+        );
+        assert_eq!(
+            fnd_wall.insulation_details.as_deref(),
+            Some("Uninsulated"),
+        );
+    }
+
+    #[test]
+    fn foundation_wall_crawlspace_construction_type() {
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><Crawlspace/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.foundation_name.as_deref(), Some("Crawlspace"));
+        let fnd_wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::FoundationWall)
+            .expect("foundation wall expected");
+        assert_eq!(fnd_wall.construction_type.as_deref(), Some("Crawlspace"));
+    }
+
+    #[test]
+    fn foundation_wall_area_scaling_and_insulation() {
+        // FoundationWall with Height=8ft, DepthBelowGrade=4ft → area_scale=0.5
+        // Plus R-10 insulation covering half the wall height.
+        let xml = SAMPLE_XML
+            .replace(
+                "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+                "<Foundation>\n            <FoundationType><Basement/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            )
+            .replace(
+                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n          </FoundationWall>",
+                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n            <Height units=\"ft\">8</Height>\n            <DepthBelowGrade units=\"ft\">4</DepthBelowGrade>\n            <Insulation>\n              <Layer>\n                <NominalRValue>10</NominalRValue>\n                <DistanceToTopOfInsulation units=\"ft\">0</DistanceToTopOfInsulation>\n                <DistanceToBottomOfInsulation units=\"ft\">4</DistanceToBottomOfInsulation>\n              </Layer>\n            </Insulation>\n          </FoundationWall>",
+            );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let fnd_wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::FoundationWall)
+            .expect("foundation wall expected");
+
+        // Area: 60 ft² × 0.0929 m²/ft² × (4/8) = ~2.787 m²
+        let original_area_m2 = 60.0 * 0.092_903_04;
+        assert!(
+            (fnd_wall.area_m2 - original_area_m2 * 0.5).abs() < 0.01,
+            "area should be halved: got {}, expected {}",
+            fnd_wall.area_m2,
+            original_area_m2 * 0.5
+        );
+
+        // Insulation: 4ft depth, 8ft height → 4/8 = 0.5 ≤ height/2 → "Half R10"
+        // NominalRValue=10 is IP (HPXML stores IP), our code converts then back.
+        assert_eq!(
+            fnd_wall.insulation_details.as_deref(),
+            Some("Half R10"),
+            "half-height R-10 insulation expected"
+        );
+    }
+
+    #[test]
+    fn foundation_wall_no_foundation_type_keeps_wall_type() {
+        // Without FoundationType, foundation_name is None, so construction_type
+        // stays as the WallType (parsed by extract_construction_metadata).
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        assert!(building.foundation_name.is_none());
+        let fnd_wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::FoundationWall)
+            .expect("foundation wall expected");
+        // No override — construction_type comes from WallType (None in this XML).
+        assert!(fnd_wall.construction_type.is_none());
+    }
+
+    #[test]
+    fn finished_basement_from_conditioned_element() {
+        // HPXML 4.x: <Basement><Conditioned>true</Conditioned></Basement>
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><Basement><Conditioned>true</Conditioned></Basement></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.foundation_name.as_deref(), Some("Finished Basement"));
+    }
+
+    #[test]
+    fn unfinished_basement_from_conditioned_false() {
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><Basement><Conditioned>false</Conditioned></Basement></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.foundation_name.as_deref(), Some("Unfinished Basement"));
+    }
+
+    #[test]
+    fn finished_basement_from_floor_count_heuristic() {
+        // OCHRE heuristic: total_floors > floors_above_grade → Finished Basement.
+        // No <Conditioned> element, so falls back to floor count comparison.
+        let xml = SAMPLE_XML
+            .replace(
+                "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+                "<Foundation>\n            <FoundationType><Basement/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            )
+            .replace(
+                "</BuildingConstruction>",
+                "<NumberofConditionedFloors>2</NumberofConditionedFloors>\n          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>\n        </BuildingConstruction>",
+            );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.foundation_name.as_deref(), Some("Finished Basement"));
+    }
+
+    #[test]
+    fn unfinished_basement_from_equal_floor_counts() {
+        // total_floors == floors_above_grade → Unfinished Basement.
+        let xml = SAMPLE_XML
+            .replace(
+                "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+                "<Foundation>\n            <FoundationType><Basement/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            )
+            .replace(
+                "</BuildingConstruction>",
+                "<NumberofConditionedFloors>1</NumberofConditionedFloors>\n          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>\n        </BuildingConstruction>",
+            );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.foundation_name.as_deref(), Some("Unfinished Basement"));
+    }
+
+    #[test]
+    fn conditioned_element_takes_priority_over_floor_count() {
+        // <Conditioned>false</Conditioned> overrides floor count heuristic.
+        let xml = SAMPLE_XML
+            .replace(
+                "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+                "<Foundation>\n            <FoundationType><Basement><Conditioned>false</Conditioned></Basement></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            )
+            .replace(
+                "</BuildingConstruction>",
+                "<NumberofConditionedFloors>2</NumberofConditionedFloors>\n          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>\n        </BuildingConstruction>",
+            );
+        let building = parse_building(&xml).expect("parse should succeed");
+        // Explicit Conditioned=false wins over floor count heuristic (which would say Finished).
+        assert_eq!(building.foundation_name.as_deref(), Some("Unfinished Basement"));
+    }
+
+    #[test]
+    fn slab_on_grade_foundation_name_is_none() {
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><SlabOnGrade/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert!(building.foundation_name.is_none());
+    }
+
+    // ── Slab insulation detail tests ────────────────────────────────────
+
+    #[test]
+    fn slab_uninsulated() {
+        // Default SAMPLE_XML slab has no insulation elements.
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let slab = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Slab)
+            .expect("slab expected");
+        assert_eq!(slab.insulation_details.as_deref(), Some("Uninsulated"));
+    }
+
+    #[test]
+    fn slab_perimeter_insulation() {
+        let xml = SAMPLE_XML.replace(
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n          </Slab>",
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n            <PerimeterInsulation><Layer><NominalRValue>10</NominalRValue><InsulationDepth>2</InsulationDepth></Layer></PerimeterInsulation>\n          </Slab>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let slab = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Slab)
+            .expect("slab expected");
+        assert_eq!(slab.insulation_details.as_deref(), Some("2ft R10 Perimeter"));
+    }
+
+    #[test]
+    fn slab_underslab_whole() {
+        let xml = SAMPLE_XML.replace(
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n          </Slab>",
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n            <UnderSlabInsulation><Layer><NominalRValue>10</NominalRValue><InsulationSpansEntireSlab>true</InsulationSpansEntireSlab></Layer></UnderSlabInsulation>\n          </Slab>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let slab = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Slab)
+            .expect("slab expected");
+        assert_eq!(slab.insulation_details.as_deref(), Some("R10 Whole Slab"));
+    }
+
+    #[test]
+    fn slab_underslab_partial() {
+        let xml = SAMPLE_XML.replace(
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n          </Slab>",
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n            <UnderSlabInsulation><Layer><NominalRValue>10</NominalRValue><InsulationWidth>4</InsulationWidth></Layer></UnderSlabInsulation>\n          </Slab>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let slab = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Slab)
+            .expect("slab expected");
+        assert_eq!(slab.insulation_details.as_deref(), Some("4ft R10 Exterior"));
+    }
+
+    #[test]
+    fn slab_minimal_insulation() {
+        let xml = SAMPLE_XML.replace(
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n          </Slab>",
+            "<Slab>\n            <SystemIdentifier id=\"Slab1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">80</Area>\n            <PerimeterInsulation><Layer><NominalRValue>500</NominalRValue></Layer></PerimeterInsulation>\n            <UnderSlabInsulation><Layer><NominalRValue>500</NominalRValue></Layer></UnderSlabInsulation>\n          </Slab>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let slab = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Slab)
+            .expect("slab expected");
+        assert_eq!(slab.insulation_details.as_deref(), Some("Minimal"));
+    }
+
+    // ── Furniture boundary auto-generation tests ────────────────────────
+
+    #[test]
+    fn furniture_boundaries_generated_for_conditioned_zone() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let furniture: Vec<_> = building
+            .boundaries
+            .iter()
+            .filter(|b| b.id.contains("furniture"))
+            .collect();
+        // Conditioned zone has floor area → generates furniture boundary.
+        assert!(
+            furniture.iter().any(|b| b.id == "conditioned_furniture"),
+            "conditioned furniture boundary expected"
+        );
+        let cond_furn = furniture
+            .iter()
+            .find(|b| b.id == "conditioned_furniture")
+            .unwrap();
+        // Same-zone: interior == exterior.
+        assert_eq!(cond_furn.interior_zone, Some(ZoneType::Conditioned));
+        assert_eq!(cond_furn.exterior_zone, Some(ZoneType::Conditioned));
+        // Area = floor_area × 0.4.
+        let expected_floor_m2 = 2152.0 * 0.092_903_04;
+        assert!(
+            (cond_furn.area_m2 - expected_floor_m2 * 0.4).abs() < 0.1,
+            "furniture area: got {}, expected {}",
+            cond_furn.area_m2,
+            expected_floor_m2 * 0.4
+        );
+    }
+
+    #[test]
+    fn furniture_boundary_for_garage() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let garage_furn = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "garage_furniture");
+        assert!(garage_furn.is_some(), "garage furniture boundary expected");
+        let gf = garage_furn.unwrap();
+        assert_eq!(gf.interior_zone, Some(ZoneType::Garage));
+        assert_eq!(gf.exterior_zone, Some(ZoneType::Garage));
+        // Area = 400 ft² × 0.0929 × 0.1
+        let expected = 400.0 * 0.092_903_04 * 0.1;
+        assert!(
+            (gf.area_m2 - expected).abs() < 0.1,
+            "garage furniture area: got {}, expected {}",
+            gf.area_m2, expected
+        );
+    }
+
+    #[test]
+    fn furniture_boundary_for_foundation() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let fnd_furn = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "foundation_furniture");
+        assert!(fnd_furn.is_some(), "foundation furniture boundary expected");
+        let ff = fnd_furn.unwrap();
+        assert_eq!(ff.interior_zone, Some(ZoneType::Foundation));
+        assert_eq!(ff.exterior_zone, Some(ZoneType::Foundation));
+        // Area = 800 ft² × 0.0929 × 0.4
+        let expected = 800.0 * 0.092_903_04 * 0.4;
+        assert!(
+            (ff.area_m2 - expected).abs() < 0.1,
+            "foundation furniture area: got {}, expected {}",
+            ff.area_m2, expected
+        );
+    }
+
+    #[test]
+    fn no_attic_furniture_boundary() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let attic_furn = building
+            .boundaries
+            .iter()
+            .find(|b| b.id == "attic_furniture");
+        assert!(attic_furn.is_none(), "attic should not have furniture boundary");
+    }
+
+    #[test]
+    fn adjacent_zone_label_parsed() {
+        // "other housing unit" should parse to ZoneType::Adjacent.
+        // Test via a boundary with InteriorAdjacentTo="other housing unit".
+        let xml = SAMPLE_XML.replace(
+            "<InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>",
+            "<InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>other housing unit</ExteriorAdjacentTo>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Wall && b.id == "Wall1")
+            .expect("wall expected");
+        assert_eq!(wall.exterior_zone, Some(ZoneType::Adjacent));
+    }
+
+    // ── Insulation details dispatch tests ───────────────────────────────
+
+    #[test]
+    fn wall_has_no_insulation_details() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Wall)
+            .expect("wall expected");
+        assert!(
+            wall.insulation_details.is_none(),
+            "regular walls should not have insulation_details, got {:?}",
+            wall.insulation_details
+        );
+    }
+
+    #[test]
+    fn roof_has_no_insulation_details() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let roof = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Roof)
+            .expect("roof expected");
+        assert!(
+            roof.insulation_details.is_none(),
+            "roofs should not have insulation_details, got {:?}",
+            roof.insulation_details
+        );
+    }
+
+    #[test]
+    fn door_has_no_insulation_details() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        for bd in &building.boundaries {
+            if bd.boundary_type == BoundaryType::Door {
+                assert!(
+                    bd.insulation_details.is_none(),
+                    "doors should not have insulation_details"
+                );
+            }
+        }
     }
 }

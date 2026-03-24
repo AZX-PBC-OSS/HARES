@@ -1502,7 +1502,7 @@ mod tests {
         assert_eq!(rc.a_c.nrows(), 2);
     }
 
-    // ── PARITY-013: Framing factor parallel-path tests ─────────────
+    // ── Framing factor parallel-path tests ─────────────────────────
 
     #[test]
     fn parallel_path_conductivity_no_framing_returns_cavity() {
