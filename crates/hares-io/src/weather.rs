@@ -555,7 +555,8 @@ pub fn pchip_resample(values: &[f64], factor: usize) -> Vec<f64> {
 
     if n == 2 {
         // Linear interpolation fallback for two-element input.
-        // Clamp frac to [0, 1] for flat extrapolation beyond the last knot.
+        // Clamp frac to [0, 1]: beyond the last knot, frac saturates at 1.0
+        // producing flat-hold at values[n-1].
         for i in 0..total {
             let t = i as f64 / factor as f64;
             let k = (t as usize).min(n - 2);

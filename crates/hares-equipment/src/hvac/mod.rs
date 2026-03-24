@@ -11,9 +11,11 @@ pub(super) mod equivalent_battery;
 pub mod furnace;
 pub mod heat_pump;
 pub(crate) mod helpers;
+pub(super) mod duct_distribution;
 pub(super) mod hvac_core;
 pub(super) mod latent_degradation;
 pub(super) mod speed_control;
+pub(super) mod staging;
 pub(super) mod thermostat;
 
 pub use equivalent_battery::EquivalentBatteryModel;

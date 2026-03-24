@@ -180,7 +180,17 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         }
 
         let dni = parse_data_f64(&fields, col_map.dni, row, "DNI")?;
+        if !(0.0..=1100.0).contains(&dni) {
+            return Err(WeatherError::Validation(format!(
+                "row {row}: DNI out of range [0, 1100] W/m^2: {dni}"
+            )));
+        }
         let dhi = parse_data_f64(&fields, col_map.dhi, row, "DHI")?;
+        if !(0.0..=800.0).contains(&dhi) {
+            return Err(WeatherError::Validation(format!(
+                "row {row}: DHI out of range [0, 800] W/m^2: {dhi}"
+            )));
+        }
 
         let ws = parse_data_f64(&fields, col_map.wind_speed, row, "Wind Speed")?;
         if !(0.0..=60.0).contains(&ws) {
@@ -197,6 +207,9 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
 
         if let Some(idx) = col_map.surface_albedo {
             let val = parse_data_f64(&fields, idx, row, "Surface Albedo")?;
+            if !(0.0..=1.0).contains(&val) {
+                tracing::warn!("row {row}: Surface Albedo {val} outside [0, 1], clamped");
+            }
             surface_albedo.as_mut().expect("pre-allocated").push(val.clamp(0.0, 1.0));
         }
 
@@ -240,8 +253,9 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
             &monthly_ground_temps,
             month,
             day,
-            // PSM3 uses 0-23 hours; interpolate_ground_temp_c expects 1-24 (EPW convention).
-            // Use hour + 1 to convert, but cap at 24 so hour=23 becomes 24.
+            // PSM3 uses 0-23 hours (start-of-interval); interpolate_ground_temp_c
+            // expects 1-24 (EPW end-of-interval convention). Add 1 to convert,
+            // clamped to [1, 24].
             (hour + 1).clamp(1, 24),
             is_leap_year,
         )?);

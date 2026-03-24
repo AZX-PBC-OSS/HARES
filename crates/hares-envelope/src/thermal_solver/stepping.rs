@@ -88,6 +88,8 @@ impl ThermalSolver {
             };
             let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
             let d = inf.h_inf_w_k * b_coeff;
+            // Compensation: the coupling API subtracts d*x[k] from the explicit side,
+            // but backward Euler wants zero on the explicit side, so add d*x[k] back.
             let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));
         }

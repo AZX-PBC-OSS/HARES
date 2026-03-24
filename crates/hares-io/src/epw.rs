@@ -20,6 +20,7 @@ use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
 const DEFAULT_GROUND_TEMP_C: f64 = 10.0;
+/// Mirrors `hares_types::KELVIN_OFFSET` — kept local to avoid import verbosity.
 const KELVIN_OFFSET_C: f64 = 273.15;
 
 const LOCATION_MIN_FIELDS: usize = 10;
@@ -358,10 +359,15 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
 }
 
 /// DOE-2/OCHRE model constants for monthly ground-temperature fallback.
+/// Hours in a standard (non-leap) year [h/year].
 const DOE2_GROUND_HOURS_PER_YEAR: f64 = 8760.0;
+/// Days in a standard year used in the phase-angle formula [days].
 const DOE2_GROUND_DAYS_PER_YEAR: f64 = 365.0;
+/// Soil thermal diffusivity [m²/hour] — DOE-2 default for average soil.
 const DOE2_GROUND_DIFFUSIVITY: f64 = 0.025;
+/// Burial depth factor [m] used in the damping exponent.
 const DOE2_GROUND_DEPTH_FACTOR: f64 = 10.0;
+/// Phase offset [rad] aligning the ground-temperature sinusoid to peak in late summer.
 const DOE2_GROUND_PHASE_OFFSET_RAD: f64 = 0.6;
 
 /// DOE-2/OCHRE mid-month day-of-year values used for monthly ground temperature.
@@ -425,6 +431,7 @@ pub(crate) fn doe2_ground_temp_monthly(dry_bulb_c: &[f64], is_leap_year: bool) -
 /// Core formula shared by EPW and PSM3 parsers. Accepts the 12-element
 /// monthly mean dry-bulb array directly, avoiding any assumption about
 /// the temporal resolution of the source data.
+#[must_use]
 pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64; 12] {
     let t_avg = monthly_avg.iter().sum::<f64>() / 12.0;
     let t_min = monthly_avg.iter().copied().fold(f64::INFINITY, f64::min);
@@ -496,6 +503,7 @@ fn compute_sky_temp_c(
 /// Cite: Clark, G. and Allen, C. (1978), "The Estimation of Atmospheric
 /// Radiation for Clear and Cloudy Skies", Proc. 2nd National Passive Solar
 /// Conference (AS/ISES), pp. 675-678.
+#[must_use]
 pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
     let dry_bulb_k = dry_bulb_c + KELVIN_OFFSET_C;
     let dew_point_k = dew_point_c + KELVIN_OFFSET_C;
@@ -514,6 +522,7 @@ pub(crate) fn clark_allen_sky_temp_c(dry_bulb_c: f64, dew_point_c: f64) -> f64 {
 ///
 /// Cite: Martin, M. and Berdahl, P. (1984), "Characteristics of Infrared Sky
 /// Radiation in the United States", Solar Energy, 33(3/4), 321-336.
+#[must_use]
 pub(crate) fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
     let x = t_dp_c / 100.0;
     0.758 + 0.521 * x + 0.625 * x * x
@@ -530,6 +539,7 @@ pub(crate) fn berdahl_martin_sky_emissivity(t_dp_c: f64) -> f64 {
 /// Q.J.R. Meteorol. Soc., 58, 389-420.
 // Not wired into the compute_sky_temp_c cascade; available for future model selection.
 #[allow(dead_code)]
+#[must_use]
 pub(crate) fn brunt_sky_emissivity(t_dp_c: f64) -> f64 {
     let p_wv_hpa = magnus_saturation_pressure_hpa(t_dp_c);
     0.618 + 0.056 * p_wv_hpa.sqrt()
@@ -547,6 +557,7 @@ pub(crate) fn brunt_sky_emissivity(t_dp_c: f64) -> f64 {
 /// Water Resources Research, 17(2), 295-304.
 // Not wired into the compute_sky_temp_c cascade; available for future model selection.
 #[allow(dead_code)]
+#[must_use]
 pub(crate) fn idso_sky_emissivity(t_db_c: f64, t_dp_c: f64) -> f64 {
     let p_wv_hpa = magnus_saturation_pressure_hpa(t_dp_c);
     let t_db_k = t_db_c + KELVIN_OFFSET_C;
@@ -561,6 +572,7 @@ pub(crate) fn idso_sky_emissivity(t_db_c: f64, t_dp_c: f64) -> f64 {
 ///
 /// Cite: Walton, G.N. (1983), "Thermal Analysis Research Program Reference
 /// Manual", NBSIR 83-2655.
+#[must_use]
 pub(crate) fn walton_cloud_correction(epsilon_clear: f64, opaque_sky_cover: f64) -> f64 {
     let n = opaque_sky_cover.clamp(0.0, 10.0);
     (epsilon_clear * (1.0 + 0.0224 * n - 0.0035 * n * n + 0.00028 * n * n * n)).clamp(0.0, 1.0)
@@ -569,6 +581,7 @@ pub(crate) fn walton_cloud_correction(epsilon_clear: f64, opaque_sky_cover: f64)
 /// Convert sky emissivity and dry bulb temperature to sky temperature.
 ///
 /// T_sky = T_db_K × ε_sky^0.25 - 273.15
+#[must_use]
 pub(crate) fn sky_temp_from_emissivity(t_db_c: f64, epsilon: f64) -> f64 {
     let t_db_k = t_db_c + KELVIN_OFFSET_C;
     t_db_k * epsilon.powf(0.25) - KELVIN_OFFSET_C
@@ -577,6 +590,7 @@ pub(crate) fn sky_temp_from_emissivity(t_db_c: f64, epsilon: f64) -> f64 {
 /// Magnus formula saturation pressure at temperature `t_c` [deg C].
 /// Returns pressure in hPa (hectopascals / millibars).
 #[allow(dead_code)]
+#[must_use]
 fn magnus_saturation_pressure_hpa(t_c: f64) -> f64 {
     6.1078 * (17.27 * t_c / (t_c + 237.3)).exp()
 }

@@ -381,6 +381,10 @@ impl Dwelling {
             }
         };
 
+        let empty_overrides = Value::Object(Map::new());
+        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
+            .map_err(|e| HaresError::Io(e.to_string()))?;
+
         let (
             thermal_solver,
             humidity_solver,
@@ -393,11 +397,8 @@ impl Dwelling {
             &building,
             &defaults,
             &weather_avgs,
+            &equipment_specs,
         )?;
-
-        let empty_overrides = Value::Object(Map::new());
-        let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
-            .map_err(|e| HaresError::Io(e.to_string()))?;
         hares_io::inject_schedule_into_specs(
             &mut equipment_specs,
             environment.schedule_mut(),

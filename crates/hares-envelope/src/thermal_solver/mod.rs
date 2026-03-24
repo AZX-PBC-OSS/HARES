@@ -188,6 +188,8 @@ impl ThermalSolver {
         Ok(())
     }
 
+    /// Replaces the set of zones that receive ideal HVAC capacity back-calculation
+    /// during each `resolve()` call.
     pub fn set_ideal_hvac_zones(&mut self, zones: Vec<ZoneId>) {
         self.config.ideal_hvac_zones = zones;
     }

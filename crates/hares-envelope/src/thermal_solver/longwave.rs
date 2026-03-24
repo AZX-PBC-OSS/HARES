@@ -70,7 +70,7 @@ impl ThermalSolver {
                 })
                 .unwrap_or(0.0);
 
-            // Incoming LWR (environment -> surface), independent of surface temp.
+            // Incoming LWR (environment → surface), independent of surface temp.
             let t_air_k4 = (t_ext + CELSIUS_TO_KELVIN).powi(4);
             let h_lwr_inj = if !t_sky_valid {
                 e_factor * t_air_k4

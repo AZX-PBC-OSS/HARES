@@ -51,7 +51,9 @@ fn isa_pressure_kpa(elevation_m: f64) -> f64 {
 /// `alpha = ln(RH/100) + (17.67 * T_db) / (243.5 + T_db)`
 /// `T_dp  = (243.5 * alpha) / (17.67 - alpha)`
 ///
-/// August-Roche-Magnus approximation (Tetens 1930, b=17.67, c=243.5).
+/// August-Roche-Magnus approximation. Coefficients b=17.67, c=243.5°C are from
+/// Alduchov & Eskridge (1996) but widely attributed to the Magnus/Tetens family.
+/// Valid range: -40°C to +50°C dry bulb.
 fn magnus_dew_point_c(dry_bulb_c: f64, rh_pct: f64) -> f64 {
     let rh_frac = (rh_pct / 100.0).clamp(0.001, 1.0);
     let alpha = rh_frac.ln() + (17.67 * dry_bulb_c) / (243.5 + dry_bulb_c);
@@ -191,6 +193,11 @@ pub fn parse_resstock_csv_str(
         }
 
         let wind_dir_deg = parse_field(fields[col_indices.wind_dir], row_num, "wind_direction")?;
+        if !(0.0..=360.0).contains(&wind_dir_deg) {
+            return Err(WeatherError::Validation(format!(
+                "row {row_num}: wind direction out of range [0, 360] deg: {wind_dir_deg}"
+            )));
+        }
 
         let ghi_w_m2 = parse_field(fields[col_indices.ghi], row_num, "ghi")?;
         if ghi_w_m2 < 0.0 {
@@ -200,16 +207,16 @@ pub fn parse_resstock_csv_str(
         }
 
         let dni_w_m2 = parse_field(fields[col_indices.dni], row_num, "dni")?;
-        if dni_w_m2 < 0.0 {
+        if !(0.0..=1100.0).contains(&dni_w_m2) {
             return Err(WeatherError::Validation(format!(
-                "row {row_num}: DNI must be >= 0, got {dni_w_m2}"
+                "row {row_num}: DNI out of range [0, 1100] W/m^2: {dni_w_m2}"
             )));
         }
 
         let dhi_w_m2 = parse_field(fields[col_indices.dhi], row_num, "dhi")?;
-        if dhi_w_m2 < 0.0 {
+        if !(0.0..=800.0).contains(&dhi_w_m2) {
             return Err(WeatherError::Validation(format!(
-                "row {row_num}: DHI must be >= 0, got {dhi_w_m2}"
+                "row {row_num}: DHI out of range [0, 800] W/m^2: {dhi_w_m2}"
             )));
         }
 

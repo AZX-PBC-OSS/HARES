@@ -8,6 +8,9 @@ use std::fmt;
 use chrono::{DateTime, Duration, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Offset between Kelvin and Celsius [K].
+pub const KELVIN_OFFSET: f64 = 273.15;
+
 /// Default ground albedo for bare ground (EnergyPlus default: 0.2).
 ///
 /// Used as the fallback when weather data does not include measured surface

@@ -7,7 +7,7 @@ use hares_envelope::{
     StateSpaceWiring, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
     assemble_building_rc, derive_zone_capacitances,
 };
-use hares_io::{Building, DefaultsStore, SimulationConfig, WeatherTimeSeries};
+use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
 
 use super::Result;
@@ -47,6 +47,7 @@ pub(crate) fn build_default_solvers(
     building: &Building,
     defaults: &DefaultsStore,
     weather_avgs: &WeatherAverages,
+    equipment_specs: &[EquipmentSpec],
 ) -> Result<SolverBundle> {
     use hares_envelope::state_space::{OutputMapping, StateSpaceModel};
     use nalgebra::DMatrix;
@@ -445,6 +446,30 @@ pub(crate) fn build_default_solvers(
             };
 
             thermal_cfg.infiltration.push((zone_id, method));
+        }
+    }
+
+    // --- Mechanical ventilation from equipment specs ---
+    if let Some(vent_spec) = equipment_specs.iter().find(|s| s.name == "Ventilation Fan") {
+        let params = &vent_spec.parameters;
+        if let Some(cfm) = params.get("ventilation_rate_cfm").and_then(|v| v.as_f64()) {
+            let flow_m3_s = cfm * hares_physics::constants::CFM_TO_M3_S;
+            thermal_cfg.ventilation_flow_m3_s = flow_m3_s;
+        }
+        if let Some(balanced) = params.get("balanced").and_then(|v| v.as_bool()) {
+            thermal_cfg.ventilation.balanced = balanced;
+        }
+        if let Some(sens_re) = params
+            .get("sensible_recovery_efficiency")
+            .and_then(|v| v.as_f64())
+        {
+            thermal_cfg.ventilation.sensible_recovery_efficiency = sens_re;
+        }
+        if let Some(lat_re) = params
+            .get("latent_recovery_efficiency")
+            .and_then(|v| v.as_f64())
+        {
+            thermal_cfg.ventilation.latent_recovery_efficiency = lat_re;
         }
     }
 

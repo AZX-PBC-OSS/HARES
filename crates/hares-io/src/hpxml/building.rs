@@ -450,6 +450,19 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 ],
                 ValueKind::Raw,
             )
+        })
+        // HPXML 4.x: AirLeakage may appear directly under AirInfiltrationMeasurement
+        // without the optional BuildingAirLeakage wrapper.
+        .or_else(|| {
+            extract_first_f64(
+                details,
+                &[
+                    "AirInfiltration",
+                    "AirInfiltrationMeasurement",
+                    "AirLeakage",
+                ],
+                ValueKind::Raw,
+            )
         }),
         hvac_capacity_w: find_descendant_f64(details, "HeatingCapacity", ValueKind::Raw)
             .or_else(|| find_descendant_f64(details, "CoolingCapacity", ValueKind::Raw))

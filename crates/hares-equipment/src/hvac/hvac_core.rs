@@ -1,12 +1,9 @@
 //! Core HVAC equipment wrapper with thermostat state, step logic, and helpers.
 
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset};
-use hares_physics::biquadratic::{BiquadraticCurve, quadratic};
+use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::{CFM_PER_M3_S, CFM_TO_M3_S, W_PER_TON};
-use hares_types::{
-    ControlSignal, EnvironmentState, PortContribution, PortSlots,
-    ScheduleSource, ThermalCategory, ZoneId,
-};
+use hares_types::{ControlSignal, EnvironmentState, ScheduleSource, ZoneId};
 
 use crate::EquipmentConfig;
 
@@ -14,7 +11,8 @@ use super::core_config::{
     build_setpoint_source, extract_bool, extract_numeric, load_biquadratic_coeffs,
     load_bounds_pair, load_plr_coefficients, parse_speed_control_mode,
 };
-use super::speed_control::{SpeedControlMode, SpeedSelection, StartupConfig};
+use super::speed_control::{SpeedControlMode, StartupConfig};
+use super::staging::{DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF};
 use super::thermostat::{
     RuntimeSetpointOverride, ScheduleSetpoints, ThermalSetpoints, ThermostatConfig, ThermostatMode,
     is_cycle_change_allowed, lookup_zone_temp,
@@ -31,18 +29,11 @@ const DEFAULT_FAN_POWER_W_PER_M3_S: f64 = DEFAULT_FAN_POWER_W_PER_CFM * CFM_PER_
 /// AHRI 210/240 H1 heating test condition.
 const DEFAULT_INIT_OUTDOOR_TEMP_C: f64 = 8.3;
 
-/// Default low-speed capacity fraction for two-speed equipment.
-const DEFAULT_LOW_SPEED_CAPACITY_FRACTION: f64 = 0.5;
-
 /// Default thermostat cutout ratio when not specified in config.
 const DEFAULT_CUTOUT_RATIO: f64 = 0.25;
 
 /// Default minimum on/off cycle lockout [s] when not specified in config.
 const DEFAULT_MIN_CYCLE_TIME_S: f64 = 60.0;
-
-/// Default part-load factor degradation coefficient (Cd).
-/// AHRI Standard 210/240-2023, S6.6.3 default when no test data available.
-const DEFAULT_PLF_DEGRADATION_COEFF: f64 = 0.25;
 
 /// OCHRE HVAC.py: biquadratic curve input bounds clamp physically impossible
 /// extrapolation. These match OCHRE's fallback defaults (`min_Twb`/`max_Twb`,
@@ -457,48 +448,6 @@ impl HvacEquipment {
     ///
     /// OCHRE HVAC.py lines 853–857: `disable_speeds` is updated from the external
     /// control signal. The highest non-disabled speed is cached as `max_enabled_speed`.
-    /// If all speeds are disabled, `max_enabled_speed` falls back to the last stage.
-    ///
-    /// `disabled`: length must equal the number of speed stages, or may be shorter
-    /// (remaining stages default to enabled). An empty slice re-enables all stages.
-    pub fn set_disabled_speeds(&mut self, disabled: &[bool]) {
-        let n = self.n_speed_stages();
-        self.disabled_speeds.resize(n, false);
-        for (i, slot) in self.disabled_speeds.iter_mut().enumerate() {
-            *slot = disabled.get(i).copied().unwrap_or(false);
-        }
-        // Cache the highest non-disabled index (0-based).
-        self.max_enabled_speed = self
-            .disabled_speeds
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|&(_, d)| !d)
-            .map(|(i, _)| i)
-            .unwrap_or(n.saturating_sub(1));
-    }
-
-    /// Number of discrete speed stages. For single-speed equipment this is 1.
-    pub fn n_speed_stages(&self) -> usize {
-        match self.speed_control_mode {
-            SpeedControlMode::SingleSpeed => 1,
-            SpeedControlMode::TwoSpeedSetpoint
-            | SpeedControlMode::TwoSpeedTime
-            | SpeedControlMode::TwoSpeedAlternating => 2,
-            SpeedControlMode::MultiSpeedInterpolated => {
-                let caps = self.heating_capacities_w.len().max(self.cooling_capacities_w.len());
-                caps.max(1)
-            }
-            SpeedControlMode::VariableSpeedIdeal => 1,
-        }
-    }
-
-    /// Record the current zone temperature for the next step's `TwoSpeedTime` comparison.
-    /// Pass `None` when the unit turns off to ensure the next on-cycle starts at low speed.
-    pub fn update_prev_zone_temp(&mut self, zone_temp_c: Option<f64>) {
-        self.prev_zone_temp_c = zone_temp_c;
-    }
-
     pub fn apply_control_signal(&mut self, signal: &ControlSignal) {
         if let ControlSignal::ThermalSetpoint {
             heating_setpoint_c,
@@ -771,471 +720,12 @@ impl HvacEquipment {
         (raw, adjusted)
     }
 
-    /// Compute the part-load factor (PLF) for the given PLR and speed stage.
-    ///
-    /// Two paths:
-    /// 1. **Biquadratic PLR curve** (`eir_plr_coefficients` is `Some`):
-    ///    OCHRE HVAC.py lines 823, 841–844: PLF = a + b·PLR + c·PLR² evaluated
-    ///    from the per-speed `eir_plr` quadratic, then clamped to [0.7, 1.0].
-    ///    The speed index selects the curve; out-of-range indices use the last entry.
-    /// 2. **Simplified Cd formula** (fallback, backward-compatible):
-    ///    PLF = 1 − Cd · (1 − PLR), clamped to [max(0.7, PLR), 1.0].
-    ///
-    /// Variable-speed equipment always returns 1.0 (no cycling degradation).
-    pub fn part_load_factor(&mut self, plr: f64) -> f64 {
-        self.part_load_factor_for_stage(plr, self.last_speed_index)
-    }
-
-    /// Compute PLF for an explicit speed stage index (used when the caller knows
-    /// which stage was selected before `last_speed_index` is updated).
-    pub fn part_load_factor_for_stage(&mut self, plr: f64, stage_index: usize) -> f64 {
-        // Variable-speed equipment modulates compressor speed rather than cycling,
-        // so the AHRI cycling-degradation penalty does not apply.
-        if matches!(
-            self.speed_control_mode,
-            SpeedControlMode::VariableSpeedIdeal
-        ) {
-            self.plf_state = 1.0;
-            return 1.0;
-        }
-        let plr = plr.clamp(0.0, 1.0);
-
-        let plf_raw = if let Some(ref curves) = self.eir_plr_coefficients {
-            // OCHRE biquadratic PLR path: per-speed quadratic coefficients.
-            // a + b·PLR + c·PLR² (OCHRE _biquadratic with only plr terms active).
-            let coeffs = curves
-                .get(stage_index)
-                .copied()
-                .or_else(|| curves.last().copied())
-                .unwrap_or([1.0, 0.0, 0.0]);
-            quadratic(&coeffs, plr)
-        } else {
-            // Simplified Cd formula: PLF = 1 − Cd × (1 − PLR).
-            let cd = self.plf_cooling_degradation_coeff.clamp(0.0, 1.0);
-            1.0 - cd * (1.0 - plr)
-        };
-
-        // EnergyPlus constraints (ASHRAE 90.1 Appendix G / EnergyPlus I/O Reference):
-        // PLF must be at least 0.7 (any lower indicates bad curve coefficients) and
-        // must be >= PLR so that RTF = PLR/PLF never exceeds 1.0.
-        if plf_raw < 0.7 {
-            tracing::warn!(
-                plf_raw,
-                plr,
-                stage_index,
-                "PLF curve returned value < 0.7; check eir_plr or cooling_cd. \
-                 Clamping to max(0.7, PLR)."
-            );
-        }
-        let plf = plf_raw.clamp(0.7_f64.max(plr), 1.0);
-        self.plf_state = plf;
-        plf
-    }
-
-    /// Advance the speed-stage timer by `dt_s` seconds.
-    /// Must be called once per timestep in the equipment `step()` method
-    /// when the unit is running in `TwoSpeedSetpoint` mode.
-    pub fn advance_speed_timer(&mut self, dt_s: f64) {
-        self.time_at_current_speed_s += dt_s;
-    }
-
-    pub fn select_speed(&mut self, load_fraction: f64) -> SpeedSelection {
-        self.select_speed_with_zone_temp(load_fraction, None, false)
-    }
-
-    /// Speed selection that accepts the current zone temperature and heating
-    /// direction for `TwoSpeedTime` mode. Callers that know the zone temperature
-    /// should prefer this over `select_speed`; the simpler `select_speed` wrapper
-    /// is provided for call sites that do not track temperature.
-    ///
-    /// - `zone_temp_c` — current zone temperature; used only for `TwoSpeedTime`.
-    /// - `is_heating`  — `true` for heating mode, `false` for cooling.
-    pub fn select_speed_with_zone_temp(
-        &mut self,
-        load_fraction: f64,
-        zone_temp_c: Option<f64>,
-        is_heating: bool,
-    ) -> SpeedSelection {
-        let load_fraction = load_fraction.clamp(0.0, 1.0);
-        let selection = match self.speed_control_mode {
-            SpeedControlMode::SingleSpeed => SpeedSelection {
-                speed_index: 0,
-                part_load_ratio: load_fraction,
-                speed_frac: load_fraction,
-            },
-            SpeedControlMode::TwoSpeedSetpoint => {
-                let low_cap = self.low_speed_capacity_fraction.clamp(0.01, 0.999);
-                let desired_index = if load_fraction > low_cap { 1 } else { 0 };
-                let desired_index = self.apply_disabled_speeds_two_speed(desired_index);
-                // OCHRE HVAC.py: min_time_in_speed — prevent speed hunting by
-                // locking the current stage until the minimum dwell time elapses.
-                let locked = self.time_at_current_speed_s < self.min_time_per_speed_s
-                    && desired_index != self.last_speed_index;
-                let speed_index = if locked {
-                    self.last_speed_index
-                } else {
-                    if desired_index != self.last_speed_index {
-                        self.time_at_current_speed_s = 0.0;
-                    }
-                    desired_index
-                };
-                if speed_index == 1 {
-                    SpeedSelection {
-                        speed_index: 1,
-                        part_load_ratio: load_fraction,
-                        speed_frac: 1.0,
-                    }
-                } else {
-                    SpeedSelection {
-                        speed_index: 0,
-                        part_load_ratio: (load_fraction / low_cap).clamp(0.0, 1.0),
-                        speed_frac: low_cap,
-                    }
-                }
-            }
-            SpeedControlMode::TwoSpeedTime => {
-                // OCHRE HVAC.py lines 868–875 "Time" mode:
-                // Start at low speed (index 0) on turn-on. Escalate to high speed
-                // (index 1) if the zone temperature continues to move in the wrong
-                // direction after min_time_per_speed_s has elapsed at the current stage.
-                //
-                //   Heating: "wrong direction" = temperature still dropping (current < prev)
-                //   Cooling: "wrong direction" = temperature still rising  (current > prev)
-                //
-                // When prev_zone_temp_c is None (fresh cycle start after turn-off), force
-                // speed 0 immediately — do not apply the min-time lock, which is only
-                // intended to prevent speed hunting within an active cycle.
-                let (desired_index, fresh_cycle) =
-                    if let (Some(current), Some(prev)) = (zone_temp_c, self.prev_zone_temp_c) {
-                        let moving_wrong_way = if is_heating {
-                            current < prev
-                        } else {
-                            current > prev
-                        };
-                        let idx = if moving_wrong_way
-                            && self.time_at_current_speed_s >= self.min_time_per_speed_s
-                        {
-                            1
-                        } else {
-                            self.last_speed_index
-                        };
-                        (idx, false)
-                    } else {
-                        (0, true) // no prior temperature data: start at low speed
-                    };
-                let desired_index = self.apply_disabled_speeds_two_speed(desired_index);
-                // Skip the min-time lock when starting a fresh cycle: `prev_zone_temp_c`
-                // being None means we just turned back on and must reset to low speed.
-                let locked = !fresh_cycle
-                    && self.time_at_current_speed_s < self.min_time_per_speed_s
-                    && desired_index != self.last_speed_index;
-                let speed_index = if locked {
-                    self.last_speed_index
-                } else {
-                    if desired_index != self.last_speed_index {
-                        self.time_at_current_speed_s = 0.0;
-                    }
-                    desired_index
-                };
-                let low_cap = self.low_speed_capacity_fraction.clamp(0.01, 0.999);
-                if speed_index == 1 {
-                    SpeedSelection {
-                        speed_index: 1,
-                        part_load_ratio: load_fraction,
-                        speed_frac: 1.0,
-                    }
-                } else {
-                    SpeedSelection {
-                        speed_index: 0,
-                        part_load_ratio: (load_fraction / low_cap).clamp(0.0, 1.0),
-                        speed_frac: low_cap,
-                    }
-                }
-            }
-            SpeedControlMode::TwoSpeedAlternating => {
-                // OCHRE HVAC.py lines 893–898 "Time2" mode:
-                // Always runs at high speed (index 1) when on.
-                let desired_index = self.apply_disabled_speeds_two_speed(1);
-                if desired_index != self.last_speed_index {
-                    self.time_at_current_speed_s = 0.0;
-                }
-                SpeedSelection {
-                    speed_index: desired_index,
-                    part_load_ratio: load_fraction,
-                    speed_frac: 1.0,
-                }
-            }
-            SpeedControlMode::MultiSpeedInterpolated => {
-                let cap_fracs = self.capacity_fractions();
-                if cap_fracs.is_empty() || load_fraction <= 0.0 {
-                    SpeedSelection {
-                        speed_index: 0,
-                        speed_frac: 0.0,
-                        part_load_ratio: 0.0,
-                    }
-                } else if load_fraction <= cap_fracs[0] {
-                    // Below lowest stage capacity: cycle at speed 0.
-                    SpeedSelection {
-                        speed_index: 0,
-                        speed_frac: 0.0,
-                        part_load_ratio: load_fraction / cap_fracs[0],
-                    }
-                } else if load_fraction >= *cap_fracs.last().unwrap() {
-                    // At or above max capacity: full output at top stage.
-                    SpeedSelection {
-                        speed_index: cap_fracs.len() - 1,
-                        speed_frac: 0.0,
-                        part_load_ratio: 1.0,
-                    }
-                } else {
-                    // Inter-speed interpolation: find bracketing stages.
-                    let hi = cap_fracs.partition_point(|&f| f < load_fraction);
-                    let lo = hi - 1;
-                    let span = cap_fracs[hi] - cap_fracs[lo];
-                    let frac = if span > f64::EPSILON {
-                        (load_fraction - cap_fracs[lo]) / span
-                    } else {
-                        0.0
-                    };
-                    SpeedSelection {
-                        speed_index: lo,
-                        speed_frac: frac,
-                        part_load_ratio: 1.0,
-                    }
-                }
-            }
-            SpeedControlMode::VariableSpeedIdeal => SpeedSelection {
-                speed_index: 0,
-                part_load_ratio: 1.0,
-                speed_frac: load_fraction,
-            },
-        };
-        self.last_speed_index = selection.speed_index;
-        self.last_speed_frac = selection.speed_frac;
-        selection
-    }
-
-    /// Apply disabled-speed routing for two-speed modes.
-    ///
-    /// OCHRE HVAC.py lines 906–909: when the desired speed is disabled, route to
-    /// the highest allowed (non-disabled) speed. If the `disabled_speeds` vec is
-    /// empty (default), all speeds are enabled and `desired_index` is returned
-    /// unchanged. If both stages are disabled this returns `desired_index`
-    /// unchanged (misconfiguration — handled at a higher level).
-    fn apply_disabled_speeds_two_speed(&self, desired_index: usize) -> usize {
-        if self.disabled_speeds.is_empty() {
-            return desired_index;
-        }
-        if self
-            .disabled_speeds
-            .get(desired_index)
-            .copied()
-            .unwrap_or(false)
-        {
-            self.max_enabled_speed
-        } else {
-            desired_index
-        }
-    }
-
-    /// Apply the Winkler (2011) exponential startup capacity ramp.
-    ///
-    /// `steady_capacity_w` — the steady-state capacity before any startup penalty.
-    /// `dt_min`            — timestep duration in minutes.
-    ///
-    /// Returns the derated capacity. When `c_d == 0` (variable-speed) or the ramp
-    /// has completed, returns `steady_capacity_w` unchanged.
-    pub fn apply_startup_capacity_degradation(
-        &mut self,
-        steady_capacity_w: f64,
-        dt_min: f64,
-    ) -> f64 {
-        let on_now = self.duty_cycle > 0.0;
-        let mult = self.startup.capacity_multiplier(on_now, dt_min);
-        steady_capacity_w * mult
-    }
-
-    pub fn rated_capacity_w(&self, mode: ThermostatMode) -> f64 {
-        match mode {
-            ThermostatMode::Heating => self
-                .heating_capacities_w
-                .first()
-                .copied()
-                .unwrap_or_default(),
-            ThermostatMode::Cooling => self
-                .cooling_capacities_w
-                .first()
-                .copied()
-                .unwrap_or_default(),
-            ThermostatMode::Deadband => 0.0,
-        }
-    }
-
-    pub fn capacity_at_stage(capacities: &[f64], stage_index: usize) -> f64 {
-        if capacities.is_empty() {
-            return 0.0;
-        }
-        capacities[stage_index.min(capacities.len() - 1)]
-    }
-
-    pub fn eir_at_stage(&self, stage_index: usize) -> f64 {
-        if self.eir_by_stage.is_empty() {
-            return 1.0;
-        }
-        self.eir_by_stage[stage_index.min(self.eir_by_stage.len() - 1)]
-    }
-
-    /// Normalized capacity fractions `cap[i] / cap[last]` for the populated capacities array.
-    /// Uses whichever of heating/cooling has more stages (they should not both be populated
-    /// for a single equipment instance, but if they are, the longer one wins).
-    pub fn capacity_fractions(&self) -> Vec<f64> {
-        let caps = if self.heating_capacities_w.len() >= self.cooling_capacities_w.len() {
-            &self.heating_capacities_w
-        } else {
-            &self.cooling_capacities_w
-        };
-        let max_cap = caps.last().copied().unwrap_or(0.0);
-        if max_cap <= 0.0 {
-            return vec![];
-        }
-        caps.iter().map(|&c| c / max_cap).collect()
-    }
-
-    /// Interpolate capacity between two bracket stages using `speed_frac`.
-    pub fn interpolated_capacity(&self, capacities: &[f64], speed_index: usize, speed_frac: f64) -> f64 {
-        let cap_lo = Self::capacity_at_stage(capacities, speed_index);
-        if speed_frac > 0.0 {
-            let cap_hi = Self::capacity_at_stage(capacities, speed_index + 1);
-            cap_lo * (1.0 - speed_frac) + cap_hi * speed_frac
-        } else {
-            cap_lo
-        }
-    }
-
-    /// Interpolate EIR between two bracket stages using `speed_frac`.
-    pub fn interpolated_eir(&self, speed_index: usize, speed_frac: f64) -> f64 {
-        let eir_lo = self.eir_at_stage(speed_index);
-        if speed_frac > 0.0 {
-            let eir_hi = self.eir_at_stage(speed_index + 1);
-            eir_lo * (1.0 - speed_frac) + eir_hi * speed_frac
-        } else {
-            eir_lo
-        }
-    }
-
-    pub fn airflow_m3_s_for_capacity_w(&self, capacity_w: f64) -> f64 {
-        capacity_w.max(0.0) * self.airflow_m3_s_per_w
-    }
-
-    pub fn fan_power_w(&self, airflow_m3_s: f64) -> f64 {
-        airflow_m3_s.max(0.0) * self.fan_power_w_per_m3_s
-    }
-
-    pub fn sensible_latent_from_shr(&self, total_cooling_w: f64) -> (f64, f64) {
-        let shr = self.shr.clamp(0.0, 1.0);
-        let sensible = total_cooling_w * shr;
-        let latent = total_cooling_w - sensible;
-        (sensible, latent)
-    }
-
-    /// Compute `zone_heat_fractions` from `duct_dse` and `duct_zone_id`.
-    ///
-    /// Must be called after setting `duct_dse` and `duct_zone_id` in `init()`.
-    /// Fractions are absolute multipliers on gross capacity:
-    ///   - conditioned zone: `duct_dse`
-    ///   - duct zone (if any and different from conditioned): `1.0 - duct_dse`
-    ///
-    /// When `duct_zone_id` is `None`, duct losses are unrecoverable (lost to
-    /// outdoors). The conditioned-zone fraction equals `duct_dse`.
-    ///
-    /// OCHRE HVAC.py lines 188-197: `self.zone_fractions` computation.
-    pub fn update_zone_heat_fractions(&mut self) {
-        let dse = self.duct_dse.clamp(0.0, 1.0);
-        let basement_frac = self.basement_heat_frac.clamp(0.0, 1.0);
-
-        // Conditioned zone receives delivered heat minus any basement fraction.
-        let conditioned_frac = dse * (1.0 - basement_frac);
-        self.zone_heat_fractions = vec![(self.zone_id, conditioned_frac)];
-
-        // Basement zone receives its share of delivered heat (if configured).
-        if basement_frac > 0.0 {
-            if let Some(basement_zone) = self.basement_zone_id {
-                if basement_zone != self.zone_id {
-                    self.zone_heat_fractions
-                        .push((basement_zone, dse * basement_frac));
-                }
-            }
-        }
-
-        // Duct zone receives duct losses (if configured and distinct from conditioned).
-        if dse < 1.0 {
-            if let Some(duct_zone) = self.duct_zone_id {
-                if duct_zone != self.zone_id {
-                    self.zone_heat_fractions.push((duct_zone, 1.0 - dse));
-                }
-                // If duct_zone == zone_id, losses stay in the conditioned zone.
-            }
-        }
-    }
-
-    /// Distribute gross capacity across zones using absolute `zone_heat_fractions`.
-    ///
-    /// Each fraction is a direct multiplier on `sensible_gain_w` / `latent_gain_w`;
-    /// fractions are **not** normalized. Callers must pass gross (pre-DSE) capacity.
-    /// The conditioned-zone fraction equals `duct_dse`, so it naturally receives
-    /// only the delivered portion. Any remainder is unrecoverable duct loss.
-    pub fn write_zone_thermal_contributions(
-        &self,
-        ports: &mut PortSlots,
-        sensible_gain_w: f64,
-        latent_gain_w: f64,
-        category: ThermalCategory,
-    ) -> crate::Result<()> {
-        let fractions: &[(ZoneId, f64)] = if self.zone_heat_fractions.is_empty() {
-            &[(self.zone_id, 1.0)]
-        } else {
-            &self.zone_heat_fractions
-        };
-
-        // Fast path: single zone (>95% of dwellings)
-        if fractions.len() == 1 {
-            let f = fractions[0].1.max(0.0);
-            return ports.accumulate(&PortContribution::Thermal {
-                zone: fractions[0].0,
-                sensible_gain_w: sensible_gain_w * f,
-                latent_gain_w: latent_gain_w * f,
-                category,
-            });
-        }
-
-        // Multi-zone: fractions are absolute multipliers, not normalized.
-        for &(zone, fraction) in fractions {
-            if fraction > 0.0 {
-                ports.accumulate(&PortContribution::Thermal {
-                    zone,
-                    sensible_gain_w: sensible_gain_w * fraction,
-                    latent_gain_w: latent_gain_w * fraction,
-                    category,
-                })?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn update_supply_air_temp(&mut self, env: &EnvironmentState) {
         if self.equipment_type == HvacEquipmentType::AshpHeatPumpOnly {
             self.supply_air_temp_c = self
                 .equipment_type
                 .default_supply_air_temp_c(env.weather.outdoor_temp_c);
         }
-    }
-
-    /// Apply duct distribution system efficiency (DSE) to a capacity value.
-    ///
-    /// `capacity_w × duct_dse` is the effective delivered capacity after duct
-    /// losses. `duct_dse = 1.0` means no duct losses (direct / ductless system).
-    pub fn apply_duct_dse(&self, capacity_w: f64) -> f64 {
-        capacity_w * self.duct_dse.clamp(0.0, 1.0)
     }
 }
 
@@ -1244,7 +734,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
-        ThermalAccumulator, WeatherState, ZoneState,
+        ThermalAccumulator, ThermalCategory, WeatherState, ZoneState,
     };
 
     use super::super::thermostat::{
