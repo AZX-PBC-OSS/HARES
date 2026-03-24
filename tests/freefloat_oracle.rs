@@ -34,17 +34,19 @@ mod tests {
         // All scenarios use Denver local time (UTC-7, MST year-round for TMY3).
         // start_time is expressed in UTC so FixedOffset::east_opt(0) = UTC.
         let utc = FixedOffset::east_opt(0).expect("UTC offset");
+        // Dwelling::from_preparsed preserves wall-clock components and applies
+        // the EPW timezone. Pass LOCAL time (Denver noon = 12:00), not UTC.
         let (start_time, duration) = match scenario {
             "beopt_spring_72h" => (
-                utc.with_ymd_and_hms(2019, 5, 5, 19, 0, 0).unwrap(),
+                utc.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),
                 Duration::hours(72),
             ),
             "beopt_summer_48h" => (
-                utc.with_ymd_and_hms(2019, 7, 15, 19, 0, 0).unwrap(),
+                utc.with_ymd_and_hms(2019, 7, 15, 12, 0, 0).unwrap(),
                 Duration::hours(48),
             ),
             "beopt_winter_48h" => (
-                utc.with_ymd_and_hms(2019, 1, 15, 19, 0, 0).unwrap(),
+                utc.with_ymd_and_hms(2019, 1, 15, 12, 0, 0).unwrap(),
                 Duration::hours(48),
             ),
             other => panic!("unknown freefloat scenario: {other}"),

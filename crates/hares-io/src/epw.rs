@@ -282,6 +282,9 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         timezone_offset_h,
         elevation_m,
         source_step_secs: 3600,
+        // EPW uses hour-ending convention: row "12" covers 11:00–12:00.
+        // Subtract half-period (30 min) from sim time to read the correct period.
+        midpoint_offset_secs: 1800,
     })
 }
 
@@ -604,7 +607,10 @@ pub(crate) fn interpolate_ground_temp_c(
 ) -> Result<f64, WeatherError> {
     let year_days = if is_leap_year { 366.0 } else { 365.0 };
     let timestamp_day = f64::from(day_of_year(month, day, is_leap_year)?);
-    let hour_fraction = (f64::from(hour) - 1.0) / 24.0;
+    // EPW uses hour-ending convention: hour 12 covers 11:00–12:00.
+    // Place the PCHIP knot at the midpoint of the period (11:30 for hour 12)
+    // to match OCHRE/pvlib's +30min offset convention.
+    let hour_fraction = (f64::from(hour) - 0.5) / 24.0;
     let x = timestamp_day + hour_fraction;
 
     let mut anchors = [0.0_f64; 12];

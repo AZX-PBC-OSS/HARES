@@ -239,6 +239,7 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         timezone_offset_h,
         elevation_m,
         source_step_secs: 3600,
+        midpoint_offset_secs: 0,
     })
 }
 

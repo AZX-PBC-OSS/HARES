@@ -540,7 +540,7 @@ fn resampled_weather_produces_smooth_environment() {
     let schedule = minimal_schedule();
     let building = minimal_building();
 
-    let start = ts(0) + Duration::minutes(30);
+    let start = ts(0);
     // 60-second resolution (factor 60 from 3600s source)
     let time_res = StdDuration::from_secs(60);
     let total_steps = 1440u64; // 24h * 60 steps/h

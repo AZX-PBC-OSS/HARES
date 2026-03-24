@@ -326,6 +326,7 @@ pub fn parse_resstock_csv_str(
         timezone_offset_h,
         elevation_m,
         source_step_secs,
+        midpoint_offset_secs: 0,
     };
 
     Ok(WeatherTimeSeries {

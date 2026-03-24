@@ -222,6 +222,12 @@ pub struct WeatherMeta {
     pub elevation_m: f64,
     /// Native timestep of the source file in seconds (e.g. 3600 for EPW, 300 for 5-min PSM3).
     pub source_step_secs: u32,
+    /// Seconds to subtract from simulation time when indexing into the
+    /// resampled weather array. For EPW (hour-ending convention), this is
+    /// `source_step_secs / 2` (1800s for hourly) so that PCHIP knot positions
+    /// align with period midpoints, matching OCHRE/pvlib's +30min convention.
+    /// For hour-beginning formats (PSM3), this is 0.
+    pub midpoint_offset_secs: u32,
 }
 
 /// Addressable weather columns.

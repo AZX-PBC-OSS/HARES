@@ -273,6 +273,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         timezone_offset_h,
         elevation_m,
         source_step_secs: step_secs,
+        midpoint_offset_secs: 0,
     };
 
     Ok(WeatherTimeSeries {

@@ -397,18 +397,18 @@ impl EnvironmentManager {
 }
 
 /// EPW hour-ending midpoint shift (30 minutes = 1800 seconds).
-/// EPW files use hour-ending convention: hour 13 covers 12:00–13:00.
-/// Subtracting 30 minutes aligns the data with the period midpoint,
-/// matching the pvlib/OCHRE convention.
-const EPW_MIDPOINT_SHIFT_SECS: u64 = 1800;
-
 /// Compute the step offset into an annual weather file for a given start time.
 ///
 /// EPW files are indexed by **local standard time** (LST). The simulation
 /// start time is already in local time (`DateTime<FixedOffset>`), so no
 /// UTC→LST conversion is needed — we extract wall-clock components directly.
+///
+/// The `midpoint_offset_secs` from `WeatherMeta` accounts for the source
+/// file's timestamp convention. For EPW (hour-ending), subtracting half a
+/// period aligns the PCHIP knot with the period midpoint, matching OCHRE's
+/// pvlib +30min convention.
 fn compute_annual_offset(
-    _meta: &WeatherMeta,
+    meta: &WeatherMeta,
     start_time: DateTime<FixedOffset>,
     step_secs: u32,
 ) -> usize {
@@ -427,7 +427,8 @@ fn compute_annual_offset(
     } else {
         365 * 86400_u64
     };
-    let shifted = (seconds_into_year + year_secs - EPW_MIDPOINT_SHIFT_SECS) % year_secs;
+    let shifted = (seconds_into_year + year_secs
+        - meta.midpoint_offset_secs as u64) % year_secs;
 
     (shifted / step_secs as u64) as usize
 }
@@ -782,9 +783,8 @@ mod tests {
 
     #[test]
     fn weather_step_0_matches_first_epw_record() {
-        // Start at 00:30 LST: midpoint shift (shifted = 1800 - 1800 = 0) maps to
-        // row 0 of the weather series (the first EPW hour-ending record).
-        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
+        // Start at 00:00 LST: no midpoint shift, maps directly to row 0.
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
@@ -803,7 +803,7 @@ mod tests {
     fn weather_step_59_uses_pchip_interpolation() {
         // With 2-element [10.0, 20.0] input and PCHIP (linear for 2-pt),
         // step 59 of 60 sub-hour slots ≈ 10.0 + (59/60)*10.0 ≈ 19.833.
-        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 30, 0).unwrap();
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
@@ -1089,91 +1089,88 @@ mod tests {
 
     /// compute_annual_offset: leap year (2024) — May 5 noon.
     /// Feb has 29 days so May 5 = ordinal 126, ordinal0 = 125.
-    /// With 30-min EPW midpoint shift: (125*86400 + 12*3600 - 1800) / 3600 = 3011.
+    /// Forward +30min shift: (125*86400 + 12*3600 + 1800) / 3600 = 3012.
     #[test]
     fn annual_offset_leap_year_may_5_noon() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 5, 5, 12, 0, 0).unwrap();
-        let offset = compute_annual_offset(&meta, start, 3600);
-        assert_eq!(offset, 3011);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 3012);
     }
 
     /// compute_annual_offset: non-leap year (2023) — May 5 noon.
-    /// Feb has 28 days so May 5 = ordinal 125, ordinal0 = 124.
-    /// With 30-min EPW midpoint shift: (124*86400 + 12*3600 - 1800) / 3600 = 2987.
+    /// Forward +30min shift: (124*86400 + 12*3600 + 1800) / 3600 = 2988.
     #[test]
     fn annual_offset_non_leap_year_may_5_noon() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 5, 5, 12, 0, 0).unwrap();
-        let offset = compute_annual_offset(&meta, start, 3600);
-        assert_eq!(offset, 2987);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 2988);
     }
 
     /// compute_annual_offset: leap year Jan 1 00:00.
-    /// Shift wraps to last step of previous year: (366*86400 - 1800) / 3600 = 8783.
+    /// Forward +30min: (0 + 1800) / 3600 = 0.
     #[test]
     fn annual_offset_leap_year_jan_1() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 8783);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 0);
     }
 
     /// compute_annual_offset: non-leap year Jan 1 00:00.
-    /// Shift wraps to last step of previous year: (365*86400 - 1800) / 3600 = 8759.
+    /// Forward +30min: (0 + 1800) / 3600 = 0.
     #[test]
     fn annual_offset_non_leap_year_jan_1() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 8759);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 0);
     }
 
     /// compute_annual_offset: leap year Dec 31 23:00.
-    /// With 30-min shift: (365*86400 + 23*3600 - 1800) / 3600 = 8782.
+    /// Forward +30min: (365*86400 + 23*3600 + 1800) / 3600 = 8783.
     #[test]
     fn annual_offset_leap_year_dec_31() {
         let meta = weather_series().meta;
         let start = utc_offset()
             .with_ymd_and_hms(2024, 12, 31, 23, 0, 0)
             .unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 8782);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 8783);
     }
 
     /// compute_annual_offset: non-leap year Dec 31 23:00.
-    /// With 30-min shift: (364*86400 + 23*3600 - 1800) / 3600 = 8758.
+    /// Forward +30min: (364*86400 + 23*3600 + 1800) / 3600 = 8759.
     #[test]
     fn annual_offset_non_leap_year_dec_31() {
         let meta = weather_series().meta;
         let start = utc_offset()
             .with_ymd_and_hms(2023, 12, 31, 23, 0, 0)
             .unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 8758);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 8759);
     }
 
     /// compute_annual_offset: leap year Feb 29 → ordinal0 = 59.
-    /// With 30-min shift: (59*86400 + 6*3600 - 1800) / 3600 = 1421.
+    /// Forward +30min: (59*86400 + 6*3600 + 1800) / 3600 = 1422.
     #[test]
     fn annual_offset_leap_year_feb_29() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 2, 29, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 1421);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 1422);
     }
 
     /// compute_annual_offset: non-leap year Mar 1 → ordinal0 = 59.
-    /// With 30-min shift: (59*86400 + 6*3600 - 1800) / 3600 = 1421.
+    /// Forward +30min: (59*86400 + 6*3600 + 1800) / 3600 = 1422.
     #[test]
     fn annual_offset_non_leap_year_mar_1() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 3, 1, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 1421);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 1422);
     }
 
     /// compute_annual_offset: sub-hourly resolution (15-min steps).
-    /// start = 2023-01-01T01:30:00: seconds_into_year=5400, shifted=3600, 3600/900=4.
+    /// start = 2023-01-01T01:30:00: seconds=5400, 5400/900=6.
     #[test]
     fn annual_offset_15min_resolution() {
         let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 1, 30, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 900), 4);
+        assert_eq!(compute_annual_offset(&meta, start, 900), 6);
     }
 
     /// Various climate offsets produce correct temperatures.

@@ -722,7 +722,13 @@ pub(crate) fn build_default_solvers(
                     if let Some(ach) = bz.ventilation_ach {
                         InfiltrationMethod::Ach { ach }
                     } else if let Some(sla) = bz.ventilation_sla {
-                        let floor_area_m2 = bz.floor_area_m2.unwrap_or(100.0);
+                        // Attic floor area = conditioned zone floor area if not explicit.
+                        let conditioned_area = building.zones.iter()
+                            .find(|z| z.zone_type == ZoneType::Conditioned)
+                            .and_then(|z| z.floor_area_m2);
+                        let floor_area_m2 = bz.floor_area_m2
+                            .or(conditioned_area)
+                            .unwrap_or(100.0);
                         let ela_m2 = sla * floor_area_m2;
                         let attic_height_m = 1.5; // default triangular attic
                         let (stack_coeff, wind_coeff) =

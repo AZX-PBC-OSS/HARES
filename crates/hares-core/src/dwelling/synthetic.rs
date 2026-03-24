@@ -487,6 +487,7 @@ pub(crate) fn build_synthetic_weather(
         timezone_offset_h: 0.0,
         elevation_m: 0.0,
         source_step_secs: 3600,
+        midpoint_offset_secs: 0,
     };
     Ok(WeatherTimeSeries {
         meta,
