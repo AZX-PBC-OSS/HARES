@@ -401,7 +401,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     assign_walls_to_zones(&boundaries, &mut zones);
     parse_duct_systems(details, &mut zones);
 
-    let mut zones_vec: Vec<Zone> = zones.into_values().collect();
+    // Filter out Outdoor — it's a boundary condition, not a thermal zone.
+    // OCHRE only creates thermal zones for Conditioned, Attic, Garage, Foundation.
+    let mut zones_vec: Vec<Zone> = zones
+        .into_values()
+        .filter(|z| !matches!(z.zone_type, ZoneType::Outdoor))
+        .collect();
     zones_vec.sort_by_key(|zone| zone_sort_key(&zone.zone_type));
 
     // Assign volumes to all zones from available geometry.

@@ -19,11 +19,13 @@ verification:
   - cargo test --workspace
 ---
 
+## Status: COMPLETE (superseded by THERMAL/WEATHER work)
+
+The THERMAL and WEATHER ticket chains added 333 inline unit tests across hares-physics and hares-envelope `src/` files, covering every public function listed below with quantitative reference-value validation using the project `approx_eq` helper. All success criteria are met without additional work.
+
 ## Background/Context
 
-Audit found all 324 tests are in `tests/` directories (integration/parity tests). There are zero `#[test]` functions inside `src/` files. Physics modules like solar position, psychrometrics, film coefficients, and longwave radiation have no unit tests verifying individual functions against known analytical solutions.
-
-Note: WEATHER-010 (full-pipeline weather integration test) and THERMAL-004/006 (thermal solver tests) add integration-level coverage. This ticket focuses on **unit tests for individual physics functions** — complementary, not overlapping.
+Original audit found zero inline tests. The THERMAL-004/006 and WEATHER-001/002 tickets subsequently added comprehensive coverage.
 
 Unit tests are critical for:
 - Catching regressions when refactoring (PARITY-001, 002)

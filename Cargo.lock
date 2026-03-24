@@ -890,6 +890,7 @@ dependencies = [
 name = "hares-envelope"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "chrono",
  "criterion",
  "hares-physics",
@@ -960,6 +961,7 @@ dependencies = [
 name = "hares-physics"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "chrono",
  "hares-types",
  "thiserror",
