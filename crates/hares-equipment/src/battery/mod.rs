@@ -11,9 +11,9 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +109,107 @@ const DEFAULT_CELL_UA_W_PER_K: f64 = 5.0;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 const IDLE_POWER_THRESHOLD_KW: f64 = 1e-6;
 
+/// Gas constant [J/(mol·K)] for Arrhenius temperature dependence.
+const R_GAS_J_MOL_K: f64 = 8.314_46;
+
+// ---------------------------------------------------------------------------
+// Temperature-dependent capacity derating model
+// ---------------------------------------------------------------------------
+
+/// Configurable model for temperature-dependent capacity and power derating.
+///
+/// Affects both energy capacity (`capacity_kwh`) and power limits
+/// (`max_charge_kw`, `max_discharge_kw`) each timestep based on cell
+/// temperature.
+#[derive(Debug, Clone)]
+pub enum CapacityDerateModel {
+    /// Arrhenius electrochemical model (OCHRE/SAM-compatible).
+    ///
+    /// `d0 = d0_ref * exp(-e_ad1/R * (1/T - 1/T_ref) - e_ad2/R * (1/T - 1/T_ref)^2)`
+    ///
+    /// Reference: Schimpe et al. (2018) "Comprehensive Modeling of
+    /// Temperature-Dependent Degradation Mechanisms in Lithium Iron Phosphate
+    /// Batteries", NREL/TP-5400-70616.
+    Arrhenius {
+        d0_ref: f64,
+        e_ad1_j_mol: f64,
+        e_ad2_j2_mol2: f64,
+        t_ref_k: f64,
+    },
+    /// Piecewise-linear model from manufacturer datasheets.
+    ///
+    /// Points are `(cell_temp_c, derate_factor)` sorted by temperature.
+    /// Linearly interpolates between bracketing points; clamps outside range.
+    PiecewiseLinear {
+        points: Vec<(f64, f64)>,
+    },
+}
+
+impl Default for CapacityDerateModel {
+    fn default() -> Self {
+        Self::Arrhenius {
+            d0_ref: 1.001,
+            e_ad1_j_mol: 4_126.0,
+            e_ad2_j2_mol2: 9.752e6,
+            t_ref_k: 298.15,
+        }
+    }
+}
+
+impl CapacityDerateModel {
+    /// Evaluate the derate factor at the given cell temperature.
+    ///
+    /// Returns a value in (0, ~1.0] where 1.0 means no derating. The factor
+    /// applies to both energy capacity and power limits.
+    fn evaluate(&self, cell_temp_c: f64) -> f64 {
+        match self {
+            Self::Arrhenius {
+                d0_ref,
+                e_ad1_j_mol,
+                e_ad2_j2_mol2,
+                t_ref_k,
+            } => {
+                let t_k = cell_temp_c + 273.15;
+                if t_k <= 0.0 {
+                    return 0.0;
+                }
+                let inv_diff = 1.0 / t_k - 1.0 / t_ref_k;
+                let exponent =
+                    -e_ad1_j_mol / R_GAS_J_MOL_K * inv_diff
+                    - e_ad2_j2_mol2 / R_GAS_J_MOL_K * inv_diff * inv_diff;
+                (d0_ref * exponent.exp()).clamp(0.0, 1.5)
+            }
+            Self::PiecewiseLinear { points } => {
+                if points.is_empty() {
+                    return 1.0;
+                }
+                if points.len() == 1 {
+                    return points[0].1.clamp(0.0, 1.5);
+                }
+                if cell_temp_c <= points[0].0 {
+                    return points[0].1.clamp(0.0, 1.5);
+                }
+                if cell_temp_c >= points[points.len() - 1].0 {
+                    return points[points.len() - 1].1.clamp(0.0, 1.5);
+                }
+                for i in 0..points.len() - 1 {
+                    if cell_temp_c <= points[i + 1].0 {
+                        let (t0, d0) = points[i];
+                        let (t1, d1) = points[i + 1];
+                        let span = t1 - t0;
+                        if span.abs() < f64::EPSILON {
+                            return d0.clamp(0.0, 1.5);
+                        }
+                        let frac = (cell_temp_c - t0) / span;
+                        return (d0 + frac * (d1 - d0)).clamp(0.0, 1.5);
+                    }
+                }
+                1.0
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Serializable battery state for checkpointing
 // ---------------------------------------------------------------------------
@@ -173,10 +274,11 @@ pub struct Battery {
     heater_threshold_c: f64,
     heater_on_discharge: bool,
 
-    // Temperature-dependent power derating
+    // Temperature-dependent power and capacity derating
     min_discharge_temp_c: f64,
     full_power_temp_c: f64,
     min_charge_temp_c: f64,
+    capacity_derate_model: CapacityDerateModel,
 
     // Lumped cell thermal model
     cell_thermal_mass_j_per_k: f64,
@@ -198,6 +300,12 @@ pub struct Battery {
     soc_target: Option<f64>,
     soc_target_min: Option<f64>,
     soc_target_max: Option<f64>,
+
+    // Demand response state
+    dr_level: DRLevel,
+    dr_duration_remaining_s: Option<f64>,
+    /// External power limit from PowerLimit signal [kW]. Applied as ceiling in clamp_power.
+    external_power_limit_kw: Option<f64>,
 
     last_daily_update_day: i32,
 }
@@ -227,7 +335,9 @@ impl Battery {
             control_capabilities: ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::SOC_TARGET
                 | ControlCapabilities::GRID_CONNECT
-                | ControlCapabilities::SELF_CONSUMPTION,
+                | ControlCapabilities::SELF_CONSUMPTION
+                | ControlCapabilities::POWER_LIMIT
+                | ControlCapabilities::DEMAND_RESPONSE,
             telemetry_fields: battery_telemetry_fields(),
         };
 
@@ -257,6 +367,7 @@ impl Battery {
             min_discharge_temp_c: DEFAULT_MIN_DISCHARGE_TEMP_C,
             full_power_temp_c: DEFAULT_FULL_POWER_TEMP_C,
             min_charge_temp_c: DEFAULT_MIN_CHARGE_TEMP_C,
+            capacity_derate_model: CapacityDerateModel::default(),
             cell_thermal_mass_j_per_k: DEFAULT_CELL_THERMAL_MASS_J_PER_K,
             cell_ua_w_per_k: DEFAULT_CELL_UA_W_PER_K,
             soc: DEFAULT_INITIAL_SOC,
@@ -272,6 +383,9 @@ impl Battery {
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
+            dr_level: DRLevel::Normal,
+            dr_duration_remaining_s: None,
+            external_power_limit_kw: None,
             last_daily_update_day: 0,
         }
     }
@@ -396,20 +510,36 @@ impl Battery {
     /// OCHRE `Generator.get_power_limits` + Battery schedule inputs
     /// `Battery Max Import Limit (kW)` / `Battery Max Export Limit (kW)`.
     fn clamp_power(&self, power_kw: f64) -> f64 {
+        let temp_derate = self.capacity_derate_model.evaluate(self.cell_temp_c).clamp(0.0, 1.0);
+        let dr_fraction = self.dr_power_fraction();
         if power_kw > 0.0 {
-            let hw_max = self.max_charge_kw;
+            let hw_max = self.max_charge_kw * temp_derate * dr_fraction;
             let limit = self
                 .import_limit_kw
                 .map(|lim| hw_max.min(lim))
                 .unwrap_or(hw_max);
+            let limit = self.external_power_limit_kw.map_or(limit, |pl| limit.min(pl));
             power_kw.min(limit)
         } else {
-            let hw_max = self.max_discharge_kw;
+            let hw_max = self.max_discharge_kw * temp_derate * dr_fraction;
             let limit = self
                 .export_limit_kw
                 .map(|lim| hw_max.min(lim))
                 .unwrap_or(hw_max);
+            let limit = self.external_power_limit_kw.map_or(limit, |pl| limit.min(pl));
             power_kw.max(-limit)
+        }
+    }
+
+    /// DR-level power fraction: Normal=1.0, Moderate=0.8, High=0.5,
+    /// Critical=0.25, GridEmergency=0.0.
+    fn dr_power_fraction(&self) -> f64 {
+        match self.dr_level {
+            DRLevel::Normal => 1.0,
+            DRLevel::Moderate => 0.8,
+            DRLevel::High => 0.5,
+            DRLevel::Critical => 0.25,
+            DRLevel::GridEmergency => 0.0,
         }
     }
 
@@ -521,6 +651,36 @@ impl Equipment for Battery {
         self.min_charge_temp_c = config
             .get_f64(KEY_MIN_CHARGE_TEMP_C)
             .unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
+
+        // Capacity derate model: configurable via "capacity_derate_model" key.
+        // "piecewise" expects "capacity_derate_points" as [temp_c, factor, temp_c, factor, ...]
+        // Default: Arrhenius with OCHRE/SAM reference constants.
+        if let Some(model_name) = config.get_str("capacity_derate_model") {
+            match model_name {
+                "piecewise" => {
+                    let raw = config.get_f64_array("capacity_derate_points").unwrap_or_default();
+                    if !raw.len().is_multiple_of(2) {
+                        tracing::warn!(
+                            "capacity_derate_points has odd length {}; trailing value ignored",
+                            raw.len()
+                        );
+                    }
+                    let mut points: Vec<(f64, f64)> = raw.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+                    points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    self.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points };
+                }
+                "arrhenius" => {
+                    self.capacity_derate_model = CapacityDerateModel::Arrhenius {
+                        d0_ref: config.get_f64("capacity_derate_d0_ref").unwrap_or(1.001),
+                        e_ad1_j_mol: config.get_f64("capacity_derate_e_ad1").unwrap_or(4_126.0),
+                        e_ad2_j2_mol2: config.get_f64("capacity_derate_e_ad2").unwrap_or(9.752e6),
+                        t_ref_k: config.get_f64("capacity_derate_t_ref_k").unwrap_or(298.15),
+                    };
+                }
+                _ => {} // keep default Arrhenius
+            }
+        }
+
         self.inverter_efficiency = config
             .get_f64(KEY_INVERTER_EFFICIENCY)
             .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
@@ -606,7 +766,15 @@ impl Equipment for Battery {
         Ok(())
     }
 
-    fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
+    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
+        // DR duration countdown: auto-revert to Normal when timer expires.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= env.time_res.num_seconds() as f64;
+            if *remaining <= 0.0 {
+                self.dr_level = DRLevel::Normal;
+                self.dr_duration_remaining_s = None;
+            }
+        }
         self.mode
     }
 
@@ -666,22 +834,9 @@ impl Equipment for Battery {
             target_power_kw *= derate;
         }
 
-        // -- Temperature-dependent capacity (d0 Arrhenius model) --
-        // Reference: Schimpe et al. (2018) "Comprehensive Modeling of Temperature-Dependent
-        // Degradation Mechanisms in Lithium Iron Phosphate Batteries" and OCHRE Battery.py:321-331.
-        // Constants: d0_ref=1.001, e_ad1=4126 J/mol, e_ad2=9.752e6 J²/mol², T_ref=298.15 K, R=8.31446 J/(mol·K).
-        {
-            const D0_REF: f64 = 1.001;
-            const E_AD1: f64 = 4_126.0; // J/mol
-            const E_AD2: f64 = 9.752e6; // J²/mol²
-            const T_REF: f64 = 298.15; // K
-            const R_GAS: f64 = 8.314_46; // J/(mol·K)
-            let t_k = self.cell_temp_c + 273.15;
-            let inv_diff = 1.0 / t_k - 1.0 / T_REF;
-            let d0 =
-                D0_REF * (-E_AD1 / R_GAS * inv_diff - E_AD2 / R_GAS * inv_diff * inv_diff).exp();
-            self.capacity_kwh = self.capacity_kwh_nominal * d0;
-        }
+        // -- Temperature-dependent capacity derating --
+        let capacity_derate = self.capacity_derate_model.evaluate(self.cell_temp_c);
+        self.capacity_kwh = self.capacity_kwh_nominal * capacity_derate;
 
         // -- Compute electrical model --
         let (power_kw, ohmic_loss_w) = self.compute_electrical(target_power_kw);
@@ -842,6 +997,8 @@ impl Equipment for Battery {
         self.telemetry
             .set("discharge_derate", self.discharge_derate_factor());
         self.telemetry
+            .set("capacity_derate", self.capacity_derate_model.evaluate(self.cell_temp_c));
+        self.telemetry
             .set("cycle_count", self.rainflow.total_cycles());
         self.telemetry
             .set("capacity_fade_pct", self.degradation.capacity_fade_pct());
@@ -902,6 +1059,8 @@ impl Equipment for Battery {
             .set("capacity_fade_pct", self.degradation.capacity_fade_pct());
         self.telemetry
             .set("discharge_derate", self.discharge_derate_factor());
+        self.telemetry
+            .set("capacity_derate", self.capacity_derate_model.evaluate(self.cell_temp_c));
         // active_power_kw, ohmic_loss_w, heater_power_w are operational — reset to
         // idle defaults; they will be updated on the next step() call.
         self.telemetry.set(
@@ -950,6 +1109,13 @@ impl Equipment for Battery {
                 self.power_setpoint_kw = None;
                 self.soc_target = None;
             }
+            ControlSignal::PowerLimit { max_power_kw, .. } => {
+                self.external_power_limit_kw = Some(max_power_kw.max(0.0));
+            }
+            ControlSignal::DemandResponse { level, duration_s } => {
+                self.dr_level = *level;
+                self.dr_duration_remaining_s = *duration_s;
+            }
             _ => {
                 return Err(HaresError::Control(format!(
                     "Battery does not handle control signal: {signal:?}"
@@ -969,7 +1135,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(9);
+    let mut t = Telemetry::with_capacity(10);
     t.insert("soc", 0.0);
     t.insert("active_power_kw", 0.0);
     t.insert("ohmic_loss_w", 0.0);
@@ -977,6 +1143,7 @@ fn default_telemetry() -> Telemetry {
     t.insert("cell_temp_c", 25.0);
     t.insert("heater_power_w", 0.0);
     t.insert("discharge_derate", 1.0);
+    t.insert("capacity_derate", 1.0);
     t.insert("cycle_count", 0.0);
     t.insert("capacity_fade_pct", 0.0);
     t
@@ -1025,6 +1192,11 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
             name: "discharge_derate".to_string(),
             unit: "-".to_string(),
             description: "Temperature-dependent discharge power derating factor [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: "capacity_derate".to_string(),
+            unit: "-".to_string(),
+            description: "Temperature-dependent capacity and power derating factor (Arrhenius or piecewise)".to_string(),
         },
         TelemetryField {
             name: "capacity_fade_pct".to_string(),
@@ -1089,6 +1261,12 @@ mod tests {
                 .expect("valid UTC timestamp"),
             time_res: ChronoDuration::minutes(5),
         }
+    }
+
+    fn warm_env() -> EnvironmentState {
+        let mut env = base_env();
+        env.weather.outdoor_temp_c = 25.0;
+        env
     }
 
     fn battery_config(overrides: &[(&str, f64)]) -> EquipmentConfig {
@@ -1983,13 +2161,14 @@ mod tests {
     /// giving higher ohmic losses than the linear approximation.
     #[test]
     fn quadratic_current_gives_higher_losses_during_discharge() {
+        // Uses warm_env (25°C) so capacity derate ≈ 1.0 and full rated power flows.
         let config = battery_config(&[
             (KEY_INITIAL_SOC, 0.5),
             (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
             (KEY_INVERTER_EFFICIENCY, 1.0),
         ]);
         let mut bat = Battery::new(config.clone());
-        let env = base_env();
+        let env = warm_env();
         bat.init(&config, &env).unwrap();
 
         // Discharge at 95% of max (negative = discharge).
@@ -2841,6 +3020,8 @@ mod tests {
     #[test]
     fn no_limit_allows_full_charge_power() {
         // Without import/export limits, the battery should use its full capacity.
+        // Uses warm_env (25°C) so capacity derate ≈ 1.0 and rated power is available.
+        let env = warm_env();
         let config = battery_config(&[
             (KEY_INITIAL_SOC, 0.1),
             (KEY_MIN_SOC, 0.0),
@@ -2848,7 +3029,7 @@ mod tests {
             (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
         ]);
         let mut bat = Battery::new(config.clone());
-        bat.init(&config, &base_env()).unwrap();
+        bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 5.0,
@@ -2857,7 +3038,7 @@ mod tests {
         .unwrap();
 
         let mut slots = default_ports();
-        bat.step(&base_env(), Duration::from_secs(300), &mut slots)
+        bat.step(&env, Duration::from_secs(300), &mut slots)
             .unwrap();
 
         let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;

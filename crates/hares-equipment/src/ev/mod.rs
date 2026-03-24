@@ -109,6 +109,9 @@ struct EvCheckpoint {
     v2l_enabled: bool,
     v2l_soc_reserve: f64,
     v2l_max_discharge_kw: f64,
+    v2g_enabled: bool,
+    v2g_soc_reserve: f64,
+    v2g_max_discharge_kw: f64,
     driver_archetype: DriverArchetype,
 }
 
@@ -153,6 +156,9 @@ pub struct Ev {
     v2l_enabled: bool,
     v2l_soc_reserve: f64,
     v2l_max_discharge_kw: f64,
+    v2g_enabled: bool,
+    v2g_soc_reserve: f64,
+    v2g_max_discharge_kw: f64,
 
     soc: f64,
     battery_temp_c: f64,
@@ -261,6 +267,13 @@ impl Ev {
             v2l_max_discharge_kw: config
                 .get_f64(KEY_V2L_MAX_DISCHARGE_KW)
                 .unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW),
+            v2g_enabled: config.get_bool(KEY_V2G_ENABLED).unwrap_or(false),
+            v2g_soc_reserve: config
+                .get_f64(KEY_V2G_SOC_RESERVE)
+                .unwrap_or(DEFAULT_V2G_SOC_RESERVE),
+            v2g_max_discharge_kw: config
+                .get_f64(KEY_V2G_MAX_DISCHARGE_KW)
+                .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW),
             soc: config.get_f64(KEY_INITIAL_SOC).unwrap_or(DEFAULT_SOC),
             battery_temp_c: config.get_f64(KEY_BATTERY_TEMP_C).unwrap_or(20.0),
             heater_active: false,
@@ -472,6 +485,23 @@ impl Ev {
         if !self.v2l_max_discharge_kw.is_finite() || self.v2l_max_discharge_kw < 0.0 {
             return Err(HaresError::Equipment(
                 "EV v2l_max_discharge_kw must be finite and >= 0".to_string(),
+            ));
+        }
+        self.v2g_enabled = config.get_bool(KEY_V2G_ENABLED).unwrap_or(false);
+        self.v2g_soc_reserve = config
+            .get_f64(KEY_V2G_SOC_RESERVE)
+            .unwrap_or(DEFAULT_V2G_SOC_RESERVE);
+        if !self.v2g_soc_reserve.is_finite() || !(0.0..=1.0).contains(&self.v2g_soc_reserve) {
+            return Err(HaresError::Equipment(
+                "EV v2g_soc_reserve must be finite and within [0, 1]".to_string(),
+            ));
+        }
+        self.v2g_max_discharge_kw = config
+            .get_f64(KEY_V2G_MAX_DISCHARGE_KW)
+            .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW);
+        if !self.v2g_max_discharge_kw.is_finite() || self.v2g_max_discharge_kw < 0.0 {
+            return Err(HaresError::Equipment(
+                "EV v2g_max_discharge_kw must be finite and >= 0".to_string(),
             ));
         }
 
@@ -695,10 +725,14 @@ impl Ev {
             return 0.0;
         }
 
-        // V2L discharge path: negative setpoint with V2L enabled
+        // V2L/V2G discharge path: negative setpoint with discharge enabled
         if let Some(setpoint) = self.power_setpoint_kw {
-            if setpoint < 0.0 && self.v2l_enabled {
-                return self.compute_v2l_discharge(dt);
+            if setpoint < 0.0 {
+                if self.v2g_enabled {
+                    return self.compute_v2g_discharge(dt);
+                } else if self.v2l_enabled {
+                    return self.compute_v2l_discharge(dt);
+                }
             }
         }
 
@@ -763,6 +797,22 @@ impl Ev {
         // Prevent discharging below the SOC reserve in this timestep
         let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
         let available_kwh = (self.soc - self.v2l_soc_reserve) * self.battery_capacity_kwh;
+        let max_discharge_kw = available_kwh / dt_hours;
+
+        -(capped.min(max_discharge_kw).max(0.0))
+    }
+
+    /// Compute V2G (vehicle-to-grid) discharge power as a negative value.
+    /// Uses V2G-specific SOC reserve (higher than V2L) and max discharge limit.
+    fn compute_v2g_discharge(&self, dt: Duration) -> f64 {
+        if self.soc <= self.v2g_soc_reserve {
+            return 0.0;
+        }
+        let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
+        let capped = setpoint_magnitude.min(self.v2g_max_discharge_kw);
+
+        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        let available_kwh = (self.soc - self.v2g_soc_reserve) * self.battery_capacity_kwh;
         let max_discharge_kw = available_kwh / dt_hours;
 
         -(capped.min(max_discharge_kw).max(0.0))
@@ -1025,6 +1075,9 @@ impl Equipment for Ev {
             v2l_enabled: self.v2l_enabled,
             v2l_soc_reserve: self.v2l_soc_reserve,
             v2l_max_discharge_kw: self.v2l_max_discharge_kw,
+            v2g_enabled: self.v2g_enabled,
+            v2g_soc_reserve: self.v2g_soc_reserve,
+            v2g_max_discharge_kw: self.v2g_max_discharge_kw,
             driver_archetype: self.driver_archetype,
         })
     }
@@ -1058,6 +1111,9 @@ impl Equipment for Ev {
         self.v2l_enabled = cp.v2l_enabled;
         self.v2l_soc_reserve = cp.v2l_soc_reserve;
         self.v2l_max_discharge_kw = cp.v2l_max_discharge_kw;
+        self.v2g_enabled = cp.v2g_enabled;
+        self.v2g_soc_reserve = cp.v2g_soc_reserve;
+        self.v2g_max_discharge_kw = cp.v2g_max_discharge_kw;
         self.driver_archetype = cp.driver_archetype;
 
         self.rng = ChaCha8Rng::from_seed(self.rng_seed);
@@ -1074,8 +1130,10 @@ impl Equipment for Ev {
             ControlSignal::PowerSetpoint {
                 active_power_kw, ..
             } => {
-                if *active_power_kw < 0.0 && !self.v2l_enabled {
-                    return Err(HaresError::Control("V2G not supported in v1".to_string()));
+                if *active_power_kw < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
+                    return Err(HaresError::Control(
+                        "negative PowerSetpoint requires v2l_enabled or v2g_enabled".to_string(),
+                    ));
                 }
                 if !active_power_kw.is_finite() {
                     return Err(HaresError::Control(
@@ -1372,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_power_setpoint_is_rejected_for_v2g() {
+    fn negative_power_setpoint_rejected_without_v2l_or_v2g() {
         let config = ev_config(base_raw());
         let mut ev = Ev::new(config.clone());
         let env = sample_env();
@@ -1385,7 +1443,10 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(err.to_string().contains("V2G not supported in v1"));
+        assert!(
+            err.to_string().contains("v2l_enabled or v2g_enabled"),
+            "expected rejection message, got: {err}"
+        );
     }
 
     #[test]
@@ -2295,7 +2356,7 @@ mod tests {
             })
             .unwrap_err();
         assert!(
-            err.to_string().contains("V2G not supported"),
+            err.to_string().contains("v2l_enabled or v2g_enabled"),
             "negative setpoint without V2L should be rejected"
         );
     }
