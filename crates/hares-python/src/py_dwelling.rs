@@ -386,6 +386,13 @@ fn build_config(
         .map(|obj| obj.extract::<String>())
         .transpose()?;
 
+    let defaults_path = kwargs
+        .as_ref()
+        .and_then(|k| k.get_item("defaults_path").ok().flatten())
+        .map(|obj| obj.extract::<String>())
+        .transpose()?
+        .map(PathBuf::from);
+
     let sim_config = SimulationConfig {
         start_time,
         duration,
@@ -407,7 +414,7 @@ fn build_config(
         hpxml_path: PathBuf::from(hpxml),
         schedule_path: PathBuf::from(schedule),
         weather_path: PathBuf::from(weather),
-        defaults_path: None,
+        defaults_path,
         sim_config,
         overrides: None,
         bldg_id,

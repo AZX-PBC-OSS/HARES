@@ -77,7 +77,24 @@ pub fn building_to_boundary_inputs(
                         bd.finish_type.as_deref(),
                         bd.insulation_details.as_deref(),
                         r_value,
-                    )?;
+                    );
+                    if result.is_none() {
+                        tracing::debug!(
+                            boundary = boundary_name,
+                            construction = ?bd.construction_type,
+                            finish = ?bd.finish_type,
+                            insulation = ?bd.insulation_details,
+                            r_value = ?r_value,
+                            "envelope LUT lookup miss — falling back to single-resistance"
+                        );
+                    }
+                    let result = result?;
+                    tracing::debug!(
+                        boundary = boundary_name,
+                        layers = result.layers.len(),
+                        matched_type = %result.matched_boundary_type,
+                        "envelope LUT match"
+                    );
                     Some(
                         result
                             .layers

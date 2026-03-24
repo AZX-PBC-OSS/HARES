@@ -28,8 +28,8 @@ impl OcvTable {
 
     /// Linear interpolation of cell OCV at a given SOC, clamped to table bounds.
     pub(crate) fn voltage_at_soc(&self, soc: f64) -> f64 {
-        let soc = soc.clamp(self.soc_points[0], *self.soc_points.last().unwrap());
-        // Find bracketing interval
+        // SAFETY: soc_points and voltage_v are non-empty by construction (hardcoded LUT).
+        let soc = soc.clamp(self.soc_points[0], *self.soc_points.last().expect("non-empty LUT"));
         let n = self.soc_points.len();
         if n == 1 {
             return self.voltage_v[0];
@@ -44,7 +44,7 @@ impl OcvTable {
                 return self.voltage_v[i] + t * (self.voltage_v[i + 1] - self.voltage_v[i]);
             }
         }
-        *self.voltage_v.last().unwrap()
+        *self.voltage_v.last().expect("non-empty LUT")
     }
 }
 
@@ -75,7 +75,8 @@ impl UNegTable {
 
     /// Linear interpolation of U_neg at a given SOC, clamped to table bounds.
     pub(crate) fn potential_at_soc(&self, soc: f64) -> f64 {
-        let soc = soc.clamp(self.soc_points[0], *self.soc_points.last().unwrap());
+        // SAFETY: soc_points and potential_v are non-empty by construction (hardcoded LUT).
+        let soc = soc.clamp(self.soc_points[0], *self.soc_points.last().expect("non-empty LUT"));
         let n = self.soc_points.len();
         if n == 1 {
             return self.potential_v[0];
@@ -90,6 +91,6 @@ impl UNegTable {
                 return self.potential_v[i] + t * (self.potential_v[i + 1] - self.potential_v[i]);
             }
         }
-        *self.potential_v.last().unwrap()
+        *self.potential_v.last().expect("non-empty LUT")
     }
 }

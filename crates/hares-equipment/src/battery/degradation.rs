@@ -42,7 +42,8 @@ impl RainflowCounter {
 
         // If direction hasn't changed, update the last point (extend the current ramp).
         if prev_dir * cur_dir >= 0.0 {
-            *self.reversals.last_mut().unwrap() = soc;
+            // SAFETY: reversals.len() >= 2 guaranteed by the early return at the top of this function.
+            *self.reversals.last_mut().expect("reversals.len() >= 2") = soc;
         } else {
             // Direction reversed -- record the reversal and try to extract cycles.
             self.reversals.push(soc);
@@ -89,7 +90,9 @@ impl RainflowCounter {
                 self.cycle_count += range_y;
                 self.daily_cycle_dods.push(range_y);
                 // Remove points at n-3 and n-2 (the middle two of the 4-point window).
-                let last = self.reversals.pop().unwrap();
+                // SAFETY: reversals.len() >= 4 guaranteed by the `if n < 3 { break }` guard
+                // and the `n == 3` branch exclusion above this point.
+                let last = self.reversals.pop().expect("reversals.len() >= 4");
                 self.reversals.pop(); // was n-2
                 self.reversals.pop(); // was n-3
                 self.reversals.push(last);

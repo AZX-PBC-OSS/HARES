@@ -10,20 +10,24 @@ and per-timestep heat balance resolution in `hares-envelope`.
 ```
 hares-envelope/src/
 ├── thermal_solver/
-│   ├── mod.rs           ThermalSolver struct, resolve() flow, component gains
+│   ├── mod.rs           ThermalSolver struct, DomainSolver impl, resolve() dispatch
 │   ├── config.rs        Config types, EnvelopeComponentGains, wiring indices
+│   ├── initialization.rs Steady-state initialization from outdoor conditions
+│   ├── stepping.rs      resolve_internal() CN step, semi-implicit infiltration coupling
+│   ├── longwave.rs      Exterior iterative + interior linearized LWR application
+│   ├── ports.rs         build_input_vector(): outdoor, solar, LWR, ports, infiltration
 │   ├── solar.rs         Window SHGC + IAM, opaque solar injection
-│   └── infiltration.rs  Infiltration/ventilation integration into u vector
+│   └── infiltration.rs  InfiltrationCoupling: conductance + forcing for semi-implicit
 ├── boundary_rc.rs       Building geometry → RC network assembly
 ├── rc_network.rs        RCNetwork graph → Kirchhoff A_c/B_ext matrices
-├── state_space.rs       Discretization (ZOH/Van Loan), matrix exponential, stepping
-└── longwave_radiation.rs  Exterior iterative LWR, interior linearized LWR
+├── state_space.rs       Crank-Nicolson implicit model, matrix exponential, stepping
+└── longwave_radiation.rs  4-component EnergyPlus exterior LWR, interior linearized LWR
 
 hares-physics/src/
 ├── infiltration.rs      ASHRAE wind-stack, ELA, ACH, natural ventilation
 ├── solar.rs             EnergyPlus glazing curves, IAM modifier
 ├── film_coefficients.rs TARP interior + DOE-2 exterior convection
-├── air_properties.rs    Moist air density, psychrometrics
+├── air_properties.rs    Moist air density (kg_da/m³), psychrometrics
 └── psychrometrics.rs    Humidity ratio, latent heat
 ```
 
@@ -87,62 +91,87 @@ Output: continuous-time `(A_c, B_ext)` matrices plus index maps:
 
 ---
 
-## State-Space Discretization
+## State-Space Model (Crank-Nicolson Implicit)
 
-**Entry point**: `discretize_auto(a_c, b_c, dt)`
+**Entry point**: `StateSpaceModel::from_continuous(a_c, b_c, dt, output_mapping)`
 
-Converts continuous-time `dx/dt = A_c·x + B_c·u` to discrete
-`x[k+1] = A_d·x[k] + B_d·u[k]`.
-
-### Primary Path: ZOH (Zero-Order Hold)
-
-Used when A_c is well-conditioned (rcond > 1e-12):
+The continuous-time RC system `dx/dt = A_c·x + B_c·u` is discretized using the
+Crank-Nicolson (trapezoidal) implicit scheme:
 
 ```
-A_d = exp(A_c · dt)
-B_d = A_c⁻¹ · (A_d − I) · B_c
+(I − dt/2·A_c) · x[k+1] = (I + dt/2·A_c) · x[k] + dt·B_c · u[k]
+      M                          N                     B_eff
 ```
 
-**Matrix exponential** uses 13th-order Padé scaling-and-squaring:
-- Scale factor s = ⌈log₂(‖A_c·dt‖₁ / θ₁₃)⌉ where θ₁₃ ≈ 5.37192
-- Repeated squaring recovers exp(A_c·dt) from exp(A_c·dt / 2^s)
+This is A-stable: any continuous system with Re(λ) ≤ 0 produces a stable
+discrete system regardless of timestep size. This eliminates the overshoot that
+the previous explicit ZOH solver exhibited under large infiltration loads.
 
-B_d computed via LU factorization of A_c (avoids explicit inverse).
+### Pre-Computed Matrices
 
-### Fallback: Van Loan
+At initialization, three matrices are built and stored:
+- **M** = I − dt/2·A_c (implicit half, LU-factored)
+- **N** = I + dt/2·A_c (explicit half)
+- **B_eff** = dt·B_c (scaled input)
 
-Used when A_c is singular or near-singular:
+The LU factorization of M is computed once. Each timestep step solves
+`M·x[k+1] = N·x[k] + B_eff·u[k]` via forward/back substitution — no per-step
+factorization.
 
+### Zero-Allocation Stepping
+
+`step_into(x, u, buf)` uses a caller-owned buffer:
+```rust
+buf = N·x           // gemv, zero-alloc
+buf += B_eff·u      // gemv accumulate
+M_lu.solve_mut(buf) // in-place triangular solve
 ```
-         ┌ A_c  B_c ┐
-expm(dt· │          │ )
-         └  0    0  ┘
-```
 
-A_d is extracted from the top-left block, B_d from the top-right block of the
-result matrix.
+`ThermalSolver` owns `rhs_buf` and swaps it with `x` after each step.
+
+### Discrete-Path Compatibility
+
+`StateSpaceModel::from_discrete(A_d, B_d, C, D)` sets M = I so the solve
+degenerates to `x[k+1] = A_d·x + B_d·u` for pre-discretized models.
 
 ### Stability Verification
 
-For small systems (n ≤ 20), eigenvalues are checked:
+For small systems (n ≤ 20), eigenvalues of the equivalent A_d = M⁻¹·N are
+checked:
 - Continuous: all Re(λ) < 0
 - Discrete: all |λ| ≤ 1 + 1e-10
 - Exception: singular A_c with marginally-stable A_d is permitted
 
-For larger systems, a Gershgorin bound on A_d is used instead of full
-eigenvalue decomposition.
+For larger systems, a Gershgorin bound on the continuous A_c is used — since
+CN is A-stable, continuous stability implies discrete stability.
+
+### Steady State
+
+`steady_state(u)` solves for the equilibrium state under constant input:
+- Continuous path: `x_ss = −A_c⁻¹·B_c·u`
+- Discrete path: `x_ss = (I − A_d)⁻¹·B_d·u`
+
+Used for initialization (computing initial state from outdoor conditions).
+
+### Matrix Exponential (Utility)
+
+`matrix_exp()` is retained for boundary RC assembly and returns `Result` (not
+panic). Uses 13th-order Padé scaling-and-squaring (θ₁₃ ≈ 5.37192).
 
 ---
 
 ## Per-Timestep Resolve Flow
 
-`ThermalSolver::resolve(ports, env, dt)` builds the input vector u, steps the
-state, and extracts zone temperatures. The u vector is pre-allocated and
-zeroed in-place each step (no allocation).
+`ThermalSolver::resolve(ports, env, dt)` delegates to `resolve_internal()` in
+`stepping.rs`. The resolve is split into two stages: input vector construction
+(`build_input_vector()` in `ports.rs`) and CN stepping with semi-implicit
+infiltration coupling (`resolve_internal()` in `stepping.rs`). All buffers are
+pre-allocated — zero per-step heap allocation.
 
 ### Input Application Order
 
-Each phase writes to u via pre-computed index maps in `StateSpaceWiring`:
+`build_input_vector()` writes to u via pre-computed index maps in
+`StateSpaceWiring`:
 
 ```
 u = 0
@@ -163,12 +192,16 @@ apply_interior_longwave_inputs
 apply_port_sensible_inputs    Equipment sensible gains from PortSlots
  ↓
 apply_infiltration_and_ventilation
-                              Wind-stack/ELA/ACH + natural ventilation + HRV/ERV
-                              Sensible → u vector; latent → separate return
+                              Returns InfiltrationCoupling per zone (h_inf, T_forcing)
+                              Latent loads → separate HashMap
+ ↓                            ┌─────────────────────────────────────────────┐
+resolve_internal()            │ Build semi-implicit coupling tuples         │
+                              │ Build coupled LU (M + D) if infiltration    │
+                              │ Ideal HVAC solve (coupled or uncoupled)     │
+                              │ CN step: M⁻¹(N·x + B_eff·u + forcing)      │
+                              │ Cache coupled LU + couplings for next step  │
+                              └─────────────────────────────────────────────┘
  ↓
-ideal HVAC solve              Back-calculate capacity to hold setpoint (if configured)
- ↓
-x_next = A_d·x + B_d·u       State integration
 y_next = C·x_next + D·u      Output extraction (zone temperatures)
 ```
 
@@ -207,13 +240,25 @@ For each `ExteriorSurfaceInfo` (non-window):
 
 Two paths depending on film resistance coupling:
 
-**Simple** (rad_frac ≤ 0): Single call to `exterior_longwave_w()`:
+**Simple** (rad_frac ≤ 0): Single call to `exterior_longwave_w()` using the
+EnergyPlus 4-component model (Engineering Reference §External Longwave
+Radiation):
+
 ```
-Q_lw = ε·σ·A · [(f_gnd + (1−β)·f_sky)·(T_air⁴ − T_surf⁴) + β·f_sky·(T_sky⁴ − T_surf⁴)]
+Q_lw = ε·σ·A · [F_gnd·(T_air⁴ − T_surf⁴)
+              + β·F_sky·(T_sky⁴ − T_surf⁴)
+              + (1−β)·F_sky·(T_air⁴ − T_surf⁴)]
 ```
-- f_sky: sky view factor (function of tilt)
-- β: horizon bias factor (enhances near-horizon air radiation)
-- f_gnd = 1 − f_sky
+
+Three radiation source terms:
+- **Ground hemisphere**: F_gnd × (T_air⁴ − T_surf⁴), where T_ground = T_air per E+ standard
+- **True sky** (cold): β × F_sky × (T_sky⁴ − T_surf⁴)
+- **Near-horizon air** (warm): (1−β) × F_sky × (T_air⁴ − T_surf⁴)
+
+View factors (linear, not raised to 1.5):
+- F_sky = 0.5·(1 + cos φ), where φ is surface tilt from horizontal
+- F_gnd = 1 − F_sky
+- β = √F_sky (splits sky hemisphere into true-sky and near-horizon)
 
 **Iterative** (rad_frac > 0): Couples surface temperature to RC node:
 
@@ -266,25 +311,52 @@ These feed `EnvelopeComponentGains` but are summed for the u vector.
 - Balanced (ERV/HRV): `q_sens = (q_inf + q_nat) + q_forced·(1 − SRE)`
 - Unbalanced: `q = √[(q_inf + q_nat)² + q_forced²]`
 
-**Load calculation**:
-- Mass flow: `ṁ = ρ_da(P, T_out, w_out) · q` [kg_da/s]
-- Sensible: `Q_s = ṁ · c_p · (T_out − T_zone)` → injected to u
+**Load calculation** (dry-air basis):
+- Density: `ρ = moist_air_density_kg_m3(P, T_out, w_out)` — inverts ASHRAE HOF
+  2021 Ch.1 Eq.28 specific volume `v = R_da·T·(1+W/ε)/p`, yielding kg_da/m³
+  (dry air mass per unit volume, not total moist air mass)
+- Mass flow: `ṁ = ρ · q` [kg_da/s]
+- Sensible: `Q_s = ṁ · c_p_da · (T_out − T_zone)` [W]
 - Latent: `Q_l = ṁ · H_fg · (w_out − w_zone)` → returned separately for
   humidity solver
+
+**Semi-implicit treatment**: Infiltration is not injected directly into the u
+vector. Instead, `apply_infiltration_and_ventilation()` returns per-zone
+`InfiltrationCoupling` structs containing `h_inf_w_k` (sensible conductance
+[W/K]) and `t_forcing_c` (outdoor driving temperature). In `resolve_internal()`,
+the temperature-dependent term `−h_inf·T_zone` is moved to the implicit (M)
+side of the CN system following EnergyPlus Engineering Reference §13.3. This
+guarantees monotonic, oscillation-free convergence even when the infiltration
+time constant is much smaller than the timestep.
+
+The coupling modifies M's diagonal per-step:
+```
+d = h_inf × B_eff[(state, input)]
+M_coupled = M + diag(d)
+forcing = h_inf × T_out × B_eff + d × x[k]  (compensation for N-side)
+```
+
+A per-step LU factorization of M_coupled is built once and reused for both
+the ideal HVAC solve and the CN step. The coupled LU is cached for the
+next-step ideal HVAC back-calculation.
 
 ### Ideal HVAC Capacity
 
 For zones configured with ideal HVAC, the solver back-calculates the input
-power needed to hold the setpoint after one state-space step:
+power needed to hold the setpoint after one CN step. Two paths:
 
-```
-y_target = C·A_d·x + (C·B_d[:,idx] + D[out,idx])·u[idx] + background
-```
+- **Coupled** (infiltration active): `solve_for_scalar_input_coupled()` uses
+  the per-step M_coupled LU factorization
+- **Uncoupled**: `solve_for_output_input()` uses the base M LU
 
-Rearranged: `u[idx] = (y_target − background) / coeff`
+Both solve a single linear equation for the HVAC input index that drives the
+zone output to the setpoint.
 
-Uses `last_u` (previous timestep) for the background estimate — one-step-stale
-duty cycle matching OCHRE behavior.
+`solve_ideal_capacity()` is called by equipment *before* `resolve()` builds the
+current-step inputs, using `last_u`, `last_coupling`, and `last_coupled_lu`
+(previous timestep). The estimate is therefore one-step stale — matching OCHRE
+behavior. Zero allocation: the coupled LU was cached at the end of the previous
+`resolve()` call.
 
 ### EnvelopeComponentGains
 
@@ -311,90 +383,22 @@ Accessible via `solver.component_gains()`.
 
 ---
 
-## Planned Improvements (THERMAL Tickets)
+## Source Files
 
-The following tickets track improvements to the thermal solver, ordered by
-dependency chain.
-
-### THERMAL-001: Dry Air Density for Infiltration
-
-Infiltration mass flow currently uses moist air density directly, overestimating
-by ~0.5–1%. Fix: divide by (1 + W) to get dry-air mass flow, since sensible and
-latent loads are formulated per kg dry air.
-
-### THERMAL-002: EnergyPlus 4-Component Exterior LWR
-
-Replace the current 2-component sky/ground LWR model with EnergyPlus's
-4-component formulation using linear view factors and a β split coefficient.
-Removes the `powf(1.5)` sky view factor exponent. Adds `beta: f64` to
-`ExteriorSurface`.
-
-### THERMAL-003: Pre-Refactor Cleanup
-
-Structural cleanup before the Crank-Nicolson refactor (all behavior-preserving):
-- Split `resolve_internal()` into phases
-- `matrix_exp()` returns `Result` instead of panicking
-- Configurable indoor zone (removes hardcoded `ZoneId(1)`)
-- Deduplicate LWR functions
-- Separate mutable surface temps from config
-- Depends on: THERMAL-002
-
-### THERMAL-004: Pre-Refactor Test Coverage
-
-Fill coverage gaps before the solver rewrite:
-- Multi-zone thermal coupling (2-zone wall heat transfer)
-- Interior LWR energy balance (4-surface zone)
-- 24h energy conservation (with and without HVAC)
-- Depends on: THERMAL-003
-
-### THERMAL-005: Crank-Nicolson Implicit Solver
-
-Replace the explicit `x[k+1] = A_d·x + B_d·u` step with an implicit
-Crank-Nicolson scheme that eliminates overshoot under large infiltration loads:
-
-```
-(I − dt/2·A_c)·x[k+1] = (I + dt/2·A_c)·x[k] + dt·B_c·u[k]
-```
-
-Pre-computes M = (I − dt/2·A_c) and its LU factorization at init. Zero-allocation
-`step_into()` uses pre-allocated work buffers. Removes `SolverMethod` enum —
-implicit-only.
-- Depends on: THERMAL-002, THERMAL-003, THERMAL-004
-
-### THERMAL-006: Analytical Validation
-
-Synthetic box tests against known analytical solutions:
-- 1R1C exponential decay, steady-state, solar step response
-- Extreme ACH stability (50 ACH — would blow up explicit solver)
-- Implicit vs explicit agreement for stable cases
-- Zero-allocation verification
-- Depends on: THERMAL-005
-
-### THERMAL-007: 48-Hour OCHRE Trace Comparison
-
-Per-timestep comparison against OCHRE reference output over 48 hours.
-Thresholds: zone temp < 0.1°C divergence for first 6h, cumulative < 0.5°C at
-48h.
-- Depends on: THERMAL-001, THERMAL-002, THERMAL-005
-
-### THERMAL-008: 7-Day Parity Benchmark
-
-Tighten OCHRE parity tolerances to ASHRAE 140-2023 levels:
-- HVAC heating: 15% (was 123%)
-- Schedule-driven: 2%
-- Performance guard: >30k steps/sec
-- 1h parity gate: all equipment within 5%
-- Depends on: THERMAL-007
-
-### Dependency Chain
-
-```
-THERMAL-001 (dry air density) ─────────────────────┐
-THERMAL-002 (4-component LWR) ──┬──────────────────┤
-                                ↓                   ↓
-THERMAL-003 (cleanup) ──→ THERMAL-004 (tests) ──→ THERMAL-005 (Crank-Nicolson)
-                                                    ↓
-                                               THERMAL-006 (analytical)
-                                                    ↓
-                                               THERMAL-007 (48h trace) ──→ THERMAL-008 (7-day parity)
-```
+| File | Purpose |
+|------|---------|
+| `hares-envelope/src/thermal_solver/mod.rs` | ThermalSolver struct, DomainSolver impl |
+| `hares-envelope/src/thermal_solver/config.rs` | Config types, EnvelopeComponentGains, wiring |
+| `hares-envelope/src/thermal_solver/stepping.rs` | resolve_internal(), semi-implicit CN step |
+| `hares-envelope/src/thermal_solver/ports.rs` | build_input_vector(): all input application |
+| `hares-envelope/src/thermal_solver/longwave.rs` | Exterior iterative + interior LWR application |
+| `hares-envelope/src/thermal_solver/solar.rs` | Window SHGC + IAM, opaque solar |
+| `hares-envelope/src/thermal_solver/infiltration.rs` | InfiltrationCoupling computation |
+| `hares-envelope/src/thermal_solver/initialization.rs` | Steady-state init from outdoor conditions |
+| `hares-envelope/src/boundary_rc.rs` | Building geometry → RC network |
+| `hares-envelope/src/rc_network.rs` | Kirchhoff A_c/B_ext matrix assembly |
+| `hares-envelope/src/state_space.rs` | Crank-Nicolson model, matrix_exp, stepping |
+| `hares-envelope/src/longwave_radiation.rs` | 4-component exterior LWR, interior linearized |
+| `hares-physics/src/infiltration.rs` | ASHRAE wind-stack, ELA, ACH, natural vent |
+| `hares-physics/src/solar.rs` | EnergyPlus glazing curves, Perez tilted irradiance |
+| `hares-physics/src/air_properties.rs` | Dry air density (ASHRAE HOF 2021) |

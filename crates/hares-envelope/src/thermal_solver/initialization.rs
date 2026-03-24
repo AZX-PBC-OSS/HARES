@@ -58,15 +58,12 @@ pub(crate) fn initialize_steady_state(
     // Discrete path (from_discrete): solve (I - A_d)·x = B_d·u with zone states pinned.
     //   Partitioned: (I - A_d_reduced)·x_reduced = B_d·u + A_d[:,j]·T_j for each fixed j.
     let use_continuous = model.a_c().is_some() && model.b_c().is_some();
-    let (mut a_reduced, mut b_rhs) = if use_continuous {
-        let a_c = model.a_c().unwrap();
-        let b_c = model.b_c().unwrap();
-        (a_c.clone(), b_c * &u)
-    } else {
-        // n_mat = A_d and b_eff = B_d only for from_discrete() models.
-        debug_assert!(model.a_c().is_none(), "discrete init path reached with a_c present");
-        (model.n_mat().clone(), model.b_eff() * &u)
-    };
+    let (mut a_reduced, mut b_rhs) =
+        if let (Some(a_c), Some(b_c)) = (model.a_c(), model.b_c()) {
+            (a_c.clone(), b_c * &u)
+        } else {
+            (model.n_mat().clone(), model.b_eff() * &u)
+        };
 
     // Add coupling from fixed zone states to RHS, then remove those rows/cols.
     for &(j, t_fixed) in &zone_fixes {

@@ -197,7 +197,8 @@ impl HvacEquipment {
                 part_load_ratio: load_fraction / cap_fracs[0],
             };
         }
-        if load_fraction >= *cap_fracs.last().unwrap() {
+        // SAFETY: cap_fracs is non-empty (early return above checks is_empty).
+        if load_fraction >= *cap_fracs.last().expect("cap_fracs non-empty") {
             return SpeedSelection {
                 speed_index: cap_fracs.len() - 1,
                 speed_frac: 0.0,

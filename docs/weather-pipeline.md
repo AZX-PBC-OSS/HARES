@@ -10,10 +10,11 @@ per-timestep environmental state to equipment and solvers.
 ```
 hares-io/src/
 ├── epw.rs              EPW file parser, sky temp, ground temp models
-└── weather.rs          WeatherTimeSeries storage, field access, resampling
+├── psm3.rs             NREL PSM3/NSRDB CSV parser (5/15/30/60-min native solar)
+└── weather.rs          WeatherTimeSeries, WeatherFormat dispatch, PCHIP resampling
 
 hares-core/src/
-└── environment.rs      EnvironmentManager: offset alignment, per-timestep state
+└── environment.rs      EnvironmentManager: offset alignment, per-timestep state, DST
 
 hares-physics/src/
 ├── solar.rs            Solar position (Spencer 1971), Perez tilted irradiance
@@ -23,6 +24,34 @@ hares-physics/src/
 hares-types/src/
 └── environment.rs      WeatherState, SurfaceIrradiance, ZoneState
 ```
+
+---
+
+## File Format Support
+
+HARES supports multiple weather file formats via a unified dispatch layer.
+
+### Unified Dispatch
+
+**Entry point**: `hares-io::weather::parse_weather(path)` — auto-detects format
+and dispatches to the appropriate parser.
+
+Detection logic (`detect_weather_format()`):
+- `.epw` extension → EPW parser
+- `.csv` extension → header sniffing:
+  - Line 1 starts with `Source` + ≥10 fields, line 3 has temporal + solar columns → **PSM3**
+  - Header contains `Dry Bulb Temperature` + `Global Horizontal Radiation` → **ResStock CSV**
+- Other extensions → descriptive error
+
+```rust
+pub enum WeatherFormat {
+    Epw,          // EnergyPlus Weather
+    Psm3,         // NREL NSRDB PSM3 (SAM format)
+    ResStockCsv,  // ResStock simplified CSV (AMY 2018, etc.)
+}
+```
+
+Dwelling construction uses the unified entry point: `parse_weather(&config.weather_path)`.
 
 ---
 
@@ -66,6 +95,46 @@ mm → m. Record count must be exactly 8760 (standard year) or 8784 (leap year).
 
 ---
 
+## PSM3 Parsing
+
+**Entry point**: `hares-io::psm3::parse_psm3()`
+
+Parses NREL's Physical Solar Model v3 (PSM3/NSRDB) CSV format, which provides
+native sub-hourly solar data at 5, 15, 30, or 60-minute intervals — eliminating
+interpolation artifacts for solar fields.
+
+### Key Differences from EPW
+
+| Aspect               | EPW                    | PSM3                           |
+|----------------------|------------------------|--------------------------------|
+| Native resolution    | Hourly (3600 s)        | 5/15/30/60 min (auto-detected) |
+| Solar data           | Period-average          | Period-average at native res   |
+| Infrared radiation   | Measured (field 12)     | Not available                  |
+| Sky temperature      | Stefan-Boltzmann from IR| Clark-Allen empirical model    |
+| Ground temperature   | EPW header or DOE-2     | DOE-2 from monthly dry-bulb   |
+| Pressure units       | Pa → kPa               | mbar → kPa (÷10)              |
+| Surface albedo       | Not in EPW              | Available per-timestep         |
+
+Record counts validated for the detected interval (e.g., 105120 records for
+5-minute data in a standard year).
+
+### Shared Helpers
+
+Sky temperature and ground temperature models are `pub(crate)` functions in
+`epw.rs`, shared by both parsers:
+- `clark_allen_sky_temp_c()` — empirical sky temp from dry-bulb and dew-point
+- `doe2_ground_temp_monthly()` — DOE-2 sinusoidal model from hourly dry-bulb
+- `doe2_ground_temp_from_monthly_avg()` — DOE-2 from pre-computed monthly means
+  (used by PSM3 via `compute_monthly_means_sub_hourly()`)
+
+### WeatherMeta
+
+Both parsers produce `WeatherMeta` with a `source_step_secs` field indicating
+the native timestep (3600 for EPW, 300/900/1800/3600 for PSM3). This controls
+resampling behavior — native-resolution data is not resampled unnecessarily.
+
+---
+
 ## Storage Format
 
 `WeatherTimeSeries` stores data column-major — one `Vec<f64>` per field.
@@ -75,15 +144,18 @@ Access is O(1) by field and timestep index:
 let temp = series.get(WeatherField::DryBulbC, timestep_idx);
 ```
 
-All fields are hourly after parse, starting Jan 1 00:00 (EPW hour-ending
-convention: hour 1 = 00:00–01:00 LST).
+After EPW parse, fields are hourly (8760/8784 entries). PSM3 data retains its
+native resolution. Both use the same column-major structure. Resampling (see
+below) converts to the simulation timestep before the run begins.
 
 ---
 
 ## Sub-Hourly Resampling
 
-`WeatherTimeSeries::resample(target_step_secs)` converts hourly data to
-sub-hourly resolution. Target step must divide 3600 evenly.
+`WeatherTimeSeries::resample(target_step_secs)` converts source data to the
+simulation timestep. Handles both upsampling (hourly EPW → 60s) and
+downsampling (5-min PSM3 → 15-min). Target step must divide 3600 evenly.
+No-op when source and target resolution match.
 
 | Field Type                   | Algorithm     | Rationale                              |
 |------------------------------|---------------|----------------------------------------|
@@ -98,9 +170,13 @@ sub-hourly resolution. Target step must divide 3600 evenly.
 | Accumulated depth            | Distribute    | `depth / factor` preserves total       |
 | (precipitation)              |               |                                        |
 
-**PCHIP**: Piecewise Cubic Hermite Interpolating Polynomial with Fritsch-Carlson
+**PCHIP** (implemented in `fritsch_carlson_slopes()` and `pchip_resample()`):
+Piecewise Cubic Hermite Interpolating Polynomial with Fritsch-Carlson
 monotonicity preservation (1980). Guarantees C¹ continuity, passes through
-original knots, and prevents overshoot in monotone regions.
+original knots, and prevents overshoot in monotone regions. Uses Hermite basis
+functions for evaluation. Linear fallback for 2-element input. Flat
+extrapolation at year boundaries (no cyclic wrap). NaN propagation through
+affected intervals.
 
 ---
 
@@ -198,6 +274,20 @@ Output: `Vec<SurfaceIrradiance>` with `direct_w_m2`, `diffuse_w_m2`,
 Index into schedule columns at `(current_step + schedule_offset) % len`.
 All columns extracted for the current row.
 
+**DST-aware indexing** (optional, behind `dst` cargo feature): When a civil
+timezone is configured via `EnvironmentManager::new(civil_timezone: Some("America/New_York"))`,
+schedule indexing converts simulation time to civil time using `chrono-tz` before
+computing the schedule index. This correctly handles:
+- Spring forward: civil time jumps, schedule index skips one hour
+- Fall back: civil time repeats, schedule index reuses one hour
+
+Weather indexing is **never** affected by DST — it stays on the fixed UTC offset,
+which is physically correct for outdoor conditions. Only occupancy/rate schedules
+that follow civil time use DST conversion.
+
+When the `dst` feature is not compiled, supplying a timezone returns
+`EnvironmentManagerError::DstNotEnabled`.
+
 ### Step 4: Zone State Feedback
 
 Zone temperatures and humidity ratios from the previous timestep's solver
@@ -230,52 +320,15 @@ The +6°F offset accounts for ground buffering above outdoor average.
 
 ---
 
-## Planned Improvements (WEATHER Tickets)
+## Source Files
 
-### WEATHER-001: PCHIP Sub-Hourly Interpolation
-
-Implement Fritsch-Carlson monotonicity-preserving PCHIP to replace zero-order
-hold for continuous weather fields. Defensive clamping for bounded fields.
-ZOH preserved for solar/wind; distribution for precipitation.
-
-### WEATHER-002: Interpolation Quality Tests
-
-Comprehensive test coverage for PCHIP at 60s, 300s, 900s timesteps: knot
-pass-through, C¹ continuity, monotonicity, physical bounds, edge cases, NaN
-propagation, year boundary behavior.
-
-### WEATHER-003: PSM3/NSRDB Parser
-
-Native support for NREL PSM3 CSV format (5/15/30/60-minute solar data).
-Extract shared helpers (Clark-Allen sky temp, DOE-2 ground temp) from `epw.rs`
-to `pub(crate)`. Add `source_step_secs` to `WeatherMeta`. Rewrite
-`resample()` to handle non-hourly source data (upsampling + downsampling).
-
-### WEATHER-004: PSM3 Parser Tests
-
-Test coverage for PSM3 parsing, unit conversions, resolution detection,
-resampling round-trips, and validation of out-of-range values.
-
-### WEATHER-005: Unified Weather Dispatch
-
-Single `parse_weather()` entry point with automatic format detection:
-- `.epw` → EPW parser
-- `.csv` → header sniffing for PSM3 (`Source`, `Year,Month,Day,...,GHI,DNI,DHI`)
-- `WeatherFormat` enum and `detect_weather_format()` function
-
-### WEATHER-006: DST-Aware Schedule Indexing
-
-Add optional `chrono-tz` dependency behind `dst` cargo feature. Schedule
-indexing converts simulation time to civil time for DST-aware lookup (spring
-forward skips, fall back repeats). Weather indexing stays on fixed UTC offset
-(physically correct).
-
-### Dependency Chain
-
-```
-WEATHER-001 (PCHIP interpolation) ──→ WEATHER-002 (interpolation tests)
-                                        ↓
-WEATHER-003 (PSM3 parser) ──→ WEATHER-004 (PSM3 tests) ──→ WEATHER-005 (unified dispatch)
-
-WEATHER-006 (DST schedules)  [independent]
-```
+| File | Purpose |
+|------|---------|
+| `hares-io/src/epw.rs` | EPW parser, Clark-Allen sky temp, DOE-2 ground temp |
+| `hares-io/src/psm3.rs` | PSM3/NSRDB parser, sub-hourly native solar |
+| `hares-io/src/weather.rs` | WeatherTimeSeries, WeatherFormat dispatch, PCHIP resampling |
+| `hares-core/src/environment.rs` | EnvironmentManager, offset alignment, DST schedule indexing |
+| `hares-physics/src/solar.rs` | Solar position (Spencer), Perez tilted irradiance |
+| `hares-physics/src/psychrometrics.rs` | Humidity ratio, wet-bulb, enthalpy |
+| `hares-physics/src/water_mains.rs` | Burch-Christensen mains water temperature |
+| `hares-types/src/environment.rs` | WeatherState, SurfaceIrradiance, ZoneState |
