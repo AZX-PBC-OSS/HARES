@@ -154,7 +154,6 @@ pub struct ScheduledLoad {
     /// Per-month scale factors [0..11] applied after load_fraction.
     // OCHRE ScheduledLoad.py:38-41: month_multipliers zeros schedule in specified months.
     // Used for seasonal equipment like ceiling fans (zero in winter months).
-    #[allow(dead_code)] // Parsing stub; applied in step() once seasonal logic is implemented
     month_multipliers: Option<[f64; 12]>,
     last_non_zero_power_kw: f64,
     last_non_zero_gas_w: f64,
@@ -339,7 +338,7 @@ impl Equipment for ScheduledLoad {
             self.telemetry.set("electric_kw", 0.0);
             self.telemetry.set("sensible_gain_w", 0.0);
             self.telemetry.set("latent_gain_w", 0.0);
-            self.telemetry.set("gas_consumption_w", 0.0);
+            self.telemetry.set("fuel_input_w", 0.0);
             return Ok(());
         }
 
@@ -350,7 +349,7 @@ impl Equipment for ScheduledLoad {
             self.telemetry.set("electric_kw", 0.0);
             self.telemetry.set("sensible_gain_w", 0.0);
             self.telemetry.set("latent_gain_w", 0.0);
-            self.telemetry.set("gas_consumption_w", 0.0);
+            self.telemetry.set("fuel_input_w", 0.0);
             return Ok(());
         }
 
@@ -439,7 +438,7 @@ impl Equipment for ScheduledLoad {
         self.telemetry.set("electric_kw", electric_power_kw);
         self.telemetry.set("sensible_gain_w", sensible_gain_w);
         self.telemetry.set("latent_gain_w", latent_gain_w);
-        self.telemetry.set("gas_consumption_w", gas_consumption_w);
+        self.telemetry.set("fuel_input_w", gas_consumption_w);
         Ok(())
     }
 
@@ -504,7 +503,7 @@ impl Equipment for ScheduledLoad {
             total_gain_source_w * self.latent_gain_fraction,
         );
         self.telemetry
-            .insert("gas_consumption_w", self.last_non_zero_gas_w);
+            .insert("fuel_input_w", self.last_non_zero_gas_w);
         Ok(())
     }
 
@@ -680,7 +679,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert("electric_kw", 0.0);
     telemetry.insert("sensible_gain_w", 0.0);
     telemetry.insert("latent_gain_w", 0.0);
-    telemetry.insert("gas_consumption_w", 0.0);
+    telemetry.insert("fuel_input_w", 0.0);
     telemetry
 }
 
@@ -702,7 +701,7 @@ fn scheduled_load_telemetry_fields() -> Vec<TelemetryField> {
             description: "Latent thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "gas_consumption_w".to_string(),
+            name: "fuel_input_w".to_string(),
             unit: "W".to_string(),
             description: "Gas fuel consumption rate converted to watts".to_string(),
         },
@@ -1528,7 +1527,7 @@ mod tests {
         assert!(names.contains(&"electric_kw"));
         assert!(names.contains(&"sensible_gain_w"));
         assert!(names.contains(&"latent_gain_w"));
-        assert!(names.contains(&"gas_consumption_w"));
+        assert!(names.contains(&"fuel_input_w"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Synthetic (BESTEST-style) dwelling construction from TOML config.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
@@ -26,6 +27,17 @@ pub(crate) struct SyntheticTomlConfig {
     pub(crate) overrides: Option<Value>,
     #[serde(default)]
     pub(crate) output: SyntheticOutputConfig,
+    #[serde(default)]
+    pub(crate) boundaries: Option<Vec<SyntheticBoundaryConfig>>,
+    #[serde(default)]
+    pub(crate) windows: Option<Vec<SyntheticWindowConfig>>,
+    #[serde(default)]
+    pub(crate) setpoints: Option<SyntheticSetpointConfig>,
+    #[serde(default)]
+    pub(crate) infiltration: Option<SyntheticInfiltrationConfig>,
+    #[serde(default)]
+    #[allow(dead_code)] // parsed from TOML, wired in future ticket
+    pub(crate) internal_gains_w: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,6 +79,8 @@ pub(crate) struct SyntheticWeatherConfig {
     pub(crate) rel_humidity_pct: f64,
     #[serde(default = "default_pressure_kpa")]
     pub(crate) pressure_kpa: f64,
+    #[serde(default)]
+    pub(crate) epw_path: Option<String>,
 }
 
 impl Default for SyntheticWeatherConfig {
@@ -76,6 +90,7 @@ impl Default for SyntheticWeatherConfig {
             dew_point_c: default_dew_point_c(),
             rel_humidity_pct: default_rel_humidity_pct(),
             pressure_kpa: default_pressure_kpa(),
+            epw_path: None,
         }
     }
 }
@@ -120,6 +135,71 @@ impl Default for SyntheticOutputConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SyntheticBoundaryConfig {
+    pub(crate) id: String,
+    pub(crate) boundary_type: String,
+    pub(crate) area_m2: f64,
+    #[serde(default)]
+    pub(crate) azimuth_deg: Option<f64>,
+    #[serde(default)]
+    pub(crate) tilt_deg: Option<f64>,
+    #[serde(default)]
+    pub(crate) solar_absorptance: Option<f64>,
+    #[serde(default)]
+    pub(crate) emittance: Option<f64>,
+    #[serde(default = "default_interior_zone")]
+    pub(crate) interior_zone: String,
+    #[serde(default = "default_exterior_zone")]
+    pub(crate) exterior_zone: String,
+    #[serde(default)]
+    pub(crate) material_layers: Vec<SyntheticMaterialLayer>,
+    #[serde(default)]
+    pub(crate) r_value_m2_k_w: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SyntheticMaterialLayer {
+    pub(crate) thickness_m: f64,
+    pub(crate) conductivity_w_m_k: f64,
+    #[serde(default)]
+    pub(crate) density_kg_m3: f64,
+    #[serde(default)]
+    pub(crate) specific_heat_j_kg_k: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SyntheticWindowConfig {
+    pub(crate) id: String,
+    pub(crate) area_m2: f64,
+    #[serde(default)]
+    pub(crate) azimuth_deg: Option<f64>,
+    pub(crate) u_factor_w_m2_k: f64,
+    pub(crate) shgc: f64,
+    #[serde(default)]
+    pub(crate) attached_to_wall_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SyntheticSetpointConfig {
+    pub(crate) heating_c: f64,
+    pub(crate) cooling_c: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SyntheticInfiltrationConfig {
+    /// Continuous ACH (not ACH50).
+    pub(crate) ach: f64,
+}
+
+fn default_interior_zone() -> String {
+    "Conditioned".to_string()
+}
+
+fn default_exterior_zone() -> String {
+    "Outdoor".to_string()
+}
+
 fn default_wall_area_m2() -> f64 {
     120.0
 }
@@ -148,8 +228,35 @@ fn default_output_chunk_size() -> usize {
     10_000
 }
 
+fn parse_zone_type(s: &str) -> hares_io::hpxml::ZoneType {
+    use hares_io::hpxml::ZoneType;
+    match s {
+        "Conditioned" => ZoneType::Conditioned,
+        "Outdoor" => ZoneType::Outdoor,
+        "Ground" => ZoneType::Ground,
+        "Attic" => ZoneType::Attic,
+        "Garage" => ZoneType::Garage,
+        "Foundation" => ZoneType::Foundation,
+        other => ZoneType::Other(other.to_string()),
+    }
+}
+
+fn parse_boundary_type(s: &str) -> hares_io::hpxml::BoundaryType {
+    use hares_io::hpxml::BoundaryType;
+    match s {
+        "Wall" => BoundaryType::Wall,
+        "Roof" => BoundaryType::Roof,
+        "Floor" => BoundaryType::Floor,
+        "Door" => BoundaryType::Door,
+        "FoundationWall" => BoundaryType::FoundationWall,
+        "RimJoist" => BoundaryType::RimJoist,
+        "Slab" => BoundaryType::Slab,
+        other => BoundaryType::Other(other.to_string()),
+    }
+}
+
 pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
-    use hares_io::hpxml::{Boundary, BoundaryType, Site, Zone, ZoneType};
+    use hares_io::hpxml::{Boundary, BoundaryType, MaterialLayer, Site, Window, Zone, ZoneType};
 
     let heating_capacity = config.hvac.heating_capacity_kbtu_h.unwrap_or(30.0);
     let floor_area = if config.geometry.floor_area_m2 > 0.0 {
@@ -204,25 +311,59 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         }],
     };
 
-    Building {
-        site: Site {
-            elevation_m: Some(0.0),
-            site_type: None,
-            shielding_of_home: None,
-            latitude_deg: Some(39.0),
-            longitude_deg: Some(-105.0),
-        },
-        zones: vec![Zone {
-            zone_type: ZoneType::Conditioned,
-            floor_area_m2: Some(floor_area),
-            volume_m3: Some(config.geometry.zone_volume_m3),
-            attached_wall_ids: vec!["wall-1".to_string()],
-            duct_systems: Vec::new(),
-            vented: false,
-            ventilation_ach: None,
-            ventilation_sla: None,
-        }],
-        boundaries: vec![Boundary {
+    let boundaries: Vec<Boundary> = if let Some(boundary_configs) = &config.boundaries {
+        boundary_configs
+            .iter()
+            .map(|bc| {
+                let layers: Vec<MaterialLayer> = bc
+                    .material_layers
+                    .iter()
+                    .map(|ml| MaterialLayer {
+                        thickness_m: ml.thickness_m,
+                        conductivity_w_m_k: ml.conductivity_w_m_k,
+                        density_kg_m3: ml.density_kg_m3,
+                        specific_heat_j_kg_k: ml.specific_heat_j_kg_k,
+                        area_m2: bc.area_m2,
+                    })
+                    .collect();
+
+                let r_value = bc.r_value_m2_k_w.or_else(|| {
+                    if layers.is_empty() {
+                        None
+                    } else {
+                        let total_r: f64 = layers
+                            .iter()
+                            .map(|l| l.thickness_m / l.conductivity_w_m_k)
+                            .sum();
+                        Some(total_r)
+                    }
+                });
+
+                Boundary {
+                    id: bc.id.clone(),
+                    boundary_type: parse_boundary_type(&bc.boundary_type),
+                    area_m2: bc.area_m2,
+                    azimuth_deg: bc.azimuth_deg,
+                    assembly_r_value_m2_k_w: r_value,
+                    r_value_layers_m2_k_w: r_value.map(|r| vec![r]).unwrap_or_default(),
+                    interior_zone: Some(parse_zone_type(&bc.interior_zone)),
+                    exterior_zone: Some(parse_zone_type(&bc.exterior_zone)),
+                    material_layers: layers,
+                    construction_type: None,
+                    finish_type: None,
+                    insulation_details: None,
+                    has_radiant_barrier: false,
+                    solar_absorptance: bc.solar_absorptance,
+                    emittance: bc.emittance,
+                    tilt_deg: bc.tilt_deg,
+                    framing_factor: None,
+                    lut_boundary_name: None,
+                    floor_or_ceiling: None,
+                }
+            })
+            .collect()
+    } else {
+        vec![Boundary {
             id: "wall-1".to_string(),
             boundary_type: BoundaryType::Wall,
             area_m2: config.geometry.wall_area_m2,
@@ -241,17 +382,76 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
             tilt_deg: Some(90.0),
             framing_factor: None,
             lut_boundary_name: None,
+            floor_or_ceiling: None,
+        }]
+    };
+
+    let windows: Vec<Window> = config
+        .windows
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|wc| Window {
+            id: wc.id.clone(),
+            area_m2: wc.area_m2,
+            azimuth_deg: wc.azimuth_deg,
+            u_factor_w_m2_k: Some(wc.u_factor_w_m2_k),
+            shgc: Some(wc.shgc),
+            interior_shading_fraction: 1.0,
+            winter_shading_fraction: 1.0,
+            fraction_operable: 0.0,
+            frame_type: None,
+            attached_to_wall_id: wc.attached_to_wall_id.clone(),
+        })
+        .collect();
+
+    // Build constant 24-hour setpoint vectors when setpoints are configured.
+    let (heating_weekday, cooling_weekday) = if let Some(sp) = &config.setpoints {
+        (
+            Some(vec![sp.heating_c; 24]),
+            Some(vec![sp.cooling_c; 24]),
+        )
+    } else {
+        (None, None)
+    };
+
+    // Approximate continuous ACH → ACH50 using a factor of 20 (standard blower-door
+    // assumption: infiltration at 50 Pa ≈ 20× natural infiltration).
+    let infiltration_ach50 = config.infiltration.as_ref().map(|inf| inf.ach * 20.0);
+
+    let wall_ids: Vec<String> = boundaries.iter().map(|b| b.id.clone()).collect();
+
+    Building {
+        site: Site {
+            elevation_m: Some(1609.0),
+            site_type: None,
+            shielding_of_home: None,
+            latitude_deg: Some(39.76),
+            longitude_deg: Some(-104.86),
+        },
+        zones: vec![Zone {
+            zone_type: ZoneType::Conditioned,
+            floor_area_m2: Some(floor_area),
+            volume_m3: Some(config.geometry.zone_volume_m3),
+            attached_wall_ids: wall_ids,
+            duct_systems: Vec::new(),
+            vented: false,
+            ventilation_ach: None,
+            ventilation_sla: None,
         }],
-        windows: Vec::new(),
-        infiltration_ach50: None,
+        boundaries,
+        windows,
+        infiltration_ach50,
+        infiltration_cfm50: None,
+        infiltration_ela_cm2: None,
         hvac_capacity_w: Some(heating_capacity),
         seer2: None,
         hspf2: None,
         water_heater_setpoint_c: None,
-        heating_weekday_setpoints_c: None,
-        heating_weekend_setpoints_c: None,
-        cooling_weekday_setpoints_c: None,
-        cooling_weekend_setpoints_c: None,
+        heating_weekday_setpoints_c: heating_weekday.clone(),
+        heating_weekend_setpoints_c: heating_weekday,
+        cooling_weekday_setpoints_c: cooling_weekday.clone(),
+        cooling_weekend_setpoints_c: cooling_weekday,
         battery_round_trip_efficiency: None,
         pv_tilt_deg: None,
         conditioned_volume_m3: Some(config.geometry.zone_volume_m3),
@@ -260,21 +460,32 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         floors_above_grade: None,
         has_flue_or_chimney: None,
         foundation_name: None,
+        residential_facility_type: None,
         details_xml,
     }
 }
 
-pub(crate) fn build_synthetic_weather(config: &SyntheticTomlConfig) -> WeatherTimeSeries {
+pub(crate) fn build_synthetic_weather(
+    config: &SyntheticTomlConfig,
+    toml_path: &Path,
+) -> super::Result<WeatherTimeSeries> {
+    if let Some(epw_rel) = &config.weather.epw_path {
+        let base_dir = toml_path.parent().unwrap_or(Path::new("."));
+        let epw_path = base_dir.join(epw_rel);
+        return hares_io::parse_epw(&epw_path)
+            .map_err(|err| hares_types::HaresError::Io(format!("EPW load failed: {err}")));
+    }
+
     let n = 8760usize;
     let meta = WeatherMeta {
         location: "Synthetic".to_string(),
-        latitude: 39.0,
-        longitude: -105.0,
+        latitude: 39.76,
+        longitude: -104.86,
         timezone_offset_h: 0.0,
         elevation_m: 0.0,
         source_step_secs: 3600,
     };
-    WeatherTimeSeries {
+    Ok(WeatherTimeSeries {
         meta,
         dry_bulb_c: vec![config.weather.outdoor_temp_c; n],
         dew_point_c: vec![config.weather.dew_point_c; n],
@@ -291,7 +502,7 @@ pub(crate) fn build_synthetic_weather(config: &SyntheticTomlConfig) -> WeatherTi
         ground_temp_c: vec![config.weather.outdoor_temp_c; n],
         liquid_precip_m: vec![0.0; n],
         surface_albedo: None,
-    }
+    })
 }
 
 pub(crate) fn build_synthetic_schedule(config: &SyntheticTomlConfig) -> Result<ScheduleTimeSeries> {

@@ -84,6 +84,49 @@ pub struct GasEnergyMetrics {
     pub total_kwh_equivalent: f64,
 }
 
+/// Envelope component loads [kWh] over the simulation period.
+///
+/// These represent the thermal loads imposed on the conditioned zone by each
+/// envelope component. Positive = heat gain to zone, negative = heat loss.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EnvelopeComponentLoadsKwh {
+    /// Window transmitted + absorbed-inward solar gain.
+    pub window_solar_kwh: f64,
+    /// Opaque surface solar + exterior LWR.
+    pub opaque_solar_lwr_kwh: f64,
+    /// Interior longwave radiation exchange.
+    pub interior_lwr_kwh: f64,
+    /// Infiltration sensible load.
+    pub infiltration_kwh: f64,
+    /// Ventilation sensible load.
+    pub ventilation_kwh: f64,
+    /// HVAC heating delivered to zone.
+    pub hvac_heating_kwh: f64,
+    /// HVAC cooling delivered to zone.
+    pub hvac_cooling_kwh: f64,
+    /// Internal gains (occupants, equipment, lighting).
+    pub internal_gains_kwh: f64,
+    /// Duct distribution losses to zone.
+    pub duct_loss_kwh: f64,
+}
+
+/// Per-equipment efficiency metrics.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EfficiencyMetrics {
+    /// HVAC heating COP: total thermal output / total electrical input.
+    /// `None` if no heating occurred.
+    pub hvac_heating_cop: Option<f64>,
+    /// HVAC cooling COP: total cooling delivered / total electrical input.
+    /// `None` if no cooling occurred.
+    pub hvac_cooling_cop: Option<f64>,
+    /// Water heater COP: total delivered energy / total input energy.
+    /// `None` if no water heating occurred.
+    pub water_heater_cop: Option<f64>,
+    /// Battery round-trip efficiency: energy_out / energy_in.
+    /// `None` if no battery cycling occurred.
+    pub battery_round_trip_efficiency: Option<f64>,
+}
+
 /// Final simulation metrics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimulationMetrics {
@@ -93,6 +136,10 @@ pub struct SimulationMetrics {
     pub unmet_load_hours: Option<f64>,
     pub renewable_energy_fraction: Option<f64>,
     pub grid_interaction_metrics: GridInteractionMetrics,
+    /// Envelope component loads. `None` if component gain columns not present.
+    pub envelope_loads_kwh: Option<EnvelopeComponentLoadsKwh>,
+    /// Per-equipment efficiency metrics. Always present (fields are Option).
+    pub efficiency: EfficiencyMetrics,
 }
 
 /// Extended metrics returned by [`MetricsCalculator::finish`], including gas tracking.
@@ -233,6 +280,24 @@ pub struct MetricsCalculator {
     setpoints: Option<SetpointInputs>,
     hvac_capacity_pairs: Vec<(usize, usize)>,
 
+    // Envelope component gain column indices (optional — verbosity >= 6)
+    window_solar_w_idx: Option<usize>,
+    infiltration_w_idx: Option<usize>,
+    interior_lwr_w_idx: Option<usize>,
+    internal_gains_w_idx: Option<usize>,
+    opaque_solar_lwr_w_idx: Option<usize>,
+    forced_ventilation_w_idx: Option<usize>,
+    natural_ventilation_w_idx: Option<usize>,
+    duct_loss_w_idx: Option<usize>,
+    // HVAC thermal delivered columns (verbosity >= 4)
+    hvac_heating_delivered_w_idx: Option<usize>,
+    hvac_cooling_delivered_w_idx: Option<usize>,
+    // HVAC electric power columns (discovered from end-use naming)
+    hvac_heating_kw_idx: Option<usize>,
+    hvac_cooling_kw_idx: Option<usize>,
+    // Battery power column
+    battery_kw_idx: Option<usize>,
+
     total_electric_energy_kwh: f64,
     total_gas_energy_therms: f64,
     total_consumption_kwh: f64,
@@ -244,6 +309,24 @@ pub struct MetricsCalculator {
     comfort_step_count: f64,
     unmet_step_count: f64,
     rolling_peak: RollingPeakBuffer,
+
+    // Envelope component load accumulators [W·h → kWh at finish]
+    envelope_window_solar_wh: f64,
+    envelope_opaque_solar_lwr_wh: f64,
+    envelope_interior_lwr_wh: f64,
+    envelope_infiltration_wh: f64,
+    envelope_ventilation_wh: f64,
+    envelope_hvac_heating_wh: f64,
+    envelope_hvac_cooling_wh: f64,
+    envelope_internal_gains_wh: f64,
+    envelope_duct_loss_wh: f64,
+    has_envelope_columns: bool,
+
+    // Efficiency accumulators
+    hvac_heating_electric_wh: f64,
+    hvac_cooling_electric_wh: f64,
+    battery_energy_in_kwh: f64,
+    battery_energy_out_kwh: f64,
 }
 
 #[derive(Debug)]
@@ -282,6 +365,38 @@ impl MetricsCalculator {
         let setpoints = discover_setpoint_inputs(schema, config)?;
         let hvac_capacity_pairs = discover_hvac_capacity_pairs(schema)?;
 
+        // Discover optional envelope component gain columns (verbosity >= 6).
+        let window_solar_w_idx =
+            optional_float64_column(schema, &["Window Transmitted Solar Gain (W)"])?;
+        let infiltration_w_idx =
+            optional_float64_column(schema, &["Infiltration Heat Gain - Indoor (W)"])?;
+        let interior_lwr_w_idx =
+            optional_float64_column(schema, &["Radiation Heat Gain - Indoor (W)"])?;
+        let internal_gains_w_idx =
+            optional_float64_column(schema, &["Internal Heat Gain - Indoor (W)"])?;
+        let opaque_solar_lwr_w_idx =
+            optional_float64_column(schema, &["Opaque Surface Heat Gain - Indoor (W)"])?;
+        let forced_ventilation_w_idx =
+            optional_float64_column(schema, &["Forced Ventilation Heat Gain - Indoor (W)"])?;
+        let natural_ventilation_w_idx =
+            optional_float64_column(schema, &["Natural Ventilation Heat Gain - Indoor (W)"])?;
+        let duct_loss_w_idx =
+            optional_float64_column(schema, &["Duct Loss Heat Gain - Indoor (W)"])?;
+
+        // Discover HVAC thermal delivered columns (verbosity >= 4).
+        let hvac_heating_delivered_w_idx =
+            optional_float64_column(schema, &["HVAC Heating Delivered (W)"])?;
+        let hvac_cooling_delivered_w_idx =
+            optional_float64_column(schema, &["HVAC Cooling Delivered (W)"])?;
+
+        // Discover HVAC electric power and battery columns from end-use naming.
+        let hvac_heating_kw_idx =
+            optional_float64_column(schema, &["HVAC Heating Electric Power (kW)"])?;
+        let hvac_cooling_kw_idx =
+            optional_float64_column(schema, &["HVAC Cooling Electric Power (kW)"])?;
+        let battery_kw_idx =
+            optional_float64_column(schema, &["Battery Electric Power (kW)"])?;
+
         let timestep_h = f64::from(time_res_secs) / 3600.0;
         let energy_by_end_use = end_use_columns
             .iter()
@@ -302,6 +417,19 @@ impl MetricsCalculator {
             end_use_columns,
             setpoints,
             hvac_capacity_pairs,
+            window_solar_w_idx,
+            infiltration_w_idx,
+            interior_lwr_w_idx,
+            internal_gains_w_idx,
+            opaque_solar_lwr_w_idx,
+            forced_ventilation_w_idx,
+            natural_ventilation_w_idx,
+            duct_loss_w_idx,
+            hvac_heating_delivered_w_idx,
+            hvac_cooling_delivered_w_idx,
+            hvac_heating_kw_idx,
+            hvac_cooling_kw_idx,
+            battery_kw_idx,
             total_electric_energy_kwh: 0.0,
             total_gas_energy_therms: 0.0,
             total_consumption_kwh: 0.0,
@@ -313,6 +441,29 @@ impl MetricsCalculator {
             comfort_step_count: 0.0,
             unmet_step_count: 0.0,
             rolling_peak,
+            envelope_window_solar_wh: 0.0,
+            envelope_opaque_solar_lwr_wh: 0.0,
+            envelope_interior_lwr_wh: 0.0,
+            envelope_infiltration_wh: 0.0,
+            envelope_ventilation_wh: 0.0,
+            envelope_hvac_heating_wh: 0.0,
+            envelope_hvac_cooling_wh: 0.0,
+            envelope_internal_gains_wh: 0.0,
+            envelope_duct_loss_wh: 0.0,
+            has_envelope_columns: window_solar_w_idx.is_some()
+                || infiltration_w_idx.is_some()
+                || interior_lwr_w_idx.is_some()
+                || internal_gains_w_idx.is_some()
+                || opaque_solar_lwr_w_idx.is_some()
+                || forced_ventilation_w_idx.is_some()
+                || natural_ventilation_w_idx.is_some()
+                || duct_loss_w_idx.is_some()
+                || hvac_heating_delivered_w_idx.is_some()
+                || hvac_cooling_delivered_w_idx.is_some(),
+            hvac_heating_electric_wh: 0.0,
+            hvac_cooling_electric_wh: 0.0,
+            battery_energy_in_kwh: 0.0,
+            battery_energy_out_kwh: 0.0,
         })
     }
 
@@ -444,6 +595,87 @@ impl MetricsCalculator {
                     self.unmet_step_count += 1.0;
                 }
             }
+
+            // Envelope component loads [W → Wh via timestep_h].
+            if let Some(idx) = self.window_solar_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_window_solar_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.infiltration_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_infiltration_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.interior_lwr_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_interior_lwr_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.internal_gains_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_internal_gains_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.opaque_solar_lwr_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_opaque_solar_lwr_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.forced_ventilation_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_ventilation_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.natural_ventilation_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_ventilation_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.duct_loss_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_duct_loss_wh += v * self.timestep_h;
+                }
+            }
+
+            // HVAC thermal delivered accumulation for COP and envelope loads.
+            if let Some(idx) = self.hvac_heating_delivered_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_hvac_heating_wh += v * self.timestep_h;
+                }
+            }
+            if let Some(idx) = self.hvac_cooling_delivered_w_idx {
+                if let Some(v) = value_at(as_f64_array(batch, idx), row) {
+                    self.envelope_hvac_cooling_wh += v * self.timestep_h;
+                }
+            }
+
+            // HVAC electric power accumulation for COP.
+            if let Some(idx) = self.hvac_heating_kw_idx {
+                if let Some(kw) = value_at(as_f64_array(batch, idx), row) {
+                    if kw > 0.0 {
+                        self.hvac_heating_electric_wh += kw * 1000.0 * self.timestep_h;
+                    }
+                }
+            }
+            if let Some(idx) = self.hvac_cooling_kw_idx {
+                if let Some(kw) = value_at(as_f64_array(batch, idx), row) {
+                    if kw > 0.0 {
+                        self.hvac_cooling_electric_wh += kw * 1000.0 * self.timestep_h;
+                    }
+                }
+            }
+
+            // Battery energy tracking for round-trip efficiency.
+            if let Some(idx) = self.battery_kw_idx {
+                if let Some(kw) = value_at(as_f64_array(batch, idx), row) {
+                    if kw > 0.0 {
+                        self.battery_energy_in_kwh += kw * self.timestep_h;
+                    } else if kw < 0.0 {
+                        self.battery_energy_out_kwh += kw.abs() * self.timestep_h;
+                    }
+                }
+            }
         }
     }
 
@@ -495,6 +727,42 @@ impl MetricsCalculator {
                 grid_interaction_metrics: GridInteractionMetrics {
                     peak_import_kw: self.peak_import_kw.max(0.0),
                     peak_export_kw: self.peak_export_kw.max(0.0),
+                },
+                envelope_loads_kwh: if self.has_envelope_columns {
+                    Some(EnvelopeComponentLoadsKwh {
+                        window_solar_kwh: self.envelope_window_solar_wh / 1000.0,
+                        opaque_solar_lwr_kwh: self.envelope_opaque_solar_lwr_wh / 1000.0,
+                        interior_lwr_kwh: self.envelope_interior_lwr_wh / 1000.0,
+                        infiltration_kwh: self.envelope_infiltration_wh / 1000.0,
+                        ventilation_kwh: self.envelope_ventilation_wh / 1000.0,
+                        hvac_heating_kwh: self.envelope_hvac_heating_wh / 1000.0,
+                        hvac_cooling_kwh: self.envelope_hvac_cooling_wh / 1000.0,
+                        internal_gains_kwh: self.envelope_internal_gains_wh / 1000.0,
+                        duct_loss_kwh: self.envelope_duct_loss_wh / 1000.0,
+                    })
+                } else {
+                    None
+                },
+                efficiency: EfficiencyMetrics {
+                    hvac_heating_cop: if self.hvac_heating_electric_wh > EPSILON {
+                        // Thermal output from envelope gains; electric input from telemetry column.
+                        let thermal = self.envelope_hvac_heating_wh.max(0.0);
+                        Some(thermal / self.hvac_heating_electric_wh)
+                    } else {
+                        None
+                    },
+                    hvac_cooling_cop: if self.hvac_cooling_electric_wh > EPSILON {
+                        let thermal = self.envelope_hvac_cooling_wh.abs();
+                        Some(thermal / self.hvac_cooling_electric_wh)
+                    } else {
+                        None
+                    },
+                    water_heater_cop: None, // requires WH-specific telemetry columns
+                    battery_round_trip_efficiency: if self.battery_energy_in_kwh > EPSILON {
+                        Some(self.battery_energy_out_kwh / self.battery_energy_in_kwh)
+                    } else {
+                        None
+                    },
                 },
             },
             gas_energy,
@@ -993,5 +1261,156 @@ mod tests {
             Some(1.0),
             "should detect capacity saturation at high wattage"
         );
+    }
+
+    #[test]
+    fn hvac_heating_cop_computed_from_delivered_and_electric() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating Electric Power (kW)",
+            "HVAC Heating Delivered (W)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // 10 kW thermal delivery, 2 kW electric → COP = 10000 Wh / 2000 Wh = 5.0
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![2.0, 2.0]),
+            ("HVAC Heating Electric Power (kW)", vec![2.0, 2.0]),
+            ("HVAC Heating Delivered (W)", vec![10_000.0, 10_000.0]),
+        ]));
+        let metrics = calc.finish();
+
+        let cop = metrics.metrics.efficiency.hvac_heating_cop.expect("COP should be present");
+        assert!((cop - 5.0).abs() < 1e-9, "heating COP should be 5.0, got {cop}");
+    }
+
+    #[test]
+    fn hvac_cooling_cop_uses_abs_of_negative_delivery() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Cooling Electric Power (kW)",
+            "HVAC Cooling Delivered (W)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // -8000 W cooling (negative = heat removal), 2 kW electric → COP = 8000/2000 = 4.0
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![2.0]),
+            ("HVAC Cooling Electric Power (kW)", vec![2.0]),
+            ("HVAC Cooling Delivered (W)", vec![-8_000.0]),
+        ]));
+        let metrics = calc.finish();
+
+        let cop = metrics.metrics.efficiency.hvac_cooling_cop.expect("COP should be present");
+        assert!((cop - 4.0).abs() < 1e-9, "cooling COP should be 4.0, got {cop}");
+    }
+
+    #[test]
+    fn cop_none_when_no_electric_draw() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating Delivered (W)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![0.0]),
+            ("HVAC Heating Delivered (W)", vec![5000.0]),
+        ]));
+        let metrics = calc.finish();
+
+        assert!(metrics.metrics.efficiency.hvac_heating_cop.is_none());
+    }
+
+    #[test]
+    fn battery_round_trip_efficiency_computed() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Battery Electric Power (kW)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // 10 kWh in, 9 kWh out → 90% round trip
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![10.0, -9.0]),
+            ("Battery Electric Power (kW)", vec![10.0, -9.0]),
+        ]));
+        let metrics = calc.finish();
+
+        let rte = metrics.metrics.efficiency.battery_round_trip_efficiency
+            .expect("RTE should be present");
+        assert!((rte - 0.9).abs() < 1e-9, "RTE should be 0.9, got {rte}");
+    }
+
+    #[test]
+    fn ventilation_accumulates_forced_and_natural() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Forced Ventilation Heat Gain - Indoor (W)",
+            "Natural Ventilation Heat Gain - Indoor (W)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        // 500 W forced + 300 W natural = 800 W → 800 Wh → 0.8 kWh for 1 hour
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
+            ("Forced Ventilation Heat Gain - Indoor (W)", vec![500.0]),
+            ("Natural Ventilation Heat Gain - Indoor (W)", vec![300.0]),
+        ]));
+        let metrics = calc.finish();
+
+        let loads = metrics.metrics.envelope_loads_kwh.expect("envelope loads present");
+        assert!((loads.ventilation_kwh - 0.8).abs() < 1e-9,
+            "ventilation should be 0.8 kWh, got {}", loads.ventilation_kwh);
+    }
+
+    #[test]
+    fn envelope_loads_include_all_components() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "Window Transmitted Solar Gain (W)",
+            "Opaque Surface Heat Gain - Indoor (W)",
+            "Radiation Heat Gain - Indoor (W)",
+            "Infiltration Heat Gain - Indoor (W)",
+            "Forced Ventilation Heat Gain - Indoor (W)",
+            "Internal Heat Gain - Indoor (W)",
+            "Duct Loss Heat Gain - Indoor (W)",
+            "HVAC Heating Delivered (W)",
+            "HVAC Cooling Delivered (W)",
+        ]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+
+        calc.accumulate(&build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
+            ("Window Transmitted Solar Gain (W)", vec![1000.0]),
+            ("Opaque Surface Heat Gain - Indoor (W)", vec![200.0]),
+            ("Radiation Heat Gain - Indoor (W)", vec![50.0]),
+            ("Infiltration Heat Gain - Indoor (W)", vec![-100.0]),
+            ("Forced Ventilation Heat Gain - Indoor (W)", vec![-50.0]),
+            ("Internal Heat Gain - Indoor (W)", vec![300.0]),
+            ("Duct Loss Heat Gain - Indoor (W)", vec![75.0]),
+            ("HVAC Heating Delivered (W)", vec![5000.0]),
+            ("HVAC Cooling Delivered (W)", vec![-3000.0]),
+        ]));
+        let metrics = calc.finish();
+        let loads = metrics.metrics.envelope_loads_kwh.expect("envelope loads present");
+
+        assert!((loads.window_solar_kwh - 1.0).abs() < 1e-9);
+        assert!((loads.opaque_solar_lwr_kwh - 0.2).abs() < 1e-9);
+        assert!((loads.interior_lwr_kwh - 0.05).abs() < 1e-9);
+        assert!((loads.infiltration_kwh - (-0.1)).abs() < 1e-9);
+        assert!((loads.ventilation_kwh - (-0.05)).abs() < 1e-9);
+        assert!((loads.internal_gains_kwh - 0.3).abs() < 1e-9);
+        assert!((loads.duct_loss_kwh - 0.075).abs() < 1e-9);
+        assert!((loads.hvac_heating_kwh - 5.0).abs() < 1e-9);
+        assert!((loads.hvac_cooling_kwh - (-3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn envelope_loads_none_without_any_envelope_columns() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        calc.accumulate(&build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0])]));
+        let metrics = calc.finish();
+        assert!(metrics.metrics.envelope_loads_kwh.is_none());
     }
 }

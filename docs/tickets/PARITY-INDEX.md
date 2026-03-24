@@ -63,7 +63,7 @@ Depend on Phase 1 outputs.
 |---|-------|-----|-------|------------|
 | [017](PARITY-017.md) | HPWH wet-bulb COP input | High-9 | hares-equipment | DONE (verified, already implemented) |
 | [018](PARITY-018.md) | Solar distribution to interior surfaces | Critical-3 | hares-envelope | DONE |
-| [019](PARITY-019.md) | Eliminate hot-path allocations in thermal solver | Quality | hares-envelope, hares-core | 001 |
+| [019](PARITY-019.md) | Eliminate hot-path allocations in thermal solver | Quality | hares-envelope, hares-core | DONE |
 
 ### Phase 3: Validation (020–021)
 
@@ -71,7 +71,7 @@ Depend on all physics being in place.
 
 | # | Title | Gap | Scope | Depends On |
 |---|-------|-----|-------|------------|
-| [020](PARITY-020.md) | Output metrics expansion (25+ metrics) | High-12 | hares-io, hares-core | 015, 016, 018 |
+| [020](PARITY-020.md) | Output metrics expansion (25+ metrics) | High-12 | hares-io, hares-core | DONE |
 | [021](PARITY-021.md) | BESTEST validation harness (ASHRAE 140) | Medium-25 | tests | 014, 015, 016, 018, 020 |
 
 ## Dependency Graph

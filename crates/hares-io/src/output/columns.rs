@@ -125,6 +125,9 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
                 true,
             ));
         }
+        // HVAC thermal delivery columns (OCHRE convention, verbosity 4).
+        fields.push(Field::new("HVAC Heating Delivered (W)", DataType::Float64, true));
+        fields.push(Field::new("HVAC Cooling Delivered (W)", DataType::Float64, true));
     }
 
     if verbosity >= 5 {
@@ -163,6 +166,8 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
             "Natural Ventilation Heat Gain - Indoor (W)",
             "Internal Heat Gain - Indoor (W)",
             "Radiation Heat Gain - Indoor (W)",
+            "Opaque Surface Heat Gain - Indoor (W)",
+            "Duct Loss Heat Gain - Indoor (W)",
             "Roof Heat Gain - Indoor (W)",
             "Floor Heat Gain - Indoor (W)",
             "Wall Heat Gain - Indoor (W)",

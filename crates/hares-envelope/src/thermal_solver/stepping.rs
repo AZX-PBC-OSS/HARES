@@ -59,8 +59,7 @@ impl ThermalSolver {
         env: &EnvironmentState,
         ideal_hvac_zones: &[ZoneId],
     ) -> DomainUpdate {
-        let (mut u, latent_by_zone, infiltration_couplings) =
-            self.build_input_vector(ports, env);
+        let (mut u, latent_by_zone) = self.build_input_vector(ports, env);
 
         // Build per-step fully-implicit coupling tuples from infiltration.
         //
@@ -76,7 +75,7 @@ impl ThermalSolver {
         //   d = h_inf * b_eff[(state, input)]
         //   f = h_inf * T_out * b_eff + d * x[state]
         self.coupling_buf.clear();
-        for inf in &infiltration_couplings {
+        for inf in &self.infiltration_buf {
             if inf.h_inf_w_k.abs() < 1e-15 {
                 continue;
             }
@@ -94,6 +93,10 @@ impl ThermalSolver {
             self.coupling_buf.push((state_idx, d, forcing));
         }
 
+        // Track ideal HVAC loads for component_gains reporting.
+        let mut ideal_heating_w = 0.0_f64;
+        let mut ideal_cooling_w = 0.0_f64;
+
         if !self.coupling_buf.is_empty() {
             // Coupled path: build modified LU once, reuse for HVAC solve, step, and cache.
             let coupled_lu =
@@ -109,7 +112,7 @@ impl ThermalSolver {
                 };
                 let target = zone_setpoint_c(&self.config, env, zone);
 
-                if let Ok(q) = self.model.solve_for_scalar_input_coupled(
+                if let Ok(q) = self.model.solve_for_scalar_input_coupled_into(
                     &self.x,
                     &u,
                     target,
@@ -117,8 +120,11 @@ impl ThermalSolver {
                     input_idx,
                     &coupled_lu,
                     &self.coupling_buf,
+                    &mut self.solve_rhs_buf,
+                    &mut self.solve_gain_buf,
                 ) {
                     u[input_idx] = q;
+                    if q > 0.0 { ideal_heating_w += q; } else { ideal_cooling_w += q; }
                 }
             }
 
@@ -141,17 +147,30 @@ impl ThermalSolver {
                 };
                 let target = zone_setpoint_c(&self.config, env, zone);
 
-                if let Ok(q) =
-                    self.model
-                        .solve_for_output_input(&self.x, &u, target, output_idx, input_idx)
-                {
+                if let Ok(q) = self.model.solve_for_output_input_into(
+                    &self.x,
+                    &u,
+                    target,
+                    output_idx,
+                    input_idx,
+                    &mut self.solve_rhs_buf,
+                    &mut self.solve_gain_buf,
+                ) {
                     u[input_idx] = q;
+                    if q > 0.0 { ideal_heating_w += q; } else { ideal_cooling_w += q; }
                 }
             }
 
             self.model.step_into(&self.x, &u, &mut self.rhs_buf);
             self.last_coupled_lu = None;
         }
+
+        self.ideal_heating_w = ideal_heating_w;
+        self.ideal_cooling_w = ideal_cooling_w;
+
+        // Add ideal HVAC loads to component gains (on top of any equipment port contributions).
+        self.component_gains.hvac_heating_w += ideal_heating_w;
+        self.component_gains.hvac_cooling_w += ideal_cooling_w;
 
         std::mem::swap(&mut self.x, &mut self.rhs_buf);
         let y_next = self.model.output(&self.x, &u);

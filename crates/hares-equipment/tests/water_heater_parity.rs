@@ -262,10 +262,10 @@ fn gas_wh_fuel_not_electricity() {
     );
 
     // Telemetry must be consistent
-    let tel_gas = wh.telemetry().get("gas_consumption_w").expect("gas_consumption_w must exist");
+    let tel_gas = wh.telemetry().get("fuel_input_w").expect("fuel_input_w must exist");
     assert!(
         (tel_gas - gas_w).abs() < 1e-6,
-        "telemetry gas_consumption_w ({tel_gas:.2}) must match port ({gas_w:.2})"
+        "telemetry fuel_input_w ({tel_gas:.2}) must match port ({gas_w:.2})"
     );
 }
 

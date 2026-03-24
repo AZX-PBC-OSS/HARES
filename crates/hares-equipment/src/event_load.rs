@@ -323,7 +323,7 @@ impl EventBasedLoad {
         self.telemetry.set("active_power_kw", electric_power_kw);
         self.telemetry.set("sensible_gain_w", sensible_gain_w);
         self.telemetry.set("latent_gain_w", latent_gain_w);
-        self.telemetry.set("gas_consumption_w", fuel_consumption_w);
+        self.telemetry.set("fuel_input_w", fuel_consumption_w);
         self.telemetry.set("state", phase_ordinal(self.phase));
         Ok(())
     }
@@ -467,7 +467,7 @@ impl Equipment for EventBasedLoad {
         );
         self.telemetry
             .set("latent_gain_w", gain_source_w * self.latent_gain_fraction);
-        self.telemetry.set("gas_consumption_w", fuel_consumption_w);
+        self.telemetry.set("fuel_input_w", fuel_consumption_w);
         self.telemetry.set("state", phase_ordinal(self.phase));
         Ok(())
     }
@@ -677,7 +677,7 @@ impl WetAppliance {
         self.telemetry.set("active_power_kw", electric_power_kw);
         self.telemetry.set("sensible_gain_w", sensible_gain_w);
         self.telemetry.set("latent_gain_w", latent_gain_w);
-        self.telemetry.set("gas_consumption_w", fuel_consumption_w);
+        self.telemetry.set("fuel_input_w", fuel_consumption_w);
         self.telemetry.set(
             "cycle_phase",
             cycle_phase_ordinal(self.active, self.phase_index),
@@ -850,7 +850,7 @@ impl Equipment for WetAppliance {
         );
         self.telemetry
             .set("latent_gain_w", gain_source_w * self.latent_gain_fraction);
-        self.telemetry.set("gas_consumption_w", fuel_consumption_w);
+        self.telemetry.set("fuel_input_w", fuel_consumption_w);
         self.telemetry.set(
             "cycle_phase",
             cycle_phase_ordinal(self.active, self.phase_index),
@@ -1168,7 +1168,7 @@ fn default_event_load_telemetry() -> Telemetry {
     telemetry.insert("active_power_kw", 0.0);
     telemetry.insert("sensible_gain_w", 0.0);
     telemetry.insert("latent_gain_w", 0.0);
-    telemetry.insert("gas_consumption_w", 0.0);
+    telemetry.insert("fuel_input_w", 0.0);
     telemetry.insert("state", 0.0);
     telemetry
 }
@@ -1178,7 +1178,7 @@ fn default_wet_appliance_telemetry() -> Telemetry {
     telemetry.insert("active_power_kw", 0.0);
     telemetry.insert("sensible_gain_w", 0.0);
     telemetry.insert("latent_gain_w", 0.0);
-    telemetry.insert("gas_consumption_w", 0.0);
+    telemetry.insert("fuel_input_w", 0.0);
     telemetry.insert("cycle_phase", 0.0);
     telemetry
 }
@@ -1201,7 +1201,7 @@ fn event_load_telemetry_fields() -> Vec<TelemetryField> {
             description: "Latent thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "gas_consumption_w".to_string(),
+            name: "fuel_input_w".to_string(),
             unit: "W".to_string(),
             description: "Gas fuel consumption rate converted to watts".to_string(),
         },
@@ -1231,7 +1231,7 @@ fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
             description: "Latent thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "gas_consumption_w".to_string(),
+            name: "fuel_input_w".to_string(),
             unit: "W".to_string(),
             description: "Gas fuel consumption rate converted to watts".to_string(),
         },
@@ -2036,7 +2036,7 @@ mod tests {
     }
 
     #[test]
-    fn gas_telemetry_reports_gas_consumption_w() {
+    fn gas_telemetry_reports_fuel_input_w() {
         let mut env = base_env();
         let config = gas_event_config("Gas Range Telem");
         let mut eq = EventBasedLoad::new(config.clone());
@@ -2046,9 +2046,9 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
-        let gas_w = eq.telemetry().get("gas_consumption_w").unwrap();
+        let gas_w = eq.telemetry().get("fuel_input_w").unwrap();
         let elec_kw = eq.telemetry().get("active_power_kw").unwrap();
-        assert!(gas_w > 0.0, "gas_consumption_w must be positive for gas equipment");
+        assert!(gas_w > 0.0, "fuel_input_w must be positive for gas equipment");
         assert_eq!(elec_kw, 0.0, "active_power_kw must be zero for gas equipment");
     }
 }

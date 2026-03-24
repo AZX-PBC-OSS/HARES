@@ -11,6 +11,10 @@ pub mod writer;
 use std::path::PathBuf;
 
 pub use columns::{build_schema, expected_columns_at_verbosity, mode_to_ordinal};
+pub use metrics::{
+    EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
+    SimulationMetrics,
+};
 pub use writer::{OutputError, StreamingRecorder};
 
 /// Summary returned by [`StreamingRecorder::finish`].

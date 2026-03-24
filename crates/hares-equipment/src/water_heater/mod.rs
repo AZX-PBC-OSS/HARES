@@ -16,7 +16,8 @@ pub(crate) const DEFAULT_UA_W_PER_K: f64 = 2.0;
 pub(crate) const DEFAULT_TANK_HEIGHT_M: f64 = 1.2;
 pub(crate) const DEFAULT_TANK_DIAMETER_M: f64 = 0.5;
 pub(crate) const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
-pub(crate) const DEFAULT_TANK_VOLUME_GAL: f64 = 50.0;
+/// 50 US gallons in m³ (50 × 0.003785411784).
+pub(crate) const DEFAULT_TANK_VOLUME_M3: f64 = 0.189_270_589_2;
 pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 
 use hares_types::{BoundaryPolicy, DomainId, EnvironmentState, LoopId, PortSlots, ScheduleSource};

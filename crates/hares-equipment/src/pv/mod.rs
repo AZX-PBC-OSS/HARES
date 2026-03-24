@@ -1984,4 +1984,68 @@ mod tests {
             "shading_factor must be in telemetry_fields"
         );
     }
+
+    /// 5 kW panels, 4 kW inverter at full irradiance: AC output must be capped
+    /// at the inverter rating. Use cold ambient (-10 °C) to drive cell temp below
+    /// 25 °C so temp derating boosts DC above 5 kW, well above the 4 kW cap.
+    #[test]
+    fn inverter_capacity_4kw_clips_5kw_panels() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let mut raw = HashMap::new();
+        raw.insert("equipment_id".to_string(), 1.0.into());
+        raw.insert("capacity_kw".to_string(), 5.0.into());
+        raw.insert("tilt_deg".to_string(), 30.0.into());
+        raw.insert("azimuth_deg".to_string(), 180.0.into());
+        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
+        // Perfect inverter efficiency so DC→AC conversion does not reduce below 4 kW.
+        raw.insert("inverter_efficiency".to_string(), 1.0.into());
+        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
+        raw.insert("system_losses_fraction".to_string(), 0.0.into());
+        raw.insert("inverter_capacity_kw".to_string(), 4.0.into());
+        let cfg = EquipmentConfig {
+            name: "PV 5kW/4kW inverter".to_string(),
+            ochre_class: "PV".to_string(),
+            raw_config: raw,
+        };
+
+        // Cold ambient (-10 °C) keeps cell temp well below 25 °C, giving positive
+        // temp derating so DC > nameplate 5 kW and definitely above the 4 kW cap.
+        // wind=2 m/s: cell_temp ≈ -10 + 1000*(47-20)/800 * 9.5/(5.7+7.6) ≈ -10+19.2 = 9.2 °C
+        // temp_derate = 1 + (-0.0047)*(9.2-25) ≈ 1.074 → DC ≈ 5.37 kW > 4 kW cap.
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 1_000.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            -10.0,
+        );
+
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let ac_kw = pv.telemetry().get("ac_power_kw").unwrap_or(0.0);
+        let dc_kw = pv.telemetry().get("dc_power_kw").unwrap_or(0.0);
+        let clipping_kw = pv.telemetry().get("inverter_clipping_kw").unwrap_or(0.0);
+
+        // DC must exceed the 4 kW cap (cold boost ensures this).
+        assert!(
+            dc_kw > 4.0,
+            "DC power must exceed 4 kW at cold ambient to exercise clipping, got {dc_kw:.3}"
+        );
+        // AC must be clamped at the 4 kW inverter rating.
+        approx_eq(ac_kw, 4.0);
+        // Clipping must be positive.
+        assert!(
+            clipping_kw > 0.0,
+            "inverter_clipping_kw must be > 0, got {clipping_kw:.3}"
+        );
+        // Port contribution must reflect the clamped value.
+        approx_eq(ports.electrical.generation_power_kw, -4.0);
+    }
 }

@@ -24,25 +24,39 @@ impl BestestCase {
 pub fn core_cases() -> Vec<BestestCase> {
     vec![
         BestestCase {
+            id: "600",
+            description: "Low-mass conditioned building, annual loads",
+            tier: BestestTier::Core,
+            fixture_file: "600.toml",
+            timestep_seconds: 3600,
+        },
+        BestestCase {
+            id: "900",
+            description: "High-mass conditioned building, annual loads",
+            tier: BestestTier::Core,
+            fixture_file: "900.toml",
+            timestep_seconds: 3600,
+        },
+        BestestCase {
             id: "600FF",
             description: "Free-float lightweight envelope",
             tier: BestestTier::Core,
             fixture_file: "600ff.toml",
-            timestep_seconds: 60,
+            timestep_seconds: 3600,
         },
         BestestCase {
             id: "900FF",
             description: "Heavyweight free-float envelope",
             tier: BestestTier::Core,
             fixture_file: "900ff.toml",
-            timestep_seconds: 60,
+            timestep_seconds: 3600,
         },
         BestestCase {
             id: "640",
             description: "Setback thermostat heating energy",
             tier: BestestTier::Core,
             fixture_file: "640.toml",
-            timestep_seconds: 60,
+            timestep_seconds: 3600,
         },
     ]
 }
@@ -54,35 +68,35 @@ pub fn extended_cases() -> Vec<BestestCase> {
             description: "South shading overhang",
             tier: BestestTier::Extended,
             fixture_file: "610.toml",
-            timestep_seconds: 60,
+            timestep_seconds: 3600,
         },
         BestestCase {
             id: "620",
             description: "East/west windows",
             tier: BestestTier::Extended,
             fixture_file: "620.toml",
-            timestep_seconds: 60,
+            timestep_seconds: 3600,
         },
         BestestCase {
             id: "CE100",
             description: "DX cooling equipment case",
             tier: BestestTier::Extended,
             fixture_file: "ce100.toml",
-            timestep_seconds: 60,
+            timestep_seconds: 3600,
         },
         BestestCase {
             id: "CE200",
             description: "DX cooling equipment variant",
             tier: BestestTier::Extended,
             fixture_file: "ce200.toml",
-            timestep_seconds: 60,
+            timestep_seconds: 3600,
         },
         BestestCase {
             id: "S5.4-HP",
             description: "Heat pump heating performance",
             tier: BestestTier::Extended,
             fixture_file: "s54_heat_pump.toml",
-            timestep_seconds: 60,
+            timestep_seconds: 3600,
         },
     ]
 }

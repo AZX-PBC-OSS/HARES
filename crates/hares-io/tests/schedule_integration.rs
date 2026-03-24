@@ -4,12 +4,14 @@ use std::time::Duration;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, FixedOffset, TimeZone, Timelike};
 use hares_equipment::{Equipment, EquipmentConfig, config::ConfigValue};
 use hares_equipment::{event_load::EventBasedLoad, scheduled_load::ScheduledLoad};
-use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs};
+use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
+use hares_io::defaults::DefaultsStore;
+use hares_io::hpxml::building::parse_building;
 use hares_types::{
     DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, WeatherState, ZoneId,
     ZoneState, schedule_domain_id,
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tempfile::tempdir;
 
 fn make_schedule(columns: &[(&str, &[f64])]) -> ScheduleTimeSeries {
@@ -319,5 +321,92 @@ fn missing_column_index_errors_at_init_not_step() {
     assert!(
         err.to_string().contains("power_schedule_col"),
         "expected init-time missing-column-index error, got: {err}"
+    );
+}
+
+/// Verify the full pipeline: HPXML appliance spec → schedule injection → ScheduledLoad step
+/// produces a non-zero sensible heat gain.  This is the end-to-end wiring test for the
+/// schedule infrastructure.
+#[test]
+fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
+    let xml = r#"
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">150</ConditionedFloorArea>
+          <NumberofBedrooms>3</NumberofBedrooms>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Appliances>
+        <Refrigerator>
+          <RatedAnnualkWh>600</RatedAnnualkWh>
+        </Refrigerator>
+      </Appliances>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+
+    let building = parse_building(xml).expect("HPXML should parse");
+    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment should succeed");
+
+    let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").expect(
+        "resolve_equipment should produce a Refrigerator spec from the HPXML Appliances section",
+    );
+    // Confirm annual energy was parsed
+    assert!(
+        ref_spec
+            .parameters
+            .get("annual_electric_kwh")
+            .and_then(|v| v.as_f64())
+            .is_some_and(|kwh| kwh > 0.0),
+        "Refrigerator spec must carry annual_electric_kwh > 0"
+    );
+
+    // The refrigerator schedule column uses a constant fraction of 1.0 for all hours.
+    let n_steps = 24_usize;
+    let mut schedule = make_schedule(&[("refrigerator", &vec![1.0_f64; n_steps])]);
+    inject_schedule_into_specs(&mut specs, &mut schedule, None);
+
+    let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").unwrap();
+    assert!(
+        ref_spec.parameters.contains_key("power_schedule_source"),
+        "inject_schedule_into_specs must wire Refrigerator to a power schedule source"
+    );
+
+    let config = equipment_config_from_spec(ref_spec);
+    let mut eq = ScheduledLoad::new(config.clone(), EndUse::Refrigeration, "Refrigerator");
+    let env = base_env(payload_for_row(&schedule, 0));
+    eq.init(&config, &env)
+        .expect("ScheduledLoad init should succeed");
+
+    let mut ports = PortSlots::from_declarations(eq.ports());
+    eq.step(&env, Duration::from_secs(3600), &mut ports)
+        .expect("ScheduledLoad step should succeed");
+
+    let electric_kw = ports.electrical.net_active_kw();
+    assert!(
+        electric_kw > 0.0,
+        "Refrigerator must draw positive electrical power; got {electric_kw} kW"
+    );
+
+    // Refrigerators have 100% sensible gain fraction, so sensible_gain_w == electric_w.
+    let sensible_w = eq
+        .telemetry()
+        .get("sensible_gain_w")
+        .expect("sensible_gain_w telemetry field must be present");
+    assert!(
+        sensible_w > 0.0,
+        "Refrigerator must produce positive sensible heat gain; got {sensible_w} W"
+    );
+    assert!(
+        (sensible_w - electric_kw * 1000.0).abs() < 1e-6,
+        "Refrigerator sensible_gain_w ({sensible_w} W) should equal electric_w ({} W)",
+        electric_kw * 1000.0
     );
 }

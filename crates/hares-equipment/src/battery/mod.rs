@@ -46,7 +46,12 @@ const KEY_CELL_UA_W_PER_K: &str = "cell_ua_w_per_k";
 const KEY_MIN_DISCHARGE_TEMP_C: &str = "min_discharge_temp_c";
 const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";
 const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
+/// Symmetric round-trip inverter efficiency: splits as sqrt(rte) per direction.
 const KEY_INVERTER_EFFICIENCY: &str = "inverter_efficiency";
+/// Explicit charge-direction efficiency (AC→DC). Overrides sqrt split when set.
+const KEY_CHARGE_EFFICIENCY: &str = "charge_efficiency";
+/// Explicit discharge-direction efficiency (DC→AC). Overrides sqrt split when set.
+const KEY_DISCHARGE_EFFICIENCY: &str = "discharge_efficiency";
 /// Per-cell capacity (Ah). When provided with KEY_V_CELL, n_series/n_parallel
 /// are derived from capacity_kwh: n_series = V_pack/V_cell, n_parallel = Ah_pack/Ah_cell,
 /// where V_pack ≈ cell_ocv_nom * n_series and Ah_pack = capacity_kwh * 1000 / V_pack.
@@ -89,7 +94,8 @@ const DEFAULT_HEATER_POWER_W: f64 = 0.0;
 /// Heater activation threshold. Tesla Heat Mode targets 0 C minimum cell temp;
 /// Franklin activates around 5-10 C. 0 C is the Li-ion plating safety boundary.
 const DEFAULT_HEATER_THRESHOLD_C: f64 = 0.0;
-/// OCHRE/industry-standard inverter efficiency (AC-DC conversion loss, both directions).
+/// OCHRE/industry-standard symmetric RTE: sqrt(0.97) ≈ 0.9849 per direction.
+/// When only `inverter_efficiency` is given, both directions use sqrt(rte).
 const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.97;
 /// All major residential batteries (Powerwall, aPower 2, Enphase IQ) spec -20 C
 /// as the lower operating limit for discharge.
@@ -177,20 +183,20 @@ impl CapacityDerateModel {
                 let exponent =
                     -e_ad1_j_mol / R_GAS_J_MOL_K * inv_diff
                     - e_ad2_j2_mol2 / R_GAS_J_MOL_K * inv_diff * inv_diff;
-                (d0_ref * exponent.exp()).clamp(0.0, 1.5)
+                (d0_ref * exponent.exp()).clamp(0.0, 1.06)
             }
             Self::PiecewiseLinear { points } => {
                 if points.is_empty() {
                     return 1.0;
                 }
                 if points.len() == 1 {
-                    return points[0].1.clamp(0.0, 1.5);
+                    return points[0].1.clamp(0.0, 1.06);
                 }
                 if cell_temp_c <= points[0].0 {
-                    return points[0].1.clamp(0.0, 1.5);
+                    return points[0].1.clamp(0.0, 1.06);
                 }
                 if cell_temp_c >= points[points.len() - 1].0 {
-                    return points[points.len() - 1].1.clamp(0.0, 1.5);
+                    return points[points.len() - 1].1.clamp(0.0, 1.06);
                 }
                 for i in 0..points.len() - 1 {
                     if cell_temp_c <= points[i + 1].0 {
@@ -198,10 +204,10 @@ impl CapacityDerateModel {
                         let (t1, d1) = points[i + 1];
                         let span = t1 - t0;
                         if span.abs() < f64::EPSILON {
-                            return d0.clamp(0.0, 1.5);
+                            return d0.clamp(0.0, 1.06);
                         }
                         let frac = (cell_temp_c - t0) / span;
-                        return (d0 + frac * (d1 - d0)).clamp(0.0, 1.5);
+                        return (d0 + frac * (d1 - d0)).clamp(0.0, 1.06);
                     }
                 }
                 1.0
@@ -269,8 +275,9 @@ pub struct Battery {
     /// OCHRE `export_limit`: clamps battery discharging to prevent excessive grid export.
     export_limit_kw: Option<f64>,
 
-    // Inverter efficiency (AC-DC conversion, applied in both charge and discharge directions)
-    inverter_efficiency: f64,
+    // Inverter AC↔DC conversion efficiencies (charge and discharge are independently configurable)
+    charge_efficiency: f64,
+    discharge_efficiency: f64,
 
     // Cell heater config (e.g. Franklin WH ~500 W heater at 0 C)
     heater_power_w: f64,
@@ -363,7 +370,8 @@ impl Battery {
             max_soc: DEFAULT_MAX_SOC,
             import_limit_kw: None,
             export_limit_kw: None,
-            inverter_efficiency: DEFAULT_INVERTER_EFFICIENCY,
+            charge_efficiency: DEFAULT_INVERTER_EFFICIENCY.sqrt(),
+            discharge_efficiency: DEFAULT_INVERTER_EFFICIENCY.sqrt(),
             heater_power_w: DEFAULT_HEATER_POWER_W,
             heater_threshold_c: DEFAULT_HEATER_THRESHOLD_C,
             heater_on_discharge: false,
@@ -415,13 +423,13 @@ impl Battery {
             return (0.0, 0.0);
         }
 
-        // Convert AC power to DC power using inverter efficiency.
-        // Charging: DC power = AC power * eta (less DC than AC due to conversion loss).
-        // Discharging: DC power = AC power / eta (more DC needed than AC delivered).
+        // Convert AC power to DC power using direction-specific efficiency.
+        // Charging (AC→DC): DC = AC * charge_eta (conversion loss reduces DC).
+        // Discharging (DC→AC): DC = AC / discharge_eta (more DC needed to deliver AC).
         let dc_power_kw = if target_ac_power_kw > 0.0 {
-            target_ac_power_kw * self.inverter_efficiency
+            target_ac_power_kw * self.charge_efficiency
         } else {
-            target_ac_power_kw / self.inverter_efficiency
+            target_ac_power_kw / self.discharge_efficiency
         };
         let dc_power_w = dc_power_kw * 1000.0;
 
@@ -454,9 +462,11 @@ impl Battery {
         let actual_ac_power_kw = if discriminant >= 0.0 {
             target_ac_power_kw
         } else if actual_dc_power_w > 0.0 {
-            actual_dc_power_w / self.inverter_efficiency / 1000.0
+            // Charging: DC → AC = DC / charge_eta
+            actual_dc_power_w / self.charge_efficiency / 1000.0
         } else {
-            actual_dc_power_w * self.inverter_efficiency / 1000.0
+            // Discharging: DC → AC = DC * discharge_eta
+            actual_dc_power_w * self.discharge_efficiency / 1000.0
         };
 
         (actual_ac_power_kw, ohmic_loss_w)
@@ -684,9 +694,21 @@ impl Equipment for Battery {
             }
         }
 
-        self.inverter_efficiency = config
+        // Derive per-direction efficiencies.
+        // If explicit charge_efficiency or discharge_efficiency are set, use them.
+        // Otherwise fall back to sqrt(inverter_efficiency) for a symmetric split.
+        let sym_eta = config
             .get_f64(KEY_INVERTER_EFFICIENCY)
             .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
+            .clamp(f64::EPSILON, 1.0);
+        let sym_split = sym_eta.sqrt();
+        self.charge_efficiency = config
+            .get_f64(KEY_CHARGE_EFFICIENCY)
+            .unwrap_or(sym_split)
+            .clamp(f64::EPSILON, 1.0);
+        self.discharge_efficiency = config
+            .get_f64(KEY_DISCHARGE_EFFICIENCY)
+            .unwrap_or(sym_split)
             .clamp(f64::EPSILON, 1.0);
         self.cell_thermal_mass_j_per_k = config
             .get_f64(KEY_CELL_THERMAL_MASS_J_PER_K)
@@ -851,12 +873,12 @@ impl Equipment for Battery {
 
         // -- Update SOC from charge/discharge --
         // DC power is the power seen by the battery cells (after inverter conversion).
-        // Charging (power_kw > 0): DC = AC * eta; cell stores DC power - ohmic losses.
-        // Discharging (power_kw < 0): DC = AC / eta; cell provides DC power + ohmic losses.
+        // Charging (power_kw > 0): DC = AC * charge_eta; cell stores DC - ohmic losses.
+        // Discharging (power_kw < 0): DC = AC / discharge_eta; cell provides DC + ohmic losses.
         let dc_power_kw = if power_kw > 0.0 {
-            power_kw * self.inverter_efficiency
+            power_kw * self.charge_efficiency
         } else {
-            power_kw / self.inverter_efficiency
+            power_kw / self.discharge_efficiency
         };
         let effective_cell_power_kw = if dc_power_kw > 0.0 {
             dc_power_kw - ohmic_loss_w / 1000.0
@@ -887,11 +909,11 @@ impl Equipment for Battery {
                 // Recompute ohmic losses from actual cell DC power (use effective DC power as proxy).
                 // Since compute_electrical works in AC terms, pass the scaled AC equivalent.
                 let ac_equivalent_kw = if actual_cell_energy_kwh > 0.0 {
-                    // Charging: cell DC → AC = DC / eta
-                    actual_cell_power_kw / self.inverter_efficiency
+                    // Charging: cell DC → AC = DC / charge_eta
+                    actual_cell_power_kw / self.charge_efficiency
                 } else {
-                    // Discharging: cell DC → AC = DC * eta
-                    actual_cell_power_kw * self.inverter_efficiency
+                    // Discharging: cell DC → AC = DC * discharge_eta
+                    actual_cell_power_kw * self.discharge_efficiency
                 };
                 let (_, actual_ohmic_w) = self.compute_electrical(ac_equivalent_kw);
                 (ac_equivalent_kw, actual_ohmic_w)
@@ -2163,6 +2185,131 @@ mod tests {
             gap > 1e-4,
             "inverter loss should be measurable: rte_ideal={rte_ideal:.4}, rte_with_inverter={rte_with_inverter:.4}, gap={gap:.6}"
         );
+    }
+
+    /// Asymmetric charge/discharge efficiencies must apply in the correct direction.
+    ///
+    /// With R=0 (no ohmic loss), the SOC change per unit AC energy is determined
+    /// entirely by the inverter efficiency:
+    ///   - Charging 1 kWh AC → stores charge_eta kWh in cells → SOC += charge_eta / capacity
+    ///   - Discharging 1 kWh DC from cells → delivers discharge_eta kWh AC → SOC -= 1/capacity
+    ///   - To get 1 kWh AC output: need 1/discharge_eta kWh DC → SOC -= (1/discharge_eta)/capacity
+    ///
+    /// We verify each direction independently by observing SOC delta.
+    #[test]
+    fn asymmetric_charge_discharge_efficiency() {
+        let charge_eta = 0.90_f64;
+        let discharge_eta = 0.80_f64;
+        let capacity_kwh = 10.0_f64;
+        let dt = Duration::from_secs(3600); // 1 hour for clean arithmetic
+        let power_kw = 1.0_f64; // 1 kW AC for 1 hour = 1 kWh AC
+
+        let make_bat = |charge_e: f64, discharge_e: f64| {
+            let mut raw: HashMap<String, ConfigValue> = HashMap::new();
+            raw.insert(KEY_CAPACITY_KWH.to_string(), capacity_kwh.into());
+            raw.insert(KEY_MAX_CHARGE_KW.to_string(), 5.0.into());
+            raw.insert(KEY_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+            raw.insert(KEY_STANDBY_POWER_W.to_string(), 0.0.into());
+            raw.insert(KEY_MIN_SOC.to_string(), 0.0.into());
+            raw.insert(KEY_MAX_SOC.to_string(), 1.0.into());
+            raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+            raw.insert(KEY_SELF_DISCHARGE_PCT_PER_DAY.to_string(), 0.0.into());
+            raw.insert(KEY_CHARGE_EFFICIENCY.to_string(), charge_e.into());
+            raw.insert(KEY_DISCHARGE_EFFICIENCY.to_string(), discharge_e.into());
+            // Zero cell resistance isolates inverter efficiency from ohmic loss.
+            raw.insert(KEY_CELL_RESISTANCE_OHM.to_string(), 0.0.into());
+            // Disable Arrhenius capacity derating so nominal capacity is used exactly.
+            raw.insert("capacity_derate_model".to_string(), "piecewise".into());
+            EquipmentConfig {
+                name: "TestBat".to_string(),
+                ochre_class: "Battery".to_string(),
+                raw_config: raw,
+            }
+        };
+
+        let env = warm_env();
+
+        // --- Charge leg: 1 kW AC for 1 h → 1 kWh AC drawn, charge_eta kWh stored ---
+        {
+            let config = make_bat(charge_eta, discharge_eta);
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &env).unwrap();
+            let soc_before = bat.soc;
+
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: power_kw,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+            let mut ports = default_ports();
+            bat.step(&env, dt, &mut ports).unwrap();
+            let soc_after = bat.soc;
+
+            let soc_delta = soc_after - soc_before;
+            let expected_soc_delta = power_kw * charge_eta / capacity_kwh; // 1 * 0.90 / 10 = 0.090
+            assert!(
+                (soc_delta - expected_soc_delta).abs() < 1e-6,
+                "charge leg: 1 kW AC for 1 h with charge_eta={charge_eta} should give \
+                 SOC delta {expected_soc_delta:.4}, got {soc_delta:.4}"
+            );
+        }
+
+        // --- Discharge leg: 1 kW AC for 1 h → 1 kWh AC delivered, 1/discharge_eta kWh consumed ---
+        {
+            let config = make_bat(charge_eta, discharge_eta);
+            let mut bat = Battery::new(config.clone());
+            bat.init(&config, &env).unwrap();
+            let soc_before = bat.soc;
+
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: -power_kw,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+            let mut ports = default_ports();
+            bat.step(&env, dt, &mut ports).unwrap();
+            let soc_after = bat.soc;
+
+            let soc_delta = soc_before - soc_after; // positive = energy drawn from cells
+            // Cell energy consumed = AC_energy / discharge_eta = 1 / 0.80 = 1.25 kWh
+            let expected_soc_delta = power_kw / discharge_eta / capacity_kwh;
+            assert!(
+                (soc_delta - expected_soc_delta).abs() < 1e-6,
+                "discharge leg: 1 kW AC for 1 h with discharge_eta={discharge_eta} should consume \
+                 SOC delta {expected_soc_delta:.4}, got {soc_delta:.4}"
+            );
+        }
+
+        // --- Verify asymmetry: swapping etas gives different per-leg behavior ---
+        {
+            let config_swapped = make_bat(discharge_eta, charge_eta); // swapped
+            let mut bat = Battery::new(config_swapped.clone());
+            bat.init(&config_swapped, &env).unwrap();
+            let soc_before = bat.soc;
+
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_kw: power_kw,
+                reactive_power_kvar: None,
+            })
+            .unwrap();
+
+            let mut ports = default_ports();
+            bat.step(&env, dt, &mut ports).unwrap();
+            let soc_delta_swapped = bat.soc - soc_before;
+
+            // With charge_eta=0.80 (swapped), SOC delta = 0.80/10 = 0.080 < 0.090
+            let expected_swapped = power_kw * discharge_eta / capacity_kwh;
+            assert!(
+                (soc_delta_swapped - expected_swapped).abs() < 1e-6,
+                "swapped charge leg: expected SOC delta {expected_swapped:.4}, got {soc_delta_swapped:.4}"
+            );
+            assert!(
+                soc_delta_swapped < power_kw * charge_eta / capacity_kwh,
+                "lower charge_eta must give smaller SOC increase per AC kWh"
+            );
+        }
     }
 
     /// The quadratic terminal-voltage formula accounts for voltage sag during

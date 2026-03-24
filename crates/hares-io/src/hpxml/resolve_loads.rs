@@ -73,8 +73,8 @@ pub(super) fn resolve_scheduled_loads(
                 // Appliance-specific parameters
                 match tag {
                     "ClothesWasher" => {
-                        if let Some(cap) = child_f64(node, "Capacity") {
-                            params.insert("capacity_ft3".to_string(), json!(cap));
+                        if let Some(capacity_ft3) = child_f64(node, "Capacity") {
+                            params.insert("capacity_m3".to_string(), json!(conv::volume_ft3_to_m3(capacity_ft3)));
                         }
                         if let Some(usage) = child_f64(node, "LabelUsage") {
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));

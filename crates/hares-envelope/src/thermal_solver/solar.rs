@@ -10,7 +10,7 @@ use super::config::InteriorSurfaceInfo;
 const BEAM_FLOOR_FRACTION: f64 = 0.60;
 
 impl ThermalSolver {
-    pub(super) fn apply_solar_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
+    pub(super) fn apply_solar_inputs(&mut self, u: &mut DVector<f64>, env: &EnvironmentState) {
         for irr in &env.weather.solar_irradiance {
             let Some(&idx) = self.wiring.solar_input_indices.get(&irr.surface_id) else {
                 continue;
@@ -35,26 +35,29 @@ impl ThermalSolver {
 
                 // Absorbed glass heat (inward-flowing fraction) → zone air node.
                 // This is convective heat from the glass pane, not radiation to surfaces.
+                debug_assert!(
+                    win.shgc >= win.transmittance - 1e-6,
+                    "SHGC ({}) < transmittance ({}): check window config",
+                    win.shgc, win.transmittance
+                );
                 let absorbed_inward = (win.shgc - win.transmittance).max(0.0);
                 let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
                 u[idx] += absorbed_zone_w;
 
                 // Distribute transmitted solar to interior surfaces if configured,
                 // otherwise inject directly into zone air (backward-compatible).
-                let zone_id = self.config.window_zone_ids.get(&irr.surface_id);
-                let distributed = zone_id
-                    .map(|&zid| {
-                        self.distribute_transmitted_solar(
-                            u,
-                            zid,
-                            transmitted_beam_w,
-                            transmitted_diffuse_w,
-                        )
-                    })
-                    .unwrap_or(false);
+                let zone_id = self.config.window_zone_ids.get(&irr.surface_id).copied();
+                let distributed = match zone_id {
+                    Some(zid) => self.distribute_transmitted_solar(
+                        u,
+                        zid,
+                        transmitted_beam_w,
+                        transmitted_diffuse_w,
+                    ),
+                    None => false,
+                };
 
                 if !distributed {
-                    // No interior surfaces configured — all to zone air (legacy path).
                     u[idx] += transmitted_total_w;
                 }
             }
@@ -72,7 +75,7 @@ impl ThermalSolver {
     /// Returns `true` if distribution occurred (surfaces found), `false` if no
     /// interior surfaces configured for this zone (caller should use legacy path).
     fn distribute_transmitted_solar(
-        &self,
+        &mut self,
         u: &mut DVector<f64>,
         zone_id: ZoneId,
         beam_w: f64,
@@ -90,11 +93,15 @@ impl ThermalSolver {
             return false;
         }
 
-        let (absorbed_per_surface, reflected_w) =
-            compute_solar_distribution(&zone_cfg.surfaces, beam_w, diffuse_w);
+        let reflected_w = compute_solar_distribution_into(
+            &zone_cfg.surfaces,
+            beam_w,
+            diffuse_w,
+            &mut self.solar_absorbed_buf,
+        );
 
         // Inject absorbed solar into each surface's input vector slot.
-        for (s, &q) in zone_cfg.surfaces.iter().zip(absorbed_per_surface.iter()) {
+        for (s, &q) in zone_cfg.surfaces.iter().zip(self.solar_absorbed_buf.iter()) {
             if s.input_index < u.len() && q > 0.0 {
                 u[s.input_index] += q;
             }
@@ -149,6 +156,7 @@ impl ThermalSolver {
 /// absorbed [W] and total reflected to zone air [W].
 ///
 /// Energy conservation: `beam_w + diffuse_w == Σ absorbed + reflected`.
+#[cfg(test)]
 pub(crate) fn compute_solar_distribution(
     surfaces: &[InteriorSurfaceInfo],
     beam_w: f64,
@@ -156,6 +164,22 @@ pub(crate) fn compute_solar_distribution(
 ) -> (Vec<f64>, f64) {
     let n = surfaces.len();
     let mut absorbed = vec![0.0_f64; n];
+    let reflected = compute_solar_distribution_into(surfaces, beam_w, diffuse_w, &mut absorbed);
+    (absorbed, reflected)
+}
+
+/// Like `compute_solar_distribution` but writes into a caller-owned buffer.
+///
+/// `absorbed_buf` is resized and zeroed as needed. Returns total reflected [W].
+pub(crate) fn compute_solar_distribution_into(
+    surfaces: &[InteriorSurfaceInfo],
+    beam_w: f64,
+    diffuse_w: f64,
+    absorbed: &mut Vec<f64>,
+) -> f64 {
+    let n = surfaces.len();
+    absorbed.clear();
+    absorbed.resize(n, 0.0);
     let floor_area: f64 = surfaces.iter().filter(|s| s.is_floor).map(|s| s.area_m2).sum();
     let nonfloor_area: f64 = surfaces.iter().filter(|s| !s.is_floor).map(|s| s.area_m2).sum();
     let total_area: f64 = surfaces.iter().map(|s| s.area_m2).sum();
@@ -185,8 +209,13 @@ pub(crate) fn compute_solar_distribution(
     }
 
     let total_absorbed: f64 = absorbed.iter().sum();
-    let reflected = (beam_w + diffuse_w) - total_absorbed;
-    (absorbed, reflected.max(0.0))
+    let total_input = beam_w + diffuse_w;
+    let reflected = total_input - total_absorbed;
+    debug_assert!(
+        reflected >= -1e-6,
+        "solar distribution: absorbed ({total_absorbed}) exceeds input ({total_input})"
+    );
+    reflected.max(0.0)
 }
 
 #[cfg(test)]

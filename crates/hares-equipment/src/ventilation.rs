@@ -17,11 +17,14 @@ use hares_physics::constants::{CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_J_KG}
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+use crate::schedule_helpers::{
+    ScheduleSourceState, capture_schedule_source_state, restore_schedule_source_state,
+};
 
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
 const KEY_ZONE_ID: &str = "zone_id";
@@ -33,6 +36,8 @@ const KEY_BYPASS_TEMP_MIN_C: &str = "bypass_temp_min_c";
 const KEY_BYPASS_TEMP_MAX_C: &str = "bypass_temp_max_c";
 const KEY_DEFROST_TEMP_C: &str = "defrost_temp_c";
 const KEY_DEFROST_EFFECTIVENESS_FRACTION: &str = "defrost_effectiveness_fraction";
+const KEY_SCHEDULE_SOURCE: &str = "schedule_source";
+const KEY_SCHEDULE_CONSTANT: &str = "schedule_constant";
 
 const DEFAULT_FAN_POWER_W: f64 = 50.0;
 const DEFAULT_FLOW_RATE_M3_S: f64 = 0.035; // ~75 CFM, typical residential
@@ -62,6 +67,7 @@ struct VentilationCheckpoint {
     mode: OperatingMode,
     dr_level: DRLevel,
     dr_duration_remaining_s: Option<f64>,
+    schedule_source_state: ScheduleSourceState,
 }
 
 pub struct Ventilation {
@@ -83,6 +89,8 @@ pub struct Ventilation {
     // Defrost: at low outdoor temps, reduce effectiveness.
     defrost_temp_c: f64,
     defrost_effectiveness_fraction: f64,
+
+    schedule_source: ScheduleSource,
 
     mode: OperatingMode,
     dr_level: DRLevel,
@@ -143,6 +151,7 @@ impl Ventilation {
             bypass_temp_max_c: DEFAULT_BYPASS_TEMP_MAX_C,
             defrost_temp_c: DEFAULT_DEFROST_TEMP_C,
             defrost_effectiveness_fraction: DEFAULT_DEFROST_EFFECTIVENESS_FRACTION,
+            schedule_source: ScheduleSource::Constant(1.0),
             mode: OperatingMode::Off,
             dr_level: DRLevel::Normal,
             dr_duration_remaining_s: None,
@@ -229,6 +238,18 @@ impl Equipment for Ventilation {
             ));
         }
 
+        self.schedule_source = match config.get_str(KEY_SCHEDULE_SOURCE) {
+            Some("constant") | None => {
+                let v = config.get_f64(KEY_SCHEDULE_CONSTANT).unwrap_or(1.0);
+                ScheduleSource::Constant(v)
+            }
+            Some(other) => {
+                return Err(HaresError::Equipment(format!(
+                    "ventilation: unsupported schedule_source '{other}' (only 'constant' supported)"
+                )));
+            }
+        };
+
         self.mode = OperatingMode::Standby;
         Ok(())
     }
@@ -262,6 +283,19 @@ impl Equipment for Ventilation {
             return Ok(());
         }
 
+        let schedule_frac = self.schedule_source.value_at(env)?.clamp(0.0, 1.0);
+        let effective_flow_rate_m3_s = self.flow_rate_m3_s * schedule_frac;
+        let effective_fan_power_w = self.fan_power_w * schedule_frac;
+
+        if effective_flow_rate_m3_s <= 0.0 {
+            self.telemetry.set("fan_power_w", 0.0);
+            self.telemetry.set("sensible_recovery_w", 0.0);
+            self.telemetry.set("latent_recovery_w", 0.0);
+            self.telemetry.set("supply_temp_c", env.weather.outdoor_temp_c);
+            self.telemetry.set("bypass_active", 0.0);
+            return Ok(());
+        }
+
         let t_outdoor_c = env.weather.outdoor_temp_c;
         let zone = env.zones.iter().find(|z| z.id == self.zone_id);
         let t_indoor_c = zone.map(|z| z.temperature_c).unwrap_or(20.0);
@@ -279,7 +313,7 @@ impl Equipment for Ventilation {
         let w_supply = w_outdoor + eff_l * (w_indoor - w_outdoor);
 
         // Mass flow rate [kg/s]
-        let m_dot_kg_s = self.flow_rate_m3_s * AIR_DENSITY_KG_M3;
+        let m_dot_kg_s = effective_flow_rate_m3_s * AIR_DENSITY_KG_M3;
 
         // Sensible ventilation load to zone [W]:
         // Positive = heating the zone (supply warmer than outdoor but still cooler than indoor).
@@ -295,7 +329,7 @@ impl Equipment for Ventilation {
         let q_recovery_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_J_KG * eff_l * (w_indoor - w_outdoor);
 
         // Fan electrical power [kW]
-        let fan_kw = self.fan_power_w / 1000.0;
+        let fan_kw = effective_fan_power_w / 1000.0;
 
         // Write ports
         ports.accumulate(&PortContribution::Electrical {
@@ -311,7 +345,7 @@ impl Equipment for Ventilation {
         })?;
 
         // Telemetry
-        self.telemetry.set("fan_power_w", self.fan_power_w);
+        self.telemetry.set("fan_power_w", effective_fan_power_w);
         self.telemetry.set("sensible_recovery_w", q_recovery_sensible_w);
         self.telemetry.set("latent_recovery_w", q_recovery_latent_w);
         self.telemetry.set("supply_temp_c", t_supply_c);
@@ -329,6 +363,7 @@ impl Equipment for Ventilation {
             mode: self.mode,
             dr_level: self.dr_level,
             dr_duration_remaining_s: self.dr_duration_remaining_s,
+            schedule_source_state: capture_schedule_source_state(&self.schedule_source),
         })
     }
 
@@ -337,6 +372,7 @@ impl Equipment for Ventilation {
         self.mode = cp.mode;
         self.dr_level = cp.dr_level;
         self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
+        restore_schedule_source_state(&mut self.schedule_source, &cp.schedule_source_state)?;
         Ok(())
     }
 
@@ -682,5 +718,79 @@ mod tests {
         assert!(registry.get("HRV").is_some());
         assert!(registry.get("ERV").is_some());
         assert!(registry.get("Ventilation Fan").is_some());
+    }
+
+    #[test]
+    fn constant_half_schedule_halves_flow_and_power() {
+        let mut raw = std::collections::HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("ventilation_type".to_string(), "hrv".into());
+        raw.insert(KEY_FAN_POWER_W.to_string(), 50.0.into());
+        raw.insert(KEY_FLOW_RATE_M3_S.to_string(), 0.035.into());
+        raw.insert(KEY_SENSIBLE_EFFECTIVENESS.to_string(), 0.70.into());
+        raw.insert(KEY_SCHEDULE_SOURCE.to_string(), "constant".into());
+        raw.insert(KEY_SCHEDULE_CONSTANT.to_string(), 0.5.into());
+        let cfg = EquipmentConfig {
+            name: "HRV-half".to_string(),
+            ochre_class: "HRV".to_string(),
+            raw_config: raw,
+        };
+
+        let e = env(0.0, 20.0);
+        let mut hrv = Ventilation::new(cfg.clone());
+        hrv.init(&cfg, &e).expect("init");
+
+        // Run full-schedule reference first (separate instance)
+        let mut raw_full = std::collections::HashMap::new();
+        raw_full.insert("zone_id".to_string(), 1.0.into());
+        raw_full.insert("ventilation_type".to_string(), "hrv".into());
+        raw_full.insert(KEY_FAN_POWER_W.to_string(), 50.0.into());
+        raw_full.insert(KEY_FLOW_RATE_M3_S.to_string(), 0.035.into());
+        raw_full.insert(KEY_SENSIBLE_EFFECTIVENESS.to_string(), 0.70.into());
+        let cfg_full = EquipmentConfig {
+            name: "HRV-full".to_string(),
+            ochre_class: "HRV".to_string(),
+            raw_config: raw_full,
+        };
+        let mut hrv_full = Ventilation::new(cfg_full.clone());
+        hrv_full.init(&cfg_full, &e).expect("init full");
+
+        let mut ports_half = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports_half).expect("step half");
+
+        let mut ports_full = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv_full.step(&e, Duration::from_secs(300), &mut ports_full).expect("step full");
+
+        let power_half = hrv.telemetry().get("fan_power_w").expect("fan_power_w half");
+        let power_full = hrv_full.telemetry().get("fan_power_w").expect("fan_power_w full");
+        assert!(
+            (power_half - power_full * 0.5).abs() < 0.01,
+            "half-schedule should halve fan power: got {power_half}, expected {}",
+            power_full * 0.5
+        );
+
+        // Thermal port sensible gain should also be halved
+        let sensible_half = ports_half.thermal[0].sensible_gain_w;
+        let sensible_full = ports_full.thermal[0].sensible_gain_w;
+        assert!(
+            (sensible_half - sensible_full * 0.5).abs() < 0.1,
+            "half-schedule should halve thermal gain: got {sensible_half}, expected {}",
+            sensible_full * 0.5
+        );
+
+        // Electrical port should also be halved
+        let elec_half = ports_half.electrical.net_active_kw();
+        let elec_full = ports_full.electrical.net_active_kw();
+        assert!(
+            (elec_half - elec_full * 0.5).abs() < 0.001,
+            "half-schedule should halve electrical draw: got {elec_half}, expected {}",
+            elec_full * 0.5
+        );
     }
 }

@@ -79,11 +79,15 @@ fn bestest_extended_cases_are_tracked() {
 }
 
 fn run_case(case: &cases::BestestCase) -> CaseObservation {
+    let t0 = std::time::Instant::now();
     let mut dwelling = Dwelling::from_toml_config(&case.fixture_path())
         .unwrap_or_else(|err| panic!("failed to load BESTEST case {}: {err}", case.id));
+    eprintln!("[bestest] case={} loaded in {:?}", case.id, t0.elapsed());
+    let t1 = std::time::Instant::now();
     let results = dwelling
         .simulate()
         .unwrap_or_else(|err| panic!("simulation failed for BESTEST case {}: {err}", case.id));
+    eprintln!("[bestest] case={} simulated {} steps in {:?}", case.id, results.steps.len(), t1.elapsed());
 
     let dt_hours = case.timestep_seconds as f64 / 3600.0;
     let mut max_temp = f64::NEG_INFINITY;
@@ -96,8 +100,8 @@ fn run_case(case: &cases::BestestCase) -> CaseObservation {
             max_temp = max_temp.max(*temp_c);
             min_temp = min_temp.min(*temp_c);
         }
-        heating_kwh += step.net_electric_power_kw.max(0.0) * dt_hours;
-        cooling_kwh += (-step.net_electric_power_kw).max(0.0) * dt_hours;
+        heating_kwh += step.hvac_heating_w / 1000.0 * dt_hours;
+        cooling_kwh += step.hvac_cooling_w / 1000.0 * dt_hours;
     }
 
     let mut values = BTreeMap::new();

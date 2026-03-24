@@ -2,8 +2,8 @@ building_id = 640
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 604800
+time_res_s = 3600
+duration_s = 31536000
 
 [geometry]
 floor_area_m2 = 48.0

@@ -9,7 +9,7 @@ use crate::EquipmentConfig;
 
 use super::core_config::{
     build_setpoint_source, extract_bool, extract_numeric, load_biquadratic_coeffs,
-    load_bounds_pair, load_plr_coefficients, parse_speed_control_mode,
+    load_bounds_pair, load_plr_coefficients, parse_biquadratic_list, parse_speed_control_mode,
 };
 use super::speed_control::{SpeedControlMode, StartupConfig};
 use super::staging::{DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF};
@@ -369,6 +369,30 @@ impl HvacEquipment {
         };
         self.startup.validate()?;
         self.biquadratic_coeffs = load_biquadratic_coeffs(config, "biquadratic_coeffs")?;
+        // Also honour the split capacity/EIR keys that the HPXML resolver writes
+        // (capacity_biquadratic_coeffs / eir_biquadratic_coeffs). These are the
+        // same keys that ac_config::load_curve_pair handles for the AC path; the
+        // HP heater goes through this generic init, so we replicate the fallback
+        // here.  Split keys override or supplement the combined key at indices 0/1.
+        if let Some(raw) = config.get_str("capacity_biquadratic_coeffs") {
+            let cap = parse_biquadratic_list(raw)?;
+            if !cap.is_empty() {
+                if self.biquadratic_coeffs.is_empty() {
+                    self.biquadratic_coeffs.push(cap[0]);
+                } else {
+                    self.biquadratic_coeffs[0] = cap[0];
+                }
+            }
+        }
+        if let Some(raw) = config.get_str("eir_biquadratic_coeffs") {
+            let eir = parse_biquadratic_list(raw)?;
+            if !eir.is_empty() {
+                while self.biquadratic_coeffs.len() < 2 {
+                    self.biquadratic_coeffs.push(DEFAULT_BIQUADRATIC_COEFFS);
+                }
+                self.biquadratic_coeffs[1] = eir[0];
+            }
+        }
         // OCHRE HVAC.py: biquadratic CSV files specify `min_Twb`, `max_Twb`,
         // `min_Tdb`, `max_Tdb` bounds. Load from config if provided.
         self.biquadratic_x1_bounds = load_bounds_pair(
@@ -440,6 +464,14 @@ impl HvacEquipment {
             }
             self.space_fraction = f.clamp(0.0, 1.0);
         }
+
+        if let Some(raw) = extract_numeric(config, "basement_zone_id") {
+            if raw.is_finite() && raw >= 0.0 && raw.fract() == 0.0 && raw <= u16::MAX as f64 {
+                self.basement_zone_id = Some(ZoneId(raw as u16));
+            }
+        }
+        self.basement_heat_frac =
+            extract_numeric(config, "basement_airflow_ratio").unwrap_or(0.0);
 
         Ok(())
     }
@@ -1880,6 +1912,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn update_zone_heat_fractions_basement_frac_splits_conditioned_and_basement() {
+        // OCHRE HVAC.py lines 188-197: basement_heat_frac routes a fraction of
+        // DSE-adjusted capacity to the basement zone.
+        // DSE=0.8, basement_frac=0.2:
+        //   conditioned = 0.8 * (1 - 0.2) = 0.64
+        //   basement    = 0.8 * 0.2        = 0.16
+        //   duct zone   = 1 - 0.8          = 0.20
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.duct_dse = 0.8;
+        hvac.duct_zone_id = Some(ZoneId(3));
+        hvac.basement_heat_frac = 0.2;
+        hvac.basement_zone_id = Some(ZoneId(2));
+        hvac.update_zone_heat_fractions();
+
+        assert_eq!(hvac.zone_heat_fractions.len(), 3);
+        let fracs: std::collections::HashMap<ZoneId, f64> =
+            hvac.zone_heat_fractions.iter().copied().collect();
+        assert!(
+            (fracs[&ZoneId(1)] - 0.64).abs() < 1e-12,
+            "conditioned zone expected 0.64, got {}",
+            fracs[&ZoneId(1)]
+        );
+        assert!(
+            (fracs[&ZoneId(2)] - 0.16).abs() < 1e-12,
+            "basement zone expected 0.16, got {}",
+            fracs[&ZoneId(2)]
+        );
+        assert!(
+            (fracs[&ZoneId(3)] - 0.20).abs() < 1e-12,
+            "duct zone expected 0.20, got {}",
+            fracs[&ZoneId(3)]
+        );
+    }
+
+    #[test]
+    fn init_loads_basement_zone_id_and_airflow_ratio_from_config() {
+        // basement_zone_id and basement_airflow_ratio config keys must be picked
+        // up by HvacEquipment::init() so that subsequent update_zone_heat_fractions
+        // calls route heat correctly without extra setup.
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .raw_config
+            .insert("basement_zone_id".to_string(), 4.0.into());
+        config
+            .raw_config
+            .insert("basement_airflow_ratio".to_string(), 0.2.into());
+        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+        assert_eq!(hvac.basement_zone_id, Some(ZoneId(4)));
+        assert!((hvac.basement_heat_frac - 0.2).abs() < 1e-12);
+    }
+
     // --- Change 1: TwoSpeedTime and TwoSpeedAlternating speed control ---
 
     #[test]
@@ -2234,6 +2319,40 @@ mod tests {
         assert!(
             err.to_string().contains("deadband_offset"),
             "error must mention deadband_offset"
+        );
+    }
+
+    /// Regression test for bug: HvacEquipment::init only read the combined
+    /// "biquadratic_coeffs" key and ignored the split "capacity_biquadratic_coeffs"
+    /// and "eir_biquadratic_coeffs" keys that the HPXML resolver writes.
+    /// When only split keys were provided the HP heater got identity curves.
+    #[test]
+    fn split_biquadratic_keys_are_applied_during_init() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        // Provide only the split keys, not the combined key.
+        config.raw_config.insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "2.0,0.0,0.0,0.0,0.0,0.0".into(),
+        );
+        config.raw_config.insert(
+            "eir_biquadratic_coeffs".to_string(),
+            "3.0,0.0,0.0,0.0,0.0,0.0".into(),
+        );
+        hvac.init(&config, &env(20.0, 60, 0)).expect("init must succeed");
+        assert!(
+            hvac.biquadratic_coeffs.len() >= 2,
+            "must have at least two curves after split-key init"
+        );
+        assert!(
+            (hvac.biquadratic_coeffs[0][0] - 2.0).abs() < 1e-12,
+            "capacity curve intercept must be 2.0, got {}",
+            hvac.biquadratic_coeffs[0][0]
+        );
+        assert!(
+            (hvac.biquadratic_coeffs[1][0] - 3.0).abs() < 1e-12,
+            "EIR curve intercept must be 3.0, got {}",
+            hvac.biquadratic_coeffs[1][0]
         );
     }
 }

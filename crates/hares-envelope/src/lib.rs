@@ -31,7 +31,8 @@ pub use state_space::{
     discretize_auto, discretize_zoh, eigenvalue_check, matrix_exp, van_loan_discretize,
 };
 pub use thermal_solver::{
-    EnvelopeComponentGains, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
-    InteriorSurfaceInfo, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
-    ThermalSolverConfig, ThermalSolverError, VentilationConfig, WindowSolarProperties,
+    BoundaryCategory, EnvelopeComponentGains, ExteriorSurfaceInfo, InfiltrationMethod,
+    InteriorLwrZoneConfig, InteriorSurfaceInfo, NaturalVentilationConfig, StateSpaceWiring,
+    ThermalSolver, ThermalSolverConfig, ThermalSolverError, VentilationConfig,
+    WindowSolarProperties,
 };

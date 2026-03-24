@@ -204,7 +204,7 @@ fn net_electric_power_is_positive_with_active_electric_furnace() {
 //
 // The PortSlots.fuel accumulator is zeroed after every step, so post-step
 // access to raw ports yields 0. Equipment telemetry is the correct observable.
-// A gas furnace that fires must report nonzero gas_consumption_w.
+// A gas furnace that fires must report nonzero fuel_input_w.
 // ---------------------------------------------------------------------------
 
 #[test]

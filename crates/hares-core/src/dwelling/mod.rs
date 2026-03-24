@@ -100,6 +100,10 @@ pub struct StepResult {
     pub timestamp: DateTime<FixedOffset>,
     pub net_electric_power_kw: f64,
     pub zone_temperatures_c: Vec<(ZoneId, f64)>,
+    /// Thermal energy delivered to the zone by HVAC heating equipment (W, positive).
+    pub hvac_heating_w: f64,
+    /// Thermal energy removed from the zone by HVAC cooling equipment (W, positive = heat removed).
+    pub hvac_cooling_w: f64,
 }
 
 /// Accumulated simulation outputs.
@@ -302,7 +306,7 @@ impl Dwelling {
 
         let hpxml_building = build_synthetic_building(&config);
         let schedule = build_synthetic_schedule(&config)?;
-        let weather = build_synthetic_weather(&config);
+        let weather = build_synthetic_weather(&config, path)?;
         let dwelling_config = DwellingConfig {
             hpxml_path: path.to_path_buf(),
             schedule_path: path.to_path_buf(),
@@ -386,7 +390,7 @@ impl Dwelling {
             .map_err(|e| HaresError::Io(e.to_string()))?;
 
         let (
-            thermal_solver,
+            mut thermal_solver,
             humidity_solver,
             electrical_solver,
             fluid_solver,
@@ -399,6 +403,17 @@ impl Dwelling {
             &weather_avgs,
             &equipment_specs,
         )?;
+
+        // Enable ideal HVAC on the indoor zone when both heating AND cooling
+        // setpoints are configured — the thermal solver back-calculates the exact
+        // load needed to maintain the setpoint at each timestep.
+        if building.heating_weekday_setpoints_c.is_some()
+            && building.cooling_weekday_setpoints_c.is_some()
+        {
+            let indoor_zone = thermal_solver.config().indoor_zone_id;
+            thermal_solver.set_ideal_hvac_zones(vec![indoor_zone]);
+        }
+
         hares_io::inject_schedule_into_specs(
             &mut equipment_specs,
             environment.schedule_mut(),
@@ -409,9 +424,16 @@ impl Dwelling {
             .clone()
             .unwrap_or_else(|| Value::Object(Map::new()));
 
+        // Equipment names whose loads are handled outside the registry (e.g. directly in the
+        // simulation loop) — silently skip them rather than emitting a warning.
+        const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
+
         let registry = EquipmentRegistry::new();
         let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
         for spec in &equipment_specs {
+            if HANDLED_OUTSIDE_REGISTRY.contains(&spec.name.as_str()) {
+                continue;
+            }
             let base_cfg = equipment_config_from_spec(spec);
             let mut eq = match registry.create(&base_cfg.ochre_class, base_cfg.clone()) {
                 Ok(eq) => eq,
@@ -1121,10 +1143,18 @@ impl Dwelling {
             .collect();
         zone_temperatures_c.sort_by_key(|(z, _)| *z);
 
+        // HVAC thermal delivery: use component_gains which includes both equipment
+        // port contributions and ideal HVAC loads from the thermal solver.
+        let gains = self.thermal_solver.component_gains();
+        let hvac_heating_w = gains.hvac_heating_w.max(0.0);
+        let hvac_cooling_w = gains.hvac_cooling_w.abs();
+
         let step_result = StepResult {
             timestamp: self.latest_env.current_time,
             net_electric_power_kw: self.electrical_solver.net_active_kw(),
             zone_temperatures_c,
+            hvac_heating_w,
+            hvac_cooling_w,
         };
 
         // Step 5: record outputs.
@@ -1208,7 +1238,7 @@ impl Dwelling {
             let gas_col_key = format!("{name} Gas Power (therms/hour)");
             if let Some(&idx) = self.output_column_index.get(&gas_col_key) {
                 let telem = eq.telemetry();
-                let gas_w = telem.get("gas_consumption_w").unwrap_or(0.0);
+                let gas_w = telem.get("fuel_input_w").unwrap_or(0.0);
                 row[idx] = gas_w / GAS_THERMS_PER_HOUR_TO_W;
             }
             // Mode column
@@ -1254,6 +1284,13 @@ impl Dwelling {
                 gains.internal_gain_w + gains.jacket_loss_w,
             ),
             ("Radiation Heat Gain - Indoor (W)", gains.interior_lwr_w),
+            (
+                "Opaque Surface Heat Gain - Indoor (W)",
+                gains.opaque_solar_lwr_w,
+            ),
+            ("Duct Loss Heat Gain - Indoor (W)", gains.duct_loss_w),
+            ("HVAC Heating Delivered (W)", gains.hvac_heating_w),
+            ("HVAC Cooling Delivered (W)", gains.hvac_cooling_w),
         ];
         for &(col_name, value) in envelope_cols {
             if let Some(&idx) = self.output_column_index.get(col_name) {

@@ -190,6 +190,8 @@ fn minimal_building() -> hares_io::Building {
                 emittance: None,
                 tilt_deg: Some(90.0),
                 framing_factor: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
             },
             Boundary {
                 id: "north-wall".to_string(),
@@ -209,10 +211,14 @@ fn minimal_building() -> hares_io::Building {
                 emittance: None,
                 tilt_deg: Some(90.0),
                 framing_factor: None,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
             },
         ],
         windows: Vec::<Window>::new(),
         infiltration_ach50: None,
+        infiltration_cfm50: None,
+        infiltration_ela_cm2: None,
         hvac_capacity_w: None,
         seer2: None,
         hspf2: None,
@@ -229,6 +235,7 @@ fn minimal_building() -> hares_io::Building {
         floors_above_grade: None,
         has_flue_or_chimney: None,
         foundation_name: None,
+        residential_facility_type: None,
         details_xml,
     }
 }

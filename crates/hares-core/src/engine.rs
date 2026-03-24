@@ -387,6 +387,8 @@ fn empty_metrics() -> SimulationMetrics {
             peak_import_kw: 0.0,
             peak_export_kw: 0.0,
         },
+        envelope_loads_kwh: None,
+        efficiency: hares_io::EfficiencyMetrics::default(),
     }
 }
 

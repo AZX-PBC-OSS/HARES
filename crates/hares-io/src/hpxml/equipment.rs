@@ -9,7 +9,7 @@ use super::building::Building;
 
 use crate::defaults::{DefaultsStore, ZipParameters};
 
-use super::resolve_der::{resolve_batteries, resolve_ev, resolve_pv};
+use super::resolve_der::{resolve_batteries, resolve_ev, resolve_generators, resolve_pv};
 use super::resolve_hvac::resolve_hvac;
 use super::resolve_loads::{default_gain_fractions, resolve_scheduled_loads, resolve_ventilation};
 use super::resolve_water_heater::resolve_water_heaters;
@@ -35,6 +35,7 @@ pub fn resolve_equipment(
     resolve_pv(details, defaults, &mut specs);
     resolve_batteries(details, defaults, &mut specs);
     resolve_ev(details, defaults, &mut specs);
+    resolve_generators(details, defaults, &mut specs);
     resolve_scheduled_loads(building, defaults, &mut specs);
     resolve_ventilation(details, defaults, &mut specs);
 
@@ -1034,6 +1035,59 @@ mod tests {
         assert!(
             (bldg_cooling_wd[0] - expected_cool).abs() < 1e-6,
             "cooling setpoint should be 75F converted to C"
+        );
+    }
+
+    /// HPXML Generator: gas generator with ElectricalPowerOutput and annual energy figures
+    /// → rated_power_kw and eta_electric are emitted with correct values.
+    #[test]
+    fn hpxml_gas_generator_emits_capacity_and_efficiency() {
+        // 10 kW output, 120 kBtu/h consumption at rated load.
+        // Annual figures: 8760 kWh out, 105_120 kBtu in (≈ 8760 * 12 kBtu/h assumed)
+        // eta = 8760 / (105_120 * 0.29307107) ≈ 0.2844
+        let annual_out_kwh = 8_760.0_f64;
+        let annual_cons_kbtu = 105_120.0_f64;
+        let expected_eta = annual_out_kwh / (annual_cons_kbtu * 0.293_071_07);
+
+        let xml = minimal_wh_xml(&format!(
+            r#"<extension>
+          <Generators>
+            <Generator>
+              <SystemIdentifier id="gen-1"/>
+              <FuelType>natural gas</FuelType>
+              <ElectricalPowerOutput>10.0</ElectricalPowerOutput>
+              <AnnualOutputkWh>{annual_out_kwh}</AnnualOutputkWh>
+              <AnnualConsumptionkBtu>{annual_cons_kbtu}</AnnualConsumptionkBtu>
+            </Generator>
+          </Generators>
+        </extension>"#
+        ));
+        let building = parse_building(&xml).expect("should parse");
+        let specs =
+            resolve_equipment(&building, &DefaultsStore::empty(), &json!({})).expect("resolve_equipment");
+        let generator = specs
+            .iter()
+            .find(|s| s.name == "Gas Generator")
+            .expect("Gas Generator spec must be present");
+
+        let rated_power = generator
+            .parameters
+            .get("rated_power_kw")
+            .and_then(Value::as_f64)
+            .expect("rated_power_kw must be present");
+        assert!(
+            (rated_power - 10.0).abs() < 1e-9,
+            "rated_power_kw={rated_power}, expected 10.0"
+        );
+
+        let eta = generator
+            .parameters
+            .get("eta_electric")
+            .and_then(Value::as_f64)
+            .expect("eta_electric must be present");
+        assert!(
+            (eta - expected_eta).abs() < 1e-6,
+            "eta_electric={eta:.6}, expected {expected_eta:.6}"
         );
     }
 }

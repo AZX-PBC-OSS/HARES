@@ -248,6 +248,67 @@ pub fn natural_ventilation_flow_m3_s(
     q_nat.min(max_nat_flow)
 }
 
+/// ASHRAE 152 duct-leakage/infiltration interaction — superposition formula.
+///
+/// When the HVAC fan is running, unbalanced duct leakage pressurises or
+/// depressurises the house, shifting the natural infiltration rate.  ASHRAE
+/// Standard 152 §9.3 gives the adjusted infiltration flow:
+///
+/// ```text
+/// infil_fan_off  = 0.35 × house_volume_m3 / 60          [m³/s]  (ASHRAE 152 baseline)
+/// imb            = |supply_leakage_m3_s - return_leakage_m3_s|   [m³/s]
+///
+/// if supply > return:  adjusted = (baseline^1.5 + imb^1.5)^0.67  (pressurisation → more infiltration)
+/// elif imb > baseline: adjusted = 0                               (large depressurisation dominates)
+/// else:                adjusted = (baseline^1.5 - imb^1.5)^0.67  (partial depressurisation)
+/// ```
+///
+/// # Parameters
+/// - `base_infil_m3_s`: natural infiltration rate computed by the zone model [m³/s]
+/// - `supply_leakage_m3_s`: supply duct leakage flow during fan operation [m³/s]
+/// - `return_leakage_m3_s`: return duct leakage flow during fan operation [m³/s]
+/// - `house_volume_m3`: conditioned zone volume [m³]
+///
+/// Returns the adjusted infiltration flow [m³/s].  When both leakage flows are
+/// zero the function is a no-op (returns `base_infil_m3_s` unchanged).
+///
+/// # References
+/// - ASHRAE Standard 152-2004 §9.3, Eq. 9.3 (infiltration interaction).
+/// - Infiltration in ASHRAE's Residential Ventilation Standards (Sherman, 2008).
+pub fn duct_leakage_infiltration_m3_s(
+    base_infil_m3_s: f64,
+    supply_leakage_m3_s: f64,
+    return_leakage_m3_s: f64,
+    house_volume_m3: f64,
+) -> f64 {
+    if supply_leakage_m3_s == 0.0 && return_leakage_m3_s == 0.0 {
+        return base_infil_m3_s;
+    }
+
+    // ASHRAE 152 §9.3 baseline: 0.35 × V / 60  [m³/s]
+    let infil_fan_off = 0.35 * house_volume_m3 / 60.0;
+    let imb = (supply_leakage_m3_s - return_leakage_m3_s).abs();
+
+    let adjusted = if supply_leakage_m3_s > return_leakage_m3_s {
+        // Pressurisation: infiltration increases above baseline.
+        (infil_fan_off.powf(1.5) + imb.powf(1.5)).powf(0.67)
+    } else if imb > infil_fan_off {
+        // Large depressurisation dominates: all envelope leakage becomes exfiltration.
+        0.0
+    } else {
+        // Partial depressurisation: baseline partially suppressed.
+        (infil_fan_off.powf(1.5) - imb.powf(1.5)).powf(0.67)
+    };
+
+    // The ASHRAE 152 formula replaces the `infil_fan_off` term.  We scale the
+    // caller's base rate by the same ratio so it also captures stack/wind effects.
+    if infil_fan_off > 0.0 {
+        base_infil_m3_s * (adjusted / infil_fan_off)
+    } else {
+        adjusted
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Typed boundary wrappers
 // ---------------------------------------------------------------------------
@@ -1215,6 +1276,73 @@ mod tests {
         assert!(
             (0.1..=1.5).contains(&ach),
             "natural ACH={ach:.3} outside reasonable range [0.1, 1.5]"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // duct_leakage_infiltration_m3_s — ASHRAE 152 §9.3 superposition
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duct_leakage_zero_is_noop() {
+        // When both leakage flows are zero the function must return the base rate unchanged.
+        let base = 0.05;
+        let result = duct_leakage_infiltration_m3_s(base, 0.0, 0.0, 300.0);
+        approx_eq(result, base, 1e-15);
+    }
+
+    #[test]
+    fn supply_greater_than_return_increases_infiltration() {
+        // Supply > return pressurises house → adjusted > base.
+        let volume_m3 = 300.0;
+        let base = 0.35 * volume_m3 / 60.0; // set base equal to infil_fan_off for clean ratio
+        let supply = 0.04; // m³/s supply leakage
+        let result = duct_leakage_infiltration_m3_s(base, supply, 0.0, volume_m3);
+        assert!(
+            result > base,
+            "supply > return must increase infiltration: base={base:.4}, result={result:.4}"
+        );
+    }
+
+    #[test]
+    fn return_greater_than_supply_decreases_infiltration() {
+        // Return > supply depressurises house → adjusted substantially < base.
+        // Use a large return leakage (50% of infil_fan_off) to ensure the
+        // depressurisation effect exceeds the formula's ~0.5% non-linearity.
+        let volume_m3 = 300.0;
+        let infil_fan_off = 0.35 * volume_m3 / 60.0; // 1.75 m³/s
+        let base = infil_fan_off;
+        let ret = infil_fan_off * 0.5; // 0.875 m³/s — well above the 1% threshold
+        let result = duct_leakage_infiltration_m3_s(base, 0.0, ret, volume_m3);
+        assert!(
+            result < base * 0.99,
+            "significant return > supply must decrease infiltration by >1%: base={base:.4}, result={result:.4}"
+        );
+    }
+
+    #[test]
+    fn large_return_dominance_drives_infiltration_to_zero() {
+        // When return leakage imbalance exceeds infil_fan_off, the result must be zero.
+        let volume_m3 = 300.0;
+        let base = 0.35 * volume_m3 / 60.0; // infil_fan_off = 0.35 * 300 / 60 = 1.75 m³/s
+        // imb = 100 m³/s >> infil_fan_off → exfiltration dominates
+        let result = duct_leakage_infiltration_m3_s(base, 0.0, 100.0, volume_m3);
+        approx_eq(result, 0.0, 1e-15);
+    }
+
+    #[test]
+    fn balanced_duct_leakage_is_noop() {
+        // Equal supply and return leakage → imb = 0 → no pressurisation effect.
+        // The ASHRAE 152 formula uses exponents 1.5 and 0.67 (not exact inverses:
+        // 1.5 × 0.67 = 1.005), so the ratio adjusted/infil_fan_off ≈ 1.005 when
+        // imb = 0.  The result should be within 1% of the base rate.
+        let volume_m3 = 300.0;
+        let base = 0.05;
+        let leak = 0.03;
+        let result = duct_leakage_infiltration_m3_s(base, leak, leak, volume_m3);
+        assert!(
+            (result - base).abs() / base < 0.01,
+            "balanced leakage must not change infiltration by more than 1%: base={base}, result={result}"
         );
     }
 }

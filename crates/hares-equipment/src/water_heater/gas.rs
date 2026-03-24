@@ -29,7 +29,7 @@ use crate::hvac::helpers::{
 
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
-    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_GAL, DEFAULT_UA_W_PER_K,
+    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
     WATER_DENSITY_KG_PER_M3,
 };
 
@@ -52,7 +52,7 @@ struct GasWhState {
     tank_avg_temp_c: f64,
     burner_power_w: f64,
     pilot_power_w: f64,
-    gas_consumption_w: f64,
+    fuel_input_w: f64,
     flue_loss_w: f64,
     fan_electric_w: f64,
     draw_flow_rate_kg_s: f64,
@@ -246,10 +246,9 @@ impl Equipment for GasWH {
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
             .clamp(1, 12);
-        let tank_volume_m3 = conv::volume_gal_to_m3(
-            first_f64(config, &["TankVolume", "tank_volume_gal"])
-                .unwrap_or(DEFAULT_TANK_VOLUME_GAL),
-        );
+        let tank_volume_m3 =
+            first_f64(config, &["tank_volume_m3"])
+                .unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =
@@ -288,8 +287,7 @@ impl Equipment for GasWH {
             ua_end_cap_w_per_k: None,
         })?;
 
-        self.burner_input_w = first_f64(config, &["HeatingCapacity", "heating_capacity_btu_hr"])
-            .map(conv::power_btu_h_to_w)
+        self.burner_input_w = first_f64(config, &["heating_capacity_w"])
             .unwrap_or(DEFAULT_BURNER_INPUT_W)
             .max(0.0);
         let has_standing_pilot =
@@ -457,11 +455,11 @@ impl Equipment for GasWH {
             dt,
         )?;
 
-        let gas_consumption_w = burner_input_w + self.pilot_power_w;
-        if gas_consumption_w > 0.0 {
+        let fuel_input_w = burner_input_w + self.pilot_power_w;
+        if fuel_input_w > 0.0 {
             ports.accumulate(&PortContribution::Fuel {
                 fuel_type: self.fuel_type,
-                consumption_w: gas_consumption_w,
+                consumption_w: fuel_input_w,
             })?;
         }
 
@@ -507,7 +505,7 @@ impl Equipment for GasWH {
         self.telemetry.set("tank_avg_temp_c", avg_temp_c);
         self.telemetry.set("burner_power_w", burner_input_w);
         self.telemetry.set("pilot_power_w", self.pilot_power_w);
-        self.telemetry.set("gas_consumption_w", gas_consumption_w);
+        self.telemetry.set("fuel_input_w", fuel_input_w);
         self.telemetry.set("flue_loss_w", flue_loss_w);
         self.telemetry.set("fan_electric_w", fan_electric_w);
         self.telemetry
@@ -543,7 +541,7 @@ impl Equipment for GasWH {
             tank_avg_temp_c: self.telemetry.get("tank_avg_temp_c").unwrap_or(0.0),
             burner_power_w: self.telemetry.get("burner_power_w").unwrap_or(0.0),
             pilot_power_w: self.telemetry.get("pilot_power_w").unwrap_or(0.0),
-            gas_consumption_w: self.telemetry.get("gas_consumption_w").unwrap_or(0.0),
+            fuel_input_w: self.telemetry.get("fuel_input_w").unwrap_or(0.0),
             flue_loss_w: self.telemetry.get("flue_loss_w").unwrap_or(0.0),
             fan_electric_w: self.telemetry.get("fan_electric_w").unwrap_or(0.0),
             draw_flow_rate_kg_s: self.telemetry.get("draw_flow_rate_kg_s").unwrap_or(0.0),
@@ -574,7 +572,7 @@ impl Equipment for GasWH {
         self.telemetry
             .insert("pilot_power_w", decoded.pilot_power_w);
         self.telemetry
-            .insert("gas_consumption_w", decoded.gas_consumption_w);
+            .insert("fuel_input_w", decoded.fuel_input_w);
         self.telemetry.insert("flue_loss_w", decoded.flue_loss_w);
         self.telemetry
             .insert("fan_electric_w", decoded.fan_electric_w);
@@ -681,7 +679,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert("tank_avg_temp_c", 0.0);
     telemetry.insert("burner_power_w", 0.0);
     telemetry.insert("pilot_power_w", 0.0);
-    telemetry.insert("gas_consumption_w", 0.0);
+    telemetry.insert("fuel_input_w", 0.0);
     telemetry.insert("flue_loss_w", 0.0);
     telemetry.insert("fan_electric_w", 0.0);
     telemetry.insert("draw_flow_rate_kg_s", 0.0);
@@ -707,7 +705,7 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             description: "Pilot light fuel input power (continuous)".to_string(),
         },
         TelemetryField {
-            name: "gas_consumption_w".to_string(),
+            name: "fuel_input_w".to_string(),
             unit: "W".to_string(),
             description: "Total fuel consumption rate".to_string(),
         },
@@ -1115,13 +1113,13 @@ mod tests {
             0.0,
             "burner_power_w must be zero during GridEmergency"
         );
-        // gas_consumption_w = burner_input_w + pilot_power_w; with burner off, only
+        // fuel_input_w = burner_input_w + pilot_power_w; with burner off, only
         // pilot remains. Verify burner contribution is zero — pilot is a continuous flame
         // and is not subject to DR load shedding.
         assert_eq!(
-            eq.telemetry().get("gas_consumption_w").unwrap_or(1.0),
+            eq.telemetry().get("fuel_input_w").unwrap_or(1.0),
             eq.pilot_power_w,
-            "gas_consumption_w during GridEmergency must equal pilot only (burner is off)"
+            "fuel_input_w during GridEmergency must equal pilot only (burner is off)"
         );
     }
 
@@ -1190,7 +1188,7 @@ mod tests {
             "burner should be off at setpoint with no draw"
         );
         assert!(
-            eq.telemetry().get("gas_consumption_w").unwrap_or(0.0) > 0.0,
+            eq.telemetry().get("fuel_input_w").unwrap_or(0.0) > 0.0,
             "standing-pilot unit should report non-zero gas consumption at standby"
         );
     }

@@ -366,6 +366,10 @@ impl ScriptFCoefficients {
         if n == 0 || t_surfaces_c.len() != n {
             return vec![0.0; t_surfaces_c.len()];
         }
+        // Guard against NaN/Inf temperatures which would corrupt the T⁴ calculation.
+        if t_surfaces_c.iter().any(|t| !t.is_finite()) {
+            return vec![0.0; n];
+        }
         if self.total_ea <= 0.0 {
             return vec![0.0; n];
         }
@@ -387,6 +391,28 @@ impl ScriptFCoefficients {
             *qi = total_out * w - *qi;
         }
         q_net
+    }
+
+    /// Like `net_flux_w` but writes into a caller-owned buffer.
+    pub fn net_flux_w_into(&self, t_surfaces_c: &[f64], buf: &mut Vec<f64>) {
+        let n = self.e_sigma_a.len();
+        buf.clear();
+        if n == 0 || t_surfaces_c.len() != n || self.total_ea <= 0.0
+            || t_surfaces_c.iter().any(|t| !t.is_finite())
+        {
+            buf.resize(t_surfaces_c.len(), 0.0);
+            return;
+        }
+
+        let mut total_out = 0.0_f64;
+        for (&esa, &t_c) in self.e_sigma_a.iter().zip(t_surfaces_c.iter()) {
+            let j_out = esa * (t_c + CELSIUS_TO_KELVIN).powi(4);
+            buf.push(j_out);
+            total_out += j_out;
+        }
+        for (qi, &w) in buf.iter_mut().zip(self.radiosity_weights.iter()) {
+            *qi = total_out * w - *qi;
+        }
     }
 }
 
@@ -442,6 +468,37 @@ pub fn interior_longwave_linearised_w(
             h_r * s.area_m2 * (t_mrt - t_surf)
         })
         .collect()
+}
+
+/// Like `interior_longwave_linearised_w` but writes into a caller-owned buffer.
+pub fn interior_longwave_linearised_w_into(
+    surfaces: &[InteriorSurface],
+    t_surfaces_c: &[f64],
+    t_zone_c: f64,
+    buf: &mut Vec<f64>,
+) {
+    buf.clear();
+    let n = surfaces.len();
+    if n == 0 {
+        return;
+    }
+
+    let total_ea: f64 = surfaces.iter().map(|s| s.area_m2 * s.emissivity).sum();
+    if total_ea <= 0.0 {
+        buf.resize(n, 0.0);
+        return;
+    }
+    let t_mrt: f64 = surfaces
+        .iter()
+        .zip(t_surfaces_c.iter())
+        .map(|(s, &t)| s.area_m2 * s.emissivity * t)
+        .sum::<f64>()
+        / total_ea;
+
+    buf.extend(surfaces.iter().zip(t_surfaces_c.iter()).map(|(s, &t_surf)| {
+        let h_r = linearised_h_r(s.emissivity, t_zone_c);
+        h_r * s.area_m2 * (t_mrt - t_surf)
+    }));
 }
 
 #[cfg(test)]

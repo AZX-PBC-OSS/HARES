@@ -312,12 +312,15 @@ pub fn resolve_boundary_name(
 
     // Adjacent (adiabatic) boundaries — multifamily party walls/floors.
     if *int == ZoneType::Adjacent || *ext == ZoneType::Adjacent {
-        return match boundary_type {
-            BoundaryType::Wall => Some("Adjacent Wall"),
-            BoundaryType::Floor => Some("Adjacent Floor"),
-            BoundaryType::Roof => Some("Adjacent Ceiling"),
-            BoundaryType::FoundationWall => Some("Adjacent Foundation Wall"),
-            BoundaryType::RimJoist => Some("Adjacent Rim Joist"),
+        let other = if *int == ZoneType::Adjacent { ext } else { int };
+        return match (boundary_type, other) {
+            (BoundaryType::Wall, ZoneType::Attic) => Some("Adjacent Attic Wall"),
+            (BoundaryType::Wall, ZoneType::Garage) => Some("Adjacent Wall"),
+            (BoundaryType::Wall, _) => Some("Adjacent Wall"),
+            (BoundaryType::Floor, _) => Some("Adjacent Floor"),
+            (BoundaryType::Roof, _) => Some("Adjacent Ceiling"),
+            (BoundaryType::FoundationWall, _) => Some("Adjacent Foundation Wall"),
+            (BoundaryType::RimJoist, _) => Some("Adjacent Rim Joist"),
             _ => None,
         };
     }

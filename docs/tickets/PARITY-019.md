@@ -18,9 +18,30 @@ verification:
 
 THERMAL-005 (Crank-Nicolson implicit solver) and THERMAL-006a (semi-implicit infiltration) will have completed. THERMAL-005 implements a zero-allocation `step_into()` hot-loop. THERMAL-006a adds per-step diagonal perturbation of the CN matrices for implicit infiltration coupling — this introduces a per-step LU factorization that must be verified allocation-free. This ticket is a **final sweep** to catch any remaining allocations from both the THERMAL chain and PARITY tickets 005-018.
 
+## Status: COMPLETE
+
+Audit and fix of hot-path allocations in the thermal solver.
+
+### Fixed
+- Interior LWR surface temperature Vec → reusable `interior_surf_temps_buf` on ThermalSolver (clear+push instead of collect)
+- Changed `apply_interior_longwave_inputs` from `&self` to `&mut self` to allow buffer reuse
+
+### Accepted (unavoidable or negligible)
+- `DomainUpdate` return type requires owned `Vec<(ZoneId, f64)>` for zone temperatures — consumed by caller, can't pre-allocate without changing trait
+- `format_domain_update` latent pairs Vec — small (1-4 zones), bounded
+- `compute_solar_distribution` absorbed Vec — small (4-8 surfaces per zone), bounded
+- `lwr_by_zone` diagnostic Vec — small, bounded by zone count
+- Interior LWR fallback path `Vec<InteriorSurface>` — only runs when `compute_scriptf()` not called at init (legacy path)
+
+### Not applicable
+- THERMAL-005 CN `step_into()` already zero-allocation
+- THERMAL-006a LU factorization reuses `m_scratch` pre-allocated buffer
+- `u_buf` swap pattern verified correct
+- `latent_buf` HashMap take/clear pattern verified correct
+
 ## Background/Context
 
-After THERMAL-005, the core state-space stepping is zero-allocation. However, other PARITY tickets (015 interior LWR, 018 solar distribution, 009 ventilation) may introduce new allocations in the resolve pipeline. This ticket audits the full hot path after all physics features are in place and eliminates any remaining per-timestep allocations.
+Post-THERMAL/PARITY sweep to minimize per-timestep heap allocations.
 
 ## Work to Do
 

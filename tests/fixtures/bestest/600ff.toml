@@ -1,28 +1,209 @@
 building_id = 600
 
 [simulation]
-start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 604800
+start_time = "2024-01-01T00:00:00-07:00"
+time_res_s = 3600
+duration_s = 31536000
 
 [geometry]
 floor_area_m2 = 48.0
-zone_volume_m3 = 120.0
-wall_area_m2 = 145.0
+zone_volume_m3 = 129.6
 
 [materials]
 wall_r_value_m2_k_w = 2.0
 
 [hvac]
-equipment_name = "Furnace"
+equipment_name = "None"
 fuel = "electricity"
-heating_capacity_kbtu_h = 25.0
+heating_capacity_kbtu_h = 0.0
 
 [weather]
-outdoor_temp_c = 5.0
-dew_point_c = 2.0
-rel_humidity_pct = 55.0
-pressure_kpa = 101.325
+epw_path = "../../../vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"
+
+[infiltration]
+ach = 0.5
+
+internal_gains_w = 200.0
+
+[[boundaries]]
+id = "south-wall"
+boundary_type = "Wall"
+area_m2 = 9.6
+azimuth_deg = 180.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.066
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.012
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "north-wall"
+boundary_type = "Wall"
+area_m2 = 21.6
+azimuth_deg = 0.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.066
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.012
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "east-wall"
+boundary_type = "Wall"
+area_m2 = 16.2
+azimuth_deg = 90.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.066
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.012
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "west-wall"
+boundary_type = "Wall"
+area_m2 = 16.2
+azimuth_deg = 270.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.066
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.012
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "roof"
+boundary_type = "Roof"
+area_m2 = 48.0
+tilt_deg = 0.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.019
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.1118
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.010
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "floor"
+boundary_type = "Floor"
+area_m2 = 48.0
+tilt_deg = 180.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+
+[[boundaries.material_layers]]
+thickness_m = 0.025
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 1.003
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[windows]]
+id = "south-window-1"
+area_m2 = 6.0
+azimuth_deg = 180.0
+u_factor_w_m2_k = 3.0
+shgc = 0.789
+attached_to_wall_id = "south-wall"
+
+[[windows]]
+id = "south-window-2"
+area_m2 = 6.0
+azimuth_deg = 180.0
+u_factor_w_m2_k = 3.0
+shgc = 0.789
+attached_to_wall_id = "south-wall"
 
 [schedule]
 occupancy = 1.0
@@ -30,5 +211,5 @@ occupancy = 1.0
 [output]
 output_verbosity = 0
 output_format = "csv"
-output_chunk_size = 1000
+output_chunk_size = 10000
 master_seed = 0

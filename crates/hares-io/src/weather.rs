@@ -20,6 +20,10 @@ pub enum WeatherFormat {
     /// Contains only dry bulb, RH, wind, and solar — missing pressure, dew point,
     /// infrared, sky cover, and precipitation, which are estimated at parse time.
     ResStockCsv,
+    /// NREL TMY3 CSV file, hourly data (8760 rows for standard year).
+    /// Reference: Wilcox & Marion (2008), NREL/TP-581-43156.
+    /// <https://docs.nrel.gov/docs/fy08osti/43156.pdf>
+    Tmy3,
 }
 
 /// Detect the weather file format from its path extension and (for CSV) header content.
@@ -28,6 +32,8 @@ pub enum WeatherFormat {
 /// - `.csv` extension triggers header sniffing:
 ///   - **PSM3**: line 1 starts with `Source` and has 10+ fields; line 3 contains
 ///     `Year`, `Month`, `Day`, `Hour`, `Minute` and at least one of `GHI`/`DNI`/`DHI`.
+///   - **TMY3**: line 2 contains `Date (MM/DD/YYYY)`, `Time (HH:MM)`, and at least
+///     one of `GHI (W/m^2)` / `DNI (W/m^2)` / `DHI (W/m^2)`.
 ///   - **ResStock CSV**: line 1 contains both `Dry Bulb Temperature` and
 ///     `Global Horizontal Radiation` (case-insensitive).
 /// - Other extensions produce an error listing supported formats.
@@ -49,13 +55,13 @@ pub fn detect_weather_format(path: impl AsRef<Path>) -> Result<WeatherFormat, We
                 format!(".{ext}")
             };
             Err(WeatherError::Parse(format!(
-                "unsupported weather file extension {ext_display}; supported formats: .epw, .csv (PSM3/ResStock)"
+                "unsupported weather file extension {ext_display}; supported formats: .epw, .csv (PSM3/TMY3/ResStock)"
             )))
         }
     }
 }
 
-/// Read the first line(s) of a CSV file and detect whether it is PSM3 or ResStock format.
+/// Read the first lines of a CSV file and detect whether it is PSM3, TMY3, or ResStock format.
 fn sniff_csv_header(path: &Path) -> Result<WeatherFormat, WeatherError> {
     let file = std::fs::File::open(path).map_err(|source| WeatherError::Io {
         path: path.display().to_string(),
@@ -64,9 +70,11 @@ fn sniff_csv_header(path: &Path) -> Result<WeatherFormat, WeatherError> {
     let reader = std::io::BufReader::new(file);
     let mut lines_iter = reader.lines();
 
-    // Line 1: check PSM3 first (starts with "Source", 10+ fields).
+    // Line 1.
     let line1 = next_line(&mut lines_iter, path, 1)?;
     let fields: Vec<&str> = line1.split(',').collect();
+
+    // PSM3: line 1 starts with "Source" and has 10+ fields.
     let looks_like_psm3_line1 = fields
         .first()
         .is_some_and(|f| {
@@ -94,14 +102,21 @@ fn sniff_csv_header(path: &Path) -> Result<WeatherFormat, WeatherError> {
         }
     }
 
-    // Not PSM3 — try ResStock CSV detection on line 1.
+    // ResStock: detectable from line 1 alone.
     if crate::resstock_csv::is_resstock_csv_header(&line1) {
         return Ok(WeatherFormat::ResStockCsv);
     }
 
+    // TMY3: line 1 is station metadata; line 2 is the column header.
+    // The column header contains "Date (MM/DD/YYYY)" and solar columns.
+    let line2 = next_line(&mut lines_iter, path, 2)?;
+    if crate::tmy3::is_tmy3_column_header(&line2) {
+        return Ok(WeatherFormat::Tmy3);
+    }
+
     Err(WeatherError::Parse(
-        "CSV file does not appear to be PSM3/SAM or ResStock format; \
-         expected NSRDB header or ResStock columns"
+        "CSV file does not appear to be PSM3/SAM, TMY3, or ResStock format; \
+         expected NSRDB header, TMY3 column header, or ResStock columns"
             .to_string(),
     ))
 }
@@ -130,6 +145,8 @@ fn next_line(
 /// Supported formats:
 /// - **EPW** (`.epw`): EnergyPlus Weather files, hourly data.
 /// - **PSM3** (`.csv`): NREL NSRDB SAM CSV files at 5/15/30/60-min resolution.
+/// - **TMY3** (`.csv`): NREL TMY3 CSV files, hourly data.
+/// - **ResStock CSV** (`.csv`): ResStock simplified 8-column CSV files.
 ///
 /// Format detection is performed by [`detect_weather_format`], then the file is
 /// dispatched to the appropriate parser.
@@ -138,6 +155,7 @@ pub fn parse_weather(path: impl AsRef<Path>) -> Result<WeatherTimeSeries, Weathe
     match detect_weather_format(path)? {
         WeatherFormat::Epw => crate::epw::parse_epw(path),
         WeatherFormat::Psm3 => crate::psm3::parse_psm3(path),
+        WeatherFormat::Tmy3 => crate::tmy3::parse_tmy3(path),
         WeatherFormat::ResStockCsv => {
             // Default to sea-level elevation and equator when called through the
             // generic interface. Callers who know the site location should use
@@ -181,6 +199,7 @@ pub fn parse_weather_with_location(
     match detect_weather_format(path)? {
         WeatherFormat::Epw => crate::epw::parse_epw(path),
         WeatherFormat::Psm3 => crate::psm3::parse_psm3(path),
+        WeatherFormat::Tmy3 => crate::tmy3::parse_tmy3(path),
         WeatherFormat::ResStockCsv => {
             crate::resstock_csv::parse_resstock_csv(
                 path,

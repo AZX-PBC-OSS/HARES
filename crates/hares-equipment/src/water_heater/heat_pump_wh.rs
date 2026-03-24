@@ -37,7 +37,7 @@ use crate::hvac::helpers::{
 
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
-    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_GAL, DEFAULT_UA_W_PER_K,
+    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
     WATER_DENSITY_KG_PER_M3,
 };
 
@@ -335,10 +335,9 @@ impl Equipment for HeatPumpWH {
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
             .clamp(1, 12);
-        let tank_volume_m3 = conv::volume_gal_to_m3(
-            first_f64(config, &["TankVolume", "tank_volume_gal"])
-                .unwrap_or(DEFAULT_TANK_VOLUME_GAL),
-        );
+        let tank_volume_m3 =
+            first_f64(config, &["tank_volume_m3"])
+                .unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =

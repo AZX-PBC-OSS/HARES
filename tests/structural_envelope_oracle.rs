@@ -635,4 +635,119 @@ mod tests {
             );
         }
     }
+
+    // ── Test 5: UA parity with OCHRE ────────────────────────────────────
+
+    #[test]
+    fn beopt_ua_parity() {
+        let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
+        let defaults_path = project_root().join("defaults");
+        let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
+
+        let n_zones = building.zones.len();
+        let zone_inputs = building_to_zone_inputs(&building, n_zones);
+        let boundary_inputs =
+            building_to_boundary_inputs(&building, n_zones, &defaults, 2.0, 10.0, 10.0);
+        let zone_caps = derive_zone_capacitances(&zone_inputs);
+
+        let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps)
+            .expect("assemble_building_rc must succeed");
+
+        // Aggregate HARES boundary UA by LUT name for comparison with OCHRE
+        // (OCHRE consolidates walls by type; HARES keeps per-orientation).
+        let lut = defaults.envelope_lut().expect("envelope LUT");
+        let mut hares_ua_by_name: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for (bd, diag_bd) in building.boundaries.iter().zip(diag.boundaries.iter()) {
+            let name = bd
+                .lut_boundary_name
+                .clone()
+                .or_else(|| {
+                    resolve_boundary_name(
+                        &bd.boundary_type,
+                        bd.interior_zone.as_ref(),
+                        bd.exterior_zone.as_ref(),
+                    )
+                    .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| format!("Unknown({})", bd.id));
+            *hares_ua_by_name.entry(name).or_default() += diag_bd.ua_w_per_k;
+        }
+
+        // OCHRE reference per-boundary effective UA (from ochre_rc_reference.json).
+        let ochre_ua: &[(&str, f64)] = &[
+            ("Exterior Wall", OCHRE_EXTERIOR_WALL_UA),
+            ("Attic Wall", OCHRE_ATTIC_WALL_UA),
+            ("Attic Floor", OCHRE_ATTIC_FLOOR_UA),
+            ("Floor", OCHRE_FLOOR_SLAB_UA),
+            ("Attic Roof", OCHRE_ATTIC_ROOF_UA),
+            ("Door", OCHRE_DOOR_UA),
+            ("Interior Wall", OCHRE_INTERIOR_WALL_UA),
+            ("Indoor Furniture", OCHRE_INDOOR_FURNITURE_UA),
+        ];
+
+        eprintln!("\n=== UA Parity: HARES vs OCHRE ===");
+        eprintln!(
+            "{:<25} {:>10} {:>10} {:>8}",
+            "Boundary", "HARES", "OCHRE", "Diff%"
+        );
+        eprintln!("{}", "-".repeat(58));
+
+        for &(name, ochre_val) in ochre_ua {
+            let hares_val = hares_ua_by_name.get(name).copied().unwrap_or(0.0);
+            let diff_pct = if ochre_val.abs() > 1e-6 {
+                (hares_val - ochre_val) / ochre_val * 100.0
+            } else {
+                0.0
+            };
+            let status = if diff_pct.abs() < 5.0 { "OK" } else { "!!" };
+            eprintln!(
+                "{:<25} {:>10.2} {:>10.2} {:>7.1}% {status}",
+                name, hares_val, ochre_val, diff_pct
+            );
+        }
+
+        let hares_total = diag.total_ua_w_per_k;
+        let diff_total = (hares_total - OCHRE_TOTAL_UA) / OCHRE_TOTAL_UA * 100.0;
+        eprintln!("{}", "-".repeat(58));
+        eprintln!(
+            "{:<25} {:>10.2} {:>10.2} {:>7.1}%",
+            "TOTAL", hares_total, OCHRE_TOTAL_UA, diff_total
+        );
+
+        // Per-boundary assertions: opaque LUT-matched boundaries within 1%.
+        for &(name, ochre_val) in ochre_ua {
+            if ochre_val < 1.0 {
+                continue; // skip tiny boundaries
+            }
+            let hares_val = hares_ua_by_name.get(name).copied().unwrap_or(0.0);
+            assert_within_pct(
+                hares_val,
+                ochre_val,
+                1.0,
+                &format!("{name} UA"),
+            );
+        }
+
+        // Total UA within 10% (windows account for the difference).
+        assert_within_pct(hares_total, OCHRE_TOTAL_UA, 10.0, "total building UA");
+
+        // Zone capacitances within 1%.
+        let cond_idx = zone_index(&building, ZoneType::Conditioned);
+        let attic_idx = zone_index(&building, ZoneType::Attic);
+        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * 7.0;
+        assert_within_pct(
+            zone_caps[cond_idx],
+            hares_indoor_cap,
+            1.0,
+            "indoor zone capacitance",
+        );
+        let hares_attic_cap = 1.2 * 1006.0 * OCHRE_ATTIC_VOLUME_M3 * 7.0;
+        assert_within_pct(
+            zone_caps[attic_idx],
+            hares_attic_cap,
+            1.0,
+            "attic zone capacitance",
+        );
+    }
 }

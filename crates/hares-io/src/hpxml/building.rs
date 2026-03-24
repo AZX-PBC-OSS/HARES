@@ -58,6 +58,12 @@ pub enum BoundaryType {
     Other(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorOrCeiling {
+    Floor,
+    Ceiling,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaterialLayer {
     pub thickness_m: f64,
@@ -106,6 +112,8 @@ pub struct Boundary {
     /// auto-generated boundaries (interior walls, furniture) whose LUT name
     /// can't be derived from zone types alone.
     pub lut_boundary_name: Option<String>,
+    /// HPXML `<FloorOrCeiling>` — distinguishes adjacent floors from ceilings.
+    pub floor_or_ceiling: Option<FloorOrCeiling>,
     /// Surface tilt angle [degrees].
     ///
     /// 0 = horizontal facing up (flat roof), 90 = vertical (wall),
@@ -132,6 +140,12 @@ pub struct Window {
     /// Per ANSI/RESNET/ICC 301: `effective_shgc = shgc * interior_shading_fraction`.
     /// A value of 0.70 means 70% of solar passes through (30% blocked).
     pub interior_shading_fraction: f64,
+    /// Winter shading coefficient for seasonal SHGC adjustment.
+    /// Per ANSI/RESNET/ICC 301: summer/winter shading may differ.
+    pub winter_shading_fraction: f64,
+    /// Fraction of window area that is operable (0.0–1.0).
+    /// Used for natural ventilation flow calculation.
+    pub fraction_operable: f64,
     pub frame_type: Option<String>,
     pub attached_to_wall_id: Option<String>,
 }
@@ -179,6 +193,10 @@ pub struct Building {
     pub boundaries: Vec<Boundary>,
     pub windows: Vec<Window>,
     pub infiltration_ach50: Option<f64>,
+    /// Blower-door result at 50 Pa in CFM (cubic feet per minute).
+    pub infiltration_cfm50: Option<f64>,
+    /// Effective Leakage Area converted to cm² from sq-in input.
+    pub infiltration_ela_cm2: Option<f64>,
     pub hvac_capacity_w: Option<f64>,
     pub seer2: Option<f64>,
     pub hspf2: Option<f64>,
@@ -201,6 +219,9 @@ pub struct Building {
     /// Foundation type name for LUT matching (e.g. "Unfinished Basement", "Crawlspace").
     /// Derived from `<Foundation>/<FoundationType>` per OCHRE hpxml.py:276-286.
     pub foundation_name: Option<String>,
+    /// Residential facility type from `<BuildingConstruction>/<ResidentialFacilityType>`.
+    /// Used for adjusted bedroom count in water heater draw profiles.
+    pub residential_facility_type: Option<String>,
     // TODO: `details_xml` leaks the parse tree (`XmlNode`) into the domain model,
     // forcing `hares-core` to construct XmlNode trees. Extract remaining
     // XML-dependent fields into typed struct members and remove this field.
@@ -406,10 +427,26 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .path(&["BuildingConstruction", "NumberofConditionedFloorsAboveGrade"])
         .and_then(|node| parse_value_with_units(Some(node), ValueKind::Raw));
 
+    let residential_facility_type = summary
+        .path(&["BuildingConstruction", "ResidentialFacilityType"])
+        .map(|n| n.text.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     // InfiltrationHeight lives under AirInfiltrationMeasurement — HPXML stores it in feet.
     let infiltration_height_m = details
         .first_descendant("InfiltrationHeight")
         .and_then(|node| parse_value_with_units(Some(node), ValueKind::Length));
+
+    // <EffectiveLeakageArea units="sq-in"> — convert sq inches to cm² (1 in² = 6.4516 cm²).
+    let infiltration_ela_cm2 = details
+        .first_descendant("EffectiveLeakageArea")
+        .and_then(|node| node.text_as_f64())
+        .map(|sq_in| sq_in * 6.4516);
+
+    // <AirLeakage units="CFM50"> under BuildingAirLeakage, or UnitofMeasure = "CFM".
+    // The existing infiltration_ach50 path reads <AirLeakage> raw, so we check the units
+    // attribute to detect CFM50 vs ACH50.
+    let infiltration_cfm50 = parse_air_leakage_cfm50(details);
 
     // <extension><HasFlueOrChimneyInConditionedSpace> — boolean text
     let has_flue_or_chimney = details
@@ -554,21 +591,31 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                     emittance: None,
                     tilt_deg: Some(90.0),
                     lut_boundary_name: Some("Interior Wall".to_string()),
+                    floor_or_ceiling: None,
                 });
             }
         }
     }
 
     // Auto-generate furniture boundaries per zone (same-zone thermal mass).
+    // HPXML extension/FurnitureMass/AreaFraction overrides the conditioned zone default.
+    let furniture_area_fraction_override = details
+        .path(&["Enclosure", "extension", "FurnitureMass", "AreaFraction"])
+        .and_then(XmlNode::text_as_f64);
     const FURNITURE_FRACTIONS: &[(ZoneType, f64)] = &[
         (ZoneType::Conditioned, 0.4),
         (ZoneType::Foundation, 0.4),
         (ZoneType::Garage, 0.1),
         // Attic: 0 (no furniture)
     ];
-    for (zone_type, fraction) in FURNITURE_FRACTIONS {
+    for (zone_type, default_fraction) in FURNITURE_FRACTIONS {
         if let Some(zone) = zones.values().find(|z| z.zone_type == *zone_type) {
             if let Some(area) = zone.floor_area_m2 {
+                let fraction = if *zone_type == ZoneType::Conditioned {
+                    furniture_area_fraction_override.unwrap_or(*default_fraction)
+                } else {
+                    *default_fraction
+                };
                 let furniture_area = area * fraction;
                 if furniture_area > 0.0 {
                     let lut_name = match zone_type {
@@ -596,6 +643,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         emittance: None,
                         tilt_deg: Some(90.0),
                         lut_boundary_name: Some(lut_name.to_string()),
+                        floor_or_ceiling: None,
                     });
                 }
             }
@@ -635,6 +683,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         zones: zones_vec,
         boundaries,
         windows,
+        infiltration_cfm50,
+        infiltration_ela_cm2,
         infiltration_ach50: extract_first_f64(
             details,
             &[
@@ -695,6 +745,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         floors_above_grade,
         has_flue_or_chimney,
         foundation_name,
+        residential_facility_type,
         details_xml: details.clone(),
     })
 }
@@ -772,14 +823,29 @@ fn parse_windows(
         // InteriorShading/SummerShadingCoefficient is a transmittance multiplier
         // per ANSI/RESNET/ICC 301-2019 Table 4.2.2(1). Default 0.70 when
         // InteriorShading present but coefficient absent; 1.0 when absent entirely.
-        let interior_shading_fraction = match window.child("InteriorShading") {
-            Some(shading) => shading
-                .child("SummerShadingCoefficient")
-                .and_then(XmlNode::text_as_f64)
-                .unwrap_or(0.70)
-                .clamp(0.0, 1.0),
-            None => 1.0,
-        };
+        let (interior_shading_fraction, winter_shading_fraction) =
+            match window.child("InteriorShading") {
+                Some(shading) => {
+                    let summer = shading
+                        .child("SummerShadingCoefficient")
+                        .and_then(XmlNode::text_as_f64)
+                        .unwrap_or(0.70)
+                        .clamp(0.0, 1.0);
+                    let winter = shading
+                        .child("WinterShadingCoefficient")
+                        .and_then(XmlNode::text_as_f64)
+                        .unwrap_or(0.85)
+                        .clamp(0.0, 1.0);
+                    (summer, winter)
+                }
+                None => (1.0, 1.0),
+            };
+
+        let fraction_operable = window
+            .child("FractionOperable")
+            .and_then(XmlNode::text_as_f64)
+            .unwrap_or(0.67)
+            .clamp(0.0, 1.0);
 
         let frame_type = window.child("FrameType").map(|n| n.text.trim().to_string());
         let attached_to_wall_id = window
@@ -793,6 +859,8 @@ fn parse_windows(
             u_factor_w_m2_k,
             shgc,
             interior_shading_fraction,
+            winter_shading_fraction,
+            fraction_operable,
             frame_type,
             attached_to_wall_id,
         });
@@ -817,6 +885,7 @@ fn parse_windows(
             tilt_deg: Some(90.0),
             framing_factor: None,
             lut_boundary_name: None,
+            floor_or_ceiling: None,
         });
     }
 
@@ -828,7 +897,8 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
     let area_m2 = parse_boundary_area(node, &boundary_type, &id)?;
     let r_value_layers_m2_k_w = parse_nominal_r_layers(node);
     let assembly_r_value_m2_k_w =
-        parse_value_with_units(node.child("AssemblyEffectiveRValue"), ValueKind::RValue);
+        parse_value_with_units(node.child("AssemblyEffectiveRValue"), ValueKind::RValue)
+            .or_else(|| parse_value_with_units(node.child("RValue"), ValueKind::RValue));
     let material_layers = parse_material_layers(node, area_m2);
 
     let has_radiant_barrier = node
@@ -894,6 +964,13 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
         emittance,
         tilt_deg,
         lut_boundary_name: None,
+        floor_or_ceiling: node.child("FloorOrCeiling").and_then(|n| {
+            match n.text.trim().to_ascii_lowercase().as_str() {
+                "floor" => Some(FloorOrCeiling::Floor),
+                "ceiling" => Some(FloorOrCeiling::Ceiling),
+                _ => None,
+            }
+        }),
     })
 }
 
@@ -1651,6 +1728,35 @@ fn convert_temperature_to_c(value: f64, units: Option<&str>) -> f64 {
     }
 }
 
+/// Extract CFM50 from `<BuildingAirLeakage>` when `UnitofMeasure` is "CFM" or
+/// when `<AirLeakage units="CFM50">` appears directly under `AirInfiltrationMeasurement`.
+///
+/// Returns `None` if the leakage value is specified in ACH or is absent.
+fn parse_air_leakage_cfm50(details: &XmlNode) -> Option<f64> {
+    // HPXML 3.x: BuildingAirLeakage wrapper with UnitofMeasure child element.
+    let measurement = details.first_descendant("AirInfiltrationMeasurement")?;
+    if let Some(bal) = measurement.child("BuildingAirLeakage") {
+        let unit = bal
+            .child("UnitofMeasure")
+            .map(|n| normalize_ascii(n.text.trim()));
+        if matches!(unit.as_deref(), Some("cfm")) {
+            return bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+        }
+    }
+    // HPXML 4.x: <AirLeakage units="CFM50"> directly under AirInfiltrationMeasurement.
+    if let Some(al) = measurement.child("AirLeakage") {
+        let unit_attr = al
+            .attrs
+            .get("units")
+            .or_else(|| al.attrs.get("unit"))
+            .map(|s| normalize_ascii(s));
+        if matches!(unit_attr.as_deref(), Some("cfm50") | Some("cfm")) {
+            return al.text_as_f64();
+        }
+    }
+    None
+}
+
 fn parse_site_type(text: &str) -> SiteType {
     match normalize_ascii(text).as_str() {
         "rural" => SiteType::Rural,
@@ -1665,7 +1771,7 @@ fn parse_zone_ref(node: Option<&XmlNode>) -> Option<ZoneType> {
     Some(parse_zone_label(node.text.trim()))
 }
 
-fn parse_zone_label(text: &str) -> ZoneType {
+pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
     let norm = normalize_ascii(text);
     if norm.contains("condition") || norm == "living space" {
         ZoneType::Conditioned
@@ -1707,7 +1813,7 @@ fn parse_duct_location(text: &str) -> DuctLocation {
     }
 }
 
-fn zone_key(zone_type: &ZoneType) -> String {
+pub(crate) fn zone_key(zone_type: &ZoneType) -> String {
     match zone_type {
         ZoneType::Conditioned => "conditioned".to_string(),
         ZoneType::Attic => "attic".to_string(),
@@ -2717,5 +2823,170 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn window_fraction_operable_parsed() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let w = &building.windows[0];
+        assert!(
+            (w.fraction_operable - 0.67).abs() < f64::EPSILON,
+            "default fraction_operable should be 0.67, got {}",
+            w.fraction_operable,
+        );
+    }
+
+    #[test]
+    fn window_fraction_operable_custom() {
+        let xml = SAMPLE_XML.replace(
+            "<SHGC>0.25</SHGC>",
+            "<SHGC>0.25</SHGC>\n            <FractionOperable>0.33</FractionOperable>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let w = &building.windows[0];
+        assert!(
+            (w.fraction_operable - 0.33).abs() < f64::EPSILON,
+            "custom fraction_operable, got {}",
+            w.fraction_operable,
+        );
+    }
+
+    #[test]
+    fn window_fraction_operable_half() {
+        let xml = SAMPLE_XML.replace(
+            "<SHGC>0.25</SHGC>",
+            "<SHGC>0.25</SHGC>\n            <FractionOperable>0.5</FractionOperable>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let w = &building.windows[0];
+        assert!(
+            (w.fraction_operable - 0.5).abs() < f64::EPSILON,
+            "FractionOperable=0.5 must be parsed exactly, got {}",
+            w.fraction_operable,
+        );
+    }
+
+    #[test]
+    fn window_winter_shading_coefficient_parsed() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        let w = &building.windows[0];
+        // No InteriorShading in SAMPLE_XML → defaults to 1.0.
+        assert!(
+            (w.winter_shading_fraction - 1.0).abs() < f64::EPSILON,
+            "no shading → winter=1.0, got {}",
+            w.winter_shading_fraction,
+        );
+    }
+
+    #[test]
+    fn window_winter_shading_with_element() {
+        let xml = SAMPLE_XML.replace(
+            "<SHGC>0.25</SHGC>",
+            "<SHGC>0.25</SHGC>\n            <InteriorShading>\n              <SummerShadingCoefficient>0.70</SummerShadingCoefficient>\n              <WinterShadingCoefficient>0.85</WinterShadingCoefficient>\n            </InteriorShading>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let w = &building.windows[0];
+        assert!(
+            (w.interior_shading_fraction - 0.70).abs() < f64::EPSILON,
+            "summer shading, got {}",
+            w.interior_shading_fraction,
+        );
+        assert!(
+            (w.winter_shading_fraction - 0.85).abs() < f64::EPSILON,
+            "winter shading, got {}",
+            w.winter_shading_fraction,
+        );
+    }
+
+    #[test]
+    fn floor_or_ceiling_parsed() {
+        // SAMPLE_XML doesn't have a <Floor> element at the right level,
+        // but we can test the parsing via a FrameFloor with FloorOrCeiling.
+        // For now, verify the field exists on parsed boundaries.
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        // No FloorOrCeiling in SAMPLE_XML → all boundaries have None.
+        for bd in &building.boundaries {
+            if !bd.id.contains("furniture") && bd.id != "interior_wall" {
+                assert!(
+                    bd.floor_or_ceiling.is_none(),
+                    "boundary {} should have no floor_or_ceiling without element",
+                    bd.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn residential_facility_type_parsed() {
+        let xml = SAMPLE_XML.replace(
+            "</BuildingConstruction>",
+            "<ResidentialFacilityType>single-family detached</ResidentialFacilityType>\n        </BuildingConstruction>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(
+            building.residential_facility_type.as_deref(),
+            Some("single-family detached")
+        );
+    }
+
+    #[test]
+    fn residential_facility_type_absent() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        assert!(building.residential_facility_type.is_none());
+    }
+
+    #[test]
+    fn infiltration_ach50_parsed_from_sample() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        assert_eq!(building.infiltration_ach50, Some(5.0));
+        assert!(building.infiltration_cfm50.is_none());
+        assert!(building.infiltration_ela_cm2.is_none());
+    }
+
+    #[test]
+    fn infiltration_cfm50_parsed_from_unitofmeasure_cfm() {
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<BuildingAirLeakage>\
+               <UnitofMeasure>CFM</UnitofMeasure>\
+               <AirLeakage>850.0</AirLeakage>\
+             </BuildingAirLeakage>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.infiltration_cfm50, Some(850.0));
+        // The raw ACH path will not find the value since it's wrapped.
+        // infiltration_ach50 may or may not be set depending on parse path — the
+        // important thing is that cfm50 is set correctly.
+    }
+
+    #[test]
+    fn infiltration_cfm50_parsed_from_units_attribute() {
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<AirLeakage units=\"CFM50\">750.0</AirLeakage>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.infiltration_cfm50, Some(750.0));
+    }
+
+    #[test]
+    fn infiltration_ela_parsed_from_sq_in() {
+        let xml = SAMPLE_XML.replace(
+            "<AirLeakage>5.0</AirLeakage>",
+            "<EffectiveLeakageArea units=\"sq-in\">10.0</EffectiveLeakageArea>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        // 10 sq-in × 6.4516 = 64.516 cm²
+        let ela = building.infiltration_ela_cm2.expect("ELA should be parsed");
+        assert!(
+            (ela - 64.516).abs() < 0.001,
+            "10 sq-in should convert to 64.516 cm², got {ela}"
+        );
+    }
+
+    #[test]
+    fn infiltration_ela_absent_when_not_present() {
+        let building = parse_building(SAMPLE_XML).expect("parse should succeed");
+        assert!(building.infiltration_ela_cm2.is_none());
     }
 }

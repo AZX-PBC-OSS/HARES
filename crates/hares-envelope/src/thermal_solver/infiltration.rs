@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use hares_physics::air_properties::moist_air_density_kg_m3;
 use hares_physics::constants::CP_DRY_AIR_J_KG_K;
 use hares_physics::infiltration::{
-    ach_infiltration, ashrae_wind_stack, ela_infiltration, natural_ventilation_flow_m3_s,
+    ach_infiltration, ashrae_wind_stack, duct_leakage_infiltration_m3_s, ela_infiltration,
+    natural_ventilation_flow_m3_s,
 };
 use hares_types::{EnvironmentState, ZoneId};
 
@@ -20,6 +21,7 @@ use super::config::{InfiltrationMethod, ThermalSolverConfig};
 /// following the EnergyPlus zone air heat balance (Engineering Reference §13.3,
 /// Predictor-Corrector algorithm: `C_z dT/dt = ... + m_inf*cp*(T_out - T_z)`
 /// where `m_inf*cp` enters the implicit denominator coefficient).
+#[derive(Debug, Clone)]
 pub(crate) struct InfiltrationCoupling {
     pub zone: ZoneId,
     /// Infiltration+ventilation sensible conductance [W/K] = m_dot_sens * cp.
@@ -31,19 +33,32 @@ pub(crate) struct InfiltrationCoupling {
     #[allow(dead_code)]
     pub q_latent_w: f64,
     /// Diagnostic sensible gain [W] = h_inf * (T_out - T_zone) for reporting.
+    #[allow(dead_code)]
     pub q_sensible_diagnostic_w: f64,
+    /// Pure infiltration sensible gain [W] — excludes ventilation components.
+    pub q_infiltration_w: f64,
+    /// Forced mechanical ventilation sensible gain [W] — after recovery efficiency.
+    pub q_forced_vent_w: f64,
+    /// Natural ventilation sensible gain [W] — operable window stack/wind flow.
+    pub q_natural_vent_w: f64,
 }
 
 /// Computes infiltration and ventilation coupling terms and accumulates latent loads
 /// into `latent_out` (which the caller has already cleared).
 ///
+/// `hvac_active` indicates whether the HVAC fan is running this timestep.  When
+/// true and the config carries non-zero duct leakage flows, the conditioned-zone
+/// infiltration rate is adjusted per ASHRAE 152 §9.3.
+///
 /// Returns per-zone `InfiltrationCoupling` structs for semi-implicit treatment.
 pub(crate) fn apply_infiltration_and_ventilation(
     config: &ThermalSolverConfig,
     env: &EnvironmentState,
+    hvac_active: bool,
     latent_out: &mut HashMap<ZoneId, f64>,
-) -> Vec<InfiltrationCoupling> {
-    let mut couplings = Vec::new();
+    couplings: &mut Vec<InfiltrationCoupling>,
+) {
+    couplings.clear();
     let p_pa = env.weather.pressure_pa();
     let t_out = env.weather.outdoor_temp_c;
     let w_out = env.weather.outdoor_humidity_ratio;
@@ -60,7 +75,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
             .map(|(_, m)| *m)
             .unwrap_or_default();
 
-        let q_inf_m3_s = match method {
+        let mut q_inf_m3_s = match method {
             InfiltrationMethod::AshraeWindStack {
                 c_s,
                 c_w,
@@ -87,6 +102,21 @@ pub(crate) fn apply_infiltration_and_ventilation(
             ),
             InfiltrationMethod::Ach { ach } => ach_infiltration(ach, zone.volume_m3),
         };
+
+        // ASHRAE 152 §9.3: duct leakage imbalance adjusts infiltration when the
+        // HVAC fan is running.  Only applied to the conditioned zone (duct leakage
+        // does not directly pressurise unconditioned zones).
+        if hvac_active
+            && zone.id == config.indoor_zone_id
+            && (config.supply_duct_leakage_m3_s > 0.0 || config.return_duct_leakage_m3_s > 0.0)
+        {
+            q_inf_m3_s = duct_leakage_infiltration_m3_s(
+                q_inf_m3_s,
+                config.supply_duct_leakage_m3_s,
+                config.return_duct_leakage_m3_s,
+                zone.volume_m3,
+            );
+        }
 
         // Natural ventilation flow (operable windows).
         let q_nat_m3_s = config
@@ -115,6 +145,17 @@ pub(crate) fn apply_infiltration_and_ventilation(
             .get(&zone.id)
             .copied()
             .unwrap_or(config.ventilation_flow_m3_s);
+
+        // Compute per-component diagnostic gains before flow combination.
+        let delta_t = t_out - zone.temperature_c;
+        let q_infiltration_w = rho * q_inf_m3_s * CP_DRY_AIR_J_KG_K * delta_t;
+        let q_natural_vent_w = rho * q_nat_m3_s * CP_DRY_AIR_J_KG_K * delta_t;
+        let forced_eff = if config.ventilation.balanced {
+            1.0 - config.ventilation.sensible_recovery_efficiency
+        } else {
+            1.0
+        };
+        let q_forced_vent_w = rho * forced_flow_m3_s * forced_eff * CP_DRY_AIR_J_KG_K * delta_t;
 
         // Combine infiltration + natural ventilation + forced ventilation.
         // OCHRE Envelope.py:59-87:
@@ -151,10 +192,12 @@ pub(crate) fn apply_infiltration_and_ventilation(
             t_forcing_c: t_out,
             q_latent_w: q_latent,
             q_sensible_diagnostic_w: q_sensible_diagnostic,
+            q_infiltration_w,
+            q_forced_vent_w,
+            q_natural_vent_w,
         });
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }
-    couplings
 }
 
 #[cfg(test)]

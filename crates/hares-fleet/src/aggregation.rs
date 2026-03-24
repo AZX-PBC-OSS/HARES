@@ -434,6 +434,8 @@ mod tests {
                 peak_import_kw: peak,
                 peak_export_kw: 0.0,
             },
+            envelope_loads_kwh: None,
+            efficiency: Default::default(),
         }
     }
 

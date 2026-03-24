@@ -38,7 +38,7 @@ pub enum ElementPriorityMode {
 
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
-    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_GAL, DEFAULT_UA_W_PER_K,
+    DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
     WATER_DENSITY_KG_PER_M3,
 };
 
@@ -248,10 +248,9 @@ impl Equipment for ResistanceWH {
             .unwrap_or(6)
             .clamp(1, 12);
 
-        let tank_volume_m3 = conv::volume_gal_to_m3(
-            first_f64(config, &["TankVolume", "tank_volume_gal"])
-                .unwrap_or(DEFAULT_TANK_VOLUME_GAL),
-        );
+        let tank_volume_m3 =
+            first_f64(config, &["tank_volume_m3"])
+                .unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =
@@ -293,8 +292,7 @@ impl Equipment for ResistanceWH {
             ua_end_cap_w_per_k: None,
         })?;
 
-        let capacity_w = first_f64(config, &["HeatingCapacity", "heating_capacity_btu_hr"])
-            .map(conv::power_btu_h_to_w)
+        let capacity_w = first_f64(config, &["heating_capacity_w"])
             .unwrap_or(DEFAULT_ELEMENT_POWER_W);
         self.upper_element_power_w =
             first_f64(config, &["upper_element_power_w", "UpperElementPower"])

@@ -117,6 +117,8 @@ impl PyDwelling {
         let out = PyDict::new(py);
         out.set_item("time", chrono_to_py_datetime(py, step.timestamp)?)?;
         out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
+        out.set_item("hvac_heating_w", step.hvac_heating_w)?;
+        out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
         for (zone_id, temp_c) in &step.zone_temperatures_c {
             let key = if zone_id.0 == 0 {
                 "Temperature - Indoor (C)".to_string()

@@ -1009,13 +1009,16 @@ impl Equipment for Ev {
         self.battery_temp_c -= (q_loss_w * dt_s) / self.thermal_mass_j_per_k;
 
         if is_v2l_discharge {
-            // V2L discharge: negative active_power_kw = generation
+            // V2L/V2G discharge: negative active_power_kw = generation.
+            // The battery must provide MORE energy than reaches the grid/load
+            // because of inverter losses (same efficiency as charging, reversed).
             ports.accumulate(&PortContribution::Electrical {
                 active_power_kw: self.active_power_kw,
                 reactive_power_kvar: 0.0,
             })?;
             let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
-            let dc_discharge_kwh = charger_kw.abs() * dt_hours;
+            let ac_discharge_kw = charger_kw.abs();
+            let dc_discharge_kwh = (ac_discharge_kw / self.charging_efficiency.max(0.01)) * dt_hours;
             self.soc = (self.soc - dc_discharge_kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
         } else if self.active_power_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {

@@ -4,12 +4,12 @@
 //! orchestration. Both methods operate on the shared input vector `u` and read
 //! the current state vector `x` plus exterior surface temperature warm-starts.
 
-use hares_types::{EnvironmentState, ZoneId};
+use hares_types::EnvironmentState;
 use nalgebra::DVector;
 
 use crate::longwave_radiation::{
     CELSIUS_TO_KELVIN, ExteriorSurface, InteriorSurface, STEFAN_BOLTZMANN, beta_factor,
-    exterior_longwave_w, interior_longwave_linearised_w, sky_view_factor,
+    exterior_longwave_w, interior_longwave_linearised_w_into, sky_view_factor,
 };
 
 use super::ThermalSolver;
@@ -114,11 +114,11 @@ impl ThermalSolver {
     ///
     /// Returns per-zone net interior LWR heat gains [W] for diagnostics output.
     pub(super) fn apply_interior_longwave_inputs(
-        &self,
+        &mut self,
         u: &mut DVector<f64>,
         env: &EnvironmentState,
-    ) -> Vec<(ZoneId, f64)> {
-        let mut lwr_by_zone = Vec::with_capacity(self.config.interior_lwr_zones.len());
+    ) {
+        self.lwr_by_zone_buf.clear();
         for zone_cfg in &self.config.interior_lwr_zones {
             if zone_cfg.surfaces.len() < 2 {
                 continue;
@@ -133,45 +133,45 @@ impl ThermalSolver {
                     20.0
                 });
 
-            let t_surfaces: Vec<f64> = zone_cfg
-                .surfaces
-                .iter()
-                .map(|s| {
-                    let t_node = if s.state_index < self.x.len() {
-                        self.x[s.state_index]
-                    } else {
-                        t_zone_c
-                    };
-                    s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone_c
-                })
-                .collect();
+            // Reuse pre-allocated buffer for surface temperatures.
+            let buf = &mut self.interior_surf_temps_buf;
+            buf.clear();
+            for s in &zone_cfg.surfaces {
+                let t_node = if s.state_index < self.x.len() {
+                    self.x[s.state_index]
+                } else {
+                    t_zone_c
+                };
+                buf.push(s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone_c);
+            }
+            let t_surfaces = &*buf;
 
             // Use ScriptF (exact T⁴ radiosity) when pre-computed at init,
-            // linearized h_r approximation as fallback. The fallback allocates
-            // a temporary Vec per zone — call compute_scriptf() at init to avoid.
-            let net_lw = if let Some(ref scriptf) = zone_cfg.scriptf {
-                scriptf.net_flux_w(&t_surfaces)
+            // linearized h_r approximation as fallback.
+            if let Some(ref scriptf) = zone_cfg.scriptf {
+                scriptf.net_flux_w_into(t_surfaces, &mut self.lwr_net_flux_buf);
             } else {
-                let surfaces: Vec<InteriorSurface> = zone_cfg
-                    .surfaces
-                    .iter()
-                    .map(|s| InteriorSurface {
-                        area_m2: s.area_m2,
-                        emissivity: s.emissivity,
-                    })
-                    .collect();
-                interior_longwave_linearised_w(&surfaces, &t_surfaces, t_zone_c)
+                self.lwr_surfaces_buf.clear();
+                self.lwr_surfaces_buf.extend(zone_cfg.surfaces.iter().map(|s| InteriorSurface {
+                    area_m2: s.area_m2,
+                    emissivity: s.emissivity,
+                }));
+                interior_longwave_linearised_w_into(
+                    &self.lwr_surfaces_buf,
+                    t_surfaces,
+                    t_zone_c,
+                    &mut self.lwr_net_flux_buf,
+                );
             };
 
             let mut zone_total = 0.0_f64;
-            for (info, &q) in zone_cfg.surfaces.iter().zip(net_lw.iter()) {
+            for (info, &q) in zone_cfg.surfaces.iter().zip(self.lwr_net_flux_buf.iter()) {
                 if info.input_index < u.len() {
                     u[info.input_index] += q;
                 }
                 zone_total += q;
             }
-            lwr_by_zone.push((zone_cfg.zone_id, zone_total));
+            self.lwr_by_zone_buf.push((zone_cfg.zone_id, zone_total));
         }
-        lwr_by_zone
     }
 }

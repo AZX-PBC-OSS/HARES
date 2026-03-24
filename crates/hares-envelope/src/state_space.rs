@@ -414,15 +414,14 @@ impl StateSpaceModel {
         m_scratch: &mut DMatrix<f64>,
         couplings: &[(usize, f64, f64)],
     ) -> LU<f64, Dyn, Dyn> {
-        debug_assert_eq!(m_scratch.nrows(), self.state_dim());
-        debug_assert_eq!(m_scratch.ncols(), self.state_dim());
-
         m_scratch.clone_from(&self.m_mat);
         for &(idx, d_diag, _) in couplings {
             debug_assert!(idx < self.state_dim(), "coupling index {idx} out of bounds");
             m_scratch[(idx, idx)] += d_diag;
         }
-        m_scratch.clone().lu()
+        // Take the matrix content (leaves m_scratch as 0x0), factorize without clone.
+        // m_scratch will be rebuilt from m_mat on next call via clone_from anyway.
+        std::mem::take(m_scratch).lu()
     }
 
     /// Like `solve_for_scalar_input` but with per-step diagonal coupling.
@@ -533,6 +532,136 @@ impl StateSpaceModel {
             - d_row[input_index] * u_i_original;
 
         let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
+
+        if effective_gain.abs() <= ZERO_GAIN_EPSILON {
+            return Err(StateSpaceError::ZeroEffectiveGain { input_index });
+        }
+
+        Ok((y_target - y_fixed) / effective_gain)
+    }
+
+    /// Like `solve_for_scalar_input_coupled` but uses pre-allocated buffers.
+    ///
+    /// `rhs_buf` and `gain_buf` are scratch DVectors that must be `state_dim()` long.
+    /// They are overwritten and used as workspace; no heap allocation occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_for_scalar_input_coupled_into(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        output_index: usize,
+        input_index: usize,
+        m_coupled_lu: &LU<f64, Dyn, Dyn>,
+        couplings: &[(usize, f64, f64)],
+        rhs_buf: &mut DVector<f64>,
+        gain_buf: &mut DVector<f64>,
+    ) -> Result<f64> {
+        if output_index >= self.c.nrows() {
+            return Err(StateSpaceError::OutputIndexOutOfBounds {
+                output_index,
+                output_dim: self.c.nrows(),
+            });
+        }
+        if input_index >= self.b_eff.ncols() {
+            return Err(StateSpaceError::InputIndexOutOfBounds {
+                index: input_index,
+                input_dim: self.b_eff.ncols(),
+            });
+        }
+
+        let u_i_original = u[input_index];
+
+        // Build RHS in-place: rhs_buf = N·x + B_eff·u - b_col·u_i - D·x + f
+        rhs_buf.gemv(1.0, &self.n_mat, x, 0.0);
+        rhs_buf.gemv(1.0, &self.b_eff, u, 1.0);
+        let b_col = self.b_eff.column(input_index);
+        for i in 0..rhs_buf.len() {
+            rhs_buf[i] -= b_col[i] * u_i_original;
+        }
+        for &(idx, d_diag, forcing) in couplings {
+            rhs_buf[idx] -= d_diag * x[idx];
+            rhs_buf[idx] += forcing;
+        }
+
+        // Solve in-place: rhs_buf = M_coupled⁻¹ · rhs_buf
+        if !m_coupled_lu.solve_mut(rhs_buf) {
+            return Err(StateSpaceError::ImplicitMatrixSingular);
+        }
+
+        // Gain vector in-place: gain_buf = M_coupled⁻¹ · b_col
+        gain_buf.copy_from(&b_col);
+        if !m_coupled_lu.solve_mut(gain_buf) {
+            return Err(StateSpaceError::ImplicitMatrixSingular);
+        }
+
+        let c_row = self.c.row(output_index);
+        let d_row = self.d.row(output_index);
+        let y_fixed = (c_row * &*rhs_buf)[0] + (d_row * u)[0]
+            - d_row[input_index] * u_i_original;
+
+        let effective_gain = (c_row * &*gain_buf)[0] + self.d[(output_index, input_index)];
+
+        if effective_gain.abs() <= ZERO_GAIN_EPSILON {
+            return Err(StateSpaceError::ZeroEffectiveGain { input_index });
+        }
+
+        Ok((y_target - y_fixed) / effective_gain)
+    }
+
+    /// Like `solve_for_scalar_input` but uses pre-allocated buffers.
+    ///
+    /// `rhs_buf` and `gain_buf` are scratch DVectors that must be `state_dim()` long.
+    pub fn solve_for_output_input_into(
+        &self,
+        x: &DVector<f64>,
+        u: &DVector<f64>,
+        y_target: f64,
+        output_index: usize,
+        input_index: usize,
+        rhs_buf: &mut DVector<f64>,
+        gain_buf: &mut DVector<f64>,
+    ) -> Result<f64> {
+        if output_index >= self.c.nrows() {
+            return Err(StateSpaceError::OutputIndexOutOfBounds {
+                output_index,
+                output_dim: self.c.nrows(),
+            });
+        }
+        if input_index >= self.b_eff.ncols() {
+            return Err(StateSpaceError::InputIndexOutOfBounds {
+                index: input_index,
+                input_dim: self.b_eff.ncols(),
+            });
+        }
+
+        let u_i_original = u[input_index];
+
+        // Build RHS in-place: rhs_buf = N·x + B_eff·u - b_col·u_i
+        rhs_buf.gemv(1.0, &self.n_mat, x, 0.0);
+        rhs_buf.gemv(1.0, &self.b_eff, u, 1.0);
+        let b_col = self.b_eff.column(input_index);
+        for i in 0..rhs_buf.len() {
+            rhs_buf[i] -= b_col[i] * u_i_original;
+        }
+
+        // Solve in-place: rhs_buf = M⁻¹ · rhs_buf
+        if !self.m_lu.solve_mut(rhs_buf) {
+            return Err(StateSpaceError::ImplicitMatrixSingular);
+        }
+
+        // Gain vector in-place: gain_buf = M⁻¹ · b_col
+        gain_buf.copy_from(&b_col);
+        if !self.m_lu.solve_mut(gain_buf) {
+            return Err(StateSpaceError::ImplicitMatrixSingular);
+        }
+
+        let c_row = self.c.row(output_index);
+        let d_row = self.d.row(output_index);
+        let y_fixed = (c_row * &*rhs_buf)[0] + (d_row * u)[0]
+            - d_row[input_index] * u_i_original;
+
+        let effective_gain = (c_row * &*gain_buf)[0] + self.d[(output_index, input_index)];
 
         if effective_gain.abs() <= ZERO_GAIN_EPSILON {
             return Err(StateSpaceError::ZeroEffectiveGain { input_index });

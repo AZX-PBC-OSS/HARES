@@ -368,14 +368,15 @@ fn self_consumption_discharges_when_importing() {
 
 #[test]
 fn inverter_efficiency_applied() {
-    // Charge at a known AC setpoint and verify that the AC power reported at
-    // the port is less than what would be stored if there were no conversion losses.
-    // Specifically: DC stored = AC * eta, so SOC gain reflects eta < 1.
+    // Charge at a known AC setpoint and verify that SOC gain reflects inverter losses.
+    // When inverter_efficiency=0.97 is given, the charge direction uses sqrt(0.97) ≈ 0.9849,
+    // so DC stored = AC * sqrt(eta), and the round-trip loss is eta = sqrt(eta)^2 = 0.97.
     let mut bat = make_battery();
     let env = base_env();
     let dt = Duration::from_secs(3600); // One hour step for easy energy arithmetic.
     let charge_kw = 2.0_f64;
     let inverter_eta = 0.97_f64;
+    let charge_eta = inverter_eta.sqrt(); // per-direction efficiency from symmetric split
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: charge_kw,
@@ -390,15 +391,15 @@ fn inverter_efficiency_applied() {
 
     // AC energy drawn from grid.
     let ac_energy_kwh = charge_kw; // 2 kW × 1 h
-    // DC energy into cells ≈ AC × eta (ignoring ohmic losses for this assertion).
-    let dc_energy_expected_kwh = ac_energy_kwh * inverter_eta;
+    // DC energy into cells ≈ AC × charge_eta (ignoring ohmic losses for this assertion).
+    let dc_energy_expected_kwh = ac_energy_kwh * charge_eta;
     let soc_gain = soc_after - soc_before;
-    // Energy stored = soc_gain × capacity_kwh. We compare against DC expectation.
-    // Ohmic losses reduce it slightly further, so actual <= dc_expected.
+    // Energy stored = soc_gain × capacity_kwh. Ohmic losses reduce it slightly, so actual <= dc_expected.
     let energy_stored_kwh = soc_gain * 13.5;
     assert!(
         energy_stored_kwh <= dc_energy_expected_kwh + 1e-4,
-        "Energy stored ({energy_stored_kwh:.4} kWh) must not exceed AC×eta ({dc_energy_expected_kwh:.4} kWh)"
+        "Energy stored ({energy_stored_kwh:.4} kWh) must not exceed AC×sqrt(eta) \
+         ({dc_energy_expected_kwh:.4} kWh)"
     );
     // At 0.148C (2kW/13.5kWh), ohmic losses are <2%. Tighten lower bound
     // to catch incorrect pack resistance computation.
@@ -406,6 +407,12 @@ fn inverter_efficiency_applied() {
         energy_stored_kwh > dc_energy_expected_kwh * 0.97,
         "Energy stored ({energy_stored_kwh:.4} kWh) should be within 3% of DC expected \
          ({dc_energy_expected_kwh:.4} kWh); ohmic losses at 0.148C are <2%"
+    );
+    // Verify that losses are present (not a perfect-efficiency no-op).
+    assert!(
+        energy_stored_kwh < ac_energy_kwh,
+        "Energy stored ({energy_stored_kwh:.4} kWh) must be less than AC energy drawn \
+         ({ac_energy_kwh:.4} kWh) due to inverter conversion losses"
     );
 }
 

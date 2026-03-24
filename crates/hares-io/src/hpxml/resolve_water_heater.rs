@@ -30,17 +30,31 @@ pub(super) fn resolve_water_heaters(
 
         let energy_factor = child_f64(wh, "EnergyFactor");
         let uniform_energy_factor = child_f64(wh, "UniformEnergyFactor");
+        // Raw HPXML values (IP) — kept for DOE test procedure UA calculation.
         let tank_volume_rated_gal = child_f64(wh, "TankVolume");
         let first_hour_rating_gal = child_f64(wh, "FirstHourRating");
         let heating_capacity_btu_hr = child_f64(wh, "HeatingCapacity");
         let recovery_efficiency = child_f64(wh, "RecoveryEfficiency");
 
+        // Convert to SI at the parse boundary. All downstream params are SI.
+        let volume_correction = if fuel == FuelType::Electric { 0.9 } else { 0.95 };
+        let tank_volume_m3 = tank_volume_rated_gal
+            .map(|gal| conv::volume_gal_to_m3(gal * volume_correction));
+        let first_hour_rating_m3 = first_hour_rating_gal
+            .map(conv::volume_gal_to_m3);
+        let heating_capacity_w = heating_capacity_btu_hr
+            .map(conv::power_btu_h_to_w);
+        let tank_height_m = child_f64(wh, "TankHeight")
+            .map(conv::length_ft_to_m)
+            .unwrap_or(conv::length_ft_to_m(4.0));
+
         let mut params = Map::new();
-        if let Some(gal) = tank_volume_rated_gal {
-            params.insert("tank_volume_gal".to_string(), json!(gal));
+        if let Some(v) = tank_volume_m3 {
+            params.insert("tank_volume_m3".to_string(), json!(v));
         }
-        if let Some(gal) = first_hour_rating_gal {
-            params.insert("first_hour_rating_gal".to_string(), json!(gal));
+        params.insert("tank_height_m".to_string(), json!(tank_height_m));
+        if let Some(v) = first_hour_rating_m3 {
+            params.insert("first_hour_rating_m3".to_string(), json!(v));
         }
         if let Some(temp_c) = child_temperature_c(wh) {
             params.insert("setpoint_c".to_string(), json!(temp_c));
@@ -51,11 +65,8 @@ pub(super) fn resolve_water_heaters(
         if let Some(uef) = uniform_energy_factor {
             params.insert("uniform_energy_factor".to_string(), json!(uef));
         }
-        if let Some(cap) = heating_capacity_btu_hr {
-            params.insert(
-                "heating_capacity_kbtu_h".to_string(),
-                json!(conv::power_btu_h_to_kbtu_h(cap)),
-            );
+        if let Some(cap_w) = heating_capacity_w {
+            params.insert("heating_capacity_w".to_string(), json!(cap_w));
         }
         params.insert(
             "water_heater_type".to_string(),
@@ -127,9 +138,11 @@ pub(super) fn resolve_water_heaters(
             params.insert("performance_adjustment".to_string(), json!(perf_adj));
         }
 
-        // Water heater location
+        // Water heater location → canonical zone name.
         if let Some(location) = child_text(wh, "Location") {
-            params.insert("location".to_string(), Value::String(location));
+            let zone_type = super::building::parse_zone_label(&location);
+            let zone_name = super::building::zone_key(&zone_type);
+            params.insert("zone_type".to_string(), Value::String(zone_name));
         }
 
         specs.push(build_spec(name, fuel, params, defaults));
@@ -145,13 +158,32 @@ pub(super) fn resolve_water_heaters(
 /// Returns `None` when bedroom count is absent (required for the formula).
 fn parse_avg_water_draw_l_per_day(details: &XmlNode) -> Option<f64> {
     // Bedroom count is required; without it the formula cannot be evaluated.
-    let n_bedrooms = details
+    let n_bedrooms_raw = details
         .path(&[
             "BuildingSummary",
             "BuildingConstruction",
             "NumberofBedrooms",
         ])
         .and_then(|n| n.text.trim().parse::<f64>().ok())?;
+
+    // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797).
+    let n_occupants = details
+        .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
+        .and_then(|n| n.text.trim().parse::<f64>().ok());
+    let house_type = details
+        .path(&[
+            "BuildingSummary",
+            "BuildingConstruction",
+            "ResidentialFacilityType",
+        ])
+        .map(|n| n.text.trim().to_ascii_lowercase());
+    let n_bedrooms = match (n_occupants, house_type.as_deref()) {
+        (Some(occ), Some("single-family attached" | "apartment unit")) => {
+            (-0.68 + 1.09 * occ).max(0.0)
+        }
+        (Some(occ), _) => (-1.47 + 1.69 * occ).max(0.0),
+        (None, _) => n_bedrooms_raw,
+    };
 
     // Fixture efficiency: low-flow if any WaterFixture has <LowFlow>true</LowFlow>.
     let fixture_efficiency = if details

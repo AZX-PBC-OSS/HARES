@@ -3,6 +3,15 @@ use std::collections::HashMap;
 use hares_types::ZoneId;
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BoundaryCategory {
+    Wall,
+    Floor,
+    Roof,
+    Window,
+    InternalMass,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InfiltrationMethod {
     AshraeWindStack {
@@ -108,18 +117,19 @@ impl NaturalVentilationConfig {
 /// transmitted and absorbed fractions per EnergyPlus Steps 4–5.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowSolarProperties {
-    /// Solar heat gain coefficient at normal incidence [dimensionless].
+    /// Summer effective SHGC at normal incidence (SHGC × summer shading coefficient).
     pub shgc: f64,
+    /// Winter effective SHGC at normal incidence (SHGC × winter shading coefficient).
+    pub winter_shgc: f64,
     /// Window U-factor [W/(m²·K)], used to select the EnergyPlus glazing curve.
     pub u_factor_w_m2_k: f64,
     /// Glazing area [m²].
     pub area_m2: f64,
-    /// Solar transmittance at normal incidence [dimensionless].
-    /// Fraction of incident solar that passes directly through the glass.
+    /// Summer solar transmittance at normal incidence [dimensionless].
     pub transmittance: f64,
+    /// Winter solar transmittance at normal incidence [dimensionless].
+    pub winter_transmittance: f64,
     /// Inward-flowing fraction of absorbed solar [dimensionless].
-    /// Fraction of glass-absorbed heat that reaches the interior zone;
-    /// `(1 - radiation_frac)` is lost to the exterior.
     pub radiation_frac: f64,
 }
 
@@ -243,6 +253,9 @@ pub struct ExteriorSurfaceInfo {
     /// Solar absorptance [-] (0–1). Default 0.60 for opaque surfaces, 0.05 for
     /// radiant barriers. Ref: OCHRE `Envelope.py:222`.
     pub absorptance: f64,
+    /// Boundary type for per-component heat flow tracking.
+    /// `None` means the surface is not attributed to a named component category.
+    pub boundary_category: Option<BoundaryCategory>,
 }
 
 /// Index mappings derived from the state-space model structure.
@@ -298,6 +311,16 @@ pub struct ThermalSolverConfig {
     /// Per-zone infiltration methods. Zones not listed default to zero ACH.
     /// Uses a `Vec` instead of `HashMap` for cache-friendly hot-loop iteration.
     pub infiltration: Vec<(ZoneId, InfiltrationMethod)>,
+    /// Supply duct leakage during fan operation [m³/s].
+    ///
+    /// Pre-computed as `supply_leakage_frac × rated_fan_flow_m3_s`.  Zero means
+    /// no duct adjustment is applied.  Set from HPXML duct data in solver_builder.
+    pub supply_duct_leakage_m3_s: f64,
+    /// Return duct leakage during fan operation [m³/s].
+    ///
+    /// Pre-computed as `return_leakage_frac × rated_fan_flow_m3_s`.  Zero means
+    /// no duct adjustment is applied.
+    pub return_duct_leakage_m3_s: f64,
     pub ventilation_flow_m3_s: f64,
     pub ventilation: VentilationConfig,
     /// Natural ventilation through operable windows. `None` disables the feature (default).
@@ -315,6 +338,8 @@ impl Default for ThermalSolverConfig {
             ideal_setpoints_c: HashMap::new(),
             ideal_hvac_zones: Vec::new(),
             infiltration: Vec::new(),
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
             natural_ventilation: None,
@@ -370,4 +395,18 @@ pub struct EnvelopeComponentGains {
     pub infiltration_by_zone: Vec<(ZoneId, f64)>,
     /// Per-zone interior LWR net heat gains [W].
     pub interior_lwr_by_zone: Vec<(ZoneId, f64)>,
+    /// Heat gain through wall boundaries (conduction + solar + LWR) [W].
+    pub wall_heat_gain_w: f64,
+    /// Heat gain through floor boundaries [W].
+    pub floor_heat_gain_w: f64,
+    /// Heat gain through roof boundaries [W].
+    pub roof_heat_gain_w: f64,
+    /// Heat gain through window boundaries (transmitted + absorbed) [W].
+    pub window_heat_gain_w: f64,
+    /// Heat gain from internal mass surfaces [W].
+    pub internal_mass_heat_gain_w: f64,
+    /// Opaque exterior surface solar absorptance gain only [W].
+    pub opaque_solar_w: f64,
+    /// Exterior longwave radiation exchange only [W].
+    pub exterior_lwr_w: f64,
 }

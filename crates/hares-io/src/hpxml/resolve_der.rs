@@ -1,4 +1,4 @@
-//! Distributed energy resource (PV, battery, EV) resolution from HPXML.
+//! Distributed energy resource (PV, battery, EV, generator) resolution from HPXML.
 
 use std::collections::HashMap;
 
@@ -8,9 +8,12 @@ use hares_types::FuelType;
 
 use super::building::XmlNode;
 use super::equipment::{EquipmentSpec, build_spec};
-use super::xml_helpers::{child_energy_kwh, child_f64, child_text, element_id};
+use super::xml_helpers::{child_energy_kwh, child_f64, child_text, element_id, parse_fuel};
 
 use crate::defaults::DefaultsStore;
+
+/// kBtu → kWh: 1 kBtu(IT) = 0.293_071_07 kWh exactly.
+const KBTU_TO_KWH: f64 = 0.293_071_07;
 
 pub(super) fn resolve_pv(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
     let Some(photovoltaics) = details.path(&["Systems", "Photovoltaics"]) else {
@@ -108,5 +111,34 @@ pub(super) fn resolve_ev(details: &XmlNode, defaults: &DefaultsStore, specs: &mu
                 defaults,
             ));
         }
+    }
+}
+
+pub(super) fn resolve_generators(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
+    let Some(generators) = details.path(&["Systems", "extension", "Generators"]) else {
+        return;
+    };
+
+    for generator in generators.children_named("Generator") {
+        let fuel = parse_fuel(child_text(generator, "FuelType").as_deref());
+        let mut params = Map::new();
+
+        if let Some(kw) = child_f64(generator, "ElectricalPowerOutput") {
+            params.insert("rated_power_kw".to_string(), json!(kw));
+        }
+
+        // Derive electrical efficiency from annual energy figures when present.
+        // eta = AnnualOutputkWh / (AnnualConsumptionkBtu * KBTU_TO_KWH)
+        let annual_output_kwh = child_f64(generator, "AnnualOutputkWh");
+        let annual_consumption_kbtu = child_f64(generator, "AnnualConsumptionkBtu");
+        if let (Some(out_kwh), Some(cons_kbtu)) = (annual_output_kwh, annual_consumption_kbtu) {
+            let cons_kwh = cons_kbtu * KBTU_TO_KWH;
+            if cons_kwh > 0.0 {
+                let eta = (out_kwh / cons_kwh).clamp(0.0, 1.0);
+                params.insert("eta_electric".to_string(), json!(eta));
+            }
+        }
+
+        specs.push(build_spec("Gas Generator".to_string(), fuel, params, defaults));
     }
 }

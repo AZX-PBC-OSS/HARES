@@ -830,6 +830,49 @@ mod tests {
         );
     }
 
+    /// Regression test for bug: per-equipment gas output column read the telemetry key
+    /// "gas_consumption_w" but furnace writes "fuel_input_w", so the breakdown was always
+    /// 0.0.  This test verifies the correct key is written and the old key is absent.
+    #[test]
+    fn gas_furnace_writes_fuel_input_w_telemetry_key() {
+        let mut cfg = config("GF", "Gas Furnace");
+        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config
+            .insert("capacity_w".to_string(), 10_000.0.into());
+        cfg.raw_config
+            .insert("fuel_efficiency".to_string(), 0.9.into());
+        cfg.raw_config.insert("fan_power_w".to_string(), 0.0.into());
+        cfg.raw_config
+            .insert("heating_setpoint_c".to_string(), 21.0.into());
+        cfg.raw_config
+            .insert("cooling_setpoint_c".to_string(), 27.0.into());
+
+        let mut eq = GasFurnace::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let fuel_input_w = eq
+            .telemetry()
+            .get("fuel_input_w")
+            .expect("furnace must write fuel_input_w telemetry key");
+        assert!(
+            fuel_input_w > 0.0,
+            "fuel_input_w must be positive during heating; got {fuel_input_w}"
+        );
+        // The old (wrong) key must not exist in telemetry.
+        assert!(
+            eq.telemetry().get("gas_consumption_w").is_none(),
+            "gas_consumption_w must not be a telemetry key on furnace"
+        );
+    }
+
     #[test]
     fn registry_includes_furnace_aliases_and_thermal_stage() {
         let mut registry = EquipmentRegistry::new();

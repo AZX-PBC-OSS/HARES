@@ -105,7 +105,7 @@ fn gas_config(
         draw_flow_rate_kg_s.into(),
     );
     raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-    // No standing pilot; isolates burner power from gas_consumption_w.
+    // No standing pilot; isolates burner power from fuel_input_w.
     raw.insert("pilot_power_w".to_string(), 0.0.into());
     EquipmentConfig {
         name: "GWH".to_string(),
@@ -282,10 +282,10 @@ fn gas_wh_consumes_gas_not_electricity() {
     );
 
     // Telemetry must be consistent with the port report.
-    let telemetry_gas = wh.telemetry().get("gas_consumption_w").unwrap_or(0.0);
+    let telemetry_gas = wh.telemetry().get("fuel_input_w").unwrap_or(0.0);
     assert!(
         (telemetry_gas - gas_w).abs() < 1e-6,
-        "telemetry gas_consumption_w ({telemetry_gas:.2}) must match port value ({gas_w:.2})"
+        "telemetry fuel_input_w ({telemetry_gas:.2}) must match port value ({gas_w:.2})"
     );
 }
 
@@ -529,7 +529,7 @@ fn operating_mode_consistent_with_power() {
     }
 }
 
-/// Gas WH: operating_mode=Heating implies positive gas_consumption_w.
+/// Gas WH: operating_mode=Heating implies positive fuel_input_w.
 #[test]
 fn gas_wh_mode_consistent_with_fuel_consumption() {
     let env = make_env(21.0);
@@ -544,7 +544,7 @@ fn gas_wh_mode_consistent_with_fuel_consumption() {
 
         let mode = wh.telemetry().get("operating_mode").unwrap_or(0.0);
         let burner_w = wh.telemetry().get("burner_power_w").unwrap_or(0.0);
-        let gas_w = wh.telemetry().get("gas_consumption_w").unwrap_or(0.0);
+        let gas_w = wh.telemetry().get("fuel_input_w").unwrap_or(0.0);
 
         if mode > 0.5 {
             assert!(
@@ -553,7 +553,7 @@ fn gas_wh_mode_consistent_with_fuel_consumption() {
             );
             assert!(
                 gas_w > 0.0,
-                "operating_mode=Heating must imply positive gas_consumption_w; got {gas_w:.2}"
+                "operating_mode=Heating must imply positive fuel_input_w; got {gas_w:.2}"
             );
         } else {
             assert_eq!(

@@ -153,7 +153,8 @@ impl EnvironmentManager {
             .get(init_offset)
             .copied()
             .unwrap_or(DEFAULT_SETPOINT_C);
-        let zones = initial_zones(building, initial_outdoor_temp_c);
+        let start_hour = start_time.hour() as usize;
+        let zones = initial_zones(building, initial_outdoor_temp_c, start_hour);
 
         Ok(Self {
             weather,
@@ -537,8 +538,8 @@ fn build_surface_geometry(building: &Building) -> Vec<SurfaceGeometry> {
 const OUTDOOR_HEATING_COOLING_THRESHOLD_C: f64 = 12.0;
 const DEFAULT_SETPOINT_C: f64 = 21.0;
 
-fn initial_zones(building: &Building, outdoor_temp_c: f64) -> Vec<ZoneState> {
-    let default_temp = determine_initial_indoor_temp_c(building, outdoor_temp_c);
+fn initial_zones(building: &Building, outdoor_temp_c: f64, start_hour: usize) -> Vec<ZoneState> {
+    let default_temp = determine_initial_indoor_temp_c(building, outdoor_temp_c, start_hour);
     if building.zones.is_empty() {
         return vec![ZoneState {
             id: ZoneId(1),
@@ -571,15 +572,21 @@ fn initial_zones(building: &Building, outdoor_temp_c: f64) -> Vec<ZoneState> {
 /// - outdoor > 12°C → cooling setpoint (building is in cooling mode)
 /// - outdoor ≤ 12°C → heating setpoint (building is in heating mode)
 /// - No setpoints available → 21°C (OCHRE default)
-fn determine_initial_indoor_temp_c(building: &Building, outdoor_temp_c: f64) -> f64 {
+/// `start_hour` must be in `[0, 23]` (e.g. from `chrono::DateTime::hour()`).
+fn determine_initial_indoor_temp_c(
+    building: &Building,
+    outdoor_temp_c: f64,
+    start_hour: usize,
+) -> f64 {
+    debug_assert!(start_hour <= 23, "start_hour out of range: {start_hour}");
     let heating_sp = building
         .heating_weekday_setpoints_c
         .as_ref()
-        .and_then(|v| v.first().copied());
+        .and_then(|v| v.get(start_hour).copied());
     let cooling_sp = building
         .cooling_weekday_setpoints_c
         .as_ref()
-        .and_then(|v| v.first().copied());
+        .and_then(|v| v.get(start_hour).copied());
 
     match (heating_sp, cooling_sp) {
         (Some(h), Some(c)) => {
@@ -708,6 +715,8 @@ mod tests {
                     emittance: None,
                     tilt_deg: Some(90.0),
                     framing_factor: None,
+                    lut_boundary_name: None,
+                    floor_or_ceiling: None,
                 },
                 Boundary {
                     id: "north-wall".to_string(),
@@ -727,10 +736,14 @@ mod tests {
                     emittance: None,
                     tilt_deg: Some(90.0),
                     framing_factor: None,
+                    lut_boundary_name: None,
+                    floor_or_ceiling: None,
                 },
             ],
             windows: Vec::<Window>::new(),
             infiltration_ach50: None,
+            infiltration_cfm50: None,
+            infiltration_ela_cm2: None,
             hvac_capacity_w: None,
             seer2: None,
             hspf2: None,
@@ -747,6 +760,7 @@ mod tests {
             floors_above_grade: None,
             has_flue_or_chimney: None,
             foundation_name: None,
+            residential_facility_type: None,
             details_xml,
         }
     }
