@@ -288,6 +288,23 @@ mod tests {
                 bd.inner_state_index, bd.area_m2, bd.r_film_int_m2_k_w, bd.radiation_frac, bd.category
             );
         }
+        // Infiltration parameters
+        eprintln!("  infiltration config:");
+        for (zone_id, method) in &dwelling.thermal_solver.config().infiltration {
+            match method {
+                hares_envelope::InfiltrationMethod::AshraeWindStack { c_s, c_w, shielding_coeff, n_i } => {
+                    eprintln!("    Zone {:?}: ASHRAE c_s={:.10}, c_w={:.10}, shelter={:.6}, n_i={:.2}", 
+                              zone_id, c_s, c_w, shielding_coeff, n_i);
+                }
+                hares_envelope::InfiltrationMethod::Ela { ela_m2, stack_coeff, wind_coeff } => {
+                    eprintln!("    Zone {:?}: ELA ela={:.6} m², stack={:.10}, wind={:.10}", 
+                              zone_id, ela_m2, stack_coeff, wind_coeff);
+                }
+                hares_envelope::InfiltrationMethod::Ach { ach } => {
+                    eprintln!("    Zone {:?}: ACH={:.4}", zone_id, ach);
+                }
+            }
+        }
         // State vector at init
         let (x_state, _, _) = dwelling.thermal_solver.snapshot_state();
         eprintln!("  state vector ({} entries):", x_state.len());

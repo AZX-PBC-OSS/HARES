@@ -570,7 +570,12 @@ pub(crate) fn build_default_solvers(
             }
         }
 
-        if sb.is_conditioned_interior && sb.area_m2 > 0.0 {
+        // Add interior surfaces for LWR and solar distribution.
+        // Windows are EXCLUDED - they receive solar via SHGC/IAM, not distribution.
+        if sb.is_conditioned_interior
+            && sb.area_m2 > 0.0
+            && sb.boundary_category != Some(BoundaryCategory::Window)
+        {
             let (state_idx, input_idx) = if let Some(ref iw) = sb.inner_wiring {
                 (iw.state_row, iw.b_col)
             } else {

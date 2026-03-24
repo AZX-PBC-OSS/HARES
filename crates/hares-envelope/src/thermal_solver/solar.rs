@@ -37,9 +37,13 @@ impl ThermalSolver {
                 debug_assert!(
                     win.shgc >= win.transmittance - 1e-6,
                     "SHGC ({}) < transmittance ({}): check window config",
-                    win.shgc, win.transmittance
+                    win.shgc,
+                    win.transmittance
                 );
-                let absorbed_inward = (win.shgc - win.transmittance).max(0.0);
+                // BUG FIX: The absorbed_inward must include radiation_frac (N_i) which
+                // is the inward-flowing fraction of absorbed solar per EnergyPlus model.
+                // absorbed_inward = (SHGC - transmittance) * radiation_frac
+                let absorbed_inward = (win.shgc - win.transmittance).max(0.0) * win.radiation_frac;
                 let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
 
                 // Window solar (absorbed + transmitted) → zone air node directly.
@@ -191,8 +195,16 @@ pub(crate) fn compute_solar_distribution_into(
     let n = surfaces.len();
     absorbed.clear();
     absorbed.resize(n, 0.0);
-    let floor_area: f64 = surfaces.iter().filter(|s| s.is_floor).map(|s| s.area_m2).sum();
-    let nonfloor_area: f64 = surfaces.iter().filter(|s| !s.is_floor).map(|s| s.area_m2).sum();
+    let floor_area: f64 = surfaces
+        .iter()
+        .filter(|s| s.is_floor)
+        .map(|s| s.area_m2)
+        .sum();
+    let nonfloor_area: f64 = surfaces
+        .iter()
+        .filter(|s| !s.is_floor)
+        .map(|s| s.area_m2)
+        .sum();
     let total_area: f64 = surfaces.iter().map(|s| s.area_m2).sum();
 
     // Beam: 60% to floors by area, 40% to walls by area, then absorb once.
@@ -283,7 +295,8 @@ mod tests {
         assert!(
             absorbed[0] > absorbed[1],
             "floor should absorb more beam than ceiling: floor={}, ceiling={}",
-            absorbed[0], absorbed[1]
+            absorbed[0],
+            absorbed[1]
         );
         // Floor fraction of total absorbed should be > 50%
         let total: f64 = absorbed.iter().sum();
@@ -397,10 +410,7 @@ mod tests {
 
     #[test]
     fn only_floors_loses_wall_beam_fraction() {
-        let surfaces = vec![
-            make_surface(30.0, 0.6, true),
-            make_surface(20.0, 0.6, true),
-        ];
+        let surfaces = vec![make_surface(30.0, 0.6, true), make_surface(20.0, 0.6, true)];
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, 1000.0, 0.0);
         // All surfaces are floors. 60% beam (600) goes to floors.
         // 40% beam (400) goes to nonfloor_area=0 → incident=0 for walls.

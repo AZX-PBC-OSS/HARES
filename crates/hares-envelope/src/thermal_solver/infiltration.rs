@@ -164,17 +164,39 @@ pub(crate) fn apply_infiltration_and_ventilation(
         //               latent_flow   = total_nat + forced * (1 - lat_recovery_eff)
         //   unbalanced: flow = sqrt(total_nat² + forced²)  (quadrature combination)
         let total_nat_flow = q_inf_m3_s + q_nat_m3_s;
-        let (sensible_flow_m3_s, latent_flow_m3_s) = if config.ventilation.balanced {
+        let (
+            sensible_flow_m3_s,
+            latent_flow_m3_s,
+            scaled_q_inf_m3_s,
+            scaled_q_nat_m3_s,
+            scaled_forced_m3_s,
+        ) = if config.ventilation.balanced {
             (
                 total_nat_flow
                     + forced_flow_m3_s * (1.0 - config.ventilation.sensible_recovery_efficiency),
                 total_nat_flow
                     + forced_flow_m3_s * (1.0 - config.ventilation.latent_recovery_efficiency),
+                q_inf_m3_s,
+                q_nat_m3_s,
+                forced_flow_m3_s,
             )
         } else {
             let combined =
                 (total_nat_flow * total_nat_flow + forced_flow_m3_s * forced_flow_m3_s).sqrt();
-            (combined, combined)
+            // OCHRE Envelope.py:78-81: For unbalanced ventilation, scale individual
+            // flow components proportionally to maintain mass balance.
+            let nat_flow_ratio = if total_nat_flow > 0.0 {
+                (combined - forced_flow_m3_s) / total_nat_flow
+            } else {
+                1.0
+            };
+            (
+                combined,
+                combined,
+                q_inf_m3_s * nat_flow_ratio,
+                q_nat_m3_s * nat_flow_ratio,
+                forced_flow_m3_s, // Forced flow is not scaled in OCHRE
+            )
         };
 
         // Combined flow drives sensible/latent loads against outdoor conditions.
@@ -186,15 +208,22 @@ pub(crate) fn apply_infiltration_and_ventilation(
         let q_sensible_diagnostic = h_inf * (t_out - zone.temperature_c);
         let q_latent = m_dot_lat * H_FG_J_PER_KG * (w_out - zone.humidity_ratio);
 
+        // Recompute diagnostic gains using scaled flows (for OCHRE parity in reporting).
+        // OCHRE reports the scaled infiltration component, not the raw AIM-2 flow.
+        let q_infiltration_w_scaled = rho * scaled_q_inf_m3_s * CP_DRY_AIR_J_KG_K * delta_t;
+        let q_natural_vent_w_scaled = rho * scaled_q_nat_m3_s * CP_DRY_AIR_J_KG_K * delta_t;
+        let q_forced_vent_w_scaled =
+            rho * scaled_forced_m3_s * forced_eff * CP_DRY_AIR_J_KG_K * delta_t;
+
         couplings.push(InfiltrationCoupling {
             zone: zone.id,
             h_inf_w_k: h_inf,
             t_forcing_c: t_out,
             q_latent_w: q_latent,
             q_sensible_diagnostic_w: q_sensible_diagnostic,
-            q_infiltration_w,
-            q_forced_vent_w,
-            q_natural_vent_w,
+            q_infiltration_w: q_infiltration_w_scaled,
+            q_forced_vent_w: q_forced_vent_w_scaled,
+            q_natural_vent_w: q_natural_vent_w_scaled,
         });
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;
     }

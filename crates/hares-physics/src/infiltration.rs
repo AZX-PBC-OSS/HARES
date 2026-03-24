@@ -482,21 +482,17 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
         let ncfl = params.floors_above_grade.max(1.0);
         let z_f = (ncfl + 0.5) / ncfl;
         // Critical ceiling-floor leakage difference (Eq. 13)
-        let x_c = r_i + (2.0 * (1.0 - r_i - y_i)) / (n_i + 1.0)
-            - 2.0 * y_i * (z_f - 1.0).powf(n_i);
+        let x_c = r_i + (2.0 * (1.0 - r_i - y_i)) / (n_i + 1.0) - 2.0 * y_i * (z_f - 1.0).powf(n_i);
         // Additive flue function (Eq. 12)
         n_i * y_i
             * (z_f - 1.0).powf((3.0 * n_i - 1.0) / 3.0)
-            * (1.0
-                - (3.0 * (x_c - x_i_raw).powi(2) * r_i.powf(1.0 - n_i))
-                    / (2.0 * (z_f + 1.0)))
+            * (1.0 - (3.0 * (x_c - x_i_raw).powi(2) * r_i.powf(1.0 - n_i)) / (2.0 * (z_f + 1.0)))
     } else {
         0.0
     };
 
     // Walker & Wilson (1998) Eq. 9
-    let f_s =
-        ((1.0 + n_i * r_i) / (n_i + 1.0)) * (0.5 - 0.5 * m_i.powf(1.2)).powf(n_i + 1.0) + f_i;
+    let f_s = ((1.0 + n_i * r_i) / (n_i + 1.0)) * (0.5 - 0.5 * m_i.powf(1.2)).powf(n_i + 1.0) + f_i;
 
     // Step 4: Stack coefficient Cs — pure SI
     // Cs = f_s × (ρ·g·H / T_in)^n_i  [(Pa/K)^n_i]
@@ -536,8 +532,7 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     );
     let s_wflue = if params.has_flue { 1.0 } else { 0.0 };
     // OCHRE envelope.py:521: inf_sft = f_t * (shelter * (1-y_i) + s_wflue * 1.5 * y_i)
-    let shelter_coeff =
-        f_t * (params.shielding.raw() * (1.0 - y_i) + s_wflue * 1.5 * y_i);
+    let shelter_coeff = f_t * (params.shielding.raw() * (1.0 - y_i) + s_wflue * 1.5 * y_i);
 
     Aim2Coefficients {
         c_s,
@@ -612,9 +607,7 @@ pub fn calculate_ela_coefficients(
     const NL: f64 = 0.5;
 
     // Stack shape factor f_s (Walker-Wilson 1998, Eq. 12).
-    let f_s = (2.0 / 3.0)
-        * (1.0 + hor_lk_frac / 2.0)
-        * (2.0 * NL * (1.0 - NL)).sqrt()
+    let f_s = (2.0 / 3.0) * (1.0 + hor_lk_frac / 2.0) * (2.0 * NL * (1.0 - NL)).sqrt()
         / (NL.sqrt() + (1.0 - NL).sqrt());
 
     // Stack coefficient [m²/(s²·K)], then ×1e-2 → [(L/s)²/(cm⁴·K)].
@@ -1013,7 +1006,11 @@ mod tests {
     #[test]
     fn ela_coefficients_attic_produces_positive_values() {
         let (stack, wind) = super::calculate_ela_coefficients(
-            0.75, 1.5, 5.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.75,
+            1.5,
+            5.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
         assert!(stack > 0.0, "attic stack_coeff must be positive: {stack}");
         assert!(wind > 0.0, "attic wind_coeff must be positive: {wind}");
@@ -1029,19 +1026,37 @@ mod tests {
     #[test]
     fn ela_coefficients_conditioned_zero_hor_lk_frac() {
         let (stack, wind) = super::calculate_ela_coefficients(
-            0.0, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.0,
+            2.5,
+            0.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
-        assert!(stack > 0.0, "conditioned stack_coeff must be positive: {stack}");
-        assert!(wind > 0.0, "conditioned wind_coeff must be positive: {wind}");
+        assert!(
+            stack > 0.0,
+            "conditioned stack_coeff must be positive: {stack}"
+        );
+        assert!(
+            wind > 0.0,
+            "conditioned wind_coeff must be positive: {wind}"
+        );
     }
 
     #[test]
     fn ela_coefficients_higher_hor_lk_frac_increases_stack() {
         let (stack_low, _) = super::calculate_ela_coefficients(
-            0.0, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.0,
+            2.5,
+            0.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
         let (stack_high, _) = super::calculate_ela_coefficients(
-            0.75, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.75,
+            2.5,
+            0.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
         assert!(
             stack_high > stack_low,
@@ -1052,10 +1067,18 @@ mod tests {
     #[test]
     fn ela_coefficients_higher_hor_lk_frac_decreases_wind() {
         let (_, wind_low) = super::calculate_ela_coefficients(
-            0.75, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.75,
+            2.5,
+            0.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
         let (_, wind_high) = super::calculate_ela_coefficients(
-            0.0, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.0,
+            2.5,
+            0.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
         assert!(
             wind_high > wind_low,
@@ -1067,7 +1090,11 @@ mod tests {
     fn attic_ela_convenience_matches_raw() {
         let (s1, w1) = super::attic_ela_coefficients(1.5, 5.0);
         let (s2, w2) = super::calculate_ela_coefficients(
-            0.75, 1.5, 5.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.75,
+            1.5,
+            5.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
         approx_eq(s1, s2, 1e-15);
         approx_eq(w1, w2, 1e-15);
@@ -1077,7 +1104,11 @@ mod tests {
     fn garage_ela_convenience_matches_raw() {
         let (s1, w1) = super::garage_ela_coefficients(2.5);
         let (s2, w2) = super::calculate_ela_coefficients(
-            0.4, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.4,
+            2.5,
+            0.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
         approx_eq(s1, s2, 1e-15);
         approx_eq(w1, w2, 1e-15);
@@ -1091,7 +1122,11 @@ mod tests {
         // Cs_m2 = (1/3)² × 9.80665 × 2.5 / 296.15 = 0.009199...
         // stack_coeff = 0.009199... × 1e-2 = 9.199e-5
         let (stack, _) = super::calculate_ela_coefficients(
-            0.0, 2.5, 0.0, TerrainClass::Suburban, super::SHIELDING_NORMAL,
+            0.0,
+            2.5,
+            0.0,
+            TerrainClass::Suburban,
+            super::SHIELDING_NORMAL,
         );
         let f_s = 1.0 / 3.0;
         let expected = f_s * f_s * 9.80665 * 2.5 / 296.15 * 1e-2;
@@ -1102,9 +1137,7 @@ mod tests {
     // AIM-2 from ACH50 (Walker & Wilson 1998)
     // -----------------------------------------------------------------------
 
-    use super::{
-        Aim2Params, FoundationLeakageClass, ShieldingClass, aim2_coefficients_from_ach50,
-    };
+    use super::{Aim2Params, FoundationLeakageClass, ShieldingClass, aim2_coefficients_from_ach50};
 
     fn typical_aim2_params() -> Aim2Params {
         Aim2Params {
@@ -1220,16 +1253,14 @@ mod tests {
         //     = 0.80303 × 0.31855 = 0.25581
         let n_i = 0.65_f64;
         let r_i = 0.5_f64;
-        let expected_f_s = ((1.0 + n_i * r_i) / (n_i + 1.0))
-            * (0.5_f64).powf(n_i + 1.0);
+        let expected_f_s = ((1.0 + n_i * r_i) / (n_i + 1.0)) * (0.5_f64).powf(n_i + 1.0);
         approx_eq(expected_f_s, 0.255_81, 0.001);
 
         // f_w (non-crawlspace, no flue): J_i = (0 + 0.5 + 0)/2 = 0.25
         // f_w = 0.19×(2-0.65)×(1 - (0.5/2)^1.5) - 0
         //     = 0.19×1.35×(1 - 0.25^1.5)
         //     = 0.2565 × (1 - 0.125) = 0.2565 × 0.875 = 0.22444
-        let expected_f_w = 0.19 * (2.0 - n_i)
-            * (1.0 - (0.25_f64).powf(1.5));
+        let expected_f_w = 0.19 * (2.0 - n_i) * (1.0 - (0.25_f64).powf(1.5));
         approx_eq(expected_f_w, 0.224_44, 0.001);
 
         let p = Aim2Params {

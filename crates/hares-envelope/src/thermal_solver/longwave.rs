@@ -133,6 +133,13 @@ impl ThermalSolver {
                     20.0
                 });
 
+            tracing::trace!(
+                zone_id = ?zone_cfg.zone_id,
+                n_surfaces = zone_cfg.surfaces.len(),
+                t_zone_c = t_zone_c,
+                "interior LWR: starting calculation"
+            );
+
             // Reuse pre-allocated buffer for surface temperatures.
             let buf = &mut self.interior_surf_temps_buf;
             buf.clear();
@@ -142,7 +149,8 @@ impl ThermalSolver {
                 } else {
                     t_zone_c
                 };
-                buf.push(s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone_c);
+                let t_surf = s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone_c;
+                buf.push(t_surf);
             }
             let t_surfaces = &*buf;
 
@@ -152,10 +160,11 @@ impl ThermalSolver {
                 scriptf.net_flux_w_into(t_surfaces, &mut self.lwr_net_flux_buf);
             } else {
                 self.lwr_surfaces_buf.clear();
-                self.lwr_surfaces_buf.extend(zone_cfg.surfaces.iter().map(|s| InteriorSurface {
-                    area_m2: s.area_m2,
-                    emissivity: s.emissivity,
-                }));
+                self.lwr_surfaces_buf
+                    .extend(zone_cfg.surfaces.iter().map(|s| InteriorSurface {
+                        area_m2: s.area_m2,
+                        emissivity: s.emissivity,
+                    }));
                 interior_longwave_linearised_w_into(
                     &self.lwr_surfaces_buf,
                     t_surfaces,
