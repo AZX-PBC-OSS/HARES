@@ -613,6 +613,16 @@ fn furnace_thermostat_off_above_setpoint() {
     }
 }
 
+fn make_ports_two_zones() -> PortSlots {
+    PortSlots {
+        thermal: vec![
+            ThermalAccumulator::new(ZoneId(1)),
+            ThermalAccumulator::new(ZoneId(2)),
+        ],
+        ..PortSlots::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 10. Two-speed ASHP: heating at low outdoor temp falls back to backup
 //
@@ -659,5 +669,315 @@ fn ashp_heating_at_extreme_cold() {
         "[hvac_parity] extreme_cold: thermal={thermal_w:.1} W, electric={electric_kw:.4} kW, \
          COP={:.3}",
         thermal_w / (electric_kw * 1_000.0)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. AC deadband: zero output when zone is below cooling setpoint
+//
+// An AC is a one-way cooling device. When zone temp is below the cooling
+// setpoint minus the deadband half-width, the thermostat is satisfied and
+// the unit must be fully off.
+//
+// Setup: cooling_setpoint=24°C, zone=22°C, outdoor=20°C.
+// Deadband default is ~1°C, so the lower edge is ~23.5°C; zone at 22°C is
+// comfortably inside the satisfied region.
+// Expected: mode != Cooling, thermal == 0.0 W, electric == 0.0 kW.
+// ---------------------------------------------------------------------------
+#[test]
+fn ac_deadband_no_output_when_zone_below_cooling_setpoint() {
+    let c = cfg(
+        "ac",
+        "Air Conditioner",
+        &[
+            ("zone_id", 1.0),
+            ("capacity_w", 10_000.0),
+            ("heating_setpoint_c", 20.0),
+            ("cooling_setpoint_c", 24.0),
+        ],
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Air Conditioner", c.clone()).unwrap();
+    let env = make_env(22.0, 20.0, 15.0);
+    eq.init(&c, &env).unwrap();
+    let mode = eq.update_control(&env);
+
+    let mut ports = make_ports();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let thermal_w = ports.thermal[0].sensible_gain_w;
+    let electric_kw = ports.electrical.net_active_kw();
+
+    assert_ne!(
+        mode,
+        OperatingMode::Cooling,
+        "AC must not be in Cooling mode when zone (22°C) is below setpoint (24°C); got {mode:?}"
+    );
+    assert!(
+        thermal_w.abs() < 1.0,
+        "AC must deliver zero thermal output when off; got {thermal_w:.4} W"
+    );
+    assert!(
+        electric_kw.abs() < 0.001,
+        "AC must draw zero electricity when off; got {electric_kw:.6} kW"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. ASHP COP drops when defrost activates
+//
+// Carnot COP degrades as outdoor temperature falls. For HARES with identity
+// biquadratic curves ([1,0,0,0,0,0]), the compressor performance is identical
+// at 15°C and 7°C. The observable COP drop occurs when the OnDemand defrost
+// model activates below max_oat_defrost_c (default ~5°C). Defrost diverts
+// compressor capacity and adds extra resistive power, lowering net COP.
+//
+// Expected:
+//   COP at 7°C (no defrost) >= COP at 0°C (defrost active)
+//   COP at 0°C > COP at -10°C (deeper defrost penalty)
+//   All COPs positive (heat is delivered at all three outdoor temperatures)
+// ---------------------------------------------------------------------------
+#[test]
+fn ashp_cop_drops_with_defrost() {
+    let make_ashp_cop = |outdoor_c: f64| {
+        let c = cfg(
+            "ashp",
+            "ASHP Heater",
+            &[
+                ("zone_id", 1.0),
+                ("heating_setpoint_c", 21.0),
+                ("cooling_setpoint_c", 27.0),
+                ("backup_capacity_w", 0.0),
+            ],
+        );
+        let registry = EquipmentRegistry::new();
+        let mut eq = registry.create("ASHP Heater", c.clone()).unwrap();
+        let env = make_env(19.0, outdoor_c, outdoor_c - 2.0);
+        eq.init(&c, &env).unwrap();
+        // Run 30 steps to allow defrost accumulation to reach steady state.
+        for _ in 0..30 {
+            eq.update_control(&env);
+            let mut ports = make_ports();
+            eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        }
+        let tel = eq.telemetry();
+        let thermal_w = tel.get("thermal_output_w").expect("thermal_output_w");
+        let electric_kw = tel.get("electric_kw").expect("electric_kw");
+        let cop = thermal_w / (electric_kw * 1_000.0);
+        (cop, thermal_w, electric_kw)
+    };
+
+    let (cop_7, thermal_7, elec_7) = make_ashp_cop(7.0);
+    let (cop_0, thermal_0, elec_0) = make_ashp_cop(0.0);
+    let (cop_m10, thermal_m10, elec_m10) = make_ashp_cop(-10.0);
+
+    assert!(cop_7 > 0.0, "COP must be positive at 7°C; got {cop_7:.3}");
+    assert!(cop_0 > 0.0, "COP must be positive at 0°C; got {cop_0:.3}");
+    assert!(cop_m10 > 0.0, "COP must be positive at -10°C; got {cop_m10:.3}");
+
+    // At 0°C and -10°C defrost is active; at 7°C it is not.
+    // COP with defrost must be lower than COP without defrost.
+    assert!(
+        cop_7 >= cop_0,
+        "COP at 7°C ({cop_7:.3}) must be >= COP at 0°C ({cop_0:.3}) \
+         (defrost active at 0°C; outdoor_temp < max_oat_defrost_c)"
+    );
+    assert!(
+        cop_0 > cop_m10,
+        "COP at 0°C ({cop_0:.3}) must exceed COP at -10°C ({cop_m10:.3}) \
+         (deeper defrost penalty at -10°C)"
+    );
+
+    eprintln!(
+        "[hvac_parity] ashp_cop_vs_outdoor: \
+         7°C: cop={cop_7:.3} (thermal={thermal_7:.1} W, elec={elec_7:.4} kW) | \
+         0°C: cop={cop_0:.3} (thermal={thermal_0:.1} W, elec={elec_0:.4} kW) | \
+         -10°C: cop={cop_m10:.3} (thermal={thermal_m10:.1} W, elec={elec_m10:.4} kW)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. AC first law: sensible + latent = total cooling
+//
+// When an AC dehumidifies air, total heat removed equals sensible heat
+// removed plus latent heat of condensation. This is a direct consequence
+// of the first law applied to the moist-air coil model.
+//
+// Setup: zone=28°C, outdoor=35°C, wet_bulb=19°C → cooling active.
+// Expected:
+//   sensible_cooling_w + latent_cooling_w ≈ |sensible_gain_w| + |latent_gain_w|
+//   Both components negative in the port (heat removed from zone).
+//   Tolerance: 1.0 W (floating-point rounding in DSE application).
+// ---------------------------------------------------------------------------
+#[test]
+fn ac_sensible_plus_latent_equals_total() {
+    let c = cfg(
+        "ac",
+        "Air Conditioner",
+        &[
+            ("zone_id", 1.0),
+            ("capacity_w", 10_000.0),
+            ("heating_setpoint_c", 20.0),
+            ("cooling_setpoint_c", 24.0),
+            // Disable startup ramp so first-step output reflects full capacity.
+            ("startup_cd", 0.0),
+        ],
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Air Conditioner", c.clone()).unwrap();
+    let env = make_env(28.0, 35.0, 19.0);
+    eq.init(&c, &env).unwrap();
+    eq.update_control(&env);
+
+    let mut ports = make_ports();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let sensible_port_w = ports.thermal[0].sensible_gain_w;
+    let latent_port_w = ports.thermal[0].latent_gain_w;
+
+    // Ports accumulate cooling as negative values (heat removed from zone).
+    assert!(
+        sensible_port_w < -100.0,
+        "sensible_gain_w must be negative (heat removed); got {sensible_port_w:.3} W"
+    );
+    assert!(
+        latent_port_w <= 0.0,
+        "latent_gain_w must be <= 0 (moisture removed); got {latent_port_w:.3} W"
+    );
+
+    let total_port_w = sensible_port_w.abs() + latent_port_w.abs();
+
+    // Telemetry reports post-DSE delivered values (DSE=1.0 by default).
+    let sens_tel = eq.telemetry().get("sensible_cooling_w").expect("sensible_cooling_w");
+    let lat_tel = eq.telemetry().get("latent_cooling_w").expect("latent_cooling_w");
+    let total_tel = sens_tel + lat_tel;
+
+    // First law: telemetry total must equal port total within floating-point error.
+    assert!(
+        (total_tel - total_port_w).abs() < 1.0,
+        "sensible_cooling_w ({sens_tel:.3} W) + latent_cooling_w ({lat_tel:.3} W) \
+         = {total_tel:.3} W must equal port total {total_port_w:.3} W (tolerance 1.0 W)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 14. Gas furnace first law: thermal output < fuel input
+//
+// For any combustion device with AFUE < 1.0, delivered thermal energy must
+// be strictly less than the chemical energy consumed. The ratio equals AFUE.
+//
+// Setup: capacity=15000 W, AFUE=0.80, fan_power=0 W, zone=18°C → heating.
+// Expected:
+//   thermal_output_w < fuel_input_w (first law, AFUE < 1.0)
+//   thermal_output_w / fuel_input_w ≈ 0.80 within 1%
+//   thermal_output_w > 0 (heating is active)
+// ---------------------------------------------------------------------------
+#[test]
+fn gas_furnace_first_law_thermal_less_than_fuel() {
+    let c = cfg(
+        "furnace",
+        "Gas Furnace",
+        &[
+            ("zone_id", 1.0),
+            ("capacity_w", 15_000.0),
+            ("heating_setpoint_c", 21.0),
+            ("cooling_setpoint_c", 27.0),
+            ("fuel_efficiency", 0.80),
+            ("fan_power_w", 0.0),
+        ],
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
+    let env = make_env(18.0, -5.0, 12.0);
+    eq.init(&c, &env).unwrap();
+    eq.update_control(&env);
+
+    let mut ports = make_ports();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let tel = eq.telemetry();
+    let thermal_w = tel.get("thermal_output_w").expect("thermal_output_w");
+    let fuel_w = tel.get("fuel_input_w").expect("fuel_input_w");
+
+    assert!(
+        thermal_w > 0.0,
+        "furnace must deliver positive heat at 18°C; got {thermal_w:.1} W"
+    );
+    assert!(
+        thermal_w < fuel_w,
+        "first law: thermal_output ({thermal_w:.1} W) must be < fuel_input ({fuel_w:.1} W)"
+    );
+
+    // AFUE = thermal / fuel. Hand calculation: 15000 / (15000 / 0.80) = 0.80.
+    let effective_afue = thermal_w / fuel_w;
+    assert!(
+        (effective_afue - 0.80).abs() < 0.01,
+        "effective AFUE must be ~0.80; got {effective_afue:.4} \
+         (thermal={thermal_w:.1} W, fuel={fuel_w:.1} W)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 15. Gas furnace DSE multi-zone energy conservation
+//
+// With duct_dse < 1.0 and an explicit duct_zone_id, the furnace must route
+// the gross capacity to both zones such that:
+//   zone_1 + zone_2 = rated_capacity (energy conservation)
+//   zone_1 = rated * DSE
+//   zone_2 = rated * (1 - DSE)
+//
+// This exercises the full equipment pipeline: config parsing, zone_heat_fractions
+// initialisation, and write_zone_thermal_contributions at step time.
+//
+// Setup: capacity=10000 W, DSE=0.80, duct_zone_id=2, fan_power=0 W.
+// Expected (tolerance 10 W for floating-point):
+//   zone_1_thermal ≈ 8000 W
+//   zone_2_thermal ≈ 2000 W
+//   zone_1 + zone_2 ≈ 10000 W
+// ---------------------------------------------------------------------------
+#[test]
+fn gas_furnace_dse_multi_zone_energy_conservation() {
+    let c = cfg(
+        "furnace",
+        "Gas Furnace",
+        &[
+            ("zone_id", 1.0),
+            ("capacity_w", 10_000.0),
+            ("heating_setpoint_c", 21.0),
+            ("cooling_setpoint_c", 27.0),
+            ("fuel_efficiency", 0.80),
+            ("fan_power_w", 0.0),
+            ("duct_dse", 0.80),
+            ("duct_zone_id", 2.0),
+        ],
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
+    let env = make_env(18.0, -5.0, 12.0);
+    eq.init(&c, &env).unwrap();
+    eq.update_control(&env);
+
+    let mut ports = make_ports_two_zones();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let zone1_w = ports.thermal[0].sensible_gain_w;
+    let zone2_w = ports.thermal[1].sensible_gain_w;
+    let total_w = zone1_w + zone2_w;
+
+    // zone_1 = 10000 * 0.80 = 8000 W
+    assert!(
+        (zone1_w - 8_000.0).abs() < 10.0,
+        "conditioned zone must receive capacity * DSE = 8000 W; got {zone1_w:.2} W"
+    );
+    // zone_2 = 10000 * (1 - 0.80) = 2000 W
+    assert!(
+        (zone2_w - 2_000.0).abs() < 10.0,
+        "duct zone must receive capacity * (1-DSE) = 2000 W; got {zone2_w:.2} W"
+    );
+    // Conservation: zone_1 + zone_2 = rated capacity
+    assert!(
+        (total_w - 10_000.0).abs() < 10.0,
+        "total delivered heat must conserve energy: zone1 + zone2 = 10000 W; \
+         got zone1={zone1_w:.2} W + zone2={zone2_w:.2} W = {total_w:.2} W"
     );
 }

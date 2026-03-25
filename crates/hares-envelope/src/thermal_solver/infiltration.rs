@@ -159,17 +159,6 @@ pub(crate) fn apply_infiltration_and_ventilation(
                 0.0
             });
 
-        // Compute per-component diagnostic gains before flow combination.
-        let delta_t = t_out - zone.temperature_c;
-        let q_infiltration_w = rho * q_inf_m3_s * CP_DRY_AIR_J_KG_K * delta_t;
-        let q_natural_vent_w = rho * q_nat_m3_s * CP_DRY_AIR_J_KG_K * delta_t;
-        let forced_eff = if config.ventilation.balanced {
-            1.0 - config.ventilation.sensible_recovery_efficiency
-        } else {
-            1.0
-        };
-        let q_forced_vent_w = rho * forced_flow_m3_s * forced_eff * CP_DRY_AIR_J_KG_K * delta_t;
-
         // Combine infiltration + natural ventilation + forced ventilation.
         // OCHRE Envelope.py:59-87:
         //   total_nat_flow = infiltration + natural_ventilation
@@ -223,10 +212,16 @@ pub(crate) fn apply_infiltration_and_ventilation(
 
         // Recompute diagnostic gains using scaled flows (for OCHRE parity in reporting).
         // OCHRE reports the scaled infiltration component, not the raw AIM-2 flow.
-        let q_infiltration_w_scaled = rho * scaled_q_inf_m3_s * CP_DRY_AIR_J_KG_K * delta_t;
-        let q_natural_vent_w_scaled = rho * scaled_q_nat_m3_s * CP_DRY_AIR_J_KG_K * delta_t;
+        let dt_c = t_out - zone.temperature_c;
+        let q_infiltration_w_scaled = rho * scaled_q_inf_m3_s * CP_DRY_AIR_J_KG_K * dt_c;
+        let q_natural_vent_w_scaled = rho * scaled_q_nat_m3_s * CP_DRY_AIR_J_KG_K * dt_c;
+        let forced_sens_eff = if config.ventilation.balanced {
+            1.0 - config.ventilation.sensible_recovery_efficiency
+        } else {
+            1.0 // Unbalanced: no heat recovery, quadrature combination already applied
+        };
         let q_forced_vent_w_scaled =
-            rho * scaled_forced_m3_s * forced_eff * CP_DRY_AIR_J_KG_K * delta_t;
+            rho * scaled_forced_m3_s * forced_sens_eff * CP_DRY_AIR_J_KG_K * dt_c;
 
         couplings.push(InfiltrationCoupling {
             zone: zone.id,

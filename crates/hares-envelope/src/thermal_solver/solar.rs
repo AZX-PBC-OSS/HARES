@@ -41,8 +41,7 @@ impl ThermalSolver {
                 let absorbed_inward = (win.shgc - win.transmittance).max(0.0) * win.radiation_frac;
                 let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
 
-                // Copy scalars from `win` before mutable borrows below.
-                let shgc = win.shgc;
+                let _shgc = win.shgc;
                 let zone_id = self.config.window_zone_ids.get(&irr.surface_id).copied();
                 let air_idx = zone_id
                     .and_then(|zid| self.wiring.zone_sensible_input_indices.get(&zid).copied())
@@ -75,7 +74,7 @@ impl ThermalSolver {
                         transmitted_beam_w,
                         transmitted_diffuse_w,
                         absorbed_zone_w,
-                        shgc,
+                        shgc: _shgc,
                     });
             }
         }

@@ -179,7 +179,10 @@ impl EnvironmentManager {
             hares_physics::ground::DEFAULT_PHASE_DAY_NORTHERN
         };
         let surfaces = build_surface_geometry(building);
-        let init_offset = compute_annual_offset_unshifted(&weather.meta, start_time, step_secs);
+        // Use the shifted offset (with midpoint_offset_secs applied) for initial conditions
+        // to match OCHRE's behavior of reading weather at the period midpoint.
+        // EPW hour 12 (covers 11:00-12:00) has its representative value at 11:30.
+        let init_offset = compute_annual_offset(&weather.meta, start_time, step_secs);
         let initial_outdoor_temp_c = weather
             .dry_bulb_c
             .get(init_offset)
@@ -496,24 +499,6 @@ fn compute_annual_offset(
     let shifted = (seconds_into_year + year_secs - meta.midpoint_offset_secs as u64) % year_secs;
 
     (shifted / step_secs as u64) as usize
-}
-
-/// Un-shifted annual offset for initial-condition lookup.
-/// OCHRE reads the schedule/weather at the raw hour-ending position for init.
-fn compute_annual_offset_unshifted(
-    _meta: &WeatherMeta,
-    start_time: DateTime<FixedOffset>,
-    step_secs: u32,
-) -> usize {
-    if step_secs == 0 {
-        return 0;
-    }
-    let doy0 = start_time.ordinal0() as u64;
-    let h = start_time.hour() as u64;
-    let m = start_time.minute() as u64;
-    let s = start_time.second() as u64;
-    let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
-    (seconds_into_year / step_secs as u64) as usize
 }
 
 /// Compute offset into the schedule time series.

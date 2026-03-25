@@ -193,6 +193,9 @@ impl IdealHvac {
             self.mode = mode;
             self.last_mode_switch_at = Some(when);
             self.mode_start_at = Some(when);
+            if mode == ThermostatMode::Deadband {
+                self.ideal_capacity_w = 0.0;
+            }
         }
     }
 
@@ -217,6 +220,14 @@ impl IdealHvac {
         self.resolve_schedule_setpoints(env);
         let zone_temp = lookup_zone_temp(env, self.zone_id)?;
         let setpoints = self.effective_setpoints();
+
+        // Always track schedule setpoint changes even during min-cycle lockout.
+        // The solver needs current_target_c to reflect the live setpoint.
+        match self.mode {
+            ThermostatMode::Heating => self.current_target_c = setpoints.heating_c,
+            ThermostatMode::Cooling => self.current_target_c = setpoints.cooling_c,
+            ThermostatMode::Deadband => {}
+        }
 
         if !is_cycle_change_allowed(&self.thermostat, self.last_mode_switch_at, env.current_time) {
             return Ok(self.mode);
@@ -284,12 +295,12 @@ impl IdealHvac {
             }
         };
 
-        if !self.can_transition_mode(next_mode, env.current_time) {
-            return Ok(self.mode);
+        if self.can_transition_mode(next_mode, env.current_time) {
+            self.set_mode(next_mode, env.current_time);
         }
 
-        self.set_mode(next_mode, env.current_time);
-
+        // Always update target from current setpoints — even when mode doesn't
+        // transition, the schedule setpoint may have changed (day↔night shift).
         match self.mode {
             ThermostatMode::Heating => self.current_target_c = setpoints.heating_c,
             ThermostatMode::Cooling => self.current_target_c = setpoints.cooling_c,
@@ -385,14 +396,20 @@ impl Equipment for IdealHvac {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let capacity_w = if self.use_ideal_cached {
-            self.ideal_capacity_w * self.load_fraction
-        } else {
-            match self.mode {
-                ThermostatMode::Heating => self.rated_capacity_w * self.load_fraction,
-                ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction,
-                ThermostatMode::Deadband => 0.0,
+        let capacity_w = match self.mode {
+            ThermostatMode::Deadband => 0.0,
+            ThermostatMode::Heating if self.use_ideal_cached => {
+                // Solver may return negative (cooling needed) when zone is above target
+                // due to one-step-stale estimate — clamp to non-negative for heating mode.
+                (self.ideal_capacity_w * self.load_fraction).max(0.0)
             }
+            ThermostatMode::Cooling if self.use_ideal_cached => {
+                // Solver may return positive (heating needed) when zone is below target
+                // due to solar gains dissipating at night — clamp to non-positive for cooling.
+                (self.ideal_capacity_w * self.load_fraction).min(0.0)
+            }
+            ThermostatMode::Heating => self.rated_capacity_w * self.load_fraction,
+            ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction,
         };
 
         if capacity_w.abs() > 0.0 {
@@ -1128,5 +1145,188 @@ mod tests {
         let result = eq.init(&cfg, &env);
 
         assert!(result.is_err(), "overlapping setpoints should be rejected");
+    }
+
+    // Bug 1: current_target_c must update when setpoint changes mid-mode.
+    // DailyProfile: hour 0 = 21.67°C, hour 8 = 18.33°C. Zone is below heat
+    // turn-on at both hours so no mode transition occurs. The target must still
+    // follow the schedule shift.
+    #[test]
+    fn current_target_c_tracks_schedule_shift_without_mode_change() {
+        let mut heating_weekday = [21.67f64; 24];
+        heating_weekday[8] = 18.33;
+        let cooling_weekday = [26.0f64; 24];
+
+        let mut cfg = config("IH");
+        cfg.raw_config.insert("zone_id".into(), 1.0.into());
+        cfg.raw_config
+            .insert("ideal_capacity_mode".into(), "on".into());
+        cfg.raw_config.insert(
+            "heating_weekday_setpoints_c".into(),
+            heating_weekday.to_vec().into(),
+        );
+        cfg.raw_config.insert(
+            "heating_weekend_setpoints_c".into(),
+            heating_weekday.to_vec().into(),
+        );
+        cfg.raw_config.insert(
+            "cooling_weekday_setpoints_c".into(),
+            cooling_weekday.to_vec().into(),
+        );
+        cfg.raw_config.insert(
+            "cooling_weekend_setpoints_c".into(),
+            cooling_weekday.to_vec().into(),
+        );
+
+        // Zone at 15°C — well below both setpoints, always triggers Heating.
+        // hysteresis=1.0, deadband_offset=0.2 → heat turn-on at setpoint-0.8
+        // 15 < 21.67-0.8=20.87 and 15 < 18.33-0.8=17.53
+        let env_h0 = env(15.0, 60, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_h0).unwrap();
+        eq.update_control(&env_h0);
+
+        assert_eq!(eq.mode, super::ThermostatMode::Heating);
+        assert!(
+            (eq.current_target_c - 21.67).abs() < 1e-6,
+            "hour 0 target should be 21.67, got {}",
+            eq.current_target_c
+        );
+
+        // Advance to hour 8 — same zone temp, same mode, but setpoint drops.
+        let env_h8 = env(15.0, 60, 8 * 3600);
+        eq.update_control(&env_h8);
+
+        assert_eq!(
+            eq.mode,
+            super::ThermostatMode::Heating,
+            "mode must not change"
+        );
+        assert!(
+            (eq.current_target_c - 18.33).abs() < 1e-6,
+            "current_target_c should update to new schedule setpoint, got {}",
+            eq.current_target_c
+        );
+    }
+
+    // Bug 2: Deadband must produce 0W even when ideal_capacity_w was set while
+    // heating and the transition to Deadband did not clear it explicitly via the
+    // ControlSignal path.
+    #[test]
+    fn deadband_outputs_zero_despite_stale_ideal_capacity() {
+        let mut cfg = config("IH");
+        cfg.raw_config.insert("zone_id".into(), 1.0.into());
+        cfg.raw_config
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.raw_config
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.raw_config
+            .insert("ideal_capacity_mode".into(), "on".into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        // Zone cold → enters Heating.
+        let env_cold = env(18.0, 60, 0);
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        assert_eq!(eq.mode, super::ThermostatMode::Heating);
+
+        // Solver dispatches capacity while in Heating.
+        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 5000.0 };
+        eq.apply_control_unchecked(&signal).unwrap();
+        assert!((eq.ideal_capacity_w - 5000.0).abs() < 1e-9);
+
+        // Zone warms past turn-off threshold (20.0 + 1.0*0.2 = 20.2) → Deadband.
+        let env_warm = env(21.0, 60, 0);
+        eq.update_control(&env_warm);
+        assert_eq!(
+            eq.mode,
+            super::ThermostatMode::Deadband,
+            "zone at 21°C should be in Deadband"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_warm, std::time::Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        assert_eq!(
+            ports.thermal[0].sensible_gain_w, 0.0,
+            "Deadband must output 0W, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    // Bug 3a: Cooling mode must clamp positive ideal_capacity_w to 0W.
+    #[test]
+    fn cooling_mode_clamps_positive_ideal_capacity_to_zero() {
+        let mut cfg = config("IH");
+        cfg.raw_config.insert("zone_id".into(), 1.0.into());
+        cfg.raw_config
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.raw_config
+            .insert("cooling_setpoint_c".into(), 24.0.into());
+        cfg.raw_config
+            .insert("ideal_capacity_mode".into(), "on".into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env_hot = env(28.0, 60, 0);
+        eq.init(&cfg, &env_hot).unwrap();
+        eq.update_control(&env_hot);
+        assert_eq!(eq.mode, super::ThermostatMode::Cooling);
+
+        // Solver mistakenly returns positive capacity (e.g. outdoor dropped).
+        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: 3000.0 };
+        eq.apply_control_unchecked(&signal).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_hot, std::time::Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        assert_eq!(
+            ports.thermal[0].sensible_gain_w, 0.0,
+            "Cooling mode must not output positive capacity, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    // Bug 3b: Heating mode must clamp negative ideal_capacity_w to 0W.
+    #[test]
+    fn heating_mode_clamps_negative_ideal_capacity_to_zero() {
+        let mut cfg = config("IH");
+        cfg.raw_config.insert("zone_id".into(), 1.0.into());
+        cfg.raw_config
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.raw_config
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.raw_config
+            .insert("ideal_capacity_mode".into(), "on".into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env_cold = env(18.0, 60, 0);
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        assert_eq!(eq.mode, super::ThermostatMode::Heating);
+
+        // Solver returns negative capacity (zone overshot, cooling needed).
+        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: -2000.0 };
+        eq.apply_control_unchecked(&signal).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_cold, std::time::Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        assert_eq!(
+            ports.thermal[0].sensible_gain_w, 0.0,
+            "Heating mode must not output negative capacity, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
     }
 }

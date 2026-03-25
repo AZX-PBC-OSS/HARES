@@ -2322,4 +2322,228 @@ mod tests {
             hvac.biquadratic_coeffs[1][0]
         );
     }
+
+    #[test]
+    fn mode_reversal_heating_to_cooling_via_deadband() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.thermostat.hysteresis_c = 1.0;
+        hvac.thermostat.deadband_offset = 0.2;
+        hvac.static_setpoints = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 25.0,
+        };
+
+        let mode = hvac.update_mode(&env(18.0, 60, 0)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Heating, "18°C < 19.2 → Heating");
+
+        let mode = hvac.update_mode(&env(21.0, 60, 61)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Deadband, "21°C > 20.2 → Deadband");
+
+        let mode = hvac.update_mode(&env(26.0, 60, 122)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Cooling, "26°C > 25.8 → Cooling");
+    }
+
+    #[test]
+    fn mode_reversal_cooling_to_heating_via_deadband() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.thermostat.hysteresis_c = 1.0;
+        hvac.thermostat.deadband_offset = 0.2;
+        hvac.static_setpoints = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 25.0,
+        };
+
+        let mode = hvac.update_mode(&env(27.0, 60, 0)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Cooling, "27°C > 25.8 → Cooling");
+
+        let mode = hvac.update_mode(&env(24.0, 60, 61)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Deadband, "24°C < 24.8 → Deadband");
+
+        let mode = hvac.update_mode(&env(18.0, 60, 122)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Heating, "18°C < 19.2 → Heating");
+    }
+
+    #[test]
+    fn min_on_and_off_time_stacking() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.thermostat.hysteresis_c = 1.0;
+        hvac.thermostat.deadband_offset = 0.2;
+        hvac.thermostat.min_cycle_time_s = 0.0;
+        hvac.static_setpoints = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 25.0,
+        };
+        hvac.min_on_time_s = 120.0;
+        hvac.min_off_time_s = 180.0;
+
+        let mode = hvac.update_mode(&env(18.0, 60, 0)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Heating, "cold zone → Heating");
+
+        let mode = hvac.update_mode(&env(30.0, 60, 60)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Heating, "min_on=120 not elapsed → still Heating");
+
+        let mode = hvac.update_mode(&env(30.0, 60, 121)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Deadband, "min_on elapsed at 121s → Deadband");
+
+        let mode = hvac.update_mode(&env(15.0, 60, 150)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Deadband, "only 29s in Deadband → min_off blocks restart");
+
+        let mode = hvac.update_mode(&env(15.0, 60, 302)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Heating, "181s in Deadband > min_off=180 → Heating");
+    }
+
+    #[test]
+    fn two_speed_time_escalates_when_temp_moving_wrong_way() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.low_speed_capacity_fraction = 0.5;
+        hvac.min_time_per_speed_s = 60.0;
+
+        let sel = hvac.select_speed_with_zone_temp(0.8, None, true);
+        assert_eq!(sel.speed_index, 0, "fresh cycle → low speed");
+
+        hvac.update_prev_zone_temp(Some(20.0));
+        hvac.advance_speed_timer(61.0);
+
+        let sel = hvac.select_speed_with_zone_temp(0.8, Some(19.5), true);
+        assert_eq!(sel.speed_index, 1, "temp dropped during heating, timer≥60s → escalate to high");
+    }
+
+    #[test]
+    fn two_speed_time_stays_low_when_temp_moving_right_way() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.low_speed_capacity_fraction = 0.5;
+        hvac.min_time_per_speed_s = 60.0;
+
+        hvac.update_prev_zone_temp(Some(20.0));
+        hvac.advance_speed_timer(61.0);
+
+        let sel = hvac.select_speed_with_zone_temp(0.8, Some(20.5), true);
+        assert_eq!(sel.speed_index, 0, "temp rising during heating → stay at low speed");
+    }
+
+    #[test]
+    fn two_speed_alternating_always_high_speed() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+
+        assert_eq!(hvac.select_speed(0.3).speed_index, 1, "low load → high speed");
+        assert_eq!(hvac.select_speed(0.9).speed_index, 1, "high load → high speed");
+    }
+
+    #[test]
+    fn all_disabled_speeds_falls_back_to_last() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.low_speed_capacity_fraction = 0.5;
+        hvac.min_time_per_speed_s = 0.0;
+
+        hvac.set_disabled_speeds(&[true, true]);
+        assert_eq!(hvac.max_enabled_speed, 1, "all disabled → fallback to last (index 1)");
+
+        let sel = hvac.select_speed(0.3);
+        assert_eq!(sel.speed_index, 1, "all disabled → select max_enabled (index 1)");
+    }
+
+    #[test]
+    fn eir_plr_per_stage_with_custom_quad_curves() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.eir_plr_coefficients = Some(vec![[0.8, 0.3, -0.1], [0.9, 0.15, -0.05]]);
+
+        let plf0 = hvac.part_load_factor_for_stage(0.5, 0);
+        assert!(
+            (plf0 - 0.925).abs() < 1e-12,
+            "stage 0 at PLR=0.5: 0.8 + 0.3×0.5 + (-0.1)×0.25 = 0.925; got {plf0}"
+        );
+
+        let plf1 = hvac.part_load_factor_for_stage(0.5, 1);
+        assert!(
+            (plf1 - 0.9625).abs() < 1e-12,
+            "stage 1 at PLR=0.5: 0.9 + 0.15×0.5 + (-0.05)×0.25 = 0.9625; got {plf1}"
+        );
+
+        let plf_oob = hvac.part_load_factor_for_stage(0.5, 5);
+        assert!(
+            (plf_oob - 0.9625).abs() < 1e-12,
+            "out-of-range stage → uses last curve (0.9625); got {plf_oob}"
+        );
+    }
+
+    #[test]
+    fn deadband_offset_zero_thresholds() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.thermostat.hysteresis_c = 1.0;
+        hvac.thermostat.deadband_offset = 0.0;
+        hvac.thermostat.cutout_ratio = 0.5;
+        hvac.static_setpoints = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 25.0,
+        };
+
+        let mode = hvac.update_mode(&env(19.5, 60, 0)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Deadband, "19.5°C > turn-on 19.0 → Deadband");
+
+        let mode = hvac.update_mode(&env(18.5, 60, 1)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Heating, "18.5°C < turn-on 19.0 → Heating");
+    }
+
+    #[test]
+    fn deadband_offset_half_thresholds() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.thermostat.hysteresis_c = 1.0;
+        hvac.thermostat.deadband_offset = 0.5;
+        hvac.static_setpoints = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 25.0,
+        };
+
+        let mode = hvac.update_mode(&env(19.4, 60, 0)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Heating, "19.4°C < turn-on 19.5 → Heating");
+
+        let mode = hvac.update_mode(&env(20.6, 60, 61)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Deadband, "20.6°C > turn-off 20.5 → Deadband");
+    }
+
+    #[test]
+    fn deadband_offset_one_thresholds() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.thermostat.hysteresis_c = 1.0;
+        hvac.thermostat.deadband_offset = 1.0;
+        hvac.static_setpoints = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 25.0,
+        };
+
+        let mode = hvac.update_mode(&env(19.9, 60, 0)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Heating, "19.9°C < turn-on 20.0 → Heating");
+
+        let mode = hvac.update_mode(&env(21.1, 60, 61)).expect("mode");
+        assert_eq!(mode, ThermostatMode::Deadband, "21.1°C > turn-off 21.0 → Deadband");
+    }
+
+    #[test]
+    fn shr_sensible_latent_split() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+
+        hvac.shr = 0.5;
+        let (s, l) = hvac.sensible_latent_from_shr(10_000.0);
+        assert!((s - 5_000.0).abs() < 1e-9, "shr=0.5 → sensible=5000; got {s}");
+        assert!((l - 5_000.0).abs() < 1e-9, "shr=0.5 → latent=5000; got {l}");
+
+        hvac.shr = 1.0;
+        let (s, l) = hvac.sensible_latent_from_shr(10_000.0);
+        assert!((s - 10_000.0).abs() < 1e-9, "shr=1.0 → sensible=10000; got {s}");
+        assert!((l - 0.0).abs() < 1e-9, "shr=1.0 → latent=0; got {l}");
+
+        hvac.shr = 0.0;
+        let (s, l) = hvac.sensible_latent_from_shr(10_000.0);
+        assert!((s - 0.0).abs() < 1e-9, "shr=0.0 → sensible=0; got {s}");
+        assert!((l - 10_000.0).abs() < 1e-9, "shr=0.0 → latent=10000; got {l}");
+
+        hvac.shr = 1.5;
+        let (s, l) = hvac.sensible_latent_from_shr(10_000.0);
+        assert!((s - 10_000.0).abs() < 1e-9, "shr=1.5 clamped to 1.0 → sensible=10000; got {s}");
+        assert!((l - 0.0).abs() < 1e-9, "shr=1.5 clamped to 1.0 → latent=0; got {l}");
+    }
 }

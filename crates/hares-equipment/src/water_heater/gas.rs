@@ -21,8 +21,6 @@ use super::{
     mains_temp_schedule_source, parse_usize, resolve_draw_rate_kg_s, resolve_storage_step_inputs,
     weighted_average_tank_temp,
 };
-use hares_physics::units as conv;
-
 use crate::hvac::helpers::{
     equipment_id_from_config, first_f64, loop_id_from_config, parse_fuel_type, zone_id_from_config,
 };

@@ -99,6 +99,11 @@ impl ThermalSolver {
         &self.component_gains
     }
 
+    /// Number of configured boundary diagnostic entries.
+    pub fn boundary_diagnostics_count(&self) -> usize {
+        self.config.boundary_diagnostics.len()
+    }
+
     pub fn model_dims(&self) -> (usize, usize, usize) {
         (
             self.model.state_dim(),

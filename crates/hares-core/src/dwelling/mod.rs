@@ -722,6 +722,14 @@ impl Dwelling {
         &self.equipment
     }
 
+    /// Returns the current environment state (zone temps, weather, grid, time).
+    ///
+    /// Useful for initializing equipment with realistic state before the first step.
+    #[must_use]
+    pub fn latest_env(&self) -> &EnvironmentState {
+        &self.latest_env
+    }
+
     /// Adds equipment to the dwelling and refreshes internal caches.
     ///
     /// Equipment execution order and dispatch targets are pre-computed for
@@ -1117,9 +1125,7 @@ impl Dwelling {
             let capture = self
                 .control_dispatcher
                 .dispatch_into_observed(&mut self.equipment, &mut self.warnings);
-            if !capture.signals.is_empty() {
-                obs_phases.post_dispatch = Some(capture);
-            }
+            obs_phases.post_dispatch = Some(capture);
         } else {
             self.control_dispatcher
                 .dispatch_into(&mut self.equipment, &mut self.warnings);

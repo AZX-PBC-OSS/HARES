@@ -212,7 +212,7 @@ impl ThermalSolver {
             };
 
             let mut zone_total = 0.0_f64;
-            for (j, (info, &q)) in zone_cfg
+            for (_j, (info, &q)) in zone_cfg
                 .surfaces
                 .iter()
                 .zip(self.lwr_net_flux_buf.iter())
@@ -225,7 +225,7 @@ impl ThermalSolver {
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                 self.int_surface_diag_buf
                     .push(super::config::IntSurfaceDiag {
-                        surface_temp_c: t_surfaces[j],
+                        surface_temp_c: t_surfaces[_j],
                         lwr_flux_w: q,
                     });
             }
