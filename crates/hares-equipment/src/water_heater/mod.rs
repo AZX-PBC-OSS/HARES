@@ -585,10 +585,7 @@ mod tests {
         cfg.raw_config.insert("zip_iq".to_string(), 0.3.into());
         cfg.raw_config.insert("zip_pq".to_string(), 0.3.into());
         let result = WaterHeaterZip::from_config(&cfg);
-        assert!(
-            result.is_err(),
-            "ZIP zq+iq+pq=1.1 must be rejected"
-        );
+        assert!(result.is_err(), "ZIP zq+iq+pq=1.1 must be rejected");
     }
 }
 
@@ -600,8 +597,7 @@ mod dhw_integration_tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         DomainUpdate, EnvironmentState, FluidType, GridState, PortContribution, PortSlots,
-        WeatherState, ZoneId, ZoneState,
-        schedule_domain_id,
+        WeatherState, ZoneId, ZoneState, schedule_domain_id,
     };
 
     use super::DHW_DEMAND_LOOP;

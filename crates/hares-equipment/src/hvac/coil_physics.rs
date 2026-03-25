@@ -203,12 +203,8 @@ const ITERATE_PERTURBATION: f64 = 0.1;
 pub(super) struct CoilResult {
     pub shr: f64,
     /// Apparatus dew point temperature [°C].
-    // Retained for callers that perform zone humidity or dehumidification accounting.
-    #[allow(dead_code)]
     pub adp_temp_c: f64,
     /// Coil bypass factor [-].
-    // Retained for callers that need the bypass fraction directly.
-    #[allow(dead_code)]
     pub bypass_factor: f64,
     /// Supply air dry-bulb temperature [°C]: T_adp + BF * (T_entering - T_adp).
     pub supply_temp_c: f64,

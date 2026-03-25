@@ -235,8 +235,9 @@ impl InteriorLwrZoneConfig {
                     emissivity: s.emissivity,
                 })
                 .collect();
-            self.scriptf =
-                Some(crate::longwave_radiation::ScriptFCoefficients::compute(&interior_surfaces));
+            self.scriptf = Some(crate::longwave_radiation::ScriptFCoefficients::compute(
+                &interior_surfaces,
+            ));
         }
     }
 }
@@ -331,8 +332,6 @@ pub struct ThermalSolverConfig {
     /// using the current zone air temperature as the linearisation point and accumulates
     /// the net surface fluxes into the corresponding `input_index` entries in `u`.
     pub interior_lwr_zones: Vec<InteriorLwrZoneConfig>,
-    pub ideal_setpoints_c: HashMap<ZoneId, f64>,
-    pub ideal_hvac_zones: Vec<ZoneId>,
     /// Per-zone infiltration methods. Zones not listed default to zero ACH.
     /// Uses a `Vec` instead of `HashMap` for cache-friendly hot-loop iteration.
     pub infiltration: Vec<(ZoneId, InfiltrationMethod)>,
@@ -362,8 +361,6 @@ impl Default for ThermalSolverConfig {
             window_zone_ids: HashMap::new(),
             exterior_surfaces: Vec::new(),
             interior_lwr_zones: Vec::new(),
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: Vec::new(),
             infiltration: Vec::new(),
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -454,12 +451,17 @@ pub struct EnvelopeComponentGains {
     pub natural_vent_m3_s: f64,
     /// Per-exterior-surface energy diagnostics (solar absorbed, LWR, surface temp).
     /// Parallel to `ThermalSolverConfig::exterior_surfaces`.
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     pub ext_surface_diag: Vec<ExtSurfaceDiag>,
     /// Per-interior-surface diagnostics (surface temp, LWR flux).
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     pub int_surface_diag: Vec<IntSurfaceDiag>,
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    pub window_solar_diag: Vec<WindowSolarDiag>,
 }
 
 /// Per-exterior-surface energy diagnostic snapshot.
+#[cfg(any(debug_assertions, feature = "observe_detailed"))]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExtSurfaceDiag {
     pub surface_id: u32,
@@ -475,6 +477,7 @@ pub struct ExtSurfaceDiag {
 }
 
 /// Per-interior-surface diagnostic snapshot.
+#[cfg(any(debug_assertions, feature = "observe_detailed"))]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IntSurfaceDiag {
     /// Interpolated interior surface temperature [°C].
@@ -482,4 +485,27 @@ pub struct IntSurfaceDiag {
     pub surface_temp_c: f64,
     /// Net interior LWR flux for this surface [W].
     pub lwr_flux_w: f64,
+}
+
+/// Per-window solar diagnostic snapshot.
+#[cfg(any(debug_assertions, feature = "observe_detailed"))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowSolarDiag {
+    pub surface_id: u32,
+    /// Beam POA after IAM correction [W/m²].
+    pub poa_beam_w_m2: f64,
+    /// Diffuse POA after IAM correction [W/m²].
+    pub poa_diffuse_w_m2: f64,
+    /// Beam IAM factor (0–1).
+    pub iam_beam: f64,
+    /// Diffuse IAM factor (0–1).
+    pub iam_diffuse: f64,
+    /// Transmitted beam solar [W].
+    pub transmitted_beam_w: f64,
+    /// Transmitted diffuse solar [W].
+    pub transmitted_diffuse_w: f64,
+    /// Absorbed inward-flowing solar [W] (glass absorptance × N_i × area × POA).
+    pub absorbed_zone_w: f64,
+    /// SHGC used for this window.
+    pub shgc: f64,
 }

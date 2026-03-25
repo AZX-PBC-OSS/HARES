@@ -162,7 +162,7 @@ fn io_injection_to_scheduled_load_step_column_source() {
         .expect("power_schedule_col should be injected") as usize;
 
     let config = equipment_config_from_spec(&specs[0]);
-    let mut eq = ScheduledLoad::new(config.clone(), EndUse::Lighting, "Indoor Lighting");
+    let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
 
     let env = base_env(payload_for_row(&schedule, 0));
     eq.init(&config, &env).expect("scheduled load init should pass");
@@ -193,7 +193,7 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
     );
 
     let config = equipment_config_from_spec(&specs[0]);
-    let mut eq = ScheduledLoad::new(config.clone(), EndUse::Lighting, "Indoor Lighting");
+    let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
 
     let env = base_env(payload_for_row(&schedule, 0));
     eq.init(&config, &env).expect("scheduled load init should pass");
@@ -248,7 +248,7 @@ fn io_injection_to_scheduled_load_step_constant_source() {
         .expect("power_constant_kw should be injected");
 
     let config = equipment_config_from_spec(&specs[0]);
-    let mut eq = ScheduledLoad::new(config.clone(), EndUse::Lighting, "Indoor Lighting");
+    let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
 
     let env = base_env(payload_for_row(&schedule, 0));
     eq.init(&config, &env).expect("scheduled load init should pass");
@@ -312,7 +312,7 @@ fn missing_column_index_errors_at_init_not_step() {
         .insert("power_schedule_source".to_string(), "column".into());
     config.raw_config.remove("power_schedule_col");
 
-    let mut eq = ScheduledLoad::new(config.clone(), EndUse::Lighting, "Indoor Lighting");
+    let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
     let env = base_env(payload_for_row(&schedule, 0));
     let err = eq
         .init(&config, &env)
@@ -380,7 +380,7 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
     );
 
     let config = equipment_config_from_spec(ref_spec);
-    let mut eq = ScheduledLoad::new(config.clone(), EndUse::Refrigeration, "Refrigerator");
+    let mut eq = ScheduledLoad::new(config.clone(), EndUse::REFRIGERATION, "Refrigerator");
     let env = base_env(payload_for_row(&schedule, 0));
     eq.init(&config, &env)
         .expect("ScheduledLoad init should succeed");

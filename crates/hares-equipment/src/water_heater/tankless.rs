@@ -85,7 +85,7 @@ impl TanklessWH {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
                 name: config.name,
-                end_use: EndUse::WaterHeating,
+                end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Tankless Water Heater"),
                 zone: Some(zone),
                 fuel: fuel_type,
@@ -263,33 +263,31 @@ impl Equipment for TanklessWH {
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
         let total_draw_kg_s = self.draw_flow_rate_kg_s + appliance_demand_kg_s;
 
-        let (thermal_output_w, outlet_temp_c) = if mode == OperatingMode::Heating
-            && total_draw_kg_s > 0.0
-        {
-            // Unclamped thermal demand to reach setpoint.
-            let demand_w =
-                total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K * delta_t_c * duty;
+        let (thermal_output_w, outlet_temp_c) =
+            if mode == OperatingMode::Heating && total_draw_kg_s > 0.0 {
+                // Unclamped thermal demand to reach setpoint.
+                let demand_w = total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K * delta_t_c * duty;
 
-            let capacity_w = effective_max_w * duty;
+                let capacity_w = effective_max_w * duty;
 
-            if demand_w <= capacity_w {
-                // Within capacity: deliver setpoint temperature.
-                (demand_w, setpoint_c)
+                if demand_w <= capacity_w {
+                    // Within capacity: deliver setpoint temperature.
+                    (demand_w, setpoint_c)
+                } else {
+                    // Over-capacity: clamp time-averaged output; compute on-phase outlet temp
+                    // using full (non-duty-scaled) power — the heater fires at rated power
+                    // during its on-fraction.
+                    let outlet_c = inlet_temp_c
+                        + effective_max_w / (total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+                    (capacity_w, outlet_c)
+                }
+            } else if mode == OperatingMode::Heating {
+                // Heating mode but zero flow: no output needed.
+                (0.0, setpoint_c)
             } else {
-                // Over-capacity: clamp time-averaged output; compute on-phase outlet temp
-                // using full (non-duty-scaled) power — the heater fires at rated power
-                // during its on-fraction.
-                let outlet_c = inlet_temp_c
-                    + effective_max_w / (total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K);
-                (capacity_w, outlet_c)
-            }
-        } else if mode == OperatingMode::Heating {
-            // Heating mode but zero flow: no output needed.
-            (0.0, setpoint_c)
-        } else {
-            // Off: outlet equals inlet.
-            (0.0, inlet_temp_c)
-        };
+                // Off: outlet equals inlet.
+                (0.0, inlet_temp_c)
+            };
 
         let fuel_input_w = thermal_output_w / self.efficiency_factor;
 
@@ -323,8 +321,7 @@ impl Equipment for TanklessWH {
         self.telemetry.set("fuel_input_w", fuel_input_w);
         self.telemetry
             .set("parasitic_electric_w", self.parasitic_power_w);
-        self.telemetry
-            .set("draw_flow_rate_kg_s", total_draw_kg_s);
+        self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry.set(
             "operating_mode",
             if mode == OperatingMode::Heating {

@@ -100,6 +100,9 @@ pub enum ControlSignal {
     InverterPriorityMode {
         priority: InverterPriority,
     },
+    IdealCapacity {
+        capacity_w: f64,
+    },
 }
 
 /// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
@@ -130,6 +133,7 @@ bitflags! {
         const REACTIVE_SETPOINT = 1 << 13;
         const POWER_FACTOR_SETPOINT = 1 << 14;
         const INVERTER_PRIORITY_MODE = 1 << 15;
+        const IDEAL_CAPACITY = 1 << 16;
     }
 }
 
@@ -152,6 +156,7 @@ impl ControlSignal {
             Self::ReactiveSetpoint { .. } => ControlCapabilities::REACTIVE_SETPOINT,
             Self::PowerFactorSetpoint { .. } => ControlCapabilities::POWER_FACTOR_SETPOINT,
             Self::InverterPriorityMode { .. } => ControlCapabilities::INVERTER_PRIORITY_MODE,
+            Self::IdealCapacity { .. } => ControlCapabilities::IDEAL_CAPACITY,
         }
     }
 }
@@ -234,6 +239,7 @@ mod tests {
                 protocol: ProtocolId(17),
                 payload: vec![1, 2, 3, 4, 5],
             },
+            ControlSignal::IdealCapacity { capacity_w: 3500.0 },
         ];
 
         for signal in signals {
@@ -252,6 +258,17 @@ mod tests {
         let decoded: ControlCapabilities =
             serde_json::from_str(&json).expect("deserialize capabilities");
         assert_eq!(decoded, caps);
+    }
+
+    #[test]
+    fn control_capabilities_with_ideal_capacity_round_trip_through_json() {
+        let caps = ControlCapabilities::IDEAL_CAPACITY | ControlCapabilities::THERMAL_SETPOINT;
+        let json = serde_json::to_string(&caps).expect("serialize capabilities");
+        let decoded: ControlCapabilities =
+            serde_json::from_str(&json).expect("deserialize capabilities");
+        assert_eq!(decoded, caps);
+        assert!(decoded.contains(ControlCapabilities::IDEAL_CAPACITY));
+        assert!(decoded.contains(ControlCapabilities::THERMAL_SETPOINT));
     }
 
     #[test]
@@ -274,6 +291,47 @@ mod tests {
             min_soc: None,
             max_soc: None,
         };
+        let result = ensure_signal_supported(capabilities, &signal);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ideal_capacity_variant_constructs_and_matches() {
+        let signal = ControlSignal::IdealCapacity { capacity_w: 1000.0 };
+        match signal {
+            ControlSignal::IdealCapacity { capacity_w } => assert_eq!(capacity_w, 1000.0),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn ideal_capacity_capability_flag_is_valid() {
+        let caps = ControlCapabilities::IDEAL_CAPACITY;
+        assert!(caps.contains(ControlCapabilities::IDEAL_CAPACITY));
+        assert!(!caps.contains(ControlCapabilities::POWER_SETPOINT));
+    }
+
+    #[test]
+    fn ideal_capacity_signal_requires_ideal_capacity_capability() {
+        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0 };
+        assert_eq!(
+            signal.required_capability(),
+            ControlCapabilities::IDEAL_CAPACITY
+        );
+    }
+
+    #[test]
+    fn ideal_capacity_signal_rejected_without_capability() {
+        let capabilities = ControlCapabilities::POWER_SETPOINT;
+        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0 };
+        let result = ensure_signal_supported(capabilities, &signal);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ideal_capacity_signal_accepted_with_capability() {
+        let capabilities = ControlCapabilities::IDEAL_CAPACITY;
+        let signal = ControlSignal::IdealCapacity { capacity_w: 500.0 };
         let result = ensure_signal_supported(capabilities, &signal);
         assert!(result.is_ok());
     }

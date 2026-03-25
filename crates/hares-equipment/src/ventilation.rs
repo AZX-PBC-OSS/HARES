@@ -21,10 +21,10 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, restore_schedule_source_state,
 };
+use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
 const KEY_ZONE_ID: &str = "zone_id";
@@ -100,8 +100,14 @@ pub struct Ventilation {
 impl Ventilation {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
-        let equipment_id = config.get_f64(KEY_EQUIPMENT_ID).map(|v| v as u32).unwrap_or(0);
-        let zone_id = config.get_f64(KEY_ZONE_ID).map(|v| ZoneId(v as u16)).unwrap_or(ZoneId(1));
+        let equipment_id = config
+            .get_f64(KEY_EQUIPMENT_ID)
+            .map(|v| v as u32)
+            .unwrap_or(0);
+        let zone_id = config
+            .get_f64(KEY_ZONE_ID)
+            .map(|v| ZoneId(v as u16))
+            .unwrap_or(ZoneId(1));
 
         let ventilation_type = match config.get_str("ventilation_type").unwrap_or("hrv") {
             "exhaust_fan" | "ExhaustFan" => VentilationType::ExhaustFan,
@@ -110,8 +116,8 @@ impl Ventilation {
         };
 
         let end_use = match ventilation_type {
-            VentilationType::ExhaustFan => EndUse::Ventilation,
-            VentilationType::Hrv | VentilationType::Erv => EndUse::Ventilation,
+            VentilationType::ExhaustFan => EndUse::VENTILATION,
+            VentilationType::Hrv | VentilationType::Erv => EndUse::VENTILATION,
         };
 
         let descriptor = EquipmentDescriptor {
@@ -203,8 +209,12 @@ impl Equipment for Ventilation {
     }
 
     fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
-        self.fan_power_w = config.get_f64(KEY_FAN_POWER_W).unwrap_or(DEFAULT_FAN_POWER_W);
-        self.flow_rate_m3_s = config.get_f64(KEY_FLOW_RATE_M3_S).unwrap_or(DEFAULT_FLOW_RATE_M3_S);
+        self.fan_power_w = config
+            .get_f64(KEY_FAN_POWER_W)
+            .unwrap_or(DEFAULT_FAN_POWER_W);
+        self.flow_rate_m3_s = config
+            .get_f64(KEY_FLOW_RATE_M3_S)
+            .unwrap_or(DEFAULT_FLOW_RATE_M3_S);
         self.sensible_effectiveness = config
             .get_f64(KEY_SENSIBLE_EFFECTIVENESS)
             .unwrap_or(DEFAULT_SENSIBLE_EFFECTIVENESS)
@@ -271,14 +281,14 @@ impl Equipment for Ventilation {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let is_running = self.mode != OperatingMode::Off
-            && self.dr_level != DRLevel::GridEmergency;
+        let is_running = self.mode != OperatingMode::Off && self.dr_level != DRLevel::GridEmergency;
 
         if !is_running {
             self.telemetry.set("fan_power_w", 0.0);
             self.telemetry.set("sensible_recovery_w", 0.0);
             self.telemetry.set("latent_recovery_w", 0.0);
-            self.telemetry.set("supply_temp_c", env.weather.outdoor_temp_c);
+            self.telemetry
+                .set("supply_temp_c", env.weather.outdoor_temp_c);
             self.telemetry.set("bypass_active", 0.0);
             return Ok(());
         }
@@ -291,7 +301,8 @@ impl Equipment for Ventilation {
             self.telemetry.set("fan_power_w", 0.0);
             self.telemetry.set("sensible_recovery_w", 0.0);
             self.telemetry.set("latent_recovery_w", 0.0);
-            self.telemetry.set("supply_temp_c", env.weather.outdoor_temp_c);
+            self.telemetry
+                .set("supply_temp_c", env.weather.outdoor_temp_c);
             self.telemetry.set("bypass_active", 0.0);
             return Ok(());
         }
@@ -325,8 +336,10 @@ impl Equipment for Ventilation {
         let q_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_J_KG * (w_supply - w_indoor);
 
         // Sensible recovery [W] — how much the HRV/ERV saved vs raw ventilation
-        let q_recovery_sensible_w = m_dot_kg_s * CP_DRY_AIR_J_KG_K * eff_s * (t_indoor_c - t_outdoor_c);
-        let q_recovery_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_J_KG * eff_l * (w_indoor - w_outdoor);
+        let q_recovery_sensible_w =
+            m_dot_kg_s * CP_DRY_AIR_J_KG_K * eff_s * (t_indoor_c - t_outdoor_c);
+        let q_recovery_latent_w =
+            m_dot_kg_s * LATENT_HEAT_VAPORISATION_J_KG * eff_l * (w_indoor - w_outdoor);
 
         // Fan electrical power [kW]
         let fan_kw = effective_fan_power_w / 1000.0;
@@ -346,10 +359,12 @@ impl Equipment for Ventilation {
 
         // Telemetry
         self.telemetry.set("fan_power_w", effective_fan_power_w);
-        self.telemetry.set("sensible_recovery_w", q_recovery_sensible_w);
+        self.telemetry
+            .set("sensible_recovery_w", q_recovery_sensible_w);
         self.telemetry.set("latent_recovery_w", q_recovery_latent_w);
         self.telemetry.set("supply_temp_c", t_supply_c);
-        self.telemetry.set("bypass_active", if bypass_active { 1.0 } else { 0.0 });
+        self.telemetry
+            .set("bypass_active", if bypass_active { 1.0 } else { 0.0 });
 
         Ok(())
     }
@@ -403,7 +418,10 @@ impl Equipment for Ventilation {
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
-    registry.register("Ventilation Fan", Box::new(|config| Box::new(Ventilation::new(config))));
+    registry.register(
+        "Ventilation Fan",
+        Box::new(|config| Box::new(Ventilation::new(config))),
+    );
     registry.register("HRV", Box::new(|config| Box::new(Ventilation::new(config))));
     registry.register("ERV", Box::new(|config| Box::new(Ventilation::new(config))));
 }
@@ -524,7 +542,8 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&e, Duration::from_secs(300), &mut ports).expect("step");
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
 
         // T_supply = 0 + 0.70 * (20 - 0) = 14°C
         let t_supply = hrv.telemetry().get("supply_temp_c").expect("supply_temp_c");
@@ -546,7 +565,8 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&e, Duration::from_secs(300), &mut ports).expect("step");
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
 
         // T_supply = -20 + 0.35 * (20 - (-20)) = -20 + 14 = -6°C
         let t_supply = hrv.telemetry().get("supply_temp_c").expect("supply_temp_c");
@@ -568,12 +588,19 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&e, Duration::from_secs(300), &mut ports).expect("step");
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
 
         let sensible = ports.thermal[0].sensible_gain_w;
-        assert!(sensible < 0.0, "ventilation should cool the zone (outdoor colder)");
+        assert!(
+            sensible < 0.0,
+            "ventilation should cool the zone (outdoor colder)"
+        );
 
-        let recovery = hrv.telemetry().get("sensible_recovery_w").expect("recovery");
+        let recovery = hrv
+            .telemetry()
+            .get("sensible_recovery_w")
+            .expect("recovery");
         assert!(recovery > 0.0, "HRV should recover positive sensible heat");
 
         // m_dot = 0.035 * 1.2 = 0.042 kg/s
@@ -585,7 +612,8 @@ mod tests {
         let reduction = recovery / raw_load;
         assert!(
             reduction > 0.6 && reduction < 0.8,
-            "HRV should reduce heating load by 60-80%, got {:.0}%", reduction * 100.0
+            "HRV should reduce heating load by 60-80%, got {:.0}%",
+            reduction * 100.0
         );
     }
 
@@ -600,7 +628,8 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        erv.step(&e, Duration::from_secs(300), &mut ports).expect("step");
+        erv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
 
         let latent_recovery = erv.telemetry().get("latent_recovery_w").expect("latent");
         assert!(
@@ -620,7 +649,8 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&e, Duration::from_secs(300), &mut ports).expect("step");
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
 
         let electric_kw = ports.electrical.net_active_kw();
         assert!(
@@ -640,14 +670,18 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&e, Duration::from_secs(300), &mut ports).expect("step");
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
 
         let bypass = hrv.telemetry().get("bypass_active").expect("bypass");
         assert!(
             (bypass - 1.0).abs() < 0.01,
             "bypass should be active when outdoor is in comfort range"
         );
-        let recovery = hrv.telemetry().get("sensible_recovery_w").expect("recovery");
+        let recovery = hrv
+            .telemetry()
+            .get("sensible_recovery_w")
+            .expect("recovery");
         assert!(
             recovery.abs() < 0.1,
             "no recovery expected during bypass, got {recovery}"
@@ -666,14 +700,16 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&cold_env, Duration::from_secs(300), &mut ports_cold).expect("step cold");
+        hrv.step(&cold_env, Duration::from_secs(300), &mut ports_cold)
+            .expect("step cold");
         let _recovery_cold = hrv.telemetry().get("sensible_recovery_w").expect("cold");
 
         let mut ports_mild = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&mild_env, Duration::from_secs(300), &mut ports_mild).expect("step mild");
+        hrv.step(&mild_env, Duration::from_secs(300), &mut ports_mild)
+            .expect("step mild");
 
         let eff_cold = hrv.effective_sensible_effectiveness(-20.0);
         let eff_mild = hrv.effective_sensible_effectiveness(0.0);
@@ -703,9 +739,13 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        fan.step(&e, Duration::from_secs(300), &mut ports).expect("step");
+        fan.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
 
-        let recovery = fan.telemetry().get("sensible_recovery_w").expect("recovery");
+        let recovery = fan
+            .telemetry()
+            .get("sensible_recovery_w")
+            .expect("recovery");
         assert!(
             recovery.abs() < 0.01,
             "exhaust fan should have zero recovery, got {recovery}"
@@ -759,16 +799,25 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv.step(&e, Duration::from_secs(300), &mut ports_half).expect("step half");
+        hrv.step(&e, Duration::from_secs(300), &mut ports_half)
+            .expect("step half");
 
         let mut ports_full = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hrv_full.step(&e, Duration::from_secs(300), &mut ports_full).expect("step full");
+        hrv_full
+            .step(&e, Duration::from_secs(300), &mut ports_full)
+            .expect("step full");
 
-        let power_half = hrv.telemetry().get("fan_power_w").expect("fan_power_w half");
-        let power_full = hrv_full.telemetry().get("fan_power_w").expect("fan_power_w full");
+        let power_half = hrv
+            .telemetry()
+            .get("fan_power_w")
+            .expect("fan_power_w half");
+        let power_full = hrv_full
+            .telemetry()
+            .get("fan_power_w")
+            .expect("fan_power_w full");
         assert!(
             (power_half - power_full * 0.5).abs() < 0.01,
             "half-schedule should halve fan power: got {power_half}, expected {}",

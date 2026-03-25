@@ -183,9 +183,8 @@ mod tests {
 
         let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
 
-        // Remove all equipment and disable ideal HVAC — free-floating envelope only.
-        dwelling.equipment.clear();
-        dwelling.thermal_solver.set_ideal_hvac_zones(vec![]);
+        // Remove all equipment — free-floating envelope only.
+        dwelling.clear_equipment();
 
         dwelling.enable_observer(n_steps);
 
@@ -446,22 +445,25 @@ mod tests {
 
                 // HARES per-exterior-surface diagnostics
                 if let Some(g) = snap.phases.post_solvers.as_ref().map(|s| &s.envelope_gains) {
-                    if !g.ext_surface_diag.is_empty() {
-                        eprintln!("\n  HARES per-exterior-surface:");
-                        for d in &g.ext_surface_diag {
-                            eprintln!(
-                                "    id={:2} cat={:?}  solar={:>8.1}  lwr={:>8.1}  T_surf={:>6.1}°C  injected={:>8.1}",
-                                d.surface_id, d.category, d.solar_absorbed_w, d.lwr_gain_w, d.surface_temp_c, d.injected_w
-                            );
+                    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                    {
+                        if !g.ext_surface_diag.is_empty() {
+                            eprintln!("\n  HARES per-exterior-surface:");
+                            for d in &g.ext_surface_diag {
+                                eprintln!(
+                                    "    id={:2} cat={:?}  solar={:>8.1}  lwr={:>8.1}  T_surf={:>6.1}°C  injected={:>8.1}",
+                                    d.surface_id, d.category, d.solar_absorbed_w, d.lwr_gain_w, d.surface_temp_c, d.injected_w
+                                );
+                            }
                         }
-                    }
-                    if !g.int_surface_diag.is_empty() {
-                        eprintln!("\n  HARES per-interior-surface:");
-                        for (j, d) in g.int_surface_diag.iter().enumerate() {
-                            eprintln!(
-                                "    [{j}] T_surf={:>6.2}°C  lwr_flux={:>8.1}W",
-                                d.surface_temp_c, d.lwr_flux_w
-                            );
+                        if !g.int_surface_diag.is_empty() {
+                            eprintln!("\n  HARES per-interior-surface:");
+                            for (j, d) in g.int_surface_diag.iter().enumerate() {
+                                eprintln!(
+                                    "    [{j}] T_surf={:>6.2}°C  lwr_flux={:>8.1}W",
+                                    d.surface_temp_c, d.lwr_flux_w
+                                );
+                            }
                         }
                     }
                     // Combined airflow diagnostic
@@ -879,5 +881,134 @@ mod tests {
     #[test]
     fn freefloat_winter_48h() {
         run_freefloat_scenario("beopt_winter_48h");
+    }
+
+    // ── Solar override parity tests ─────────────────────────────────────
+    // Inject pvlib-computed POA (matching OCHRE exactly) to prove the
+    // RC network physics is correct and remaining MAE is from solar inputs.
+
+    fn load_solar_override(scenario: &str, n_surfaces: usize) -> Vec<Vec<hares_types::SurfaceIrradiance>> {
+        let path = project_root()
+            .join(format!("tests/fixtures/freefloat/{scenario}/pvlib_solar_override.csv"));
+        if !path.exists() {
+            panic!("pvlib solar override not found: {}\nRun: PYTHONPATH=vendors/OCHRE vendors/OCHRE/.venv/bin/python tests/python/generate_pvlib_solar_override.py", path.display());
+        }
+        let contents = fs::read_to_string(&path).expect("read pvlib CSV");
+        let mut lines = contents.lines();
+        let _header = lines.next().expect("header");
+
+        let mut steps: Vec<Vec<hares_types::SurfaceIrradiance>> = Vec::new();
+        for line in lines {
+            if line.trim().is_empty() { continue; }
+            let fields: Vec<f64> = line.split(',')
+                .filter_map(|s| s.trim().parse::<f64>().ok())
+                .collect();
+            // fields[0] = step, then 4 fields per surface (direct, diffuse, reflected, aoi)
+            let mut surfaces = Vec::with_capacity(n_surfaces);
+            for sid in 0..n_surfaces {
+                let base = 1 + sid * 4; // skip step column
+                if base + 3 < fields.len() {
+                    surfaces.push(hares_types::SurfaceIrradiance {
+                        surface_id: sid as u32,
+                        direct_w_m2: fields[base],
+                        diffuse_w_m2: fields[base + 1],
+                        reflected_w_m2: fields[base + 2],
+                        angle_of_incidence_rad: fields[base + 3],
+                    });
+                }
+            }
+            steps.push(surfaces);
+        }
+        steps
+    }
+
+    fn run_freefloat_with_solar_override(scenario: &str) {
+        let output_path = std::env::temp_dir().join(format!("hares_ff_solar_{scenario}.csv"));
+        let _ = fs::remove_file(&output_path);
+
+        let config = beopt_freefloat_config(scenario, output_path.clone());
+        let n_steps = {
+            let dur = config.sim_config.duration;
+            let res = config.sim_config.time_res;
+            (dur.num_seconds() / res.num_seconds()) as usize
+        };
+
+        let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
+        dwelling.clear_equipment();
+
+        // Load pvlib solar override and inject.
+        let n_surfaces = dwelling.environment.surface_count();
+        let solar_data = load_solar_override(scenario, n_surfaces);
+        eprintln!("[solar_override] loaded {} steps × {} surfaces", solar_data.len(), n_surfaces);
+        dwelling.environment.set_solar_override(solar_data);
+
+        // Run simulation.
+        for _ in 0..n_steps {
+            dwelling.step().expect("dwelling.step");
+        }
+        let _ = fs::remove_file(&output_path);
+
+        // Collect zone temps from step results.
+        let results = dwelling.results();
+        let zone_indoor = ZoneId(1);
+        let zone_attic = ZoneId(2);
+        let hares_indoor: Vec<f64> = results.steps.iter()
+            .map(|s| s.zone_temperatures_c.iter()
+                .find(|(z, _)| *z == zone_indoor)
+                .map(|(_, t)| *t).unwrap_or(f64::NAN))
+            .collect();
+        let hares_attic: Vec<f64> = results.steps.iter()
+            .map(|s| s.zone_temperatures_c.iter()
+                .find(|(z, _)| *z == zone_attic)
+                .map(|(_, t)| *t).unwrap_or(f64::NAN))
+            .collect();
+
+        // Load OCHRE reference.
+        let ochre_csv = fixture_dir(scenario).join("ochre_reference.csv");
+        let ochre = parse_csv_columns(&ochre_csv);
+        let ochre_indoor = ochre.get("Temperature - Indoor (C)").cloned().unwrap_or_default();
+        let ochre_attic = ochre.get("Temperature - Attic (C)").cloned().unwrap_or_default();
+
+        // Compute MAE.
+        let mae = |a: &[f64], b: &[f64]| -> f64 {
+            let diffs: Vec<f64> = a.iter().zip(b.iter())
+                .filter(|(x, y)| x.is_finite() && y.is_finite())
+                .map(|(x, y)| (x - y).abs())
+                .collect();
+            if diffs.is_empty() { f64::INFINITY } else { diffs.iter().sum::<f64>() / diffs.len() as f64 }
+        };
+
+        let indoor_mae = mae(&hares_indoor, &ochre_indoor);
+        let attic_mae = mae(&hares_attic, &ochre_attic);
+
+        let h_ind_mean = hares_indoor.iter().filter(|t| t.is_finite()).sum::<f64>() / hares_indoor.len() as f64;
+        let o_ind_mean = ochre_indoor.iter().sum::<f64>() / ochre_indoor.len().max(1) as f64;
+        let h_atc_mean = hares_attic.iter().filter(|t| t.is_finite()).sum::<f64>() / hares_attic.len() as f64;
+        let o_atc_mean = ochre_attic.iter().sum::<f64>() / ochre_attic.len().max(1) as f64;
+
+        eprintln!("\n{:=^70}", format!(" SOLAR OVERRIDE: {scenario} "));
+        eprintln!("  Indoor: HARES={h_ind_mean:.2}°C  OCHRE={o_ind_mean:.2}°C  MAE={indoor_mae:.3}°C");
+        eprintln!("  Attic:  HARES={h_atc_mean:.2}°C  OCHRE={o_atc_mean:.2}°C  MAE={attic_mae:.3}°C");
+
+        // With matching solar, physics should produce <0.5°C indoor MAE.
+        assert!(
+            indoor_mae < 1.0,
+            "solar override indoor MAE {indoor_mae:.3}°C exceeds 1.0°C — physics bug remaining"
+        );
+    }
+
+    #[test]
+    fn freefloat_spring_solar_override() {
+        run_freefloat_with_solar_override("beopt_spring_72h");
+    }
+
+    #[test]
+    fn freefloat_summer_solar_override() {
+        run_freefloat_with_solar_override("beopt_summer_48h");
+    }
+
+    #[test]
+    fn freefloat_winter_solar_override() {
+        run_freefloat_with_solar_override("beopt_winter_48h");
     }
 }

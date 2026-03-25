@@ -17,19 +17,17 @@ use super::ac_config::{
     default_telemetry, load_curve_pair, parse_crankcase_capacity_curve, telemetry_fields,
 };
 use super::coil_physics::{
-    CoilResult, LatentDegradationParams, calculate_shr,
-    effective_shr_with_latent_degradation,
+    CoilResult, LatentDegradationParams, calculate_shr, effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::{
-    DEFAULT_LATENT_TIME_CONSTANT_S, DEFAULT_MAX_CYCLING_RATE, DEFAULT_TWET_RATED_S,
-    DEFAULT_GAMMA_RATED, compute_coil_ao_by_stage,
+    DEFAULT_GAMMA_RATED, DEFAULT_LATENT_TIME_CONSTANT_S, DEFAULT_MAX_CYCLING_RATE,
+    DEFAULT_TWET_RATED_S, compute_coil_ao_by_stage,
 };
 use super::{
-    HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
-    SpeedControlMode,
+    HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
-        equipment_id_from_config, first_f64, load_stage_values, lookup_zone,
-        operating_mode_code, zone_id_from_config,
+        equipment_id_from_config, first_f64, load_stage_values, lookup_zone, operating_mode_code,
+        zone_id_from_config,
     },
 };
 
@@ -40,7 +38,6 @@ const DEFAULT_CENTRAL_AC_CAPACITY_W: f64 = 12_000.0;
 const DEFAULT_ROOM_AC_CAPACITY_W: f64 = 3_500.0;
 const DEFAULT_EIR_FALLBACK: f64 = 0.35;
 const BTU_PER_HR_PER_W: f64 = 3.412_141_633;
-
 
 pub struct AirConditioner {
     pub(super) core: CoolingCore,
@@ -79,6 +76,8 @@ pub(super) struct CoolingCore {
     /// Henderson-Rengarajan latent degradation model parameters.
     /// All four fields must be > 0 (checked via `is_active()`) to enable the model.
     latent_degradation: LatentDegradationParams,
+    last_adp_c: f64,
+    last_bypass_factor: f64,
 
     // --- External control signals (sticky) ---
     ctrl_duty_cycle: f64,
@@ -129,6 +128,8 @@ struct AirConditionerState {
     dr_load_fraction: f64,
     dr_duty_cycle: f64,
     dr_duration_remaining_s: Option<f64>,
+    last_adp_c: f64,
+    last_bypass_factor: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -163,8 +164,11 @@ impl AirConditioner {
         cooling_rtf: f64,
         companion_heating_rtf: Option<f64>,
     ) -> f64 {
-        self.core
-            .crankcase_heater_power_internal(outdoor_temp_c, cooling_rtf, companion_heating_rtf)
+        self.core.crankcase_heater_power_internal(
+            outdoor_temp_c,
+            cooling_rtf,
+            companion_heating_rtf,
+        )
     }
 
     /// Override crankcase heater parameters after `init()`.
@@ -293,7 +297,7 @@ impl CoolingCore {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
                 name: config.name,
-                end_use: EndUse::HvacCooling,
+                end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed(equipment_type),
                 zone: Some(zone),
                 fuel: FuelType::Electric,
@@ -327,6 +331,8 @@ impl CoolingCore {
             is_room_ac,
             rated_shr: 0.75,
             latent_degradation: LatentDegradationParams::default(),
+            last_adp_c: 0.0,
+            last_bypass_factor: 0.0,
             ctrl_duty_cycle: 1.0,
             ctrl_power_limit_kw: f64::INFINITY,
             ctrl_mode_override: None,
@@ -362,8 +368,7 @@ impl CoolingCore {
             }
         } else {
             // DSE computed below after capacity is resolved.
-            self.hvac.duct_zone_id =
-                super::helpers::parse_zone_id_key(config, "duct_zone_id");
+            self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
         }
 
         self.flow_fraction_correction = first_f64(
@@ -421,7 +426,12 @@ impl CoolingCore {
 
         // Resolve DSE now that cooling capacity is known.
         if !self.is_room_ac {
-            let rated_cap = self.hvac.cooling_capacities_w.last().copied().unwrap_or(0.0);
+            let rated_cap = self
+                .hvac
+                .cooling_capacities_w
+                .last()
+                .copied()
+                .unwrap_or(0.0);
             let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
             let n_speeds = self.hvac.cooling_capacities_w.len().min(255) as u8;
             self.hvac.duct_dse = super::helpers::resolve_duct_dse(
@@ -433,7 +443,8 @@ impl CoolingCore {
         self.hvac.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
         // Rated SHR at the AHRI test point, used only for coil Ao initialisation.
         // Defaults to 0.75 — ASHRAE Handbook HVAC Systems and Equipment Ch. 42 typical value.
-        let rated_shr = first_f64(config, &["rated_shr", "shr", "SHR", "shr_rated"]).unwrap_or(0.75);
+        let rated_shr =
+            first_f64(config, &["rated_shr", "shr", "SHR", "shr_rated"]).unwrap_or(0.75);
         self.rated_shr = rated_shr.clamp(0.0, 1.0);
         self.compute_coil_ao(rated_shr)?;
 
@@ -622,8 +633,8 @@ impl CoolingCore {
             self.crankcase_heater_kw = crankcase_kw;
         }
 
-        let electric_kw = (compressor_kw + fan_kw + self.crankcase_heater_kw)
-            * self.hvac.space_fraction;
+        let electric_kw =
+            (compressor_kw + fan_kw + self.crankcase_heater_kw) * self.hvac.space_fraction;
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_kw: electric_kw,
@@ -634,8 +645,10 @@ impl CoolingCore {
         // Telemetry reports delivered (post-DSE) values for the conditioned zone.
         let dse = self.hvac.duct_dse.clamp(0.0, 1.0);
         self.telemetry.set("electric_kw", electric_kw);
-        self.telemetry.set("sensible_cooling_w", sensible_cooling_w * dse);
-        self.telemetry.set("latent_cooling_w", latent_cooling_w * dse);
+        self.telemetry
+            .set("sensible_cooling_w", sensible_cooling_w * dse);
+        self.telemetry
+            .set("latent_cooling_w", latent_cooling_w * dse);
         self.telemetry.set("shr", self.hvac.shr);
         self.telemetry
             .set("operating_mode", operating_mode_code(self.operating_mode));
@@ -650,6 +663,13 @@ impl CoolingCore {
         self.telemetry.set("cop", cop);
         self.telemetry
             .set("runtime_fraction", self.last_cooling_rtf.clamp(0.0, 1.0));
+        self.telemetry.set("compressor_kw", compressor_kw);
+        self.telemetry.set("fan_kw", fan_kw);
+        self.telemetry
+            .set("supply_temp_c", self.hvac.supply_air_temp_c);
+        self.telemetry
+            .set("apparatus_dew_point_c", self.last_adp_c);
+        self.telemetry.set("bypass_factor", self.last_bypass_factor);
 
         Ok(())
     }
@@ -793,7 +813,10 @@ impl CoolingCore {
 
         let ao = self.ao_for_speed(speed_index);
         let CoilResult {
-            shr, supply_temp_c, ..
+            shr,
+            supply_temp_c,
+            adp_temp_c,
+            bypass_factor,
         } = calculate_shr(
             zone.temperature_c,
             zone.humidity_ratio,
@@ -803,6 +826,8 @@ impl CoolingCore {
             ao,
         )?;
         let steady_state_shr = shr.clamp(0.0, 1.0);
+        self.last_adp_c = adp_temp_c;
+        self.last_bypass_factor = bypass_factor;
 
         // Apply Henderson-Rengarajan latent degradation at part load.
         // RTF = PLR / PLF; at continuous operation (plf==0 guard is already
@@ -913,6 +938,8 @@ impl CoolingCore {
             dr_load_fraction: self.dr_load_fraction,
             dr_duty_cycle: self.dr_duty_cycle,
             dr_duration_remaining_s: self.dr_duration_remaining_s,
+            last_adp_c: self.last_adp_c,
+            last_bypass_factor: self.last_bypass_factor,
         })
     }
 
@@ -942,6 +969,8 @@ impl CoolingCore {
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duty_cycle = decoded.dr_duty_cycle;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        self.last_adp_c = decoded.last_adp_c;
+        self.last_bypass_factor = decoded.last_bypass_factor;
 
         self.telemetry.insert("electric_kw", decoded.electric_kw);
         self.telemetry
@@ -1034,7 +1063,6 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     );
     registry.register("Room AC", Box::new(|config| Box::new(RoomAC::new(config))));
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1730,7 +1758,10 @@ mod dr_tests {
 
         // Step at t=0: remaining decrements 60→60 s (still active) → must be off.
         let kw_during = step_once(&mut eq, &env_t0);
-        assert_eq!(kw_during, 0.0, "GridEmergency must shed load while duration active");
+        assert_eq!(
+            kw_during, 0.0,
+            "GridEmergency must shed load while duration active"
+        );
 
         // Step at t=60: remaining decrements 60→0 s → auto-reverts → AC can cool.
         let kw_after = step_once(&mut eq, &env_t60);
@@ -1986,10 +2017,7 @@ mod crankcase_tests {
         );
         raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         raw.insert("crankcase_heater_kw".to_string(), 0.10.into()); // 100 W rated
-        raw.insert(
-            "crankcase_heater_threshold_c".to_string(),
-            12.8_f64.into(),
-        );
+        raw.insert("crankcase_heater_threshold_c".to_string(), 12.8_f64.into());
         EquipmentConfig {
             name: "AC".to_string(),
             ochre_class: "Air Conditioner".to_string(),

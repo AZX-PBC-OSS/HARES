@@ -26,11 +26,9 @@ use serde::{Serialize, de::DeserializeOwned};
 
 pub use config::EquipmentConfig;
 pub use hares_types::Telemetry;
-pub use water_heater::DHW_DEMAND_LOOP;
-pub use hvac::{
-    EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride,
-};
+pub use hvac::{EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride};
 pub use registry::{EquipmentFactory, EquipmentRegistry};
+pub use water_heater::DHW_DEMAND_LOOP;
 
 /// Equipment-layer result type.
 pub type Result<T> = std::result::Result<T, HaresError>;
@@ -62,6 +60,12 @@ pub trait Equipment: Send + Sync {
     fn apply_control(&mut self, signal: &ControlSignal) -> Result<()> {
         ensure_signal_supported(self.descriptor().control_capabilities, signal)?;
         self.apply_control_unchecked(signal)
+    }
+
+    /// Returns the zone and ideal heating/cooling capacity (watts) this
+    /// equipment wants the thermal solver to back-calculate.
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        None
     }
 }
 
@@ -104,8 +108,8 @@ mod tests {
     use hares_types::{
         ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor,
         EquipmentId, ExecutionStage, FluidType, FuelType, GridState, LoopId, OperatingMode,
-        PortDeclaration, PortSlots, ProtocolId, SurfaceIrradiance, Telemetry,
-        TelemetryField, WeatherState, ZoneId, ZoneState,
+        PortDeclaration, PortSlots, ProtocolId, SurfaceIrradiance, Telemetry, TelemetryField,
+        WeatherState, ZoneId, ZoneState,
     };
     use serde::{Deserialize, Serialize};
 
@@ -126,7 +130,7 @@ mod tests {
                 descriptor: EquipmentDescriptor {
                     id: EquipmentId(1),
                     name: "Mock".to_string(),
-                    end_use: EndUse::Other,
+                    end_use: EndUse::OTHER,
                     equipment_type: Cow::Borrowed("Mock"),
                     zone: Some(ZoneId(1)),
                     fuel: FuelType::Electric,
@@ -354,5 +358,19 @@ mod tests {
         let bytes = save_postcard(&s);
         let decoded: S = load_postcard(&bytes).unwrap();
         assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn equipment_ideal_target_default_returns_none() {
+        let eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        assert!(eq.ideal_target().is_none());
+    }
+
+    #[test]
+    fn equipment_without_ideal_capacity_capability_rejects_ideal_capacity_signal() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        let signal = ControlSignal::IdealCapacity { capacity_w: 1000.0 };
+        let result = eq.apply_control(&signal);
+        assert!(result.is_err());
     }
 }

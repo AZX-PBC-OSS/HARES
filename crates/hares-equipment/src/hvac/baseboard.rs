@@ -50,7 +50,7 @@ impl ElectricBaseboard {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
-            end_use: EndUse::HvacHeating,
+            end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Baseboard"),
             zone: Some(zone),
             fuel: FuelType::Electric,
@@ -118,8 +118,12 @@ impl Equipment for ElectricBaseboard {
                 active_power_kw: electric_kw,
                 reactive_power_kvar: 0.0,
             })?;
-            self.hvac
-                .write_zone_thermal_contributions(ports, thermal_output_w, 0.0, ThermalCategory::HvacHeating)?;
+            self.hvac.write_zone_thermal_contributions(
+                ports,
+                thermal_output_w,
+                0.0,
+                ThermalCategory::HvacHeating,
+            )?;
             self.run_time_s += dt.as_secs_f64();
         }
 

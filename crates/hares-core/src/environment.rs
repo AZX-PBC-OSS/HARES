@@ -13,7 +13,8 @@ use hares_physics::{
     water_mains::{Hemisphere, water_mains_temperature_c},
 };
 use hares_types::{
-    DomainId, EnvironmentState, GridState, WeatherState, ZoneId, ZoneState, schedule_domain_id,
+    DomainId, EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    schedule_domain_id,
 };
 use thiserror::Error;
 
@@ -79,6 +80,11 @@ pub struct EnvironmentManager {
     /// timezone instead of the fixed UTC offset. Weather indexing is unaffected.
     #[cfg(feature = "dst")]
     civil_tz: Option<chrono_tz::Tz>,
+    /// Optional pre-computed per-surface irradiance for each timestep.
+    /// When set, bypasses the built-in Perez tilted irradiance computation
+    /// in `update()`. Indexed as `solar_override[step % len][surface_idx]`.
+    /// Use for parity testing with OCHRE (pvlib) or injecting PySAM/PVWatts data.
+    solar_override: Option<Vec<Vec<SurfaceIrradiance>>>,
 }
 
 impl EnvironmentManager {
@@ -97,7 +103,15 @@ impl EnvironmentManager {
         start_time: DateTime<FixedOffset>,
         civil_timezone: Option<&str>,
     ) -> Result<Self, EnvironmentManagerError> {
-        Self::new_with_resample(weather, schedule, building, time_res, start_time, civil_timezone, None)
+        Self::new_with_resample(
+            weather,
+            schedule,
+            building,
+            time_res,
+            start_time,
+            civil_timezone,
+            None,
+        )
     }
 
     /// Like [`new`] but with optional per-column weather resampling overrides.
@@ -194,7 +208,35 @@ impl EnvironmentManager {
             ground_phase_day,
             #[cfg(feature = "dst")]
             civil_tz,
+            solar_override: None,
         })
+    }
+
+    /// Set pre-computed per-surface irradiance for all timesteps.
+    ///
+    /// When set, `update()` reads from this table instead of computing Perez
+    /// tilted irradiance from GHI/DNI/DHI. Use for parity testing with OCHRE
+    /// (pvlib) or injecting PySAM/PVWatts data from Python.
+    ///
+    /// `data[step][surface_idx]` must match the surface geometry order from
+    /// `build_surface_geometry()` (same as `building.boundaries` order).
+    pub fn set_solar_override(&mut self, data: Vec<Vec<SurfaceIrradiance>>) {
+        self.solar_override = Some(data);
+    }
+
+    /// Clear the solar override, reverting to built-in Perez computation.
+    pub fn clear_solar_override(&mut self) {
+        self.solar_override = None;
+    }
+
+    /// Number of surfaces in the surface geometry array.
+    pub fn surface_count(&self) -> usize {
+        self.surfaces.len()
+    }
+
+    /// Surface geometry for building Python/external override data.
+    pub fn surface_geometry(&self) -> &[SurfaceGeometry] {
+        &self.surfaces
     }
 
     /// Override default grid state for subsequent updates.
@@ -335,24 +377,30 @@ impl EnvironmentManager {
             self.mains_hemisphere,
         );
         let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
-        let solar_irradiance = self
-            .surfaces
-            .iter()
-            .map(|surface| {
-                perez_tilted_irradiance(
-                    surface.surface_id,
-                    ghi,
-                    dni,
-                    dhi,
-                    solar_zenith_deg,
-                    pos.azimuth_deg,
-                    surface.tilt_deg,
-                    surface.azimuth_deg,
-                    day_of_year,
-                    ground_albedo,
-                )
-            })
-            .collect();
+        let solar_irradiance = if let Some(ref overrides) = self.solar_override {
+            // Use pre-computed POA from external source (pvlib, PySAM, etc.)
+            let idx = step % overrides.len();
+            overrides[idx].clone()
+        } else {
+            // Compute POA from GHI/DNI/DHI using Perez tilted irradiance model.
+            self.surfaces
+                .iter()
+                .map(|surface| {
+                    perez_tilted_irradiance(
+                        surface.surface_id,
+                        ghi,
+                        dni,
+                        dhi,
+                        solar_zenith_deg,
+                        pos.azimuth_deg,
+                        surface.tilt_deg,
+                        surface.azimuth_deg,
+                        day_of_year,
+                        ground_albedo,
+                    )
+                })
+                .collect()
+        };
 
         // Step 3: schedule values
         let schedule_values = self
@@ -445,8 +493,7 @@ fn compute_annual_offset(
     } else {
         365 * 86400_u64
     };
-    let shifted = (seconds_into_year + year_secs
-        - meta.midpoint_offset_secs as u64) % year_secs;
+    let shifted = (seconds_into_year + year_secs - meta.midpoint_offset_secs as u64) % year_secs;
 
     (shifted / step_secs as u64) as usize
 }
@@ -1419,12 +1466,9 @@ mod tests {
         /// schedule row was selected.
         fn annual_hourly_schedule() -> ScheduleTimeSeries {
             let n = 8760;
-            let start = utc_offset()
-                .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
-                .unwrap();
-            let timestamps: Vec<DateTime<FixedOffset>> = (0..n)
-                .map(|i| start + Duration::hours(i as i64))
-                .collect();
+            let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+            let timestamps: Vec<DateTime<FixedOffset>> =
+                (0..n).map(|i| start + Duration::hours(i as i64)).collect();
             let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
             let mut index = HashMap::new();
             index.insert("hour_idx".to_string(), 0);
@@ -1452,7 +1496,7 @@ mod tests {
                     timezone_offset_h: -5.0,
                     elevation_m: 10.0,
                     source_step_secs: 3600,
-                midpoint_offset_secs: 0,
+                    midpoint_offset_secs: 0,
                 },
                 dry_bulb_c: (0..n).map(|i| i as f64 * 0.01).collect(),
                 dew_point_c: vec![2.0; n],
@@ -1487,9 +1531,7 @@ mod tests {
         /// pre-DST fixed-offset behavior.
         #[test]
         fn schedule_without_dst_unchanged() {
-            let start = utc_offset()
-                .with_ymd_and_hms(2024, 3, 10, 6, 0, 0)
-                .unwrap();
+            let start = utc_offset().with_ymd_and_hms(2024, 3, 10, 6, 0, 0).unwrap();
             let mut mgr_no_dst = EnvironmentManager::new(
                 annual_hourly_weather(),
                 annual_hourly_schedule(),
@@ -1655,11 +1697,7 @@ mod tests {
             )
             .expect("year-round manager");
 
-            let mut clock = SimClock::new(
-                start,
-                Duration::hours(1),
-                Duration::hours(8760),
-            );
+            let mut clock = SimClock::new(start, Duration::hours(1), Duration::hours(8760));
 
             let tz: chrono_tz::Tz = "America/New_York".parse().unwrap();
             for step in 0..8760u64 {
@@ -1682,9 +1720,7 @@ mod tests {
         /// Invalid timezone string returns an error.
         #[test]
         fn invalid_timezone_returns_error() {
-            let start = utc_offset()
-                .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
-                .unwrap();
+            let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
             let result = EnvironmentManager::new(
                 annual_hourly_weather(),
                 annual_hourly_schedule(),

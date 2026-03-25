@@ -222,7 +222,7 @@ fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
     let mut ever_nonzero_gas = false;
     for _ in 0..10 {
         dwelling.step().expect("step must succeed");
-        for eq in &dwelling.equipment {
+        for eq in dwelling.equipment() {
             let telem = eq.telemetry();
             // "fuel_input_w" is the canonical gas consumption key for GasFurnace.
             if let Some(fuel_w) = telem.get("fuel_input_w") {

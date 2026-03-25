@@ -29,7 +29,10 @@ impl OcvTable {
     /// Linear interpolation of cell OCV at a given SOC, clamped to table bounds.
     pub(crate) fn voltage_at_soc(&self, soc: f64) -> f64 {
         // SAFETY: soc_points and voltage_v are non-empty by construction (hardcoded LUT).
-        let soc = soc.clamp(self.soc_points[0], *self.soc_points.last().expect("non-empty LUT"));
+        let soc = soc.clamp(
+            self.soc_points[0],
+            *self.soc_points.last().expect("non-empty LUT"),
+        );
         let n = self.soc_points.len();
         if n == 1 {
             return self.voltage_v[0];
@@ -76,7 +79,10 @@ impl UNegTable {
     /// Linear interpolation of U_neg at a given SOC, clamped to table bounds.
     pub(crate) fn potential_at_soc(&self, soc: f64) -> f64 {
         // SAFETY: soc_points and potential_v are non-empty by construction (hardcoded LUT).
-        let soc = soc.clamp(self.soc_points[0], *self.soc_points.last().expect("non-empty LUT"));
+        let soc = soc.clamp(
+            self.soc_points[0],
+            *self.soc_points.last().expect("non-empty LUT"),
+        );
         let n = self.soc_points.len();
         if n == 1 {
             return self.potential_v[0];

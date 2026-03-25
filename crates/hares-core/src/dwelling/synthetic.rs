@@ -410,10 +410,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
 
     // Build constant 24-hour setpoint vectors when setpoints are configured.
     let (heating_weekday, cooling_weekday) = if let Some(sp) = &config.setpoints {
-        (
-            Some(vec![sp.heating_c; 24]),
-            Some(vec![sp.cooling_c; 24]),
-        )
+        (Some(vec![sp.heating_c; 24]), Some(vec![sp.cooling_c; 24]))
     } else {
         (None, None)
     };

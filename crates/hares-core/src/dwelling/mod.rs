@@ -8,12 +8,13 @@ pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stag
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
-#[cfg(feature = "profiling")]
+#[cfg(any(feature = "profiling", feature = "actor_profiling"))]
 use std::time::Instant;
 
 use chrono::{DateTime, Duration, FixedOffset};
-use hares_control::{DispatchRequest, DispatchTarget, PriceSignal};
+use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal};
 use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
 use hares_equipment::{Equipment, EquipmentRegistry};
 use hares_io::{
@@ -33,13 +34,17 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
 
+use crate::actors::SolverFeedbackActor;
 use crate::checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
 use crate::invariants::InvariantChecker;
 use crate::telemetry::DwellingTelemetry;
-use crate::{EnvironmentManager, SimClock, derive_dwelling_rng};
+use crate::{Actor, EnvironmentManager, SimClock, derive_dwelling_rng};
 
 #[cfg(feature = "observe")]
-use crate::observer::{EquipmentObservation, ObserverBuffer, PhaseSnapshots, StepSnapshot};
+use crate::observer::{
+    DispatchCapture, DispatchedSignal, EquipmentObservation, ObserverBuffer, PhaseSnapshots,
+    StepSnapshot,
+};
 #[cfg(feature = "observe")]
 use crate::observer_capture;
 use conversions::{
@@ -117,65 +122,155 @@ pub struct SimulationResults {
 }
 
 /// Internal control queue and routing logic.
-#[derive(Debug, Default)]
+///
+/// Signals are bucketed into tier queues on `queue()` and drained low→high in
+/// `dispatch_into()`. Because every signal fires (no deduplication), the
+/// highest-priority tier writes last and wins. Equipment `apply_control` must
+/// be overwrite-safe (idempotent set, not accumulate).
 struct ControlDispatcher {
-    queued: VecDeque<DispatchRequest>,
+    by_tier: [VecDeque<DispatchRequest>; PRIORITY_TIER_COUNT],
+    /// Scratch buffer for conflict detection — tracks (target, tier_index).
+    /// Pre-allocated, cleared each step. Linear scan for typical <16 signals.
+    seen_targets: Vec<(DispatchTarget, usize)>,
+}
+
+impl Default for ControlDispatcher {
+    fn default() -> Self {
+        Self {
+            by_tier: std::array::from_fn(|_| VecDeque::new()),
+            seen_targets: Vec::with_capacity(16),
+        }
+    }
 }
 
 impl ControlDispatcher {
     fn queue(&mut self, request: DispatchRequest) {
-        self.queued.push_back(request);
+        self.by_tier[request.priority.index()].push_back(request);
     }
 
     fn dispatch_into(&mut self, equipment: &mut [Box<dyn Equipment>], warnings: &mut Vec<String>) {
-        while let Some(request) = self.queued.pop_front() {
-            match request.target {
-                DispatchTarget::ByName(name) => {
-                    let mut delivered = false;
-                    for eq in equipment.iter_mut() {
-                        if eq.descriptor().name == name {
-                            delivered = true;
-                            if let Err(err) = eq.apply_control(&request.signal) {
-                                warnings.push(format!(
-                                    "control apply failed for '{}' : {err}",
-                                    eq.descriptor().name
-                                ));
-                            }
-                        }
-                    }
-                    if !delivered {
-                        warnings.push(format!("control target not found by name: {name}"));
-                    }
+        self.drain_tiers(equipment, warnings, |_, _, _| {});
+    }
+
+    #[cfg(feature = "observe")]
+    fn dispatch_into_observed(
+        &mut self,
+        equipment: &mut [Box<dyn Equipment>],
+        warnings: &mut Vec<String>,
+    ) -> DispatchCapture {
+        let mut signals = Vec::new();
+        self.drain_tiers(equipment, warnings, |request, delivered, overwrote| {
+            signals.push(DispatchedSignal {
+                target: request.target.clone(),
+                signal: request.signal.clone(),
+                priority: request.priority,
+                overwrote_earlier: overwrote,
+                delivered,
+            });
+        });
+        DispatchCapture { signals }
+    }
+
+    fn drain_tiers(
+        &mut self,
+        equipment: &mut [Box<dyn Equipment>],
+        warnings: &mut Vec<String>,
+        mut on_signal: impl FnMut(&DispatchRequest, bool, bool),
+    ) {
+        self.seen_targets.clear();
+
+        for (tier_idx, tier_que) in self.by_tier.iter_mut().enumerate() {
+            for request in tier_que.drain(..) {
+                let overwrote = self
+                    .seen_targets
+                    .iter()
+                    .any(|&(ref t, prev_tier)| {
+                        t.conflicts_with(&request.target) && tier_idx > prev_tier
+                    });
+                if overwrote {
+                    tracing::debug!(
+                        target_equipment = ?request.target,
+                        priority = ?request.priority,
+                        "higher priority signal overwriting earlier signal for same equipment"
+                    );
                 }
-                DispatchTarget::ByEndUse(end_use) => {
-                    let mut delivered = false;
-                    for eq in equipment.iter_mut() {
-                        if eq.descriptor().end_use == end_use {
-                            delivered = true;
-                            if let Err(err) = eq.apply_control(&request.signal) {
-                                warnings.push(format!(
-                                    "control apply failed for '{}' : {err}",
-                                    eq.descriptor().name
-                                ));
-                            }
-                        }
-                    }
-                    if !delivered {
-                        warnings.push(format!(
-                            "control target not found by end-use: {:?}",
-                            end_use
-                        ));
-                    }
-                }
+                self.seen_targets.push((request.target.clone(), tier_idx));
+
+                let delivered = route_request(&request, equipment, warnings);
+                on_signal(&request, delivered, overwrote);
             }
         }
     }
 }
 
+fn route_request(
+    request: &DispatchRequest,
+    equipment: &mut [Box<dyn Equipment>],
+    warnings: &mut Vec<String>,
+) -> bool {
+    match &request.target {
+        DispatchTarget::ByName(name) => {
+            let delivered = apply_to_matching(equipment, &request.signal, warnings, |eq| {
+                eq.descriptor().name.as_str() == &**name
+            });
+            if !delivered {
+                warnings.push(format!("control target not found by name: {name}"));
+            }
+            delivered
+        }
+        DispatchTarget::ByEndUse(end_use) => {
+            let delivered = apply_to_matching(equipment, &request.signal, warnings, |eq| {
+                eq.descriptor().end_use == *end_use
+            });
+            if !delivered {
+                warnings.push(format!(
+                    "control target not found by end-use: {:?}",
+                    end_use
+                ));
+            }
+            delivered
+        }
+    }
+}
+
+fn apply_to_matching(
+    equipment: &mut [Box<dyn Equipment>],
+    signal: &hares_types::ControlSignal,
+    warnings: &mut Vec<String>,
+    matches: impl Fn(&dyn Equipment) -> bool,
+) -> bool {
+    let mut delivered = false;
+    for eq in equipment.iter_mut() {
+        if matches(&**eq) {
+            delivered = true;
+            if let Err(err) = eq.apply_control(signal) {
+                warnings.push(format!(
+                    "control apply failed for '{}' : {err}",
+                    eq.descriptor().name
+                ));
+            }
+        }
+    }
+    delivered
+}
+
+fn compute_equipment_execution_order(equipment: &[Box<dyn Equipment>]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..equipment.len()).collect();
+    indices.sort_by_key(|&idx| stage_rank(equipment[idx].descriptor().stage));
+    indices
+}
+
+fn compute_equipment_dispatch_targets(equipment: &[Box<dyn Equipment>]) -> Vec<DispatchTarget> {
+    equipment
+        .iter()
+        .map(|eq| DispatchTarget::ByName(Arc::from(eq.descriptor().name.as_str())))
+        .collect()
+}
+
 /// Top-level single-dwelling simulation orchestrator.
 pub struct Dwelling {
     pub bldg_id: i64,
-    pub equipment: Vec<Box<dyn Equipment>>,
+    equipment: Vec<Box<dyn Equipment>>,
     pub thermal_solver: ThermalSolver,
     pub humidity_solver: HumiditySolver,
     pub electrical_solver: ElectricalSolver,
@@ -203,8 +298,21 @@ pub struct Dwelling {
     /// non-thermal and thermal equipment passes.
     #[expect(dead_code, reason = "reserved for gain-preview pass")]
     zone_capacitances_j_k: Vec<(ZoneId, f64)>,
+    /// Actor decision-makers that emit control signals each timestep.
+    /// Actors execute in registration order. Signals are dispatched by PriorityTier.
+    actors: Vec<Box<dyn Actor>>,
+    /// Pre-allocated buffer for actor dispatch requests, reused each step.
+    actor_dispatch_buf: Vec<DispatchRequest>,
+    /// Solver feedback actor: bridges thermal solver to IdealHvac equipment.
+    /// Stored separately (not in actors Vec) so dwelling can call collect_and_solve().
+    solver_feedback_actor: SolverFeedbackActor,
+    /// Pre-computed equipment execution order (sorted by stage rank).
+    /// Computed once at init time, reused each timestep.
+    equipment_execution_order: Vec<usize>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
+    #[cfg(feature = "actor_profiling")]
+    per_actor_timing: Vec<(String, StdDuration)>,
     #[cfg(feature = "observe")]
     observer_buf: Option<ObserverBuffer>,
 }
@@ -359,19 +467,16 @@ impl Dwelling {
 
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
-        let mut environment =
-            EnvironmentManager::new_with_resample(
-                weather,
-                schedule,
-                &building,
-                time_res,
-                local_start,
-                config.sim_config.civil_timezone.as_deref(),
-                config.resample_overrides.as_ref(),
-            )
-                .map_err(|err| {
-                    HaresError::Io(format!("environment initialization failed: {err}"))
-                })?;
+        let mut environment = EnvironmentManager::new_with_resample(
+            weather,
+            schedule,
+            &building,
+            time_res,
+            local_start,
+            config.sim_config.civil_timezone.as_deref(),
+            config.resample_overrides.as_ref(),
+        )
+        .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
 
         let occupancy_column_idx = environment.occupancy_column_idx();
 
@@ -397,7 +502,7 @@ impl Dwelling {
             .map_err(|e| HaresError::Io(e.to_string()))?;
 
         let (
-            mut thermal_solver,
+            thermal_solver,
             humidity_solver,
             electrical_solver,
             fluid_solver,
@@ -414,13 +519,6 @@ impl Dwelling {
         // Enable ideal HVAC on the indoor zone when both heating AND cooling
         // setpoints are configured — the thermal solver back-calculates the exact
         // load needed to maintain the setpoint at each timestep.
-        if building.heating_weekday_setpoints_c.is_some()
-            && building.cooling_weekday_setpoints_c.is_some()
-        {
-            let indoor_zone = thermal_solver.config().indoor_zone_id;
-            thermal_solver.set_ideal_hvac_zones(vec![indoor_zone]);
-        }
-
         hares_io::inject_schedule_into_specs(
             &mut equipment_specs,
             environment.schedule_mut(),
@@ -505,6 +603,11 @@ impl Dwelling {
 
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
 
+        let equipment_execution_order = compute_equipment_execution_order(&equipment);
+        let mut solver_feedback_actor = SolverFeedbackActor::new();
+        solver_feedback_actor
+            .set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+
         let mut dwelling = Self {
             bldg_id: config.bldg_id,
             equipment,
@@ -528,8 +631,14 @@ impl Dwelling {
             output_value_count,
             occupancy_column_idx,
             zone_capacitances_j_k,
+            actors: Vec::new(),
+            actor_dispatch_buf: Vec::with_capacity(16),
+            solver_feedback_actor,
+            equipment_execution_order,
             #[cfg(feature = "profiling")]
             profiling: DwellingProfilingSummary::default(),
+            #[cfg(feature = "actor_profiling")]
+            per_actor_timing: Vec::new(),
             #[cfg(feature = "observe")]
             observer_buf: None,
         };
@@ -572,8 +681,9 @@ impl Dwelling {
     /// Queues a control signal for one equipment instance by name.
     pub fn apply_control(&mut self, name: &str, signal: ControlSignal) {
         self.control_dispatcher.queue(DispatchRequest {
-            target: DispatchTarget::ByName(name.to_string()),
+            target: DispatchTarget::ByName(Arc::from(name)),
             signal,
+            priority: Default::default(),
         });
     }
 
@@ -582,12 +692,64 @@ impl Dwelling {
         self.control_dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(end_use),
             signal,
+            priority: Default::default(),
         });
     }
 
     /// Queues a typed dispatch request.
     pub fn queue_dispatch(&mut self, request: DispatchRequest) {
         self.control_dispatcher.queue(request);
+    }
+
+    /// Adds an actor to the dwelling's decision-making loop.
+    ///
+    /// Actors are called in registration order each timestep. They emit
+    /// dispatch requests that are routed through the control dispatcher
+    /// by [`PriorityTier`].
+    pub fn add_actor(&mut self, actor: Box<dyn Actor>) {
+        self.actors.push(actor);
+    }
+
+    /// Returns the number of registered actors.
+    #[must_use]
+    pub fn actor_count(&self) -> usize {
+        self.actors.len()
+    }
+
+    /// Returns a slice of equipment for read-only access.
+    #[must_use]
+    pub fn equipment(&self) -> &[Box<dyn Equipment>] {
+        &self.equipment
+    }
+
+    /// Adds equipment to the dwelling and refreshes internal caches.
+    ///
+    /// Equipment execution order and dispatch targets are pre-computed for
+    /// hot-loop efficiency. This method maintains those caches when adding
+    /// equipment after construction.
+    pub fn add_equipment(&mut self, eq: Box<dyn Equipment>) {
+        self.equipment.push(eq);
+        self.refresh_equipment_caches();
+    }
+
+    /// Removes all equipment and refreshes internal caches.
+    pub fn clear_equipment(&mut self) {
+        self.equipment.clear();
+        self.refresh_equipment_caches();
+    }
+
+    /// Refreshes internal caches after equipment list modification.
+    pub fn refresh_equipment_caches(&mut self) {
+        self.equipment_execution_order = compute_equipment_execution_order(&self.equipment);
+        self.solver_feedback_actor
+            .set_dispatch_targets(compute_equipment_dispatch_targets(&self.equipment));
+    }
+
+    /// Returns per-actor timing from the simulation (requires `actor_profiling` feature).
+    #[cfg(feature = "actor_profiling")]
+    #[must_use]
+    pub fn actor_timing(&self) -> &[(String, StdDuration)] {
+        &self.per_actor_timing
     }
 
     /// Stores the active price signal for equipment controllers.
@@ -828,15 +990,8 @@ impl Dwelling {
     ///   - sensible convective: `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION`
     ///   - latent:              `n_occupants × OCCUPANT_LATENT_GAIN_W`
     ///
-    /// Accumulates occupancy-driven internal heat gains into zone thermal ports.
-    ///
-    /// Reads the current occupancy count from the schedule payload carried in
-    /// `latest_env.custom_domains`, then for every declared thermal zone injects:
-    ///   - sensible convective: `n_occupants × OCCUPANT_SENSIBLE_GAIN_W × OCCUPANT_CONVECTIVE_FRACTION`
-    ///   - latent:              `n_occupants × OCCUPANT_LATENT_GAIN_W`
-    ///
     /// If no occupancy column is present in the schedule the method returns without
-    /// side-effects, preserving backward-compatibility with synthetic TOML inputs.
+    /// side-effects, supporting synthetic TOML inputs that omit occupancy schedules.
     fn apply_occupancy_gains(&mut self) {
         let Some(col_idx) = self.occupancy_column_idx else {
             return;
@@ -914,7 +1069,62 @@ impl Dwelling {
                 Some(observer_capture::capture_environment(&self.latest_env));
         }
 
+        #[cfg(feature = "observe")]
+        let observing = self.observer_buf.is_some();
+
+        // Step 1b: thermal equipment update_control() to determine mode and ideal targets.
+        // Must run BEFORE solver feedback actor collects targets.
+        for &idx in &self.equipment_execution_order {
+            if self.equipment[idx].descriptor().stage == ExecutionStage::Thermal {
+                let _ = self.equipment[idx].update_control(&self.latest_env);
+            }
+        }
+
+        // Step 1c: solver feedback actor collects ideal targets and solves for capacities.
+        self.solver_feedback_actor
+            .collect_and_solve(&self.equipment, &self.thermal_solver);
+
+        // Step 1d: actors decide and queue control signals (registration order, last write wins).
+        // Solver feedback actor decides first (Schedule priority, can be overridden by user actors).
+        self.actor_dispatch_buf.clear();
+        self.solver_feedback_actor
+            .decide(&self.latest_env, &mut self.actor_dispatch_buf);
+        for req in self.actor_dispatch_buf.drain(..) {
+            self.control_dispatcher.queue(req);
+        }
+        #[cfg(feature = "actor_profiling")]
+        {
+            self.per_actor_timing.clear();
+            self.per_actor_timing.reserve(self.actors.len());
+            for actor in &mut self.actors {
+                let start = Instant::now();
+                actor.decide(&self.latest_env, &mut self.actor_dispatch_buf);
+                self.per_actor_timing
+                    .push((actor.name().to_string(), start.elapsed()));
+            }
+        }
+        #[cfg(not(feature = "actor_profiling"))]
+        for actor in &mut self.actors {
+            actor.decide(&self.latest_env, &mut self.actor_dispatch_buf);
+        }
+        for req in self.actor_dispatch_buf.drain(..) {
+            self.control_dispatcher.queue(req);
+        }
+
         // Step 2: dispatch queued controls.
+        #[cfg(feature = "observe")]
+        if self.observer_buf.is_some() {
+            let capture = self
+                .control_dispatcher
+                .dispatch_into_observed(&mut self.equipment, &mut self.warnings);
+            if !capture.signals.is_empty() {
+                obs_phases.post_dispatch = Some(capture);
+            }
+        } else {
+            self.control_dispatcher
+                .dispatch_into(&mut self.equipment, &mut self.warnings);
+        }
+        #[cfg(not(feature = "observe"))]
         self.control_dispatcher
             .dispatch_into(&mut self.equipment, &mut self.warnings);
         #[cfg(feature = "profiling")]
@@ -938,11 +1148,7 @@ impl Dwelling {
         // Step 3a: run stage-ordered equipment, snapshot after stage 1.
         #[cfg(feature = "profiling")]
         let hvac_started = Instant::now();
-        let mut indices: Vec<usize> = (0..self.equipment.len()).collect();
-        indices.sort_by_key(|&idx| stage_rank(self.equipment[idx].descriptor().stage));
 
-        #[cfg(feature = "observe")]
-        let observing = self.observer_buf.is_some();
         #[cfg(feature = "observe")]
         let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
         #[cfg(feature = "observe")]
@@ -952,7 +1158,7 @@ impl Dwelling {
             None
         };
 
-        for &idx in &indices {
+        for &idx in &self.equipment_execution_order {
             let stage = self.equipment[idx].descriptor().stage;
             if stage == ExecutionStage::Thermal {
                 continue;
@@ -1006,14 +1212,14 @@ impl Dwelling {
             };
         }
 
-        for &idx in &indices {
+        for &idx in &self.equipment_execution_order {
             if self.equipment[idx].descriptor().stage != ExecutionStage::Thermal {
                 continue;
             }
             #[cfg(feature = "observe")]
             let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
 
-            let _ = self.equipment[idx].update_control(&self.latest_env);
+            // update_control() was already called in Step 1b for thermal equipment
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.warnings.push(format!(
                     "equipment step failed for '{}' : {err}",
@@ -1418,7 +1624,108 @@ fn zone_display_name(zone: ZoneId, indoor_zone: ZoneId) -> String {
 mod tests {
     use super::*;
     use conversions::json_value_to_config_value;
+    use hares_control::PriorityTier;
     use hares_equipment::config::ConfigValue;
+    use hares_equipment::{Equipment, EquipmentConfig};
+    use hares_types::ports::PortSlots;
+    use hares_types::{
+        ControlCapabilities, ControlSignal, EndUse, EquipmentDescriptor, EquipmentId,
+        ExecutionStage, FuelType, OperatingMode, PortDeclaration, Telemetry, TelemetryField,
+        ZoneId,
+    };
+    use std::borrow::Cow;
+    use std::time::Duration;
+
+    struct TestEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        last_power_kw: f64,
+    }
+
+    impl TestEquipment {
+        fn new(name: &str, capabilities: ControlCapabilities) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(1),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("TestEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: capabilities,
+                    telemetry_fields: vec![TelemetryField {
+                        name: "last_power_kw".to_string(),
+                        unit: "kW".to_string(),
+                        description: "last applied power".to_string(),
+                    }],
+                },
+                telemetry: Telemetry::with_capacity(1),
+                last_power_kw: 0.0,
+            }
+        }
+    }
+
+    impl Equipment for TestEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &[]
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.telemetry.insert("last_power_kw", self.last_power_kw);
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            _ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn save_state(&self) -> Vec<u8> {
+            vec![]
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            if let ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } = signal
+            {
+                self.last_power_kw = *active_power_kw;
+                self.telemetry.insert("last_power_kw", self.last_power_kw);
+            }
+            Ok(())
+        }
+    }
 
     #[test]
     fn stage_rank_orders_execution_stages() {
@@ -1439,6 +1746,570 @@ mod tests {
         assert_eq!(
             json_value_to_config_value(&serde_json::json!(true)),
             Some(ConfigValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn control_dispatcher_routes_by_tier_schedule_applied_first() {
+        let mut dispatcher = ControlDispatcher::default();
+        let signal_schedule = ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        };
+        let signal_grid = ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        };
+
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Test")),
+            signal: signal_grid,
+            priority: PriorityTier::Grid,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Test")),
+            signal: signal_schedule,
+            priority: PriorityTier::Schedule,
+        });
+
+        assert_eq!(dispatcher.by_tier[0].len(), 1);
+        assert_eq!(dispatcher.by_tier[2].len(), 1);
+        assert!(dispatcher.by_tier[1].is_empty());
+        assert!(dispatcher.by_tier[3].is_empty());
+    }
+
+    #[test]
+    fn control_dispatcher_drains_all_tiers_in_order() {
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("A")),
+            signal: ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(20.0),
+                cooling_setpoint_c: None,
+                deadband_c: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("B")),
+            signal: ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: None,
+                deadband_c: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+
+        let mut warnings = Vec::new();
+        let equipment: &mut [Box<dyn Equipment>] = &mut [];
+        dispatcher.dispatch_into(equipment, &mut warnings);
+
+        assert!(dispatcher.by_tier.iter().all(|q| q.is_empty()));
+    }
+
+    #[test]
+    fn control_dispatcher_higher_priority_wins_over_lower() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(5.0));
+    }
+
+    #[test]
+    fn control_dispatcher_safety_priority_wins_over_all() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 2.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::UserOverride,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 3.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Grid,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 0.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Safety,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(0.0));
+    }
+
+    #[test]
+    fn control_dispatcher_warns_on_missing_target_by_name() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("NonExistent")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("control target not found by name"));
+        assert!(warnings[0].contains("NonExistent"));
+    }
+
+    #[test]
+    fn control_dispatcher_warns_on_missing_target_by_end_use() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::BATTERY),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("control target not found by end-use"));
+        assert!(warnings[0].contains("battery"));
+    }
+
+    #[test]
+    fn control_dispatcher_warns_on_unsupported_signal() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::empty());
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("control apply failed"));
+    }
+
+    #[test]
+    fn control_dispatcher_routes_to_custom_end_use() {
+        // Create equipment with a custom end use
+        let mut eq = TestEquipment::new("HPWH", ControlCapabilities::POWER_SETPOINT);
+        eq.descriptor.end_use = EndUse::custom("heat_pump_water_heater");
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::custom("heat_pump_water_heater")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 2.5,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        // Should find the equipment and apply the signal
+        assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
+        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(2.5));
+    }
+
+    #[test]
+    fn control_dispatcher_custom_end_use_misses_different_custom() {
+        // Equipment with one custom end use, dispatch to a different custom end use
+        let mut eq = TestEquipment::new("HPWH", ControlCapabilities::POWER_SETPOINT);
+        eq.descriptor.end_use = EndUse::custom("heat_pump_water_heater");
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::custom("ice_storage")), // Different custom type
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        // Should not find the equipment (different custom end use)
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("control target not found by end-use"));
+        assert!(warnings[0].contains("ice_storage"));
+    }
+
+    #[test]
+    fn control_dispatcher_warns_on_missing_custom_end_use() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+        // Equipment has standard end use, dispatch targets custom end use
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::custom("novel_equipment_type")),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("control target not found by end-use"));
+        assert!(warnings[0].contains("novel_equipment_type"));
+    }
+
+    #[test]
+    fn solver_feedback_collect_and_decide_dispatches_ideal_capacity() {
+        use crate::Actor;
+        use crate::actors::SolverFeedbackActor;
+
+        let eq = TestIdealEquipment::new("HVAC", ZoneId(1), 20.0);
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+
+        let mut actor = SolverFeedbackActor::new();
+        actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+
+        // Simulate what the dwelling does: collect → decide
+        // We can't call collect_and_solve without a real ThermalSolver,
+        // but we can verify the full decide path by using the internal test helper.
+        // The solver_feedback.rs unit tests cover collect_and_solve separately.
+        actor.collect_and_solve_test(&equipment, |_zone, _target| 5000.0);
+
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].target,
+            DispatchTarget::ByName(Arc::from("HVAC"))
+        );
+        assert_eq!(requests[0].priority, PriorityTier::Schedule);
+        match &requests[0].signal {
+            ControlSignal::IdealCapacity { capacity_w } => {
+                assert!((*capacity_w - 5000.0).abs() < 1e-9);
+            }
+            _ => panic!("expected IdealCapacity signal"),
+        }
+    }
+
+    /// Test equipment that reports ideal_target() for solver feedback testing.
+    struct TestIdealEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        ideal_capacity_w: f64,
+        ideal_zone: ZoneId,
+        ideal_target_c: f64,
+    }
+
+    impl TestIdealEquipment {
+        fn new(name: &str, zone: ZoneId, target_c: f64) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(1),
+                    name: name.to_string(),
+                    end_use: EndUse::HVAC_HEATING,
+                    equipment_type: Cow::Borrowed("TestIdealEquipment"),
+                    zone: Some(zone),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Thermal,
+                    control_capabilities: ControlCapabilities::IDEAL_CAPACITY
+                        | ControlCapabilities::THERMAL_SETPOINT,
+                    telemetry_fields: vec![TelemetryField {
+                        name: "ideal_capacity_w".to_string(),
+                        unit: "W".to_string(),
+                        description: "ideal capacity from solver".to_string(),
+                    }],
+                },
+                telemetry: Telemetry::with_capacity(1),
+                ideal_capacity_w: 0.0,
+                ideal_zone: zone,
+                ideal_target_c: target_c,
+            }
+        }
+    }
+
+    impl Equipment for TestIdealEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &[]
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.telemetry
+                .insert("ideal_capacity_w", self.ideal_capacity_w);
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Heating
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            _ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn save_state(&self) -> Vec<u8> {
+            vec![]
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            if let ControlSignal::IdealCapacity { capacity_w } = signal {
+                self.ideal_capacity_w = *capacity_w;
+                self.telemetry.insert("ideal_capacity_w", *capacity_w);
+            }
+            Ok(())
+        }
+
+        fn ideal_target(&self) -> Option<(ZoneId, f64)> {
+            Some((self.ideal_zone, self.ideal_target_c))
+        }
+    }
+
+    #[test]
+    fn solver_feedback_collect_decide_dispatch_full_pipeline() {
+        use crate::Actor;
+        use crate::actors::SolverFeedbackActor;
+
+        // Set up equipment that returns ideal_target
+        let mut eq = TestIdealEquipment::new("IdealHVAC", ZoneId(1), 20.0);
+        let env = crate::actor::testing::test_env().build();
+        eq.init(&EquipmentConfig::default(), &env).ok();
+
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+
+        // Set up actor with cached targets (same as dwelling does)
+        let mut actor = SolverFeedbackActor::new();
+        actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+
+        // Step 1: collect_and_solve (mock solver returns 5000W)
+        actor.collect_and_solve_test(&equipment, |_zone, _target| 5000.0);
+
+        // Step 2: decide through Actor interface
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].target, DispatchTarget::ByName(Arc::from("IdealHVAC")));
+        assert_eq!(requests[0].priority, PriorityTier::Schedule);
+
+        // Step 3: dispatch to equipment
+        let mut dispatcher = ControlDispatcher::default();
+        for req in requests {
+            dispatcher.queue(req);
+        }
+        let mut warnings = Vec::new();
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
+        assert!(
+            (equipment[0].telemetry().get("ideal_capacity_w").unwrap_or(0.0) - 5000.0).abs() < 1e-9,
+            "equipment should have received 5000W ideal capacity"
+        );
+    }
+
+    #[test]
+    fn solver_feedback_multiple_equipment_dispatches_correctly() {
+        use crate::Actor;
+        use crate::actors::SolverFeedbackActor;
+
+        let eq1 = TestIdealEquipment::new("HVAC_Zone1", ZoneId(1), 20.0);
+        let eq2 = TestIdealEquipment::new("HVAC_Zone2", ZoneId(2), 22.0);
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
+
+        let mut actor = SolverFeedbackActor::new();
+        actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+        actor.collect_and_solve_test(&equipment, |_zone, _target| 3000.0);
+
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].target, DispatchTarget::ByName(Arc::from("HVAC_Zone1")));
+        assert_eq!(requests[1].target, DispatchTarget::ByName(Arc::from("HVAC_Zone2")));
+    }
+
+    #[test]
+    fn solver_feedback_skips_equipment_without_ideal_target() {
+        use crate::Actor;
+        use crate::actors::SolverFeedbackActor;
+
+        let non_ideal = TestEquipment::new("Battery", ControlCapabilities::POWER_SETPOINT);
+        let ideal = TestIdealEquipment::new("HVAC", ZoneId(1), 20.0);
+        let equipment: Vec<Box<dyn Equipment>> = vec![
+            Box::new(non_ideal) as Box<dyn Equipment>,
+            Box::new(ideal) as Box<dyn Equipment>,
+        ];
+
+        let mut actor = SolverFeedbackActor::new();
+        actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+        actor.collect_and_solve_test(&equipment, |_zone, _target| 7000.0);
+
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 1, "only ideal equipment should produce a signal");
+        assert_eq!(requests[0].target, DispatchTarget::ByName(Arc::from("HVAC")));
+    }
+
+    #[test]
+    fn equipment_execution_order_precomputed_at_init() {
+        // Verify that equipment_execution_order is computed once and stored
+        let eq1 = TestEquipment::new("NonThermal1", ControlCapabilities::POWER_SETPOINT);
+        let eq2 = TestEquipment::new("NonThermal2", ControlCapabilities::POWER_SETPOINT);
+
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
+        let order = compute_equipment_execution_order(&equipment);
+
+        // Order should match equipment length
+        assert_eq!(order.len(), 2);
+        // All indices should be present
+        assert!(order.contains(&0));
+        assert!(order.contains(&1));
+    }
+
+    #[test]
+    fn equipment_dispatch_targets_precomputed_at_init() {
+        let eq1 = TestEquipment::new("Equipment1", ControlCapabilities::POWER_SETPOINT);
+        let eq2 = TestEquipment::new("Equipment2", ControlCapabilities::POWER_SETPOINT);
+
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
+        let targets = compute_equipment_dispatch_targets(&equipment);
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0], DispatchTarget::ByName(Arc::from("Equipment1")));
+        assert_eq!(targets[1], DispatchTarget::ByName(Arc::from("Equipment2")));
+    }
+
+    #[test]
+    fn equipment_caches_sorted_by_stage_rank() {
+        // Thermal equipment should come after non-thermal
+        let thermal_eq = TestIdealEquipment::new("ThermalHVAC", ZoneId(1), 20.0);
+        let nonthermal_eq = TestEquipment::new("NonThermal", ControlCapabilities::POWER_SETPOINT);
+
+        // Add in reverse order (thermal first)
+        let equipment: Vec<Box<dyn Equipment>> = vec![
+            Box::new(thermal_eq) as Box<dyn Equipment>,
+            Box::new(nonthermal_eq) as Box<dyn Equipment>,
+        ];
+        let order = compute_equipment_execution_order(&equipment);
+
+        // Non-thermal should come first (lower stage rank)
+        let nonthermal_idx = equipment
+            .iter()
+            .position(|e| e.descriptor().stage == ExecutionStage::Independent)
+            .expect("non-thermal equipment exists");
+        let thermal_idx = equipment
+            .iter()
+            .position(|e| e.descriptor().stage == ExecutionStage::Thermal)
+            .expect("thermal equipment exists");
+
+        // Order should have non-thermal before thermal
+        let pos_nonthermal = order.iter().position(|&i| i == nonthermal_idx).unwrap();
+        let pos_thermal = order.iter().position(|&i| i == thermal_idx).unwrap();
+        assert!(
+            pos_nonthermal < pos_thermal,
+            "non-thermal should execute before thermal"
         );
     }
 }

@@ -389,6 +389,7 @@ fn make_series_full(
             timezone_offset_h: -7.0,
             elevation_m: 1600.0,
             source_step_secs: 3600,
+            midpoint_offset_secs: 0,
         },
         dry_bulb_c: vec![20.0; n],
         dew_point_c: vec![10.0; n],

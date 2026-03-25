@@ -7,9 +7,11 @@
 use std::collections::VecDeque;
 
 use chrono::{DateTime, FixedOffset};
+use hares_control::{DispatchTarget, PriorityTier};
 use hares_envelope::EnvelopeComponentGains;
 use hares_types::{
-    DomainUpdate, EndUse, FluidType, FuelType, LoopId, PortDeclaration, Telemetry, ZoneId,
+    ControlSignal, DomainUpdate, EndUse, FluidType, FuelType, LoopId, PortDeclaration, Telemetry,
+    ZoneId,
 };
 
 /// Complete snapshot of a single simulation timestep, populated incrementally
@@ -25,6 +27,7 @@ pub struct StepSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct PhaseSnapshots {
     pub post_environment: Option<EnvironmentCapture>,
+    pub post_dispatch: Option<DispatchCapture>,
     pub post_nonthermal_equipment: Option<EquipmentPhaseCapture>,
     pub post_thermal_equipment: Option<EquipmentPhaseCapture>,
     pub post_solvers: Option<SolverCapture>,
@@ -128,6 +131,25 @@ pub struct SolverCapture {
 pub struct ZoneUpdateCapture {
     pub zone_temps_c: Vec<(ZoneId, f64)>,
     pub zone_humidity_ratios: Vec<(ZoneId, f64)>,
+}
+
+/// Capture of all dispatched control signals and their resolution.
+#[derive(Debug, Clone)]
+pub struct DispatchCapture {
+    /// All signals dispatched this timestep, in tier order (low → high).
+    pub signals: Vec<DispatchedSignal>,
+}
+
+/// One dispatched control signal with its resolution outcome.
+#[derive(Debug, Clone)]
+pub struct DispatchedSignal {
+    pub target: DispatchTarget,
+    pub signal: ControlSignal,
+    pub priority: PriorityTier,
+    /// Whether this signal overwrote an earlier lower-priority signal to the same target.
+    pub overwrote_earlier: bool,
+    /// Whether the target equipment was found.
+    pub delivered: bool,
 }
 
 /// Ring buffer of step snapshots with configurable capacity.

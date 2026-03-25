@@ -359,10 +359,7 @@ impl Generator {
             None
         };
 
-        let mut ports = vec![
-            PortDeclaration::electrical(),
-            PortDeclaration::fuel(),
-        ];
+        let mut ports = vec![PortDeclaration::electrical(), PortDeclaration::fuel()];
         if let Some(z) = zone {
             ports.push(PortDeclaration::thermal(z));
         }
@@ -374,7 +371,7 @@ impl Generator {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id),
             name: config.name.clone(),
-            end_use: EndUse::Generator,
+            end_use: EndUse::GENERATOR,
             equipment_type: Cow::Borrowed(kind.equipment_type()),
             zone,
             fuel: FuelType::Gas,
@@ -1112,7 +1109,7 @@ mod tests {
     fn descriptor_matches_ticket_contract() {
         let config = gen_config(&[]);
         let generator = Generator::new(config, GeneratorKind::GasGenerator);
-        assert_eq!(generator.descriptor().end_use, EndUse::Generator);
+        assert_eq!(generator.descriptor().end_use, EndUse::GENERATOR);
         assert_eq!(generator.descriptor().stage, ExecutionStage::Electrical);
         assert_eq!(generator.descriptor().fuel, FuelType::Gas);
         let caps = generator.descriptor().control_capabilities;
@@ -1545,7 +1542,6 @@ mod tests {
         assert_eq!(generator.mode, OperatingMode::Off);
     }
 
-
     // =======================================================================
     // CHP thermal output
     // =======================================================================
@@ -1763,7 +1759,10 @@ mod tests {
             "q_thermal should be positive when CHP is active"
         );
         // The fluid port carries flow, not watts directly — just confirm it is active
-        assert!(slots.fluid[0].total_flow_kg_s > 0.0, "fluid port should carry flow");
+        assert!(
+            slots.fluid[0].total_flow_kg_s > 0.0,
+            "fluid port should carry flow"
+        );
     }
 
     // =======================================================================
@@ -2016,7 +2015,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn apply_control_rejects_unsupported_signal() {
         let mut generator = Generator::new(gen_config(&[]), GeneratorKind::GasGenerator);
@@ -2143,10 +2141,22 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert!(names_no_chp.contains(&"fuel_input_w"), "must use fuel_input_w");
-        assert!(!names_no_chp.iter().any(|n| *n == "fuel_input_kw"), "old kW name must not appear");
-        assert!(!names_no_chp.iter().any(|n| *n == "thermal_output_kw"), "old kW name must not appear");
-        assert!(!names_no_chp.iter().any(|n| *n == "flue_loss_kw"), "old kW name must not appear");
+        assert!(
+            names_no_chp.contains(&"fuel_input_w"),
+            "must use fuel_input_w"
+        );
+        assert!(
+            !names_no_chp.iter().any(|n| *n == "fuel_input_kw"),
+            "old kW name must not appear"
+        );
+        assert!(
+            !names_no_chp.iter().any(|n| *n == "thermal_output_kw"),
+            "old kW name must not appear"
+        );
+        assert!(
+            !names_no_chp.iter().any(|n| *n == "flue_loss_kw"),
+            "old kW name must not appear"
+        );
 
         let generator_chp = Generator::new(
             gen_config(&[(KEY_ETA_THERMAL, 0.30.into()), (KEY_ZONE_ID, 1.0.into())]),
@@ -2159,7 +2169,10 @@ mod tests {
             .map(|f| f.name.as_str())
             .collect();
         assert!(names_chp.contains(&"fuel_input_w"));
-        assert!(names_chp.contains(&"thermal_output_w"), "must use thermal_output_w");
+        assert!(
+            names_chp.contains(&"thermal_output_w"),
+            "must use thermal_output_w"
+        );
         assert!(names_chp.contains(&"flue_loss_w"), "must use flue_loss_w");
     }
 
@@ -2212,7 +2225,6 @@ mod tests {
     // =======================================================================
     // Telemetry field names are in watts (regression tests)
     // =======================================================================
-
 
     #[test]
     fn fuel_cell_defaults_to_curve_efficiency() {

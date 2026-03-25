@@ -13,7 +13,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [features]
-thermal_diagnostics = []
+observe_detailed = []
 
 [dev-dependencies]
 approx = "0.5"

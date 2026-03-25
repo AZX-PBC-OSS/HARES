@@ -421,6 +421,7 @@ fn build_config(
         overrides: None,
         bldg_id,
         initialization_duration,
+        resample_overrides: None,
     })
 }
 
@@ -483,8 +484,7 @@ fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 }
 
 fn default_start() -> DateTime<FixedOffset> {
-    DateTime::parse_from_rfc3339(DEFAULT_START)
-        .expect("valid default timestamp")
+    DateTime::parse_from_rfc3339(DEFAULT_START).expect("valid default timestamp")
 }
 
 fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {
@@ -498,7 +498,10 @@ fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {
 }
 
 #[cfg(feature = "observe")]
-fn snapshot_to_py(py: Python<'_>, snap: &hares_core::observer::StepSnapshot) -> PyResult<Py<PyAny>> {
+fn snapshot_to_py(
+    py: Python<'_>,
+    snap: &hares_core::observer::StepSnapshot,
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("step_index", snap.step_index)?;
     dict.set_item("timestamp", snap.timestamp.to_rfc3339())?;
@@ -529,7 +532,10 @@ fn snapshot_to_py(py: Python<'_>, snap: &hares_core::observer::StepSnapshot) -> 
     }
 
     for (key, phase) in [
-        ("post_nonthermal_equipment", &phases.post_nonthermal_equipment),
+        (
+            "post_nonthermal_equipment",
+            &phases.post_nonthermal_equipment,
+        ),
         ("post_thermal_equipment", &phases.post_thermal_equipment),
     ] {
         if let Some(eq_phase) = phase {
@@ -557,14 +563,22 @@ fn snapshot_to_py(py: Python<'_>, snap: &hares_core::observer::StepSnapshot) -> 
             let pd = PyDict::new(py);
             pd.set_item(
                 "thermal",
-                ports.thermal.iter().map(|(z, s, l)| (z.0, *s, *l)).collect::<Vec<_>>(),
+                ports
+                    .thermal
+                    .iter()
+                    .map(|(z, s, l)| (z.0, *s, *l))
+                    .collect::<Vec<_>>(),
             )?;
             pd.set_item("electrical_load_kw", ports.electrical_load_kw)?;
             pd.set_item("electrical_gen_kw", ports.electrical_gen_kw)?;
             pd.set_item("electrical_reactive_kvar", ports.electrical_reactive_kvar)?;
             pd.set_item(
                 "fuel_consumption_w",
-                ports.fuel_consumption_w.iter().map(|(ft, v)| (format!("{ft:?}"), *v)).collect::<Vec<_>>(),
+                ports
+                    .fuel_consumption_w
+                    .iter()
+                    .map(|(ft, v)| (format!("{ft:?}"), *v))
+                    .collect::<Vec<_>>(),
             )?;
             d.set_item("ports", pd)?;
             dict.set_item(key, d)?;

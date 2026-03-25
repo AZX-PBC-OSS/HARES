@@ -30,6 +30,7 @@ impl EquipmentRegistry {
         crate::hvac::air_conditioner::register_with_registry(&mut registry);
         crate::hvac::dehumidifier::register_with_registry(&mut registry);
         crate::hvac::heat_pump::register_with_registry(&mut registry);
+        crate::hvac::ideal_hvac::register_with_registry(&mut registry);
         crate::water_heater::register_with_registry(&mut registry);
         crate::battery::register_with_registry(&mut registry);
         crate::pv::register_with_registry(&mut registry);

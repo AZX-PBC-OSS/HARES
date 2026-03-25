@@ -18,7 +18,7 @@ use super::thermostat::{
     is_cycle_change_allowed, lookup_zone_temp,
 };
 
-const IDEAL_CAPACITY_TIME_RES_THRESHOLD_S: i64 = 300;
+pub const IDEAL_CAPACITY_TIME_RES_THRESHOLD_S: i64 = 300;
 pub(super) const DEFAULT_BIQUADRATIC_COEFFS: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
 /// Default fan power [W/CFM]. ACCA Manual D residential air handler.
@@ -108,20 +108,6 @@ impl HvacEquipmentType {
                 | Self::MiniSplitHeat
                 | Self::Baseboard
         )
-    }
-}
-
-/// Ideal-capacity callback implemented by thermal-domain solvers.
-pub trait IdealCapacitySolver {
-    fn solve_ideal_capacity(&self, env: &EnvironmentState, zone: ZoneId) -> f64;
-}
-
-impl<F> IdealCapacitySolver for F
-where
-    F: Fn(&EnvironmentState, ZoneId) -> f64,
-{
-    fn solve_ideal_capacity(&self, env: &EnvironmentState, zone: ZoneId) -> f64 {
-        self(env, zone)
     }
 }
 
@@ -333,9 +319,8 @@ impl HvacEquipment {
         self.static_setpoints
             .validate_for_deadband(self.thermostat.hysteresis_c)?;
 
-        let mut airflow_cfm_per_ton =
-            extract_numeric(config, "airflow_cfm_per_ton")
-                .unwrap_or_else(|| self.equipment_type.default_airflow_cfm_per_ton());
+        let mut airflow_cfm_per_ton = extract_numeric(config, "airflow_cfm_per_ton")
+            .unwrap_or_else(|| self.equipment_type.default_airflow_cfm_per_ton());
         let airflow_defect_ratio = extract_numeric(config, "AirflowDefectRatio")
             .or_else(|| extract_numeric(config, "airflow_defect_ratio"))
             .unwrap_or(1.0);
@@ -470,8 +455,7 @@ impl HvacEquipment {
                 self.basement_zone_id = Some(ZoneId(raw as u16));
             }
         }
-        self.basement_heat_frac =
-            extract_numeric(config, "basement_airflow_ratio").unwrap_or(0.0);
+        self.basement_heat_frac = extract_numeric(config, "basement_airflow_ratio").unwrap_or(0.0);
 
         Ok(())
     }
@@ -631,37 +615,6 @@ impl HvacEquipment {
         Ok(self.mode)
     }
 
-    pub fn update_mode_and_duty_with_ideal_solver<S: IdealCapacitySolver>(
-        &mut self,
-        env: &EnvironmentState,
-        solver: &S,
-    ) -> crate::Result<ThermostatMode> {
-        let mode = self.update_mode(env)?;
-        if mode == ThermostatMode::Deadband {
-            self.duty_cycle = 0.0;
-            return Ok(mode);
-        }
-
-        if self.use_ideal_capacity(env) {
-            let ideal_rate_w = solver.solve_ideal_capacity(env, self.zone_id);
-            let numerator = match mode {
-                ThermostatMode::Heating => ideal_rate_w.max(0.0),
-                ThermostatMode::Cooling => (-ideal_rate_w).max(0.0),
-                ThermostatMode::Deadband => 0.0,
-            };
-            let rated_capacity = self.rated_capacity_w(mode).max(0.0);
-            self.duty_cycle = if rated_capacity > 0.0 {
-                (numerator / rated_capacity).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-        } else {
-            self.duty_cycle = 1.0;
-        }
-
-        Ok(mode)
-    }
-
     pub fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
         self.thermostat.use_ideal_capacity
             || env.time_res >= ChronoDuration::seconds(IDEAL_CAPACITY_TIME_RES_THRESHOLD_S)
@@ -694,7 +647,11 @@ impl HvacEquipment {
     ///
     /// Returns `true` when `mode_start_at` is `None` (first transition ever) or
     /// when the minimum duration for the current mode has elapsed.
-    pub fn can_transition_mode(&self, proposed: ThermostatMode, now: DateTime<FixedOffset>) -> bool {
+    pub fn can_transition_mode(
+        &self,
+        proposed: ThermostatMode,
+        now: DateTime<FixedOffset>,
+    ) -> bool {
         if self.mode == proposed {
             return true; // no transition
         }
@@ -821,13 +778,6 @@ mod tests {
         }
     }
 
-    struct FixedIdealSolver(f64);
-
-    impl IdealCapacitySolver for FixedIdealSolver {
-        fn solve_ideal_capacity(&self, _env: &EnvironmentState, _zone: ZoneId) -> f64 {
-            self.0
-        }
-    }
 
     #[test]
     fn thermostat_cutout_ratio_is_validated() {
@@ -1031,9 +981,7 @@ mod tests {
         );
         // Cooling variants use 40.6 as a construction-time placeholder;
         // overwritten by step() before any real use.
-        assert!(
-            (HvacEquipmentType::AcCooler.default_supply_air_temp_c(8.3) - 40.6).abs() < 1e-9
-        );
+        assert!((HvacEquipmentType::AcCooler.default_supply_air_temp_c(8.3) - 40.6).abs() < 1e-9);
         assert!(
             (HvacEquipmentType::MiniSplitCool.default_supply_air_temp_c(8.3) - 40.6).abs() < 1e-9
         );
@@ -1065,21 +1013,6 @@ mod tests {
         assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
     }
 
-    #[test]
-    fn ideal_capacity_mode_engages_on_coarse_timesteps_and_sets_duty() {
-        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
-        hvac.heating_capacities_w = vec![10_000.0];
-        hvac.static_setpoints = ThermalSetpoints {
-            heating_c: 20.0,
-            cooling_c: 26.0,
-        };
-        let solver = FixedIdealSolver(5_000.0);
-        let mode = hvac
-            .update_mode_and_duty_with_ideal_solver(&env(18.0, 300, 0), &solver)
-            .expect("mode updates");
-        assert_eq!(mode, ThermostatMode::Heating);
-        assert!((hvac.duty_cycle - 0.5).abs() < 1e-9);
-    }
 
     #[test]
     fn two_hvac_instances_same_zone_accumulate_thermal_ports() {
@@ -1199,8 +1132,15 @@ mod tests {
         let mut hvac = make_msi_hvac();
         let sel = hvac.select_speed(0.5);
         assert_eq!(sel.speed_index, 0, "lower bracket index");
-        assert!((sel.speed_frac - 0.5).abs() < 1e-12, "speed_frac={}", sel.speed_frac);
-        assert_eq!(sel.part_load_ratio, 1.0, "PLR=1 when interpolating between stages");
+        assert!(
+            (sel.speed_frac - 0.5).abs() < 1e-12,
+            "speed_frac={}",
+            sel.speed_frac
+        );
+        assert_eq!(
+            sel.part_load_ratio, 1.0,
+            "PLR=1 when interpolating between stages"
+        );
     }
 
     #[test]
@@ -1211,7 +1151,11 @@ mod tests {
         let sel = hvac.select_speed(0.30);
         assert_eq!(sel.speed_index, 0);
         assert_eq!(sel.speed_frac, 0.0, "no interpolation at lowest stage");
-        assert!((sel.part_load_ratio - 0.75).abs() < 1e-12, "PLR={}", sel.part_load_ratio);
+        assert!(
+            (sel.part_load_ratio - 0.75).abs() < 1e-12,
+            "PLR={}",
+            sel.part_load_ratio
+        );
     }
 
     #[test]
@@ -1221,7 +1165,11 @@ mod tests {
         let mut hvac = make_msi_hvac();
         let sel = hvac.select_speed(0.7);
         assert_eq!(sel.speed_index, 1);
-        assert!((sel.speed_frac - 0.5).abs() < 1e-12, "speed_frac={}", sel.speed_frac);
+        assert!(
+            (sel.speed_frac - 0.5).abs() < 1e-12,
+            "speed_frac={}",
+            sel.speed_frac
+        );
         assert_eq!(sel.part_load_ratio, 1.0);
     }
 
@@ -1371,7 +1319,10 @@ mod tests {
         let mut hvac = make_msi_hvac();
         let sel = hvac.select_speed(0.6);
         assert_eq!(sel.speed_index, 0, "lower bracket index is 0");
-        assert!((sel.speed_frac - 1.0).abs() < 1e-12, "speed_frac=1.0 at exact upper boundary");
+        assert!(
+            (sel.speed_frac - 1.0).abs() < 1e-12,
+            "speed_frac=1.0 at exact upper boundary"
+        );
         assert_eq!(sel.part_load_ratio, 1.0);
     }
 
@@ -1796,7 +1747,8 @@ mod tests {
     #[test]
     fn biquadratic_parser_handles_negative_coefficients() {
         let input = "-1.0, -2.5, 3.0, -0.001, 0.5, -0.02";
-        let result = super::super::core_config::parse_biquadratic_list(input).expect("should parse successfully");
+        let result = super::super::core_config::parse_biquadratic_list(input)
+            .expect("should parse successfully");
         assert_eq!(result.len(), 1, "should produce exactly one curve");
         let coeffs = result[0];
         let expected = [-1.0_f64, -2.5, 3.0, -0.001, 0.5, -0.02];
@@ -1861,8 +1813,13 @@ mod tests {
             ],
             ..PortSlots::default()
         };
-        hvac.write_zone_thermal_contributions(&mut ports, 10_000.0, 0.0, ThermalCategory::HvacHeating)
-            .expect("write ok");
+        hvac.write_zone_thermal_contributions(
+            &mut ports,
+            10_000.0,
+            0.0,
+            ThermalCategory::HvacHeating,
+        )
+        .expect("write ok");
 
         assert!(
             (ports.thermal[0].sensible_gain_w - 7_000.0).abs() < 1e-9,
@@ -1887,8 +1844,13 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..PortSlots::default()
         };
-        hvac.write_zone_thermal_contributions(&mut ports, 10_000.0, 0.0, ThermalCategory::HvacHeating)
-            .expect("write ok");
+        hvac.write_zone_thermal_contributions(
+            &mut ports,
+            10_000.0,
+            0.0,
+            ThermalCategory::HvacHeating,
+        )
+        .expect("write ok");
 
         assert!(
             (ports.thermal[0].sensible_gain_w - 7_000.0).abs() < 1e-9,
@@ -2176,7 +2138,11 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
         hvac.heating_capacities_w = vec![4000.0, 6000.0, 8000.0, 10000.0];
-        assert_eq!(hvac.n_speed_stages(), 4, "MultiSpeedInterpolated with 4 stages");
+        assert_eq!(
+            hvac.n_speed_stages(),
+            4,
+            "MultiSpeedInterpolated with 4 stages"
+        );
     }
 
     // --- Change 4: Deadband offset (asymmetric setpoint bands) ---
@@ -2339,7 +2305,8 @@ mod tests {
             "eir_biquadratic_coeffs".to_string(),
             "3.0,0.0,0.0,0.0,0.0,0.0".into(),
         );
-        hvac.init(&config, &env(20.0, 60, 0)).expect("init must succeed");
+        hvac.init(&config, &env(20.0, 60, 0))
+            .expect("init must succeed");
         assert!(
             hvac.biquadratic_coeffs.len() >= 2,
             "must have at least two curves after split-key init"

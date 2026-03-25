@@ -14,22 +14,20 @@ use serde::{Deserialize, Serialize};
 use crate::{Equipment, EquipmentConfig, load_postcard, save_postcard};
 
 use super::super::{
-    HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
-    SpeedControlMode,
+    HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{
-        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked,
-        equipment_id_from_config, first_f64, load_stage_values, lookup_zone, zone_id_from_config,
+        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked, equipment_id_from_config,
+        first_f64, load_stage_values, lookup_zone, zone_id_from_config,
     },
 };
 use super::constants::{
-    DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR,
-    DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR, DEFAULT_DEFROST_POWER_W,
-    DEFAULT_EQUIPMENT_ID, DEFAULT_ER_HARD_LOCKOUT_TIME_S, DEFAULT_ER_LOCKOUT_TEMP_C,
-    DEFAULT_ER_SETPOINT_DEADBAND_OFFSET, DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER,
-    DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR, DEFAULT_HP_LOCKOUT_TEMP_C,
-    DEFAULT_MIN_ER_CYCLE_TIME_S, DEFAULT_MSHP_SPEED_MAP, DEFAULT_ZONE_ID,
-    MAX_OAT_SUPPLEMENTAL_C,
-    MSHP_PAN_HEATER_DEFAULT_KW, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
+    DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR, DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR,
+    DEFAULT_DEFROST_POWER_W, DEFAULT_EQUIPMENT_ID, DEFAULT_ER_HARD_LOCKOUT_TIME_S,
+    DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
+    DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
+    DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S, DEFAULT_MSHP_SPEED_MAP,
+    DEFAULT_ZONE_ID, MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_KW,
+    MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
 use super::defrost::{DefrostConfig, evaluate_defrost};
 use super::heater_config::{
@@ -289,7 +287,7 @@ impl HeatPumpHeaterCore {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
                 name: config.name,
-                end_use: EndUse::HvacHeating,
+                end_use: EndUse::HVAC_HEATING,
                 equipment_type: Cow::Borrowed(equipment_type),
                 zone: Some(zone),
                 fuel: FuelType::Electric,
@@ -350,8 +348,7 @@ impl HeatPumpHeaterCore {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        self.hvac.duct_zone_id =
-            super::super::helpers::parse_zone_id_key(config, "duct_zone_id");
+        self.hvac.duct_zone_id = super::super::helpers::parse_zone_id_key(config, "duct_zone_id");
 
         self.hvac.heating_capacities_w = load_stage_values(
             config,
@@ -398,7 +395,12 @@ impl HeatPumpHeaterCore {
             // Ductless MSHP: no distribution losses.
             self.hvac.duct_dse = 1.0;
         } else {
-            let rated_cap = self.hvac.heating_capacities_w.last().copied().unwrap_or(0.0);
+            let rated_cap = self
+                .hvac
+                .heating_capacities_w
+                .last()
+                .copied()
+                .unwrap_or(0.0);
             let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
             let n_speeds = self.hvac.heating_capacities_w.len().min(255) as u8;
             self.hvac.duct_dse = super::super::helpers::resolve_duct_dse(
@@ -575,8 +577,12 @@ impl HeatPumpHeaterCore {
         let step = self.compute_step(env, dt_min)?;
 
         if step.thermal_output_w > 0.0 {
-            self.hvac
-                .write_zone_thermal_contributions(ports, step.thermal_output_w, 0.0, ThermalCategory::HvacHeating)?;
+            self.hvac.write_zone_thermal_contributions(
+                ports,
+                step.thermal_output_w,
+                0.0,
+                ThermalCategory::HvacHeating,
+            )?;
         }
         let scaled_electric_kw = step.electric_kw * self.hvac.space_fraction;
         if scaled_electric_kw > 0.0 {
@@ -641,6 +647,9 @@ impl HeatPumpHeaterCore {
             0.0
         };
         self.telemetry.set("runtime_fraction", rtf);
+        self.telemetry.set("compressor_kw", step.compressor_kw);
+        self.telemetry
+            .set("defrost_time_fraction", step.defrost_time_fraction);
 
         Ok(())
     }
@@ -651,23 +660,22 @@ impl HeatPumpHeaterCore {
 
         let speed_index = self.hvac.last_speed_index;
         let speed_frac = self.hvac.last_speed_frac;
-        let (stage_capacity_w, stage_eir) = if self.hvac.speed_control_mode
-            == SpeedControlMode::MultiSpeedInterpolated
-        {
-            (
-                self.hvac.interpolated_capacity(
-                    &self.hvac.heating_capacities_w,
-                    speed_index,
-                    speed_frac,
-                ),
-                self.hvac.interpolated_eir(speed_index, speed_frac),
-            )
-        } else {
-            (
-                HvacEquipment::capacity_at_stage(&self.hvac.heating_capacities_w, speed_index),
-                self.hvac.eir_at_stage(speed_index),
-            )
-        };
+        let (stage_capacity_w, stage_eir) =
+            if self.hvac.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated {
+                (
+                    self.hvac.interpolated_capacity(
+                        &self.hvac.heating_capacities_w,
+                        speed_index,
+                        speed_frac,
+                    ),
+                    self.hvac.interpolated_eir(speed_index, speed_frac),
+                )
+            } else {
+                (
+                    HvacEquipment::capacity_at_stage(&self.hvac.heating_capacities_w, speed_index),
+                    self.hvac.eir_at_stage(speed_index),
+                )
+            };
 
         let plr = self.hvac.duty_cycle.clamp(0.0, 1.0);
         let plf = self.hvac.part_load_factor(plr);
@@ -1292,10 +1300,7 @@ mod tests {
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
         let eir = eq.core.hvac.eir_by_stage[0];
-        assert!(
-            (eir - 0.244).abs() < 0.01,
-            "SEER=14 → EIR≈0.244, got {eir}"
-        );
+        assert!((eir - 0.244).abs() < 0.01, "SEER=14 → EIR≈0.244, got {eir}");
     }
 
     #[test]
@@ -2350,5 +2355,4 @@ mod tests {
         let cop = eq.telemetry().get("cop").unwrap_or(-1.0);
         assert_eq!(cop, 0.0, "heater off must give COP=0, got {cop}");
     }
-
 }

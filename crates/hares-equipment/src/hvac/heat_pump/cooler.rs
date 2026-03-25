@@ -51,7 +51,7 @@ impl HpCooler {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(DEFAULT_EQUIPMENT_ID)),
                 name: config.name,
-                end_use: EndUse::HvacCooling,
+                end_use: EndUse::HVAC_COOLING,
                 equipment_type: Cow::Borrowed(equipment_type),
                 zone: Some(zone),
                 fuel: FuelType::Electric,
@@ -258,7 +258,7 @@ mod tests {
         let eq = HpCooler::mshp_cooler(cfg);
 
         assert_eq!(eq.descriptor().equipment_type, "MSHP Cooler");
-        assert_eq!(eq.descriptor().end_use, EndUse::HvacCooling);
+        assert_eq!(eq.descriptor().end_use, EndUse::HVAC_COOLING);
         assert_eq!(eq.descriptor().fuel, FuelType::Electric);
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
         assert!(
@@ -351,7 +351,10 @@ mod tests {
         raw.insert("eir".to_string(), 0.33.into());
         raw.insert("cooling_setpoint_c".to_string(), 24.4.into());
         raw.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw.insert("capacity_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        raw.insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[1,0,0,0,0,0]".into(),
+        );
         raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         let cfg = EquipmentConfig {
             name: "ASHP Cooler".to_string(),
@@ -374,8 +377,7 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert_eq!(
-            ports.thermal[0].sensible_gain_w,
-            0.0,
+            ports.thermal[0].sensible_gain_w, 0.0,
             "cooler must produce zero thermal output when zone_temp (24.4°C) == cooling_setpoint; \
              OCHRE turn-on threshold = 25.2°C — got {:.3} W",
             ports.thermal[0].sensible_gain_w

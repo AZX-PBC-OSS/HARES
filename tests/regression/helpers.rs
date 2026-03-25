@@ -91,6 +91,7 @@ pub fn build_beopt_dwelling_config(
         overrides: None,
         bldg_id,
         initialization_duration: None,
+        resample_overrides: None,
     }
 }
 
@@ -118,6 +119,7 @@ pub fn build_resstock_dwelling_config(
         overrides: None,
         bldg_id,
         initialization_duration: None,
+        resample_overrides: None,
     }
 }
 

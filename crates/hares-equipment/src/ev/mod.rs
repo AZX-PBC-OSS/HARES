@@ -877,7 +877,12 @@ impl Ev {
         }
     }
 
-    fn required_ready_power_kw(&self, now: DateTime<FixedOffset>, dt: Duration, soc_limit: f64) -> f64 {
+    fn required_ready_power_kw(
+        &self,
+        now: DateTime<FixedOffset>,
+        dt: Duration,
+        soc_limit: f64,
+    ) -> f64 {
         let Some(ready_by_hour) = self.ready_by_hour else {
             return 0.0;
         };
@@ -1018,7 +1023,8 @@ impl Equipment for Ev {
             })?;
             let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
             let ac_discharge_kw = charger_kw.abs();
-            let dc_discharge_kwh = (ac_discharge_kw / self.charging_efficiency.max(0.01)) * dt_hours;
+            let dc_discharge_kwh =
+                (ac_discharge_kw / self.charging_efficiency.max(0.01)) * dt_hours;
             self.soc = (self.soc - dc_discharge_kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
         } else if self.active_power_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -1993,7 +1999,7 @@ mod tests {
         ev.init(&config, &env).unwrap();
 
         // Step at 12:00 for 100 minutes; EV is disconnected, pack should cool.
-        env.current_time = dt(2026, 1, 1,12, 0, 0);
+        env.current_time = dt(2026, 1, 1, 12, 0, 0);
         for _ in 0..100 {
             let mut ports = PortSlots::default();
             ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
@@ -2062,7 +2068,6 @@ mod tests {
             "heater should be active"
         );
     }
-
 
     #[test]
     fn deterministic_fuzzing_replays_same_event_sequence_for_same_seed() {
@@ -2714,7 +2719,8 @@ mod tests {
 
         env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
-        ev.step(&env, Duration::minutes(15), &mut ports).expect("step");
+        ev.step(&env, Duration::minutes(15), &mut ports)
+            .expect("step");
         let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
         assert!(
             power < -0.1,
@@ -2743,7 +2749,8 @@ mod tests {
 
         env.current_time = dt(2026, 1, 1, 18, 30, 0);
         let mut ports = PortSlots::default();
-        ev.step(&env, Duration::minutes(15), &mut ports).expect("step");
+        ev.step(&env, Duration::minutes(15), &mut ports)
+            .expect("step");
         let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
         assert!(
             power.abs() < 0.01,

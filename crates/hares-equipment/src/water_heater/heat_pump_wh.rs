@@ -15,15 +15,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-use super::hpwh_compressor::{
-    self, DEFAULT_BACKUP_EFFICIENCY, DEFAULT_BACKUP_ELEMENT_POWER_W, DEFAULT_BACKUP_ENABLE_OFFSET_C,
-    DEFAULT_CAPACITY_CURVE, DEFAULT_COMPRESSOR_POWER_W, DEFAULT_COP_CURVE, DEFAULT_DEADBAND_C,
-    DEFAULT_FAN_POWER_W, DEFAULT_LOST_HEAT_FRACTION, DEFAULT_MAX_AMBIENT_TEMP_C,
-    DEFAULT_MIN_AMBIENT_TEMP_C, DEFAULT_MIN_ON_TIME_S, DEFAULT_PARASITIC_POWER_W, DEFAULT_SHR,
-    DEFAULT_TANK_TEMP_BOUNDS_C, DEFAULT_ZONE_TEMP_BOUNDS_C, LOW_POWER_MAX_AMBIENT_TEMP_C,
-    LOW_POWER_MIN_AMBIENT_TEMP_C,
-};
 pub use super::hpwh_compressor::ElementHpControlMode;
+use super::hpwh_compressor::{
+    self, DEFAULT_BACKUP_EFFICIENCY, DEFAULT_BACKUP_ELEMENT_POWER_W,
+    DEFAULT_BACKUP_ENABLE_OFFSET_C, DEFAULT_CAPACITY_CURVE, DEFAULT_COMPRESSOR_POWER_W,
+    DEFAULT_COP_CURVE, DEFAULT_DEADBAND_C, DEFAULT_FAN_POWER_W, DEFAULT_LOST_HEAT_FRACTION,
+    DEFAULT_MAX_AMBIENT_TEMP_C, DEFAULT_MIN_AMBIENT_TEMP_C, DEFAULT_MIN_ON_TIME_S,
+    DEFAULT_PARASITIC_POWER_W, DEFAULT_SHR, DEFAULT_TANK_TEMP_BOUNDS_C, DEFAULT_ZONE_TEMP_BOUNDS_C,
+    LOW_POWER_MAX_AMBIENT_TEMP_C, LOW_POWER_MIN_AMBIENT_TEMP_C,
+};
 use super::tank::{StratifiedTank, StratifiedTankConfig};
 use super::{
     WaterHeaterZip, hysteresis_call, parse_usize, resolve_draw_rate_kg_s,
@@ -190,7 +190,7 @@ impl HeatPumpWH {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
                 name: config.name,
-                end_use: EndUse::WaterHeating,
+                end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Heat Pump Water Heater"),
                 zone: Some(zone),
                 fuel: FuelType::Electric,
@@ -209,7 +209,11 @@ impl HeatPumpWH {
                 PortDeclaration::fluid(loop_id, FluidType::Water),
                 PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
             ],
-            telemetry: default_telemetry(),
+            telemetry: {
+                let mut t = default_telemetry();
+                tank.register_node_telemetry(&mut t);
+                t
+            },
             tank,
             thermostat_node,
             thermostat_upper_node: 0,
@@ -336,8 +340,7 @@ impl Equipment for HeatPumpWH {
             .unwrap_or(6)
             .clamp(1, 12);
         let tank_volume_m3 =
-            first_f64(config, &["tank_volume_m3"])
-                .unwrap_or(DEFAULT_TANK_VOLUME_M3);
+            first_f64(config, &["tank_volume_m3"]).unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =
@@ -468,10 +471,8 @@ impl Equipment for HeatPumpWH {
         } else {
             DEFAULT_MAX_AMBIENT_TEMP_C
         };
-        self.min_ambient_temp_c =
-            first_f64(config, &["min_ambient_temp_c"]).unwrap_or(default_min);
-        self.max_ambient_temp_c =
-            first_f64(config, &["max_ambient_temp_c"]).unwrap_or(default_max);
+        self.min_ambient_temp_c = first_f64(config, &["min_ambient_temp_c"]).unwrap_or(default_min);
+        self.max_ambient_temp_c = first_f64(config, &["max_ambient_temp_c"]).unwrap_or(default_max);
         self.max_tank_temp_c =
             first_f64(config, &["max_tank_temp_c"]).unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
 
@@ -525,6 +526,7 @@ impl Equipment for HeatPumpWH {
         self.dr_level = DRLevel::Normal;
         self.ctrl_load_fraction = 1.0;
         self.telemetry = default_telemetry();
+        self.tank.register_node_telemetry(&mut self.telemetry);
         Ok(())
     }
 
@@ -543,7 +545,10 @@ impl Equipment for HeatPumpWH {
 
         // Safety cutout: force off if ANY node exceeds max tank temperature.
         // A high-limit aquastat/thermal fuse responds to the hottest point in the tank.
-        let max_node_temp = self.tank.node_temps().iter()
+        let max_node_temp = self
+            .tank
+            .node_temps()
+            .iter()
             .copied()
             .reduce(f64::max)
             .expect("node_temps is never empty");
@@ -674,11 +679,7 @@ impl Equipment for HeatPumpWH {
         // Use wet-bulb temperature for COP/capacity curves: HPWH performance depends
         // on available enthalpy in the ambient air, not dry-bulb temperature alone.
         let wet_bulb_c = self.zone_wet_bulb_c(env);
-        let cop = (self
-            .cop_curve
-            .evaluate(wet_bulb_c, tank_avg_temp_c)
-            * self.cop_scale)
-            .max(0.1);
+        let cop = (self.cop_curve.evaluate(wet_bulb_c, tank_avg_temp_c) * self.cop_scale).max(0.1);
         // Capacity multiplier modulates the rated delivered heat based on ambient
         // wet-bulb and tank temperature, matching EnergyPlus/OCHRE HPWH model.
         let cap_mult = self
@@ -807,8 +808,7 @@ impl Equipment for HeatPumpWH {
         self.telemetry.set("backup_element_power_w", backup_power_w);
         self.telemetry
             .set("zone_heat_extraction_w", zone_heat_extraction_w);
-        self.telemetry
-            .set("draw_flow_rate_kg_s", total_draw_kg_s);
+        self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry
             .set("wall_sensible_gain_w", sensible_to_wall_w);
         self.telemetry.set("unmet_load_w", draw.unmet_load_w);
@@ -821,6 +821,7 @@ impl Equipment for HeatPumpWH {
                 _ => 0.0,
             },
         );
+        self.tank.update_node_telemetry(&mut self.telemetry);
 
         // Reset transient ctrl_load_fraction after this step so it does not
         // carry over to the next step unless reapplied by the controller.
@@ -1075,14 +1076,16 @@ fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: "wall_sensible_gain_w".to_string(),
             unit: "W".to_string(),
-            description: "Sensible heat directed to interior wall surfaces (wall_heat_fraction share)"
-                .to_string(),
+            description:
+                "Sensible heat directed to interior wall surfaces (wall_heat_fraction share)"
+                    .to_string(),
         },
         TelemetryField {
             name: "unmet_load_w".to_string(),
             unit: "W".to_string(),
-            description: "Unmet fixture load: heat not delivered because outlet temp < fixture setpoint"
-                .to_string(),
+            description:
+                "Unmet fixture load: heat not delivered because outlet temp < fixture setpoint"
+                    .to_string(),
         },
     ]
 }
@@ -1829,9 +1832,14 @@ mod tests {
         let mut eq_100 = HeatPumpWH::new(cfg_100.clone());
         eq_100.init(&cfg_100, &e).unwrap();
         let mut p_100 = ports();
-        eq_100.step(&e, Duration::from_secs(60), &mut p_100).unwrap();
+        eq_100
+            .step(&e, Duration::from_secs(60), &mut p_100)
+            .unwrap();
         let backup_100 = eq_100.telemetry().get("backup_element_power_w").unwrap();
-        assert!(backup_100 > 0.0, "backup must fire for this test: got {backup_100}");
+        assert!(
+            backup_100 > 0.0,
+            "backup must fire for this test: got {backup_100}"
+        );
         let tank_100 = eq_100.telemetry().get("tank_avg_temp_c").unwrap();
 
         let cfg_80 = make_cfg(0.8);
@@ -1840,7 +1848,10 @@ mod tests {
         let mut p_80 = ports();
         eq_80.step(&e, Duration::from_secs(60), &mut p_80).unwrap();
         let backup_80 = eq_80.telemetry().get("backup_element_power_w").unwrap();
-        assert!(backup_80 > 0.0, "backup must fire for this test: got {backup_80}");
+        assert!(
+            backup_80 > 0.0,
+            "backup must fire for this test: got {backup_80}"
+        );
         let tank_80 = eq_80.telemetry().get("tank_avg_temp_c").unwrap();
 
         // Both draw the same backup electrical power, but the 80% efficient
@@ -2673,7 +2684,10 @@ mod new_feature_tests {
         eq50.step(&e, Duration::from_secs(60), &mut p50).unwrap();
         let sens50 = p50.thermal[0].sensible_gain_w;
 
-        assert!(sens0.abs() > 1e-6, "baseline sensible gain must be non-zero");
+        assert!(
+            sens0.abs() > 1e-6,
+            "baseline sensible gain must be non-zero"
+        );
         // Full sensible gain posted to zone port for energy balance (wall fraction
         // tracked in telemetry only until wall surfaces are modeled).
         let ratio = sens50 / sens0;
@@ -2708,8 +2722,12 @@ mod new_feature_tests {
         eq.init(&cfg, &env_at(24.0)).unwrap();
         for _ in 0..5 {
             let mut p = ports();
-            eq.step(&env_at(24.0), Duration::from_secs(60), &mut p).unwrap();
-            assert!(!eq.backup_on, "backup element must remain off in hp_only_mode");
+            eq.step(&env_at(24.0), Duration::from_secs(60), &mut p)
+                .unwrap();
+            assert!(
+                !eq.backup_on,
+                "backup element must remain off in hp_only_mode"
+            );
         }
     }
 
@@ -2792,7 +2810,10 @@ mod new_feature_tests {
         let mut p = ports();
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
 
-        assert!(eq.compressor_on, "compressor must be on after step with call for heat");
+        assert!(
+            eq.compressor_on,
+            "compressor must be on after step with call for heat"
+        );
         assert!(
             eq.compressor_off_since_s.is_none(),
             "compressor_off_since_s must be None while compressor is running"

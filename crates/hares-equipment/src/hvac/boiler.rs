@@ -7,8 +7,8 @@ use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FLUID, FluidDomainPayload, FluidType, FuelType, HaresError, LoopId,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
-    TelemetryField, ZoneId,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -120,7 +120,7 @@ impl ElectricBoiler {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
-            end_use: EndUse::HvacHeating,
+            end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Boiler"),
             zone: Some(zone),
             fuel: FuelType::Electric,
@@ -300,7 +300,7 @@ impl GasBoiler {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
-            end_use: EndUse::HvacHeating,
+            end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Gas Boiler"),
             zone: Some(zone),
             fuel: FuelType::Gas,
@@ -508,8 +508,7 @@ impl Equipment for GasBoiler {
         // space_fraction scales the fuel input; thermal_output_w is the fraction this
         // boiler serves, so both sides must be in the same frame.
         let thermal_output_sf_w = thermal_output_w * sf;
-        let jacket_loss_w =
-            (fuel_input_w + electric_kw * 1e3 - thermal_output_sf_w).max(0.0);
+        let jacket_loss_w = (fuel_input_w + electric_kw * 1e3 - thermal_output_sf_w).max(0.0);
         if let Some(zone) = self.descriptor.zone {
             if jacket_loss_w > 0.0 {
                 ports.accumulate(&PortContribution::Thermal {
@@ -765,7 +764,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         DomainUpdate, EnvironmentState, ExecutionStage, FLUID, FluidDomainPayload, FluidLoopState,
-        FluidType, GridState, LoopId, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        FluidType, GridState, LoopId, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+        ZoneState,
     };
 
     use super::{
@@ -1161,8 +1161,7 @@ mod tests {
 
         // Jacket loss appears in the zone thermal port under JacketLoss category.
         use hares_types::ThermalCategory;
-        let zone_jacket =
-            ports.thermal[0].sensible_for_category(ThermalCategory::JacketLoss);
+        let zone_jacket = ports.thermal[0].sensible_for_category(ThermalCategory::JacketLoss);
         assert!(
             (zone_jacket - jacket_loss_w).abs() < 1e-6,
             "thermal port jacket loss={zone_jacket} != telemetry jacket_loss_w={jacket_loss_w}"

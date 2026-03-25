@@ -6,8 +6,8 @@ use std::time::Duration;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
-    Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
+    TelemetryField, ThermalCategory, ZoneId,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -156,7 +156,7 @@ impl EventBasedLoad {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(parse_u32(&config.raw_config, KEY_EQUIPMENT_ID).unwrap_or_default()),
             name: equipment_name,
-            end_use: EndUse::Other,
+            end_use: EndUse::OTHER,
             equipment_type: Cow::Borrowed("EventBasedLoad"),
             zone: parse_zone_id(&config.raw_config),
             fuel: FuelType::Electric,
@@ -287,7 +287,11 @@ impl EventBasedLoad {
         };
 
         let is_fuel = self.fuel_type != FuelType::Electric;
-        let fuel_consumption_w = if is_fuel { active_power_kw * 1_000.0 } else { 0.0 };
+        let fuel_consumption_w = if is_fuel {
+            active_power_kw * 1_000.0
+        } else {
+            0.0
+        };
         let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
 
         // Thermal gains come from all input energy regardless of fuel type.
@@ -359,9 +363,8 @@ impl Equipment for EventBasedLoad {
 
         self.fuel_type = match config.get_str("fuel_type") {
             None => FuelType::Electric,
-            Some(raw) => parse_fuel_type(Some(raw)).ok_or_else(|| {
-                HaresError::Equipment(format!("unrecognised fuel_type: {raw}"))
-            })?,
+            Some(raw) => parse_fuel_type(Some(raw))
+                .ok_or_else(|| HaresError::Equipment(format!("unrecognised fuel_type: {raw}")))?,
         };
         self.descriptor.fuel = self.fuel_type;
 
@@ -457,7 +460,11 @@ impl Equipment for EventBasedLoad {
             0.0
         };
         let is_fuel = self.fuel_type != FuelType::Electric;
-        let fuel_consumption_w = if is_fuel { active_power_kw * 1_000.0 } else { 0.0 };
+        let fuel_consumption_w = if is_fuel {
+            active_power_kw * 1_000.0
+        } else {
+            0.0
+        };
         let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
         let gain_source_w = active_power_kw * 1_000.0;
         self.telemetry.set("active_power_kw", electric_power_kw);
@@ -512,7 +519,7 @@ impl WetAppliance {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(parse_u32(&config.raw_config, KEY_EQUIPMENT_ID).unwrap_or_default()),
             name: equipment_name,
-            end_use: EndUse::Other,
+            end_use: EndUse::OTHER,
             equipment_type: Cow::Borrowed(name),
             zone: parse_zone_id(&config.raw_config),
             fuel: FuelType::Electric,
@@ -631,7 +638,11 @@ impl WetAppliance {
         };
 
         let is_fuel = self.fuel_type != FuelType::Electric;
-        let fuel_consumption_w = if is_fuel { active_power_kw * 1_000.0 } else { 0.0 };
+        let fuel_consumption_w = if is_fuel {
+            active_power_kw * 1_000.0
+        } else {
+            0.0
+        };
         let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
 
         // Thermal gains come from all input energy regardless of fuel type.
@@ -713,9 +724,8 @@ impl Equipment for WetAppliance {
 
         self.fuel_type = match config.get_str("fuel_type") {
             None => FuelType::Electric,
-            Some(raw) => parse_fuel_type(Some(raw)).ok_or_else(|| {
-                HaresError::Equipment(format!("unrecognised fuel_type: {raw}"))
-            })?,
+            Some(raw) => parse_fuel_type(Some(raw))
+                .ok_or_else(|| HaresError::Equipment(format!("unrecognised fuel_type: {raw}")))?,
         };
         self.descriptor.fuel = self.fuel_type;
 
@@ -732,7 +742,10 @@ impl Equipment for WetAppliance {
 
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.hot_water_draw_rate_kg_s > 0.0 {
-            self.ports.push(PortDeclaration::fluid(crate::water_heater::DHW_DEMAND_LOOP, FluidType::Water));
+            self.ports.push(PortDeclaration::fluid(
+                crate::water_heater::DHW_DEMAND_LOOP,
+                FluidType::Water,
+            ));
         }
         if self.fuel_type != FuelType::Electric {
             self.ports.push(PortDeclaration::fuel());
@@ -814,7 +827,10 @@ impl Equipment for WetAppliance {
         // Regenerate ports to reflect restored DHW demand and fuel state.
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.hot_water_draw_rate_kg_s > 0.0 {
-            self.ports.push(PortDeclaration::fluid(crate::water_heater::DHW_DEMAND_LOOP, FluidType::Water));
+            self.ports.push(PortDeclaration::fluid(
+                crate::water_heater::DHW_DEMAND_LOOP,
+                FluidType::Water,
+            ));
         }
         if self.fuel_type != FuelType::Electric {
             self.ports.push(PortDeclaration::fuel());
@@ -840,7 +856,11 @@ impl Equipment for WetAppliance {
             0.0
         };
         let is_fuel = self.fuel_type != FuelType::Electric;
-        let fuel_consumption_w = if is_fuel { active_power_kw * 1_000.0 } else { 0.0 };
+        let fuel_consumption_w = if is_fuel {
+            active_power_kw * 1_000.0
+        } else {
+            0.0
+        };
         let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
         let gain_source_w = active_power_kw * 1_000.0;
         self.telemetry.set("active_power_kw", electric_power_kw);
@@ -1944,15 +1964,13 @@ mod tests {
 
     fn gas_event_config(name: &str) -> EquipmentConfig {
         let mut cfg = event_config(name, "Cooking Range");
-        cfg.raw_config
-            .insert("fuel_type".to_string(), "Gas".into());
+        cfg.raw_config.insert("fuel_type".to_string(), "Gas".into());
         cfg
     }
 
     fn gas_wet_config(name: &str) -> EquipmentConfig {
         let mut cfg = wet_config(name, "Clothes Dryer", 1.0);
-        cfg.raw_config
-            .insert("fuel_type".to_string(), "Gas".into());
+        cfg.raw_config.insert("fuel_type".to_string(), "Gas".into());
         cfg
     }
 
@@ -2048,7 +2066,13 @@ mod tests {
 
         let gas_w = eq.telemetry().get("fuel_input_w").unwrap();
         let elec_kw = eq.telemetry().get("active_power_kw").unwrap();
-        assert!(gas_w > 0.0, "fuel_input_w must be positive for gas equipment");
-        assert_eq!(elec_kw, 0.0, "active_power_kw must be zero for gas equipment");
+        assert!(
+            gas_w > 0.0,
+            "fuel_input_w must be positive for gas equipment"
+        );
+        assert_eq!(
+            elec_kw, 0.0,
+            "active_power_kw must be zero for gas equipment"
+        );
     }
 }

@@ -12,8 +12,8 @@ use hares_envelope::{
     OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };
 use hares_types::{
-    DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
-    ZoneId, ZoneState,
+    DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+    ZoneState,
 };
 use nalgebra::DMatrix;
 
@@ -63,8 +63,7 @@ fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             solar_azimuth_deg: 180.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
-
+            ground_albedo: 0.2,
         },
         grid: GridState {
             voltage_pu: 1.0,
@@ -86,7 +85,11 @@ fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
 /// Inputs: [outdoor_temp, sensible_gain]
 ///
 /// dT/dt = -UA/C * T + UA/C * T_out + Q/C
-fn build_1r1c_solver(env: &EnvironmentState, indoor_temp_c: f64, config: ThermalSolverConfig) -> ThermalSolver {
+fn build_1r1c_solver(
+    env: &EnvironmentState,
+    indoor_temp_c: f64,
+    config: ThermalSolverConfig,
+) -> ThermalSolver {
     let a_c = DMatrix::from_row_slice(1, 1, &[-UA / C]);
     let b_c = DMatrix::from_row_slice(1, 2, &[UA / C, 1.0 / C]);
 
@@ -186,82 +189,5 @@ fn test_energy_conservation_1r1c_no_hvac() {
     assert!(
         t_zone > t_outdoor,
         "zone must remain above outdoor: final={t_zone}, outdoor={t_outdoor}"
-    );
-}
-
-/// 1R1C model with ideal HVAC setpoint 20 C, outdoor at 0 C.
-/// Run 24h, then verify at steady state: Q_hvac ~ Q_loss per step.
-#[test]
-fn test_energy_conservation_with_hvac() {
-    let t_initial = 20.0;
-    let t_outdoor = 0.0;
-
-    let mut env = one_zone_env(t_initial, t_outdoor);
-    let config = ThermalSolverConfig {
-        indoor_zone_id: ZONE,
-        ideal_setpoints_c: HashMap::from([(ZONE, 20.0)]),
-        ideal_hvac_zones: vec![ZONE],
-        ..ThermalSolverConfig::default()
-    };
-
-    let mut solver = build_1r1c_solver(&env, t_initial, config);
-    let ports = one_zone_ports();
-
-    let warmup_steps = 100;
-    let mut t_zone = t_initial;
-
-    // Warmup phase: let the solver settle
-    for _ in 0..warmup_steps {
-        let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
-        t_zone = zone_temp(&update);
-        env.zones[0].temperature_c = t_zone;
-    }
-
-    // Measurement phase: at steady state the ideal HVAC must inject exactly enough
-    // power to offset envelope loss. We read the ideal capacity from the solver's
-    // last_u via snapshot (ideal HVAC writes directly to u, not to port accumulators)
-    // and compare against independently computed Q_loss.
-    let measure_steps = STEPS_24H - warmup_steps;
-    let mut q_hvac_total = 0.0;
-    let mut q_loss_total = 0.0;
-
-    for _ in 0..measure_steps {
-        let t_before = t_zone;
-        let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
-        t_zone = zone_temp(&update);
-        env.zones[0].temperature_c = t_zone;
-
-        // HVAC power: read the sensible gain input from the solver's last_u vector.
-        // Ideal HVAC writes u[sensible_input_idx] = Q [W] directly.
-        let (_, last_u, _) = solver.snapshot_state();
-        let q_hvac_w = last_u[1]; // sensible_input_index for ZONE is 1
-        q_hvac_total += q_hvac_w * DT_S;
-
-        // Independent envelope loss via trapezoidal integration
-        let t_avg = 0.5 * (t_before + t_zone);
-        let q_loss_step = UA * (t_avg - t_outdoor) * DT_S;
-        q_loss_total += q_loss_step;
-    }
-
-    // At steady state with HVAC maintaining temperature, Q_hvac should balance Q_loss
-    let relative_error = (q_hvac_total - q_loss_total).abs() / q_loss_total.abs();
-
-    assert!(
-        relative_error < 0.01,
-        "HVAC energy balance relative error {:.2}% exceeds 1% threshold; \
-         Q_hvac={q_hvac_total:.2} J, Q_loss={q_loss_total:.2} J",
-        relative_error * 100.0
-    );
-
-    // HVAC must be providing positive heating
-    assert!(
-        q_hvac_total > 0.0,
-        "HVAC total energy must be positive (heating), got {q_hvac_total}"
-    );
-
-    // Zone temperature should be near setpoint
-    assert!(
-        (t_zone - 20.0).abs() < 0.5,
-        "zone temperature must be near setpoint 20 C, got {t_zone}"
     );
 }

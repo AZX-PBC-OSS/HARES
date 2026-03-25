@@ -6,8 +6,8 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, ThermalCategory,
-    TelemetryField, ZoneId,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -134,7 +134,7 @@ impl ResistanceWH {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
                 name: config.name,
-                end_use: EndUse::WaterHeating,
+                end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Resistance Water Heater"),
                 zone: Some(zone),
                 fuel: FuelType::Electric,
@@ -153,7 +153,11 @@ impl ResistanceWH {
                 PortDeclaration::fluid(loop_id, FluidType::Water),
                 PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
             ],
-            telemetry: default_telemetry(),
+            telemetry: {
+                let mut t = default_telemetry();
+                tank.register_node_telemetry(&mut t);
+                t
+            },
             tank,
             upper_node,
             lower_node,
@@ -249,8 +253,7 @@ impl Equipment for ResistanceWH {
             .clamp(1, 12);
 
         let tank_volume_m3 =
-            first_f64(config, &["tank_volume_m3"])
-                .unwrap_or(DEFAULT_TANK_VOLUME_M3);
+            first_f64(config, &["tank_volume_m3"]).unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =
@@ -292,8 +295,8 @@ impl Equipment for ResistanceWH {
             ua_end_cap_w_per_k: None,
         })?;
 
-        let capacity_w = first_f64(config, &["heating_capacity_w"])
-            .unwrap_or(DEFAULT_ELEMENT_POWER_W);
+        let capacity_w =
+            first_f64(config, &["heating_capacity_w"]).unwrap_or(DEFAULT_ELEMENT_POWER_W);
         self.upper_element_power_w =
             first_f64(config, &["upper_element_power_w", "UpperElementPower"])
                 .unwrap_or(capacity_w)
@@ -344,6 +347,7 @@ impl Equipment for ResistanceWH {
         self.dr_level = DRLevel::Normal;
         self.ctrl_load_fraction = 1.0;
         self.telemetry = default_telemetry();
+        self.tank.register_node_telemetry(&mut self.telemetry);
         Ok(())
     }
 
@@ -362,7 +366,10 @@ impl Equipment for ResistanceWH {
 
         // Safety cutout: force off if ANY node exceeds max tank temperature.
         // A high-limit aquastat/thermal fuse responds to the hottest point in the tank.
-        let max_node_temp = self.tank.node_temps().iter()
+        let max_node_temp = self
+            .tank
+            .node_temps()
+            .iter()
             .copied()
             .reduce(f64::max)
             .expect("node_temps is never empty");
@@ -490,9 +497,7 @@ impl Equipment for ResistanceWH {
         self.telemetry.set("upper_element_power_w", upper_power_w);
         self.telemetry.set("lower_element_power_w", lower_power_w);
         self.telemetry.set("electric_power_w", electric_power_w);
-        self.telemetry
-            .set("draw_flow_rate_kg_s", total_draw_kg_s);
-        self.telemetry.set("skin_loss_w", skin_loss_w);
+        self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry.set(
             "operating_mode",
             if mode == OperatingMode::Heating {
@@ -501,6 +506,7 @@ impl Equipment for ResistanceWH {
                 0.0
             },
         );
+        self.tank.update_node_telemetry(&mut self.telemetry);
 
         // Reset transient ctrl_load_fraction after this step so it does not
         // carry over to the next step unless reapplied by the controller.
@@ -667,13 +673,12 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(7);
+    let mut telemetry = Telemetry::with_capacity(6);
     telemetry.insert("tank_avg_temp_c", 0.0);
     telemetry.insert("upper_element_power_w", 0.0);
     telemetry.insert("lower_element_power_w", 0.0);
     telemetry.insert("electric_power_w", 0.0);
     telemetry.insert("draw_flow_rate_kg_s", 0.0);
-    telemetry.insert("skin_loss_w", 0.0);
     telemetry.insert("operating_mode", 0.0);
     telemetry
 }

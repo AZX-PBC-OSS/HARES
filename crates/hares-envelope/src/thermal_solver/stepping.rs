@@ -1,36 +1,39 @@
 //! State-space integration and ideal HVAC capacity solving.
 //!
 //! Contains `resolve_internal` (the per-timestep CN step with semi-implicit
-//! infiltration coupling) and `solve_ideal_capacity` (one-step-stale HVAC
-//! back-calculation). All methods operate on pre-allocated buffers owned by
-//! `ThermalSolver` — zero per-step heap allocation.
+//! infiltration coupling) and the ideal capacity solving method:
+//! - `solve_ideal_capacity_for_target`: compute HVAC capacity needed to reach an explicit target
+//!
+//! All methods operate on pre-allocated buffers owned by `ThermalSolver` — zero per-step heap
+//! allocation.
 
 use hares_types::{DomainUpdate, EnvironmentState, PortSlots, ZoneId};
 
 use super::ThermalSolver;
-use super::zone_setpoint_c;
 
 impl ThermalSolver {
-    /// Estimate the ideal HVAC capacity needed to maintain the zone setpoint.
+    /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.
     ///
     /// Uses `last_u`, `last_coupling`, and `last_coupled_lu` (previous timestep) as
     /// background. Called by equipment *before* `resolve()` builds the current-step
     /// inputs, so the estimate is one-step stale. Zero allocation — the coupled LU
     /// was cached at the end of the previous `resolve()` call.
-    pub fn solve_ideal_capacity(&self, env: &EnvironmentState, zone: ZoneId) -> f64 {
+    ///
+    /// Returns the required capacity in watts (positive = heating, negative = cooling),
+    /// or 0.0 if the zone is unknown or solving fails.
+    pub fn solve_ideal_capacity_for_target(&self, zone: ZoneId, target_c: f64) -> f64 {
         let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
             return 0.0;
         };
         let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
             return 0.0;
         };
-        let y_target = zone_setpoint_c(&self.config, env, zone);
 
         let result = match &self.last_coupled_lu {
             Some(lu) => self.model.solve_for_scalar_input_coupled(
                 &self.x,
                 &self.last_u,
-                y_target,
+                target_c,
                 output_idx,
                 input_idx,
                 lu,
@@ -39,14 +42,18 @@ impl ThermalSolver {
             None => self.model.solve_for_output_input(
                 &self.x,
                 &self.last_u,
-                y_target,
+                target_c,
                 output_idx,
                 input_idx,
             ),
         };
 
         result.unwrap_or_else(|e| {
-            tracing::debug!(?zone, ?e, "solve_ideal_capacity failed, returning 0");
+            tracing::debug!(
+                ?zone,
+                ?e,
+                "solve_ideal_capacity_for_target failed, returning 0"
+            );
             0.0
         })
     }
@@ -57,23 +64,9 @@ impl ThermalSolver {
         &mut self,
         ports: &PortSlots,
         env: &EnvironmentState,
-        ideal_hvac_zones: &[ZoneId],
     ) -> DomainUpdate {
-        let (mut u, latent_by_zone) = self.build_input_vector(ports, env);
+        let (u, latent_by_zone) = self.build_input_vector(ports, env);
 
-        // Build per-step fully-implicit coupling tuples from infiltration.
-        //
-        // Infiltration conductance h_inf [W/K] enters the zone air heat balance as
-        // q_inf = h_inf * (T_out - T_zone). Following EnergyPlus Engineering Reference
-        // §13.3, the temperature-dependent term is treated fully implicitly to guarantee
-        // monotonic, oscillation-free convergence even when the infiltration time
-        // constant is much smaller than the timestep.
-        //
-        // The coupling API adds d to M's diagonal and subtracts d from N's diagonal.
-        // For fully implicit treatment we want d on M only, so the forcing includes a
-        // compensation term `+d * x[k]` to cancel the unwanted N-side subtraction:
-        //   d = h_inf * b_eff[(state, input)]
-        //   f = h_inf * T_out * b_eff + d * x[state]
         self.coupling_buf.clear();
         for inf in &self.infiltration_buf {
             if inf.h_inf_w_k.abs() < 1e-15 {
@@ -87,46 +80,14 @@ impl ThermalSolver {
             };
             let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
             let d = inf.h_inf_w_k * b_coeff;
-            // Compensation: the coupling API subtracts d*x[k] from the explicit side,
-            // but backward Euler wants zero on the explicit side, so add d*x[k] back.
             let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));
         }
 
-        // Track ideal HVAC loads for component_gains reporting.
-        let mut ideal_heating_w = 0.0_f64;
-        let mut ideal_cooling_w = 0.0_f64;
-
         if !self.coupling_buf.is_empty() {
-            // Coupled path: build modified LU once, reuse for HVAC solve, step, and cache.
-            let coupled_lu =
-                self.model
-                    .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
-
-            for &zone in ideal_hvac_zones {
-                let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-                    continue;
-                };
-                let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-                    continue;
-                };
-                let target = zone_setpoint_c(&self.config, env, zone);
-
-                if let Ok(q) = self.model.solve_for_scalar_input_coupled_into(
-                    &self.x,
-                    &u,
-                    target,
-                    output_idx,
-                    input_idx,
-                    &coupled_lu,
-                    &self.coupling_buf,
-                    &mut self.solve_rhs_buf,
-                    &mut self.solve_gain_buf,
-                ) {
-                    u[input_idx] = q;
-                    if q > 0.0 { ideal_heating_w += q; } else { ideal_cooling_w += q; }
-                }
-            }
+            let coupled_lu = self
+                .model
+                .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
 
             self.model.step_with_coupled_lu_into(
                 &self.x,
@@ -138,39 +99,9 @@ impl ThermalSolver {
 
             self.last_coupled_lu = Some(coupled_lu);
         } else {
-            for &zone in ideal_hvac_zones {
-                let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&zone) else {
-                    continue;
-                };
-                let Some(&output_idx) = self.wiring.zone_output_indices.get(&zone) else {
-                    continue;
-                };
-                let target = zone_setpoint_c(&self.config, env, zone);
-
-                if let Ok(q) = self.model.solve_for_output_input_into(
-                    &self.x,
-                    &u,
-                    target,
-                    output_idx,
-                    input_idx,
-                    &mut self.solve_rhs_buf,
-                    &mut self.solve_gain_buf,
-                ) {
-                    u[input_idx] = q;
-                    if q > 0.0 { ideal_heating_w += q; } else { ideal_cooling_w += q; }
-                }
-            }
-
             self.model.step_into(&self.x, &u, &mut self.rhs_buf);
             self.last_coupled_lu = None;
         }
-
-        self.ideal_heating_w = ideal_heating_w;
-        self.ideal_cooling_w = ideal_cooling_w;
-
-        // Add ideal HVAC loads to component gains (on top of any equipment port contributions).
-        self.component_gains.hvac_heating_w += ideal_heating_w;
-        self.component_gains.hvac_cooling_w += ideal_cooling_w;
 
         std::mem::swap(&mut self.x, &mut self.rhs_buf);
         let y_next = self.model.output(&self.x, &u);
@@ -179,22 +110,33 @@ impl ThermalSolver {
         // T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone
         // Q_conv = (T_surface - T_zone) × A / R_film_int
         if !self.config.boundary_diagnostics.is_empty() {
-            let zone_output_idx = self.wiring.zone_output_indices
+            let zone_output_idx = self
+                .wiring
+                .zone_output_indices
                 .get(&self.config.indoor_zone_id)
                 .copied()
                 .unwrap_or(0);
             let t_zone = y_next[zone_output_idx];
             for diag in &self.config.boundary_diagnostics {
                 let t_node = self.x[diag.inner_state_index];
-                let t_surface = diag.radiation_frac * t_node
-                    + (1.0 - diag.radiation_frac) * t_zone;
+                let t_surface = diag.radiation_frac * t_node + (1.0 - diag.radiation_frac) * t_zone;
                 let q = (t_surface - t_zone) * diag.area_m2 / diag.r_film_int_m2_k_w;
                 match diag.category {
-                    super::config::BoundaryCategory::Wall => self.component_gains.wall_heat_gain_w += q,
-                    super::config::BoundaryCategory::Floor => self.component_gains.floor_heat_gain_w += q,
-                    super::config::BoundaryCategory::Roof => self.component_gains.roof_heat_gain_w += q,
-                    super::config::BoundaryCategory::Window => self.component_gains.window_heat_gain_w += q,
-                    super::config::BoundaryCategory::InternalMass => self.component_gains.internal_mass_heat_gain_w += q,
+                    super::config::BoundaryCategory::Wall => {
+                        self.component_gains.wall_heat_gain_w += q
+                    }
+                    super::config::BoundaryCategory::Floor => {
+                        self.component_gains.floor_heat_gain_w += q
+                    }
+                    super::config::BoundaryCategory::Roof => {
+                        self.component_gains.roof_heat_gain_w += q
+                    }
+                    super::config::BoundaryCategory::Window => {
+                        self.component_gains.window_heat_gain_w += q
+                    }
+                    super::config::BoundaryCategory::InternalMass => {
+                        self.component_gains.internal_mass_heat_gain_w += q
+                    }
                 }
             }
         }

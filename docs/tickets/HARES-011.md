@@ -33,7 +33,7 @@ OCHRE expresses control actions as string key–value pairs tied to equipment ty
     - Unknown keys are silently skipped (the returned `Vec` simply omits them; no panic or error)
     - Document the `0.0`/`1.0` boolean convention explicitly in a module-level or function-level doc comment
 - [ ] Implement in `dispatch.rs`:
-  - `DispatchTarget` enum with variants: `ByName(String)`, `ByEndUse(EndUse)`
+  - `DispatchTarget` enum with variants: `ByName(Arc<str>)`, `ByEndUse(EndUse)`
   - `DispatchRequest` struct with fields: `target: DispatchTarget`, `signal: ControlSignal`
   - Note: routing logic lives in `hares-core`, not here
 - [ ] Implement in `types.rs`:

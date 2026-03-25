@@ -28,28 +28,21 @@ impl ThermalSolver {
                 let poa_diffuse = irr.diffuse_w_m2 * iam_diffuse;
                 let poa_w_m2 = poa_beam + poa_diffuse;
 
-                // Transmitted solar passes through glass into the zone.
                 let transmitted_beam_w = win.area_m2 * win.transmittance * poa_beam;
                 let transmitted_diffuse_w = win.area_m2 * win.transmittance * poa_diffuse;
                 let transmitted_total_w = transmitted_beam_w + transmitted_diffuse_w;
 
-                // Absorbed glass heat (inward-flowing fraction) → zone air node.
                 debug_assert!(
                     win.shgc >= win.transmittance - 1e-6,
                     "SHGC ({}) < transmittance ({}): check window config",
                     win.shgc,
                     win.transmittance
                 );
-                // BUG FIX: The absorbed_inward must include radiation_frac (N_i) which
-                // is the inward-flowing fraction of absorbed solar per EnergyPlus model.
-                // absorbed_inward = (SHGC - transmittance) * radiation_frac
                 let absorbed_inward = (win.shgc - win.transmittance).max(0.0) * win.radiation_frac;
                 let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
 
-                // Window solar (absorbed + transmitted) → zone air node directly.
-                // Unlike opaque solar (which goes to the wall's exterior RC node),
-                // window gains bypass the wall assembly and heat zone air.
-                // Find the zone air input index for this window's zone.
+                // Copy scalars from `win` before mutable borrows below.
+                let shgc = win.shgc;
                 let zone_id = self.config.window_zone_ids.get(&irr.surface_id).copied();
                 let air_idx = zone_id
                     .and_then(|zid| self.wiring.zone_sensible_input_indices.get(&zid).copied())
@@ -57,8 +50,6 @@ impl ThermalSolver {
 
                 u[air_idx] += absorbed_zone_w;
 
-                // Distribute transmitted solar to interior surfaces if configured,
-                // otherwise inject directly into zone air.
                 let distributed = match zone_id {
                     Some(zid) => self.distribute_transmitted_solar(
                         u,
@@ -72,6 +63,20 @@ impl ThermalSolver {
                 if !distributed {
                     u[air_idx] += transmitted_total_w;
                 }
+
+                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                self.window_solar_diag_buf
+                    .push(super::config::WindowSolarDiag {
+                        surface_id: irr.surface_id,
+                        poa_beam_w_m2: poa_beam,
+                        poa_diffuse_w_m2: poa_diffuse,
+                        iam_beam,
+                        iam_diffuse,
+                        transmitted_beam_w,
+                        transmitted_diffuse_w,
+                        absorbed_zone_w,
+                        shgc,
+                    });
             }
         }
     }

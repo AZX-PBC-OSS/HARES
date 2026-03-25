@@ -63,4 +63,4 @@ pub const MSHP_PAN_HEATER_DEFAULT_TEMP_C: f64 = 0.0;
 pub const DEFAULT_AC_SPEED_MAP_ERROR: &str =
     "mshp_speed_map must contain 4 comma-separated integers in [0, 9]";
 
-pub const HEATER_TELEMETRY_CAPACITY: usize = 10;
+pub const HEATER_TELEMETRY_CAPACITY: usize = 9;

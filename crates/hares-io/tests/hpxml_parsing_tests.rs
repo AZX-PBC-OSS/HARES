@@ -57,6 +57,7 @@ fn empty_weather_meta() -> WeatherMeta {
         timezone_offset_h: -7.0,
         elevation_m: 1600.0,
         source_step_secs: 3600,
+        midpoint_offset_secs: 0,
     }
 }
 

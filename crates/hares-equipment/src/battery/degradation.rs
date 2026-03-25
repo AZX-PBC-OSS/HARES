@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ocv::UNegTable;
 use super::SECONDS_PER_DAY;
+use super::ocv::UNegTable;
 
 // ---------------------------------------------------------------------------
 // Rainflow cycle counter (ASTM E1049-85 simplified)
@@ -268,7 +268,12 @@ impl DegradationState {
     /// `u_neg_table`        — negative electrode potential lookup table
     /// `cell_temp_k`        — representative cell temperature for the day (K)
     /// `sum_squared_dod`    — Σ DOD_i² from today's rainflow cycles
-    pub(crate) fn update_daily(&mut self, u_neg_table: &UNegTable, cell_temp_k: f64, sum_squared_dod: f64) {
+    pub(crate) fn update_daily(
+        &mut self,
+        u_neg_table: &UNegTable,
+        cell_temp_k: f64,
+        sum_squared_dod: f64,
+    ) {
         use deg_const::*;
 
         let t_day = cell_temp_k;

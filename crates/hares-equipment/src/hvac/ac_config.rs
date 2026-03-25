@@ -4,18 +4,20 @@
 
 use hares_types::{HaresError, Telemetry, TelemetryField, parse_trimmed_f64};
 
-use crate::EquipmentConfig;
 use super::core_config::parse_biquadratic_list;
+use crate::EquipmentConfig;
 
-pub(super) const DEFAULT_AC_CAPACITY_CURVE: [f64; 6] = [1.5509, -0.07505, 0.0031, 0.0024, -0.00005, -0.00043];
-pub(super) const DEFAULT_AC_EIR_CURVE: [f64; 6] = [-0.30428, 0.11805, -0.00342, -0.00626, 0.0007, -0.00047];
+pub(super) const DEFAULT_AC_CAPACITY_CURVE: [f64; 6] =
+    [1.5509, -0.07505, 0.0031, 0.0024, -0.00005, -0.00043];
+pub(super) const DEFAULT_AC_EIR_CURVE: [f64; 6] =
+    [-0.30428, 0.11805, -0.00342, -0.00626, 0.0007, -0.00047];
 pub(super) const DEFAULT_ROOM_AC_CAPACITY_CURVE: [f64; 6] =
     [0.6405, 0.01568, 0.0004531, 0.001615, -0.0001825, 0.00006614];
 pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(7);
+    let mut telemetry = Telemetry::with_capacity(12);
     telemetry.insert("electric_kw", 0.0);
     telemetry.insert("sensible_cooling_w", 0.0);
     telemetry.insert("latent_cooling_w", 0.0);
@@ -23,6 +25,11 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert("operating_mode", 0.0);
     telemetry.insert("cop", 0.0);
     telemetry.insert("runtime_fraction", 0.0);
+    telemetry.insert("compressor_kw", 0.0);
+    telemetry.insert("fan_kw", 0.0);
+    telemetry.insert("supply_temp_c", 0.0);
+    telemetry.insert("apparatus_dew_point_c", 0.0);
+    telemetry.insert("bypass_factor", 0.0);
     telemetry
 }
 
@@ -53,10 +60,48 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 2=Cooling".to_string(),
         },
+        TelemetryField {
+            name: "cop".to_string(),
+            unit: "-".to_string(),
+            description: "Coefficient of performance (AHRI: excludes fan)".to_string(),
+        },
+        TelemetryField {
+            name: "runtime_fraction".to_string(),
+            unit: "-".to_string(),
+            description: "Runtime fraction (PLR/PLF) [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: "compressor_kw".to_string(),
+            unit: "kW".to_string(),
+            description: "Compressor-only electric power".to_string(),
+        },
+        TelemetryField {
+            name: "fan_kw".to_string(),
+            unit: "kW".to_string(),
+            description: "Supply fan electric power".to_string(),
+        },
+        TelemetryField {
+            name: "supply_temp_c".to_string(),
+            unit: "C".to_string(),
+            description: "Supply air temperature leaving the coil".to_string(),
+        },
+        TelemetryField {
+            name: "apparatus_dew_point_c".to_string(),
+            unit: "C".to_string(),
+            description: "Apparatus dew point temperature at the coil".to_string(),
+        },
+        TelemetryField {
+            name: "bypass_factor".to_string(),
+            unit: "-".to_string(),
+            description: "Coil bypass factor (fraction of air bypassing the coil)".to_string(),
+        },
     ]
 }
 
-pub(super) fn load_curve_pair(config: &EquipmentConfig, is_room_ac: bool) -> crate::Result<Vec<[f64; 6]>> {
+pub(super) fn load_curve_pair(
+    config: &EquipmentConfig,
+    is_room_ac: bool,
+) -> crate::Result<Vec<[f64; 6]>> {
     let mut curves = if let Some(raw) = config.get_str("biquadratic_coeffs") {
         parse_biquadratic_list(raw)?
     } else {

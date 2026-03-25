@@ -75,12 +75,11 @@ pub(crate) fn initialize_steady_state(
     // Discrete path (from_discrete): solve (I - A_d)·x = B_d·u with zone states pinned.
     //   Partitioned: (I - A_d_reduced)·x_reduced = B_d·u + A_d[:,j]·T_j for each fixed j.
     let use_continuous = model.a_c().is_some() && model.b_c().is_some();
-    let (mut a_reduced, mut b_rhs) =
-        if let (Some(a_c), Some(b_c)) = (model.a_c(), model.b_c()) {
-            (a_c.clone(), b_c * &u)
-        } else {
-            (model.n_mat().clone(), model.b_eff() * &u)
-        };
+    let (mut a_reduced, mut b_rhs) = if let (Some(a_c), Some(b_c)) = (model.a_c(), model.b_c()) {
+        (a_c.clone(), b_c * &u)
+    } else {
+        (model.n_mat().clone(), model.b_eff() * &u)
+    };
 
     // Add coupling from fixed zone states to RHS, then remove those rows/cols.
     for &(j, t_fixed) in &zone_fixes {
@@ -183,7 +182,6 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
-
             },
             grid: GridState {
                 voltage_pu: 1.0,

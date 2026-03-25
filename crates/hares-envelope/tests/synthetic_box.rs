@@ -13,8 +13,8 @@ use hares_envelope::{
     ThermalSolverConfig, discretize_auto, matrix_exp,
 };
 use hares_types::{
-    DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
-    ZoneId, ZoneState,
+    DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+    ZoneState,
 };
 use nalgebra::{DMatrix, DVector};
 
@@ -60,8 +60,7 @@ fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64, volume_m3: f64) -> Enviro
             solar_azimuth_deg: 180.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
-
+            ground_albedo: 0.2,
         },
         grid: GridState {
             voltage_pu: 1.0,
@@ -175,44 +174,6 @@ fn test_1r1c_exponential_decay() {
     );
 }
 
-/// 1R1C with ideal HVAC at setpoint 20 C, outdoor 0 C.
-/// Steady-state HVAC = UA * dT = 20 * 20 = 400 W.
-#[test]
-fn test_1r1c_steady_state_with_hvac() {
-    let t_initial = 20.0;
-    let t_outdoor = 0.0;
-
-    let mut env = one_zone_env(t_initial, t_outdoor, 200.0);
-    let config = ThermalSolverConfig {
-        indoor_zone_id: ZONE,
-        ideal_setpoints_c: HashMap::from([(ZONE, 20.0)]),
-        ideal_hvac_zones: vec![ZONE],
-        ..ThermalSolverConfig::default()
-    };
-
-    let mut solver = build_1r1c_solver(&env, t_initial, config, UA, C);
-    let ports = one_zone_ports();
-
-    for _ in 0..STEPS_24H {
-        let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
-        let t = zone_temp(&update);
-        env.zones[0].temperature_c = t;
-    }
-
-    // Read HVAC power from last_u (index 1 = sensible gain input)
-    let (_, last_u, _) = solver.snapshot_state();
-    let hvac_power_w = last_u[1];
-
-    let expected_power = UA * (t_initial - t_outdoor); // 400 W
-    let relative_error = (hvac_power_w - expected_power).abs() / expected_power;
-
-    assert!(
-        relative_error < 0.01,
-        "HVAC power {hvac_power_w:.2} W deviates from expected {expected_power:.2} W by {:.2}%",
-        relative_error * 100.0
-    );
-}
-
 /// 1R1C with 500 W constant solar gain, no HVAC. Outdoor 0 C.
 /// Steady-state: T_ss = T_out + Q_solar * R = 0 + 500 * 0.05 = 25 C.
 /// At 5tau the analytical step response is T_out + Q/UA * (1 - exp(-5)) ~ 24.83 C.
@@ -318,66 +279,6 @@ fn test_1r1c_with_moderate_infiltration() {
     );
 }
 
-/// 1R1C with moderate infiltration + HVAC setpoint 20°C, outdoor 0°C.
-/// Steady-state HVAC must compensate both conduction and infiltration losses:
-///   HVAC_ss = (UA_envelope + UA_infiltration) × ΔT
-///   UA_inf = ρ·cp·ACH·V/3600 (using implementation's density at outdoor conditions)
-/// This validates that solve_for_scalar_input_coupled correctly accounts for the
-/// semi-implicit infiltration coupling in the ideal HVAC solve.
-#[test]
-fn test_1r1c_infiltration_with_hvac_steady_state() {
-    let t_initial = 20.0;
-    let t_outdoor = 0.0;
-    let volume_m3 = 400.0;
-    let ach = 0.05;
-
-    let mut env = one_zone_env(t_initial, t_outdoor, volume_m3);
-    let config = ThermalSolverConfig {
-        indoor_zone_id: ZONE,
-        infiltration: vec![(ZONE, InfiltrationMethod::Ach { ach })],
-        ideal_setpoints_c: std::collections::HashMap::from([(ZONE, 20.0)]),
-        ideal_hvac_zones: vec![ZONE],
-        ..ThermalSolverConfig::default()
-    };
-
-    let mut solver = build_1r1c_solver(&env, t_initial, config, UA, C);
-    let ports = one_zone_ports();
-
-    // Run 24h (>> 5τ) to reach steady state
-    for _ in 0..STEPS_24H {
-        let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
-        let t = zone_temp(&update);
-        env.zones[0].temperature_c = t;
-    }
-
-    // Read HVAC power from last_u[sensible_input_idx]
-    let (_, last_u, _) = solver.snapshot_state();
-    let hvac_power_w = last_u[1];
-
-    // Analytical: use the same density computation as the implementation
-    // (moist air density at outdoor conditions, divided by 1+w for dry-air basis)
-    let rho = hares_physics::air_properties::moist_air_density_kg_m3(
-        101_325.0, t_outdoor, 0.004,
-    );
-    let ua_inf = rho * hares_physics::constants::CP_DRY_AIR_J_KG_K * ach * volume_m3 / 3600.0;
-    let ua_total = UA + ua_inf;
-    let hvac_expected = ua_total * (t_initial - t_outdoor);
-
-    let rel_error = (hvac_power_w - hvac_expected).abs() / hvac_expected;
-    assert!(
-        rel_error < 0.02,
-        "HVAC power {hvac_power_w:.1} W differs from analytical {hvac_expected:.1} W by {:.1}% (> 2%)",
-        rel_error * 100.0
-    );
-
-    // Zone must be near setpoint
-    assert!(
-        (env.zones[0].temperature_c - 20.0).abs() < 0.5,
-        "zone must be near setpoint: got {:.4}°C",
-        env.zones[0].temperature_c
-    );
-}
-
 /// Extreme infiltration (ACH=50, V=200 m³) with low thermal mass (C=50 kJ/K).
 /// UA_inf = 1207 × 50 × 200 / 3600 ≈ 3353 W/K. Combined with UA=20 → UA_total ≈ 3373 W/K.
 /// τ = 50000 / 3373 ≈ 14.8s. With dt=60s, dt/τ ≈ 4 — explicit Euler eigenvalue would be
@@ -405,10 +306,7 @@ fn test_implicit_stability_extreme_ach() {
     let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
     let t_step1 = zone_temp(&update);
     env.zones[0].temperature_c = t_step1;
-    assert!(
-        t_step1.is_finite(),
-        "step 1: temperature is NaN/Inf"
-    );
+    assert!(t_step1.is_finite(), "step 1: temperature is NaN/Inf");
     assert!(
         t_step1 >= t_outdoor && t_step1 <= t_initial,
         "step 1: zone {t_step1}°C must be in [{t_outdoor}, {t_initial}]"
@@ -434,7 +332,8 @@ fn test_implicit_stability_extreme_ach() {
         assert!(
             dist_next <= dist_prev + 0.01, // small tolerance for floating point
             "non-monotonic: {:.4}°C → {:.4}°C (outdoor={t_outdoor})",
-            window[0], window[1]
+            window[0],
+            window[1]
         );
     }
 
@@ -460,15 +359,13 @@ fn test_implicit_vs_explicit_agreement_stable_case() {
     };
 
     // CN model
-    let cn_model =
-        StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping).expect("CN model");
+    let cn_model = StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping).expect("CN model");
 
     // Matrix-exponential model
     let (a_d, b_d) = discretize_auto(&a_c, &b_c, DT_S).expect("discretize_auto");
     let c_mat = DMatrix::from_row_slice(1, 1, &[1.0]);
     let d_mat = DMatrix::zeros(1, 2);
-    let exp_model =
-        StateSpaceModel::from_discrete(a_d, b_d, c_mat, d_mat).expect("discrete model");
+    let exp_model = StateSpaceModel::from_discrete(a_d, b_d, c_mat, d_mat).expect("discrete model");
 
     let t_initial = 20.0;
     let t_outdoor = 0.0;
@@ -490,7 +387,8 @@ fn test_implicit_vs_explicit_agreement_stable_case() {
         assert!(
             diff < 0.1,
             "step {step}: CN={:.6}, exp={:.6}, diff={diff:.6} exceeds 0.1°C transient tolerance",
-            x_cn[0], x_exp[0]
+            x_cn[0],
+            x_exp[0]
         );
     }
 
@@ -499,7 +397,8 @@ fn test_implicit_vs_explicit_agreement_stable_case() {
     assert!(
         diff_final < 0.01,
         "steady-state: CN={:.6}, exp={:.6}, diff={diff_final:.6} exceeds 0.01°C",
-        x_cn[0], x_exp[0]
+        x_cn[0],
+        x_exp[0]
     );
 }
 
@@ -624,8 +523,7 @@ fn test_near_zero_thermal_mass() {
     assert!(
         converged,
         "near-zero thermal mass should converge to steady state within {} steps, final T={}",
-        total_steps,
-        x[0]
+        total_steps, x[0]
     );
 }
 
@@ -644,8 +542,7 @@ fn test_step_into_zero_allocations() {
         input_to_output: vec![],
     };
 
-    let model =
-        StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping).expect("model");
+    let model = StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping).expect("model");
 
     let mut x = DVector::from_element(1, 20.0);
     let u = DVector::from_column_slice(&[0.0, 0.0]);

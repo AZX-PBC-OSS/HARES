@@ -52,7 +52,7 @@ quick-xml = "0.39"
 rand = "0.10"
 rand_chacha = "0.10"
 rand_distr = "0.6"
-tracing = "0.1"
+tracing = { version = "0.1", features = ["release_max_level_info"] }
 thiserror = "2"
 bitflags = "2"
 toml = "1"

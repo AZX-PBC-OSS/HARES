@@ -86,6 +86,8 @@ pub struct StratifiedTank {
     /// Total skin (jacket) heat loss from the most recent conduction step [W].
     /// Positive means heat flowing OUT of the tank (warming the ambient zone).
     last_skin_loss_w: f64,
+    /// Pre-computed telemetry key strings: `["tank_node_0_c", "tank_node_1_c", ...]`.
+    telemetry_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +171,9 @@ impl StratifiedTank {
             element_nodes: config.element_nodes,
             ua_per_node,
             last_skin_loss_w: 0.0,
+            telemetry_keys: (0..config.n_nodes)
+                .map(|i| format!("tank_node_{i}_c"))
+                .collect(),
         })
     }
 
@@ -209,6 +214,27 @@ impl StratifiedTank {
     #[cfg(test)]
     pub fn node_temps_mut(&mut self) -> &mut [f64] {
         &mut self.node_temps_c
+    }
+
+    /// Number of telemetry keys that `register_node_telemetry` will insert.
+    pub fn telemetry_key_count(&self) -> usize {
+        self.telemetry_keys.len() + 1 // +1 for skin_loss_w
+    }
+
+    /// Registers per-node temperature keys in the telemetry map (`tank_node_0_c`, etc.).
+    pub fn register_node_telemetry(&self, telemetry: &mut hares_types::Telemetry) {
+        for (key, &temp) in self.telemetry_keys.iter().zip(self.node_temps_c.iter()) {
+            telemetry.insert(key.as_str(), temp);
+        }
+        telemetry.insert("skin_loss_w", self.last_skin_loss_w);
+    }
+
+    /// Updates per-node temperature values in the telemetry map. Zero allocations.
+    pub fn update_node_telemetry(&self, telemetry: &mut hares_types::Telemetry) {
+        for (key, &temp) in self.telemetry_keys.iter().zip(self.node_temps_c.iter()) {
+            telemetry.set(key, temp);
+        }
+        telemetry.set("skin_loss_w", self.last_skin_loss_w);
     }
 
     pub fn node_volumes_m3(&self) -> &[f64] {
@@ -779,7 +805,8 @@ mod tests {
         let effective_ua = tank.ua_per_node[0];
         let expected = 60.0 - (effective_ua * (60.0 - ambient) * dt.as_secs_f64()) / mcp;
 
-        tank.step(ambient, 0.0, 12.0, &[], dt).expect("standby step");
+        tank.step(ambient, 0.0, 12.0, &[], dt)
+            .expect("standby step");
         assert!((tank.node_temps()[0] - expected).abs() < 1.0e-12);
     }
 

@@ -136,6 +136,7 @@ fn run_success_produces_metrics_elapsed_and_output_path() {
         overrides: None,
         bldg_id: 123,
         initialization_duration: None,
+        resample_overrides: None,
     };
 
     let engine = SimulationEngine::new();
@@ -177,6 +178,7 @@ fn run_returns_err_for_missing_hpxml_path() {
         overrides: None,
         bldg_id: 1,
         initialization_duration: None,
+        resample_overrides: None,
     };
 
     let engine = SimulationEngine::new();
@@ -197,6 +199,7 @@ fn run_returns_err_for_missing_schedule_or_weather_path() {
         overrides: None,
         bldg_id: 2,
         initialization_duration: None,
+        resample_overrides: None,
     };
 
     let engine = SimulationEngine::new();
@@ -214,6 +217,7 @@ fn run_returns_err_for_missing_schedule_or_weather_path() {
         overrides: None,
         bldg_id: 3,
         initialization_duration: None,
+        resample_overrides: None,
     };
     fs::write(&weather_missing.schedule_path, build_schedule_csv())
         .expect("failed to write temp schedule");

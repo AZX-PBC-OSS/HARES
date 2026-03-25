@@ -91,16 +91,13 @@ pub fn building_to_boundary_inputs(
             } else {
                 envelope_lut
                     .and_then(|lut| {
-                        let boundary_name = bd
-                            .lut_boundary_name
-                            .as_deref()
-                            .or_else(|| {
-                                resolve_boundary_name(
-                                    &bd.boundary_type,
-                                    bd.interior_zone.as_ref(),
-                                    bd.exterior_zone.as_ref(),
-                                )
-                            })?;
+                        let boundary_name = bd.lut_boundary_name.as_deref().or_else(|| {
+                            resolve_boundary_name(
+                                &bd.boundary_type,
+                                bd.interior_zone.as_ref(),
+                                bd.exterior_zone.as_ref(),
+                            )
+                        })?;
                         let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
                             let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
                             if sum > 0.0 { Some(sum) } else { None }
@@ -147,26 +144,25 @@ pub fn building_to_boundary_inputs(
 
             // Window U-factor decomposition: EnergyPlus Simple Window Model Step 1.
             // Overrides fallback_r and film resistances for window boundaries.
-            let (fallback_r, r_film_int, r_film_ext) =
-                if bd.boundary_type == BoundaryType::Window {
-                    let u_factor = building
-                        .windows
-                        .iter()
-                        .find(|w| w.id == bd.id)
-                        .and_then(|w| w.u_factor_w_m2_k);
-                    if let Some(u) = u_factor.filter(|&u| u > 0.0) {
-                        let (r_glass, r_int) = window_u_factor_decomposition(u);
-                        (r_glass, r_int, 0.0)
-                    } else {
-                        tracing::warn!(
-                            boundary = %bd.id,
-                            "window boundary has no U-factor — using generic film resistances"
-                        );
-                        (fallback_r, r_film_int, r_film_ext)
-                    }
+            let (fallback_r, r_film_int, r_film_ext) = if bd.boundary_type == BoundaryType::Window {
+                let u_factor = building
+                    .windows
+                    .iter()
+                    .find(|w| w.id == bd.id)
+                    .and_then(|w| w.u_factor_w_m2_k);
+                if let Some(u) = u_factor.filter(|&u| u > 0.0) {
+                    let (r_glass, r_int) = window_u_factor_decomposition(u);
+                    (r_glass, r_int, 0.0)
                 } else {
+                    tracing::warn!(
+                        boundary = %bd.id,
+                        "window boundary has no U-factor — using generic film resistances"
+                    );
                     (fallback_r, r_film_int, r_film_ext)
-                };
+                }
+            } else {
+                (fallback_r, r_film_int, r_film_ext)
+            };
 
             BoundaryInput {
                 area_m2: bd.area_m2,

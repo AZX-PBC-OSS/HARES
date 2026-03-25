@@ -146,9 +146,7 @@ pub enum CapacityDerateModel {
     ///
     /// Points are `(cell_temp_c, derate_factor)` sorted by temperature.
     /// Linearly interpolates between bracketing points; clamps outside range.
-    PiecewiseLinear {
-        points: Vec<(f64, f64)>,
-    },
+    PiecewiseLinear { points: Vec<(f64, f64)> },
 }
 
 impl Default for CapacityDerateModel {
@@ -180,8 +178,7 @@ impl CapacityDerateModel {
                     return 0.0;
                 }
                 let inv_diff = 1.0 / t_k - 1.0 / t_ref_k;
-                let exponent =
-                    -e_ad1_j_mol / R_GAS_J_MOL_K * inv_diff
+                let exponent = -e_ad1_j_mol / R_GAS_J_MOL_K * inv_diff
                     - e_ad2_j2_mol2 / R_GAS_J_MOL_K * inv_diff * inv_diff;
                 (d0_ref * exponent.exp()).clamp(0.0, 1.06)
             }
@@ -337,7 +334,7 @@ impl Battery {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id),
             name: config.name.clone(),
-            end_use: EndUse::Battery,
+            end_use: EndUse::BATTERY,
             equipment_type: Cow::Borrowed("Battery"),
             zone,
             fuel: FuelType::Electric,
@@ -407,12 +404,12 @@ impl Battery {
     /// quadratic terminal-voltage formula (OCHRE method) for accurate current and
     /// ohmic loss calculation at high C-rates.
     ///
-    /// Returns `(actual_power_kw, ohmic_loss_w)` where `actual_power_kw` is the
-    /// power at the grid connection point (positive = charging/consuming,
-    /// negative = discharging/generating).
-    fn compute_electrical(&self, target_ac_power_kw: f64) -> (f64, f64) {
+    /// Returns `(actual_power_kw, ohmic_loss_w, terminal_voltage_v, current_a)`
+    /// where `actual_power_kw` is the power at the grid connection point
+    /// (positive = charging/consuming, negative = discharging/generating).
+    fn compute_electrical(&self, target_ac_power_kw: f64) -> (f64, f64, f64, f64) {
         if target_ac_power_kw.abs() < IDLE_POWER_THRESHOLD_KW {
-            return (0.0, 0.0);
+            return (0.0, 0.0, 0.0, 0.0);
         }
         let cell_ocv = self.ocv_table.voltage_at_soc(self.soc);
         let pack_ocv = cell_ocv * self.n_series as f64;
@@ -420,7 +417,7 @@ impl Battery {
             self.cell_resistance_ohm * self.n_series as f64 / self.n_parallel as f64;
 
         if pack_ocv < f64::EPSILON {
-            return (0.0, 0.0);
+            return (0.0, 0.0, 0.0, 0.0);
         }
 
         // Convert AC power to DC power using direction-specific efficiency.
@@ -469,7 +466,7 @@ impl Battery {
             actual_dc_power_w * self.discharge_efficiency / 1000.0
         };
 
-        (actual_ac_power_kw, ohmic_loss_w)
+        (actual_ac_power_kw, ohmic_loss_w, terminal_v, current_a)
     }
 
     /// Determine the target charge/discharge power based on control state and
@@ -523,7 +520,10 @@ impl Battery {
     /// OCHRE `Generator.get_power_limits` + Battery schedule inputs
     /// `Battery Max Import Limit (kW)` / `Battery Max Export Limit (kW)`.
     fn clamp_power(&self, power_kw: f64) -> f64 {
-        let temp_derate = self.capacity_derate_model.evaluate(self.cell_temp_c).clamp(0.0, 1.0);
+        let temp_derate = self
+            .capacity_derate_model
+            .evaluate(self.cell_temp_c)
+            .clamp(0.0, 1.0);
         let dr_fraction = self.dr_power_fraction();
         if power_kw > 0.0 {
             let hw_max = self.max_charge_kw * temp_derate * dr_fraction;
@@ -531,7 +531,9 @@ impl Battery {
                 .import_limit_kw
                 .map(|lim| hw_max.min(lim))
                 .unwrap_or(hw_max);
-            let limit = self.external_power_limit_kw.map_or(limit, |pl| limit.min(pl));
+            let limit = self
+                .external_power_limit_kw
+                .map_or(limit, |pl| limit.min(pl));
             power_kw.min(limit)
         } else {
             let hw_max = self.max_discharge_kw * temp_derate * dr_fraction;
@@ -539,7 +541,9 @@ impl Battery {
                 .export_limit_kw
                 .map(|lim| hw_max.min(lim))
                 .unwrap_or(hw_max);
-            let limit = self.external_power_limit_kw.map_or(limit, |pl| limit.min(pl));
+            let limit = self
+                .external_power_limit_kw
+                .map_or(limit, |pl| limit.min(pl));
             power_kw.max(-limit)
         }
     }
@@ -671,15 +675,19 @@ impl Equipment for Battery {
         if let Some(model_name) = config.get_str("capacity_derate_model") {
             match model_name {
                 "piecewise" => {
-                    let raw = config.get_f64_array("capacity_derate_points").unwrap_or_default();
+                    let raw = config
+                        .get_f64_array("capacity_derate_points")
+                        .unwrap_or_default();
                     if !raw.len().is_multiple_of(2) {
                         tracing::warn!(
                             "capacity_derate_points has odd length {}; trailing value ignored",
                             raw.len()
                         );
                     }
-                    let mut points: Vec<(f64, f64)> = raw.chunks_exact(2).map(|c| (c[0], c[1])).collect();
-                    points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    let mut points: Vec<(f64, f64)> =
+                        raw.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+                    points
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                     self.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points };
                 }
                 "arrhenius" => {
@@ -864,7 +872,8 @@ impl Equipment for Battery {
         self.capacity_kwh = self.capacity_kwh_nominal * capacity_derate;
 
         // -- Compute electrical model --
-        let (power_kw, ohmic_loss_w) = self.compute_electrical(target_power_kw);
+        let (power_kw, ohmic_loss_w, terminal_v, current_a) =
+            self.compute_electrical(target_power_kw);
 
         // -- Apply self-discharge --
         // Self-discharge: absolute SOC loss per OCHRE Battery.py:337-338, matching Li-ion calendar aging model.
@@ -915,7 +924,7 @@ impl Equipment for Battery {
                     // Discharging: cell DC → AC = DC * discharge_eta
                     actual_cell_power_kw * self.discharge_efficiency
                 };
-                let (_, actual_ohmic_w) = self.compute_electrical(ac_equivalent_kw);
+                let (_, actual_ohmic_w, _, _) = self.compute_electrical(ac_equivalent_kw);
                 (ac_equivalent_kw, actual_ohmic_w)
             };
 
@@ -1021,12 +1030,16 @@ impl Equipment for Battery {
         self.telemetry.set("heater_power_w", heater_w);
         self.telemetry
             .set("discharge_derate", self.discharge_derate_factor());
-        self.telemetry
-            .set("capacity_derate", self.capacity_derate_model.evaluate(self.cell_temp_c));
+        self.telemetry.set(
+            "capacity_derate",
+            self.capacity_derate_model.evaluate(self.cell_temp_c),
+        );
         self.telemetry
             .set("cycle_count", self.rainflow.total_cycles());
         self.telemetry
             .set("capacity_fade_pct", self.degradation.capacity_fade_pct());
+        self.telemetry.set("terminal_voltage_v", terminal_v);
+        self.telemetry.set("current_a", current_a);
 
         Ok(())
     }
@@ -1090,8 +1103,10 @@ impl Equipment for Battery {
             .set("capacity_fade_pct", self.degradation.capacity_fade_pct());
         self.telemetry
             .set("discharge_derate", self.discharge_derate_factor());
-        self.telemetry
-            .set("capacity_derate", self.capacity_derate_model.evaluate(self.cell_temp_c));
+        self.telemetry.set(
+            "capacity_derate",
+            self.capacity_derate_model.evaluate(self.cell_temp_c),
+        );
         // active_power_kw, ohmic_loss_w, heater_power_w are operational — reset to
         // idle defaults; they will be updated on the next step() call.
         self.telemetry.set(
@@ -1166,7 +1181,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(10);
+    let mut t = Telemetry::with_capacity(12);
     t.insert("soc", 0.0);
     t.insert("active_power_kw", 0.0);
     t.insert("ohmic_loss_w", 0.0);
@@ -1177,6 +1192,8 @@ fn default_telemetry() -> Telemetry {
     t.insert("capacity_derate", 1.0);
     t.insert("cycle_count", 0.0);
     t.insert("capacity_fade_pct", 0.0);
+    t.insert("terminal_voltage_v", 0.0);
+    t.insert("current_a", 0.0);
     t
 }
 
@@ -1227,12 +1244,24 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: "capacity_derate".to_string(),
             unit: "-".to_string(),
-            description: "Temperature-dependent capacity and power derating factor (Arrhenius or piecewise)".to_string(),
+            description:
+                "Temperature-dependent capacity and power derating factor (Arrhenius or piecewise)"
+                    .to_string(),
         },
         TelemetryField {
             name: "capacity_fade_pct".to_string(),
             unit: "%".to_string(),
             description: "Cumulative capacity degradation".to_string(),
+        },
+        TelemetryField {
+            name: "terminal_voltage_v".to_string(),
+            unit: "V".to_string(),
+            description: "Pack terminal voltage (Voc ± IR drop)".to_string(),
+        },
+        TelemetryField {
+            name: "current_a".to_string(),
+            unit: "A".to_string(),
+            description: "Pack current (positive=charging, negative=discharging)".to_string(),
         },
     ]
 }
@@ -1325,7 +1354,7 @@ mod tests {
     fn descriptor_matches_ticket_contract() {
         let config = battery_config(&[]);
         let bat = Battery::new(config);
-        assert_eq!(bat.descriptor().end_use, EndUse::Battery);
+        assert_eq!(bat.descriptor().end_use, EndUse::BATTERY);
         assert_eq!(bat.descriptor().stage, ExecutionStage::Electrical);
         assert_eq!(bat.descriptor().fuel, FuelType::Electric);
         let caps = bat.descriptor().control_capabilities;
@@ -2774,7 +2803,7 @@ mod tests {
         let p_max_w = pack_ocv * pack_ocv / (4.0 * pack_r);
         let p_max_kw = p_max_w / 1000.0;
 
-        let (actual_kw, ohmic_w) = bat.compute_electrical(-p_max_kw * 100.0);
+        let (actual_kw, ohmic_w, _, _) = bat.compute_electrical(-p_max_kw * 100.0);
 
         assert!(actual_kw.is_finite(), "clamped power must be finite");
         assert!(ohmic_w.is_finite(), "clamped ohmic loss must be finite");
@@ -3119,11 +3148,7 @@ mod tests {
 
         // Standby is always drawn on top; charging itself must not exceed 2 kW.
         let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
-        let charging_kw = bat
-            .telemetry()
-            .get("active_power_kw")
-            .unwrap_or(0.0)
-            - standby_kw;
+        let charging_kw = bat.telemetry().get("active_power_kw").unwrap_or(0.0) - standby_kw;
         assert!(
             charging_kw <= 2.0 + 1e-9,
             "charge power {charging_kw:.4} kW should be capped at 2 kW by import_limit_w"
@@ -3198,11 +3223,7 @@ mod tests {
             .unwrap();
 
         let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
-        let charging_kw = bat
-            .telemetry()
-            .get("active_power_kw")
-            .unwrap_or(0.0)
-            - standby_kw;
+        let charging_kw = bat.telemetry().get("active_power_kw").unwrap_or(0.0) - standby_kw;
         // Should be close to 5 kW (max_charge_kw), not capped lower.
         assert!(
             charging_kw > 4.9,
@@ -3256,7 +3277,8 @@ mod tests {
         .expect("setpoint");
 
         let mut ports = default_ports();
-        bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+        bat.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step");
         let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
         assert!(
             power.abs() <= 2.0 + 0.01,
@@ -3284,7 +3306,8 @@ mod tests {
         .expect("setpoint");
 
         let mut ports = default_ports();
-        bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+        bat.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step");
         let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
         // Critical = 25% of max, so max discharge ≈ 1.25 kW
         assert!(
@@ -3313,7 +3336,8 @@ mod tests {
         .expect("setpoint");
 
         let mut ports = default_ports();
-        bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+        bat.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step");
         let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
         let standby = DEFAULT_STANDBY_POWER_W / 1000.0;
         assert!(
@@ -3339,7 +3363,8 @@ mod tests {
         let mut ports = default_ports();
         for _ in 0..3 {
             bat.update_control(&env);
-            bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+            bat.step(&env, Duration::from_secs(60), &mut ports)
+                .expect("step");
             ports = default_ports();
         }
 
@@ -3350,7 +3375,8 @@ mod tests {
         })
         .expect("setpoint");
 
-        bat.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+        bat.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step");
         let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
         assert!(
             power < -1.0,

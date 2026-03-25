@@ -16,9 +16,9 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked,
-        equipment_id_from_config, first_f64, operating_mode_code, parse_fuel_type,
-        update_heating_control, zone_id_from_config,
+        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked, equipment_id_from_config,
+        first_f64, operating_mode_code, parse_fuel_type, update_heating_control,
+        zone_id_from_config,
     },
 };
 use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
@@ -72,7 +72,7 @@ impl ElectricFurnace {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
-            end_use: EndUse::HvacHeating,
+            end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Electric Furnace"),
             zone: Some(zone),
             fuel: FuelType::Electric,
@@ -116,7 +116,12 @@ impl Equipment for ElectricFurnace {
 
         let fan_flow = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
         self.hvac.duct_dse = super::helpers::resolve_duct_dse(
-            config, true, self.rated_capacity_w, fan_flow, 1, false,
+            config,
+            true,
+            self.rated_capacity_w,
+            fan_flow,
+            1,
+            false,
         );
         self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
         self.hvac.update_zone_heat_fractions();
@@ -153,8 +158,12 @@ impl Equipment for ElectricFurnace {
         }
 
         if gross_capacity_w > 0.0 {
-            self.hvac
-                .write_zone_thermal_contributions(ports, gross_capacity_w, 0.0, ThermalCategory::HvacHeating)?;
+            self.hvac.write_zone_thermal_contributions(
+                ports,
+                gross_capacity_w,
+                0.0,
+                ThermalCategory::HvacHeating,
+            )?;
         }
 
         if self.operating_mode == OperatingMode::Heating {
@@ -224,7 +233,7 @@ impl GasFurnace {
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
             name: config.name,
-            end_use: EndUse::HvacHeating,
+            end_use: EndUse::HVAC_HEATING,
             equipment_type: Cow::Borrowed("Gas Furnace"),
             zone: Some(zone),
             fuel: FuelType::Gas,
@@ -270,7 +279,12 @@ impl Equipment for GasFurnace {
 
         let fan_flow = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
         self.hvac.duct_dse = super::helpers::resolve_duct_dse(
-            config, true, self.rated_capacity_w, fan_flow, 1, false,
+            config,
+            true,
+            self.rated_capacity_w,
+            fan_flow,
+            1,
+            false,
         );
         self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
         self.hvac.update_zone_heat_fractions();
@@ -339,8 +353,12 @@ impl Equipment for GasFurnace {
         }
 
         if gross_capacity_w > 0.0 {
-            self.hvac
-                .write_zone_thermal_contributions(ports, gross_capacity_w, 0.0, ThermalCategory::HvacHeating)?;
+            self.hvac.write_zone_thermal_contributions(
+                ports,
+                gross_capacity_w,
+                0.0,
+                ThermalCategory::HvacHeating,
+            )?;
         }
 
         if self.operating_mode == OperatingMode::Heating {

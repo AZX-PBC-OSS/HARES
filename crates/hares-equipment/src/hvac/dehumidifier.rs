@@ -112,7 +112,7 @@ impl Dehumidifier {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(parse_u32_from_f64(config.get_f64(KEY_EQUIPMENT_ID)).unwrap_or(0)),
                 name: config.name,
-                end_use: EndUse::Dehumidifier,
+                end_use: EndUse::DEHUMIDIFIER,
                 equipment_type: Cow::Borrowed("Dehumidifier"),
                 zone: Some(zone),
                 fuel: FuelType::Electric,

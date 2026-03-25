@@ -1,7 +1,7 @@
 //! State-space representation and Crank-Nicolson implicit discretization.
 
-use nalgebra::{Complex, DMatrix, DVector, Dyn};
 use nalgebra::linalg::LU;
+use nalgebra::{Complex, DMatrix, DVector, Dyn};
 use thiserror::Error;
 
 const RCOND_THRESHOLD: f64 = 1.0e-12;
@@ -83,6 +83,7 @@ pub struct StateSpaceModel {
     b_eff: DMatrix<f64>,
     pub c: DMatrix<f64>,
     pub d: DMatrix<f64>,
+    max_discrete_eigenvalue_magnitude: Option<f64>,
 }
 
 impl std::fmt::Debug for StateSpaceModel {
@@ -96,6 +97,7 @@ impl std::fmt::Debug for StateSpaceModel {
             .field("b_eff", &self.b_eff)
             .field("c", &self.c)
             .field("d", &self.d)
+            .field("max_discrete_eigenvalue_magnitude", &self.max_discrete_eigenvalue_magnitude)
             .finish()
     }
 }
@@ -141,6 +143,7 @@ impl StateSpaceModel {
             b_eff: b_d,
             c,
             d,
+            max_discrete_eigenvalue_magnitude: None,
         })
     }
 
@@ -157,6 +160,12 @@ impl StateSpaceModel {
     /// Number of outputs (rows of C).
     pub fn output_dim(&self) -> usize {
         self.c.nrows()
+    }
+
+    /// Max discrete eigenvalue magnitude computed at construction.
+    /// `None` for large matrices (n > 20) where eigenvalue decomposition is skipped.
+    pub fn max_discrete_eigenvalue_magnitude(&self) -> Option<f64> {
+        self.max_discrete_eigenvalue_magnitude
     }
 
     /// Implicit-half matrix M = I - dt/2·A_c (or I for discrete-path).
@@ -196,7 +205,10 @@ impl StateSpaceModel {
         } else {
             // This branch is only correct when n_mat = A_d (from_discrete path).
             // For from_continuous models, a_c/b_c are always Some and the branch above handles it.
-            debug_assert!(self.a_c.is_none(), "discrete steady_state branch reached with a_c present");
+            debug_assert!(
+                self.a_c.is_none(),
+                "discrete steady_state branch reached with a_c present"
+            );
             let n = self.state_dim();
             let eye = DMatrix::<f64>::identity(n, n);
             let lhs = eye - &self.n_mat;
@@ -235,16 +247,18 @@ impl StateSpaceModel {
         }
 
         // Stability check on equivalent A_d = M⁻¹·N
+        let max_discrete_eigenvalue_magnitude;
         if n <= 20 {
             let a_d_equiv = m_lu
                 .solve(&n_mat)
                 .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
+            let eigs = a_d_equiv.complex_eigenvalues();
+            max_discrete_eigenvalue_magnitude =
+                Some(eigs.iter().map(|l| l.norm()).fold(0.0_f64, f64::max));
             let a_c_singular = is_singular(a_c);
             if let Err(stability) = eigenvalue_check(a_c, &a_d_equiv) {
-                let discrete_marginally_stable = a_d_equiv
-                    .complex_eigenvalues()
-                    .iter()
-                    .all(|lambda| lambda.norm() <= 1.0 + 1e-10);
+                let discrete_marginally_stable =
+                    eigs.iter().all(|lambda| lambda.norm() <= 1.0 + 1e-10);
                 if !(a_c_singular && discrete_marginally_stable) {
                     return Err(StateSpaceError::UnstableSystem(stability));
                 }
@@ -254,10 +268,6 @@ impl StateSpaceModel {
                 n,
                 "skipping full eigenvalue check for large matrix; using continuous Gershgorin bound"
             );
-            // CN is A-stable: if all continuous eigenvalues have Re(lambda) <= 0,
-            // the discrete system is guaranteed stable. Check via continuous
-            // Gershgorin discs — cheaper O(n²) and not overly conservative like
-            // the discrete Gershgorin bound on M⁻¹·N.
             let continuous_stable = gershgorin_continuous_stable(a_c);
             if !continuous_stable {
                 return Err(StateSpaceError::UnstableSystem(StabilityResult {
@@ -266,6 +276,7 @@ impl StateSpaceModel {
                     near_unity_eigenvalues: Vec::new(),
                 }));
             }
+            max_discrete_eigenvalue_magnitude = None;
         }
 
         Ok(Self {
@@ -277,6 +288,7 @@ impl StateSpaceModel {
             b_eff,
             c,
             d,
+            max_discrete_eigenvalue_magnitude,
         })
     }
 
@@ -459,8 +471,8 @@ impl StateSpaceModel {
         let u_i_original = u[input_index];
 
         // Build RHS with coupling: (N - D)·x + B_eff·u_fixed + f
-        let mut rhs_fixed = &self.n_mat * x + &self.b_eff * u
-            - self.b_eff.column(input_index) * u_i_original;
+        let mut rhs_fixed =
+            &self.n_mat * x + &self.b_eff * u - self.b_eff.column(input_index) * u_i_original;
         for &(idx, d_diag, forcing) in couplings {
             rhs_fixed[idx] -= d_diag * x[idx]; // subtract D·x
             rhs_fixed[idx] += forcing; // add forcing
@@ -477,8 +489,8 @@ impl StateSpaceModel {
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
-        let y_fixed = (c_row * &x_next_fixed)[0] + (d_row * u)[0]
-            - d_row[input_index] * u_i_original;
+        let y_fixed =
+            (c_row * &x_next_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
         let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
 
@@ -513,8 +525,8 @@ impl StateSpaceModel {
         let u_i_original = u[input_index];
 
         // Compute rhs without the variable input contribution
-        let rhs_fixed = &self.n_mat * x + &self.b_eff * u
-            - self.b_eff.column(input_index) * u_i_original;
+        let rhs_fixed =
+            &self.n_mat * x + &self.b_eff * u - self.b_eff.column(input_index) * u_i_original;
         let x_next_fixed = self
             .m_lu
             .solve(&rhs_fixed)
@@ -528,8 +540,8 @@ impl StateSpaceModel {
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
-        let y_fixed = (c_row * &x_next_fixed)[0] + (d_row * u)[0]
-            - d_row[input_index] * u_i_original;
+        let y_fixed =
+            (c_row * &x_next_fixed)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
         let effective_gain = (c_row * &g)[0] + self.d[(output_index, input_index)];
 
@@ -597,8 +609,7 @@ impl StateSpaceModel {
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
-        let y_fixed = (c_row * &*rhs_buf)[0] + (d_row * u)[0]
-            - d_row[input_index] * u_i_original;
+        let y_fixed = (c_row * &*rhs_buf)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
         let effective_gain = (c_row * &*gain_buf)[0] + self.d[(output_index, input_index)];
 
@@ -658,8 +669,7 @@ impl StateSpaceModel {
 
         let c_row = self.c.row(output_index);
         let d_row = self.d.row(output_index);
-        let y_fixed = (c_row * &*rhs_buf)[0] + (d_row * u)[0]
-            - d_row[input_index] * u_i_original;
+        let y_fixed = (c_row * &*rhs_buf)[0] + (d_row * u)[0] - d_row[input_index] * u_i_original;
 
         let effective_gain = (c_row * &*gain_buf)[0] + self.d[(output_index, input_index)];
 
@@ -1135,8 +1145,7 @@ mod tests {
 
         // C and D matrices are independent of discretization method
         let c_expected = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
-        let d_expected =
-            DMatrix::from_row_slice(2, 4, &[0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.10]);
+        let d_expected = DMatrix::from_row_slice(2, 4, &[0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.10]);
         assert_matrix_close(&model.c, &c_expected, 1.0e-12);
         assert_matrix_close(&model.d, &d_expected, 1.0e-12);
 
@@ -1437,9 +1446,8 @@ mod tests {
         let c_mat = DMatrix::from_row_slice(1, 1, &[1.0]);
         let d_mat = DMatrix::from_row_slice(1, 1, &[0.0]);
 
-        let explicit_model =
-            StateSpaceModel::from_discrete(a_d_fe, b_d_fe, c_mat, d_mat)
-                .expect("explicit model should build");
+        let explicit_model = StateSpaceModel::from_discrete(a_d_fe, b_d_fe, c_mat, d_mat)
+            .expect("explicit model should build");
 
         let x_explicit = explicit_model.step(&x0, &u);
         let overshoots = x_explicit[0] < 0.0 || x_explicit[0] > 20.0;
@@ -1490,13 +1498,8 @@ mod tests {
         let c_mat = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
         let d_mat = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.0, 0.0]);
 
-        let model = StateSpaceModel::from_discrete(
-            a_d.clone(),
-            b_d.clone(),
-            c_mat,
-            d_mat,
-        )
-        .expect("discrete model should build");
+        let model = StateSpaceModel::from_discrete(a_d.clone(), b_d.clone(), c_mat, d_mat)
+            .expect("discrete model should build");
 
         let mut x = DVector::from_row_slice(&[20.0, 15.0]);
         let u = DVector::from_row_slice(&[5.0, 3.0]);
@@ -1567,8 +1570,8 @@ mod tests {
         };
 
         let dt = 60.0;
-        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
-            .expect("model should build");
+        let model =
+            StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping).expect("model should build");
 
         let x0 = DVector::from_row_slice(&[20.0]);
         let u = DVector::from_row_slice(&[0.0]);
@@ -1616,8 +1619,8 @@ mod tests {
         };
 
         let dt = 60.0;
-        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
-            .expect("model should build");
+        let model =
+            StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping).expect("model should build");
 
         let x = DVector::from_row_slice(&[20.0]);
         let u = DVector::from_row_slice(&[30.0, 0.0]);

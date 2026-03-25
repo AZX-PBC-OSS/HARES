@@ -6,8 +6,8 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -136,7 +136,7 @@ impl GasWH {
             descriptor: EquipmentDescriptor {
                 id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
                 name: config.name,
-                end_use: EndUse::WaterHeating,
+                end_use: EndUse::WATER_HEATING,
                 equipment_type: Cow::Borrowed("Gas Water Heater"),
                 zone: Some(zone),
                 fuel: FuelType::Gas,
@@ -156,7 +156,11 @@ impl GasWH {
                 PortDeclaration::fluid(loop_id, FluidType::Water),
                 PortDeclaration::fluid(super::DHW_DEMAND_LOOP, FluidType::Water),
             ],
-            telemetry: default_telemetry(),
+            telemetry: {
+                let mut t = default_telemetry();
+                tank.register_node_telemetry(&mut t);
+                t
+            },
             tank,
             burner_node,
             burner_input_w: DEFAULT_BURNER_INPUT_W,
@@ -247,8 +251,7 @@ impl Equipment for GasWH {
             .unwrap_or(6)
             .clamp(1, 12);
         let tank_volume_m3 =
-            first_f64(config, &["tank_volume_m3"])
-                .unwrap_or(DEFAULT_TANK_VOLUME_M3);
+            first_f64(config, &["tank_volume_m3"]).unwrap_or(DEFAULT_TANK_VOLUME_M3);
         let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
             .unwrap_or(DEFAULT_TANK_DIAMETER_M);
         let inferred_height_m =
@@ -362,6 +365,7 @@ impl Equipment for GasWH {
         self.dr_level = DRLevel::Normal;
         self.ctrl_load_fraction = 1.0;
         self.telemetry = default_telemetry();
+        self.tank.register_node_telemetry(&mut self.telemetry);
         Ok(())
     }
 
@@ -380,7 +384,10 @@ impl Equipment for GasWH {
 
         // Safety cutout: force off if ANY node exceeds max tank temperature.
         // A high-limit aquastat/thermal fuse responds to the hottest point in the tank.
-        let max_node_temp = self.tank.node_temps().iter()
+        let max_node_temp = self
+            .tank
+            .node_temps()
+            .iter()
             .copied()
             .reduce(f64::max)
             .expect("node_temps is never empty");
@@ -508,8 +515,7 @@ impl Equipment for GasWH {
         self.telemetry.set("fuel_input_w", fuel_input_w);
         self.telemetry.set("flue_loss_w", flue_loss_w);
         self.telemetry.set("fan_electric_w", fan_electric_w);
-        self.telemetry
-            .set("draw_flow_rate_kg_s", total_draw_kg_s);
+        self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry.set(
             "operating_mode",
             if mode == OperatingMode::Heating {
@@ -518,6 +524,7 @@ impl Equipment for GasWH {
                 0.0
             },
         );
+        self.tank.update_node_telemetry(&mut self.telemetry);
 
         // Reset transient ctrl_load_fraction after this step so it does not
         // carry over to the next step unless reapplied by the controller.
@@ -571,8 +578,7 @@ impl Equipment for GasWH {
             .insert("burner_power_w", decoded.burner_power_w);
         self.telemetry
             .insert("pilot_power_w", decoded.pilot_power_w);
-        self.telemetry
-            .insert("fuel_input_w", decoded.fuel_input_w);
+        self.telemetry.insert("fuel_input_w", decoded.fuel_input_w);
         self.telemetry.insert("flue_loss_w", decoded.flue_loss_w);
         self.telemetry
             .insert("fan_electric_w", decoded.fan_electric_w);

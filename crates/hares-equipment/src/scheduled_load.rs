@@ -9,8 +9,8 @@ use hares_physics::constants::GAS_THERMS_PER_HOUR_TO_W;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -472,19 +472,17 @@ impl Equipment for ScheduledLoad {
                         .to_string(),
                 ));
             }
-            (Some(source), None) => {
-                match source {
-                    ScheduleSource::Constant(_)
-                    | ScheduleSource::DailyProfile { .. }
-                    | ScheduleSource::ColumnRef { .. }
-                    | ScheduleSource::SolarAware { .. } => {}
-                    _ => {
-                        return Err(HaresError::Equipment(
+            (Some(source), None) => match source {
+                ScheduleSource::Constant(_)
+                | ScheduleSource::DailyProfile { .. }
+                | ScheduleSource::ColumnRef { .. }
+                | ScheduleSource::SolarAware { .. } => {}
+                _ => {
+                    return Err(HaresError::Equipment(
                             "checkpoint is missing gas schedule state for a stateful gas schedule source".to_string(),
                         ));
-                    }
                 }
-            }
+            },
             (None, None) => {}
         }
         self.telemetry
@@ -538,15 +536,15 @@ impl Equipment for ScheduledLoad {
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     registry.register(
         "Lighting",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Lighting, "Lighting"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::LIGHTING, "Lighting"))),
     );
     registry.register(
         "Plug Loads",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PlugLoads, "Plug Loads"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "Plug Loads"))),
     );
     registry.register(
         "Other",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Other, "Other"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Other"))),
     );
 
     // Appliance loads
@@ -555,58 +553,58 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| {
             Box::new(ScheduledLoad::new(
                 config,
-                EndUse::Refrigeration,
+                EndUse::REFRIGERATION,
                 "Refrigerator",
             ))
         }),
     );
     registry.register(
         "Freezer",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Refrigeration, "Freezer"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::REFRIGERATION, "Freezer"))),
     );
     registry.register(
         "MELs",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PlugLoads, "MELs"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "MELs"))),
     );
     registry.register(
         "TV",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PlugLoads, "TV"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::PLUG_LOADS, "TV"))),
     );
 
     // Pumps
     registry.register(
         "Well Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Other, "Well Pump"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Well Pump"))),
     );
     registry.register(
         "Pool Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Other, "Pool Pump"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Pool Pump"))),
     );
     registry.register(
         "Pool Heater",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Other, "Pool Heater"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Pool Heater"))),
     );
     registry.register(
         "Spa Pump",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Other, "Spa Pump"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Spa Pump"))),
     );
     registry.register(
         "Spa Heater",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Other, "Spa Heater"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Spa Heater"))),
     );
 
     // Gas appliances
     registry.register(
         "Gas Grill",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Other, "Gas Grill"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Gas Grill"))),
     );
     registry.register(
         "Gas Fireplace",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Other, "Gas Fireplace"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::OTHER, "Gas Fireplace"))),
     );
     registry.register(
         "Gas Lighting",
-        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::Lighting, "Gas Lighting"))),
+        Box::new(|config| Box::new(ScheduledLoad::new(config, EndUse::LIGHTING, "Gas Lighting"))),
     );
 
     // Fans
@@ -615,7 +613,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| {
             Box::new(ScheduledLoad::new(
                 config,
-                EndUse::Ventilation,
+                EndUse::VENTILATION,
                 "Ceiling Fan",
             ))
         }),
@@ -625,7 +623,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| {
             Box::new(ScheduledLoad::new(
                 config,
-                EndUse::Ventilation,
+                EndUse::VENTILATION,
                 "Ventilation Fan",
             ))
         }),
@@ -637,7 +635,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| {
             Box::new(ScheduledLoad::new(
                 config,
-                EndUse::Lighting,
+                EndUse::LIGHTING,
                 "Indoor Lighting",
             ))
         }),
@@ -647,7 +645,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| {
             Box::new(ScheduledLoad::new(
                 config,
-                EndUse::Lighting,
+                EndUse::LIGHTING,
                 "Exterior Lighting",
             ))
         }),
@@ -657,7 +655,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| {
             Box::new(ScheduledLoad::new(
                 config,
-                EndUse::Lighting,
+                EndUse::LIGHTING,
                 "Basement Lighting",
             ))
         }),
@@ -667,7 +665,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         Box::new(|config| {
             Box::new(ScheduledLoad::new(
                 config,
-                EndUse::Lighting,
+                EndUse::LIGHTING,
                 "Garage Lighting",
             ))
         }),
@@ -1060,7 +1058,7 @@ mod tests {
         config.raw_config.insert(KEY_ZIP_Z.to_string(), 0.2.into());
         config.raw_config.insert(KEY_ZIP_I.to_string(), 0.2.into());
         config.raw_config.insert(KEY_ZIP_P.to_string(), 0.2.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(err.to_string().contains("invalid ZIP coefficients"));
     }
@@ -1071,7 +1069,7 @@ mod tests {
         config.raw_config.insert(KEY_ZIP_Z.to_string(), 0.2.into());
         config.raw_config.insert(KEY_ZIP_I.to_string(), 0.3.into());
         config.raw_config.insert(KEY_ZIP_P.to_string(), 0.5.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.grid.voltage_pu = 0.95;
         eq.init(&config, &env).unwrap();
@@ -1095,7 +1093,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_LATENT_GAIN_FRACTION.to_string(), 0.2.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -1111,7 +1109,7 @@ mod tests {
     #[test]
     fn missing_sensible_gain_fraction_uses_conservative_half() {
         let config = config_with_schedule("s", "Lighting", &[1.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -1131,7 +1129,7 @@ mod tests {
             .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.70.into());
         let mut eq = ScheduledLoad::new(
             config.clone(),
-            hares_types::EndUse::Lighting,
+            hares_types::EndUse::LIGHTING,
             "Indoor Lighting",
         );
         let env = base_env();
@@ -1148,7 +1146,7 @@ mod tests {
     #[test]
     fn zero_or_negative_schedule_value_writes_no_power() {
         let config = config_with_schedule("s", "Lighting", &[0.0, -2.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -1171,7 +1169,7 @@ mod tests {
         // Schedule produces 3.0 kW; PowerSetpoint should override it with 5.0 kW for one step,
         // then revert to the schedule on the next step.
         let config = config_with_schedule("s", "Lighting", &[3.0, 3.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::PowerSetpoint {
@@ -1203,7 +1201,7 @@ mod tests {
     #[test]
     fn unsupported_control_signal_is_rejected() {
         let config = config_with_schedule("s", "Lighting", &[1.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         eq.init(&config, &base_env()).unwrap();
         let err = eq
             .apply_control(&ControlSignal::SOCTarget {
@@ -1218,7 +1216,7 @@ mod tests {
     #[test]
     fn load_fraction_scales_electric_output() {
         let config = config_with_schedule("s", "Lighting", &[2.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.5 })
@@ -1235,7 +1233,7 @@ mod tests {
     #[test]
     fn mode_override_off_forces_zero_power() {
         let config = config_with_schedule("s", "Lighting", &[5.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::ModeOverride {
@@ -1254,7 +1252,7 @@ mod tests {
     #[test]
     fn voltage_outage_forces_zero_output() {
         let config = config_with_schedule("s", "Lighting", &[3.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         eq.init(&config, &env).unwrap();
         env.grid.voltage_pu = 0.0;
@@ -1271,7 +1269,7 @@ mod tests {
     #[test]
     fn load_fraction_state_round_trip() {
         let config = config_with_schedule("s", "Lighting", &[2.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.7 })
@@ -1279,7 +1277,7 @@ mod tests {
         let state = eq.save_state();
 
         let mut restored =
-            ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+            ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         restored.init(&config, &env).unwrap();
         restored.load_state(&state).unwrap();
 
@@ -1302,7 +1300,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_GAS_CONSTANT.to_string(), 0.1.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -1330,7 +1328,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_GAS_SCHEDULE_IS_W.to_string(), 1.0.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -1348,7 +1346,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         eq.init(&config, &env).unwrap();
         eq.power_source = ScheduleSource::Shared {
@@ -1372,7 +1370,7 @@ mod tests {
     #[test]
     fn state_round_trip_preserves_source_state_and_last_values() {
         let config = config_with_schedule("s", "Lighting", &[1.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         eq.init(&config, &env).unwrap();
         eq.power_source = ScheduleSource::Shared {
@@ -1391,7 +1389,7 @@ mod tests {
         let state = eq.save_state();
 
         let mut restored =
-            ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+            ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         restored.init(&config, &base_env()).unwrap();
         restored.power_source = ScheduleSource::Shared {
             data: Arc::from(vec![1.0, 2.0]),
@@ -1416,7 +1414,7 @@ mod tests {
             .raw_config
             .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
 
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.custom_domains.push(DomainUpdate {
             domain_id: schedule_domain_id(),
@@ -1440,7 +1438,7 @@ mod tests {
             .raw_config
             .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
         let mut env = base_env();
-        let mut a = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut a = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         a.init(&config, &env).unwrap();
         a.power_source = ScheduleSource::SeededNoise {
             base: 1.0,
@@ -1460,7 +1458,7 @@ mod tests {
         a.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         let checkpoint = a.save_state();
 
-        let mut b = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut b = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         b.init(&config, &env).unwrap();
         b.power_source = ScheduleSource::SeededNoise {
             base: 1.0,
@@ -1497,7 +1495,7 @@ mod tests {
     #[test]
     fn descriptor_stage_capabilities_and_telemetry_fields_match_contract() {
         let config = config_with_schedule("s", "Lighting", &[1.0]);
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         eq.init(&config, &base_env()).unwrap();
         assert_eq!(
             eq.descriptor().stage,
@@ -1548,7 +1546,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_GAS_CONSTANT.to_string(), 0.2.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Other, "Gas Grill");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::OTHER, "Gas Grill");
         let env = base_env();
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.5 })
@@ -1576,7 +1574,7 @@ mod tests {
             .insert(format!("{KEY_MONTH_MULTIPLIER_PREFIX}0"), 0.0.into());
         let mut eq = ScheduledLoad::new(
             config.clone(),
-            hares_types::EndUse::Ventilation,
+            hares_types::EndUse::VENTILATION,
             "Ceiling Fan",
         );
         let mut env = base_env();
@@ -1625,7 +1623,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_RADIATIVE_GAIN_FRACTION.to_string(), 0.2.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -1647,7 +1645,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_LATENT_GAIN_FRACTION.to_string(), 0.5.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
             err.to_string().contains("must not exceed 1.0"),
@@ -1665,7 +1663,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_ZIP_V0.to_string(), 0.95.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.grid.voltage_pu = 0.95;
         eq.init(&config, &env).unwrap();
@@ -1684,7 +1682,7 @@ mod tests {
         let config = config_with_schedule("Exterior Lighting", "Exterior Lighting", &[1.0]);
         let eq = ScheduledLoad::new(
             config.clone(),
-            hares_types::EndUse::Lighting,
+            hares_types::EndUse::LIGHTING,
             "Exterior Lighting",
         );
         assert!(
@@ -1733,7 +1731,7 @@ mod tests {
         config
             .raw_config
             .insert(super::KEY_ZIP_PF.to_string(), 0.8.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -1752,7 +1750,7 @@ mod tests {
         config
             .raw_config
             .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
@@ -1781,7 +1779,7 @@ mod tests {
         config
             .raw_config
             .insert(super::KEY_ZIP_PF.to_string(), 0.9.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.grid.voltage_pu = 0.9;
         eq.init(&config, &env).unwrap();
@@ -1810,7 +1808,7 @@ mod tests {
         config
             .raw_config
             .insert(super::KEY_ZIP_PQ.to_string(), 0.3.into());
-        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::Lighting, "Lighting");
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let err = eq.init(&config, &base_env()).unwrap_err();
         assert!(
             err.to_string().contains("reactive ZIP coefficients"),
@@ -1822,7 +1820,7 @@ mod tests {
     fn garage_name_auto_routes_to_garage_zone() {
         let mut config = config_with_schedule("Garage Lighting", "Garage Lighting", &[1.0]);
         config.raw_config.remove("zone_id");
-        let eq = ScheduledLoad::new(config, hares_types::EndUse::Lighting, "Garage Lighting");
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::LIGHTING, "Garage Lighting");
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(2)),
@@ -1834,7 +1832,7 @@ mod tests {
     fn basement_name_auto_routes_to_foundation_zone() {
         let mut config = config_with_schedule("Basement Lighting", "Basement Lighting", &[1.0]);
         config.raw_config.remove("zone_id");
-        let eq = ScheduledLoad::new(config, hares_types::EndUse::Lighting, "Basement Lighting");
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::LIGHTING, "Basement Lighting");
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(3)),
@@ -1846,7 +1844,7 @@ mod tests {
     fn explicit_zone_id_overrides_auto_routing() {
         let mut config = config_with_schedule("Garage Lighting", "Garage Lighting", &[1.0]);
         config.raw_config.insert("zone_id".to_string(), 1.0.into());
-        let eq = ScheduledLoad::new(config, hares_types::EndUse::Lighting, "Garage Lighting");
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::LIGHTING, "Garage Lighting");
         assert_eq!(
             eq.descriptor().zone,
             Some(ZoneId(1)),
@@ -1858,7 +1856,7 @@ mod tests {
     fn outdoor_name_suppresses_auto_routing() {
         let mut config = config_with_schedule("Outdoor Garage Fan", "Other", &[1.0]);
         config.raw_config.remove("zone_id");
-        let eq = ScheduledLoad::new(config, hares_types::EndUse::Other, "Other");
+        let eq = ScheduledLoad::new(config, hares_types::EndUse::OTHER, "Other");
         assert!(
             eq.descriptor().zone.is_none(),
             "Outdoor prefix takes precedence and suppresses garage auto-routing"

@@ -40,15 +40,16 @@ impl ThermalSolver {
             // Without this, windows use zone air temp as "surface temp" (rad_frac=0,
             // state_index = zone air), producing massive erroneous LWR cooling.
             if info.boundary_category == Some(super::config::BoundaryCategory::Window) {
-                #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
-                self.ext_surface_diag_buf.push(super::config::ExtSurfaceDiag {
-                    surface_id: info.surface_id,
-                    category: info.boundary_category,
-                    solar_absorbed_w: 0.0,
-                    lwr_gain_w: 0.0,
-                    surface_temp_c: t_ext,
-                    injected_w: 0.0,
-                });
+                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                self.ext_surface_diag_buf
+                    .push(super::config::ExtSurfaceDiag {
+                        surface_id: info.surface_id,
+                        category: info.boundary_category,
+                        solar_absorbed_w: 0.0,
+                        lwr_gain_w: 0.0,
+                        surface_temp_c: t_ext,
+                        injected_w: 0.0,
+                    });
                 continue;
             }
 
@@ -64,15 +65,16 @@ impl ThermalSolver {
                 };
                 let q_lw = exterior_longwave_w(&surface, t_sky_raw, t_ext, t_node_c);
                 u[info.input_index] += q_lw;
-                #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
-                self.ext_surface_diag_buf.push(super::config::ExtSurfaceDiag {
-                    surface_id: info.surface_id,
-                    category: info.boundary_category,
-                    solar_absorbed_w: 0.0,
-                    lwr_gain_w: q_lw,
-                    surface_temp_c: t_node_c,
-                    injected_w: q_lw,
-                });
+                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                self.ext_surface_diag_buf
+                    .push(super::config::ExtSurfaceDiag {
+                        surface_id: info.surface_id,
+                        category: info.boundary_category,
+                        solar_absorbed_w: 0.0,
+                        lwr_gain_w: q_lw,
+                        surface_temp_c: t_node_c,
+                        injected_w: q_lw,
+                    });
                 continue;
             }
 
@@ -129,15 +131,16 @@ impl ThermalSolver {
             let injected = (solar_w + q_lw) * info.rad_frac;
             u[info.input_index] += injected;
 
-            #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
-            self.ext_surface_diag_buf.push(super::config::ExtSurfaceDiag {
-                surface_id: info.surface_id,
-                category: info.boundary_category,
-                solar_absorbed_w: solar_w,
-                lwr_gain_w: q_lw,
-                surface_temp_c: t_surf,
-                injected_w: injected,
-            });
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            self.ext_surface_diag_buf
+                .push(super::config::ExtSurfaceDiag {
+                    surface_id: info.surface_id,
+                    category: info.boundary_category,
+                    solar_absorbed_w: solar_w,
+                    lwr_gain_w: q_lw,
+                    surface_temp_c: t_surf,
+                    injected_w: injected,
+                });
         }
     }
 
@@ -209,16 +212,22 @@ impl ThermalSolver {
             };
 
             let mut zone_total = 0.0_f64;
-            for (j, (info, &q)) in zone_cfg.surfaces.iter().zip(self.lwr_net_flux_buf.iter()).enumerate() {
+            for (j, (info, &q)) in zone_cfg
+                .surfaces
+                .iter()
+                .zip(self.lwr_net_flux_buf.iter())
+                .enumerate()
+            {
                 if info.input_index < u.len() {
                     u[info.input_index] += q;
                 }
                 zone_total += q;
-                #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
-                self.int_surface_diag_buf.push(super::config::IntSurfaceDiag {
-                    surface_temp_c: t_surfaces[j],
-                    lwr_flux_w: q,
-                });
+                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                self.int_surface_diag_buf
+                    .push(super::config::IntSurfaceDiag {
+                        surface_temp_c: t_surfaces[j],
+                        lwr_flux_w: q,
+                    });
             }
             self.lwr_by_zone_buf.push((zone_cfg.zone_id, zone_total));
         }

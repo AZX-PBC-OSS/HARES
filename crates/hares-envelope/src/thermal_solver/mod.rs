@@ -52,7 +52,7 @@ pub struct ThermalSolver {
     m_scratch: DMatrix<f64>,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
-    /// Previous-step coupling tuples and pre-built LU for `solve_ideal_capacity`.
+    /// Previous-step coupling tuples and pre-built LU for `solve_ideal_capacity_for_target`.
     /// One-step stale, matching the staleness of `last_u`.
     last_coupling: Vec<(usize, f64, f64)>,
     last_coupled_lu: Option<nalgebra::linalg::LU<f64, nalgebra::Dyn, nalgebra::Dyn>>,
@@ -64,10 +64,6 @@ pub struct ThermalSolver {
     /// Reusable buffer for interior surface temperatures in LWR calculation.
     /// Avoids per-zone per-timestep allocation in apply_interior_longwave_inputs.
     interior_surf_temps_buf: Vec<f64>,
-    /// Pre-allocated scratch for HVAC solve RHS (state_dim-sized).
-    solve_rhs_buf: DVector<f64>,
-    /// Pre-allocated scratch for HVAC solve gain vector (state_dim-sized).
-    solve_gain_buf: DVector<f64>,
     /// Pre-allocated buffer for infiltration couplings returned by build_input_vector.
     infiltration_buf: Vec<InfiltrationCoupling>,
     /// Pre-allocated buffer for solar distribution absorbed values.
@@ -78,16 +74,15 @@ pub struct ThermalSolver {
     lwr_net_flux_buf: Vec<f64>,
     /// Pre-allocated fallback buffer for InteriorSurface structs in non-ScriptF path.
     lwr_surfaces_buf: Vec<crate::longwave_radiation::InteriorSurface>,
-    /// Ideal HVAC heating load [W] from the most recent resolve (positive = heating).
-    ideal_heating_w: f64,
-    /// Ideal HVAC cooling load [W] from the most recent resolve (negative = cooling).
-    ideal_cooling_w: f64,
     /// Per-exterior-surface diagnostic buffer (compiled out in release).
-    #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     ext_surface_diag_buf: Vec<config::ExtSurfaceDiag>,
     /// Per-interior-surface diagnostic buffer (compiled out in release).
-    #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     int_surface_diag_buf: Vec<config::IntSurfaceDiag>,
+    /// Per-window solar diagnostic buffer (compiled out in release).
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    window_solar_diag_buf: Vec<config::WindowSolarDiag>,
 }
 
 impl ThermalSolver {
@@ -131,7 +126,8 @@ impl ThermalSolver {
         let last_coupling = Vec::new();
         let last_coupled_lu = None;
         let latent_buf = HashMap::new();
-        let exterior_surface_temps = vec![env.weather.outdoor_temp_c; config.exterior_surfaces.len()];
+        let exterior_surface_temps =
+            vec![env.weather.outdoor_temp_c; config.exterior_surfaces.len()];
         let n_lwr_zones = config.interior_lwr_zones.len();
         let max_interior_surfaces = config
             .interior_lwr_zones
@@ -140,7 +136,10 @@ impl ThermalSolver {
             .max()
             .unwrap_or(0);
 
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         let n_ext_surfaces = config.exterior_surfaces.len();
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        let n_windows = config.window_properties.len();
 
         Ok(Self {
             model,
@@ -159,19 +158,17 @@ impl ThermalSolver {
             exterior_surface_temps,
             component_gains: EnvelopeComponentGains::default(),
             interior_surf_temps_buf: Vec::with_capacity(max_interior_surfaces),
-            solve_rhs_buf: DVector::zeros(n_states),
-            solve_gain_buf: DVector::zeros(n_states),
             infiltration_buf: Vec::with_capacity(env.zones.len()),
             solar_absorbed_buf: Vec::new(),
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
-            ideal_heating_w: 0.0,
-            ideal_cooling_w: 0.0,
-            #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
-            #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             int_surface_diag_buf: Vec::with_capacity(max_interior_surfaces),
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            window_solar_diag_buf: Vec::with_capacity(n_windows),
         })
     }
 
@@ -240,12 +237,6 @@ impl ThermalSolver {
         Ok(())
     }
 
-    /// Replaces the set of zones that receive ideal HVAC capacity back-calculation
-    /// during each `resolve()` call.
-    pub fn set_ideal_hvac_zones(&mut self, zones: Vec<ZoneId>) {
-        self.config.ideal_hvac_zones = zones;
-    }
-
     /// Assembles the full input vector from outdoor, solar, LWR, and port
     /// contributions. Updates `self.component_gains` for diagnostics.
     /// Populates `self.infiltration_buf` with per-zone coupling terms.
@@ -268,6 +259,8 @@ impl ThermalSolver {
         self.apply_outdoor_inputs(&mut u, env);
 
         let u_pre = u.iter().sum::<f64>();
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        self.window_solar_diag_buf.clear();
         self.apply_solar_inputs(&mut u, env);
         let window_solar_w = u.iter().sum::<f64>() - u_pre;
 
@@ -275,13 +268,13 @@ impl ThermalSolver {
         self.apply_exterior_solar_inputs(&mut u, env);
         let opaque_solar_w = u.iter().sum::<f64>() - u_pre;
         let u_pre = u.iter().sum::<f64>();
-        #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.ext_surface_diag_buf.clear();
         self.apply_exterior_longwave_inputs_iterative(&mut u, env);
         let exterior_lwr_w = u.iter().sum::<f64>() - u_pre;
         let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w;
 
-        #[cfg(any(debug_assertions, feature = "thermal_diagnostics"))]
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.int_surface_diag_buf.clear();
         self.apply_interior_longwave_inputs(&mut u, env);
         // Interior LWR redistributes heat between surfaces (zero-sum on u).
@@ -326,22 +319,26 @@ impl ThermalSolver {
             &mut self.infiltration_buf,
         );
 
-        let infiltration_indoor_w = self.infiltration_buf
+        let infiltration_indoor_w = self
+            .infiltration_buf
             .iter()
             .find(|c| c.zone == indoor_zone)
             .map(|c| c.q_infiltration_w)
             .unwrap_or(0.0);
-        let ventilation_w = self.infiltration_buf
+        let ventilation_w = self
+            .infiltration_buf
             .iter()
             .find(|c| c.zone == indoor_zone)
             .map(|c| c.q_forced_vent_w)
             .unwrap_or(0.0);
-        let natural_ventilation_w = self.infiltration_buf
+        let natural_ventilation_w = self
+            .infiltration_buf
             .iter()
             .find(|c| c.zone == indoor_zone)
             .map(|c| c.q_natural_vent_w)
             .unwrap_or(0.0);
-        let combined_airflow_sensible_w = self.infiltration_buf
+        let combined_airflow_sensible_w = self
+            .infiltration_buf
             .iter()
             .find(|c| c.zone == indoor_zone)
             .map(|c| c.q_sensible_diagnostic_w)
@@ -364,7 +361,8 @@ impl ThermalSolver {
             .map(|a| a.sensible_for_category(ThermalCategory::DuctLoss))
             .unwrap_or(0.0);
 
-        let mut infiltration_by_zone_vec: Vec<(ZoneId, f64)> = self.infiltration_buf
+        let mut infiltration_by_zone_vec: Vec<(ZoneId, f64)> = self
+            .infiltration_buf
             .iter()
             .map(|c| (c.zone, c.q_infiltration_w))
             .collect();
@@ -393,28 +391,36 @@ impl ThermalSolver {
             internal_mass_heat_gain_w: 0.0,
             opaque_solar_w,
             exterior_lwr_w,
-            total_airflow_m3_s: self.infiltration_buf
+            total_airflow_m3_s: self
+                .infiltration_buf
                 .iter()
                 .find(|c| c.zone == indoor_zone)
                 .map(|c| c.combined_flow_m3_s)
                 .unwrap_or(0.0),
-            raw_infiltration_m3_s: self.infiltration_buf
+            raw_infiltration_m3_s: self
+                .infiltration_buf
                 .iter()
                 .find(|c| c.zone == indoor_zone)
                 .map(|c| c.raw_inf_m3_s)
                 .unwrap_or(0.0),
-            forced_vent_m3_s: self.infiltration_buf
+            forced_vent_m3_s: self
+                .infiltration_buf
                 .iter()
                 .find(|c| c.zone == indoor_zone)
                 .map(|c| c.forced_flow_m3_s)
                 .unwrap_or(0.0),
-            natural_vent_m3_s: self.infiltration_buf
+            natural_vent_m3_s: self
+                .infiltration_buf
                 .iter()
                 .find(|c| c.zone == indoor_zone)
                 .map(|c| c.nat_flow_m3_s)
                 .unwrap_or(0.0),
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag: self.ext_surface_diag_buf.clone(),
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             int_surface_diag: self.int_surface_diag_buf.clone(),
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            window_solar_diag: self.window_solar_diag_buf.clone(),
         };
 
         (u, latent_by_zone)
@@ -469,7 +475,6 @@ impl ThermalSolver {
             }
         }
     }
-
 }
 
 impl DomainSolver for ThermalSolver {
@@ -484,30 +489,9 @@ impl DomainSolver for ThermalSolver {
             dt.as_secs_f64(),
             self.dt_s
         );
-        // Take the vec to avoid cloning while still being able to call &mut self methods.
-        let ideal_hvac_zones = std::mem::take(&mut self.config.ideal_hvac_zones);
-        let result = self.resolve_internal(ports, env, &ideal_hvac_zones);
-        self.config.ideal_hvac_zones = ideal_hvac_zones;
-        result
+        self.resolve_internal(ports, env)
     }
 }
-
-/// Returns the effective zone setpoint from solver config, falling back to the current zone air
-/// temperature when no static setpoint is configured.
-pub(super) fn zone_setpoint_c(config: &ThermalSolverConfig, env: &EnvironmentState, zone: ZoneId) -> f64 {
-    config
-        .ideal_setpoints_c
-        .get(&zone)
-        .copied()
-        .or_else(|| {
-            env.zones
-                .iter()
-                .find(|z| z.id == zone)
-                .map(|z| z.temperature_c)
-        })
-        .unwrap_or_default()
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -564,7 +548,6 @@ mod tests {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
-
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -608,8 +591,6 @@ mod tests {
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
@@ -738,8 +719,6 @@ mod tests {
             window_zone_ids: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
@@ -829,8 +808,6 @@ mod tests {
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: vec![],
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
@@ -1187,8 +1164,6 @@ mod tests {
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: vec![],
             infiltration: vec![(ZoneId(1), method)],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
@@ -1208,7 +1183,7 @@ mod tests {
     /// ASHRAE wind+stack infiltration with a warm zone and cold outdoor must
     /// cool the zone compared to a zero-infiltration baseline.
     #[test]
-fn ashrae_wind_stack_infiltration_changes_zone_temperature() {
+    fn ashrae_wind_stack_infiltration_changes_zone_temperature() {
         let zone_temp = 22.0;
         let outdoor_temp = 5.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
@@ -1255,7 +1230,7 @@ fn ashrae_wind_stack_infiltration_changes_zone_temperature() {
     /// ELA infiltration with non-zero drivers must also shift zone temperature
     /// toward the colder outdoor value vs a zero-infiltration baseline.
     #[test]
-fn ela_infiltration_changes_zone_temperature() {
+    fn ela_infiltration_changes_zone_temperature() {
         let zone_temp = 22.0;
         let outdoor_temp = 5.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
@@ -1294,14 +1269,11 @@ fn ela_infiltration_changes_zone_temperature() {
         assert!(delta > 1e-3, "ELA effect too small: delta={delta:.6} C");
     }
 
-    /// solve_ideal_capacity must return a load Q such that, when injected as a
-    /// port sensible gain and stepped, the zone output reaches the setpoint to
-    /// within 0.05 K (discrete-time one-step residual tolerance).
     #[test]
-    fn solve_ideal_capacity_drives_zone_to_setpoint() {
-        let zone_temp = 18.0; // below setpoint
+    fn solve_ideal_capacity_for_target_returns_correct_load() {
+        let zone_temp = 18.0;
         let outdoor_temp = -5.0;
-        let setpoint_c = 21.0;
+        let target_c = 21.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
 
         let r = 2.0;
@@ -1327,11 +1299,8 @@ fn ela_infiltration_changes_zone_temperature() {
             indoor_zone_id: ZoneId(1),
             window_properties: HashMap::new(),
             window_zone_ids: HashMap::new(),
-
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::from([(ZoneId(1), setpoint_c)]),
-            ideal_hvac_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
@@ -1343,15 +1312,13 @@ fn ela_infiltration_changes_zone_temperature() {
         let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
         solver.x[0] = zone_temp;
 
-        let q_ideal = solver.solve_ideal_capacity(&env, ZoneId(1));
+        let q_ideal = solver.solve_ideal_capacity_for_target(ZoneId(1), target_c);
 
-        // We are below setpoint so heating load must be positive.
         assert!(
             q_ideal > 0.0,
             "ideal capacity for heating must be positive: q={q_ideal:.1}"
         );
 
-        // Inject the computed load and step — zone should reach setpoint.
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
@@ -1361,8 +1328,169 @@ fn ela_infiltration_changes_zone_temperature() {
         let t_after = update.zone_temperatures_c[0].1;
 
         assert!(
-            (t_after - setpoint_c).abs() < 0.05,
-            "zone should reach setpoint after ideal load: t={t_after:.4}, setpoint={setpoint_c}"
+            (t_after - target_c).abs() < 0.05,
+            "zone should reach explicit target: t={t_after:.4}, target={target_c}"
+        );
+    }
+
+    #[test]
+    fn solve_ideal_capacity_for_target_returns_zero_for_unknown_zone() {
+        let zone_temp = 20.0;
+        let outdoor_temp = 10.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: VentilationConfig::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+
+        let q = solver.solve_ideal_capacity_for_target(ZoneId(99), 22.0);
+        assert_eq!(q, 0.0, "unknown zone should return 0");
+    }
+
+    #[test]
+    fn solve_ideal_capacity_for_target_works_without_setpoint_config() {
+        let zone_temp = 18.0;
+        let outdoor_temp = -5.0;
+        let target_c = 23.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: VentilationConfig::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+
+        let q_ideal = solver.solve_ideal_capacity_for_target(ZoneId(1), target_c);
+
+        assert!(
+            q_ideal > 0.0,
+            "should compute capacity without setpoint config: q={q_ideal:.1}"
+        );
+    }
+
+    #[test]
+    fn solve_ideal_capacity_for_target_returns_negative_for_cooling() {
+        let zone_temp = 25.0;
+        let outdoor_temp = 35.0;
+        let target_c = 22.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: VentilationConfig::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, zone_temp).unwrap();
+        solver.x[0] = zone_temp;
+
+        let q_ideal = solver.solve_ideal_capacity_for_target(ZoneId(1), target_c);
+
+        assert!(
+            q_ideal < 0.0,
+            "ideal capacity for cooling must be negative: q={q_ideal:.1}"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        ports.thermal[0].sensible_gain_w = q_ideal;
+        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let t_after = update.zone_temperatures_c[0].1;
+
+        assert!(
+            (t_after - target_c).abs() < 0.05,
+            "zone should reach explicit target: t={t_after:.4}, target={target_c}"
         );
     }
 
@@ -1416,11 +1544,10 @@ fn ela_infiltration_changes_zone_temperature() {
                     dni_w_m2: 0.0,
                     dhi_w_m2: 0.0,
                     solar_altitude_deg: 0.0,
-                solar_azimuth_deg: 180.0,
+                    solar_azimuth_deg: 180.0,
                     mains_temp_c: 15.0,
                     rainfall_m: 0.0,
-                ground_albedo: 0.2,
-
+                    ground_albedo: 0.2,
                 },
                 grid: GridState {
                     voltage_pu: 1.0,
@@ -1449,7 +1576,7 @@ fn ela_infiltration_changes_zone_temperature() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
-            window_zone_ids: HashMap::new(),
+                window_zone_ids: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 42,
                     state_index: 0,
@@ -1464,8 +1591,6 @@ fn ela_infiltration_changes_zone_temperature() {
                     boundary_category: None,
                 }],
                 interior_lwr_zones: vec![],
-                ideal_setpoints_c: HashMap::new(),
-                ideal_hvac_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
@@ -1565,7 +1690,6 @@ fn ela_infiltration_changes_zone_temperature() {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
-
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -1593,7 +1717,7 @@ fn ela_infiltration_changes_zone_temperature() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
-            window_zone_ids: HashMap::new(),
+                window_zone_ids: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 1,
                     state_index: 0,
@@ -1608,8 +1732,6 @@ fn ela_infiltration_changes_zone_temperature() {
                     boundary_category: None,
                 }],
                 interior_lwr_zones: vec![],
-                ideal_setpoints_c: HashMap::new(),
-                ideal_hvac_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
@@ -1719,7 +1841,6 @@ fn ela_infiltration_changes_zone_temperature() {
                 mains_temp_c: 15.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
-
             },
             grid: GridState {
                 voltage_pu: 1.0,
@@ -1747,7 +1868,7 @@ fn ela_infiltration_changes_zone_temperature() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
-            window_zone_ids: HashMap::new(),
+                window_zone_ids: HashMap::new(),
 
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 0,
@@ -1763,8 +1884,6 @@ fn ela_infiltration_changes_zone_temperature() {
                     boundary_category: None,
                 }],
                 interior_lwr_zones: vec![],
-                ideal_setpoints_c: HashMap::new(),
-                ideal_hvac_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
@@ -1818,7 +1937,7 @@ fn ela_infiltration_changes_zone_temperature() {
     /// volumetric flow: q_wind = c_w * shelter * v². A solver with v=8 m/s must
     /// end up cooler than the same solver with v=2 m/s after one step.
     #[test]
-fn ashrae_wind_stack_higher_wind_produces_more_cooling() {
+    fn ashrae_wind_stack_higher_wind_produces_more_cooling() {
         let zone_temp = 22.0;
         let outdoor_temp = 0.0;
 
@@ -1867,7 +1986,7 @@ fn ashrae_wind_stack_higher_wind_produces_more_cooling() {
     /// Ela method, because wind enters the driver as wind_coeff * v² and
     /// increases the square-root flow rate monotonically.
     #[test]
-fn ela_higher_wind_produces_more_cooling() {
+    fn ela_higher_wind_produces_more_cooling() {
         let zone_temp = 22.0;
         let outdoor_temp = 0.0;
 
@@ -2055,11 +2174,10 @@ fn ela_higher_wind_produces_more_cooling() {
                     dni_w_m2: 0.0,
                     dhi_w_m2: 0.0,
                     solar_altitude_deg: 0.0,
-                solar_azimuth_deg: 180.0,
+                    solar_azimuth_deg: 180.0,
                     mains_temp_c: 15.0,
                     rainfall_m: 0.0,
-                ground_albedo: 0.2,
-
+                    ground_albedo: 0.2,
                 },
                 grid: GridState {
                     voltage_pu: 1.0,
@@ -2088,7 +2206,7 @@ fn ela_higher_wind_produces_more_cooling() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
-            window_zone_ids: HashMap::new(),
+                window_zone_ids: HashMap::new(),
                 exterior_surfaces: vec![ExteriorSurfaceInfo {
                     surface_id: 7,
                     state_index: 0,
@@ -2103,8 +2221,6 @@ fn ela_higher_wind_produces_more_cooling() {
                     boundary_category: None,
                 }],
                 interior_lwr_zones: vec![],
-                ideal_setpoints_c: HashMap::new(),
-                ideal_hvac_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
@@ -2168,7 +2284,7 @@ fn ela_higher_wind_produces_more_cooling() {
     /// relative to an identical solver without natural ventilation, when outdoor air is
     /// cool, dry, and below the zone temperature.
     #[test]
-fn natural_ventilation_cools_warm_zone_when_conditions_met() {
+    fn natural_ventilation_cools_warm_zone_when_conditions_met() {
         // Zone well above comfort base, cool dry outdoor air — nat vent should be active.
         let zone_temp = 27.0; // above t_base (22.778 °C)
         let outdoor_temp = 18.0; // cool outdoor, below zone
@@ -2212,8 +2328,6 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
@@ -2295,8 +2409,6 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
@@ -2385,12 +2497,10 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             let cfg = ThermalSolverConfig {
                 indoor_zone_id: ZoneId(1),
                 window_properties: HashMap::new(),
-            window_zone_ids: HashMap::new(),
+                window_zone_ids: HashMap::new(),
 
                 exterior_surfaces,
                 interior_lwr_zones: vec![],
-                ideal_setpoints_c: HashMap::new(),
-                ideal_hvac_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
@@ -2496,11 +2606,10 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                     dni_w_m2: 0.0,
                     dhi_w_m2: 0.0,
                     solar_altitude_deg: 0.0,
-                solar_azimuth_deg: 180.0,
+                    solar_azimuth_deg: 180.0,
                     mains_temp_c: 15.0,
                     rainfall_m: 0.0,
-                ground_albedo: 0.2,
-
+                    ground_albedo: 0.2,
                 },
                 grid: GridState {
                     voltage_pu: 1.0,
@@ -2532,8 +2641,6 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 window_zone_ids: HashMap::new(),
                 exterior_surfaces: vec![],
                 interior_lwr_zones: vec![],
-                ideal_setpoints_c: HashMap::new(),
-                ideal_hvac_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
                 ventilation: VentilationConfig::default(),
@@ -2639,12 +2746,10 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
                 let cfg = ThermalSolverConfig {
                     indoor_zone_id: ZoneId(1),
                     window_properties: HashMap::new(),
-            window_zone_ids: HashMap::new(),
+                    window_zone_ids: HashMap::new(),
 
                     exterior_surfaces,
                     interior_lwr_zones: vec![],
-                    ideal_setpoints_c: HashMap::new(),
-                    ideal_hvac_zones: vec![],
                     infiltration: vec![],
                     ventilation_flow_m3_s: 0.0,
                     ventilation: VentilationConfig::default(),
@@ -2947,8 +3052,6 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
             window_zone_ids: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: vent_flow_m3_s,
             ventilation: vent,
@@ -2967,7 +3070,7 @@ fn natural_ventilation_cools_warm_zone_when_conditions_met() {
     /// HRV with 70% sensible recovery should reduce ventilation sensible load
     /// by ~70% compared to no recovery, verified by zone temperature drift.
     #[test]
-fn hrv_sensible_recovery_reduces_ventilation_load() {
+    fn hrv_sensible_recovery_reduces_ventilation_load() {
         let zone_temp = 22.0;
         let outdoor_temp = 0.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
@@ -3082,7 +3185,7 @@ fn hrv_sensible_recovery_reduces_ventilation_load() {
     /// the combined flow should be sqrt(2) × individual, not 2× (linear).
     /// This means less cooling than simple linear addition.
     #[test]
-fn unbalanced_fan_uses_quadrature_not_linear_addition() {
+    fn unbalanced_fan_uses_quadrature_not_linear_addition() {
         let zone_temp = 22.0;
         let outdoor_temp = 0.0;
         let env = env_for_temp(zone_temp, outdoor_temp);
@@ -3127,8 +3230,6 @@ fn unbalanced_fan_uses_quadrature_not_linear_addition() {
             window_zone_ids: HashMap::new(),
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
-            ideal_setpoints_c: HashMap::new(),
-            ideal_hvac_zones: vec![],
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })],
             ventilation_flow_m3_s: forced_flow,
             ventilation: VentilationConfig {

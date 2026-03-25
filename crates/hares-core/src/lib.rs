@@ -1,5 +1,7 @@
 //! Core simulation engine: dwelling, clock, scheduler, and checkpoint.
 
+pub mod actor;
+pub mod actors;
 pub mod checkpoint;
 pub mod clock;
 pub mod diagnostics;
@@ -15,7 +17,7 @@ pub mod rng;
 pub mod scheduler;
 pub mod telemetry;
 
-pub use checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
+pub use actor::{Actor, ActorInterest};
 pub use clock::SimClock;
 pub use dwelling::{
     Dwelling, DwellingConfig, SimulationResults as DwellingSimulationResults, StepResult,

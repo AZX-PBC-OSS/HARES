@@ -25,6 +25,8 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert("defrost_active", 0.0);
     telemetry.insert("cop", 0.0);
     telemetry.insert("runtime_fraction", 0.0);
+    telemetry.insert("compressor_kw", 0.0);
+    telemetry.insert("defrost_time_fraction", 0.0);
     telemetry
 }
 
@@ -66,6 +68,16 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: "runtime_fraction".to_string(),
             unit: "-".to_string(),
             description: "Compressor runtime fraction (part-load ratio) this timestep".to_string(),
+        },
+        TelemetryField {
+            name: "compressor_kw".to_string(),
+            unit: "kW".to_string(),
+            description: "Compressor-only electric power".to_string(),
+        },
+        TelemetryField {
+            name: "defrost_time_fraction".to_string(),
+            unit: "-".to_string(),
+            description: "Fraction of timestep in defrost mode [0..1]".to_string(),
         },
     ]
 }

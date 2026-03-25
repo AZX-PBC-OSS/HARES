@@ -499,9 +499,6 @@ pub(crate) fn build_default_solvers(
         wiring
             .zone_sensible_input_indices
             .insert(zone.id, zone_input_offset + zone_idx);
-        thermal_cfg
-            .ideal_setpoints_c
-            .insert(zone.id, zone.temperature_c);
     }
     if let Some(col) = outdoor_col {
         wiring.outdoor_temp_input_indices = vec![col];
@@ -723,15 +720,16 @@ pub(crate) fn build_default_solvers(
                         InfiltrationMethod::Ach { ach }
                     } else if let Some(sla) = bz.ventilation_sla {
                         // Attic floor area = conditioned zone floor area if not explicit.
-                        let conditioned_area = building.zones.iter()
+                        let conditioned_area = building
+                            .zones
+                            .iter()
                             .find(|z| z.zone_type == ZoneType::Conditioned)
                             .and_then(|z| z.floor_area_m2);
-                        let floor_area_m2 = bz.floor_area_m2
-                            .or(conditioned_area)
-                            .unwrap_or(100.0);
+                        let floor_area_m2 = bz.floor_area_m2.or(conditioned_area).unwrap_or(100.0);
                         let ela_m2 = sla * floor_area_m2;
                         // Attic height from volume: V = 0.5 × A × h → h = 2V/A.
-                        let attic_height_m = bz.volume_m3
+                        let attic_height_m = bz
+                            .volume_m3
                             .filter(|&v| v > 0.0)
                             .map(|v| 2.0 * v / floor_area_m2)
                             .unwrap_or(1.5);

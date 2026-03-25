@@ -142,6 +142,7 @@ Full weather pipeline details — EPW parsing, sub-hourly resampling, solar posi
 | Topic | Document |
 |-------|----------|
 | Weather ingestion, derived quantities, per-timestep state construction | [Weather Pipeline](weather-pipeline.md) |
+| Schedule source variants, time-window lookups, boundary policies | [Schedule Sources](schedule-sources.md) |
 
 ### PortSlots (Typed Accumulator Bus)
 

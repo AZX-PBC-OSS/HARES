@@ -1,7 +1,7 @@
 //! Config parsing helpers for HVAC equipment initialization.
 
-use hares_types::{BoundaryPolicy, HaresError, ScheduleSource};
 use hares_types::normalize_ascii;
+use hares_types::{BoundaryPolicy, HaresError, ScheduleSource};
 
 use crate::EquipmentConfig;
 
@@ -24,7 +24,10 @@ pub(super) fn extract_bool(config: &EquipmentConfig, key: &str) -> Option<bool> 
 ///   1. `{prefix}_setpoint_schedule_col` → `ColumnRef` (per-timestep CSV column)
 ///   2. `{prefix}_weekday_setpoints_c` + `{prefix}_weekend_setpoints_c` → `DailyProfile`
 ///   3. None — static setpoints will be used
-pub(super) fn build_setpoint_source(config: &EquipmentConfig, prefix: &str) -> Option<ScheduleSource> {
+pub(super) fn build_setpoint_source(
+    config: &EquipmentConfig,
+    prefix: &str,
+) -> Option<ScheduleSource> {
     // Priority 1: per-timestep CSV column index
     let col_key = format!("{prefix}_setpoint_schedule_col");
     if let Some(col) = extract_numeric(config, &col_key) {
@@ -74,9 +77,7 @@ pub(super) fn load_bounds_pair(
 }
 
 pub(super) fn parse_speed_control_mode(config: &EquipmentConfig) -> SpeedControlMode {
-    let from_text = config
-        .get_str("speed_control_mode")
-        .map(normalize_ascii);
+    let from_text = config.get_str("speed_control_mode").map(normalize_ascii);
     if let Some(value) = from_text {
         return match value.as_str() {
             "single" | "single_speed" | "single-speed" => SpeedControlMode::SingleSpeed,
@@ -87,7 +88,11 @@ pub(super) fn parse_speed_control_mode(config: &EquipmentConfig) -> SpeedControl
             "two_speed_alternating" | "two-speed-alternating" | "time2" | "alternating" => {
                 SpeedControlMode::TwoSpeedAlternating
             }
-            "four" | "four_speed" | "four-speed" | "multi_speed" | "multi-speed"
+            "four"
+            | "four_speed"
+            | "four-speed"
+            | "multi_speed"
+            | "multi-speed"
             | "multi_speed_interpolated" => SpeedControlMode::MultiSpeedInterpolated,
             "variable" | "variable_speed" | "variable-speed" | "ideal" => {
                 SpeedControlMode::VariableSpeedIdeal
@@ -193,7 +198,10 @@ pub(super) fn parse_biquadratic_list(raw: &str) -> crate::Result<Vec<[f64; 6]>> 
     Ok(parsed)
 }
 
-pub(super) fn load_biquadratic_coeffs(config: &EquipmentConfig, key: &str) -> crate::Result<Vec<[f64; 6]>> {
+pub(super) fn load_biquadratic_coeffs(
+    config: &EquipmentConfig,
+    key: &str,
+) -> crate::Result<Vec<[f64; 6]>> {
     if let Some(raw) = config.get_str(key) {
         return parse_biquadratic_list(raw);
     }

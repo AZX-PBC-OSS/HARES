@@ -52,7 +52,7 @@ pub(crate) fn capture_single_equipment(
     EquipmentObservation {
         name: desc.name.clone(),
         equipment_type: desc.equipment_type.to_string(),
-        end_use: desc.end_use,
+        end_use: desc.end_use.clone(),
         telemetry: eq.telemetry().clone(),
         port_declarations: eq.ports().to_vec(),
         contribution,
