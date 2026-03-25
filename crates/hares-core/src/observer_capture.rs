@@ -17,10 +17,17 @@ pub(crate) fn capture_environment(env: &EnvironmentState) -> EnvironmentCapture 
     EnvironmentCapture {
         outdoor_temp_c: env.weather.outdoor_temp_c,
         ghi_w_m2: env.weather.ghi_w_m2,
+        dni_w_m2: env.weather.dni_w_m2,
+        dhi_w_m2: env.weather.dhi_w_m2,
+        solar_altitude_deg: env.weather.solar_altitude_deg,
+        solar_azimuth_deg: env.weather.solar_azimuth_deg,
         wind_speed_m_s: env.weather.wind_speed_m_s,
         mains_temp_c: env.weather.mains_temp_c,
+        ground_temp_c: env.weather.ground_temp_c,
+        sky_temp_c: env.weather.sky_temp_c,
         zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
         zone_humidity_ratios: env.zones.iter().map(|z| (z.id, z.humidity_ratio)).collect(),
+        solar_irradiance: env.weather.solar_irradiance.clone(),
     }
 }
 

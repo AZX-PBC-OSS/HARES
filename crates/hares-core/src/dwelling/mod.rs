@@ -72,6 +72,10 @@ pub struct DwellingConfig {
     pub overrides: Option<serde_json::Value>,
     pub bldg_id: i64,
     pub initialization_duration: Option<StdDuration>,
+    /// Per-column weather resampling overrides. `None` uses defaults
+    /// (PCHIP for continuous fields, ZOH for energy/wind).
+    /// Use `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
+    pub resample_overrides: Option<hares_io::ResampleOverrides>,
 }
 
 /// Snapshot of accumulated port totals at a stage boundary.
@@ -258,6 +262,7 @@ impl Dwelling {
             overrides,
             bldg_id: 0,
             initialization_duration: None,
+            resample_overrides: None,
         };
         Self::from_config(config)
     }
@@ -316,6 +321,7 @@ impl Dwelling {
             overrides: config.overrides.clone(),
             bldg_id: config.building_id.unwrap_or(0),
             initialization_duration: None,
+            resample_overrides: None,
         };
 
         Self::from_preparsed(dwelling_config, hpxml_building, weather, schedule)
@@ -354,13 +360,14 @@ impl Dwelling {
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
         let mut environment =
-            EnvironmentManager::new(
+            EnvironmentManager::new_with_resample(
                 weather,
                 schedule,
                 &building,
                 time_res,
                 local_start,
                 config.sim_config.civil_timezone.as_deref(),
+                config.resample_overrides.as_ref(),
             )
                 .map_err(|err| {
                     HaresError::Io(format!("environment initialization failed: {err}"))

@@ -169,12 +169,12 @@ fn build_solver_boundaries(
             hares_io::hpxml::BoundaryType::Door | hares_io::hpxml::BoundaryType::Other(_) => None,
         };
 
-        // Tilt.
-        let tilt_deg = match boundary.boundary_type {
+        // Tilt: use parsed value from HPXML, fall back to type-based default.
+        let tilt_deg = boundary.tilt_deg.unwrap_or(match boundary.boundary_type {
             hares_io::hpxml::BoundaryType::Roof => 0.0,
             hares_io::hpxml::BoundaryType::Slab | hares_io::hpxml::BoundaryType::Floor => 180.0,
             _ => 90.0,
-        };
+        });
 
         // Emissivity / absorptance (radiant barrier logic).
         let is_attic_radiant_barrier = boundary.has_radiant_barrier

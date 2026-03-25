@@ -13,7 +13,8 @@ use crate::rc_network::{RCNetwork, parallel_resistance};
 // ── Physical constants ──────────────────────────────────────────────────────
 
 /// Dry air density at ~20 °C, 101.325 kPa [kg/m³].
-pub const AIR_DENSITY_KG_M3: f64 = 1.2;
+/// Matches OCHRE's 1.2041 for parity.
+pub const AIR_DENSITY_KG_M3: f64 = 1.2041;
 /// Specific heat of dry air [J/(kg·K)].
 pub const AIR_CP_J_KG_K: f64 = 1006.0;
 /// Default zone volume when floor area is unknown [m³].

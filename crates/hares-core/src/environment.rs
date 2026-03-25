@@ -97,12 +97,30 @@ impl EnvironmentManager {
         start_time: DateTime<FixedOffset>,
         civil_timezone: Option<&str>,
     ) -> Result<Self, EnvironmentManagerError> {
+        Self::new_with_resample(weather, schedule, building, time_res, start_time, civil_timezone, None)
+    }
+
+    /// Like [`new`] but with optional per-column weather resampling overrides.
+    ///
+    /// Pass `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
+    pub fn new_with_resample(
+        weather: WeatherTimeSeries,
+        schedule: ScheduleTimeSeries,
+        building: &Building,
+        time_res: StdDuration,
+        start_time: DateTime<FixedOffset>,
+        civil_timezone: Option<&str>,
+        resample_overrides: Option<&hares_io::ResampleOverrides>,
+    ) -> Result<Self, EnvironmentManagerError> {
         let step_secs = u32::try_from(time_res.as_secs()).unwrap_or(u32::MAX);
         if step_secs == 0 {
             return Err(EnvironmentManagerError::ZeroTimeResolution);
         }
 
-        let weather = weather.resample(step_secs)?;
+        let weather = match resample_overrides {
+            Some(ov) => weather.resample_with(step_secs, ov)?,
+            None => weather.resample(step_secs)?,
+        };
         if weather.is_empty() {
             return Err(EnvironmentManagerError::EmptyWeather);
         }

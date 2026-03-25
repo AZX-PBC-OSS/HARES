@@ -128,6 +128,7 @@ impl Fleet {
                         overrides: None,
                         bldg_id: building.bldg_id,
                         initialization_duration: None,
+                    resample_overrides: None,
                     },
                     sample_weight: building.sample_weight,
                 }
@@ -427,6 +428,7 @@ mod tests {
                 overrides: None,
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
+                    resample_overrides: None,
             })
             .collect()
     }
@@ -442,6 +444,7 @@ mod tests {
                 overrides: None,
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
+                    resample_overrides: None,
             })
             .collect()
     }

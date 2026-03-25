@@ -75,6 +75,9 @@ mod tests {
             overrides: None,
             bldg_id: 1,
             initialization_duration: None,
+            // Use ZOH resampling for all continuous weather fields to match
+            // OCHRE's pandas resample().ffill() convention for parity testing.
+            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
         }
     }
 
@@ -261,6 +264,41 @@ mod tests {
         // Load OCHRE reference CSV.
         let ochre_csv = fixture_dir(scenario).join("ochre_reference.csv");
         assert!(ochre_csv.exists(), "OCHRE reference fixture not found: {}", ochre_csv.display());
+
+        // Hourly time-of-day comparison for first 24 hours.
+        eprintln!("\n--- HOURLY COMPARISON (first 24h): {scenario} ---");
+        eprintln!("  {:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "Hour", "H_ind", "O_ind", "Δ_ind", "H_atc", "O_atc", "Δ_atc",
+            "H_out", "O_out", "H_wsol", "O_wsol");
+        // Pre-load OCHRE columns for hourly dump
+        let ochre_data = parse_csv_columns(&ochre_csv);
+        let o_ind = ochre_data.get("Temperature - Indoor (C)").cloned().unwrap_or_default();
+        let o_atc = ochre_data.get("Temperature - Attic (C)").cloned().unwrap_or_default();
+        let o_out = ochre_data.get("Temperature - Outdoor (C)").cloned().unwrap_or_default();
+        let o_wsol = ochre_data.get("Window Transmitted Solar Gain (W)").cloned().unwrap_or_default();
+        let o_inf_in = ochre_data.get("Infiltration Heat Gain - Indoor (W)").cloned().unwrap_or_default();
+        let o_vent = ochre_data.get("Forced Ventilation Heat Gain - Indoor (W)").cloned().unwrap_or_default();
+        let o_inf_atc = ochre_data.get("Infiltration Heat Gain - Attic (W)").cloned().unwrap_or_default();
+        for hour in 0..24 {
+            let step = hour * 60;
+            if step >= hares_indoor_temp.len() { break; }
+            let hi = hares_indoor_temp[step];
+            let ha = hares_attic_temp[step];
+            let oi = o_ind.get(step).copied().unwrap_or(f64::NAN);
+            let oa = o_atc.get(step).copied().unwrap_or(f64::NAN);
+            let ho = snapshots.get(step)
+                .and_then(|s| s.phases.post_environment.as_ref())
+                .map(|e| e.outdoor_temp_c).unwrap_or(f64::NAN);
+            let oo = o_out.get(step).copied().unwrap_or(f64::NAN);
+            let hw = hares_window_solar.get(step).copied().unwrap_or(0.0);
+            let ow = o_wsol.get(step).copied().unwrap_or(0.0);
+            let h_inf = hares_infiltration.get(step).copied().unwrap_or(0.0);
+            let o_i = o_inf_in.get(step).copied().unwrap_or(0.0);
+            eprintln!(
+                "  {:>4} {:>8.2} {:>8.2} {:>+8.2} {:>8.2} {:>8.2} {:>+8.2} {:>8.1} {:>8.1} {:>8.0} {:>8.0}",
+                hour, hi, oi, hi-oi, ha, oa, ha-oa, ho, oo, hw, ow
+            );
+        }
         let ochre = parse_csv_columns(&ochre_csv);
 
         // Solver config diagnostics.
@@ -313,6 +351,24 @@ mod tests {
         eprintln!("  state vector ({} entries):", x_state.len());
         for (i, &t) in x_state.iter().enumerate().take(25) {
             eprintln!("    x[{i:2}] = {t:.4}°C");
+        }
+
+        // Solar irradiance diagnostic from step-0 environment.
+        if let Some(snap) = snapshots.first() {
+            if let Some(e) = snap.phases.post_environment.as_ref() {
+                eprintln!("\n--- STEP-0 SOLAR & WEATHER: {scenario} ---");
+                eprintln!("  T_out={:.1}°C  T_ground={:.1}°C  T_sky={:.1}°C  wind={:.1}m/s",
+                    e.outdoor_temp_c, e.ground_temp_c, e.sky_temp_c, e.wind_speed_m_s);
+                eprintln!("  GHI={:.1}  DNI={:.1}  DHI={:.1} W/m²", e.ghi_w_m2, e.dni_w_m2, e.dhi_w_m2);
+                eprintln!("  Solar alt={:.2}°  az={:.2}°", e.solar_altitude_deg, e.solar_azimuth_deg);
+                eprintln!("  Per-surface POA irradiance:");
+                for irr in &e.solar_irradiance {
+                    let total = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
+                    eprintln!("    srf {:2}: direct={:>7.1} diffuse={:>6.1} refl={:>5.1} total={:>7.1} aoi={:.2}°",
+                        irr.surface_id, irr.direct_w_m2, irr.diffuse_w_m2, irr.reflected_w_m2,
+                        total, irr.angle_of_incidence_rad.to_degrees());
+                }
+            }
         }
 
         // Step-0 comprehensive heat balance: HARES vs OCHRE side-by-side.

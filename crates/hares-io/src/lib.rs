@@ -44,4 +44,4 @@ pub use resstock::{
 };
 pub use schedule::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
 pub use schedule_resolve::inject_schedule_into_specs;
-pub use weather::{WeatherField, WeatherMeta, WeatherTimeSeries};
+pub use weather::{ResampleMethod, ResampleOverrides, WeatherField, WeatherMeta, WeatherTimeSeries};

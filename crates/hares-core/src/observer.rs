@@ -36,10 +36,17 @@ pub struct PhaseSnapshots {
 pub struct EnvironmentCapture {
     pub outdoor_temp_c: f64,
     pub ghi_w_m2: f64,
+    pub dni_w_m2: f64,
+    pub dhi_w_m2: f64,
+    pub solar_altitude_deg: f64,
+    pub solar_azimuth_deg: f64,
     pub wind_speed_m_s: f64,
     pub mains_temp_c: f64,
+    pub ground_temp_c: f64,
+    pub sky_temp_c: f64,
     pub zone_temps_c: Vec<(ZoneId, f64)>,
     pub zone_humidity_ratios: Vec<(ZoneId, f64)>,
+    pub solar_irradiance: Vec<hares_types::SurfaceIrradiance>,
 }
 
 /// Equipment telemetry + accumulated port state after an equipment phase.

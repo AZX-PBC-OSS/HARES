@@ -230,6 +230,59 @@ pub struct WeatherMeta {
     pub midpoint_offset_secs: u32,
 }
 
+/// Upsampling interpolation strategy for continuous weather fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResampleMethod {
+    /// Piecewise Cubic Hermite Interpolating Polynomial — smooth, monotone,
+    /// physically superior for continuous fields like temperature. Default.
+    #[default]
+    Pchip,
+    /// Zero-order hold (forward fill) — each sub-step gets the previous
+    /// hourly value. Matches OCHRE's pandas `resample().ffill()` convention.
+    /// Use for parity testing against OCHRE.
+    Zoh,
+    /// Linear interpolation between hourly knots.
+    Linear,
+}
+
+/// Per-column override for weather resampling strategy.
+///
+/// All fields default to `None` (use the category default: PCHIP for
+/// continuous, ZOH for energy/wind). Set a field to override.
+#[derive(Debug, Clone, Default)]
+pub struct ResampleOverrides {
+    pub dry_bulb: Option<ResampleMethod>,
+    pub dew_point: Option<ResampleMethod>,
+    pub rel_humidity: Option<ResampleMethod>,
+    pub pressure: Option<ResampleMethod>,
+    pub infrared: Option<ResampleMethod>,
+    pub sky_temp: Option<ResampleMethod>,
+    pub ground_temp: Option<ResampleMethod>,
+    pub opaque_sky_cover: Option<ResampleMethod>,
+    pub ghi: Option<ResampleMethod>,
+    pub dni: Option<ResampleMethod>,
+    pub dhi: Option<ResampleMethod>,
+    pub wind_speed: Option<ResampleMethod>,
+    pub wind_dir: Option<ResampleMethod>,
+}
+
+impl ResampleOverrides {
+    /// All continuous fields set to ZOH — matches OCHRE's resampling.
+    pub fn ochre_compat() -> Self {
+        Self {
+            dry_bulb: Some(ResampleMethod::Zoh),
+            dew_point: Some(ResampleMethod::Zoh),
+            rel_humidity: Some(ResampleMethod::Zoh),
+            pressure: Some(ResampleMethod::Zoh),
+            infrared: Some(ResampleMethod::Zoh),
+            sky_temp: Some(ResampleMethod::Zoh),
+            ground_temp: Some(ResampleMethod::Zoh),
+            opaque_sky_cover: Some(ResampleMethod::Zoh),
+            ..Default::default()
+        }
+    }
+}
+
 /// Addressable weather columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeatherField {
@@ -345,7 +398,17 @@ impl WeatherTimeSeries {
     ///   fields, sum for accumulated fields.
     ///
     /// Requires that one step divides evenly into the other.
+    /// Resample with default strategies (PCHIP for continuous, ZOH for energy/wind).
     pub fn resample(&self, target_step_secs: u32) -> Result<Self, WeatherError> {
+        self.resample_with(target_step_secs, &ResampleOverrides::default())
+    }
+
+    /// Resample with per-column strategy overrides.
+    pub fn resample_with(
+        &self,
+        target_step_secs: u32,
+        overrides: &ResampleOverrides,
+    ) -> Result<Self, WeatherError> {
         if target_step_secs == 0 {
             return Err(WeatherError::Resample(
                 "target_step_secs must be > 0".to_string(),
@@ -381,25 +444,34 @@ impl WeatherTimeSeries {
                     source_step_secs: target_step_secs,
                     ..self.meta.clone()
                 },
-                // Continuous instantaneous fields → PCHIP.
-                dry_bulb_c: pchip_resample(&self.dry_bulb_c, factor),
-                dew_point_c: pchip_resample(&self.dew_point_c, factor),
+                // Continuous instantaneous fields default to PCHIP (smooth, monotone).
+                // Override to ZOH for OCHRE parity or Linear for simpler interpolation.
+                dry_bulb_c: resample_field(&self.dry_bulb_c, factor,
+                    overrides.dry_bulb.unwrap_or(ResampleMethod::Pchip)),
+                dew_point_c: resample_field(&self.dew_point_c, factor,
+                    overrides.dew_point.unwrap_or(ResampleMethod::Pchip)),
                 rel_humidity_pct,
-                pressure_kpa: pchip_resample(&self.pressure_kpa, factor),
-                horizontal_infrared_w_m2: pchip_resample(
-                    &self.horizontal_infrared_w_m2,
-                    factor,
-                ),
-                sky_temp_c: pchip_resample(&self.sky_temp_c, factor),
-                ground_temp_c: pchip_resample(&self.ground_temp_c, factor),
+                pressure_kpa: resample_field(&self.pressure_kpa, factor,
+                    overrides.pressure.unwrap_or(ResampleMethod::Pchip)),
+                horizontal_infrared_w_m2: resample_field(&self.horizontal_infrared_w_m2, factor,
+                    overrides.infrared.unwrap_or(ResampleMethod::Pchip)),
+                sky_temp_c: resample_field(&self.sky_temp_c, factor,
+                    overrides.sky_temp.unwrap_or(ResampleMethod::Pchip)),
+                ground_temp_c: resample_field(&self.ground_temp_c, factor,
+                    overrides.ground_temp.unwrap_or(ResampleMethod::Pchip)),
                 opaque_sky_cover,
-                // Period-average energy flux → ZOH.
-                ghi_w_m2: replicate_zoh(&self.ghi_w_m2, factor),
-                dni_w_m2: replicate_zoh(&self.dni_w_m2, factor),
-                dhi_w_m2: replicate_zoh(&self.dhi_w_m2, factor),
+                // Period-average energy flux defaults to ZOH.
+                ghi_w_m2: resample_field(&self.ghi_w_m2, factor,
+                    overrides.ghi.unwrap_or(ResampleMethod::Zoh)),
+                dni_w_m2: resample_field(&self.dni_w_m2, factor,
+                    overrides.dni.unwrap_or(ResampleMethod::Zoh)),
+                dhi_w_m2: resample_field(&self.dhi_w_m2, factor,
+                    overrides.dhi.unwrap_or(ResampleMethod::Zoh)),
                 // Turbulent/stochastic → ZOH.
-                wind_speed_m_s: replicate_zoh(&self.wind_speed_m_s, factor),
-                wind_dir_deg: replicate_zoh(&self.wind_dir_deg, factor),
+                wind_speed_m_s: resample_field(&self.wind_speed_m_s, factor,
+                    overrides.wind_speed.unwrap_or(ResampleMethod::Zoh)),
+                wind_dir_deg: resample_field(&self.wind_dir_deg, factor,
+                    overrides.wind_dir.unwrap_or(ResampleMethod::Zoh)),
                 // Accumulated depth → distribute evenly so downstream sums are preserved.
                 liquid_precip_m: distribute_accumulated(&self.liquid_precip_m, factor),
                 // Surface property → ZOH (not interpolatable).
@@ -620,6 +692,33 @@ fn replicate_zoh(values: &[f64], factor: usize) -> Vec<f64> {
         out.extend(std::iter::repeat_n(value, factor));
     }
     out
+}
+
+/// Linear interpolation between hourly knots (simpler than PCHIP, no overshoot).
+fn linear_resample(values: &[f64], factor: usize) -> Vec<f64> {
+    let n = values.len();
+    if n == 0 { return vec![]; }
+    if factor <= 1 { return values.to_vec(); }
+    if n == 1 { return vec![values[0]; factor]; }
+
+    let total = n * factor;
+    let mut out = Vec::with_capacity(total);
+    for i in 0..total {
+        let t = i as f64 / factor as f64;
+        let k = (t as usize).min(n - 2);
+        let frac = (t - k as f64).clamp(0.0, 1.0);
+        out.push(values[k] + frac * (values[k + 1] - values[k]));
+    }
+    out
+}
+
+/// Dispatch resampling based on method enum.
+fn resample_field(values: &[f64], factor: usize, method: ResampleMethod) -> Vec<f64> {
+    match method {
+        ResampleMethod::Pchip => pchip_resample(values, factor),
+        ResampleMethod::Zoh => replicate_zoh(values, factor),
+        ResampleMethod::Linear => linear_resample(values, factor),
+    }
 }
 
 /// Distribute an accumulated quantity evenly across sub-timestep slots.
