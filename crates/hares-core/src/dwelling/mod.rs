@@ -2312,4 +2312,261 @@ mod tests {
             "non-thermal should execute before thermal"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Dispatch wiring: signal count preservation (no signal loss)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_delivers_all_signals_no_loss() {
+        let eq1 = TestEquipment::new("Eq1", ControlCapabilities::POWER_SETPOINT);
+        let eq2 = TestEquipment::new("Eq2", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        // Queue 3 signals to 2 different equipment
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Eq1")),
+            signal: ControlSignal::PowerSetpoint { active_power_kw: 1.0, reactive_power_kvar: None },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Eq2")),
+            signal: ControlSignal::PowerSetpoint { active_power_kw: 2.0, reactive_power_kvar: None },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Eq1")),
+            signal: ControlSignal::PowerSetpoint { active_power_kw: 3.0, reactive_power_kvar: None },
+            priority: PriorityTier::Grid,
+        });
+
+        let mut warnings = Vec::new();
+        let mut delivered_count = 0u32;
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, delivered, _| {
+            if delivered { delivered_count += 1; }
+        });
+
+        assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
+        assert_eq!(delivered_count, 3, "all 3 signals must be delivered");
+        // Eq1 gets Grid (3.0) as last write, Eq2 gets Schedule (2.0)
+        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(3.0));
+        assert_eq!(equipment[1].telemetry().get("last_power_kw"), Some(2.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatch wiring: same-tier same-target last-write-wins
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_same_tier_same_target_last_write_wins() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        // Two Schedule-tier signals to same equipment
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint { active_power_kw: 1.0, reactive_power_kvar: None },
+            priority: PriorityTier::Schedule,
+        });
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint { active_power_kw: 9.0, reactive_power_kvar: None },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        // Last queued signal in the same tier wins (FIFO within tier, last write wins)
+        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(9.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatch wiring: ByEndUse targets all matching equipment
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_by_end_use_targets_all_matching_equipment() {
+        let mut eq1 = TestEquipment::new("Heater1", ControlCapabilities::POWER_SETPOINT);
+        eq1.descriptor.end_use = EndUse::HVAC_HEATING;
+        let mut eq2 = TestEquipment::new("Heater2", ControlCapabilities::POWER_SETPOINT);
+        eq2.descriptor.end_use = EndUse::HVAC_HEATING;
+        let mut eq3 = TestEquipment::new("Battery", ControlCapabilities::POWER_SETPOINT);
+        eq3.descriptor.end_use = EndUse::BATTERY;
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
+            signal: ControlSignal::PowerSetpoint { active_power_kw: 5.0, reactive_power_kvar: None },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![
+            Box::new(eq1), Box::new(eq2), Box::new(eq3),
+        ];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        assert!(warnings.is_empty());
+        // Both HVAC_HEATING equipment should receive the signal
+        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(5.0));
+        assert_eq!(equipment[1].telemetry().get("last_power_kw"), Some(5.0));
+        // Battery should NOT receive it
+        assert_eq!(equipment[2].telemetry().get("last_power_kw"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatch wiring: queues are drained each dispatch (no carryover)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_queues_drained_no_carryover_between_steps() {
+        let eq = TestEquipment::new("Heater", ControlCapabilities::POWER_SETPOINT);
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("Heater")),
+            signal: ControlSignal::PowerSetpoint { active_power_kw: 5.0, reactive_power_kvar: None },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+
+        // First dispatch
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(5.0));
+
+        // Second dispatch with nothing queued — queues should be empty
+        let mut delivered_count = 0u32;
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, delivered, _| {
+            if delivered { delivered_count += 1; }
+        });
+        assert_eq!(delivered_count, 0, "no signals should be delivered on second dispatch");
+    }
+
+    // -----------------------------------------------------------------------
+    // Solver feedback: collect→decide→dispatch→equipment full round-trip
+    // with signal count verification
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solver_feedback_signal_count_matches_ideal_equipment_count() {
+        use crate::Actor;
+        use crate::actors::SolverFeedbackActor;
+
+        // 2 ideal + 1 non-ideal = expect exactly 2 signals
+        let ideal1 = TestIdealEquipment::new("HVAC_1", ZoneId(1), 20.0);
+        let ideal2 = TestIdealEquipment::new("HVAC_2", ZoneId(2), 22.0);
+        let battery = TestEquipment::new("Battery", ControlCapabilities::POWER_SETPOINT);
+
+        let equipment: Vec<Box<dyn Equipment>> = vec![
+            Box::new(ideal1), Box::new(ideal2), Box::new(battery),
+        ];
+
+        let mut actor = SolverFeedbackActor::new();
+        actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+        actor.collect_and_solve_test(&equipment, |zone, _target_c| {
+            if zone == ZoneId(1) { 3000.0 } else { -2000.0 }
+        });
+
+        let env = crate::actor::testing::test_env().build();
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+
+        assert_eq!(requests.len(), 2, "exactly 2 ideal equipment → 2 signals");
+        // Verify correct zone→capacity mapping
+        match &requests[0].signal {
+            ControlSignal::IdealCapacity { capacity_w } => {
+                assert!((capacity_w - 3000.0).abs() < 1e-9, "zone 1 → 3000W");
+            }
+            _ => panic!("expected IdealCapacity"),
+        }
+        match &requests[1].signal {
+            ControlSignal::IdealCapacity { capacity_w } => {
+                assert!((capacity_w - (-2000.0)).abs() < 1e-9, "zone 2 → -2000W");
+            }
+            _ => panic!("expected IdealCapacity"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Full pipeline: actor→dispatch→equipment with IdealCapacity + override
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn solver_feedback_signal_overridden_by_higher_priority_actor() {
+        use crate::Actor;
+        use crate::actors::SolverFeedbackActor;
+
+        let mut eq = TestIdealEquipment::new("HVAC", ZoneId(1), 20.0);
+        let env = crate::actor::testing::test_env().build();
+        eq.init(&EquipmentConfig::default(), &env).ok();
+
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
+
+        // Step 1: SolverFeedback emits IdealCapacity at Schedule priority
+        let mut actor = SolverFeedbackActor::new();
+        actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+        actor.collect_and_solve_test(&equipment, |_, _| 5000.0);
+
+        let mut requests = Vec::new();
+        actor.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1);
+
+        // Step 2: User actor emits override at Grid priority (e.g., DR curtailment)
+        requests.push(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from("HVAC")),
+            signal: ControlSignal::IdealCapacity { capacity_w: 0.0 },
+            priority: PriorityTier::Grid,
+        });
+
+        // Step 3: Queue both and dispatch
+        let mut dispatcher = ControlDispatcher::default();
+        for req in requests {
+            dispatcher.queue(req);
+        }
+        let mut warnings = Vec::new();
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        // Grid priority (0W) should overwrite Schedule priority (5000W)
+        assert!(warnings.is_empty());
+        assert!(
+            (equipment[0].telemetry().get("ideal_capacity_w").unwrap_or(999.0) - 0.0).abs() < 1e-9,
+            "Grid priority override should zero out the ideal capacity"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatcher correctly handles equipment apply_control errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_continues_after_one_equipment_rejects_signal() {
+        // eq1 has no capabilities (rejects all), eq2 accepts PowerSetpoint
+        let eq1 = TestEquipment::new("NoCapEq", ControlCapabilities::empty());
+        let mut eq2 = TestEquipment::new("CapEq", ControlCapabilities::POWER_SETPOINT);
+        eq2.descriptor.end_use = EndUse::OTHER;
+        // Both have same end_use (OTHER) from TestEquipment default
+
+        let mut dispatcher = ControlDispatcher::default();
+        dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByEndUse(EndUse::OTHER),
+            signal: ControlSignal::PowerSetpoint { active_power_kw: 7.0, reactive_power_kvar: None },
+            priority: PriorityTier::Schedule,
+        });
+
+        let mut warnings = Vec::new();
+        let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
+        dispatcher.dispatch_into(&mut equipment, &mut warnings);
+
+        // eq1 should generate a warning but eq2 should still receive the signal
+        assert_eq!(warnings.len(), 1, "one warning for rejected signal");
+        assert!(warnings[0].contains("control apply failed"));
+        assert_eq!(equipment[1].telemetry().get("last_power_kw"), Some(7.0),
+            "second equipment should still receive signal despite first rejecting");
+    }
 }

@@ -537,3 +537,119 @@ fn step_result_timestamps_advance_monotonically() {
         prev_ts = result.timestamp;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test: HVAC heating energy flows through full dispatch pipeline to thermal solver
+//
+// At cold outdoor temp, the furnace's thermostat decides to heat. Equipment
+// writes thermal port contributions via step(). The thermal solver reads those
+// contributions and adjusts zone temperature. If dispatch wiring is broken
+// (signals lost, equipment not stepping, ports not reaching solver), the
+// zone temperature will drop continuously with no heating offset.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hvac_heating_energy_reaches_thermal_solver() {
+    let path_heated = unique_temp_toml("hvac-reach-heated");
+    let path_unheated = unique_temp_toml("hvac-reach-unheated");
+
+    // Dwelling A: cold outdoor with furnace (should heat)
+    write_synthetic_toml(&path_heated, -10.0, "electricity", 30.0, 600);
+
+    // Dwelling B: same conditions but we'll clear equipment (no heating)
+    write_synthetic_toml(&path_unheated, -10.0, "electricity", 30.0, 600);
+
+    let mut dwelling_heated = Dwelling::from_toml_config(&path_heated)
+        .expect("heated dwelling must load");
+    let mut dwelling_unheated = Dwelling::from_toml_config(&path_unheated)
+        .expect("unheated dwelling must load");
+    let _ = fs::remove_file(&path_heated);
+    let _ = fs::remove_file(&path_unheated);
+
+    // Remove all equipment from unheated dwelling to isolate the envelope
+    dwelling_unheated.clear_equipment();
+
+    const STEPS: usize = 10;
+    let mut heated_final_temp = f64::NAN;
+    let mut unheated_final_temp = f64::NAN;
+
+    for _ in 0..STEPS {
+        let r_h = dwelling_heated.step().expect("heated step");
+        let r_u = dwelling_unheated.step().expect("unheated step");
+        heated_final_temp = r_h.zone_temperatures_c[0].1;
+        unheated_final_temp = r_u.zone_temperatures_c[0].1;
+    }
+
+    assert!(heated_final_temp.is_finite());
+    assert!(unheated_final_temp.is_finite());
+
+    // With furnace: zone temp should be warmer than without
+    // This proves: thermostat → dispatch → equipment.step() → thermal port → solver
+    assert!(
+        heated_final_temp > unheated_final_temp,
+        "heated dwelling ({heated_final_temp:.2}°C) must be warmer than unheated \
+         ({unheated_final_temp:.2}°C) after {STEPS} steps at -10°C outdoor. \
+         If equal, the HVAC dispatch→port→solver pipeline is broken."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: StepResult hvac_heating_w reflects actual HVAC thermal contribution
+//
+// When the furnace is heating, hvac_heating_w must be positive. This verifies
+// the StepResult aggregation of equipment thermal port contributions.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn step_result_hvac_heating_w_positive_when_furnace_fires() {
+    let path = unique_temp_toml("hvac-heat-w");
+    write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
+
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("must load");
+    let _ = fs::remove_file(&path);
+
+    let mut ever_heating = false;
+    for _ in 0..10 {
+        let result = dwelling.step().expect("step");
+        if result.hvac_heating_w > 0.0 {
+            ever_heating = true;
+        }
+    }
+
+    assert!(
+        ever_heating,
+        "hvac_heating_w must be positive at least once in 10 steps at -10°C outdoor; \
+         this indicates furnace thermal contributions are not reaching the StepResult"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: no warnings emitted during normal dwelling operation
+//
+// If the dispatch wiring is correct (targets exist, capabilities match),
+// a normal dwelling should produce zero warnings across multiple steps.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn normal_operation_produces_no_dispatch_warnings() {
+    let path = unique_temp_toml("no-warnings");
+    write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
+
+    let mut dwelling =
+        Dwelling::from_toml_config(&path).expect("must load");
+    let _ = fs::remove_file(&path);
+
+    for _ in 0..10 {
+        dwelling.step().expect("step");
+    }
+
+    let dispatch_warnings: Vec<&String> = dwelling.warnings.iter()
+        .filter(|w| w.contains("control target not found") || w.contains("control apply failed"))
+        .collect();
+    assert!(
+        dispatch_warnings.is_empty(),
+        "normal operation should produce no dispatch warnings, got: {:?}",
+        dispatch_warnings
+    );
+}

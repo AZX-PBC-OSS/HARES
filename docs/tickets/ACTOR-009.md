@@ -31,15 +31,15 @@ To validate HARES's IdealHvac equipment against OCHRE, we need OCHRE reference C
 
 ## Work to Do
 
-- [ ] Create `tests/python/generate_conditioned_oracle.py` modeled on `generate_freefloat_oracle.py`
-- [ ] Strip non-HVAC equipment (appliances, lighting, water heater, ventilation fan) but keep HVAC heater + cooler
-- [ ] Use OCHRE's native setpoint schedule (from HPXML) — don't override to fixed values
-- [ ] Export columns: zone temps (Indoor, Attic, Outdoor), HVAC Heating/Cooling Delivered (W), HVAC setpoints, Net Sensible Heat Gain, plus all envelope diagnostics (same as freefloat)
-- [ ] Three scenarios: beopt_spring_72h, beopt_summer_48h, beopt_winter_48h
-- [ ] **Two modes per scenario:**
+- [x] Create `tests/python/generate_conditioned_oracle.py` modeled on `generate_freefloat_oracle.py`
+- [x] Strip non-HVAC equipment (appliances, lighting, water heater, ventilation fan) but keep HVAC heater + cooler
+- [x] Use OCHRE's native setpoint schedule (from HPXML) — don't override to fixed values
+- [x] Export columns: zone temps (Indoor, Attic, Outdoor), HVAC Heating/Cooling Delivered (W), HVAC setpoints, Net Sensible Heat Gain, plus all envelope diagnostics (same as freefloat)
+- [x] Three scenarios: beopt_spring_72h, beopt_summer_48h, beopt_winter_48h
+- [x] **Two modes per scenario:**
   - `use_ideal_capacity=True` → output to `tests/fixtures/conditioned_ideal/{scenario}/`
   - `use_ideal_capacity=False` → output to `tests/fixtures/conditioned_dynamic/{scenario}/`
-- [ ] Run the script and commit all fixture CSVs
+- [x] Run the script and commit all fixture CSVs
 
 ## Files to Touch
 
@@ -49,12 +49,37 @@ To validate HARES's IdealHvac equipment against OCHRE, we need OCHRE reference C
 
 ## Measures of Success
 
-- [ ] Script runs without errors against OCHRE vendor directory
-- [ ] Indoor temperature tracks setpoint closely (within OCHRE's deadband)
-- [ ] HVAC loads are non-zero and physically reasonable
-- [ ] Three scenarios generated with expected step counts (4320, 2880, 2880)
+- [x] Script runs without errors against OCHRE vendor directory
+- [x] Indoor temperature tracks setpoint closely (within OCHRE's deadband)
+- [x] HVAC loads are non-zero and physically reasonable
+- [x] Three scenarios generated with expected step counts (4320, 2880, 2880)
 
 ## Verification
 
-- [ ] `PYTHONPATH=vendors/OCHRE vendors/OCHRE/.venv/bin/python tests/python/generate_conditioned_oracle.py` completes
-- [ ] Fixture CSVs exist and have expected column count and row count
+- [x] `uv run tests/python/generate_conditioned_oracle.py` completes
+- [x] Fixture CSVs exist and have expected column count and row count
+
+## Fixture Details
+
+### conditioned_ideal/ (use_ideal_capacity=True)
+
+| Scenario | Rows | Columns | HVAC Equipment |
+|----------|------|---------|---------------|
+| beopt_spring_72h | 4320 | 103 | ASHP Heater, ASHP Cooler |
+| beopt_summer_48h | 2880 | 103 | ASHP Heater, ASHP Cooler |
+| beopt_winter_48h | 2880 | 103 | ASHP Heater, ASHP Cooler |
+
+### conditioned_dynamic/ (use_ideal_capacity=False)
+
+| Scenario | Rows | Columns | HVAC Equipment |
+|----------|------|---------|---------------|
+| beopt_spring_72h | 4320 | 103 | ASHP Heater, ASHP Cooler |
+| beopt_summer_48h | 2880 | 103 | ASHP Heater, ASHP Cooler |
+| beopt_winter_48h | 2880 | 103 | ASHP Heater, ASHP Cooler |
+
+### Key Columns Exported
+
+- Temperature columns: Indoor, Attic, Outdoor, Ground
+- HVAC Heating: Delivered (W), Setpoint (C), COP (-), Capacity (W), Mode
+- HVAC Cooling: Delivered (W), Setpoint (C), COP (-), Capacity (W), Mode
+- Envelope diagnostics: Heat gains, flow rates, surface temperatures, film coefficients
