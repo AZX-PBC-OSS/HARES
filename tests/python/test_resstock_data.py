@@ -17,6 +17,7 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_zip(hpxml_content: str = "", schedule_content: str = "") -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -57,6 +58,7 @@ def _make_metadata_parquet(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def _isolate_modules():
     """Remove cached ochre_next.data modules between tests."""
@@ -70,9 +72,11 @@ def _isolate_modules():
 # 1. Version config / URL construction
 # ---------------------------------------------------------------------------
 
+
 class TestVersionConfig:
     def test_v2024_1_zip_url(self):
         from ochre_next.data.resstock import _version_config, _zip_url
+
         cfg = _version_config("2024.1")
         url = _zip_url(cfg, bldg_id=1, upgrade_id=0)
         assert "2024/resstock_dataset_2024.1/resstock_tmy3/" in url
@@ -80,6 +84,7 @@ class TestVersionConfig:
 
     def test_v2024_2_zip_url(self):
         from ochre_next.data.resstock import _version_config, _zip_url
+
         cfg = _version_config("2024.2")
         url = _zip_url(cfg, bldg_id=42, upgrade_id=0)
         assert "2024/resstock_tmy3_release_2/" in url
@@ -88,6 +93,7 @@ class TestVersionConfig:
 
     def test_v2025_1_zip_url(self):
         from ochre_next.data.resstock import _version_config, _zip_url
+
         cfg = _version_config("2025.1")
         url = _zip_url(cfg, bldg_id=7, upgrade_id=1)
         assert "2025/resstock_amy2018_release_1/" in url
@@ -95,6 +101,7 @@ class TestVersionConfig:
 
     def test_v2025_1_metadata_baseline(self):
         from ochre_next.data.resstock import _version_config, _metadata_url
+
         cfg = _version_config("2025.1")
         url = _metadata_url(cfg, upgrade_id=0)
         assert "upgrade0.parquet" in url
@@ -102,24 +109,28 @@ class TestVersionConfig:
 
     def test_v2024_2_metadata_upgrade(self):
         from ochre_next.data.resstock import _version_config, _metadata_url
+
         cfg = _version_config("2024.2")
         url = _metadata_url(cfg, upgrade_id=3)
         assert "upgrade03_metadata_and_annual_results.parquet" in url
 
     def test_weather_url_v2024_2(self):
         from ochre_next.data.resstock import _version_config, _weather_url
+
         cfg = _version_config("2024.2")
         url = _weather_url(cfg, state="CO", fips="G0800130")
         assert "weather/state=CO/G0800130_TMY3.csv" in url
 
     def test_weather_url_v2025_1(self):
         from ochre_next.data.resstock import _version_config, _weather_url
+
         cfg = _version_config("2025.1")
         url = _weather_url(cfg, state="CO", fips="G0800130")
         assert "weather/state=CO/G0800130_2018.csv" in url
 
     def test_invalid_version_raises(self):
         from ochre_next.data.resstock import _version_config
+
         with pytest.raises(ValueError, match="Unknown ResStock version"):
             _version_config("9999.9")
 
@@ -128,9 +139,11 @@ class TestVersionConfig:
 # 2. ResStockBuilding dataclass
 # ---------------------------------------------------------------------------
 
+
 class TestResStockBuilding:
     def test_frozen(self):
         from ochre_next.data.resstock import ResStockBuilding
+
         b = ResStockBuilding(
             bldg_id=1,
             sample_weight=1.0,
@@ -143,6 +156,7 @@ class TestResStockBuilding:
 
     def test_fields_accessible(self):
         from ochre_next.data.resstock import ResStockBuilding
+
         b = ResStockBuilding(1, 2.5, Path("/h.xml"), Path("/s.csv"), Path("/w.csv"))
         assert b.bldg_id == 1
         assert b.sample_weight == 2.5
@@ -154,6 +168,7 @@ import dataclasses  # noqa: E402 – needed for test_frozen above
 class TestResStockBuildingFrozen:
     def test_mutation_raises(self):
         from ochre_next.data.resstock import ResStockBuilding
+
         b = ResStockBuilding(1, 1.0, Path("/a"), Path("/b"), Path("/c"))
         with pytest.raises(dataclasses.FrozenInstanceError):
             b.bldg_id = 2  # type: ignore[misc]
@@ -162,6 +177,7 @@ class TestResStockBuildingFrozen:
 # ---------------------------------------------------------------------------
 # 3. fetch_resstock_building — basic download + extract
 # ---------------------------------------------------------------------------
+
 
 class TestFetchResStockBuilding:
     def test_downloads_and_extracts(self, tmp_path: Path):
@@ -244,7 +260,10 @@ class TestFetchResStockBuilding:
             _fake_download(zip_bytes, tmp_path)(url, dest)
 
         with (
-            mock.patch("ochre_next.data.resstock._download_file", side_effect=recording_download),
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=recording_download,
+            ),
             mock.patch(
                 "ochre_next.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
@@ -269,7 +288,9 @@ class TestFetchResStockBuilding:
             download_calls.append(url)
             _fake_download(zip_bytes, tmp_path)(url, dest)
 
-        with mock.patch("ochre_next.data.resstock._download_file", side_effect=recording_download):
+        with mock.patch(
+            "ochre_next.data.resstock._download_file", side_effect=recording_download
+        ):
             result = fetch_resstock_building(
                 1,
                 cache_dir=tmp_path,
@@ -319,7 +340,10 @@ class TestFetchResStockBuilding:
             _fake_download(zip_bytes, tmp_path)(url, dest)
 
         with (
-            mock.patch("ochre_next.data.resstock._download_file", side_effect=recording_download),
+            mock.patch(
+                "ochre_next.data.resstock._download_file",
+                side_effect=recording_download,
+            ),
             mock.patch(
                 "ochre_next.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
@@ -335,6 +359,7 @@ class TestFetchResStockBuilding:
 # ---------------------------------------------------------------------------
 # 4. fetch_resstock_fleet
 # ---------------------------------------------------------------------------
+
 
 class TestFetchResStockFleet:
     def _metadata_file(self, tmp_path: Path, bldg_ids: list[int], **kwargs) -> Path:
@@ -446,6 +471,7 @@ class TestFetchResStockFleet:
 # 5. Fallback to urllib (no httpx, no boto3)
 # ---------------------------------------------------------------------------
 
+
 class TestFallbackToUrllib:
     def test_urllib_fallback(self, tmp_path: Path):
         """_try_download falls back to urllib when httpx/boto3 are absent."""
@@ -462,6 +488,7 @@ class TestFallbackToUrllib:
         class _FakeUrllibCtx:
             def __enter__(self):
                 return fake_resp
+
             def __exit__(self, *_):
                 pass
 
@@ -479,9 +506,11 @@ class TestFallbackToUrllib:
 # 6. HPXML weather station parsing
 # ---------------------------------------------------------------------------
 
+
 class TestParseWeatherStation:
     def test_parses_fips_code(self, tmp_path: Path):
         from ochre_next.data.resstock import _parse_weather_station
+
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_minimal_hpxml("G0800130"))
         result = _parse_weather_station(hpxml)
@@ -489,6 +518,7 @@ class TestParseWeatherStation:
 
     def test_returns_none_for_unknown_fips(self, tmp_path: Path):
         from ochre_next.data.resstock import _parse_weather_station
+
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_minimal_hpxml("UNKNOWN_STATION"))
         result = _parse_weather_station(hpxml)
@@ -496,6 +526,7 @@ class TestParseWeatherStation:
 
     def test_returns_none_for_missing_element(self, tmp_path: Path):
         from ochre_next.data.resstock import _parse_weather_station
+
         hpxml = tmp_path / "home.xml"
         hpxml.write_text("<HPXML><Building/></HPXML>")
         result = _parse_weather_station(hpxml)
@@ -503,6 +534,7 @@ class TestParseWeatherStation:
 
     def test_returns_none_for_bad_xml(self, tmp_path: Path):
         from ochre_next.data.resstock import _parse_weather_station
+
         hpxml = tmp_path / "home.xml"
         hpxml.write_text("not xml at all <<<")
         result = _parse_weather_station(hpxml)
@@ -513,9 +545,11 @@ class TestParseWeatherStation:
 # 7. ResStockVersion enum
 # ---------------------------------------------------------------------------
 
+
 class TestResStockVersion:
     def test_values(self):
         from ochre_next.data.resstock import ResStockVersion
+
         assert ResStockVersion.V2024_1.value == "2024.1"
         assert ResStockVersion.V2024_2.value == "2024.2"
         assert ResStockVersion.V2025_1.value == "2025.1"
@@ -523,6 +557,7 @@ class TestResStockVersion:
     def test_default_version_is_2024_2(self):
         import inspect
         from ochre_next.data.resstock import fetch_resstock_building
+
         sig = inspect.signature(fetch_resstock_building)
         assert sig.parameters["version"].default == "2024.2"
 
@@ -531,15 +566,18 @@ class TestResStockVersion:
 # Internal mock helpers
 # ---------------------------------------------------------------------------
 
+
 def _fake_download(zip_bytes: bytes, tmp_path: Path):
     """Return a side_effect that writes zip_bytes to dest for .zip URLs
     and an empty CSV for .csv URLs."""
+
     def _inner(url: str, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if url.endswith(".zip"):
             dest.write_bytes(zip_bytes)
         else:
             dest.write_text("fake,weather\n0,0\n")
+
     return _inner
 
 
@@ -547,8 +585,14 @@ def _fake_fleet_building(tmp_path: Path):
     """Return a side_effect for fetch_resstock_building that creates fake files."""
     from ochre_next.data.resstock import ResStockBuilding
 
-    def _inner(bldg_id: int, version: str = "2024.2", upgrade_id: int = 0,
-                cache_dir: Path | None = None, weather_override: Path | None = None) -> ResStockBuilding:
+    def _inner(
+        bldg_id: int,
+        version: str = "2024.2",
+        upgrade_id: int = 0,
+        cache_dir: Path | None = None,
+        weather_override: Path | None = None,
+        weather_format=None,
+    ) -> ResStockBuilding:
         bdir = (cache_dir or tmp_path) / version / f"bldg{bldg_id:07d}"
         bdir.mkdir(parents=True, exist_ok=True)
         h = bdir / "home.xml"
@@ -564,4 +608,5 @@ def _fake_fleet_building(tmp_path: Path):
             schedule_path=s,
             weather_path=w,
         )
+
     return _inner

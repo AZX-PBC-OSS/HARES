@@ -250,12 +250,20 @@ pub enum PyDRLevel {
 
 /// Strongly typed operating modes.
 #[pyclass(name = "Mode", from_py_object)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PyMode {
     Off,
     Heating,
     Cooling,
     Standby,
+    Defrost,
+    Charging,
+    Discharging,
+    HeatingHP,
+    HeatingER,
+    HeatingHPAndER,
+    HeatPumpWH,
+    BackupElement,
 }
 
 /// Strongly typed priority tiers.
@@ -357,6 +365,14 @@ impl PyMode {
             PyMode::Heating => OperatingMode::Heating,
             PyMode::Cooling => OperatingMode::Cooling,
             PyMode::Standby => OperatingMode::Standby,
+            PyMode::Defrost => OperatingMode::Defrost,
+            PyMode::Charging => OperatingMode::Charging,
+            PyMode::Discharging => OperatingMode::Discharging,
+            PyMode::HeatingHP => OperatingMode::HeatingHP,
+            PyMode::HeatingER => OperatingMode::HeatingER,
+            PyMode::HeatingHPAndER => OperatingMode::HeatingHPAndER,
+            PyMode::HeatPumpWH => OperatingMode::HeatPumpWH,
+            PyMode::BackupElement => OperatingMode::BackupElement,
         }
     }
 }
@@ -645,8 +661,112 @@ impl PyMode {
         PyMode::Standby
     }
 
+    #[staticmethod]
+    fn defrost() -> Self {
+        PyMode::Defrost
+    }
+
+    #[staticmethod]
+    fn charging() -> Self {
+        PyMode::Charging
+    }
+
+    #[staticmethod]
+    fn discharging() -> Self {
+        PyMode::Discharging
+    }
+
+    #[staticmethod]
+    fn heating_hp() -> Self {
+        PyMode::HeatingHP
+    }
+
+    #[staticmethod]
+    fn heating_er() -> Self {
+        PyMode::HeatingER
+    }
+
+    #[staticmethod]
+    fn heating_hp_and_er() -> Self {
+        PyMode::HeatingHPAndER
+    }
+
+    #[staticmethod]
+    fn heat_pump_wh() -> Self {
+        PyMode::HeatPumpWH
+    }
+
+    #[staticmethod]
+    fn backup_element() -> Self {
+        PyMode::BackupElement
+    }
+
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        match name.to_lowercase().as_str() {
+            "off" => Ok(PyMode::Off),
+            "heating" => Ok(PyMode::Heating),
+            "cooling" => Ok(PyMode::Cooling),
+            "standby" => Ok(PyMode::Standby),
+            "defrost" => Ok(PyMode::Defrost),
+            "charging" => Ok(PyMode::Charging),
+            "discharging" => Ok(PyMode::Discharging),
+            "heating_hp" => Ok(PyMode::HeatingHP),
+            "heating_er" => Ok(PyMode::HeatingER),
+            "heating_hp_and_er" => Ok(PyMode::HeatingHPAndER),
+            "heat_pump_wh" => Ok(PyMode::HeatPumpWH),
+            "backup_element" => Ok(PyMode::BackupElement),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid OperatingMode variant: {}",
+                name
+            ))),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        match self {
+            PyMode::Off => "off".to_string(),
+            PyMode::Heating => "heating".to_string(),
+            PyMode::Cooling => "cooling".to_string(),
+            PyMode::Standby => "standby".to_string(),
+            PyMode::Defrost => "defrost".to_string(),
+            PyMode::Charging => "charging".to_string(),
+            PyMode::Discharging => "discharging".to_string(),
+            PyMode::HeatingHP => "heating_hp".to_string(),
+            PyMode::HeatingER => "heating_er".to_string(),
+            PyMode::HeatingHPAndER => "heating_hp_and_er".to_string(),
+            PyMode::HeatPumpWH => "heat_pump_wh".to_string(),
+            PyMode::BackupElement => "backup_element".to_string(),
+        }
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Ok(other_mode) = other.extract::<PyMode>() {
+            Ok(*self == other_mode)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn __hash__(&self) -> u64 {
+        match self {
+            PyMode::Off => 0,
+            PyMode::Heating => 1,
+            PyMode::Cooling => 2,
+            PyMode::Standby => 3,
+            PyMode::Defrost => 4,
+            PyMode::Charging => 5,
+            PyMode::Discharging => 6,
+            PyMode::HeatingHP => 7,
+            PyMode::HeatingER => 8,
+            PyMode::HeatingHPAndER => 9,
+            PyMode::HeatPumpWH => 10,
+            PyMode::BackupElement => 11,
+        }
     }
 }
 

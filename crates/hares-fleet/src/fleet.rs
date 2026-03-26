@@ -128,7 +128,7 @@ impl Fleet {
                         overrides: None,
                         bldg_id: building.bldg_id,
                         initialization_duration: None,
-                    resample_overrides: None,
+                        resample_overrides: None,
                     },
                     sample_weight: building.sample_weight,
                 }
@@ -151,6 +151,39 @@ impl Fleet {
     pub fn with_progress(mut self, cb: impl Fn(usize, usize) + Send + Sync + 'static) -> Self {
         self.progress = Some(Arc::new(cb));
         self
+    }
+
+    /// Sets a fleet progress callback without consuming self.
+    pub fn set_progress(&mut self, cb: impl Fn(usize, usize) + Send + Sync + 'static) {
+        self.progress = Some(Arc::new(cb));
+    }
+
+    /// Patches sample weights for all fleet entries.
+    ///
+    /// The weights vector length must match the number of entries.
+    #[must_use]
+    pub fn with_sample_weights(mut self, weights: Vec<f64>) -> Self {
+        assert_eq!(
+            weights.len(),
+            self.entries.len(),
+            "weights length must match fleet size"
+        );
+        for (entry, weight) in self.entries.iter_mut().zip(weights) {
+            entry.sample_weight = weight;
+        }
+        self
+    }
+
+    /// Returns the number of dwellings in the fleet.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true if the fleet has no dwellings.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     /// Simulates all dwellings in parallel.
@@ -428,7 +461,7 @@ mod tests {
                 overrides: None,
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
-                    resample_overrides: None,
+                resample_overrides: None,
             })
             .collect()
     }
@@ -444,7 +477,7 @@ mod tests {
                 overrides: None,
                 bldg_id: idx as i64 + 1,
                 initialization_duration: None,
-                    resample_overrides: None,
+                resample_overrides: None,
             })
             .collect()
     }
@@ -545,5 +578,35 @@ mod tests {
 
         let _ = fleet.simulate(2);
         assert!(progress_count.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn test_remap_weather_path_same_dir_passthrough() {
+        let hpxml_dir = PathBuf::from("/data/buildings");
+        let weather_dir = PathBuf::from("/data/buildings");
+        let path = PathBuf::from("/data/buildings/USA_CO_Denver.epw");
+
+        let result = remap_weather_path(&path, &hpxml_dir, &weather_dir);
+        assert_eq!(result, PathBuf::from("/data/buildings/USA_CO_Denver.epw"));
+    }
+
+    #[test]
+    fn test_remap_weather_path_different_dir_remaps() {
+        let hpxml_dir = PathBuf::from("/data/buildings");
+        let weather_dir = PathBuf::from("/data/weather");
+        let path = PathBuf::from("/data/buildings/USA_CO_Denver.epw");
+
+        let result = remap_weather_path(&path, &hpxml_dir, &weather_dir);
+        assert_eq!(result, PathBuf::from("/data/weather/USA_CO_Denver.epw"));
+    }
+
+    #[test]
+    fn test_remap_weather_path_empty_path_uses_weather_dir() {
+        let hpxml_dir = PathBuf::from("/data/buildings");
+        let weather_dir = PathBuf::from("/data/weather");
+        let path = PathBuf::from("");
+
+        let result = remap_weather_path(&path, &hpxml_dir, &weather_dir);
+        assert_eq!(result, PathBuf::from("/data/weather"));
     }
 }

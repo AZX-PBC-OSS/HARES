@@ -12,10 +12,10 @@ from pathlib import Path
 
 
 # NREL Data Catalog: TMY3 EPW files by county FIPS code.
-# Updated Dec 2024; covers all US counties.
+# Covers all US counties. Corrected TMY3 data (Bianchi & Fontanini 2021).
 # Reference: https://data.nrel.gov/submissions/156
 _TMY3_EPW_ZIP_URL = (
-    "https://data.openei.org/files/156/BuildStock_TMY3_FIPS.zip"
+    "https://data.nrel.gov/system/files/156/Buildstock_TMY3_FIPS-1678817889.zip"
 )
 
 

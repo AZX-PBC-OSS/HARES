@@ -232,6 +232,11 @@ impl EnvironmentManager {
         self.solar_override = None;
     }
 
+    /// Returns whether a solar override is currently active.
+    pub fn has_solar_override(&self) -> bool {
+        self.solar_override.is_some()
+    }
+
     /// Number of surfaces in the surface geometry array.
     pub fn surface_count(&self) -> usize {
         self.surfaces.len()

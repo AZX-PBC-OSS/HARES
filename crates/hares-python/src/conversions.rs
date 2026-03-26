@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, StringArray};
+use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use chrono::SecondsFormat;
 use hares_core::StepResult;
@@ -11,9 +11,23 @@ use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 
 use crate::py_fleet::PyFleetResults;
+
+/// Route to the IPC path when Arrow batches are available, otherwise fall back to the
+/// step-result path.
+pub fn batches_or_steps_to_polars_df(
+    py: Python<'_>,
+    batches: &[RecordBatch],
+    steps: &[StepResult],
+) -> PyResult<Py<PyAny>> {
+    if batches.is_empty() {
+        steps_to_polars_df(py, steps)
+    } else {
+        record_batches_to_polars_df(py, batches)
+    }
+}
 
 /// Convert in-memory dwelling step results to a polars `DataFrame`.
 pub fn steps_to_polars_df(py: Python<'_>, steps: &[StepResult]) -> PyResult<Py<PyAny>> {
@@ -34,7 +48,7 @@ pub fn steps_to_polars_df(py: Python<'_>, steps: &[StepResult]) -> PyResult<Py<P
     Ok(df.unbind())
 }
 
-/// Convert one or more Arrow `RecordBatch` values into a polars `DataFrame`.
+/// Convert one or more Arrow `RecordBatch` values into a polars `DataFrame` via Arrow IPC.
 pub fn record_batches_to_polars_df(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<Py<PyAny>> {
     if batches.is_empty() {
         let polars = py.import("polars")?;
@@ -43,58 +57,35 @@ pub fn record_batches_to_polars_df(py: Python<'_>, batches: &[RecordBatch]) -> P
     }
 
     let schema = batches[0].schema();
-    let mut columns: Vec<(String, Vec<Py<PyAny>>)> = schema
-        .fields()
-        .iter()
-        .map(|field| (field.name().to_string(), Vec::new()))
-        .collect();
-
     for batch in batches {
         if batch.schema().fields() != schema.fields() {
             return Err(PyValueError::new_err(
                 "all record batches must share the same schema",
             ));
         }
+    }
 
-        for (col_idx, (_name, values)) in columns.iter_mut().enumerate() {
-            let array = batch.column(col_idx);
-            if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-                for row in 0..batch.num_rows() {
-                    if arr.is_null(row) {
-                        values.push(py.None());
-                    } else {
-                        values.push(arr.value(row).into_pyobject(py)?.unbind().into());
-                    }
-                }
-                continue;
-            }
+    let mut ipc_buffer = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut ipc_buffer, &schema)
+            .map_err(|e| PyValueError::new_err(format!("failed to create IPC writer: {}", e)))?;
 
-            if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-                for row in 0..batch.num_rows() {
-                    if arr.is_null(row) {
-                        values.push(py.None());
-                    } else {
-                        values.push(arr.value(row).into_pyobject(py)?.unbind().into());
-                    }
-                }
-                continue;
-            }
-
-            return Err(PyValueError::new_err(format!(
-                "unsupported Arrow column type for `{}`",
-                schema.field(col_idx).name()
-            )));
+        for batch in batches {
+            writer.write(batch).map_err(|e| {
+                PyValueError::new_err(format!("failed to write batch to IPC: {}", e))
+            })?;
         }
+
+        writer
+            .finish()
+            .map_err(|e| PyValueError::new_err(format!("failed to finish IPC writer: {}", e)))?;
     }
 
-    let data = PyDict::new(py);
-    for (name, values) in columns {
-        let list = PyList::new(py, values)?;
-        data.set_item(name, list)?;
-    }
+    let py_bytes = pyo3::types::PyBytes::new(py, &ipc_buffer);
 
     let polars = py.import("polars")?;
-    let df = polars.getattr("DataFrame")?.call1((data,))?;
+    let read_ipc = polars.getattr("read_ipc")?;
+    let df = read_ipc.call1((py_bytes,))?;
     Ok(df.unbind())
 }
 
@@ -155,5 +146,46 @@ fn sim_status_to_string(status: &SimStatus) -> String {
         SimStatus::Ok => "ok".to_string(),
         SimStatus::Flagged(message) => format!("flagged:{message}"),
         SimStatus::Failed(message) => format!("failed:{message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sim_status_to_string;
+    use hares_fleet::SimStatus;
+
+    #[test]
+    fn test_sim_status_to_string_ok() {
+        let status = SimStatus::Ok;
+        let result = sim_status_to_string(&status);
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_sim_status_to_string_flagged() {
+        let status = SimStatus::Flagged("soft limit exceeded".to_string());
+        let result = sim_status_to_string(&status);
+        assert_eq!(result, "flagged:soft limit exceeded");
+    }
+
+    #[test]
+    fn test_sim_status_to_string_flagged_no_message() {
+        let status = SimStatus::Flagged(String::new());
+        let result = sim_status_to_string(&status);
+        assert_eq!(result, "flagged:");
+    }
+
+    #[test]
+    fn test_sim_status_to_string_failed() {
+        let status = SimStatus::Failed("division by zero".to_string());
+        let result = sim_status_to_string(&status);
+        assert_eq!(result, "failed:division by zero");
+    }
+
+    #[test]
+    fn test_sim_status_to_string_failed_no_message() {
+        let status = SimStatus::Failed(String::new());
+        let result = sim_status_to_string(&status);
+        assert_eq!(result, "failed:");
     }
 }

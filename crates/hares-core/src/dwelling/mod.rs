@@ -502,6 +502,8 @@ impl Dwelling {
         let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
             .map_err(|e| HaresError::Io(e.to_string()))?;
 
+        eprintln!("DEBUG: equipment_specs count = {}", equipment_specs.len());
+
         let solvers = build_default_solvers(
             &initial_env,
             &config.sim_config,
@@ -535,6 +537,10 @@ impl Dwelling {
                 continue;
             }
             let base_cfg = equipment_config_from_spec(spec);
+            eprintln!(
+                "DEBUG: Creating equipment: name={}, ochre_class={}",
+                base_cfg.name, base_cfg.ochre_class
+            );
             let mut eq = match registry.create(&base_cfg.ochre_class, base_cfg.clone()) {
                 Ok(eq) => eq,
                 Err(err) => {
@@ -550,9 +556,20 @@ impl Dwelling {
             };
 
             let merged_cfg = merged_equipment_config(spec, &override_root);
+            eprintln!("DEBUG: Initializing equipment: name={}", merged_cfg.name);
             match eq.init(&merged_cfg, &initial_env) {
-                Ok(()) => equipment.push(eq),
+                Ok(()) => {
+                    eprintln!(
+                        "DEBUG: Equipment initialized successfully: {}",
+                        merged_cfg.name
+                    );
+                    equipment.push(eq)
+                }
                 Err(err) => {
+                    eprintln!(
+                        "DEBUG: Equipment init FAILED: name={}, err={}",
+                        merged_cfg.name, err
+                    );
                     // Non-critical equipment (appliances, loads) may lack schedule data;
                     // skip them with a warning rather than aborting the entire simulation.
                     let msg = format!(

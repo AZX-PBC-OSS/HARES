@@ -126,8 +126,16 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
             ));
         }
         // HVAC thermal delivery columns (OCHRE convention, verbosity 4).
-        fields.push(Field::new("HVAC Heating Delivered (W)", DataType::Float64, true));
-        fields.push(Field::new("HVAC Cooling Delivered (W)", DataType::Float64, true));
+        fields.push(Field::new(
+            "HVAC Heating Delivered (W)",
+            DataType::Float64,
+            true,
+        ));
+        fields.push(Field::new(
+            "HVAC Cooling Delivered (W)",
+            DataType::Float64,
+            true,
+        ));
     }
 
     if verbosity >= 5 {
@@ -149,15 +157,7 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
 
     if verbosity >= 6 {
         // Level 6: component loads per boundary.
-        // Boundary-specific columns are generated dynamically from the
-        // equipment list; static columns are envelope-wide totals.
-        for (name, _fuel) in &names {
-            fields.push(Field::new(
-                format!("{name} Energy (kWh)"),
-                DataType::Float64,
-                true,
-            ));
-        }
+        // Note: Energy (kWh) columns are already added at verbosity 4.
         // Envelope component load columns for Indoor zone.
         for label in &[
             "Window Transmitted Solar Gain (W)",

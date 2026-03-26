@@ -3,6 +3,7 @@
 from ochre_next.data.resstock import (
     ResStockBuilding,
     ResStockVersion,
+    WeatherFormat,
     fetch_resstock_building,
     fetch_resstock_fleet,
 )
@@ -10,6 +11,7 @@ from ochre_next.data.resstock import (
 __all__ = [
     "ResStockBuilding",
     "ResStockVersion",
+    "WeatherFormat",
     "fetch_resstock_building",
     "fetch_resstock_fleet",
 ]

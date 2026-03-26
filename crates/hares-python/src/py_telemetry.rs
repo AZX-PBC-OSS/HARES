@@ -20,10 +20,10 @@ impl PyTelemetry {
 impl PyTelemetry {
     pub fn zone<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
-        out.set_item("names", self.inner.zone_names.clone())?;
-        out.set_item("temperature_c", self.inner.zone_temperatures_c.clone())?;
-        out.set_item("setpoint_heat_c", self.inner.setpoint_heat_c.clone())?;
-        out.set_item("setpoint_cool_c", self.inner.setpoint_cool_c.clone())?;
+        out.set_item("names", &self.inner.zone_names)?;
+        out.set_item("temperature_c", &self.inner.zone_temperatures_c)?;
+        out.set_item("setpoint_heat_c", &self.inner.setpoint_heat_c)?;
+        out.set_item("setpoint_cool_c", &self.inner.setpoint_cool_c)?;
         out.set_item("outdoor_temp_c", self.inner.outdoor_temp_c)?;
         out.set_item("outdoor_rh", self.inner.outdoor_rh)?;
         Ok(out)
@@ -31,11 +31,11 @@ impl PyTelemetry {
 
     pub fn equipment<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
-        out.set_item("names", self.inner.equipment_names.clone())?;
-        out.set_item("modes", self.inner.equipment_modes.clone())?;
-        out.set_item("states", self.inner.equipment_states.clone())?;
-        out.set_item("soc", self.inner.equipment_soc.clone())?;
-        out.set_item("power_kw", self.inner.equipment_power_kw.clone())?;
+        out.set_item("names", &self.inner.equipment_names)?;
+        out.set_item("modes", &self.inner.equipment_modes)?;
+        out.set_item("states", &self.inner.equipment_states)?;
+        out.set_item("soc", &self.inner.equipment_soc)?;
+        out.set_item("power_kw", &self.inner.equipment_power_kw)?;
         Ok(out)
     }
 

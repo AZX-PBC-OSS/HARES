@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
-use crate::py_dwelling::PyDwelling;
+use crate::py_dwelling::{PyDwelling, lock_dwelling_string};
 
 /// One batched RL step result.
 #[derive(Debug, Clone)]
@@ -72,10 +72,7 @@ pub fn batch_step_with_py(
 
 fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Vec<f64>, String> {
     let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-    let dwelling = dwelling
-        .dwelling
-        .lock()
-        .map_err(|_| "failed to lock dwelling state".to_string())?;
+    let dwelling = lock_dwelling_string(&dwelling.dwelling)?;
     dwelling
         .telemetry()
         .to_observation_vec(&refs)
@@ -108,15 +105,15 @@ pub fn batch_step_py(
     actions: Vec<Vec<f64>>,
     observation_fields: Vec<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    // Bind handles and extract raw pointers while we still hold the GIL.
+    // Hold borrows alive for the duration of the parallel section.
     // The Py<PyDwelling> vec keeps every object alive for the entire function.
-    let ptrs: Vec<SendDwellingPtr> = dwellings
+    let borrows: Vec<PyRef<'_, PyDwelling>> =
+        dwellings.iter().map(|d| d.bind(py).borrow()).collect();
+    let ptrs: Vec<SendDwellingPtr> = borrows
         .iter()
-        .map(|d| {
-            let bound = d.bind(py).borrow();
-            SendDwellingPtr(&*bound as *const PyDwelling)
-        })
+        .map(|b| SendDwellingPtr(&**b as *const PyDwelling))
         .collect();
+    // borrows live until end of function scope
 
     // Release GIL — Rayon threads run step_core()/observation() without
     // touching Python. Both methods use only Mutex<Dwelling> internally.
@@ -124,7 +121,7 @@ pub fn batch_step_py(
         ptrs.par_iter()
             .enumerate()
             .map(|(idx, SendDwellingPtr(ptr))| {
-                // SAFETY: the Py<PyDwelling> handles in `dwellings` keep the
+                // SAFETY: the PyRef borrows in `borrows` and Py<PyDwelling> handles keep the
                 // objects alive. step_core() and observation() are GIL-free
                 // (they only lock the internal Mutex<Dwelling>).
                 let dwelling = unsafe { &**ptr };

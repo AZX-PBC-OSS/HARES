@@ -15,7 +15,11 @@ use crate::defaults::DefaultsStore;
 /// kBtu → kWh: 1 kBtu(IT) = 0.293_071_07 kWh exactly.
 const KBTU_TO_KWH: f64 = 0.293_071_07;
 
-pub(super) fn resolve_pv(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
+pub(super) fn resolve_pv(
+    details: &XmlNode,
+    defaults: &DefaultsStore,
+    specs: &mut Vec<EquipmentSpec>,
+) {
     let Some(photovoltaics) = details.path(&["Systems", "Photovoltaics"]) else {
         return;
     };
@@ -31,9 +35,11 @@ pub(super) fn resolve_pv(details: &XmlNode, defaults: &DefaultsStore, specs: &mu
     }
 
     for pv in photovoltaics.children_named("PVSystem") {
+        eprintln!("DEBUG: Found PVSystem element");
         let mut params = Map::new();
         if let Some(kw) = child_f64(pv, "MaxPowerOutput") {
-            params.insert("system_capacity_kw".to_string(), json!(kw));
+            eprintln!("DEBUG: MaxPowerOutput = {}", kw);
+            params.insert("capacity_kw".to_string(), json!(kw));
         }
         if let Some(tilt) = child_f64(pv, "ArrayTilt") {
             params.insert("tilt_deg".to_string(), json!(tilt));
@@ -44,6 +50,11 @@ pub(super) fn resolve_pv(details: &XmlNode, defaults: &DefaultsStore, specs: &mu
         if let Some(module_type) = child_text(pv, "ModuleType") {
             params.insert("module_type".to_string(), Value::String(module_type));
         }
+        if let Some(losses) = child_f64(pv, "SystemLossesFraction") {
+            params.insert("system_losses_fraction".to_string(), json!(losses));
+        }
+
+        eprintln!("DEBUG: PV params = {:?}", params);
 
         let inverter_eff = pv
             .child("AttachedToInverter")
@@ -63,7 +74,11 @@ pub(super) fn resolve_pv(details: &XmlNode, defaults: &DefaultsStore, specs: &mu
     }
 }
 
-pub(super) fn resolve_batteries(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
+pub(super) fn resolve_batteries(
+    details: &XmlNode,
+    defaults: &DefaultsStore,
+    specs: &mut Vec<EquipmentSpec>,
+) {
     let Some(batteries) = details.path(&["Systems", "Batteries"]) else {
         return;
     };
@@ -91,7 +106,11 @@ pub(super) fn resolve_batteries(details: &XmlNode, defaults: &DefaultsStore, spe
     }
 }
 
-pub(super) fn resolve_ev(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
+pub(super) fn resolve_ev(
+    details: &XmlNode,
+    defaults: &DefaultsStore,
+    specs: &mut Vec<EquipmentSpec>,
+) {
     if let Some(evs) = details.path(&["Systems", "ElectricVehicles"]) {
         for ev in evs.children_named("ElectricVehicle") {
             let mut params = Map::new();
@@ -114,7 +133,11 @@ pub(super) fn resolve_ev(details: &XmlNode, defaults: &DefaultsStore, specs: &mu
     }
 }
 
-pub(super) fn resolve_generators(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
+pub(super) fn resolve_generators(
+    details: &XmlNode,
+    defaults: &DefaultsStore,
+    specs: &mut Vec<EquipmentSpec>,
+) {
     let Some(generators) = details.path(&["Systems", "extension", "Generators"]) else {
         return;
     };
@@ -139,6 +162,11 @@ pub(super) fn resolve_generators(details: &XmlNode, defaults: &DefaultsStore, sp
             }
         }
 
-        specs.push(build_spec("Gas Generator".to_string(), fuel, params, defaults));
+        specs.push(build_spec(
+            "Gas Generator".to_string(),
+            fuel,
+            params,
+            defaults,
+        ));
     }
 }

@@ -3,31 +3,290 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
 use hares_core::{ActorConfig, ActorRegistry, Dwelling, DwellingConfig};
 use hares_equipment::config::ConfigValue;
-use hares_io::{OutputFormat, SimulationConfig};
-use pyo3::exceptions::PyValueError;
+use hares_io::{OutputFormat, SimulationConfig, output::metrics::MetricsCalculator};
+use hares_types::SurfaceIrradiance;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
+use std::sync::MutexGuard;
 
-use crate::conversions::{record_batches_to_polars_df, steps_to_polars_df};
+use crate::conversions::batches_or_steps_to_polars_df;
 use crate::py_actor::PyActor;
+use crate::py_config::PySimulationConfig;
 use crate::py_control::PyControlSignal;
+use crate::py_equipment::PyEquipmentDescriptor;
+use crate::py_metrics::PySimulationMetrics;
 use crate::py_telemetry::PyTelemetry;
+use crate::utils::extract_datetime;
 
 const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
 const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
 const DEFAULT_STEP_S: i64 = 60;
 
+fn parse_solar_override(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+) -> PyResult<Vec<Vec<SurfaceIrradiance>>> {
+    if let Ok(path) = data.extract::<String>() {
+        return parse_solar_override_from_path(py, &path);
+    }
+    if let Ok(list) = data.extract::<Bound<'_, PyList>>() {
+        return parse_solar_override_from_list(py, &list);
+    }
+    if data.getattr("__class__").is_ok() {
+        let class_name = data.getattr("__class__")?.getattr("__name__")?;
+        let class_name_str: String = class_name.extract()?;
+        if class_name_str == "DataFrame" {
+            return parse_solar_override_from_dataframe(py, data);
+        }
+        if class_name_str == "NDArray" || class_name_str == "ndarray" {
+            return parse_solar_override_from_dict(py, data);
+        }
+    }
+    if let Ok(dict) = data.extract::<Bound<'_, PyDict>>() {
+        return parse_solar_override_from_dict(py, dict.as_any());
+    }
+    Err(PyValueError::new_err(
+        "solar override must be a file path (str), polars DataFrame, numpy array dict, or list of dicts",
+    ))
+}
+
+fn parse_solar_override_from_path(
+    py: Python<'_>,
+    path: &str,
+) -> PyResult<Vec<Vec<SurfaceIrradiance>>> {
+    let polars = py.import("polars")?;
+    let read_parquet = polars.getattr("read_parquet")?;
+    let df = read_parquet.call1((path,))?;
+    parse_solar_override_from_dataframe(py, df.as_any())
+}
+
+fn parse_solar_override_from_dataframe(
+    _py: Python<'_>,
+    df: &Bound<'_, PyAny>,
+) -> PyResult<Vec<Vec<SurfaceIrradiance>>> {
+    let columns: Vec<String> = df.getattr("columns")?.extract()?;
+    if columns.is_empty() {
+        return Err(PyValueError::new_err("DataFrame has no columns"));
+    }
+
+    let n_rows: usize = df.getattr("height")?.extract()?;
+    if n_rows == 0 {
+        return Err(PyValueError::new_err("DataFrame has no rows"));
+    }
+
+    let mut surface_ids: Vec<u32> = Vec::new();
+    for col in &columns {
+        if col.starts_with("s") && col.ends_with("_direct") {
+            if let Ok(sid) = col[1..col.len() - 7].parse::<u32>() {
+                surface_ids.push(sid);
+            }
+        }
+    }
+    surface_ids.sort();
+
+    if surface_ids.is_empty() {
+        return Err(PyValueError::new_err(
+            "DataFrame columns must include surface columns (e.g., s0_direct, s0_diffuse, s0_reflected, s0_aoi)",
+        ));
+    }
+
+    let mut result: Vec<Vec<SurfaceIrradiance>> = Vec::with_capacity(n_rows);
+
+    for row_idx in 0..n_rows {
+        let mut surfaces = Vec::with_capacity(surface_ids.len());
+        for &sid in &surface_ids {
+            let direct_col = format!("s{}_direct", sid);
+            let diffuse_col = format!("s{}_diffuse", sid);
+            let reflected_col = format!("s{}_reflected", sid);
+            let aoi_col = format!("s{}_aoi", sid);
+
+            let direct: f64 = df.get_item(&direct_col)?.get_item(row_idx)?.extract()?;
+            let diffuse: f64 = df.get_item(&diffuse_col)?.get_item(row_idx)?.extract()?;
+            let reflected: f64 = df.get_item(&reflected_col)?.get_item(row_idx)?.extract()?;
+            let aoi: f64 = df.get_item(&aoi_col)?.get_item(row_idx)?.extract()?;
+
+            surfaces.push(SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: direct,
+                diffuse_w_m2: diffuse,
+                reflected_w_m2: reflected,
+                angle_of_incidence_rad: aoi,
+            });
+        }
+        result.push(surfaces);
+    }
+
+    Ok(result)
+}
+
+fn parse_solar_override_from_dict(
+    _py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+) -> PyResult<Vec<Vec<SurfaceIrradiance>>> {
+    let dict: Bound<'_, PyDict> = data.extract()?;
+    let mut surface_ids: Vec<u32> = Vec::new();
+
+    for (key, _) in dict.iter() {
+        if let Ok(sid) = key.extract::<u32>() {
+            surface_ids.push(sid);
+        }
+    }
+    surface_ids.sort();
+
+    if surface_ids.is_empty() {
+        return Err(PyValueError::new_err(
+            "dict must have integer keys for surface IDs",
+        ));
+    }
+
+    let first_surface: Bound<'_, PyDict> = dict.get_item(surface_ids[0])?.unwrap().extract()?;
+    let direct_val = first_surface.get_item("direct")?.unwrap();
+    let n_timesteps: usize = get_array_len(&direct_val)?;
+
+    let mut result: Vec<Vec<SurfaceIrradiance>> = Vec::with_capacity(n_timesteps);
+
+    for step_idx in 0..n_timesteps {
+        let mut surfaces = Vec::with_capacity(surface_ids.len());
+        for &sid in &surface_ids {
+            let surface_dict: Bound<'_, PyDict> = dict.get_item(sid)?.unwrap().extract()?;
+
+            let direct: f64 =
+                extract_array_element(&surface_dict.get_item("direct")?.unwrap(), step_idx)?;
+            let diffuse: f64 =
+                extract_array_element(&surface_dict.get_item("diffuse")?.unwrap(), step_idx)?;
+            let reflected: f64 =
+                extract_array_element(&surface_dict.get_item("reflected")?.unwrap(), step_idx)?;
+            let aoi: f64 =
+                extract_array_element(&surface_dict.get_item("aoi")?.unwrap(), step_idx)?;
+
+            surfaces.push(SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: direct,
+                diffuse_w_m2: diffuse,
+                reflected_w_m2: reflected,
+                angle_of_incidence_rad: aoi,
+            });
+        }
+        result.push(surfaces);
+    }
+
+    Ok(result)
+}
+
+fn get_array_len(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if let Ok(list) = arr.extract::<Bound<'_, PyList>>() {
+        return Ok(list.len());
+    }
+    if let Ok(ndarray) = arr.getattr("__class__") {
+        let name: String = ndarray.getattr("__name__")?.extract()?;
+        if name == "ndarray" {
+            if let Ok(shape) = arr.getattr("shape") {
+                if let Ok(tuple) = shape.extract::<Bound<'_, pyo3::types::PyTuple>>() {
+                    if tuple.len() > 0 {
+                        if let Ok(Ok(dim)) = tuple.get_item(0).map(|v| v.extract::<usize>()) {
+                            return Ok(dim);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(PyValueError::new_err("Expected a list or numpy array"))
+}
+
+fn extract_array_element(arr: &Bound<'_, PyAny>, index: usize) -> PyResult<f64> {
+    if let Ok(list) = arr.extract::<Bound<'_, PyList>>() {
+        return list.get_item(index)?.extract::<f64>();
+    }
+    if let Ok(ndarray) = arr.getattr("__class__") {
+        let name: String = ndarray.getattr("__name__")?.extract()?;
+        if name == "ndarray" {
+            return arr.get_item(index)?.extract::<f64>();
+        }
+    }
+    arr.get_item(index)?.extract::<f64>()
+}
+
+fn parse_solar_override_from_list(
+    _py: Python<'_>,
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<Vec<SurfaceIrradiance>>> {
+    let len = list.len();
+    if len == 0 {
+        return Err(PyValueError::new_err("list must not be empty"));
+    }
+
+    let mut result: Vec<Vec<SurfaceIrradiance>> = Vec::with_capacity(len);
+
+    for item in list.iter() {
+        let step_list: Bound<'_, PyList> = item.extract()?;
+        let mut surfaces = Vec::with_capacity(step_list.len());
+
+        for surface_item in step_list.iter() {
+            let surface_dict: Bound<'_, PyDict> = surface_item.extract()?;
+
+            let surface_id: u32 = surface_dict.get_item("surface_id")?.unwrap().extract()?;
+            let direct_w_m2: f64 = surface_dict.get_item("direct_w_m2")?.unwrap().extract()?;
+            let diffuse_w_m2: f64 = surface_dict.get_item("diffuse_w_m2")?.unwrap().extract()?;
+            let reflected_w_m2: f64 = surface_dict
+                .get_item("reflected_w_m2")?
+                .unwrap()
+                .extract()?;
+            let angle_of_incidence_rad: f64 = surface_dict
+                .get_item("angle_of_incidence_rad")
+                .ok()
+                .flatten()
+                .map(|v| v.extract::<f64>())
+                .unwrap_or(Ok(0.0))
+                .unwrap_or(0.0);
+
+            surfaces.push(SurfaceIrradiance {
+                surface_id,
+                direct_w_m2,
+                diffuse_w_m2,
+                reflected_w_m2,
+                angle_of_incidence_rad,
+            });
+        }
+        result.push(surfaces);
+    }
+
+    Ok(result)
+}
+
+fn lock_dwelling(dwelling: &Mutex<Dwelling>) -> PyResult<MutexGuard<'_, Dwelling>> {
+    dwelling.lock().map_err(|_| {
+        PyRuntimeError::new_err(
+            "dwelling state is corrupted (internal panic occurred); \
+             create a new Dwelling instance",
+        )
+    })
+}
+
+pub(crate) fn lock_dwelling_string(
+    dwelling: &Mutex<Dwelling>,
+) -> Result<MutexGuard<'_, Dwelling>, String> {
+    dwelling.lock().map_err(|_| {
+        "dwelling state is corrupted (internal panic occurred); \
+         create a new Dwelling instance"
+            .to_string()
+    })
+}
+
 #[pyclass(name = "PyDwelling")]
 pub struct PyDwelling {
     pub(crate) dwelling: Mutex<Dwelling>,
     pub(crate) config: DwellingConfig,
+    sim_config: PySimulationConfig,
     initial_state: Option<Vec<u8>>,
     initialized: bool,
     registry: ActorRegistry,
+    zone_keys: Option<Vec<String>>,
 }
 
 #[pymethods]
@@ -42,13 +301,16 @@ impl PyDwelling {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let config = build_config(hpxml, schedule, weather, kwargs)?;
+        let sim_config = PySimulationConfig::from_sim_config(&config.sim_config);
         let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
         Ok(Self {
             dwelling: Mutex::new(dwelling),
             config,
+            sim_config,
             initial_state: None,
             initialized: false,
             registry: ActorRegistry::new(),
+            zone_keys: None,
         })
     }
 
@@ -59,10 +321,7 @@ impl PyDwelling {
         }
 
         let bytes = {
-            let dwelling = self
-                .dwelling
-                .lock()
-                .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+            let dwelling = lock_dwelling(&self.dwelling)?;
             serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err)?
         };
 
@@ -72,10 +331,7 @@ impl PyDwelling {
     }
 
     pub fn timesteps(&self) -> PyResult<PyTimestepsIter> {
-        let dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let dwelling = lock_dwelling(&self.dwelling)?;
 
         let start = dwelling.clock.start_time;
         let time_res_s = dwelling.clock.time_res.num_seconds();
@@ -92,63 +348,63 @@ impl PyDwelling {
 
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         py.detach(|| {
-            let mut dwelling = self
-                .dwelling
-                .lock()
-                .map_err(|_| "failed to lock dwelling state".to_string())?;
+            let mut dwelling = lock_dwelling_string(&self.dwelling)?;
             dwelling.simulate().map_err(|err| err.to_string())?;
             Ok::<_, String>(())
         })
-        .map_err(PyValueError::new_err)?;
+        .map_err(PyRuntimeError::new_err)?;
 
-        let dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
-        let batches = dwelling.flushed_batches();
-        if batches.is_empty() {
-            // Fallback to steps path if no batches were flushed.
-            return steps_to_polars_df(py, &dwelling.results().steps);
-        }
-        record_batches_to_polars_df(py, batches)
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
+        let steps = dwelling.results().steps.clone();
+        drop(dwelling);
+        batches_or_steps_to_polars_df(py, &batches, &steps)
     }
 
-    pub fn step(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let step = py
             .detach(|| self.step_core())
-            .map_err(PyValueError::new_err)?;
+            .map_err(PyRuntimeError::new_err)?;
+
+        if self.zone_keys.is_none() {
+            let keys: Vec<String> = step
+                .zone_temperatures_c
+                .iter()
+                .map(|(zone_id, _)| {
+                    if zone_id.0 == 0 {
+                        "Temperature - Indoor (C)".to_string()
+                    } else {
+                        format!("Temperature - Zone_{} (C)", zone_id.0)
+                    }
+                })
+                .collect();
+            self.zone_keys = Some(keys);
+        }
 
         let out = PyDict::new(py);
         out.set_item("time", chrono_to_py_datetime(py, step.timestamp)?)?;
         out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
         out.set_item("hvac_heating_w", step.hvac_heating_w)?;
         out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
-        for (zone_id, temp_c) in &step.zone_temperatures_c {
-            let key = if zone_id.0 == 0 {
-                "Temperature - Indoor (C)".to_string()
-            } else {
-                format!("Temperature - Zone_{} (C)", zone_id.0)
-            };
+        for ((_zone_id, temp_c), key) in step
+            .zone_temperatures_c
+            .iter()
+            .zip(self.zone_keys.as_ref().unwrap().iter())
+        {
             out.set_item(key, *temp_c)?;
         }
         Ok(out.unbind().into())
     }
 
     pub fn apply_control(&self, name: String, signal: &PyControlSignal) -> PyResult<()> {
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
         dwelling.apply_control(&name, signal.signal.clone());
         Ok(())
     }
 
     /// Adds a Python actor to the dwelling's decision-making loop.
     pub fn add_actor(&self, py: Python<'_>, actor: Py<PyActor>) -> PyResult<()> {
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
         let wrapper = crate::py_actor::PyActorWrapper::new(py, actor);
         dwelling.add_actor(Box::new(wrapper));
         Ok(())
@@ -177,10 +433,7 @@ impl PyDwelling {
             }
         }
 
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
         dwelling
             .add_actor_by_name(&self.registry, config)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -193,39 +446,27 @@ impl PyDwelling {
             export_price: dict_optional(signal, "export_price")?,
             ghg_intensity: dict_optional(signal, "ghg_intensity")?,
         };
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
         dwelling.set_price_signal(price);
         Ok(())
     }
 
     pub fn set_grid_voltage(&self, voltage_pu: f64) -> PyResult<()> {
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
         dwelling.set_grid_voltage(voltage_pu);
         Ok(())
     }
 
     #[cfg(feature = "observe")]
     pub fn enable_observer(&self, capacity: usize) -> PyResult<()> {
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
         dwelling.enable_observer(capacity);
         Ok(())
     }
 
     #[cfg(feature = "observe")]
     pub fn drain_observations(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
         let snapshots = dwelling.drain_observations();
         snapshots
             .into_iter()
@@ -234,23 +475,77 @@ impl PyDwelling {
     }
 
     pub fn telemetry(&self) -> PyResult<PyTelemetry> {
-        let dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let dwelling = lock_dwelling(&self.dwelling)?;
         Ok(PyTelemetry::new(dwelling.telemetry()))
     }
 
-    pub fn results(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
-        let batches = dwelling.flushed_batches();
-        if batches.is_empty() {
-            return steps_to_polars_df(py, &dwelling.results().steps);
+    pub fn equipment_descriptors(&self) -> PyResult<Vec<PyEquipmentDescriptor>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        Ok(dwelling
+            .equipment()
+            .iter()
+            .map(|eq| PyEquipmentDescriptor::new(eq.descriptor().clone()))
+            .collect())
+    }
+
+    pub fn equipment_names(&self) -> PyResult<Vec<String>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        Ok(dwelling
+            .equipment()
+            .iter()
+            .map(|eq| eq.descriptor().name.clone())
+            .collect())
+    }
+
+    pub fn validate_control(&self, name: &str, signal: &PyControlSignal) -> PyResult<bool> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let required_cap = signal.signal.required_capability();
+        if let Some(eq) = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == name)
+        {
+            let caps = eq.descriptor().control_capabilities;
+            Ok(caps.contains(required_cap))
+        } else {
+            Ok(false)
         }
-        record_batches_to_polars_df(py, batches)
+    }
+
+    pub fn results(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
+        let steps = dwelling.results().steps.clone();
+        drop(dwelling);
+        batches_or_steps_to_polars_df(py, &batches, &steps)
+    }
+
+    pub fn metrics(&self) -> PyResult<PySimulationMetrics> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
+
+        if batches.is_empty() {
+            return Err(PyValueError::new_err(
+                "no batches flushed yet; run simulate() first",
+            ));
+        }
+
+        let schema = batches[0].schema();
+        let time_res_secs = self.sim_config.time_res() as u32;
+
+        let mut calculator =
+            MetricsCalculator::new(&schema, time_res_secs, &self.config.sim_config).map_err(
+                |e| PyValueError::new_err(format!("failed to create metrics calculator: {e}")),
+            )?;
+
+        for batch in &batches {
+            calculator.accumulate(batch);
+        }
+
+        let full_metrics = calculator.finish();
+        Ok(PySimulationMetrics {
+            inner: full_metrics,
+        })
     }
 
     pub fn reset_with_seed(&mut self, seed: u64) -> PyResult<()> {
@@ -262,43 +557,74 @@ impl PyDwelling {
         self.config = config;
         self.initialized = false;
         self.initial_state = None;
+        self.zone_keys = None;
 
         self.initialize()
     }
 
     pub fn save_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let dwelling = lock_dwelling(&self.dwelling)?;
         let bytes = serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err)?;
         Ok(PyBytes::new(py, &bytes))
     }
 
     pub fn load_state(&self, state: &[u8]) -> PyResult<()> {
         let checkpoint = serde_json::from_slice(state).map_err(to_py_err)?;
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
         dwelling.load_checkpoint(checkpoint).map_err(to_py_err)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Dwelling(bldg_id={}, initialized={})",
+            self.config.bldg_id, self.initialized
+        )
+    }
+
+    fn config(&self) -> PySimulationConfig {
+        self.sim_config.clone()
+    }
+
+    pub fn set_solar_override(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let solar_data = parse_solar_override(py, data)?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling.environment.set_solar_override(solar_data);
+        Ok(())
+    }
+
+    pub fn clear_solar_override(&self) -> PyResult<()> {
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling.environment.clear_solar_override();
+        Ok(())
+    }
+
+    pub fn has_solar_override(&self) -> bool {
+        if let Ok(dwelling) = self.dwelling.lock() {
+            dwelling.environment.has_solar_override()
+        } else {
+            false
+        }
+    }
+
+    pub fn surface_ids(&self) -> PyResult<Vec<u32>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        Ok(dwelling
+            .environment
+            .surface_geometry()
+            .iter()
+            .map(|s| s.surface_id)
+            .collect())
     }
 }
 
 impl PyDwelling {
     pub(crate) fn step_core(&self) -> Result<hares_core::StepResult, String> {
-        let mut dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| "failed to lock dwelling state".to_string())?;
+        let mut dwelling = lock_dwelling_string(&self.dwelling)?;
         dwelling.step().map_err(|err| err.to_string())
     }
 
     pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {
-        let dwelling = self
-            .dwelling
-            .lock()
-            .map_err(|_| "failed to lock dwelling state".to_string())?;
+        let dwelling = lock_dwelling_string(&self.dwelling)?;
         let telemetry = dwelling.telemetry();
         telemetry
             .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_rh"])
@@ -333,6 +659,13 @@ impl PyTimestepsIter {
         self.next_step = self.next_step.saturating_add(1);
         Ok(Some(chrono_to_py_datetime(py, ts)?))
     }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TimestepsIter(step={}/{})",
+            self.next_step, self.total_steps
+        )
+    }
 }
 
 fn build_config(
@@ -343,69 +676,112 @@ fn build_config(
 ) -> PyResult<DwellingConfig> {
     let kwargs = kwargs.cloned();
 
-    let start_time = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("start_time").ok().flatten())
-        .map(|obj| extract_datetime(&obj))
-        .transpose()?
-        .unwrap_or_else(default_start);
+    let py_config: Option<PySimulationConfig> = if let Some(k) = kwargs.as_ref() {
+        if let Ok(Some(value)) = k.get_item("config") {
+            Some(value.extract::<PySimulationConfig>()?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    let time_res = Duration::seconds(
-        kwargs
+    let sim_config = if let Some(py_cfg) = py_config {
+        py_cfg.to_sim_config()?
+    } else {
+        let start_time = kwargs
             .as_ref()
-            .and_then(|k| k.get_item("time_res").ok().flatten())
-            .map(|obj| extract_seconds(&obj))
+            .and_then(|k| k.get_item("start_time").ok().flatten())
+            .map(|obj| extract_datetime(&obj))
             .transpose()?
-            .unwrap_or(DEFAULT_STEP_S),
-    );
+            .unwrap_or_else(default_start);
 
-    let duration = Duration::seconds(
-        kwargs
+        let time_res = Duration::seconds(
+            kwargs
+                .as_ref()
+                .and_then(|k| k.get_item("time_res").ok().flatten())
+                .map(|obj| extract_seconds(&obj))
+                .transpose()?
+                .unwrap_or(DEFAULT_STEP_S),
+        );
+
+        let duration = Duration::seconds(
+            kwargs
+                .as_ref()
+                .and_then(|k| k.get_item("duration").ok().flatten())
+                .map(|obj| extract_seconds(&obj))
+                .transpose()?
+                .unwrap_or(DEFAULT_DURATION_S),
+        );
+
+        let output_to_parquet = kwargs
             .as_ref()
-            .and_then(|k| k.get_item("duration").ok().flatten())
-            .map(|obj| extract_seconds(&obj))
+            .and_then(|k| k.get_item("output_to_parquet").ok().flatten())
+            .map(|obj| obj.extract::<bool>())
             .transpose()?
-            .unwrap_or(DEFAULT_DURATION_S),
-    );
+            .unwrap_or(false);
 
-    let output_to_parquet = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("output_to_parquet").ok().flatten())
-        .map(|obj| obj.extract::<bool>())
-        .transpose()?
-        .unwrap_or(false);
+        let output_path = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("output_path").ok().flatten())
+            .map(|obj| obj.extract::<String>().map(PathBuf::from))
+            .transpose()?;
 
-    let output_path = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("output_path").ok().flatten())
-        .map(|obj| obj.extract::<String>().map(PathBuf::from))
-        .transpose()?;
+        let output_verbosity = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("output_verbosity").ok().flatten())
+            .map(|obj| obj.extract::<u8>())
+            .transpose()?
+            .unwrap_or(0);
 
-    let output_verbosity = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("output_verbosity").ok().flatten())
-        .map(|obj| obj.extract::<u8>())
-        .transpose()?
-        .unwrap_or(0);
+        let output_chunk_size = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("output_chunk_size").ok().flatten())
+            .map(|obj| obj.extract::<usize>())
+            .transpose()?
+            .unwrap_or(10_000);
 
-    let output_chunk_size = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("output_chunk_size").ok().flatten())
-        .map(|obj| obj.extract::<usize>())
-        .transpose()?
-        .unwrap_or(10_000);
+        let master_seed = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("master_seed").ok().flatten())
+            .map(|obj| obj.extract::<u64>())
+            .transpose()?
+            .unwrap_or(0);
+
+        let civil_timezone = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("civil_timezone").ok().flatten())
+            .map(|obj| obj.extract::<String>())
+            .transpose()?;
+
+        let setpoint_deadband_c = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("setpoint_deadband_c").ok().flatten())
+            .map(|obj| obj.extract::<f64>())
+            .transpose()?;
+
+        SimulationConfig {
+            start_time,
+            duration,
+            time_res,
+            output_verbosity,
+            output_path,
+            output_format: if output_to_parquet {
+                OutputFormat::Parquet
+            } else {
+                OutputFormat::Csv
+            },
+            output_chunk_size,
+            setpoint_deadband_c,
+            master_seed,
+            civil_timezone,
+        }
+    };
 
     let bldg_id = kwargs
         .as_ref()
         .and_then(|k| k.get_item("bldg_id").ok().flatten())
         .map(|obj| obj.extract::<i64>())
-        .transpose()?
-        .unwrap_or(0);
-
-    let master_seed = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("master_seed").ok().flatten())
-        .map(|obj| obj.extract::<u64>())
         .transpose()?
         .unwrap_or(0);
 
@@ -430,35 +806,12 @@ fn build_config(
             }
         });
 
-    let civil_timezone = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("civil_timezone").ok().flatten())
-        .map(|obj| obj.extract::<String>())
-        .transpose()?;
-
     let defaults_path = kwargs
         .as_ref()
         .and_then(|k| k.get_item("defaults_path").ok().flatten())
         .map(|obj| obj.extract::<String>())
         .transpose()?
         .map(PathBuf::from);
-
-    let sim_config = SimulationConfig {
-        start_time,
-        duration,
-        time_res,
-        output_verbosity,
-        output_path,
-        output_format: if output_to_parquet {
-            OutputFormat::Parquet
-        } else {
-            OutputFormat::Csv
-        },
-        output_chunk_size,
-        setpoint_deadband_c: None,
-        master_seed,
-        civil_timezone,
-    };
 
     Ok(DwellingConfig {
         hpxml_path: PathBuf::from(hpxml),
@@ -489,30 +842,6 @@ where
     }
 }
 
-fn extract_datetime(obj: &Bound<'_, PyAny>) -> PyResult<DateTime<FixedOffset>> {
-    if let Ok(value) = obj.extract::<String>() {
-        return parse_datetime_str(&value);
-    }
-
-    let iso: String = obj.call_method0("isoformat")?.extract()?;
-    parse_datetime_str(&iso)
-}
-
-fn parse_datetime_str(value: &str) -> PyResult<DateTime<FixedOffset>> {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
-        return Ok(dt);
-    }
-
-    if let Ok(naive) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S") {
-        let utc_offset = FixedOffset::east_opt(0).expect("valid UTC offset");
-        return Ok(utc_offset.from_utc_datetime(&naive));
-    }
-
-    Err(PyValueError::new_err(format!(
-        "failed to parse datetime `{value}`"
-    )))
-}
-
 fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     if let Ok(v) = obj.extract::<i64>() {
         return Ok(v);
@@ -532,7 +861,9 @@ fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 }
 
 fn default_start() -> DateTime<FixedOffset> {
-    DateTime::parse_from_rfc3339(DEFAULT_START).expect("valid default timestamp")
+    // SAFETY: DEFAULT_START is a compile-time constant that is a valid RFC3339 timestamp.
+    // This will not panic at runtime.
+    DateTime::parse_from_rfc3339(DEFAULT_START).unwrap()
 }
 
 fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {
@@ -686,4 +1017,117 @@ fn py_to_config_value(value: &Bound<'_, PyAny>) -> PyResult<ConfigValue> {
     Err(PyValueError::new_err(
         "config value must be bool, float, string, or list of floats",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::sync::MutexGuard;
+    use std::thread;
+
+    use super::default_start;
+    use crate::utils::parse_datetime_str;
+
+    #[derive(Debug)]
+    struct TestDwelling {
+        _data: i32,
+    }
+
+    fn lock_dwelling_test<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, String> {
+        mutex.lock().map_err(|_| {
+            "dwelling state is corrupted (internal panic occurred); \
+             create a new Dwelling instance"
+                .to_string()
+        })
+    }
+
+    #[test]
+    fn test_lock_dwelling_string_returns_error_on_poisoned_mutex() {
+        let mutex: Mutex<TestDwelling> = Mutex::new(TestDwelling { _data: 0 });
+        let mutex_static: &'static Mutex<TestDwelling> = Box::leak(Box::new(mutex));
+
+        thread::spawn(move || {
+            let _guard = mutex_static.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        })
+        .join()
+        .ok();
+
+        let result = lock_dwelling_test(mutex_static);
+        assert!(result.is_err(), "Expected error on poisoned mutex");
+        let error_message = result.unwrap_err();
+        assert!(
+            error_message.contains("corrupted"),
+            "Error should mention 'corrupted'"
+        );
+        assert!(
+            error_message.contains("create a new Dwelling"),
+            "Error should mention 'create a new Dwelling'"
+        );
+    }
+
+    #[test]
+    fn test_parse_datetime_str_rfc3339_with_z_suffix() {
+        let result = parse_datetime_str("2019-01-01T00:00:00Z");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2019-01-01T00:00:00"
+        );
+    }
+
+    #[test]
+    fn test_parse_datetime_str_rfc3339_with_positive_offset() {
+        let result = parse_datetime_str("2019-01-01T00:00:00+05:00");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
+            "2019-01-01T00:00:00+0500"
+        );
+    }
+
+    #[test]
+    fn test_parse_datetime_str_rfc3339_with_negative_offset() {
+        let result = parse_datetime_str("2019-06-15T12:30:00-08:00");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
+            "2019-06-15T12:30:00-0800"
+        );
+    }
+
+    #[test]
+    fn test_parse_datetime_str_naive_fallback_assumes_utc() {
+        let result = parse_datetime_str("2019-01-01T00:00:00");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2019-01-01T00:00:00"
+        );
+    }
+
+    #[test]
+    fn test_parse_datetime_str_rejects_invalid_string() {
+        let result = parse_datetime_str("not-a-date");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_datetime_str_rejects_invalid_month() {
+        let result = parse_datetime_str("2019-13-01T00:00:00");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_start_returns_expected_value() {
+        let result = default_start();
+        assert_eq!(
+            result.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
+            "2019-01-01T00:00:00+0000"
+        );
+    }
 }

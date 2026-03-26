@@ -35,6 +35,16 @@ class ResStockVersion(str, enum.Enum):
     V2025_1 = "2025.1"
 
 
+class WeatherFormat(str, enum.Enum):
+    """Weather file format for ResStock buildings."""
+
+    EPW = "epw"
+    """TMY3 EPW files from BuildStock_TMY3_FIPS.zip (full data, ~1200 stations)."""
+
+    CSV = "csv"
+    """Simplified 8-column CSV from OEDI S3 (dry bulb, RH, wind, solar only)."""
+
+
 @dataclasses.dataclass(frozen=True)
 class ResStockBuilding:
     bldg_id: int
@@ -52,9 +62,7 @@ class _VersionConfig:
     metadata_upgrade: str
     weather_template: str
     weather_suffix: str
-    # "epw" = fetch full EPW from BuildStock_TMY3_FIPS.zip (preferred)
-    # "csv" = fall back to ResStock simplified CSV (AMY, no EPW source)
-    weather_format: str = "epw"
+    weather_format: WeatherFormat = WeatherFormat.EPW
 
 
 _VERSION_CONFIGS: dict[ResStockVersion, _VersionConfig] = {
@@ -81,7 +89,7 @@ _VERSION_CONFIGS: dict[ResStockVersion, _VersionConfig] = {
         metadata_upgrade="metadata_and_annual_results/national/full/parquet/upgrade{upgrade}.parquet",
         weather_template="weather/state={state}/{fips}_2018.csv",
         weather_suffix="2018",
-        weather_format="csv",  # No EPW source for AMY 2018; use ResStock CSV fallback
+        weather_format=WeatherFormat.CSV,  # No EPW source for AMY 2018; use ResStock CSV
     ),
 }
 
@@ -247,14 +255,27 @@ def _fetch_weather(
     hpxml_path: Path,
     cache_dir: Path,
     version: str,
+    weather_format: WeatherFormat | None = None,
 ) -> Path:
+    """Fetch the weather file for a building.
+
+    Parameters
+    ----------
+    weather_format:
+        Override the version's default weather format.  ``WeatherFormat.EPW``
+        forces TMY3 EPW files (from BuildStock_TMY3_FIPS.zip) even for AMY
+        versions.  ``WeatherFormat.CSV`` forces the simplified S3 CSV.
+        ``None`` uses the version's native format.
+    """
     station = _parse_weather_station(hpxml_path)
     if station is None:
         return Path("")
     state, fips = station
 
-    if cfg.weather_format == "epw":
-        # TMY3 versions: fetch full EPW from BuildStock_TMY3_FIPS.zip.
+    fmt = weather_format if weather_format is not None else cfg.weather_format
+
+    if fmt is WeatherFormat.EPW:
+        # TMY3 EPW from BuildStock_TMY3_FIPS.zip.
         # All TMY3 versions share the same EPW dataset, so use a
         # version-independent cache directory.
         from ochre_next.data.weather import get_epw_for_fips
@@ -262,7 +283,7 @@ def _fetch_weather(
         weather_cache = cache_dir / "weather"
         return get_epw_for_fips(fips, cache_dir=weather_cache)
 
-    # AMY / CSV fallback: download the simplified ResStock CSV
+    # CSV: download the simplified ResStock CSV from S3.
     weather_dest = cache_dir / version / "weather" / f"{fips}_{cfg.weather_suffix}.csv"
     if weather_dest.exists() and weather_dest.stat().st_size > 0:
         return weather_dest
@@ -277,10 +298,21 @@ def fetch_resstock_building(
     upgrade_id: int = 0,
     cache_dir: Path | None = None,
     weather_override: Path | None = None,
+    weather_format: WeatherFormat | None = None,
 ) -> ResStockBuilding:
     """Download a ResStock building bundle from OEDI S3 and return local paths.
 
-    Files are cached to cache_dir and re-used on subsequent calls.
+    Files are cached to *cache_dir* and re-used on subsequent calls.
+
+    Parameters
+    ----------
+    weather_override:
+        Explicit path to a weather file — skips all weather fetching.
+    weather_format:
+        ``WeatherFormat.EPW`` to force TMY3 EPW files (even for AMY
+        versions like 2025.1), ``WeatherFormat.CSV`` to force the
+        simplified S3 CSV, or ``None`` (default) to use the version's
+        native format.
     """
     base_cache = cache_dir if cache_dir is not None else _default_cache_dir()
     cfg = _version_config(version)
@@ -299,7 +331,10 @@ def fetch_resstock_building(
     if weather_override is not None:
         weather_path = weather_override
     else:
-        weather_path = _fetch_weather(cfg, hpxml_path, base_cache, version)
+        weather_path = _fetch_weather(
+            cfg, hpxml_path, base_cache, version,
+            weather_format=weather_format,
+        )
 
     return ResStockBuilding(
         bldg_id=bldg_id,
@@ -338,6 +373,7 @@ async def _fetch_fleet_async(
     base_cache: Path,
     upgrade_id: int,
     weights: dict[int, float],
+    weather_format: WeatherFormat | None = None,
 ) -> list[ResStockBuilding]:
     results: list[ResStockBuilding] = []
 
@@ -362,7 +398,10 @@ async def _fetch_fleet_async(
             bldg_dir = _building_cache_dir(base_cache, version, bid)
             hpxml_path = bldg_dir / "home.xml"
             schedule_path = bldg_dir / "in.schedules.csv"
-            weather_path = _fetch_weather(cfg, hpxml_path, base_cache, version)
+            weather_path = _fetch_weather(
+                cfg, hpxml_path, base_cache, version,
+                weather_format=weather_format,
+            )
             results.append(ResStockBuilding(
                 bldg_id=bid,
                 sample_weight=weights.get(bid, 1.0),
@@ -377,7 +416,10 @@ async def _fetch_fleet_async(
 
     # Synchronous fallback when httpx is not available
     for bid in bldg_ids:
-        b = fetch_resstock_building(bid, version=version, upgrade_id=upgrade_id, cache_dir=base_cache)
+        b = fetch_resstock_building(
+            bid, version=version, upgrade_id=upgrade_id,
+            cache_dir=base_cache, weather_format=weather_format,
+        )
         results.append(dataclasses.replace(b, sample_weight=weights.get(bid, 1.0)))
     return results
 
@@ -390,6 +432,7 @@ def fetch_resstock_fleet(
     upgrade_id: int = 0,
     cache_dir: Path | None = None,
     filter: dict[str, object] | None = None,
+    weather_format: WeatherFormat | None = None,
 ) -> list[ResStockBuilding]:
     """Fetch a fleet of ResStock buildings with metadata-driven sample weights.
 
@@ -410,6 +453,11 @@ def fetch_resstock_fleet(
     filter:
         Column equality filters applied before building selection
         (e.g. {"in.state": "CO"}).
+    weather_format:
+        ``WeatherFormat.EPW`` to force TMY3 EPW weather for all
+        buildings (useful for OCHRE parity with AMY versions),
+        ``WeatherFormat.CSV`` to force S3 CSVs, or ``None`` to use
+        the version's native format.
     """
     import polars as pl
 
@@ -451,6 +499,7 @@ def fetch_resstock_fleet(
             base_cache,
             upgrade_id,
             weights,
+            weather_format=weather_format,
         )
     )
 

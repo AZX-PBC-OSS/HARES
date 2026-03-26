@@ -2,6 +2,28 @@
 
 Engineering guidelines for working in the HARES codebase.
 
+## Getting started
+
+See the [README](README.md) for repository setup, prerequisites, and the
+crate layout. The short version:
+
+```bash
+git clone https://github.com/NREL/HARES.git && cd HARES
+git submodule update --init --recursive
+uv venv --python 3.13 && uv sync
+```
+
+### Pre-commit checklist
+
+Every change should pass these before opening a PR:
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+uv run pytest                # if Python code was touched
+```
+
 ## Performance
 
 ### No allocations in hot loops
