@@ -14,6 +14,36 @@ const NEAR_UNITY_EIGENVALUE_THRESHOLD: f64 = 0.99;
 /// Result type for state-space operations.
 pub type Result<T> = std::result::Result<T, StateSpaceError>;
 
+/// Pre-allocated scratch buffers for zero-alloc solver methods.
+///
+/// Both vectors must be `state_dim()` long. They are overwritten on each call.
+pub struct SolverScratch {
+    pub rhs: DVector<f64>,
+    pub gain: DVector<f64>,
+}
+
+impl SolverScratch {
+    pub fn new(state_dim: usize) -> Self {
+        Self {
+            rhs: DVector::zeros(state_dim),
+            gain: DVector::zeros(state_dim),
+        }
+    }
+}
+
+/// Pre-factorized coupling data for coupled solver methods.
+pub struct CouplingData<'a> {
+    pub lu: &'a LU<f64, Dyn, Dyn>,
+    pub couplings: &'a [(usize, f64, f64)],
+}
+
+/// Solve target: which output to drive to what value, and which input to vary.
+pub struct SolveTarget {
+    pub y_target: f64,
+    pub output_index: usize,
+    pub input_index: usize,
+}
+
 /// Recoverable errors for state-space construction and stepping.
 #[derive(Debug, Error)]
 pub enum StateSpaceError {
@@ -444,7 +474,6 @@ impl StateSpaceModel {
     ///
     /// `couplings` entries are `(state_idx, d_diag, forcing)` — same format as
     /// `step_with_coupling_into`.
-    #[allow(clippy::too_many_arguments)]
     pub fn solve_for_scalar_input_coupled(
         &self,
         x: &DVector<f64>,
@@ -452,9 +481,10 @@ impl StateSpaceModel {
         y_target: f64,
         output_index: usize,
         input_index: usize,
-        m_coupled_lu: &LU<f64, Dyn, Dyn>,
-        couplings: &[(usize, f64, f64)],
+        coupling: &CouplingData<'_>,
     ) -> Result<f64> {
+        let m_coupled_lu = coupling.lu;
+        let couplings = coupling.couplings;
         if output_index >= self.c.nrows() {
             return Err(StateSpaceError::OutputIndexOutOfBounds {
                 output_index,
@@ -553,22 +583,21 @@ impl StateSpaceModel {
     }
 
     /// Like `solve_for_scalar_input_coupled` but uses pre-allocated buffers.
-    ///
-    /// `rhs_buf` and `gain_buf` are scratch DVectors that must be `state_dim()` long.
-    /// They are overwritten and used as workspace; no heap allocation occurs.
-    #[allow(clippy::too_many_arguments)]
     pub fn solve_for_scalar_input_coupled_into(
         &self,
         x: &DVector<f64>,
         u: &DVector<f64>,
-        y_target: f64,
-        output_index: usize,
-        input_index: usize,
-        m_coupled_lu: &LU<f64, Dyn, Dyn>,
-        couplings: &[(usize, f64, f64)],
-        rhs_buf: &mut DVector<f64>,
-        gain_buf: &mut DVector<f64>,
+        target: &SolveTarget,
+        coupling: &CouplingData<'_>,
+        scratch: &mut SolverScratch,
     ) -> Result<f64> {
+        let y_target = target.y_target;
+        let output_index = target.output_index;
+        let input_index = target.input_index;
+        let m_coupled_lu = coupling.lu;
+        let couplings = coupling.couplings;
+        let rhs_buf = &mut scratch.rhs;
+        let gain_buf = &mut scratch.gain;
         if output_index >= self.c.nrows() {
             return Err(StateSpaceError::OutputIndexOutOfBounds {
                 output_index,
@@ -621,18 +650,18 @@ impl StateSpaceModel {
     }
 
     /// Like `solve_for_scalar_input` but uses pre-allocated buffers.
-    ///
-    /// `rhs_buf` and `gain_buf` are scratch DVectors that must be `state_dim()` long.
     pub fn solve_for_output_input_into(
         &self,
         x: &DVector<f64>,
         u: &DVector<f64>,
-        y_target: f64,
-        output_index: usize,
-        input_index: usize,
-        rhs_buf: &mut DVector<f64>,
-        gain_buf: &mut DVector<f64>,
+        target: &SolveTarget,
+        scratch: &mut SolverScratch,
     ) -> Result<f64> {
+        let y_target = target.y_target;
+        let output_index = target.output_index;
+        let input_index = target.input_index;
+        let rhs_buf = &mut scratch.rhs;
+        let gain_buf = &mut scratch.gain;
         if output_index >= self.c.nrows() {
             return Err(StateSpaceError::OutputIndexOutOfBounds {
                 output_index,
@@ -1634,7 +1663,7 @@ mod tests {
 
         // Solve for input_index=1 to hit y_target
         let solved_u = model
-            .solve_for_scalar_input_coupled(&x, &u, y_target, 0, 1, &lu, &couplings)
+            .solve_for_scalar_input_coupled(&x, &u, y_target, 0, 1, &CouplingData { lu: &lu, couplings: &couplings })
             .expect("coupled solve should succeed");
 
         // Step with the solved input and verify output matches target

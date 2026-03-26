@@ -182,7 +182,14 @@ impl ThermalSolver {
             let buf = &mut self.interior_surf_temps_buf;
             buf.clear();
             for s in &zone_cfg.surfaces {
-                let t_node = if s.state_index < self.x.len() {
+                let t_node = if let Some(dt) = s.driving_temp {
+                    // Window/fallback boundary: use environmental driving temp
+                    // instead of state vector node.
+                    match dt {
+                        super::config::DrivingTemp::Outdoor => env.weather.outdoor_temp_c,
+                        super::config::DrivingTemp::Ground => env.weather.ground_temp_c,
+                    }
+                } else if s.state_index < self.x.len() {
                     self.x[s.state_index]
                 } else {
                     t_zone_c

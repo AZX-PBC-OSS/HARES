@@ -62,6 +62,7 @@ mod tests {
     // BEopt 1h (May 5 2019, 12:00 PM, Denver, 1-min resolution, 60 steps)
     // Source: vendors/OCHRE smoke test output (OCHRE 0.9.2)
 
+    #[allow(dead_code)]
     struct OracleValue {
         name: &'static str,
         mean: f64,
@@ -322,6 +323,7 @@ mod tests {
 
     // ── Comparison helpers ──────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     struct Check {
         name: String,
         ochre: f64,
@@ -548,7 +550,42 @@ mod tests {
             OCHRE_ATTIC_ROOF_SOLAR.mean
         );
         eprintln!("    Doors:       {:.0} W", OCHRE_DOOR_EXT_SOLAR.mean);
+        eprintln!("    Windows:     {:.0} W", OCHRE_WINDOW_EXT_SOLAR.mean);
         eprintln!("  OCHRE total ext LWR: {ochre_total_ext_lwr:.0} W");
+
+        // ── Exterior surface temperatures ─────────────────────────────
+        eprintln!("\n=== Exterior Surface Temperatures ===");
+        eprintln!(
+            "  OCHRE ext wall surface temp: {:.1} C (range {:.1}–{:.1})",
+            OCHRE_EXT_WALL_SURF_TEMP.mean,
+            OCHRE_EXT_WALL_SURF_TEMP.min,
+            OCHRE_EXT_WALL_SURF_TEMP.max
+        );
+        eprintln!(
+            "  OCHRE attic roof surface temp: {:.1} C (range {:.1}–{:.1})",
+            OCHRE_ATTIC_ROOF_SURF_TEMP.mean,
+            OCHRE_ATTIC_ROOF_SURF_TEMP.min,
+            OCHRE_ATTIC_ROOF_SURF_TEMP.max
+        );
+
+        // ── Attic zone heat gains ─────────────────────────────────────
+        eprintln!("\n=== Attic Zone Heat Gains ===");
+
+        checks.push(Check::compare_mean(
+            "Infiltration (attic)",
+            &OCHRE_INFILTRATION_ATTIC,
+            col_mean(&hares, "Infiltration Heat Gain - Attic (W)"),
+            200.0,
+            "attic infiltration, SLA, wind effects",
+        ));
+
+        checks.push(Check::compare_mean(
+            "Interior LWR (attic)",
+            &OCHRE_RADIATION_ATTIC,
+            col_mean(&hares, "Radiation Heat Gain - Attic (W)"),
+            100.0,
+            "attic interior surface LWR exchange",
+        ));
 
         // ── HVAC comparison ─────────────────────────────────────────────
         eprintln!("\n=== HVAC Energy ===");

@@ -633,6 +633,7 @@ fn initial_zones(building: &Building, outdoor_temp_c: f64, start_hour: usize) ->
 /// - outdoor > 12°C → cooling setpoint (building is in cooling mode)
 /// - outdoor ≤ 12°C → heating setpoint (building is in heating mode)
 /// - No setpoints available → 21°C (OCHRE default)
+///
 /// `start_hour` must be in `[0, 23]` (e.g. from `chrono::DateTime::hour()`).
 fn determine_initial_indoor_temp_c(
     building: &Building,

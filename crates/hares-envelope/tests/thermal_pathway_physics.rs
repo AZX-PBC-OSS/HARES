@@ -9,9 +9,8 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{
-    BoundaryCategory, BoundaryDiagnosticInfo, InteriorLwrZoneConfig,
-    InteriorSurfaceInfo, OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver,
-    ThermalSolverConfig,
+    OutputMapping, StateSpaceModel, StateSpaceWiring,
+    ThermalSolver, ThermalSolverConfig,
 };
 use hares_types::{
     DomainSolver, EnvironmentState, GridState, PortSlots,
@@ -203,16 +202,8 @@ fn diagnostic_heat_flow_uses_surface_temperature() {
     let r_zone_to_inner = r_film + r_half_layer;
     let radiation_frac = r_film / r_zone_to_inner;
 
-    let diag = BoundaryDiagnosticInfo {
-        inner_state_index: 0,
-        area_m2: area,
-        r_film_int_m2_k_w: r_film,
-        radiation_frac,
-        category: BoundaryCategory::Floor,
-    };
-
-    let t_node = 15.0;
-    let t_zone = 20.0;
+    let t_node: f64 = 15.0;
+    let t_zone: f64 = 20.0;
 
     // Compute surface temperature via voltage divider
     let t_surface = radiation_frac * t_node + (1.0 - radiation_frac) * t_zone;
@@ -222,12 +213,12 @@ fn diagnostic_heat_flow_uses_surface_temperature() {
     );
 
     // Convective heat flow from surface to zone
-    let q = (t_surface - t_zone) * diag.area_m2 / diag.r_film_int_m2_k_w;
+    let q = (t_surface - t_zone) * area / r_film;
 
     // This should equal (T_node - T_zone) × A / R_zone_to_inner (series resistance equivalence)
     let q_series = (t_node - t_zone) * area / r_zone_to_inner;
     assert!(
-        (q - q_series).abs() < 0.1,
+        (q - q_series).abs() < 0.1_f64,
         "surface-based Q ({q:.1}W) must equal series-resistance Q ({q_series:.1}W)"
     );
 
@@ -237,7 +228,7 @@ fn diagnostic_heat_flow_uses_surface_temperature() {
     let t_node_wall = 19.0;
     let wall_area = 86.0; // total wall area
     let t_surf_wall = radiation_frac * t_node_wall + (1.0 - radiation_frac) * t_zone;
-    let q_wall = (t_surf_wall - t_zone) * wall_area / r_film;
+    let q_wall: f64 = (t_surf_wall - t_zone) * wall_area / r_film;
     assert!(
         q_wall.abs() < 500.0,
         "wall convective gain ({q_wall:.0}W) should be moderate (<500W) for 1°C surface-air ΔT"

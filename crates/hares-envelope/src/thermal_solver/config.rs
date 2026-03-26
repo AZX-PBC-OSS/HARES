@@ -20,19 +20,31 @@ pub enum BoundaryCategory {
 ///
 /// This matches OCHRE's `H_{surface}_{zone}` energy flow variable.
 #[derive(Debug, Clone)]
-pub struct BoundaryDiagnosticInfo {
-    /// State vector index of the innermost RC node for this boundary.
-    pub inner_state_index: usize,
-    /// Boundary area [m²].
-    pub area_m2: f64,
-    /// Interior film resistance [m²·K/W].
-    pub r_film_int_m2_k_w: f64,
-    /// Fraction of node temperature in the surface temperature estimate.
+pub enum BoundaryDiagnosticInfo {
+    /// Boundary with RC interior node — uses surface temperature from state vector.
     /// `T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
-    /// where `radiation_frac = R_film / (R_film + R_inner_half_layer)`.
-    pub radiation_frac: f64,
-    /// Category for accumulation.
-    pub category: BoundaryCategory,
+    /// `Q = (T_surface - T_zone) × area / R_film_int`
+    RCNode {
+        inner_state_index: usize,
+        area_m2: f64,
+        r_film_int_m2_k_w: f64,
+        radiation_frac: f64,
+        category: BoundaryCategory,
+    },
+    /// Boundary without RC node (window, fallback-R) — uses steady-state UA.
+    /// `Q = UA × (T_driving - T_zone)` where T_driving is outdoor or ground.
+    SteadyState {
+        ua_w_k: f64,
+        driving_temp: DrivingTemp,
+        category: BoundaryCategory,
+    },
+}
+
+/// Which environmental temperature drives conduction for a non-RC boundary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DrivingTemp {
+    Outdoor,
+    Ground,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -201,6 +213,17 @@ pub struct InteriorSurfaceInfo {
     /// Per EnergyPlus FullInteriorAndExterior: beam solar strikes floors first
     /// (60% default for residential single-storey), remainder goes to walls/ceiling.
     pub is_floor: bool,
+    /// Optional driving temperature for surface temperature computation.
+    ///
+    /// For window surfaces without RC nodes, the interior surface temperature is
+    /// driven by outdoor conduction through the glass:
+    ///   `T_surf = radiation_frac × T_driving + (1 - radiation_frac) × T_zone`
+    /// where `radiation_frac = R_film_int / R_total` and `T_driving` comes from
+    /// the environment (outdoor or ground temp).
+    ///
+    /// When `None`, `state_index` is used to read T_node from the state vector
+    /// (standard RC-node behavior).
+    pub driving_temp: Option<DrivingTemp>,
 }
 
 /// Interior longwave radiation configuration for one zone.
@@ -441,6 +464,10 @@ pub struct EnvelopeComponentGains {
     pub opaque_solar_w: f64,
     /// Exterior longwave radiation exchange only [W].
     pub exterior_lwr_w: f64,
+    /// Outdoor driving temperature used this timestep [°C].
+    pub driving_outdoor_temp_c: f64,
+    /// Ground driving temperature used this timestep [°C].
+    pub driving_ground_temp_c: f64,
     /// Total combined air flow rate (infiltration + ventilation) [m³/s].
     pub total_airflow_m3_s: f64,
     /// Raw AIM-2 infiltration flow rate before ventilation interaction [m³/s].

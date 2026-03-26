@@ -30,15 +30,20 @@ impl ThermalSolver {
         };
 
         let result = match &self.last_coupled_lu {
-            Some(lu) => self.model.solve_for_scalar_input_coupled(
-                &self.x,
-                &self.last_u,
-                target_c,
-                output_idx,
-                input_idx,
-                lu,
-                &self.last_coupling,
-            ),
+            Some(lu) => {
+                let coupling = crate::CouplingData {
+                    lu,
+                    couplings: &self.last_coupling,
+                };
+                self.model.solve_for_scalar_input_coupled(
+                    &self.x,
+                    &self.last_u,
+                    target_c,
+                    output_idx,
+                    input_idx,
+                    &coupling,
+                )
+            }
             None => self.model.solve_for_output_input(
                 &self.x,
                 &self.last_u,
@@ -106,9 +111,9 @@ impl ThermalSolver {
         std::mem::swap(&mut self.x, &mut self.rhs_buf);
         let y_next = self.model.output(&self.x, &u);
 
-        // Per-boundary convective heat gain diagnostics.
-        // T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone
-        // Q_conv = (T_surface - T_zone) × A / R_film_int
+        // Per-boundary convective heat gain diagnostics (non-injecting: read-only from state).
+        // Compiled out in release builds without observe_detailed.
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         if !self.config.boundary_diagnostics.is_empty() {
             let zone_output_idx = self
                 .wiring
@@ -118,10 +123,33 @@ impl ThermalSolver {
                 .unwrap_or(0);
             let t_zone = y_next[zone_output_idx];
             for diag in &self.config.boundary_diagnostics {
-                let t_node = self.x[diag.inner_state_index];
-                let t_surface = diag.radiation_frac * t_node + (1.0 - diag.radiation_frac) * t_zone;
-                let q = (t_surface - t_zone) * diag.area_m2 / diag.r_film_int_m2_k_w;
-                match diag.category {
+                use super::config::{BoundaryDiagnosticInfo, DrivingTemp};
+                let (q, category) = match diag {
+                    BoundaryDiagnosticInfo::RCNode {
+                        inner_state_index,
+                        area_m2,
+                        r_film_int_m2_k_w,
+                        radiation_frac,
+                        category,
+                    } => {
+                        let t_node = self.x[*inner_state_index];
+                        let t_surface =
+                            radiation_frac * t_node + (1.0 - radiation_frac) * t_zone;
+                        ((t_surface - t_zone) * area_m2 / r_film_int_m2_k_w, *category)
+                    }
+                    BoundaryDiagnosticInfo::SteadyState {
+                        ua_w_k,
+                        driving_temp,
+                        category,
+                    } => {
+                        let t_driving = match driving_temp {
+                            DrivingTemp::Outdoor => self.cached_outdoor_temp_c,
+                            DrivingTemp::Ground => self.cached_ground_temp_c,
+                        };
+                        (ua_w_k * (t_driving - t_zone), *category)
+                    }
+                };
+                match category {
                     super::config::BoundaryCategory::Wall => {
                         self.component_gains.wall_heat_gain_w += q
                     }

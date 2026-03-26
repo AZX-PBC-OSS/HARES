@@ -4,10 +4,12 @@ use std::collections::HashMap;
 
 use hares_envelope::{
     BoundaryCategory, BoundaryDiagnostic, BoundaryDiagnosticInfo, BoundaryInput, BuildingRC,
-    EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, ElectricalSolver, ElectricalSolverConfig,
-    EnvelopeDiagnostics, ExteriorSurfaceInfo, FluidSolver, FluidSolverConfig, HumiditySolver,
-    HumiditySolverConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
-    StateSpaceWiring, SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
+    DrivingTemp, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, ElectricalSolver,
+    ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo, ExteriorTarget,
+    FluidSolver,
+    FluidSolverConfig, HumiditySolver, HumiditySolverConfig, NodeId,
+    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring,
+    SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
     assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
@@ -20,6 +22,14 @@ use super::conversions::{
 };
 
 // ── Intermediate representation ─────────────────────────────────────────────
+
+struct RCContext<'a> {
+    layer_info: &'a HashMap<usize, SurfaceLayerInfo>,
+    node_index: &'a HashMap<NodeId, usize>,
+    envelope_diagnostics: &'a EnvelopeDiagnostics,
+    n_zones: usize,
+    n_ext: usize,
+}
 
 struct NodeWiring {
     state_row: usize,
@@ -64,13 +74,8 @@ struct SolverBoundary {
 fn build_solver_boundaries(
     building: &Building,
     boundary_inputs: &[BoundaryInput],
-    layer_info: &HashMap<usize, SurfaceLayerInfo>,
-    node_index: &HashMap<NodeId, usize>,
-    _: &HashMap<NodeId, f64>,
-    envelope_diagnostics: &EnvelopeDiagnostics,
+    rc: &RCContext<'_>,
     env: &EnvironmentState,
-    n_zones: usize,
-    n_ext: usize,
 ) -> (Vec<SolverBoundary>, usize, usize) {
     // Group windows by wall they're attached to (for wall→window aggregation).
     let mut windows_by_wall: HashMap<&str, Vec<&hares_io::hpxml::building::Window>> =
@@ -82,7 +87,7 @@ fn build_solver_boundaries(
     }
 
     // Index diagnostics by boundary_idx for O(1) lookup.
-    let diag_by_idx: HashMap<usize, &BoundaryDiagnostic> = envelope_diagnostics
+    let diag_by_idx: HashMap<usize, &BoundaryDiagnostic> = rc.envelope_diagnostics
         .boundaries
         .iter()
         .map(|d| (d.boundary_idx, d))
@@ -100,7 +105,7 @@ fn build_solver_boundaries(
                 .as_ref()
                 .map(|z| *z == hares_io::hpxml::ZoneType::Outdoor)
                 .unwrap_or(false)
-                && layer_info.get(idx).is_some()
+                && rc.layer_info.get(idx).is_some()
         })
         .count();
 
@@ -123,7 +128,7 @@ fn build_solver_boundaries(
             .map(|z| *z == hares_io::hpxml::ZoneType::Conditioned)
             .unwrap_or(false);
 
-        let zone_idx = boundary_zone_index(building, boundary.interior_zone.as_ref(), n_zones);
+        let zone_idx = boundary_zone_index(building, boundary.interior_zone.as_ref(), rc.n_zones);
         let zone_id = env
             .zones
             .get(zone_idx)
@@ -132,9 +137,9 @@ fn build_solver_boundaries(
 
         // Outer wiring: exterior boundaries with RC layers.
         let outer_wiring = if is_exterior {
-            layer_info.get(&surface_idx).and_then(|info| {
-                node_index.get(&info.outer_node).map(|&state_row| {
-                    let b_col = n_ext + ext_col_counter;
+            rc.layer_info.get(&surface_idx).and_then(|info| {
+                rc.node_index.get(&info.outer_node).map(|&state_row| {
+                    let b_col = rc.n_ext + ext_col_counter;
                     ext_col_counter += 1;
                     NodeWiring { state_row, b_col }
                 })
@@ -145,9 +150,9 @@ fn build_solver_boundaries(
 
         // Inner wiring: conditioned-interior boundaries with RC layers.
         let inner_wiring = if is_conditioned_interior {
-            layer_info.get(&surface_idx).and_then(|info| {
-                node_index.get(&info.inner_node).map(|&state_row| {
-                    let b_col = n_ext + n_ext_surface_inputs + int_col_counter;
+            rc.layer_info.get(&surface_idx).and_then(|info| {
+                rc.node_index.get(&info.inner_node).map(|&state_row| {
+                    let b_col = rc.n_ext + n_ext_surface_inputs + int_col_counter;
                     int_col_counter += 1;
                     NodeWiring { state_row, b_col }
                 })
@@ -157,16 +162,34 @@ fn build_solver_boundaries(
         };
 
         // Boundary category.
-        let boundary_category = match boundary.boundary_type {
-            hares_io::hpxml::BoundaryType::Wall
-            | hares_io::hpxml::BoundaryType::FoundationWall
-            | hares_io::hpxml::BoundaryType::RimJoist => Some(BoundaryCategory::Wall),
-            hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
-            hares_io::hpxml::BoundaryType::Floor | hares_io::hpxml::BoundaryType::Slab => {
-                Some(BoundaryCategory::Floor)
+        // Same-zone boundaries (interior == exterior) are internal thermal mass.
+        let is_same_zone = boundary.interior_zone == boundary.exterior_zone
+            && boundary.interior_zone.is_some();
+        let boundary_category = if is_same_zone {
+            Some(BoundaryCategory::InternalMass)
+        } else {
+            match boundary.boundary_type {
+                hares_io::hpxml::BoundaryType::Wall
+                | hares_io::hpxml::BoundaryType::FoundationWall
+                | hares_io::hpxml::BoundaryType::RimJoist => Some(BoundaryCategory::Wall),
+                hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
+                hares_io::hpxml::BoundaryType::Floor | hares_io::hpxml::BoundaryType::Slab => {
+                    // Attic floor (exterior = Attic) represents heat flow from roof/attic
+                    // path into the conditioned zone — categorize as Roof for OCHRE parity.
+                    let is_attic_floor = boundary
+                        .exterior_zone
+                        .as_ref()
+                        .is_some_and(|z| *z == hares_io::hpxml::ZoneType::Attic);
+                    if is_attic_floor {
+                        Some(BoundaryCategory::Roof)
+                    } else {
+                        Some(BoundaryCategory::Floor)
+                    }
+                }
+                hares_io::hpxml::BoundaryType::Window => Some(BoundaryCategory::Window),
+                hares_io::hpxml::BoundaryType::Door
+                | hares_io::hpxml::BoundaryType::Other(_) => None,
             }
-            hares_io::hpxml::BoundaryType::Window => Some(BoundaryCategory::Window),
-            hares_io::hpxml::BoundaryType::Door | hares_io::hpxml::BoundaryType::Other(_) => None,
         };
 
         // Tilt: use parsed value from HPXML, fall back to type-based default.
@@ -356,13 +379,15 @@ pub(crate) fn compute_weather_averages(weather: &WeatherTimeSeries) -> WeatherAv
 }
 
 /// Solvers plus per-zone thermal capacitances [J/K] for gain preview.
-pub(crate) type SolverBundle = (
-    ThermalSolver,
-    HumiditySolver,
-    ElectricalSolver,
-    FluidSolver,
-    Vec<(ZoneId, f64)>,
-);
+pub(crate) struct SolverBundle {
+    pub thermal: ThermalSolver,
+    pub humidity: HumiditySolver,
+    pub electrical: ElectricalSolver,
+    pub fluid: FluidSolver,
+    pub zone_capacitances_j_k: Vec<(ZoneId, f64)>,
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    pub envelope_diagnostics: EnvelopeDiagnostics,
+}
 
 pub(crate) fn build_default_solvers(
     env: &EnvironmentState,
@@ -411,17 +436,15 @@ pub(crate) fn build_default_solvers(
     let n_states = a_c.nrows();
 
     // Build the intermediate SolverBoundary representations.
-    let (solver_boundaries, n_ext_surface_inputs, n_int_surface_inputs) = build_solver_boundaries(
-        building,
-        &boundary_inputs,
-        &layer_info,
-        &node_index,
-        &node_capacitances,
-        &envelope_diagnostics,
-        env,
+    let rc_ctx = RCContext {
+        layer_info: &layer_info,
+        node_index: &node_index,
+        envelope_diagnostics: &envelope_diagnostics,
         n_zones,
         n_ext,
-    );
+    };
+    let (solver_boundaries, n_ext_surface_inputs, n_int_surface_inputs) =
+        build_solver_boundaries(building, &boundary_inputs, &rc_ctx, env);
 
     // Augment B_c: [B_ext | ext-surface columns | int-surface columns | zone sensible heat].
     let n_total_inputs = n_ext + n_ext_surface_inputs + n_int_surface_inputs + n_zones;
@@ -516,6 +539,11 @@ pub(crate) fn build_default_solvers(
     // Single pass: populate exterior surfaces, window properties, interior surfaces, diagnostics.
     let mut surfaces_by_zone: HashMap<ZoneId, Vec<hares_envelope::InteriorSurfaceInfo>> =
         HashMap::new();
+    let diag_by_idx: HashMap<usize, &BoundaryDiagnostic> = envelope_diagnostics
+        .boundaries
+        .iter()
+        .map(|d| (d.boundary_idx, d))
+        .collect();
 
     for sb in &solver_boundaries {
         if sb.is_exterior {
@@ -568,11 +596,21 @@ pub(crate) fn build_default_solvers(
         }
 
         // Add interior surfaces for LWR and solar distribution.
-        // Windows are EXCLUDED - they receive solar via SHGC/IAM, not distribution.
-        if sb.is_conditioned_interior
-            && sb.area_m2 > 0.0
-            && sb.boundary_category != Some(BoundaryCategory::Window)
-        {
+        // Windows participate in interior LWR (emissivity=0.84 per EnergyPlus)
+        // but receive solar via SHGC/IAM, not the floor/wall distribution path.
+        //
+        // Window LWR flux goes entirely to zone air (no RC node). The window
+        // surface temperature is estimated from outdoor driving temp and the
+        // conduction gradient: T_surf = radiation_frac × T_outdoor + (1-radiation_frac) × T_zone.
+        // This matches OCHRE's approach where windows have t_idx=None and all
+        // LWR goes to zone.radiation_heat.
+        let is_window = sb.boundary_category == Some(BoundaryCategory::Window);
+        let include_in_lwr = if is_window {
+            sb.is_exterior && sb.area_m2 > 0.0
+        } else {
+            sb.is_conditioned_interior && sb.area_m2 > 0.0
+        };
+        if include_in_lwr {
             let (state_idx, input_idx) = if let Some(ref iw) = sb.inner_wiring {
                 (iw.state_row, iw.b_col)
             } else {
@@ -586,15 +624,39 @@ pub(crate) fn build_default_solvers(
 
             let is_floor = sb.boundary_category == Some(BoundaryCategory::Floor);
 
+            let (emissivity, solar_absorptance, radiation_frac, driving_temp) = if is_window {
+                // Window LWR: emissivity=0.84 (EnergyPlus default).
+                // Surface temp driven by outdoor conduction.
+                // radiation_frac from EnergyPlus interior film decomposition:
+                //   res_int = 1 / (0.359073 × ln(U) + 6.949915)
+                //   radiation_frac = res_int / (1/U)
+                // where U is the window U-factor in W/(m²·K).
+                const WINDOW_EMISSIVITY: f64 = 0.84;
+                let diag = diag_by_idx.get(&sb.surface_idx);
+                let r_total = diag.map(|d| d.r_total_m2_k_w).unwrap_or(0.5);
+                let u_window = if r_total > 1e-9 { 1.0 / r_total } else { 2.0 };
+                let res_int = 1.0 / (0.359073 * u_window.ln() + 6.949915);
+                let rad_frac = (res_int / r_total).clamp(0.0, 1.0);
+                (WINDOW_EMISSIVITY, 0.0, rad_frac, Some(DrivingTemp::Outdoor))
+            } else {
+                (
+                    sb.emissivity,
+                    if is_floor { 0.6 } else { 0.5 },
+                    sb.interior_rad_frac,
+                    None,
+                )
+            };
+
             surfaces_by_zone.entry(sb.zone_id).or_default().push(
                 hares_envelope::InteriorSurfaceInfo {
                     state_index: state_idx,
                     input_index: input_idx,
                     area_m2: sb.area_m2,
-                    emissivity: sb.emissivity,
-                    radiation_frac: sb.interior_rad_frac,
-                    solar_absorptance: if is_floor { 0.6 } else { 0.5 },
+                    emissivity,
+                    radiation_frac,
+                    solar_absorptance,
                     is_floor,
+                    driving_temp,
                 },
             );
         }
@@ -610,16 +672,35 @@ pub(crate) fn build_default_solvers(
                 };
                 thermal_cfg
                     .boundary_diagnostics
-                    .push(BoundaryDiagnosticInfo {
+                    .push(BoundaryDiagnosticInfo::RCNode {
                         inner_state_index: iw.state_row,
                         area_m2: sb.area_m2,
                         r_film_int_m2_k_w: r_film,
                         radiation_frac,
                         category: cat,
                     });
+            } else if sb.is_conditioned_interior
+                || (sb.is_exterior && cat == BoundaryCategory::Window)
+            {
+                // Boundary without RC interior node — use steady-state UA diagnostic.
+                let diag_bd = diag_by_idx.get(&sb.surface_idx);
+                if let Some(d) = diag_bd {
+                    let driving_temp = match d.exterior_target {
+                        ExteriorTarget::Ground => DrivingTemp::Ground,
+                        _ => DrivingTemp::Outdoor,
+                    };
+                    thermal_cfg
+                        .boundary_diagnostics
+                        .push(BoundaryDiagnosticInfo::SteadyState {
+                            ua_w_k: d.ua_w_per_k,
+                            driving_temp,
+                            category: cat,
+                        });
+                }
             }
         }
     }
+
 
     // Group surfaces_by_zone into interior_lwr_zones.
     for (zid, surfaces) in surfaces_by_zone {
@@ -910,13 +991,15 @@ pub(crate) fn build_default_solvers(
         })
         .collect();
 
-    Ok((
-        thermal_solver,
-        humidity_solver,
-        electrical_solver,
-        fluid_solver,
-        zone_caps,
-    ))
+    Ok(SolverBundle {
+        thermal: thermal_solver,
+        humidity: humidity_solver,
+        electrical: electrical_solver,
+        fluid: fluid_solver,
+        zone_capacitances_j_k: zone_caps,
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        envelope_diagnostics,
+    })
 }
 
 #[cfg(test)]

@@ -856,6 +856,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -896,6 +897,7 @@ dependencies = [
  "hares-physics",
  "hares-types",
  "nalgebra",
+ "serde",
  "thiserror",
  "tracing",
 ]

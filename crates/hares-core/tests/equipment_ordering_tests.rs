@@ -164,7 +164,7 @@ fn stage_sort_produces_documented_order() {
 fn repeated_same_stage_preserves_relative_order() {
     // Two equipment instances at the same stage must not have their relative
     // order inverted by a sort; stable sort is required.
-    let mut stages = vec![
+    let mut stages = [
         (0usize, ExecutionStage::Thermal),
         (1usize, ExecutionStage::Independent),
         (2usize, ExecutionStage::Thermal),

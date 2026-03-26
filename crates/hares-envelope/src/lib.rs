@@ -27,11 +27,13 @@ pub use longwave_radiation::{
 };
 pub use rc_network::{NodeId, RCNetwork, RCNetworkError, parallel_resistance};
 pub use state_space::{
-    OutputMapping, StabilityResult, StateSpaceError, StateSpaceModel, ZERO_GAIN_EPSILON,
-    discretize_auto, discretize_zoh, eigenvalue_check, matrix_exp, van_loan_discretize,
+    CouplingData, OutputMapping, SolveTarget, SolverScratch, StabilityResult, StateSpaceError,
+    StateSpaceModel, ZERO_GAIN_EPSILON, discretize_auto, discretize_zoh, eigenvalue_check,
+    matrix_exp, van_loan_discretize,
 };
 pub use thermal_solver::{
-    BoundaryCategory, BoundaryDiagnosticInfo, EnvelopeComponentGains, ExteriorSurfaceInfo,
+    BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
+    ExteriorSurfaceInfo,
     InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo, NaturalVentilationConfig,
     StateSpaceWiring, ThermalSolver, ThermalSolverConfig, ThermalSolverError, VentilationConfig,
     WindowSolarProperties,

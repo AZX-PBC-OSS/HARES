@@ -16,6 +16,8 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal};
 use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
+#[cfg(any(debug_assertions, feature = "observe_detailed"))]
+use hares_envelope::EnvelopeDiagnostics;
 use hares_equipment::{Equipment, EquipmentRegistry};
 use hares_io::{
     Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig, StreamingRecorder,
@@ -315,6 +317,8 @@ pub struct Dwelling {
     per_actor_timing: Vec<(String, StdDuration)>,
     #[cfg(feature = "observe")]
     observer_buf: Option<ObserverBuffer>,
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    envelope_diagnostics: EnvelopeDiagnostics,
 }
 
 impl Dwelling {
@@ -501,13 +505,7 @@ impl Dwelling {
         let mut equipment_specs = resolve_equipment(&building, &defaults, &empty_overrides)
             .map_err(|e| HaresError::Io(e.to_string()))?;
 
-        let (
-            thermal_solver,
-            humidity_solver,
-            electrical_solver,
-            fluid_solver,
-            zone_capacitances_j_k,
-        ) = build_default_solvers(
+        let solvers = build_default_solvers(
             &initial_env,
             &config.sim_config,
             &building,
@@ -611,10 +609,10 @@ impl Dwelling {
         let mut dwelling = Self {
             bldg_id: config.bldg_id,
             equipment,
-            thermal_solver,
-            humidity_solver,
-            electrical_solver,
-            fluid_solver,
+            thermal_solver: solvers.thermal,
+            humidity_solver: solvers.humidity,
+            electrical_solver: solvers.electrical,
+            fluid_solver: solvers.fluid,
             clock: clock.clone(),
             environment,
             ports,
@@ -630,7 +628,7 @@ impl Dwelling {
             output_column_index,
             output_value_count,
             occupancy_column_idx,
-            zone_capacitances_j_k,
+            zone_capacitances_j_k: solvers.zone_capacitances_j_k,
             actors: Vec::new(),
             actor_dispatch_buf: Vec::with_capacity(16),
             solver_feedback_actor,
@@ -641,6 +639,8 @@ impl Dwelling {
             per_actor_timing: Vec::new(),
             #[cfg(feature = "observe")]
             observer_buf: None,
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            envelope_diagnostics: solvers.envelope_diagnostics,
         };
 
         if let Some(init_dur) = config.initialization_duration {
@@ -728,6 +728,17 @@ impl Dwelling {
     #[must_use]
     pub fn latest_env(&self) -> &EnvironmentState {
         &self.latest_env
+    }
+
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    pub fn envelope_diagnostics(&self) -> &EnvelopeDiagnostics {
+        &self.envelope_diagnostics
+    }
+
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    pub fn envelope_diagnostics_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self.envelope_diagnostics)
+            .map_err(|e| HaresError::Io(format!("EnvelopeDiagnostics serialization: {e}")))
     }
 
     /// Adds equipment to the dwelling and refreshes internal caches.

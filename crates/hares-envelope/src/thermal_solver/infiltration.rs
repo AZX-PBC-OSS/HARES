@@ -234,7 +234,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
             q_natural_vent_w: q_natural_vent_w_scaled,
             combined_flow_m3_s: sensible_flow_m3_s,
             raw_inf_m3_s: q_inf_m3_s,
-            forced_flow_m3_s: forced_flow_m3_s,
+            forced_flow_m3_s,
             nat_flow_m3_s: q_nat_m3_s,
         });
         *latent_out.entry(zone.id).or_insert(0.0) += q_latent;

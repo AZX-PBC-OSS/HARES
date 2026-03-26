@@ -75,9 +75,10 @@ pub fn ochre_signal_to_control(
             // SOC keys are already handled in grouped form above.
             KEY_SOC | KEY_MIN_SOC | KEY_MAX_SOC => {}
             unknown => {
-                eprintln!(
-                    "ochre_signal_to_control: unrecognized key {:?} for equipment type {:?}",
-                    unknown, equipment_type
+                tracing::warn!(
+                    key = unknown,
+                    ?equipment_type,
+                    "ochre_signal_to_control: unrecognized key",
                 );
             }
         }

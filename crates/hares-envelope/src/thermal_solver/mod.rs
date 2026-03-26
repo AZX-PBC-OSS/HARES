@@ -10,10 +10,10 @@ mod stepping;
 
 pub(crate) use config::Result;
 pub use config::{
-    BoundaryCategory, BoundaryDiagnosticInfo, EnvelopeComponentGains, ExteriorSurfaceInfo,
-    InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo, NaturalVentilationConfig,
-    StateSpaceWiring, ThermalSolverConfig, ThermalSolverError, VentilationConfig,
-    WindowSolarProperties,
+    BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
+    ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo,
+    NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig, ThermalSolverError,
+    VentilationConfig, WindowSolarProperties,
 };
 
 use std::collections::HashMap;
@@ -74,6 +74,13 @@ pub struct ThermalSolver {
     lwr_net_flux_buf: Vec<f64>,
     /// Pre-allocated fallback buffer for InteriorSurface structs in non-ScriptF path.
     lwr_surfaces_buf: Vec<crate::longwave_radiation::InteriorSurface>,
+    /// Cached outdoor temperature [°C] from the most recent input vector.
+    /// Used by boundary diagnostics for non-RC boundaries.
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    cached_outdoor_temp_c: f64,
+    /// Cached ground temperature [°C] from the most recent input vector.
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    cached_ground_temp_c: f64,
     /// Per-exterior-surface diagnostic buffer (compiled out in release).
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     ext_surface_diag_buf: Vec<config::ExtSurfaceDiag>,
@@ -174,6 +181,10 @@ impl ThermalSolver {
             int_surface_diag_buf: Vec::with_capacity(max_interior_surfaces),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             window_solar_diag_buf: Vec::with_capacity(n_windows),
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            cached_outdoor_temp_c: env.weather.outdoor_temp_c,
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            cached_ground_temp_c: env.weather.ground_temp_c,
         })
     }
 
@@ -394,6 +405,8 @@ impl ThermalSolver {
             roof_heat_gain_w: 0.0,
             window_heat_gain_w: 0.0,
             internal_mass_heat_gain_w: 0.0,
+            driving_outdoor_temp_c: env.weather.outdoor_temp_c,
+            driving_ground_temp_c: env.weather.ground_temp_c,
             opaque_solar_w,
             exterior_lwr_w,
             total_airflow_m3_s: self
@@ -468,11 +481,16 @@ impl ThermalSolver {
         }
     }
 
-    fn apply_outdoor_inputs(&self, u: &mut DVector<f64>, env: &EnvironmentState) {
+    fn apply_outdoor_inputs(&mut self, u: &mut DVector<f64>, env: &EnvironmentState) {
         for &idx in &self.wiring.outdoor_temp_input_indices {
             if idx < u.len() {
                 u[idx] = env.weather.outdoor_temp_c;
             }
+        }
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        {
+            self.cached_outdoor_temp_c = env.weather.outdoor_temp_c;
+            self.cached_ground_temp_c = env.weather.ground_temp_c;
         }
         for &idx in &self.wiring.ground_temp_input_indices {
             if idx < u.len() {
@@ -2984,6 +3002,7 @@ mod tests {
                 radiation_frac: 0.7, // lightweight wall
                 solar_absorptance: 0.5,
                 is_floor: false,
+                driving_temp: None,
             },
             InteriorSurfaceInfo {
                 state_index: 1,
@@ -2993,6 +3012,7 @@ mod tests {
                 radiation_frac: 1.0, // massive floor (node ≈ surface)
                 solar_absorptance: 0.6,
                 is_floor: true,
+                driving_temp: None,
             },
             InteriorSurfaceInfo {
                 state_index: 2,
@@ -3002,6 +3022,7 @@ mod tests {
                 radiation_frac: 0.85,
                 solar_absorptance: 0.5,
                 is_floor: false,
+                driving_temp: None,
             },
         ];
         let t_nodes = [28.0, 19.0, 24.0];

@@ -22,6 +22,7 @@ mod tests {
     use hares_equipment::config::ConfigValue;
     use hares_equipment::{EquipmentConfig, EquipmentRegistry};
     use hares_io::OutputFormat;
+    use hares_physics::solar::GlazingCurve;
     use hares_types::{EndUse, ZoneId};
 
     fn vendor_dir() -> PathBuf {
@@ -326,6 +327,26 @@ mod tests {
 
         dwelling.enable_observer(n_steps);
 
+        // Window parameter dump for solar investigation.
+        {
+            let cfg = dwelling.thermal_solver.config();
+            if !cfg.window_properties.is_empty() {
+                eprintln!("\n  [{mode_name}] Window properties ({} windows):", cfg.window_properties.len());
+                eprintln!(
+                    "    {:>6} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8}",
+                    "SurfID", "SHGC", "W_SHGC", "U", "Area", "Trans", "Curve"
+                );
+                for (&sid, wp) in &cfg.window_properties {
+                    let curve = GlazingCurve::from_u_shgc(wp.u_factor_w_m2_k, wp.shgc);
+                    eprintln!(
+                        "    {:>6} {:>7.4} {:>7.4} {:>7.3} {:>7.2} {:>7.4} {:>8?}",
+                        sid, wp.shgc, wp.winter_shgc, wp.u_factor_w_m2_k,
+                        wp.area_m2, wp.transmittance, curve,
+                    );
+                }
+            }
+        }
+
         for _ in 0..n_steps {
             dwelling.step().expect("dwelling.step");
             // Read IdealHvac telemetry after each step
@@ -350,6 +371,48 @@ mod tests {
             "expected {n_steps} observer snapshots, got {}",
             snapshots.len()
         );
+
+        // One-shot interior LWR surface diagnostic from last timestep.
+        if let Some(last) = snapshots.last() {
+            if let Some(solver) = last.phases.post_solvers.as_ref() {
+                let diags = &solver.envelope_gains.int_surface_diag;
+                if !diags.is_empty() {
+                    eprintln!("\n  [{mode_name}] Interior LWR surface diagnostics (last step, {} surfaces):", diags.len());
+                    eprintln!("    {:>4} {:>10} {:>10}", "Idx", "T_surf(°C)", "LWR(W)");
+                    let mut total_lwr = 0.0_f64;
+                    for (i, d) in diags.iter().enumerate() {
+                        eprintln!("    {:>4} {:>10.2} {:>10.1}", i, d.surface_temp_c, d.lwr_flux_w);
+                        total_lwr += d.lwr_flux_w;
+                    }
+                    eprintln!("    Total LWR to zone air: {total_lwr:.1} W");
+                }
+
+                // Also dump interior LWR by zone.
+                for (zid, lwr) in &solver.envelope_gains.interior_lwr_by_zone {
+                    eprintln!("    Zone {:?} interior LWR total: {:.1} W", zid, lwr);
+                }
+            }
+        }
+
+        // Dump LWR zone config: how many surfaces per zone, which have driving_temp.
+        {
+            let cfg = dwelling.thermal_solver.config();
+            for zone_cfg in &cfg.interior_lwr_zones {
+                let n_driven = zone_cfg.surfaces.iter().filter(|s| s.driving_temp.is_some()).count();
+                let n_total = zone_cfg.surfaces.len();
+                eprintln!(
+                    "  [{mode_name}] LWR zone {:?}: {} surfaces ({} driven/window, {} RC-noded)",
+                    zone_cfg.zone_id, n_total, n_driven, n_total - n_driven
+                );
+                for (i, s) in zone_cfg.surfaces.iter().enumerate() {
+                    eprintln!(
+                        "    surf[{i}]: area={:.2} ε={:.2} rad_frac={:.4} solar_abs={:.2} floor={} driving={:?} state={} input={}",
+                        s.area_m2, s.emissivity, s.radiation_frac, s.solar_absorptance,
+                        s.is_floor, s.driving_temp, s.state_index, s.input_index,
+                    );
+                }
+            }
+        }
 
         let zone_indoor = ZoneId(1);
         let zone_attic = ZoneId(2);
@@ -584,6 +647,11 @@ mod tests {
             let mut h_combined_airflow = 0.0_f64;
             let mut h_total_airflow_m3s = 0.0_f64;
             let mut h_raw_inf_m3s = 0.0_f64;
+            let mut h_driving_outdoor_c = 0.0_f64;
+            let mut h_driving_ground_c = 0.0_f64;
+            let mut h_solar_beam_w = 0.0_f64;
+            let mut h_solar_diffuse_w = 0.0_f64;
+            let mut h_solar_absorbed_w = 0.0_f64;
             let mut n = 0usize;
 
             for snap in &snapshots {
@@ -602,6 +670,13 @@ mod tests {
                     h_combined_airflow += g.combined_airflow_sensible_w;
                     h_total_airflow_m3s += g.total_airflow_m3_s;
                     h_raw_inf_m3s += g.raw_infiltration_m3_s;
+                    h_driving_outdoor_c += g.driving_outdoor_temp_c;
+                    h_driving_ground_c += g.driving_ground_temp_c;
+                    for wd in &g.window_solar_diag {
+                        h_solar_beam_w += wd.transmitted_beam_w;
+                        h_solar_diffuse_w += wd.transmitted_diffuse_w;
+                        h_solar_absorbed_w += wd.absorbed_zone_w;
+                    }
                     n += 1;
                 }
             }
@@ -648,6 +723,38 @@ mod tests {
                 eprintln!("    {:<40} HARES={:>10.5}",
                     "Total airflow (m³/s)",
                     h_total_airflow_m3s / d);
+
+                let o_outdoor = ochre.get("Temperature - Outdoor (C)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_ground = ochre.get("Temperature - Ground (C)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                eprintln!("\n  Driving temperatures (mean °C):");
+                eprintln!("    {:<40} HARES={:>10.2}  OCHRE={:>10.2}",
+                    "Outdoor driving temp (°C)",
+                    h_driving_outdoor_c / d,
+                    o_outdoor.unwrap_or(f64::NAN));
+                eprintln!("    {:<40} HARES={:>10.2}  OCHRE={:>10.2}",
+                    "Ground driving temp (°C)",
+                    h_driving_ground_c / d,
+                    o_ground.unwrap_or(f64::NAN));
+
+                // Beam vs diffuse solar breakdown.
+                let beam_mean = h_solar_beam_w / d;
+                let diffuse_mean = h_solar_diffuse_w / d;
+                let absorbed_mean = h_solar_absorbed_w / d;
+                let total_solar = beam_mean + diffuse_mean + absorbed_mean;
+                let o_total_solar = o_wsolar.unwrap_or(0.0);
+                eprintln!("\n  Window solar breakdown (mean W):");
+                eprintln!("    Transmitted beam:      {:>8.1}", beam_mean);
+                eprintln!("    Transmitted diffuse:   {:>8.1}", diffuse_mean);
+                eprintln!("    Absorbed inward:       {:>8.1}", absorbed_mean);
+                eprintln!("    Total window solar:    {:>8.1}  (OCHRE={:.1}  Δ={:+.1})",
+                    total_solar, o_total_solar, total_solar - o_total_solar);
+                if total_solar > 1.0 {
+                    eprintln!("    Beam fraction:         {:>7.1}%", beam_mean / total_solar * 100.0);
+                    eprintln!("    Diffuse fraction:      {:>7.1}%", diffuse_mean / total_solar * 100.0);
+                    eprintln!("    Absorbed fraction:     {:>7.1}%", absorbed_mean / total_solar * 100.0);
+                }
             }
         }
 

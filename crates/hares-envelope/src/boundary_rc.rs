@@ -72,6 +72,10 @@ impl LayerInput {
 
 /// Where the exterior side of a boundary connects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    any(debug_assertions, feature = "observe_detailed"),
+    derive(serde::Serialize)
+)]
 pub enum ExteriorTarget {
     /// Another zone (by index, 0-based).
     Zone(usize),
@@ -122,6 +126,10 @@ pub struct ZoneInput {
 
 /// Which RC construction path was used for a boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    any(debug_assertions, feature = "observe_detailed"),
+    derive(serde::Serialize)
+)]
 pub enum RCPath {
     /// Pre-computed layers from OCHRE LUT.
     Precomputed,
@@ -133,6 +141,10 @@ pub enum RCPath {
 
 /// Per-boundary diagnostic data captured during RC construction.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    any(debug_assertions, feature = "observe_detailed"),
+    derive(serde::Serialize)
+)]
 pub struct BoundaryDiagnostic {
     pub boundary_idx: usize,
     /// Effective steady-state UA [W/K]: area / R_total.
@@ -160,6 +172,10 @@ pub struct BoundaryDiagnostic {
 
 /// Diagnostics captured during RC network construction.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    any(debug_assertions, feature = "observe_detailed"),
+    derive(serde::Serialize)
+)]
 pub struct EnvelopeDiagnostics {
     pub boundaries: Vec<BoundaryDiagnostic>,
     pub zone_capacitances_j_k: Vec<f64>,

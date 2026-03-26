@@ -7,6 +7,10 @@ use thiserror::Error;
 
 /// Node identifier in the RC network graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    any(debug_assertions, feature = "observe_detailed"),
+    derive(serde::Serialize)
+)]
 pub struct NodeId(pub u32);
 
 impl From<u32> for NodeId {

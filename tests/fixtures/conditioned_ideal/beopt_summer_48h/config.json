@@ -27,7 +27,7 @@
     "ASHP Cooler"
   ],
   "ochre_git_hash": "4565980356e4059cbeac623a3d8f602ced938697",
-  "generated_at": "2026-03-25T13:31:23.099647",
+  "generated_at": "2026-03-25T16:38:42.931765",
   "columns": [
     "HVAC Heating Electric Power (kW)",
     "HVAC Cooling Electric Power (kW)",
@@ -67,11 +67,11 @@
     "Natural Ventilation Heat Gain - Indoor (W)",
     "Internal Heat Gain - Indoor (W)",
     "Window Transmitted Solar Gain (W)",
-    "Window Heat Gain - Indoor (W)",
-    "Roof Heat Gain - Indoor (W)",
-    "Wall Heat Gain - Indoor (W)",
     "Floor Heat Gain - Indoor (W)",
     "Internal Mass Heat Gain - Indoor (W)",
+    "Wall Heat Gain - Indoor (W)",
+    "Window Heat Gain - Indoor (W)",
+    "Roof Heat Gain - Indoor (W)",
     "Infiltration Flow Rate - Indoor (m^3/s)",
     "Forced Ventilation Flow Rate - Indoor (m^3/s)",
     "Natural Ventilation Flow Rate - Indoor (m^3/s)",

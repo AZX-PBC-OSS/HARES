@@ -323,10 +323,22 @@ mod tests {
         }
         // Boundary diagnostics
         for (i, bd) in dwelling.thermal_solver.config().boundary_diagnostics.iter().enumerate() {
-            eprintln!(
-                "  bd_diag[{i}]: state={} area={:.1}m² r_film={:.4} rad_frac={:.4} cat={:?}",
-                bd.inner_state_index, bd.area_m2, bd.r_film_int_m2_k_w, bd.radiation_frac, bd.category
-            );
+            match bd {
+                hares_envelope::BoundaryDiagnosticInfo::RCNode {
+                    inner_state_index, area_m2, r_film_int_m2_k_w, radiation_frac, category,
+                } => {
+                    eprintln!(
+                        "  bd_diag[{i}]: RC state={inner_state_index} area={area_m2:.1}m² r_film={r_film_int_m2_k_w:.4} rad_frac={radiation_frac:.4} cat={category:?}",
+                    );
+                }
+                hares_envelope::BoundaryDiagnosticInfo::SteadyState {
+                    ua_w_k, driving_temp, category,
+                } => {
+                    eprintln!(
+                        "  bd_diag[{i}]: SS ua={ua_w_k:.2}W/K driving={driving_temp:?} cat={category:?}",
+                    );
+                }
+            }
         }
         // Infiltration parameters
         eprintln!("  infiltration config:");

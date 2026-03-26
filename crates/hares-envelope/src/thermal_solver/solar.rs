@@ -258,6 +258,7 @@ mod tests {
             radiation_frac: 1.0,
             solar_absorptance: absorptance,
             is_floor,
+            driving_temp: None,
         }
     }
 
