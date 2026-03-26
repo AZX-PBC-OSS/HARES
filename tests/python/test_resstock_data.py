@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import sys
-import types
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -57,15 +56,6 @@ def _make_metadata_parquet(
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _isolate_modules():
-    """Remove cached ochre_next.data modules between tests."""
-    yield
-    for key in list(sys.modules):
-        if key.startswith("ochre_next.data") or key == "ochre_next.data":
-            del sys.modules[key]
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +351,7 @@ class TestFetchResStockBuilding:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestFetchResStockFleet:
     def _metadata_file(self, tmp_path: Path, bldg_ids: list[int], **kwargs) -> Path:
         data = _make_metadata_parquet(bldg_ids, **kwargs)

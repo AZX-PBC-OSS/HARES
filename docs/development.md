@@ -76,10 +76,14 @@ uv run maturin develop       # compile Rust code and install into the venv
 ```
 
 **[pytest](https://docs.pytest.org/)** runs the Python test suite.
+Tests run in parallel via [pytest-xdist](https://pytest-xdist.readthedocs.io/)
+and slow tests are excluded by default.
 
 ```bash
-uv run pytest                # run all Python tests
-uv run pytest -m "not slow"  # skip slow integration tests
+uv run pytest                # run fast tests in parallel (~5s)
+uv run pytest -m slow        # run only the slow tests (ResStock, PyBaMM)
+uv run pytest -m ""          # run everything (fast + slow)
+uv run pytest -n0            # disable parallelism (easier to read output)
 ```
 
 > **Note:** Python tests require the Rust extension to be built first.
@@ -247,13 +251,19 @@ cargo test -p hares-envelope rc_step -- --nocapture
 
 ### Python tests
 
+By default `uv run pytest` runs fast tests in parallel across all CPU
+cores (via pytest-xdist). Slow tests (marked `@pytest.mark.slow`) are
+excluded — these include ResStock network fetches and PyBaMM model
+generation.
+
 ```bash
-uv run pytest                                # all Python tests
-uv run pytest -m "not slow"                  # skip slow integration tests
+uv run pytest                                   # fast tests, parallel (~5s)
+uv run pytest -m slow                           # slow tests only
+uv run pytest -m ""                             # all tests (fast + slow)
 uv run pytest tests/python/test_py_dwelling.py  # single file
-uv run pytest -k "test_thermal"              # name filter
-uv run pytest -x                             # stop on first failure
-uv run pytest -s                             # show print output
+uv run pytest -k "test_thermal"                 # name filter
+uv run pytest -x                                # stop on first failure
+uv run pytest -n0 -s                            # sequential, show print output
 ```
 
 > Python tests require the Rust extension. Run `uv run maturin develop`
@@ -316,5 +326,7 @@ production.
 | Build Python bindings (optimised) | `uv run maturin develop --release` |
 | Build Python bindings with observer | `uv run maturin develop --release -F observe` |
 | Build a distributable wheel | `uv run maturin build --release` |
-| Run Python tests | `uv run pytest` |
+| Run Python tests (fast) | `uv run pytest` |
+| Run Python tests (all) | `uv run pytest -m ""` |
+| Run Python tests (slow only) | `uv run pytest -m slow` |
 | Run benchmarks | `cargo bench` |

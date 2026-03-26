@@ -5,8 +5,9 @@ injection → stepping → metrics extraction → checkpoint/restore. Also inclu
 GIL safety stress tests for batch_step.
 """
 
+import math
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,18 @@ class TestFullSimulation:
         assert df.height > 0
         assert "Time" in df.columns or any("time" in c.lower() for c in df.columns)
 
+    def test_simulate_expected_columns(self):
+        dw = _init_dwelling(output_verbosity=3)
+        df = dw.simulate()
+        cols = df.columns
+        assert "Total Electric Power (kW)" in cols
+        # verbosity >= 2: zone temperature columns
+        temp_cols = [c for c in cols if c.startswith("Temperature -")]
+        assert len(temp_cols) > 0
+        # verbosity >= 3: equipment mode columns
+        mode_cols = [c for c in cols if c.endswith("Mode (-)")]
+        assert len(mode_cols) > 0
+
 
 # ---------------------------------------------------------------------------
 # Step-by-step
@@ -106,9 +119,35 @@ class TestControlInjection:
 
         dw = _init_dwelling()
         signal = ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
-        dw.apply_control("HVAC Heating", signal)
+        dw.apply_control("Gas Furnace", signal)
         result = dw.step()
         assert "time" in result
+
+    def test_control_reflected_in_telemetry(self):
+        from ochre_next import ControlSignal
+
+        dw = _init_dwelling()
+        signal = ControlSignal.thermal_setpoint(heat_c=21.0, cool_c=25.0)
+        dw.apply_control("Gas Furnace", signal)
+        dw.step()
+        t = dw.telemetry()
+        equip = t.equipment()
+        # Verify Gas Furnace appears in equipment telemetry
+        assert "Gas Furnace" in equip["names"]
+        idx = equip["names"].index("Gas Furnace")
+        assert math.isfinite(equip["power_kw"][idx])
+
+    def test_validate_control(self):
+        from ochre_next import ControlSignal
+
+        dw = _init_dwelling()
+        valid = ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
+        assert dw.validate_control("Gas Furnace", valid) is True
+
+        # Negative cases
+        invalid = ControlSignal.soc_target(target=0.5)
+        assert dw.validate_control("Gas Furnace", invalid) is False
+        assert dw.validate_control("Nonexistent Equipment", valid) is False
 
     def test_all_control_signal_variants_construct(self):
         from ochre_next import (
@@ -185,14 +224,18 @@ class TestTelemetry:
 
         zone = t.zone()
         assert isinstance(zone, dict)
-        assert "temperature_c" in zone
-        assert "outdoor_temp_c" in zone
+        for key in ("temperature_c", "setpoint_heat_c", "setpoint_cool_c",
+                     "outdoor_temp_c", "outdoor_rh"):
+            assert key in zone, f"Missing zone key: {key}"
 
         equip = t.equipment()
         assert isinstance(equip, dict)
+        for key in ("names", "modes", "states", "soc", "power_kw"):
+            assert key in equip, f"Missing equipment key: {key}"
 
         power = t.total_power_kw()
         assert isinstance(power, float)
+        assert math.isfinite(power)
 
 
 # ---------------------------------------------------------------------------
@@ -287,30 +330,11 @@ class TestTimesteps:
         steps = list(dw.timesteps())
         assert len(steps) == 5  # 300 / 60
 
-
-# ---------------------------------------------------------------------------
-# OCHRE compat layer
-# ---------------------------------------------------------------------------
-
-
-class TestOchreCompat:
-    def test_compat_dwelling_simulate(self):
-        from ochre_next.compat.dwelling import Dwelling as CompatDwelling
-
-        d = CompatDwelling(
-            hpxml_file=HPXML,
-            hpxml_schedule_file=SCHEDULE,
-            weather_file=WEATHER,
-            start_time=datetime(2019, 1, 1),
-            time_res=timedelta(minutes=1),
-            duration=timedelta(minutes=5),
-        )
-
-        df, metrics, df_hourly = d.simulate()
-        assert isinstance(df, pl.DataFrame)
-        assert df.height > 0
-        assert isinstance(metrics, dict)
-        assert isinstance(df_hourly, pl.DataFrame)
+    def test_timesteps_monotonic(self):
+        dw = _init_dwelling(duration_s=600, time_res_s=60)
+        steps = list(dw.timesteps())
+        for i in range(1, len(steps)):
+            assert steps[i] > steps[i - 1], f"Timestamps not monotonic at index {i}"
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +524,39 @@ class TestEvLifecycle:
         assert "EV1" in dw.equipment_names()
 
         for _ in range(3):
+            result = dw.step()
+            assert "time" in result
+
+    def test_add_ev_with_charging_curve_lut(self):
+        import numpy as np
+
+        from ochre_next import EV, LutType
+
+        # Build a minimal 4D LUT: soc × temp × c_rate × soh → power_fraction
+        soc_grid = np.array([0.0, 0.5, 1.0])
+        temp_grid = np.array([25.0])
+        crate_grid = np.array([0.5, 1.0])
+        soh_grid = np.array([1.0])
+        # Shape: (3, 1, 2, 1) = 6 values — taper at high SoC
+        lut = np.array([1.0, 1.0, 0.8, 0.8, 0.1, 0.1], dtype=np.float32).reshape(
+            (3, 1, 2, 1)
+        )
+
+        cc_cv_lut = {
+            "soc_grid": soc_grid,
+            "temp_grid": temp_grid,
+            "crate_grid": crate_grid,
+            "soh_grid": soh_grid,
+            "lut": lut,
+        }
+
+        dw = _init_dwelling(duration_s=600, time_res_s=60)
+        ev = EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68, charging_curve_lut=cc_cv_lut)
+        dw.add_ev(ev)
+        assert "EV1" in dw.equipment_names()
+        assert dw.has_equipment_lut("EV1", LutType.charging_curve())
+
+        for _ in range(5):
             result = dw.step()
             assert "time" in result
 

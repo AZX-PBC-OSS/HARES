@@ -35,12 +35,9 @@ pub(super) fn resolve_pv(
     }
 
     for pv in photovoltaics.children_named("PVSystem") {
-        eprintln!("DEBUG: Found PVSystem element");
         let mut params = Map::new();
         if let Some(watts) = child_f64(pv, "MaxPowerOutput") {
-            // HPXML MaxPowerOutput is in watts; convert to kW.
             let kw = watts / 1000.0;
-            eprintln!("DEBUG: MaxPowerOutput = {} W = {} kW", watts, kw);
             params.insert("capacity_kw".to_string(), json!(kw));
         }
         if let Some(tilt) = child_f64(pv, "ArrayTilt") {
@@ -55,8 +52,6 @@ pub(super) fn resolve_pv(
         if let Some(losses) = child_f64(pv, "SystemLossesFraction") {
             params.insert("system_losses_fraction".to_string(), json!(losses));
         }
-
-        eprintln!("DEBUG: PV params = {:?}", params);
 
         let inverter_eff = pv
             .child("AttachedToInverter")

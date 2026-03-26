@@ -69,7 +69,6 @@ pyproject.toml          Maturin build config + Python project metadata
     ├── __init__.py      Dwelling, Fleet, ControlSignal
     ├── _hares.pyi       Type stubs for IDE/mypy support
     ├── adapters/        PyBaMM, PySAM adapters
-    ├── compat/          OCHRE compatibility layer
     ├── data/            ResStock + weather fetching
     ├── rl/              Gymnasium environment wrappers
     └── helics/          HELICS co-simulation
@@ -86,11 +85,17 @@ alongside the Python source.
 # Rust tests
 cargo test
 
-# Python tests
+# Python tests (fast, parallel — ~5s)
 uv run pytest
 
-# Skip slow tests
-uv run pytest -m "not slow"
+# Include slow tests (ResStock fetches, PyBaMM model gen)
+uv run pytest -m ""
+
+# Slow tests only
+uv run pytest -m slow
+
+# Sequential with output (debugging)
+uv run pytest -n0 -s
 ```
 
 ## Optional dependencies

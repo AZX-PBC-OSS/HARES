@@ -97,8 +97,8 @@ def _normalize_config(config: GymDwellingConfig | Mapping[str, Any]) -> GymDwell
     duration_s: int | None = int(_coerce_seconds(raw_duration)) if raw_duration is not None else None
     sim_config = SimulationConfig(
         start_time=str(config["start_time"]) if "start_time" in config else None,
-        duration=duration_s,
-        time_res=time_res_s,
+        duration_s=duration_s,
+        time_res_s=time_res_s,
         output_verbosity=int(config["output_verbosity"]) if "output_verbosity" in config else None,
         output_path=str(config["output_path"]) if "output_path" in config else None,
         output_to_parquet=bool(config["output_to_parquet"]) if "output_to_parquet" in config else None,
@@ -120,10 +120,10 @@ def _sim_config_to_kwargs(sim_config: SimulationConfig) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if sim_config.start_time:
         out["start_time"] = sim_config.start_time
-    if sim_config.duration:
-        out["duration_s"] = sim_config.duration
-    if sim_config.time_res:
-        out["time_res_s"] = sim_config.time_res
+    if sim_config.duration_s:
+        out["duration_s"] = sim_config.duration_s
+    if sim_config.time_res_s:
+        out["time_res_s"] = sim_config.time_res_s
     if sim_config.output_verbosity is not None:
         out["output_verbosity"] = sim_config.output_verbosity
     if sim_config.output_path is not None:
@@ -377,8 +377,8 @@ class DwellingGymEnv(_GYM_BASE):
         )
 
         time_res_s: float = 60.0
-        if self._config.sim_config is not None and self._config.sim_config.time_res:
-            time_res_s = float(self._config.sim_config.time_res)
+        if self._config.sim_config is not None and self._config.sim_config.time_res_s:
+            time_res_s = float(self._config.sim_config.time_res_s)
         self._max_steps = max(1, int(math.ceil(episode_length.total_seconds() / time_res_s)))
         self._steps_elapsed: int = 0
         self._active_seed: int | None = None

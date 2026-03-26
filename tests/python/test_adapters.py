@@ -2,59 +2,11 @@
 
 from __future__ import annotations
 
-import sys
-import types
 from pathlib import Path
 from unittest import mock
 
 import pyarrow.parquet as pq
 import pytest
-
-
-@pytest.fixture(autouse=True)
-def _fake_hares():
-    """Snapshot and restore ``sys.modules`` around each test so adapter
-    module-level imports get a fresh slate without polluting other test files."""
-    # Save the full module state before the test
-    saved = {k: v for k, v in sys.modules.items() if k.startswith("ochre_next")}
-
-    key = "ochre_next._hares"
-    if key not in sys.modules:
-        _stub = type("_Stub", (), {})
-        fake_mod = types.ModuleType(key)
-        # Names that __init__.py imports from _hares
-        for name in (
-            "PyDwelling", "PyFleet", "PyFleetResults", "SimulationConfig",
-            "DwellingConfig", "ControlSignal", "PyTelemetry",
-            "Battery", "PV", "PvSoilingConfig", "EV",
-            "Actor", "DispatchRequest", "Priority", "Signal",
-            "EndUse", "FuelType", "OperatingMode", "Mode", "ExecutionStage",
-            "FluidType", "InverterPriority", "DutyCycleComponent", "SimStatus",
-            "AggregationResolution", "ResStockVersion", "ControlCapabilities",
-            "LutType", "BatteryChemistry", "ChargingLevel", "DriverArchetype",
-            "DRLevel", "EquipmentDescriptor", "TelemetryField",
-            "PySimulationMetrics", "PyAnnualEnergyKwh", "PyPeakPowerKw",
-            "PyRollingPeakKw", "PyGridInteractionMetrics",
-            "PyEnvelopeComponentLoadsKwh", "PyEfficiencyMetrics",
-            "PyGasEnergyMetrics", "RoofPlane", "PvCandidate", "PvSizingResult",
-            "WeatherTimeSeries", "parse_weather", "parse_epw", "parse_psm3",
-            "parse_tmy3", "parse_resstock_csv", "batch_step", "PyMode",
-        ):
-            setattr(fake_mod, name, _stub)
-        sys.modules[key] = fake_mod
-
-    # Clear adapter caches so each test gets a fresh import
-    for mod_key in list(sys.modules):
-        if mod_key.startswith("ochre_next") and mod_key != key:
-            del sys.modules[mod_key]
-
-    yield
-
-    # Restore original module state so other test files aren't affected
-    for mod_key in list(sys.modules):
-        if mod_key.startswith("ochre_next"):
-            del sys.modules[mod_key]
-    sys.modules.update(saved)
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +264,7 @@ class TestSamBatteryExtractCellParams:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestPybammBatteryEfficiencyLut:
     """Tests for pybamm_battery.generate_efficiency_lut."""
 

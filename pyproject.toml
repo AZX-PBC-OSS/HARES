@@ -40,6 +40,7 @@ dev = [
     "ruff>=0.15.7",
     "psychrolib>=2.5.0",
     "numpy>=2.4.3",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.uv]
@@ -55,6 +56,7 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
+addopts = "-n auto -m 'not slow'"
 markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "slow: marks tests as slow (run with '-m slow' or '--run-slow')",
 ]
