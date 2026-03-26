@@ -13,25 +13,48 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _fake_hares():
-    """Install a minimal fake ``ochre_next._hares`` so the package can import
-    even when the Rust extension is not available."""
+    """Snapshot and restore ``sys.modules`` around each test so adapter
+    module-level imports get a fresh slate without polluting other test files."""
+    # Save the full module state before the test
+    saved = {k: v for k, v in sys.modules.items() if k.startswith("ochre_next")}
+
     key = "ochre_next._hares"
-    already = key in sys.modules
-    if not already:
+    if key not in sys.modules:
+        _stub = type("_Stub", (), {})
         fake_mod = types.ModuleType(key)
-        fake_mod.PyDwelling = type("FakePyDwelling", (), {})
-        fake_mod.PyFleet = type("FakePyFleet", (), {})
-        fake_mod.PyControlSignal = type("FakePyControlSignal", (), {})
+        # Names that __init__.py imports from _hares
+        for name in (
+            "PyDwelling", "PyFleet", "PyFleetResults", "SimulationConfig",
+            "DwellingConfig", "ControlSignal", "PyTelemetry",
+            "Battery", "PV", "PvSoilingConfig", "EV",
+            "Actor", "DispatchRequest", "Priority", "Signal",
+            "EndUse", "FuelType", "OperatingMode", "Mode", "ExecutionStage",
+            "FluidType", "InverterPriority", "DutyCycleComponent", "SimStatus",
+            "AggregationResolution", "ResStockVersion", "ControlCapabilities",
+            "LutType", "BatteryChemistry", "ChargingLevel", "DriverArchetype",
+            "DRLevel", "EquipmentDescriptor", "TelemetryField",
+            "PySimulationMetrics", "PyAnnualEnergyKwh", "PyPeakPowerKw",
+            "PyRollingPeakKw", "PyGridInteractionMetrics",
+            "PyEnvelopeComponentLoadsKwh", "PyEfficiencyMetrics",
+            "PyGasEnergyMetrics", "RoofPlane", "PvCandidate", "PvSizingResult",
+            "WeatherTimeSeries", "parse_weather", "parse_epw", "parse_psm3",
+            "parse_tmy3", "parse_resstock_csv", "batch_step", "PyMode",
+        ):
+            setattr(fake_mod, name, _stub)
         sys.modules[key] = fake_mod
-    # Clear cached ochre_next package so it re-imports with the fake
+
+    # Clear adapter caches so each test gets a fresh import
     for mod_key in list(sys.modules):
         if mod_key.startswith("ochre_next") and mod_key != key:
             del sys.modules[mod_key]
+
     yield
-    # Cleanup: remove adapter modules so they are fresh for each test
+
+    # Restore original module state so other test files aren't affected
     for mod_key in list(sys.modules):
-        if mod_key.startswith("ochre_next") and mod_key != key:
+        if mod_key.startswith("ochre_next"):
             del sys.modules[mod_key]
+    sys.modules.update(saved)
 
 
 # ---------------------------------------------------------------------------

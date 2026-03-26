@@ -14,6 +14,58 @@ pytest.importorskip("gymnasium")
 
 def _install_fake_hares(monkeypatch: pytest.MonkeyPatch):
     class FakePyControlSignal:
+        """Fake that mirrors the typed static constructors on the real ControlSignal."""
+
+        def __init__(self, kind: str, **kwargs) -> None:
+            self._kind = kind
+            self._fields: dict = kwargs
+
+        def get(self, key, default=None):
+            if key == "type":
+                return self._kind
+            return self._fields.get(key, default)
+
+        def __getitem__(self, key):
+            if key == "type":
+                return self._kind
+            return self._fields[key]
+
+        @staticmethod
+        def thermal_setpoint(heat_c=None, cool_c=None, deadband_c=None):
+            return FakePyControlSignal("ThermalSetpoint", heat_c=heat_c, cool_c=cool_c, deadband_c=deadband_c)
+
+        @staticmethod
+        def power_setpoint(kw=0.0, reactive_kvar=None):
+            return FakePyControlSignal("PowerSetpoint", active_power_kw=kw, reactive_power_kvar=reactive_kvar)
+
+        @staticmethod
+        def power_limit(max_power_kw=0.0, ramp_rate_kw_per_s=None):
+            return FakePyControlSignal("PowerLimit", max_power_kw=max_power_kw, ramp_rate_kw_per_s=ramp_rate_kw_per_s)
+
+        @staticmethod
+        def soc_target(target=0.0, min=None, max=None):
+            return FakePyControlSignal("SOCTarget", target_soc=target, min_soc=min, max_soc=max)
+
+        @staticmethod
+        def load_fraction(fraction=0.0):
+            return FakePyControlSignal("LoadFraction", fraction=fraction)
+
+        @staticmethod
+        def duty_cycle(on_fraction=0.0, period_s=None, component=None):
+            return FakePyControlSignal("DutyCycle", on_fraction=on_fraction, period_s=period_s)
+
+        @staticmethod
+        def humidity_setpoint(target_rh=0.0, min_rh=None, max_rh=None):
+            return FakePyControlSignal("HumiditySetpoint", target_rh=target_rh, min_rh=min_rh, max_rh=max_rh)
+
+        @staticmethod
+        def grid_connect(connected=False):
+            return FakePyControlSignal("GridConnect", connected=connected)
+
+        @staticmethod
+        def self_consumption(enabled=False, solar_only_charging=False):
+            return FakePyControlSignal("SelfConsumption", enabled=enabled, solar_only_charging=solar_only_charging)
+
         @classmethod
         def from_dict(cls, d):
             return d
@@ -80,7 +132,7 @@ def _install_fake_hares(monkeypatch: pytest.MonkeyPatch):
         def apply_control(self, name, signal):
             self.apply_calls.append((name, signal))
             if signal.get("type") == "SOCTarget":
-                self.soc = float(signal.get("target_soc", self.soc))
+                self.soc = float(signal.get("target_soc") or self.soc)
 
         def step(self):
             self.step_idx += 1
@@ -110,11 +162,53 @@ def _install_fake_hares(monkeypatch: pytest.MonkeyPatch):
             )
         return out
 
+    class FakeSimulationConfig:
+        def __init__(self, start_time=None, duration=None, time_res=None,
+                     output_verbosity=None, output_path=None, output_to_parquet=None,
+                     output_chunk_size=None, master_seed=None, civil_timezone=None,
+                     setpoint_deadband_c=None):
+            self.start_time = start_time or ""
+            self.duration = duration or 0
+            self.time_res = time_res or 60
+            self.output_verbosity = output_verbosity or 0
+            self.output_path = output_path
+            self.output_to_parquet = output_to_parquet or False
+            self.output_chunk_size = output_chunk_size or 8760
+            self.master_seed = master_seed or 0
+            self.civil_timezone = civil_timezone
+            self.setpoint_deadband_c = setpoint_deadband_c
+
+    # Build a module that satisfies all imports in ochre_next/__init__.py.
+    # Unrecognised names fall back to a generic stub so the package loads.
+    _sentinel = type("_Stub", (), {})()
+
     fake_mod = types.ModuleType("ochre_next._hares")
     fake_mod.PyControlSignal = FakePyControlSignal
+    fake_mod.ControlSignal = FakePyControlSignal
+    fake_mod.SimulationConfig = FakeSimulationConfig
     fake_mod.PyDwelling = FakePyDwelling
     fake_mod.PyFleet = type("FakePyFleet", (), {})
     fake_mod.batch_step = fake_batch_step
+    # Provide stubs for every other name __init__.py tries to import.
+    for _name in (
+        "PyFleetResults", "DwellingConfig", "PyTelemetry",
+        "Battery", "PV", "PvSoilingConfig", "EV",
+        "Actor", "DispatchRequest", "Priority", "Signal",
+        "EndUse", "FuelType", "OperatingMode", "Mode", "ExecutionStage",
+        "FluidType", "InverterPriority", "DutyCycleComponent", "SimStatus",
+        "AggregationResolution", "ResStockVersion", "ControlCapabilities",
+        "LutType", "BatteryChemistry", "ChargingLevel", "DriverArchetype",
+        "DRLevel", "EquipmentDescriptor", "TelemetryField",
+        "PySimulationMetrics", "PyAnnualEnergyKwh", "PyPeakPowerKw",
+        "PyRollingPeakKw", "PyGridInteractionMetrics",
+        "PyEnvelopeComponentLoadsKwh", "PyEfficiencyMetrics",
+        "PyGasEnergyMetrics",
+        "RoofPlane", "PvCandidate", "PvSizingResult",
+        "parse_weather", "parse_epw", "parse_psm3", "parse_tmy3",
+        "parse_resstock_csv", "WeatherTimeSeries",
+    ):
+        if not hasattr(fake_mod, _name):
+            setattr(fake_mod, _name, _sentinel)
 
     monkeypatch.setitem(sys.modules, "ochre_next._hares", fake_mod)
     for module in [

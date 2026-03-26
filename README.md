@@ -39,6 +39,21 @@ cargo build --release              # optimised build
 cargo check                        # type-check without codegen (fastest feedback)
 ```
 
+Debug builds enable runtime invariant checks (energy balance, temperature
+bounds) automatically. Release builds compile these out for zero overhead
+but can opt back in:
+
+```bash
+cargo build --release -F check_invariants   # release + conservation checks
+cargo build --release -F observe            # release + step-level observer
+```
+
+**Use release builds for benchmarking and OCHRE performance comparisons.**
+Debug builds include overhead not present in production.
+
+See [docs/development.md](docs/development.md) for the full guide to
+build profiles, feature flags, and when to use each.
+
 ## Linting
 
 ```bash

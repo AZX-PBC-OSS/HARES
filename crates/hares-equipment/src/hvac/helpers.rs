@@ -106,9 +106,11 @@ pub fn equipment_id_from_config(config: &EquipmentConfig) -> crate::Result<u32> 
 
 pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
     match normalize_ascii(raw?).as_str() {
+        "electric" | "electricity" | "elec" => Some(FuelType::Electric),
         "gas" | "natural_gas" | "natural gas" => Some(FuelType::Gas),
         "propane" => Some(FuelType::Propane),
         "oil" | "fuel_oil" | "fuel oil" => Some(FuelType::Oil),
+        "none" | "no_fuel" | "no fuel" => Some(FuelType::None),
         _ => None,
     }
 }
@@ -281,9 +283,47 @@ fn parse_ashrae152_zone_type(s: &str) -> Option<hares_physics::ashrae152::Ashrae
 
 #[cfg(test)]
 mod tests {
-    use hares_types::OperatingMode;
+    use hares_types::{FuelType, OperatingMode};
 
-    use super::operating_mode_code;
+    use super::{operating_mode_code, parse_fuel_type};
+
+    #[test]
+    fn parse_fuel_type_covers_all_variants() {
+        let cases: &[(&str, FuelType)] = &[
+            ("electric", FuelType::Electric),
+            ("electricity", FuelType::Electric),
+            ("Electric", FuelType::Electric),
+            ("ELECTRICITY", FuelType::Electric),
+            ("gas", FuelType::Gas),
+            ("natural_gas", FuelType::Gas),
+            ("natural gas", FuelType::Gas),
+            ("Gas", FuelType::Gas),
+            ("propane", FuelType::Propane),
+            ("Propane", FuelType::Propane),
+            ("oil", FuelType::Oil),
+            ("fuel_oil", FuelType::Oil),
+            ("fuel oil", FuelType::Oil),
+            ("none", FuelType::None),
+            ("no_fuel", FuelType::None),
+            ("no fuel", FuelType::None),
+        ];
+
+        for &(input, expected) in cases {
+            let got = parse_fuel_type(Some(input));
+            assert_eq!(
+                got,
+                Some(expected),
+                "parse_fuel_type({input:?}) should be {expected:?}, got {got:?}"
+            );
+        }
+
+        assert_eq!(parse_fuel_type(None), None, "None input should return None");
+        assert_eq!(
+            parse_fuel_type(Some("unknown_fuel")),
+            None,
+            "unknown fuel should return None"
+        );
+    }
 
     #[test]
     fn operating_mode_code_covers_all_variants() {

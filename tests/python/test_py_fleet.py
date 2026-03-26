@@ -1,4 +1,4 @@
-"""Tests for PyFleet API completion (PY-009)."""
+"""Tests for Fleet API completion (PY-009)."""
 
 from pathlib import Path
 
@@ -13,18 +13,18 @@ OCHRE_WEATHER = VENDOR_OCHRE / "ochre" / "defaults" / "Weather"
 
 def _pyfleet_class():
     try:
-        from ochre_next._hares import PyFleet, DwellingConfig
+        from ochre_next import Fleet, DwellingConfig
     except ModuleNotFoundError:
-        pytest.skip("ochre_next._hares is not available in this environment")
-    return PyFleet, DwellingConfig
+        pytest.skip("ochre_next is not available in this environment")
+    return Fleet, DwellingConfig
 
 
 def _pyfleet_results_class():
     try:
-        from ochre_next._hares import PyFleetResults
+        from ochre_next import FleetResults
     except ModuleNotFoundError:
-        pytest.skip("ochre_next._hares is not available in this environment")
-    return PyFleetResults
+        pytest.skip("ochre_next is not available in this environment")
+    return FleetResults
 
 
 def _create_minimal_dwelling_config(tmp_path: Path):
@@ -70,7 +70,7 @@ def _ochre_fixtures_available() -> bool:
 def _build_simulatable_fleet(n: int = 1):
     """Build a fleet from real OCHRE fixtures that can actually simulate."""
     PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next._hares import SimulationConfig
+    from ochre_next import SimulationConfig
 
     if not _ochre_fixtures_available():
         pytest.skip("OCHRE fixtures not available")
@@ -157,14 +157,14 @@ def test_from_resstock_accepts_enum(tmp_path: Path) -> None:
     table = pa.table(
         {
             "building_id": [12345],
-            "upgrade": [0],
-            "sample_weight": [1.0],
+            "upgrade_id": [0],
+            "weight": [1.0],
             "in.state": ["CO"],
         }
     )
     pq.write_table(table, metadata)
 
-    from ochre_next._hares import ResStockVersion
+    from ochre_next import ResStockVersion
 
     fleet = py_fleet.from_resstock(
         str(metadata),
@@ -213,8 +213,8 @@ def test_from_resstock_default_version_is_2025_1(tmp_path: Path) -> None:
     table = pa.table(
         {
             "building_id": [12345],
-            "upgrade": [0],
-            "sample_weight": [1.0],
+            "upgrade_id": [0],
+            "weight": [1.0],
             "in.state": ["CO"],
         }
     )
@@ -264,7 +264,7 @@ def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
 @pytest.mark.slow
 def test_simulate_resolution_enum_works() -> None:
     """Verify simulate(resolution=AggregationResolution.Hourly) works."""
-    from ochre_next._hares import AggregationResolution
+    from ochre_next import AggregationResolution
 
     fleet = _build_simulatable_fleet(1)
     results = fleet.simulate(resolution=AggregationResolution.Hourly)
@@ -330,7 +330,7 @@ def test_progress_callback_invoked() -> None:
 def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
     """Verify simulate(raise_on_failure=True) raises on any failure."""
     PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next._hares import SimulationConfig
+    from ochre_next import SimulationConfig
 
     # Use invalid paths to force simulation failure
     sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
@@ -351,7 +351,7 @@ def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
 def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     """Verify default fault-tolerant mode collects failures without raising."""
     PyFleet, DwellingConfig = _pyfleet_class()
-    from ochre_next._hares import SimulationConfig
+    from ochre_next import SimulationConfig
 
     if not _ochre_fixtures_available():
         pytest.skip("OCHRE fixtures not available")

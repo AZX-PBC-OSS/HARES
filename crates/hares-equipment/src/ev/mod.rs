@@ -1256,6 +1256,10 @@ impl Equipment for Ev {
         self.charging_curve_lut = lut;
         Ok(())
     }
+
+    fn has_charging_curve_lut(&self) -> bool {
+        self.charging_curve_lut.is_some()
+    }
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {

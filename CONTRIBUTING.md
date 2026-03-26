@@ -5,7 +5,8 @@ Engineering guidelines for working in the HARES codebase.
 ## Getting started
 
 See the [README](README.md) for repository setup, prerequisites, and the
-crate layout. The short version:
+crate layout. See [docs/development.md](docs/development.md) for build profiles,
+feature flags, and benchmarking guidance. The short version:
 
 ```bash
 git clone https://github.com/NREL/HARES.git && cd HARES
@@ -88,7 +89,9 @@ numerical sanity checks (energy balance, temperature bounds, humidity
 ratio sign).  These are gated by
 `cfg(any(debug_assertions, feature = "check_invariants"))` so they run
 in tests and debug builds by default, and can be opted into in release
-via the Cargo feature flag.
+via the Cargo feature flag.  See [docs/development.md](docs/development.md)
+for build commands and [docs/invariants-and-observability.md](docs/invariants-and-observability.md)
+for the full check catalogue.
 
 When adding a new solver output or domain update, add a corresponding
 invariant check.

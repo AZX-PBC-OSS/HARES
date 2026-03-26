@@ -11,8 +11,10 @@ import hashlib
 import logging
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
+import numpy as np
+import numpy.typing as npt
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -27,7 +29,25 @@ except ImportError:
 LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_EFFICIENCY = 0.95
-_DEFAULT_DEGRADATION: dict[str, Any] = {
+
+
+class DegradationConfig(TypedDict):
+    model: str
+    calendar_q: float
+    calendar_a: float
+    cycle_q: float
+    cycle_d: float
+
+
+class ChargingCurveLutData(TypedDict):
+    soc_grid: npt.NDArray[np.float64]
+    temp_grid: npt.NDArray[np.float64]
+    crate_grid: npt.NDArray[np.float64]
+    soh_grid: npt.NDArray[np.float64]
+    lut: npt.NDArray[np.float32]
+
+
+_DEFAULT_DEGRADATION: DegradationConfig = {
     "model": "rainflow_arrhenius",
     "calendar_q": 4.14e-10,
     "calendar_a": -7280.0,
@@ -442,7 +462,7 @@ def generate_charging_curve_lut(
     thermal_patch_source: str | None = None,
     parameter_overrides: dict[str, Any] | None = None,
     cache_path: Path | str | None = None,
-) -> dict[str, Any]:
+) -> ChargingCurveLutData:
     """Generate a 4D CC-CV charging curve LUT using PyBaMM.
 
     Runs PyBaMM SPMe CC-CV simulations across the full grid of
@@ -476,11 +496,9 @@ def generate_charging_curve_lut(
 
     Returns
     -------
-    dict with numpy arrays ready for Rust ``RegularGridInterpolator``.
+    ChargingCurveLutData with numpy arrays ready for Rust ``RegularGridInterpolator``.
     """
     import itertools
-
-    import numpy as np
 
     if not _HAS_PYBAMM:
         raise ImportError(
@@ -499,13 +517,13 @@ def generate_charging_curve_lut(
         if cache_path.exists():
             LOGGER.info("Loading cached charging curve LUT from %s", cache_path)
             data = np.load(cache_path, allow_pickle=False)
-            return {
+            return cast(ChargingCurveLutData, {
                 "soc_grid": data["soc_grid"],
                 "temp_grid": data["temp_grid"],
                 "crate_grid": data["crate_grid"],
                 "soh_grid": data["soh_grid"],
                 "lut": data["lut"],
-            }
+            })
 
     shape = (len(soc_arr), len(temp_arr), len(crate_arr), len(soh_arr))
     lut = np.zeros(shape, dtype=np.float32)
@@ -550,7 +568,7 @@ def generate_charging_curve_lut(
             done, total, 100.0 * done / total, T, cr, soh * 100,
         )
 
-    result = {
+    result: ChargingCurveLutData = {
         "soc_grid": soc_arr,
         "temp_grid": temp_arr,
         "crate_grid": crate_arr,
@@ -561,7 +579,7 @@ def generate_charging_curve_lut(
     if cache_path is not None:
         cache_path = Path(cache_path)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache_path, **result)
+        np.savez_compressed(cache_path, **cast(dict[str, Any], result))
         LOGGER.info("Saved charging curve LUT → %s", cache_path)
 
     return result
@@ -580,10 +598,8 @@ def _simulate_cc_cv_single(
     thermal_model: str | None,
     thermal_patch_source: str | None,
     parameter_overrides: dict[str, Any] | None,
-) -> tuple[Any, Any]:
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Run one CC-CV simulation and return (soc_trajectory, power_fraction)."""
-    import numpy as np
-
     param = _pybamm.ParameterValues(param_set)
     param["Upper voltage cut-off [V]"] = v_upper
     param["Lower voltage cut-off [V]"] = v_lower
@@ -643,7 +659,7 @@ def _simulate_cc_cv_single(
             "PyBaMM solve failed T=%.0f°C C=%.3fC SOH=%.0f%%: %s",
             T_celsius, c_rate, soh * 100, exc,
         )
-        return np.array([soc_start, 1.0]), np.array([0.0, 0.0])
+        return np.array([soc_start, 1.0], dtype=np.float64), np.array([0.0, 0.0], dtype=np.float64)
 
     cap_nom = float(param["Nominal cell capacity [A.h]"])
     throughput = sol["Throughput capacity [A.h]"].entries

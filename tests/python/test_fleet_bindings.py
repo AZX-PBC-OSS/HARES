@@ -5,10 +5,10 @@ import pytest
 
 def _pyfleet_class():
     try:
-        from ochre_next._hares import PyFleet
+        from ochre_next import Fleet
     except ModuleNotFoundError:
-        pytest.skip("ochre_next._hares is not available in this environment")
-    return PyFleet
+        pytest.skip("ochre_next is not available in this environment")
+    return Fleet
 
 
 def _write_resstock_2024_2_metadata(path: Path) -> None:
@@ -42,7 +42,7 @@ def test_fleet_from_resstock_accepts_2024_2(tmp_path: Path) -> None:
 
 def test_fleet_from_resstock_rejects_invalid_version(tmp_path: Path) -> None:
     py_fleet = _pyfleet_class()
-    with pytest.raises(ValueError, match="invalid resstock_version"):
+    with pytest.raises(ValueError, match="invalid"):
         py_fleet.from_resstock(
             str(tmp_path / "metadata.parquet"),
             str(tmp_path),

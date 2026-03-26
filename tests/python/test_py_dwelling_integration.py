@@ -320,7 +320,7 @@ class TestOchreCompat:
 
 class TestBatchStep:
     def test_batch_step_basic(self):
-        from ochre_next._hares import batch_step
+        from ochre_next import batch_step
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         results = batch_step([dw], [[0.0]], ["total_power_kw"])
@@ -335,7 +335,7 @@ class TestBatchStep:
 
     def test_batch_step_concurrent_stress(self):
         """Verify no segfault or deadlock under concurrent batch_step calls."""
-        from ochre_next._hares import batch_step
+        from ochre_next import batch_step
 
         n_dwellings = 4
         dwellings = [
@@ -372,6 +372,50 @@ class TestBatchStep:
 
         assert len(errors) == 0, f"Errors in threads: {errors}"
 
+    def test_batch_step_empty_dwellings(self):
+        """batch_step with empty dwellings list returns empty results."""
+        from ochre_next import batch_step
+
+        results = batch_step([], [], ["total_power_kw"])
+        assert isinstance(results, list)
+        assert len(results) == 0
+
+    def test_batch_step_8_dwellings_4_threads(self):
+        """Stress test with 8 dwellings across 4 threads."""
+        from ochre_next import batch_step
+
+        dwellings = [
+            _init_dwelling(duration_s=600, time_res_s=60, seed=i)
+            for i in range(8)
+        ]
+
+        errors = []
+
+        def worker(dw_list):
+            try:
+                for _ in range(3):
+                    results = batch_step(
+                        dw_list,
+                        [[0.0]] * len(dw_list),
+                        ["total_power_kw"],
+                    )
+                    assert len(results) == len(dw_list)
+                    for r in results:
+                        assert isinstance(r, dict)
+                        assert "obs" in r
+            except Exception as e:
+                errors.append(e)
+
+        groups = [dwellings[i : i + 2] for i in range(0, 8, 2)]
+        threads = [threading.Thread(target=worker, args=(g,)) for g in groups]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive(), "Thread deadlocked"
+
+        assert len(errors) == 0, f"Errors in threads: {errors}"
+
 
 # ---------------------------------------------------------------------------
 # Solar override lifecycle
@@ -380,7 +424,7 @@ class TestBatchStep:
 
 class TestSolarOverride:
     def test_solar_override_lifecycle(self):
-        from ochre_next._hares import PV
+        from ochre_next import PV
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         dw.add_pv(PV("TestPV", 5.0, 30.0, 180.0))
@@ -422,7 +466,7 @@ class TestSolarOverride:
 
 class TestBatteryLutInjection:
     def test_add_battery_with_ocv_table(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         bat = Battery("B1", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
@@ -448,7 +492,7 @@ class TestBatteryLutInjection:
 
 class TestEvLifecycle:
     def test_add_ev_and_step(self):
-        from ochre_next._hares import EV
+        from ochre_next import EV
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         ev = EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68)
@@ -467,7 +511,7 @@ class TestEvLifecycle:
 
 class TestEquipmentMutationRoundTrip:
     def test_add_battery_set_lut_save_load_remove(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         bat = Battery("B1", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
@@ -492,7 +536,7 @@ class TestEquipmentMutationRoundTrip:
         reason="checkpoint deserialization does not yet support dynamically added equipment"
     )
     def test_lut_persists_through_checkpoint(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         bat = Battery("B1", 10.0)
@@ -512,7 +556,7 @@ class TestEquipmentMutationRoundTrip:
 
 class TestActorSystem:
     def test_python_actor_subclass(self):
-        from ochre_next._hares import Actor, DispatchRequest
+        from ochre_next import Actor, DispatchRequest
 
         class MyThermostat(Actor):
             def __init__(self):
@@ -556,7 +600,7 @@ class TestDerSimulationExplorer:
     def test_pv_battery_ev_end_to_end(self):
         """End-to-end DER simulation matching the simulation_explorer.py workflow."""
         from ochre_next import ControlSignal
-        from ochre_next._hares import EV, PV, Battery
+        from ochre_next import EV, PV, Battery
 
         # 2-week simulation at 15-min resolution
         two_weeks_s = 14 * 24 * 3600

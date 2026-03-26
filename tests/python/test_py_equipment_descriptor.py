@@ -2,6 +2,14 @@
 
 import pytest
 from pathlib import Path
+from ochre_next import (
+    ControlCapabilities,
+    ControlSignal,
+    EndUse,
+    ExecutionStage,
+    FuelType,
+    TelemetryField,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -48,9 +56,12 @@ class TestEquipmentDescriptors:
             assert isinstance(desc.name, str), "name should be a string"
             assert len(desc.name) > 0, "name should be non-empty"
 
-    def test_descriptor_end_use_returns_end_use_instance(self, dwelling):
-        from ochre_next import EndUse
+    def test_descriptor_ids_are_non_negative(self, dwelling):
+        descriptors = dwelling.equipment_descriptors()
+        for desc in descriptors:
+            assert desc.id >= 0, f"descriptor ID should be non-negative, got {desc.id}"
 
+    def test_descriptor_end_use_returns_end_use_instance(self, dwelling):
         descriptors = dwelling.equipment_descriptors()
 
         for desc in descriptors:
@@ -59,8 +70,6 @@ class TestEquipmentDescriptors:
             )
 
     def test_descriptor_fuel_type_returns_fuel_type_instance(self, dwelling):
-        from ochre_next import FuelType
-
         descriptors = dwelling.equipment_descriptors()
 
         for desc in descriptors:
@@ -69,8 +78,6 @@ class TestEquipmentDescriptors:
             )
 
     def test_descriptor_stage_returns_execution_stage_instance(self, dwelling):
-        from ochre_next import ExecutionStage
-
         descriptors = dwelling.equipment_descriptors()
 
         for desc in descriptors:
@@ -81,8 +88,6 @@ class TestEquipmentDescriptors:
     def test_descriptor_control_capabilities_returns_capabilities_instance(
         self, dwelling
     ):
-        from ochre_next import ControlCapabilities
-
         descriptors = dwelling.equipment_descriptors()
 
         for desc in descriptors:
@@ -90,9 +95,16 @@ class TestEquipmentDescriptors:
                 "control_capabilities should be PyControlCapabilities instance"
             )
 
-    def test_descriptor_telemetry_fields_returns_list(self, dwelling):
-        from ochre_next import TelemetryField
+    def test_at_least_one_equipment_is_controllable(self, dwelling):
+        descriptors = dwelling.equipment_descriptors()
+        controllable = [
+            desc for desc in descriptors if desc.control_capabilities
+        ]
+        assert len(controllable) > 0, (
+            "at least one equipment must have non-empty control_capabilities"
+        )
 
+    def test_descriptor_telemetry_fields_returns_list(self, dwelling):
         descriptors = dwelling.equipment_descriptors()
 
         for desc in descriptors:
@@ -103,9 +115,20 @@ class TestEquipmentDescriptors:
                 assert isinstance(tf, TelemetryField), (
                     "should be PyTelemetryField instance"
                 )
-                assert isinstance(tf.name, str), "name should be string"
-                assert isinstance(tf.unit, str), "unit should be string"
+                assert isinstance(tf.name, str) and len(tf.name) > 0, (
+                    "telemetry field name must be a non-empty string"
+                )
+                assert isinstance(tf.unit, str) and len(tf.unit) > 0, (
+                    "telemetry field unit must be a non-empty string"
+                )
                 assert isinstance(tf.description, str), "description should be string"
+
+    def test_at_least_one_equipment_has_telemetry_fields(self, dwelling):
+        descriptors = dwelling.equipment_descriptors()
+        with_telemetry = [desc for desc in descriptors if desc.telemetry_fields]
+        assert len(with_telemetry) > 0, (
+            "at least one equipment must have telemetry fields"
+        )
 
 
 class TestEquipmentNames:
@@ -115,7 +138,13 @@ class TestEquipmentNames:
         assert isinstance(names, list), "should return a list"
         assert len(names) > 0, "should return at least one name"
         for name in names:
-            assert isinstance(name, str), "each name should be a string"
+            assert isinstance(name, str) and len(name) > 0, (
+                "each name must be a non-empty string"
+            )
+
+    def test_equipment_names_are_unique(self, dwelling):
+        names = dwelling.equipment_names()
+        assert len(names) == len(set(names)), "equipment names must be unique"
 
     def test_equipment_names_matches_descriptor_names(self, dwelling):
         names = dwelling.equipment_names()
@@ -153,8 +182,6 @@ class TestRepr:
 
 class TestValidateControl:
     def test_validate_control_returns_true_for_valid_signal(self, dwelling):
-        from ochre_next import ControlSignal
-
         names = dwelling.equipment_names()
         assert len(names) > 0, "should have at least one equipment"
 
@@ -163,16 +190,12 @@ class TestValidateControl:
         assert isinstance(result, bool), "should return a boolean"
 
     def test_validate_control_returns_false_for_nonexistent_equipment(self, dwelling):
-        from ochre_next import ControlSignal
-
         signal = ControlSignal.power_setpoint(1.0)
         result = dwelling.validate_control("nonexistent_equipment_name", signal)
 
         assert result is False, "should return False for nonexistent equipment"
 
     def test_validate_control_does_not_raise(self, dwelling):
-        from ochre_next import ControlSignal
-
         names = dwelling.equipment_names()
         signal = ControlSignal.thermal_setpoint(heat_c=20.0)
 

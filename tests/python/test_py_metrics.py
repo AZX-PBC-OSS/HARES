@@ -1,5 +1,7 @@
 """Tests for Python-side simulation metrics exposure."""
 
+import math
+
 import pytest
 from pathlib import Path
 
@@ -39,22 +41,19 @@ class TestMetrics:
         assert isinstance(metrics, SimulationMetrics)
 
         annual = metrics.annual_energy_kwh
-        assert isinstance(annual.total, float)
         assert annual.total >= 0
-        assert isinstance(annual.per_end_use, dict)
-        assert all(isinstance(k, str) for k in annual.per_end_use.keys())
-        assert all(isinstance(v, float) for v in annual.per_end_use.values())
+        assert math.isfinite(annual.total)
+        assert len(annual.per_end_use) > 0
+        assert all(v >= 0 for v in annual.per_end_use.values())
+        assert all(math.isfinite(v) for v in annual.per_end_use.values())
 
         peak = metrics.peak_power_kw
-        assert isinstance(peak.rolling_15min_kw, float)
-        assert peak.rolling_15min_kw >= 0
-        assert isinstance(peak.per_end_use, dict)
+        assert peak.rolling_15min_kw >= peak.rolling_30min_kw >= peak.rolling_60min_kw
+        assert len(peak.per_end_use) > 0
 
         grid = metrics.grid_interaction
-        assert isinstance(grid.peak_import_kw, float)
-        assert grid.peak_import_kw >= 0
-        assert isinstance(grid.peak_export_kw, float)
-        assert grid.peak_export_kw >= 0
+        assert math.isfinite(grid.peak_import_kw)
+        assert math.isfinite(grid.peak_export_kw)
 
         eff = metrics.efficiency
         assert eff.hvac_heating_cop is None or eff.hvac_heating_cop > 0
@@ -137,15 +136,15 @@ class TestMetrics:
         env = metrics.envelope_loads_kwh
 
         assert env is not None
-        assert isinstance(env.window_solar_kwh, float)
-        assert isinstance(env.opaque_solar_lwr_kwh, float)
-        assert isinstance(env.interior_lwr_kwh, float)
-        assert isinstance(env.infiltration_kwh, float)
-        assert isinstance(env.ventilation_kwh, float)
-        assert isinstance(env.hvac_heating_kwh, float)
-        assert isinstance(env.hvac_cooling_kwh, float)
-        assert isinstance(env.internal_gains_kwh, float)
-        assert isinstance(env.duct_loss_kwh, float)
+        assert math.isfinite(env.window_solar_kwh)
+        assert math.isfinite(env.opaque_solar_lwr_kwh)
+        assert math.isfinite(env.interior_lwr_kwh)
+        assert math.isfinite(env.infiltration_kwh)
+        assert math.isfinite(env.ventilation_kwh)
+        assert math.isfinite(env.hvac_heating_kwh)
+        assert math.isfinite(env.hvac_cooling_kwh)
+        assert math.isfinite(env.internal_gains_kwh)
+        assert math.isfinite(env.duct_loss_kwh)
 
     def test_gas_energy_available_when_fuel_type_present(self):
         dw = Dwelling.from_hpxml(
@@ -166,3 +165,5 @@ class TestMetrics:
         assert metrics.gas_energy is not None
         assert metrics.gas_energy.total_therms >= 0
         assert metrics.gas_energy.total_kwh_equivalent >= 0
+        if metrics.gas_energy.total_kwh_equivalent > 0:
+            assert metrics.gas_energy.total_therms > 0

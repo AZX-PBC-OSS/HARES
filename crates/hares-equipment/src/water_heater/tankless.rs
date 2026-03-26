@@ -446,11 +446,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn parse_tankless_fuel_type(raw: Option<&str>) -> FuelType {
-    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("electric") => FuelType::Electric,
-        Some("none") => FuelType::Electric,
-        _ => parse_fuel_type(raw).unwrap_or(FuelType::Gas),
-    }
+    parse_fuel_type(raw).unwrap_or(FuelType::Electric)
 }
 
 /// Build port declarations for a tankless water heater.

@@ -15,7 +15,7 @@ import hashlib
 import logging
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -29,6 +29,15 @@ except ImportError:
     _HAS_PYSAM = False
 
 LOGGER = logging.getLogger(__name__)
+
+
+class PvWattsOutput(TypedDict):
+    ac: list[float]
+    gh: list[float]
+    dn: list[float]
+    df: list[float]
+    tamb: list[float]
+
 
 GHI_BIN_W_M2 = 50
 DNI_BIN_W_M2 = 50
@@ -99,7 +108,7 @@ def _run_pvwatts(
     module_type: int,
     array_type: int,
     weather_file: Path,
-) -> dict[str, Any]:
+) -> PvWattsOutput:
     """Run PySAM PVWatts and return hourly results."""
     if _pvwatts is None:
         raise ImportError(
@@ -129,7 +138,7 @@ def _bin_value(value: float, step: int) -> float:
     return round(round(value / step) * step, 6)
 
 
-def _build_lut_table(pvwatts_output: dict[str, Any]) -> pa.Table:
+def _build_lut_table(pvwatts_output: PvWattsOutput) -> pa.Table:
     """Aggregate hourly PVWatts output into a binned LUT."""
     ac = pvwatts_output["ac"]
     gh = pvwatts_output["gh"]

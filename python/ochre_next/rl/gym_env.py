@@ -3,20 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
 from datetime import timedelta
 import math
 import secrets
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
 
-from ochre_next._hares import PyDwelling
-
-try:
-    from ochre_next._hares import PyControlSignal
-except ImportError:
-    from ochre_next._hares import ControlSignal as PyControlSignal
+from ochre_next._hares import PyDwelling, SimulationConfig, ControlSignal as PyControlSignal
 
 try:
     import gymnasium as gym
@@ -32,12 +27,55 @@ _BROAD_LOW = -1.0e6
 _BROAD_HIGH = 1.0e6
 
 
+# ---------------------------------------------------------------------------
+# Typed config
+# ---------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
-class DwellingConfig:
+class GymDwellingConfig:
+    """Configuration for a single dwelling used by the gym environment.
+
+    Use ``sim_config`` to pass simulation-level settings (time resolution,
+    output verbosity, etc.) instead of the old untyped ``kwargs`` dict.
+    """
+
     hpxml: str
     schedule: str
     weather: str
-    kwargs: dict[str, Any] = dataclass_field(default_factory=dict)
+    defaults_path: str | None = None
+    sim_config: SimulationConfig | None = None
+
+
+# ---------------------------------------------------------------------------
+# Typed return contracts
+# ---------------------------------------------------------------------------
+
+
+class StepInfo(TypedDict):
+    seed: int
+    timestep_index: int
+    step: dict[str, Any]
+
+
+class StepResult(TypedDict):
+    obs: np.ndarray
+    reward: float
+    terminated: bool
+    truncated: bool
+    info: StepInfo
+
+
+class RewardContext(TypedDict):
+    step: dict[str, Any]
+    telemetry_zone: dict[str, Any]
+    telemetry_equipment: dict[str, Any]
+    total_power_kw: float
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
 def _coerce_seconds(value: Any) -> float:
@@ -48,30 +86,57 @@ def _coerce_seconds(value: Any) -> float:
     return 60.0
 
 
-def _normalize_config(config: DwellingConfig | Mapping[str, Any]) -> DwellingConfig:
-    if isinstance(config, DwellingConfig):
+def _normalize_config(config: GymDwellingConfig | Mapping[str, Any]) -> GymDwellingConfig:
+    if isinstance(config, GymDwellingConfig):
         return config
-    kwargs = dict(config.get("kwargs", {}))
-    for key in (
-        "start_time",
-        "time_res_s",
-        "duration_s",
-        "initialization_duration",
-        "output_to_parquet",
-        "output_path",
-        "output_verbosity",
-        "output_chunk_size",
-        "bldg_id",
-        "master_seed",
-    ):
-        if key in config and key not in kwargs:
-            kwargs[key] = config[key]
-    return DwellingConfig(
+    # Legacy dict path: extract known SimulationConfig fields into a
+    # SimulationConfig object so the result is always typed.
+    raw_time_res = config.get("time_res_s")
+    raw_duration = config.get("duration_s")
+    time_res_s: int | None = int(_coerce_seconds(raw_time_res)) if raw_time_res is not None else None
+    duration_s: int | None = int(_coerce_seconds(raw_duration)) if raw_duration is not None else None
+    sim_config = SimulationConfig(
+        start_time=str(config["start_time"]) if "start_time" in config else None,
+        duration=duration_s,
+        time_res=time_res_s,
+        output_verbosity=int(config["output_verbosity"]) if "output_verbosity" in config else None,
+        output_path=str(config["output_path"]) if "output_path" in config else None,
+        output_to_parquet=bool(config["output_to_parquet"]) if "output_to_parquet" in config else None,
+        output_chunk_size=int(config["output_chunk_size"]) if "output_chunk_size" in config else None,
+        master_seed=int(config["master_seed"]) if "master_seed" in config else None,
+    )
+    return GymDwellingConfig(
         hpxml=str(config["hpxml"]),
         schedule=str(config["schedule"]),
         weather=str(config["weather"]),
-        kwargs=kwargs,
+        defaults_path=str(config["defaults_path"]) if "defaults_path" in config else None,
+        sim_config=sim_config,
     )
+
+
+def _sim_config_to_kwargs(sim_config: SimulationConfig) -> dict[str, Any]:
+    """Extract non-None fields from a SimulationConfig into a flat kwargs dict
+    suitable for ``PyDwelling.from_hpxml``."""
+    out: dict[str, Any] = {}
+    if sim_config.start_time:
+        out["start_time"] = sim_config.start_time
+    if sim_config.duration:
+        out["duration_s"] = sim_config.duration
+    if sim_config.time_res:
+        out["time_res_s"] = sim_config.time_res
+    if sim_config.output_verbosity is not None:
+        out["output_verbosity"] = sim_config.output_verbosity
+    if sim_config.output_path is not None:
+        out["output_path"] = sim_config.output_path
+    out["output_to_parquet"] = sim_config.output_to_parquet
+    out["output_chunk_size"] = sim_config.output_chunk_size
+    if sim_config.master_seed:
+        out["master_seed"] = sim_config.master_seed
+    if sim_config.civil_timezone is not None:
+        out["civil_timezone"] = sim_config.civil_timezone
+    if sim_config.setpoint_deadband_c is not None:
+        out["setpoint_deadband_c"] = sim_config.setpoint_deadband_c
+    return out
 
 
 def _sorted_action_layout(
@@ -137,6 +202,11 @@ def _index_map(names: Sequence[str]) -> dict[str, int]:
     return {name.strip().lower(): idx for idx, name in enumerate(names)}
 
 
+# ---------------------------------------------------------------------------
+# Public helpers
+# ---------------------------------------------------------------------------
+
+
 def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) -> np.ndarray:
     zone = telemetry.zone()
     equipment = telemetry.equipment()
@@ -190,47 +260,74 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
     return np.ascontiguousarray(obs)
 
 
-def action_payload(signal_type: str, values: Mapping[str, float]) -> dict[str, Any]:
+def _build_control_signal(signal_type: str, values: Mapping[str, float]) -> Any:
+    """Build a typed ``PyControlSignal`` from a signal type name and field values.
+
+    All branches call the typed static constructors on ``PyControlSignal``
+    rather than building untyped dicts.
+    """
     lower = {k.lower(): float(v) for k, v in values.items()}
-    payload: dict[str, Any] = {"type": signal_type}
     if signal_type == "ThermalSetpoint":
-        payload["heating_setpoint_c"] = lower.get("heating_setpoint_c", lower.get("heat_c", lower.get("setpoint_c")))
-        payload["cooling_setpoint_c"] = lower.get("cooling_setpoint_c", lower.get("cool_c"))
-        payload["deadband_c"] = lower.get("deadband_c")
-    elif signal_type == "PowerSetpoint":
-        payload["active_power_kw"] = lower.get("active_power_kw", lower.get("p_setpoint_kw", lower.get("kw", 0.0)))
-        payload["reactive_power_kvar"] = lower.get("reactive_power_kvar")
-    elif signal_type == "PowerLimit":
-        payload["max_power_kw"] = lower.get("max_power_kw", 0.0)
-        payload["ramp_rate_kw_per_s"] = lower.get("ramp_rate_kw_per_s")
-    elif signal_type == "SOCTarget":
-        payload["target_soc"] = lower.get("target_soc", lower.get("soc", 0.0))
-        payload["min_soc"] = lower.get("min_soc")
-        payload["max_soc"] = lower.get("max_soc")
-    elif signal_type == "LoadFraction":
-        payload["fraction"] = lower.get("fraction", lower.get("load_fraction", 0.0))
-    elif signal_type == "DutyCycle":
-        payload["on_fraction"] = lower.get("on_fraction", lower.get("duty_cycle", 0.0))
-        payload["period_s"] = lower.get("period_s")
-    elif signal_type == "HumiditySetpoint":
-        payload["target_rh"] = lower.get("target_rh", 0.0)
-        payload["min_rh"] = lower.get("min_rh")
-        payload["max_rh"] = lower.get("max_rh")
-    elif signal_type == "GridConnect":
-        payload["connected"] = lower.get("connected", 0.0) >= 0.5
-    elif signal_type == "SelfConsumption":
-        payload["enabled"] = lower.get("enabled", 0.0) >= 0.5
-        payload["solar_only_charging"] = lower.get("solar_only_charging", 0.0) >= 0.5
-    return payload
+        return PyControlSignal.thermal_setpoint(
+            heat_c=lower.get("heating_setpoint_c", lower.get("heat_c", lower.get("setpoint_c"))),
+            cool_c=lower.get("cooling_setpoint_c", lower.get("cool_c")),
+            deadband_c=lower.get("deadband_c"),
+        )
+    if signal_type == "PowerSetpoint":
+        return PyControlSignal.power_setpoint(
+            kw=lower.get("active_power_kw", lower.get("p_setpoint_kw", lower.get("kw", 0.0))),
+            reactive_kvar=lower.get("reactive_power_kvar"),
+        )
+    if signal_type == "PowerLimit":
+        return PyControlSignal.power_limit(
+            max_power_kw=lower.get("max_power_kw", 0.0),
+            ramp_rate_kw_per_s=lower.get("ramp_rate_kw_per_s"),
+        )
+    if signal_type == "SOCTarget":
+        return PyControlSignal.soc_target(
+            target=lower.get("target_soc", lower.get("soc", 0.0)),
+            min=lower.get("min_soc"),
+            max=lower.get("max_soc"),
+        )
+    if signal_type == "LoadFraction":
+        return PyControlSignal.load_fraction(
+            fraction=lower.get("fraction", lower.get("load_fraction", 0.0)),
+        )
+    if signal_type == "DutyCycle":
+        return PyControlSignal.duty_cycle(
+            on_fraction=lower.get("on_fraction", lower.get("duty_cycle", 0.0)),
+            period_s=lower.get("period_s"),
+        )
+    if signal_type == "HumiditySetpoint":
+        return PyControlSignal.humidity_setpoint(
+            target_rh=lower.get("target_rh", 0.0),
+            min_rh=lower.get("min_rh"),
+            max_rh=lower.get("max_rh"),
+        )
+    if signal_type == "GridConnect":
+        return PyControlSignal.grid_connect(
+            connected=lower.get("connected", 0.0) >= 0.5,
+        )
+    if signal_type == "SelfConsumption":
+        return PyControlSignal.self_consumption(
+            enabled=lower.get("enabled", 0.0) >= 0.5,
+            solar_only_charging=lower.get("solar_only_charging", 0.0) >= 0.5,
+        )
+    raise ValueError(f"unsupported signal type: {signal_type!r}")
+
+
+# ---------------------------------------------------------------------------
+# Gymnasium environment
+# ---------------------------------------------------------------------------
 
 
 class DwellingGymEnv(_GYM_BASE):
     def __init__(
         self,
-        config: DwellingConfig | Mapping[str, Any],
+        config: GymDwellingConfig | Mapping[str, Any],
         observation_fields: Sequence[str],
         action_space_config: Mapping[str, Sequence[str]],
-        reward_fn: Callable[[dict[str, Any]], float],
+        reward_fn: Callable[[RewardContext], float],
         episode_length: timedelta,
     ) -> None:
         if gym is None or spaces is None:
@@ -244,11 +341,17 @@ class DwellingGymEnv(_GYM_BASE):
             action_space_config
         )
 
+        hpxml_kwargs: dict[str, Any] = {}
+        if self._config.defaults_path is not None:
+            hpxml_kwargs["defaults_path"] = self._config.defaults_path
+        if self._config.sim_config is not None:
+            hpxml_kwargs.update(_sim_config_to_kwargs(self._config.sim_config))
+
         self._dwelling = PyDwelling.from_hpxml(
             hpxml=self._config.hpxml,
             schedule=self._config.schedule,
             weather=self._config.weather,
-            **self._config.kwargs,
+            **hpxml_kwargs,
         )
         self._dwelling.initialize()
         self._initial_snapshot = bytes(self._dwelling.save_state())
@@ -260,8 +363,8 @@ class DwellingGymEnv(_GYM_BASE):
             dtype=np.float64,
         )
 
-        action_low = []
-        action_high = []
+        action_low: list[float] = []
+        action_high: list[float] = []
         for _, field in self._action_layout:
             low, high = _field_bounds(field)
             action_low.append(low)
@@ -273,9 +376,11 @@ class DwellingGymEnv(_GYM_BASE):
             dtype=np.float64,
         )
 
-        time_res_seconds = _coerce_seconds(self._config.kwargs.get("time_res_s", 60.0))
-        self._max_steps = max(1, int(math.ceil(episode_length.total_seconds() / time_res_seconds)))
-        self._steps_elapsed = 0
+        time_res_s: float = 60.0
+        if self._config.sim_config is not None and self._config.sim_config.time_res:
+            time_res_s = float(self._config.sim_config.time_res)
+        self._max_steps = max(1, int(math.ceil(episode_length.total_seconds() / time_res_s)))
+        self._steps_elapsed: int = 0
         self._active_seed: int | None = None
 
     def _observation(self) -> np.ndarray:
@@ -288,14 +393,18 @@ class DwellingGymEnv(_GYM_BASE):
             action_values.setdefault(equipment, {})[field] = float(action[idx])
 
         for equipment in sorted(action_values):
-            payload = action_payload(
+            signal = _build_control_signal(
                 self._signal_type_by_equipment[equipment],
                 action_values[equipment],
             )
-            signal = PyControlSignal.from_dict(payload)
             self._dwelling.apply_control(equipment, signal)
 
-    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[np.ndarray, dict[str, Any]]:
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         del options
         if gym is not None:
             super().reset(seed=seed)
@@ -309,7 +418,9 @@ class DwellingGymEnv(_GYM_BASE):
         obs = self._observation()
         return obs, {"seed": applied_seed}
 
-    def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    def step(
+        self, action: np.ndarray
+    ) -> tuple[np.ndarray, float, bool, bool, StepInfo]:
         arr = np.asarray(action, dtype=np.float64)
         arr = np.ascontiguousarray(arr.reshape(-1))
         if arr.shape != (len(self._action_layout),):
@@ -318,24 +429,22 @@ class DwellingGymEnv(_GYM_BASE):
             )
 
         self._apply_action(arr)
-        step_data = self._dwelling.step()
+        step_data: dict[str, Any] = self._dwelling.step()
         telemetry = self._dwelling.telemetry()
         obs = telemetry_to_observation(telemetry, self._observation_fields)
         self._steps_elapsed += 1
         truncated = self._steps_elapsed >= self._max_steps
 
-        reward_context = {
-            "step": step_data,
-            "telemetry": {
-                "zone": telemetry.zone(),
-                "equipment": telemetry.equipment(),
-                "total_power_kw": telemetry.total_power_kw(),
-            },
-        }
+        reward_context = RewardContext(
+            step=step_data,
+            telemetry_zone=telemetry.zone(),
+            telemetry_equipment=telemetry.equipment(),
+            total_power_kw=float(telemetry.total_power_kw()),
+        )
         reward = float(self._reward_fn(reward_context))
-        info = {
-            "step": step_data,
-            "seed": self._active_seed,
-            "timestep_index": self._steps_elapsed,
-        }
+        info = StepInfo(
+            step=step_data,
+            seed=self._active_seed if self._active_seed is not None else 0,
+            timestep_index=self._steps_elapsed,
+        )
         return obs, reward, False, truncated, info

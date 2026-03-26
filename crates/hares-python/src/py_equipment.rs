@@ -114,6 +114,7 @@ impl PyBattery {
         ocv_table=None,
         uneg_table=None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         name: String,

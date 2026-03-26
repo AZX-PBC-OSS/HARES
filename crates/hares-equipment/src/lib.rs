@@ -118,6 +118,21 @@ pub trait Equipment: Send + Sync {
             self.descriptor().name
         )))
     }
+
+    /// Whether a custom charging curve LUT is currently set.
+    fn has_charging_curve_lut(&self) -> bool {
+        false
+    }
+
+    /// Whether a custom (non-default) OCV table is currently set.
+    fn has_custom_ocv_table(&self) -> bool {
+        false
+    }
+
+    /// Whether a custom (non-default) UNeg table is currently set.
+    fn has_custom_u_neg_table(&self) -> bool {
+        false
+    }
 }
 
 /// Serialize checkpoint state via postcard.

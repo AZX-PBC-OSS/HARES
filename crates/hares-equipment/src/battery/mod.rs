@@ -319,6 +319,9 @@ pub struct Battery {
     external_power_limit_kw: Option<f64>,
 
     last_daily_update_day: i32,
+
+    custom_ocv: bool,
+    custom_u_neg: bool,
 }
 
 impl Battery {
@@ -400,6 +403,8 @@ impl Battery {
             dr_duration_remaining_s: None,
             external_power_limit_kw: None,
             last_daily_update_day: 0,
+            custom_ocv: false,
+            custom_u_neg: false,
         }
     }
 
@@ -1196,22 +1201,38 @@ impl Equipment for Battery {
 
     fn set_ocv_table(&mut self, table: OcvTable) -> crate::Result<()> {
         self.ocv_table = table;
+        self.custom_ocv = true;
         Ok(())
     }
 
     fn set_u_neg_table(&mut self, table: UNegTable) -> crate::Result<()> {
         self.u_neg_table = table;
+        self.custom_u_neg = true;
         Ok(())
     }
 
     fn reset_ocv_table(&mut self) -> crate::Result<()> {
         self.ocv_table = OcvTable::default_li_nmc();
+        self.custom_ocv = false;
         Ok(())
     }
 
     fn reset_u_neg_table(&mut self) -> crate::Result<()> {
         self.u_neg_table = UNegTable::default_li_nmc();
+        self.custom_u_neg = false;
         Ok(())
+    }
+
+    fn has_charging_curve_lut(&self) -> bool {
+        self.charging_curve_lut.is_some()
+    }
+
+    fn has_custom_ocv_table(&self) -> bool {
+        self.custom_ocv
+    }
+
+    fn has_custom_u_neg_table(&self) -> bool {
+        self.custom_u_neg
     }
 }
 

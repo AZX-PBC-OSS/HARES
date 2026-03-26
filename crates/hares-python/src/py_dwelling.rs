@@ -536,6 +536,10 @@ impl PyDwelling {
             .create("Battery", config.clone())
             .map_err(to_py_err)?;
 
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
+
+        // Set LUTs after init — init may reset internal state
         if let Some(ref lut) = battery.charging_curve_lut {
             eq.set_charging_curve_lut(Some(lut.clone()))
                 .map_err(to_py_err)?;
@@ -547,8 +551,6 @@ impl PyDwelling {
             eq.set_u_neg_table(table.clone()).map_err(to_py_err)?;
         }
 
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
-        eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
         dwelling.add_equipment(eq);
         Ok(())
     }
@@ -642,13 +644,15 @@ impl PyDwelling {
             .create("EV", config.clone())
             .map_err(to_py_err)?;
 
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
+
+        // Set LUT after init — init_from_config resets charging_curve_lut to None
         if let Some(ref lut) = ev.charging_curve_lut {
             eq.set_charging_curve_lut(Some(lut.clone()))
                 .map_err(to_py_err)?;
         }
 
-        let mut dwelling = lock_dwelling(&self.dwelling)?;
-        eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
         dwelling.add_equipment(eq);
         Ok(())
     }
@@ -798,18 +802,11 @@ impl PyDwelling {
             .iter()
             .find(|e| e.descriptor().name == name)
             .ok_or_else(|| PyValueError::new_err(format!("equipment '{}' not found", name)))?;
-        match lut_type {
-            PyLutType::ChargingCurve => {
-                // Check if the equipment has a charging curve by trying to inspect
-                // telemetry or type. For now, we check the descriptor type.
-                let eq_type = &eq.descriptor().equipment_type;
-                Ok(eq_type == "Battery" || eq_type == "EV")
-            }
-            PyLutType::Ocv | PyLutType::UNeg => {
-                let eq_type = &eq.descriptor().equipment_type;
-                Ok(eq_type == "Battery")
-            }
-        }
+        Ok(match lut_type {
+            PyLutType::ChargingCurve => eq.has_charging_curve_lut(),
+            PyLutType::Ocv => eq.has_custom_ocv_table(),
+            PyLutType::UNeg => eq.has_custom_u_neg_table(),
+        })
     }
 
     pub fn validate_control(&self, name: &str, signal: &PyControlSignal) -> PyResult<bool> {

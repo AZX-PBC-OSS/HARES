@@ -1,6 +1,6 @@
 """Tests for Python-side dwelling behavior (step, telemetry, error handling)."""
 
-import os
+import math
 import pytest
 from datetime import datetime
 
@@ -37,9 +37,9 @@ class TestStep:
 
         result = dw.step()
 
-        assert isinstance(result, dict), "step() should return a dict"
         assert "time" in result, "step() result should have 'time' key"
         assert isinstance(result["time"], datetime), "time should be a datetime"
+        assert result["time"].year == 2019, "time year should be 2019"
 
         net_electric_power_kw_keys = [
             k for k in result.keys() if "net_electric_power" in k
@@ -48,7 +48,12 @@ class TestStep:
             "should have net_electric_power_kw key"
         )
         for key in net_electric_power_kw_keys:
-            assert isinstance(result[key], (int, float)), f"{key} should be a number"
+            value = result[key]
+            assert isinstance(value, (int, float)), f"{key} should be a number"
+            assert math.isfinite(value), f"{key} must be finite, got {value}"
+            assert -1000.0 <= value <= 1000.0, (
+                f"{key} out of reasonable range [-1000, 1000] kW: {value}"
+            )
 
 
 class TestTelemetry:
@@ -72,9 +77,15 @@ class TestTelemetry:
         t = dw.telemetry()
         zone = t.zone()
 
-        assert isinstance(zone, dict), "zone() should return a dict"
         assert "temperature_c" in zone, "zone should have temperature_c"
-        assert isinstance(zone["temperature_c"], list), "temperature_c should be a list"
+        temps = zone["temperature_c"]
+        assert isinstance(temps, list), "temperature_c should be a list"
+        assert len(temps) > 0, "temperature_c list should be non-empty"
+        for temp in temps:
+            assert math.isfinite(temp), f"temperature_c value must be finite, got {temp}"
+            assert -50.0 <= temp <= 80.0, (
+                f"temperature_c out of reasonable range [-50, 80] C: {temp}"
+            )
 
 
 class TestStepError:
@@ -103,12 +114,14 @@ class TestStepError:
         t = dw.telemetry()
         zone = t.zone()
 
-        assert isinstance(zone, dict), "zone() should return a dict"
         assert "temperature_c" in zone, "zone should have temperature_c"
-        temp = zone["temperature_c"]
-        assert isinstance(temp, (int, float, list)), (
-            "temperature_c should be a number or list of numbers"
-        )
+        temps = zone["temperature_c"]
+        assert isinstance(temps, list), "temperature_c should be a list"
+        for temp in temps:
+            assert math.isfinite(temp), f"temperature_c value must be finite, got {temp}"
+            assert -50.0 <= temp <= 80.0, (
+                f"temperature_c out of reasonable range [-50, 80] C: {temp}"
+            )
 
     def test_telemetry_equipment_returns_correct_data(self):
         from ochre_next import Dwelling
@@ -131,6 +144,7 @@ class TestStepError:
         equipment = t.equipment()
 
         assert isinstance(equipment, dict), "equipment() should return a dict"
-
-
-
+        assert len(equipment) > 0, "equipment dict should be non-empty"
+        for name in equipment:
+            assert isinstance(name, str), f"equipment key should be a string, got {type(name)}"
+            assert len(name) > 0, "equipment name should be non-empty"

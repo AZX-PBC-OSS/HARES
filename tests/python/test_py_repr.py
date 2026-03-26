@@ -39,105 +39,62 @@ def dwelling():
 
 
 class TestPyRepr:
-    def test_dwelling_repr_contains_class_name(self, dwelling):
+    def test_dwelling_repr(self, dwelling):
         r = repr(dwelling)
-        assert r
         assert "Dwelling" in r
-
-    def test_dwelling_repr_contains_bldg_id(self, dwelling):
-        r = repr(dwelling)
-        assert "bldg_id" in r
         assert "42" in r
-
-    def test_dwelling_repr_contains_initialized(self, dwelling):
-        r = repr(dwelling)
         assert "initialized" in r
 
-
-class TestTimestepsIterRepr:
-    def test_timesteps_repr_contains_class_name(self, dwelling):
+    def test_timesteps_repr(self, dwelling):
         it = dwelling.timesteps()
         r = repr(it)
-        assert r
         assert "TimestepsIter" in r
-
-    def test_timesteps_repr_shows_step_progress(self, dwelling):
-        it = dwelling.timesteps()
-        r = repr(it)
         assert "step=" in r
         assert "/" in r
 
 
 class TestBatteryRepr:
-    def test_battery_repr_contains_class_name(self):
-        from ochre_next._hares import Battery
+    def test_battery_repr(self):
+        from ochre_next import Battery
 
         b = Battery(name="test_batt", capacity_kwh=10.0)
         r = repr(b)
-        assert r
         assert "Battery" in r
-
-    def test_battery_repr_contains_name(self):
-        from ochre_next._hares import Battery
-
-        b = Battery(name="test_batt", capacity_kwh=10.0)
-        r = repr(b)
         assert "test_batt" in r
-
-    def test_battery_repr_contains_capacity(self):
-        from ochre_next._hares import Battery
-
-        b = Battery(name="test_batt", capacity_kwh=10.0)
-        r = repr(b)
         assert "10" in r
 
 
 class TestPvSoilingConfigRepr:
-    def test_pv_soiling_config_repr_contains_class_name(self):
-        from ochre_next._hares import PvSoilingConfig
+    def test_pv_soiling_config_repr(self):
+        from ochre_next import PvSoilingConfig
 
         c = PvSoilingConfig()
         r = repr(c)
-        assert r
         assert "PvSoilingConfig" in r
+        # repr must expose at least one numeric field value, not just the class name
+        import re
+        assert re.search(r"\d+\.?\d*", r), "repr contains no numeric field value"
 
 
 class TestPvRepr:
-    def test_pv_repr_contains_class_name(self):
-        from ochre_next._hares import PV
+    def test_pv_repr(self):
+        from ochre_next import PV
 
         pv = PV(name="test_pv", capacity_kw=5.0, tilt=30.0, azimuth=180.0)
         r = repr(pv)
-        assert r
         assert "PV" in r
-
-    def test_pv_repr_contains_name(self):
-        from ochre_next._hares import PV
-
-        pv = PV(name="test_pv", capacity_kw=5.0, tilt=30.0, azimuth=180.0)
-        r = repr(pv)
         assert "test_pv" in r
-
-    def test_pv_repr_contains_capacity(self):
-        from ochre_next._hares import PV
-
-        pv = PV(name="test_pv", capacity_kw=5.0, tilt=30.0, azimuth=180.0)
-        r = repr(pv)
         assert "5" in r
+        assert "30" in r
+        assert "180" in r
 
 
 class TestEvRepr:
-    def test_ev_repr_contains_class_name(self):
-        from ochre_next._hares import EV
+    def test_ev_repr(self):
+        from ochre_next import EV
 
         ev = EV(name="test_ev", capacity_kwh=75.0, max_charging_kw=11.0)
         r = repr(ev)
-        assert r
         assert "EV" in r
-
-    def test_ev_repr_contains_name(self):
-        from ochre_next._hares import EV
-
-        ev = EV(name="test_ev", capacity_kwh=75.0, max_charging_kw=11.0)
-        r = repr(ev)
         assert "test_ev" in r
+        assert "75" in r

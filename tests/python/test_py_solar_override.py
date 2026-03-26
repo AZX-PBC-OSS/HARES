@@ -395,8 +395,30 @@ class TestSolarOverridePVProduction:
                 f"Expected non-negative net power at night, got {net_power} kW"
             )
 
-    @pytest.mark.skip(
-        reason="Requires HPXML with functioning PV system - not yet supported in base fixtures"
-    )
     def test_summer_daytime_with_pv_produces_negative_power(self):
-        pass
+        from ochre_next import Dwelling, PV
+
+        dw = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            start_time="2019-07-15T10:00:00",
+            duration_s=6 * 3600,
+            time_res_s=3600,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=42,
+            master_seed=0,
+        )
+        pv = PV(name="roof_pv", capacity_kw=10.0, tilt=30.0, azimuth=180.0)
+        dw.add_pv(pv)
+        dw.initialize()
+
+        found_negative = False
+        for _ in range(6):
+            result = dw.step()
+            if result["net_electric_power_kw"] < 0:
+                found_negative = True
+
+        assert found_negative, (
+            "Expected at least one daytime step with negative net power (PV export)"
+        )

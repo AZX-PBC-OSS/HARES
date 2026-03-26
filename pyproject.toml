@@ -8,8 +8,9 @@ version = "0.1.0"
 description = "HARES: High-performance Architecture for Residential Energy Simulation"
 requires-python = ">=3.11"
 dependencies = [
-    "polars>=1",
-    "pyarrow>=18",
+    "numpy>=2.4.3",
+    "polars>=1.39.3",
+    "pyarrow>=23.0.1",
 ]
 license = {text = "BSD-3-Clause"}
 classifiers = [
@@ -21,23 +22,24 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-sam = ["NREL-PySAM>=5"]
-pybamm = ["pybamm>=24"]
-resstock = ["boto3>=1.35", "httpx>=0.27"]
-helics = ["helics>=3"]
-rl = ["gymnasium>=1"]
+sam = ["NREL-PySAM>=7.1.0"]
+pybamm = ["pybamm>=26.3.0"]
+resstock = ["boto3>=1.42.76", "httpx>=0.28.1"]
+helics = ["helics>=3.6.1"]
+rl = ["gymnasium>=1.2.3"]
 dev = [
-    "pytest>=8",
-    "maturin>=1.7",
-    "ruff>=0.8",
+    "pytest>=9.0.2",
+    "maturin>=1.12.6",
+    "ruff>=0.15.7",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=8",
-    "maturin>=1.7",
-    "ruff>=0.8",
+    "pytest>=9.0.2",
+    "maturin>=1.12.6",
+    "ruff>=0.15.7",
     "psychrolib>=2.5.0",
+    "numpy>=2.4.3",
 ]
 
 [tool.uv]

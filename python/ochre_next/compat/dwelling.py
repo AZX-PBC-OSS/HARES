@@ -8,19 +8,58 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+from enum import StrEnum
 import logging
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 import polars as pl
 
-from ochre_next._hares import PyDwelling
-
-try:
-    from ochre_next._hares import PyControlSignal
-except ImportError:
-    from ochre_next._hares import ControlSignal as PyControlSignal
+from ochre_next import Dwelling as PyDwelling
+from ochre_next import ControlSignal as PyControlSignal
 
 LOGGER = logging.getLogger(__name__)
+
+
+class ControlPayloadKey(StrEnum):
+    SETPOINT = "Setpoint"
+    DEADBAND = "Deadband"
+    P_SETPOINT = "P Setpoint"
+    Q_SETPOINT = "Q Setpoint"
+    DUTY_CYCLE = "Duty Cycle"
+    LOAD_FRACTION = "Load Fraction"
+    SOC = "SOC"
+    SOC_MIN = "Min SOC"
+    SOC_MAX = "Max SOC"
+    SELF_CONSUMPTION = "Self Consumption Mode"
+    SOLAR_ONLY = "Solar Only Charging"
+
+
+class OchreThermalPayload(TypedDict, total=False):
+    Setpoint: float
+    Deadband: float
+
+
+class OchrePowerPayload(TypedDict, total=False):
+    """P or Q setpoint payload."""
+
+    P_Setpoint: NotRequired[float]
+    Q_Setpoint: NotRequired[float]
+
+
+class OchreControlSignal(TypedDict, total=False):
+    """One equipment's control signal in OCHRE format."""
+
+    Setpoint: float
+    Deadband: float
+    P_Setpoint: float
+    Q_Setpoint: float
+    Duty_Cycle: float
+    Load_Fraction: float
+    SOC: float
+    Min_SOC: float
+    Max_SOC: float
+    Self_Consumption_Mode: bool
+    Solar_Only_Charging: bool
 
 
 class Dwelling:
@@ -108,7 +147,7 @@ class Dwelling:
             if not series.dtype.is_numeric():
                 continue
             value = series.drop_nulls().mean()
-            if value is not None:
+            if isinstance(value, (int, float)):
                 metrics[column] = float(value)
 
         return metrics
@@ -142,13 +181,13 @@ def _map_ochre_payload(
 ) -> PyControlSignal | None:
     is_cooling = _is_cooling_equipment(equipment_name)
 
-    if "Setpoint" in payload:
-        sp = _safe_float(payload["Setpoint"], "Setpoint", equipment_name)
+    if ControlPayloadKey.SETPOINT in payload:
+        sp = _safe_float(payload[ControlPayloadKey.SETPOINT], ControlPayloadKey.SETPOINT, equipment_name)
         if sp is None:
             return None
         deadband_c: float | None = None
-        if "Deadband" in payload:
-            deadband_c = _safe_float(payload["Deadband"], "Deadband", equipment_name)
+        if ControlPayloadKey.DEADBAND in payload:
+            deadband_c = _safe_float(payload[ControlPayloadKey.DEADBAND], ControlPayloadKey.DEADBAND, equipment_name)
         if is_cooling:
             return PyControlSignal.thermal_setpoint(
                 heat_c=None, cool_c=sp, deadband_c=deadband_c,
@@ -157,51 +196,51 @@ def _map_ochre_payload(
             heat_c=sp, cool_c=None, deadband_c=deadband_c,
         )
 
-    if "Deadband" in payload:
-        db = _safe_float(payload["Deadband"], "Deadband", equipment_name)
+    if ControlPayloadKey.DEADBAND in payload:
+        db = _safe_float(payload[ControlPayloadKey.DEADBAND], ControlPayloadKey.DEADBAND, equipment_name)
         if db is None:
             return None
         return PyControlSignal.thermal_setpoint(
             heat_c=None, cool_c=None, deadband_c=db,
         )
 
-    if "P Setpoint" in payload:
-        kw = _safe_float(payload["P Setpoint"], "P Setpoint", equipment_name)
+    if ControlPayloadKey.P_SETPOINT in payload:
+        kw = _safe_float(payload[ControlPayloadKey.P_SETPOINT], ControlPayloadKey.P_SETPOINT, equipment_name)
         if kw is None:
             return None
         return PyControlSignal.power_setpoint(kw=kw, reactive_kvar=None)
 
-    if "Duty Cycle" in payload:
-        dc = _safe_float(payload["Duty Cycle"], "Duty Cycle", equipment_name)
+    if ControlPayloadKey.DUTY_CYCLE in payload:
+        dc = _safe_float(payload[ControlPayloadKey.DUTY_CYCLE], ControlPayloadKey.DUTY_CYCLE, equipment_name)
         if dc is None:
             return None
         return PyControlSignal.from_dict({"type": "DutyCycle", "on_fraction": dc})
 
-    if "Load Fraction" in payload:
-        lf = _safe_float(payload["Load Fraction"], "Load Fraction", equipment_name)
+    if ControlPayloadKey.LOAD_FRACTION in payload:
+        lf = _safe_float(payload[ControlPayloadKey.LOAD_FRACTION], ControlPayloadKey.LOAD_FRACTION, equipment_name)
         if lf is None:
             return None
         return PyControlSignal.from_dict({"type": "LoadFraction", "fraction": lf})
 
-    if "SOC" in payload:
-        soc = _safe_float(payload["SOC"], "SOC", equipment_name)
+    if ControlPayloadKey.SOC in payload:
+        soc = _safe_float(payload[ControlPayloadKey.SOC], ControlPayloadKey.SOC, equipment_name)
         if soc is None:
             return None
         return PyControlSignal.soc_target(
             target=soc,
-            min=_safe_float(payload["Min SOC"], "Min SOC", equipment_name)
-            if "Min SOC" in payload
+            min=_safe_float(payload[ControlPayloadKey.SOC_MIN], ControlPayloadKey.SOC_MIN, equipment_name)
+            if ControlPayloadKey.SOC_MIN in payload
             else None,
-            max=_safe_float(payload["Max SOC"], "Max SOC", equipment_name)
-            if "Max SOC" in payload
+            max=_safe_float(payload[ControlPayloadKey.SOC_MAX], ControlPayloadKey.SOC_MAX, equipment_name)
+            if ControlPayloadKey.SOC_MAX in payload
             else None,
         )
 
-    if "Self Consumption Mode" in payload:
+    if ControlPayloadKey.SELF_CONSUMPTION in payload:
         return PyControlSignal.from_dict(
             {
                 "type": "SelfConsumption",
-                "enabled": bool(payload["Self Consumption Mode"]),
+                "enabled": bool(payload[ControlPayloadKey.SELF_CONSUMPTION]),
                 "solar_only_charging": False,
             }
         )

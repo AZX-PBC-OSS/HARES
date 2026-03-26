@@ -22,10 +22,10 @@ def _dwelling_class():
 
 def _fleet_class():
     try:
-        from ochre_next._hares import PyFleet
+        from ochre_next import Fleet
     except ModuleNotFoundError:
-        pytest.skip("ochre_next._hares is not available in this environment")
-    return PyFleet
+        pytest.skip("ochre_next.Fleet is not available in this environment")
+    return Fleet
 
 
 @pytest.fixture(scope="session")
@@ -80,8 +80,10 @@ def fleet():
 
 
 def test_simulate_returns_dataframe(simulated_df):
-    """Verify that simulate() returns a polars DataFrame."""
+    """Verify that simulate() returns a non-empty polars DataFrame with columns."""
     assert isinstance(simulated_df, pl.DataFrame)
+    assert simulated_df.width > 0, "DataFrame should have at least one column"
+    assert simulated_df.height > 0, "DataFrame should have at least one row"
 
 
 def test_results_before_simulate_returns_dataframe(dwelling):
@@ -103,6 +105,20 @@ def test_results_before_simulate_returns_dataframe(dwelling):
 
     assert isinstance(df, pl.DataFrame)
     assert df.height == 0, "Results before simulate should be empty"
+    assert df.width > 0, "Schema should have columns even when no rows have been produced"
+    assert "Time" in df.columns, "Schema should include a Time column"
+
+
+def test_results_dataframe_columns_include_time_and_power(simulated_df):
+    """Verify DataFrame contains Time column and at least one power-related column."""
+    columns = simulated_df.columns
+    assert "Time" in columns, "DataFrame must have a Time column"
+
+    power_columns = [c for c in columns if "(kW)" in c]
+    assert len(power_columns) > 0, (
+        "DataFrame must have at least one power column matching '(kW)'; "
+        f"found columns: {columns}"
+    )
 
 
 def test_results_dataframe_shape(simulated_df):

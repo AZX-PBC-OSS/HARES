@@ -35,7 +35,7 @@ def _make_dwelling():
 
 class TestAddEquipment:
     def test_add_battery_appears_in_equipment_names(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat = Battery("TestBat", 10.0)
@@ -43,7 +43,7 @@ class TestAddEquipment:
         assert "TestBat" in dw.equipment_names()
 
     def test_add_battery_step_succeeds(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat = Battery("TestBat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
@@ -52,7 +52,7 @@ class TestAddEquipment:
         assert "time" in result
 
     def test_add_pv_appears_in_equipment_names(self):
-        from ochre_next._hares import PV
+        from ochre_next import PV
 
         dw = _make_dwelling()
         pv = PV("TestPV", 5.0, 30.0, 180.0)
@@ -60,7 +60,7 @@ class TestAddEquipment:
         assert "TestPV" in dw.equipment_names()
 
     def test_add_pv_step_succeeds(self):
-        from ochre_next._hares import PV
+        from ochre_next import PV
 
         dw = _make_dwelling()
         pv = PV("TestPV", 5.0, 30.0, 180.0)
@@ -69,7 +69,7 @@ class TestAddEquipment:
         assert "time" in result
 
     def test_add_ev_appears_in_equipment_names(self):
-        from ochre_next._hares import EV
+        from ochre_next import EV
 
         dw = _make_dwelling()
         ev = EV("TestEV", capacity_kwh=75.0)
@@ -77,7 +77,7 @@ class TestAddEquipment:
         assert "TestEV" in dw.equipment_names()
 
     def test_add_ev_step_succeeds(self):
-        from ochre_next._hares import EV
+        from ochre_next import EV
 
         dw = _make_dwelling()
         ev = EV("TestEV", capacity_kwh=75.0, max_charging_kw=7.2)
@@ -88,7 +88,7 @@ class TestAddEquipment:
 
 class TestRemoveEquipment:
     def test_remove_added_equipment(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat = Battery("TestBat", 10.0)
@@ -104,7 +104,7 @@ class TestRemoveEquipment:
             dw.remove_equipment("NoSuchEquipment")
 
     def test_step_after_remove_succeeds(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat = Battery("TestBat", 10.0)
@@ -116,7 +116,7 @@ class TestRemoveEquipment:
 
 class TestReplaceEquipment:
     def test_replace_battery_with_new_battery(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat1 = Battery("TestBat", 10.0)
@@ -133,7 +133,7 @@ class TestReplaceEquipment:
         assert "TestBat" in descs
 
     def test_replace_nonexistent_raises(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat = Battery("NoSuch", 10.0)
@@ -141,7 +141,7 @@ class TestReplaceEquipment:
             dw.replace_equipment("NoSuch", bat)
 
     def test_step_after_replace_succeeds(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat1 = Battery("TestBat", 10.0)
@@ -156,7 +156,7 @@ class TestReplaceEquipment:
 
 class TestUpdateEquipment:
     def test_update_battery_ocv_table(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat = Battery("TestBat", 10.0)
@@ -183,7 +183,7 @@ class TestUpdateEquipment:
         assert "time" in result
 
     def test_update_battery_uneg_table(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         bat = Battery("TestBat", 10.0)
@@ -222,7 +222,7 @@ class TestUpdateEquipment:
 
 class TestSetEquipmentLut:
     def test_set_ocv_from_dict(self):
-        from ochre_next._hares import Battery, LutType
+        from ochre_next import Battery, LutType
 
         dw = _make_dwelling()
         bat = Battery("TestBat", 10.0)
@@ -237,7 +237,7 @@ class TestSetEquipmentLut:
         assert "time" in result
 
     def test_clear_ocv_lut(self):
-        from ochre_next._hares import Battery, LutType
+        from ochre_next import Battery, LutType
 
         dw = _make_dwelling()
         bat = Battery("TestBat", 10.0)
@@ -253,7 +253,7 @@ class TestSetEquipmentLut:
         assert "time" in result
 
     def test_set_lut_nonexistent_raises(self):
-        from ochre_next._hares import LutType
+        from ochre_next import LutType
 
         dw = _make_dwelling()
         with pytest.raises(ValueError, match="not found"):
@@ -266,7 +266,7 @@ class TestSetEquipmentLut:
 
 class TestMultipleMutations:
     def test_add_battery_and_pv_then_step(self):
-        from ochre_next._hares import Battery, PV
+        from ochre_next import Battery, PV
 
         dw = _make_dwelling()
         dw.add_battery(Battery("Bat1", 10.0))
@@ -280,7 +280,7 @@ class TestMultipleMutations:
         assert "time" in result
 
     def test_add_then_remove_then_add_different(self):
-        from ochre_next._hares import Battery, PV
+        from ochre_next import Battery, PV
 
         dw = _make_dwelling()
         dw.add_battery(Battery("Bat1", 10.0))
@@ -300,7 +300,7 @@ class TestCheckpointRoundTrip:
         reason="checkpoint deserialization does not yet support dynamically added equipment"
     )
     def test_added_equipment_persists_through_checkpoint(self):
-        from ochre_next._hares import Battery
+        from ochre_next import Battery
 
         dw = _make_dwelling()
         dw.add_battery(Battery("TestBat", 10.0))

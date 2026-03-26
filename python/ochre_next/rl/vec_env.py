@@ -13,11 +13,6 @@ import numpy as np
 from ochre_next._hares import PyDwelling
 
 try:
-    from ochre_next._hares import PyControlSignal
-except ImportError:
-    from ochre_next._hares import ControlSignal as PyControlSignal
-
-try:
     from ochre_next._hares import batch_step as rust_batch_step
 except ImportError:  # pragma: no cover - only when extension lacks RL entrypoint
     rust_batch_step = None
@@ -28,9 +23,10 @@ except ImportError:  # pragma: no cover - optional dependency
     spaces = None
 
 from .gym_env import (
+    RewardContext,
+    _build_control_signal,
     _field_bounds,
     _sorted_action_layout,
-    action_payload,
     telemetry_to_observation,
 )
 
@@ -41,7 +37,7 @@ class VecDwellingGymEnv:
         dwellings: Sequence[PyDwelling],
         observation_fields: Sequence[str],
         action_space_config: Mapping[str, Sequence[str]],
-        reward_fn: Callable[[dict[str, Any]], float],
+        reward_fn: Callable[[RewardContext], float],
         episode_length: timedelta,
     ) -> None:
         start_method = multiprocessing.get_start_method(allow_none=True)
@@ -105,11 +101,11 @@ class VecDwellingGymEnv:
         for idx, (equipment, field) in enumerate(self._action_layout):
             action_values.setdefault(equipment, {})[field] = float(action_row[idx])
         for equipment in sorted(action_values):
-            payload = action_payload(
+            signal = _build_control_signal(
                 self._signal_type_by_equipment[equipment],
                 action_values[equipment],
             )
-            dwelling.apply_control(equipment, PyControlSignal.from_dict(payload))
+            dwelling.apply_control(equipment, signal)
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         del options
@@ -159,14 +155,12 @@ class VecDwellingGymEnv:
                 step_data = dwelling.step()
                 telemetry = dwelling.telemetry()
                 obs_rows.append(telemetry_to_observation(telemetry, self._observation_fields))
-                ctx = {
-                    "step": step_data,
-                    "telemetry": {
-                        "zone": telemetry.zone(),
-                        "equipment": telemetry.equipment(),
-                        "total_power_kw": telemetry.total_power_kw(),
-                    },
-                }
+                ctx = RewardContext(
+                    step=step_data,
+                    telemetry_zone=telemetry.zone(),
+                    telemetry_equipment=telemetry.equipment(),
+                    total_power_kw=float(telemetry.total_power_kw()),
+                )
                 rewards.append(float(self._reward_fn(ctx)))
                 dones.append(False)
                 truncs.append(False)

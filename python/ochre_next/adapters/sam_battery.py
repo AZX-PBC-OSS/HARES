@@ -11,7 +11,7 @@ import hashlib
 import logging
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
 try:
     import tomllib
@@ -28,7 +28,48 @@ except ImportError:
 
 LOGGER = logging.getLogger(__name__)
 
-_BUILTIN_DEFAULTS: dict[str, dict[str, Any]] = {
+
+class _CellSection(TypedDict):
+    chemistry: str
+    v_nominal: float
+    ah_rated: float
+    r_internal_ohm: float
+    n_series: int
+    n_parallel: int
+
+
+class _SocOcvSection(TypedDict):
+    soc: list[float]
+    v_oc: list[float]
+
+
+class _ThermalSection(TypedDict):
+    r_thermal_k_per_w: float
+    c_thermal_j_per_k: int
+
+
+class _LossesSection(TypedDict):
+    standby_power_w: float
+    self_discharge_pct_per_day: float
+    inverter_efficiency: float
+
+
+class _DegradationSection(TypedDict):
+    model: str
+    calendar_q: float
+    calendar_a: float
+    cycle_q: float
+    cycle_d: float
+
+
+class CellParamsDict(TypedDict):
+    cell: _CellSection
+    soc_ocv: _SocOcvSection
+    thermal: _ThermalSection
+    losses: _LossesSection
+    degradation: _DegradationSection
+
+_BUILTIN_DEFAULTS: dict[str, CellParamsDict] = {
     "NMC": {
         "cell": {
             "chemistry": "NMC",
@@ -226,30 +267,53 @@ class CellParams:
             _write_cache(path, self.metadata["content_hash"])
 
 
-def _extract_from_sam(chemistry: str, capacity_kwh: float) -> dict[str, Any]:
-    """Extract cell parameters from PySAM BatteryStateful."""
-    if _battery_sam is None:
-        raise ImportError(
-            "PySAM is required for SAM battery adapter; install with: "
-            "pip install 'ochre_next[sam]'"
-        )
+_CHEMISTRY_TO_SAM_DEFAULT: dict[str, str] = {
+    "NMC": "NMCGraphite",
+    "NCA": "NMCGraphite",
+    "LFP": "LFPGraphite",
+    "LTO": "LMOLTO",
+    "LMO": "LMOLTO",
+}
 
-    batt = _battery_sam.default("GenericBatteryCommercial")
-    params = dict(_BUILTIN_DEFAULTS.get(chemistry, _BUILTIN_DEFAULTS["NMC"]))
-    params["cell"] = dict(params["cell"])
-    params["cell"]["chemistry"] = chemistry
+_SAM_BATT_CACHE: dict[str, Any] = {}
+
+
+def _get_sam_battery(chemistry: str) -> Any:
+    """Return a PySAM BatteryStateful default instance for *chemistry*."""
+    sam_name = _CHEMISTRY_TO_SAM_DEFAULT.get(chemistry.upper(), "NMCGraphite")
+    if sam_name not in _SAM_BATT_CACHE:
+        if _battery_sam is None:
+            raise ImportError(
+                "PySAM is required for SAM battery adapter; install with: "
+                "pip install 'ochre_next[sam]'"
+            )
+        _SAM_BATT_CACHE[sam_name] = _battery_sam.default(sam_name)
+    return _SAM_BATT_CACHE[sam_name]
+
+
+def _extract_from_sam(chemistry: str, capacity_kwh: float) -> CellParamsDict:
+    """Extract cell parameters from PySAM BatteryStateful."""
+    batt = _get_sam_battery(chemistry)
+    base = _BUILTIN_DEFAULTS.get(chemistry, _BUILTIN_DEFAULTS["NMC"])
+    cell = {**base["cell"], "chemistry": chemistry}
+
     v_nominal = batt.ParamsCell.Vnom_default
     if v_nominal > 0:
-        params["cell"]["v_nominal"] = v_nominal
+        cell["v_nominal"] = float(v_nominal)
     r_internal = batt.ParamsCell.resistance
     if r_internal > 0:
-        params["cell"]["r_internal_ohm"] = r_internal
+        cell["r_internal_ohm"] = float(r_internal)
 
-    total_ah = capacity_kwh * 1000.0 / params["cell"]["v_nominal"]
-    n_parallel = params["cell"]["n_parallel"]
-    params["cell"]["ah_rated"] = round(total_ah / n_parallel, 2)
+    total_ah = capacity_kwh * 1000.0 / cell["v_nominal"]
+    cell["ah_rated"] = round(total_ah / cell["n_parallel"], 2)
 
-    return params
+    return cast(CellParamsDict, {
+        "cell": cell,
+        "soc_ocv": {**base["soc_ocv"]},
+        "thermal": {**base["thermal"]},
+        "losses": {**base["losses"]},
+        "degradation": {**base["degradation"]},
+    })
 
 
 def extract_cell_params(
@@ -292,20 +356,25 @@ def extract_cell_params(
 
     if source == "SAM" and _HAS_PYSAM:
         LOGGER.info("Extracting battery params from PySAM for %s %.1f kWh", chemistry, capacity_kwh)
-        params = _extract_from_sam(chemistry, capacity_kwh)
+        typed_params = _extract_from_sam(chemistry, capacity_kwh)
     else:
         if source == "SAM" and not _HAS_PYSAM:
             LOGGER.warning("PySAM not installed; using built-in defaults for %s", chemistry)
         LOGGER.info("Using built-in defaults for %s %.1f kWh", chemistry, capacity_kwh)
         chem_upper = chemistry.upper()
         base = _BUILTIN_DEFAULTS.get(chem_upper, _BUILTIN_DEFAULTS["NMC"])
-        params = {k: dict(v) if isinstance(v, dict) else v for k, v in base.items()}
-        params["cell"]["chemistry"] = chemistry
-        total_ah = capacity_kwh * 1000.0 / params["cell"]["v_nominal"]
-        n_parallel = params["cell"]["n_parallel"]
-        params["cell"]["ah_rated"] = round(total_ah / n_parallel, 2)
+        cell: _CellSection = {**base["cell"], "chemistry": chemistry}
+        total_ah = capacity_kwh * 1000.0 / cell["v_nominal"]
+        cell["ah_rated"] = round(total_ah / cell["n_parallel"], 2)
+        typed_params = CellParamsDict(
+            cell=cell,
+            soc_ocv={**base["soc_ocv"]},
+            thermal={**base["thermal"]},
+            losses={**base["losses"]},
+            degradation={**base["degradation"]},
+        )
 
-    result = CellParams(params=params, metadata={"content_hash": content_hash, "cached": False})
+    result = CellParams(params=cast(dict[str, Any], typed_params), metadata={"content_hash": content_hash, "cached": False})
 
     if cache_dir is not None:
         cached_path = Path(cache_dir) / "cell_params.toml"

@@ -8,20 +8,39 @@ from Python using multiple input formats.
 import numpy as np
 import pytest
 
-from ochre_next._hares import LutType, PyDwelling
+from pathlib import Path
+
+from ochre_next import Battery, Dwelling, EV, LutType
+
+ROOT = Path(__file__).resolve().parents[2]
+HARES_DEFAULTS = ROOT / "defaults"
+
+HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
+WEATHER = str(
+    ROOT / "vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"
+)
+SCHEDULE = str(
+    ROOT / "vendors/OCHRE/ochre/defaults/Input Files/BEopt_example_schedule.csv"
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_dwelling() -> PyDwelling:
-    """Create a minimal synthetic dwelling for testing."""
-    return PyDwelling.synthetic(
-        start="2026-01-01T00:00:00Z",
+def _make_dwelling() -> Dwelling:
+    """Create a minimal dwelling for LUT injection testing."""
+    dw = Dwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        start_time="2019-01-01T00:00:00",
         duration_s=3600,
-        step_s=60,
+        time_res_s=60,
+        defaults_path=str(HARES_DEFAULTS),
     )
+    dw.initialize()
+    return dw
 
 
 def _simple_charging_lut() -> dict:
@@ -64,8 +83,6 @@ def _simple_uneg_table() -> list[tuple[float, float]]:
 
 class TestBatteryLutInjection:
     def test_add_battery_with_charging_curve_lut(self):
-        from ochre_next._hares import Battery
-
         lut = _simple_charging_lut()
         bat = Battery("TestBat", 10.0, charging_curve_lut=lut)
         dw = _make_dwelling()
@@ -73,8 +90,6 @@ class TestBatteryLutInjection:
         assert "TestBat" in dw.equipment_names()
 
     def test_add_battery_with_ocv_table(self):
-        from ochre_next._hares import Battery
-
         ocv = _lfp_ocv_table()
         bat = Battery("TestBat", 10.0, ocv_table=ocv)
         dw = _make_dwelling()
@@ -82,8 +97,6 @@ class TestBatteryLutInjection:
         assert "TestBat" in dw.equipment_names()
 
     def test_add_battery_with_uneg_table(self):
-        from ochre_next._hares import Battery
-
         uneg = _simple_uneg_table()
         bat = Battery("TestBat", 10.0, uneg_table=uneg)
         dw = _make_dwelling()
@@ -91,8 +104,6 @@ class TestBatteryLutInjection:
         assert "TestBat" in dw.equipment_names()
 
     def test_add_battery_with_all_luts(self):
-        from ochre_next._hares import Battery
-
         bat = Battery(
             "TestBat",
             10.0,
@@ -105,44 +116,41 @@ class TestBatteryLutInjection:
         assert "TestBat" in dw.equipment_names()
 
     def test_set_equipment_lut_charging_curve(self):
-        from ochre_next._hares import Battery
-
         bat = Battery("TestBat", 10.0)
         dw = _make_dwelling()
         dw.add_battery(bat)
         dw.set_equipment_lut("TestBat", LutType.ChargingCurve, _simple_charging_lut())
+        assert dw.has_equipment_lut("TestBat", LutType.ChargingCurve)
 
     def test_set_equipment_lut_ocv(self):
-        from ochre_next._hares import Battery
-
         bat = Battery("TestBat", 10.0)
         dw = _make_dwelling()
         dw.add_battery(bat)
         dw.set_equipment_lut("TestBat", LutType.Ocv, _lfp_ocv_table())
+        assert dw.has_equipment_lut("TestBat", LutType.Ocv)
 
     def test_set_equipment_lut_uneg(self):
-        from ochre_next._hares import Battery
-
         bat = Battery("TestBat", 10.0)
         dw = _make_dwelling()
         dw.add_battery(bat)
         dw.set_equipment_lut("TestBat", LutType.UNeg, _simple_uneg_table())
+        assert dw.has_equipment_lut("TestBat", LutType.UNeg)
 
     def test_clear_equipment_lut_charging_curve(self):
-        from ochre_next._hares import Battery
-
         bat = Battery("TestBat", 10.0, charging_curve_lut=_simple_charging_lut())
         dw = _make_dwelling()
         dw.add_battery(bat)
+        assert dw.has_equipment_lut("TestBat", LutType.ChargingCurve)
         dw.clear_equipment_lut("TestBat", LutType.ChargingCurve)
+        assert not dw.has_equipment_lut("TestBat", LutType.ChargingCurve)
 
     def test_clear_equipment_lut_ocv_resets_to_default(self):
-        from ochre_next._hares import Battery
-
         bat = Battery("TestBat", 10.0, ocv_table=_lfp_ocv_table())
         dw = _make_dwelling()
         dw.add_battery(bat)
+        assert dw.has_equipment_lut("TestBat", LutType.Ocv)
         dw.clear_equipment_lut("TestBat", LutType.Ocv)
+        assert not dw.has_equipment_lut("TestBat", LutType.Ocv)
 
     def test_set_lut_nonexistent_equipment_raises(self):
         dw = _make_dwelling()
@@ -151,8 +159,6 @@ class TestBatteryLutInjection:
 
     def test_set_lut_unsupported_type_raises(self):
         """Setting OCV on an EV should raise (EV doesn't support OCV)."""
-        from ochre_next._hares import EV
-
         ev = EV("TestEV", capacity_kwh=65.0)
         dw = _make_dwelling()
         dw.add_ev(ev)
@@ -167,8 +173,6 @@ class TestBatteryLutInjection:
 
 class TestEvLutInjection:
     def test_add_ev_with_charging_curve_lut(self):
-        from ochre_next._hares import EV
-
         lut = _simple_charging_lut()
         ev = EV("TestEV", capacity_kwh=65.0, charging_curve_lut=lut)
         dw = _make_dwelling()
@@ -176,20 +180,19 @@ class TestEvLutInjection:
         assert "TestEV" in dw.equipment_names()
 
     def test_set_ev_charging_curve_after_add(self):
-        from ochre_next._hares import EV
-
         ev = EV("TestEV", capacity_kwh=65.0)
         dw = _make_dwelling()
         dw.add_ev(ev)
         dw.set_equipment_lut("TestEV", LutType.ChargingCurve, _simple_charging_lut())
+        assert dw.has_equipment_lut("TestEV", LutType.ChargingCurve)
 
     def test_clear_ev_charging_curve(self):
-        from ochre_next._hares import EV
-
         ev = EV("TestEV", capacity_kwh=65.0, charging_curve_lut=_simple_charging_lut())
         dw = _make_dwelling()
         dw.add_ev(ev)
+        assert dw.has_equipment_lut("TestEV", LutType.ChargingCurve)
         dw.clear_equipment_lut("TestEV", LutType.ChargingCurve)
+        assert not dw.has_equipment_lut("TestEV", LutType.ChargingCurve)
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +203,6 @@ class TestEvLutInjection:
 class TestInputFormats:
     def test_numpy_dict_format(self):
         """Charging curve LUT as dict of numpy arrays."""
-        from ochre_next._hares import Battery
-
         lut = {
             "soc_grid": np.array([0.0, 0.5, 1.0]),
             "temp_grid": np.array([25.0]),
@@ -214,24 +215,18 @@ class TestInputFormats:
         dw.add_battery(bat)
 
     def test_ocv_tuple_list_format(self):
-        from ochre_next._hares import Battery
-
         ocv = [(0.0, 3.0), (0.5, 3.6), (1.0, 4.2)]
         bat = Battery("TestBat", 10.0, ocv_table=ocv)
         dw = _make_dwelling()
         dw.add_battery(bat)
 
     def test_ocv_dict_format(self):
-        from ochre_next._hares import Battery
-
         ocv = {"soc": [0.0, 0.5, 1.0], "voltage": [3.0, 3.6, 4.2]}
         bat = Battery("TestBat", 10.0, ocv_table=ocv)
         dw = _make_dwelling()
         dw.add_battery(bat)
 
     def test_uneg_tuple_list_format(self):
-        from ochre_next._hares import Battery
-
         uneg = [(0.0, 1.2), (0.5, 0.12), (1.0, 0.08)]
         bat = Battery("TestBat", 10.0, uneg_table=uneg)
         dw = _make_dwelling()
@@ -239,8 +234,6 @@ class TestInputFormats:
 
     def test_npz_path_format(self, tmp_path):
         """Charging curve LUT from NPZ file path."""
-        from ochre_next._hares import Battery
-
         lut_data = _simple_charging_lut()
         npz_path = tmp_path / "test_lut.npz"
         np.savez_compressed(npz_path, **lut_data)
@@ -257,8 +250,6 @@ class TestInputFormats:
 
 class TestValidation:
     def test_invalid_ocv_mismatched_lengths_raises(self):
-        from ochre_next._hares import Battery
-
         with pytest.raises(Exception):
             Battery("TestBat", 10.0, ocv_table=[(0.0, 3.0)])  # too few points is ok
             # But mismatched dict raises:
@@ -269,8 +260,6 @@ class TestValidation:
             )
 
     def test_invalid_ocv_non_increasing_soc_raises(self):
-        from ochre_next._hares import Battery
-
         with pytest.raises(Exception):
             Battery(
                 "TestBat",
@@ -279,8 +268,6 @@ class TestValidation:
             )
 
     def test_invalid_charging_lut_shape_mismatch_raises(self):
-        from ochre_next._hares import Battery
-
         lut = {
             "soc_grid": np.array([0.0, 0.5, 1.0]),
             "temp_grid": np.array([25.0]),
