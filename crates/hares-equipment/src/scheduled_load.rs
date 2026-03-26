@@ -476,7 +476,8 @@ impl Equipment for ScheduledLoad {
                 ScheduleSource::Constant(_)
                 | ScheduleSource::DailyProfile { .. }
                 | ScheduleSource::ColumnRef { .. }
-                | ScheduleSource::SolarAware { .. } => {}
+                | ScheduleSource::SolarAware { .. }
+                | ScheduleSource::TimeWindows { .. } => {}
                 _ => {
                     return Err(HaresError::Equipment(
                             "checkpoint is missing gas schedule state for a stateful gas schedule source".to_string(),
@@ -916,16 +917,29 @@ fn scale_schedule_source(source: &mut ScheduleSource, scale: f64) {
             hares_types::DistributionKind::Uniform { low, high } => {
                 *low *= scale;
                 *high *= scale;
+                // Ensure low ≤ high after scaling (negative scale inverts).
+                if *low > *high {
+                    std::mem::swap(low, high);
+                }
             }
             hares_types::DistributionKind::Exponential { lambda } => {
                 // E[Exp(λ)] = 1/λ; scaling output by `scale` ⟹ λ′ = λ/scale.
                 *lambda /= scale;
+                *lambda = lambda.abs(); // Guard against negative scale.
             }
             hares_types::DistributionKind::Poisson { lambda } => {
                 *lambda *= scale;
+                *lambda = lambda.abs(); // Guard against negative scale.
             }
+            // LogNormal: scaling mu/sigma doesn't scale output linearly.
+            // Bernoulli: scaling a probability is not meaningful.
             hares_types::DistributionKind::LogNormal { .. }
-            | hares_types::DistributionKind::Bernoulli { .. } => {}
+            | hares_types::DistributionKind::Bernoulli { .. } => {
+                tracing::warn!(
+                    scale,
+                    "usage_multiplier ignored for LogNormal/Bernoulli distribution"
+                );
+            }
         },
         ScheduleSource::Shared { data, .. } => {
             let scaled: Vec<f64> = data.iter().map(|v| v * scale).collect();
@@ -1457,6 +1471,8 @@ mod tests {
             seed: [9_u8; 32],
             draw_count: 0,
             rng: ChaCha8Rng::from_seed([9_u8; 32]),
+            clamp_min: None,
+            clamp_max: None,
         };
 
         let mut ports = PortSlots {
@@ -1479,6 +1495,8 @@ mod tests {
             seed: [9_u8; 32],
             draw_count: 0,
             rng: ChaCha8Rng::from_seed([9_u8; 32]),
+            clamp_min: None,
+            clamp_max: None,
         };
         b.load_state(&checkpoint).unwrap();
 

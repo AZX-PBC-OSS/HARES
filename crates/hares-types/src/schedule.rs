@@ -57,6 +57,15 @@ pub struct TimeWindow {
     pub start_minute: u16,
     pub end_minute: u16,
     pub value: f64,
+    /// Optional per-window noise. When set, `value` is the center and the
+    /// result is sampled from the distribution each call. When `None`,
+    /// `value` is returned exactly (current behavior, zero-cost).
+    pub noise: Option<DistributionKind>,
+    /// Post-noise output floor. Prevents nonsensical values (e.g., negative
+    /// miles driven from Gaussian noise on a small mean).
+    pub min_value: Option<f64>,
+    /// Post-noise output ceiling.
+    pub max_value: Option<f64>,
 }
 
 impl TimeWindow {
@@ -76,6 +85,55 @@ impl TimeWindow {
             start_minute,
             end_minute,
             value,
+            noise: None,
+            min_value: None,
+            max_value: None,
+        }
+    }
+
+    /// Create a time window with additive noise and optional clamping.
+    ///
+    /// `value` becomes the center of the distribution. The noise is added to
+    /// produce the final result, then clamped to `[min_value, max_value]`.
+    /// Create a time window with additive noise and optional clamping.
+    ///
+    /// `value` becomes the center of the distribution. The `noise` distribution
+    /// should typically have `mean: 0.0` (for Gaussian) so that `value` is the
+    /// true center; the `mean` field of the distribution acts as an additional
+    /// additive offset. The noise is added to produce the final result, then
+    /// clamped to `[min_value, max_value]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if the distribution parameters are invalid.
+    pub fn with_noise(
+        day: DayFilter,
+        start_minute: u16,
+        end_minute: u16,
+        value: f64,
+        noise: DistributionKind,
+        min_value: Option<f64>,
+        max_value: Option<f64>,
+    ) -> Self {
+        debug_assert!(start_minute < 1440, "start_minute out of range");
+        debug_assert!(end_minute <= 1440, "end_minute out of range");
+        debug_assert!(
+            start_minute != end_minute,
+            "zero-width window never matches; use default instead"
+        );
+        debug_assert!(
+            noise.validate().is_ok(),
+            "invalid distribution params: {:?}",
+            noise.validate().unwrap_err()
+        );
+        Self {
+            day,
+            start_minute,
+            end_minute,
+            value,
+            noise: Some(noise),
+            min_value,
+            max_value,
         }
     }
 
@@ -138,44 +196,106 @@ pub enum DistributionKind {
 }
 
 impl DistributionKind {
+    /// Validate that the distribution parameters are well-formed.
+    pub fn validate(&self) -> Result<(), HaresError> {
+        match self {
+            Self::Gaussian { mean, std_dev }
+                if !mean.is_finite() || !std_dev.is_finite() || *std_dev < 0.0 =>
+            {
+                Err(HaresError::Equipment(
+                    "Gaussian requires finite mean and non-negative finite std_dev".into(),
+                ))
+            }
+            Self::Uniform { low, high }
+                if !low.is_finite() || !high.is_finite() || low >= high =>
+            {
+                Err(HaresError::Equipment(format!(
+                    "Uniform requires finite low < high, got {low}, {high}"
+                )))
+            }
+            Self::LogNormal { mu, sigma }
+                if !mu.is_finite() || !sigma.is_finite() || *sigma <= 0.0 =>
+            {
+                Err(HaresError::Equipment(
+                    "LogNormal requires finite mu and positive finite sigma".into(),
+                ))
+            }
+            Self::Exponential { lambda } if !lambda.is_finite() || *lambda <= 0.0 => {
+                Err(HaresError::Equipment(
+                    "Exponential requires positive finite lambda".into(),
+                ))
+            }
+            Self::Poisson { lambda } if !lambda.is_finite() || *lambda <= 0.0 => {
+                Err(HaresError::Equipment(
+                    "Poisson requires positive finite lambda".into(),
+                ))
+            }
+            Self::Bernoulli { p } if !p.is_finite() || !(0.0..=1.0).contains(p) => {
+                Err(HaresError::Equipment(format!(
+                    "Bernoulli requires finite p in [0, 1], got {p}"
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Draw a single sample from this distribution using the given RNG.
-    pub fn sample(&self, rng: &mut ChaCha8Rng) -> f64 {
+    pub fn sample(&self, rng: &mut ChaCha8Rng) -> Result<f64, HaresError> {
         match self {
             Self::Gaussian { mean, std_dev } => {
                 let z: f64 = rand_distr::StandardNormal.sample(rng);
-                mean + std_dev * z
+                Ok(mean + std_dev * z)
             }
-            Self::Uniform { low, high } => {
-                rand_distr::Uniform::new(*low, *high)
-                    .expect("invalid uniform params")
-                    .sample(rng)
-            }
-            Self::LogNormal { mu, sigma } => {
-                rand_distr::LogNormal::new(*mu, *sigma)
-                    .expect("invalid lognormal params")
-                    .sample(rng)
-            }
-            Self::Exponential { lambda } => {
-                rand_distr::Exp::new(*lambda)
-                    .expect("invalid exponential params")
-                    .sample(rng)
-            }
+            Self::Uniform { low, high } => rand_distr::Uniform::new(*low, *high)
+                .map(|d| d.sample(rng))
+                .map_err(|e| HaresError::Equipment(format!("invalid Uniform params: {e}"))),
+            Self::LogNormal { mu, sigma } => rand_distr::LogNormal::new(*mu, *sigma)
+                .map(|d| d.sample(rng))
+                .map_err(|e| HaresError::Equipment(format!("invalid LogNormal params: {e}"))),
+            Self::Exponential { lambda } => rand_distr::Exp::new(*lambda)
+                .map(|d| d.sample(rng))
+                .map_err(|e| HaresError::Equipment(format!("invalid Exponential params: {e}"))),
             Self::Poisson { lambda } => {
-                let dist =
-                    rand_distr::Poisson::new(*lambda).expect("invalid poisson params");
-                let sample: f64 = dist.sample(rng);
-                sample.floor()
+                // Poisson samples are already integer-valued f64 (e.g. 3.0, not 3.01).
+                rand_distr::Poisson::new(*lambda)
+                    .map(|d: rand_distr::Poisson<f64>| d.sample(rng))
+                    .map_err(|e| {
+                        HaresError::Equipment(format!("invalid Poisson params: {e}"))
+                    })
             }
-            Self::Bernoulli { p } => {
-                let dist =
-                    rand_distr::Bernoulli::new(*p).expect("invalid bernoulli params");
-                if dist.sample(rng) {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            Self::Bernoulli { p } => rand_distr::Bernoulli::new(*p)
+                .map(|d| if d.sample(rng) { 1.0 } else { 0.0 })
+                .map_err(|e| HaresError::Equipment(format!("invalid Bernoulli params: {e}"))),
         }
+    }
+}
+
+/// Shared RNG state for stochastic schedule sources.
+#[derive(Clone, Debug)]
+pub struct StochasticState {
+    pub seed: [u8; 32],
+    pub draw_count: u64,
+    pub rng: ChaCha8Rng,
+}
+
+impl StochasticState {
+    pub fn new(seed: [u8; 32]) -> Self {
+        Self {
+            seed,
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed(seed),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.rng = ChaCha8Rng::from_seed(self.seed);
+        self.draw_count = 0;
+    }
+}
+
+impl PartialEq for StochasticState {
+    fn eq(&self, other: &Self) -> bool {
+        self.seed == other.seed && self.draw_count == other.draw_count
     }
 }
 
@@ -213,6 +333,8 @@ pub enum ScheduleSource {
         seed: [u8; 32],
         draw_count: u64,
         rng: ChaCha8Rng,
+        clamp_min: Option<f64>,
+        clamp_max: Option<f64>,
     },
     /// Shared data with cursor-based advancement.
     Shared {
@@ -231,6 +353,9 @@ pub enum ScheduleSource {
     TimeWindows {
         windows: Vec<TimeWindow>,
         default: Option<f64>,
+        /// Seeded RNG for windows with noise. `None` when all windows are
+        /// deterministic (zero-cost — no RNG allocated).
+        rng_state: Option<Box<StochasticState>>,
     },
 }
 
@@ -293,14 +418,24 @@ impl PartialEq for ScheduleSource {
                     seed: a_seed,
                     draw_count: a_count,
                     rng: _,
+                    clamp_min: a_min,
+                    clamp_max: a_max,
                 },
                 Self::Stochastic {
                     kind: b_kind,
                     seed: b_seed,
                     draw_count: b_count,
                     rng: _,
+                    clamp_min: b_min,
+                    clamp_max: b_max,
                 },
-            ) => a_kind == b_kind && a_seed == b_seed && a_count == b_count,
+            ) => {
+                a_kind == b_kind
+                    && a_seed == b_seed
+                    && a_count == b_count
+                    && a_min == b_min
+                    && a_max == b_max
+            }
             (
                 Self::Shared {
                     data: a_data,
@@ -317,12 +452,14 @@ impl PartialEq for ScheduleSource {
                 Self::TimeWindows {
                     windows: a_win,
                     default: a_def,
+                    rng_state: a_rng,
                 },
                 Self::TimeWindows {
                     windows: b_win,
                     default: b_def,
+                    rng_state: b_rng,
                 },
-            ) => a_win == b_win && a_def == b_def,
+            ) => a_win == b_win && a_def == b_def && a_rng == b_rng,
             _ => false,
         }
     }
@@ -391,10 +528,14 @@ impl ScheduleSource {
                 seed: _,
                 draw_count,
                 rng,
+                clamp_min,
+                clamp_max,
             } => {
-                let value = kind.sample(rng);
+                let raw = kind.sample(rng)?;
                 *draw_count = draw_count.checked_add(1).expect("draw_count overflow");
-                Ok(value)
+                let lo = clamp_min.unwrap_or(f64::NEG_INFINITY);
+                let hi = clamp_max.unwrap_or(f64::INFINITY);
+                Ok(raw.clamp(lo, hi))
             }
             Self::Shared {
                 data,
@@ -406,13 +547,17 @@ impl ScheduleSource {
                 *cursor = cursor.saturating_add(1);
                 Ok(value)
             }
-            Self::TimeWindows { windows, default } => {
+            Self::TimeWindows {
+                windows,
+                default,
+                rng_state,
+            } => {
                 let weekday = env.current_time.weekday();
                 let minute_of_day =
                     env.current_time.hour() as u16 * 60 + env.current_time.minute() as u16;
                 for w in windows.iter() {
                     if w.contains(weekday, minute_of_day) {
-                        return Ok(w.value);
+                        return resolve_window_value(w, rng_state);
                     }
                 }
                 default.ok_or_else(|| {
@@ -446,13 +591,62 @@ impl ScheduleSource {
             } => {
                 *cursor = 0;
             }
+            Self::TimeWindows { rng_state, .. } => {
+                if let Some(st) = rng_state.as_mut() {
+                    st.reset();
+                }
+            }
             Self::Constant(_)
             | Self::DailyProfile { .. }
             | Self::ColumnRef { .. }
-            | Self::SolarAware { .. }
-            | Self::TimeWindows { .. } => {}
+            | Self::SolarAware { .. } => {}
         }
     }
+}
+
+impl ScheduleSource {
+    /// Create a `TimeWindows` source with a seeded RNG for noisy windows.
+    ///
+    /// At least one window should have `noise` set; otherwise prefer the
+    /// plain `TimeWindows` constructor (no RNG allocated).
+    pub fn noisy_time_windows(
+        windows: Vec<TimeWindow>,
+        default: Option<f64>,
+        seed: [u8; 32],
+    ) -> Self {
+        debug_assert!(
+            windows.iter().any(|w| w.noise.is_some()),
+            "noisy_time_windows called but no window has noise; use TimeWindows directly"
+        );
+        Self::TimeWindows {
+            windows,
+            default,
+            rng_state: Some(Box::new(StochasticState::new(seed))),
+        }
+    }
+}
+
+/// Resolve the value of a matched time window, sampling noise if present.
+fn resolve_window_value(
+    w: &TimeWindow,
+    rng_state: &mut Option<Box<StochasticState>>,
+) -> Result<f64, HaresError> {
+    let raw = match &w.noise {
+        None => w.value,
+        Some(dist) => {
+            let st = rng_state.as_mut().ok_or_else(|| {
+                HaresError::Equipment(
+                    "time window has noise but no rng_state is set".into(),
+                )
+            })?;
+            let noise = dist.sample(&mut st.rng)?;
+            st.draw_count = st.draw_count.checked_add(1).expect("draw_count overflow");
+            w.value + noise
+        }
+    };
+    let lo = w.min_value.unwrap_or(f64::NEG_INFINITY);
+    let hi = w.max_value.unwrap_or(f64::INFINITY);
+    Ok(raw.clamp(lo, hi))
 }
 
 fn resolve_index(raw_idx: i64, len: usize, boundary: BoundaryPolicy) -> Result<usize, HaresError> {
@@ -594,42 +788,24 @@ mod tests {
     }
 
     #[test]
-    fn stochastic_gaussian_is_deterministic_given_seed() {
-        let env = default_env();
-        let seed = [7_u8; 32];
-
-        let mut a = ScheduleSource::Stochastic {
-            kind: DistributionKind::Gaussian {
-                mean: 5.0,
-                std_dev: 1.2,
-            },
-            seed,
-            draw_count: 0,
-            rng: ChaCha8Rng::from_seed(seed),
+    fn stochastic_gaussian_deterministic_and_reset() {
+        let kind = DistributionKind::Gaussian {
+            mean: 5.0,
+            std_dev: 1.2,
         };
-        let mut b = ScheduleSource::Stochastic {
-            kind: DistributionKind::Gaussian {
-                mean: 5.0,
-                std_dev: 1.2,
-            },
-            seed,
-            draw_count: 0,
-            rng: ChaCha8Rng::from_seed(seed),
-        };
-
-        let mut values = Vec::with_capacity(8);
-        for _ in 0..8 {
-            let va = a.value_at(&env).expect("value a");
-            let vb = b.value_at(&env).expect("value b");
-            assert_eq!(va, vb);
-            values.push(va);
-        }
+        assert_deterministic(kind.clone(), 8);
 
         // reset() must rewind the RNG to the beginning of the sequence.
-        a.reset();
+        let env = default_env();
+        let mut src = stochastic(kind, [7_u8; 32]);
+        let first = src.value_at(&env).expect("first draw");
+        for _ in 0..7 {
+            src.value_at(&env).unwrap();
+        }
+        src.reset();
         assert_eq!(
-            a.value_at(&env).expect("value a after reset"),
-            values[0],
+            src.value_at(&env).expect("after reset"),
+            first,
             "reset() did not rewind to the first draw"
         );
     }
@@ -720,6 +896,7 @@ mod tests {
                 TimeWindow::new(DayFilter::Any, 0, 1440, 18.0),
             ],
             default: None,
+            rng_state: None,
         };
 
         assert_eq!(
@@ -747,6 +924,7 @@ mod tests {
                 TimeWindow::new(DayFilter::Any, 0, 1440, 18.0),
             ],
             default: None,
+            rng_state: None,
         };
 
         assert_eq!(
@@ -772,6 +950,7 @@ mod tests {
                 TimeWindow::new(DayFilter::Any, 420, 780, 21.0),
             ],
             default: Some(15.0),
+            rng_state: None,
         };
 
         assert_eq!(source.value_at(&env).expect("should use default"), 15.0);
@@ -791,6 +970,7 @@ mod tests {
         let mut source = ScheduleSource::TimeWindows {
             windows: vec![TimeWindow::new(DayFilter::Any, 420, 780, 21.0)],
             default: None,
+            rng_state: None,
         };
 
         let err = source
@@ -821,6 +1001,7 @@ mod tests {
                 TimeWindow::new(DayFilter::Day(chrono::Weekday::Mon), 420, 780, 22.8),
             ],
             default: Some(19.0),
+            rng_state: None,
         };
 
         // 08:00 Monday → should hit second window
@@ -854,6 +1035,7 @@ mod tests {
                 TimeWindow::new(DayFilter::Any, 360, 1320, 22.0),
             ],
             default: None,
+            rng_state: None,
         };
 
         // 23:00 → overnight
@@ -926,6 +1108,7 @@ mod tests {
         let mut source = ScheduleSource::TimeWindows {
             windows: vec![],
             default: None,
+            rng_state: None,
         };
 
         let err = source
@@ -940,6 +1123,7 @@ mod tests {
         let mut source = ScheduleSource::TimeWindows {
             windows: vec![],
             default: Some(17.0),
+            rng_state: None,
         };
 
         assert_eq!(source.value_at(&env).expect("should use default"), 17.0);
@@ -962,6 +1146,7 @@ mod tests {
                 TimeWindow::new(DayFilter::Weekends, 0, 1440, 24.0),
             ],
             default: None,
+            rng_state: None,
         };
 
         // Thursday (weekday)
@@ -988,6 +1173,8 @@ mod tests {
             seed,
             draw_count: 0,
             rng: ChaCha8Rng::from_seed(seed),
+            clamp_min: None,
+            clamp_max: None,
         }
     }
 
@@ -1101,5 +1288,537 @@ mod tests {
             let v = src.value_at(&env).unwrap();
             assert_eq!(v, *expected, "post-reset draw {i} diverged");
         }
+    }
+
+    #[test]
+    fn stochastic_clamp_min_prevents_negative() {
+        let env = default_env();
+        let mut src = ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean: 1.0,
+                std_dev: 5.0,
+            },
+            seed: [8_u8; 32],
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed([8_u8; 32]),
+            clamp_min: Some(0.0),
+            clamp_max: None,
+        };
+        for _ in 0..200 {
+            let v = src.value_at(&env).unwrap();
+            assert!(v >= 0.0, "clamp_min violated: {v}");
+        }
+    }
+
+    #[test]
+    fn stochastic_clamp_max_caps_output() {
+        let env = default_env();
+        let mut src = ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean: 90.0,
+                std_dev: 20.0,
+            },
+            seed: [9_u8; 32],
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed([9_u8; 32]),
+            clamp_min: None,
+            clamp_max: Some(100.0),
+        };
+        for _ in 0..200 {
+            let v = src.value_at(&env).unwrap();
+            assert!(v <= 100.0, "clamp_max violated: {v}");
+        }
+    }
+
+    // ── Noisy TimeWindows tests (DER-011) ────────────────────────────
+
+    #[test]
+    fn noisy_time_windows_backward_compat_no_noise() {
+        let env = default_env();
+        let mut source = ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 21.0)],
+            default: None,
+            rng_state: None,
+        };
+        assert_eq!(source.value_at(&env).unwrap(), 21.0);
+    }
+
+    #[test]
+    fn noisy_time_windows_gaussian_clusters_around_value() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let seed = [10_u8; 32];
+        let mut source = ScheduleSource::noisy_time_windows(
+            vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                38.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 5.0,
+                },
+                None,
+                None,
+            )],
+            None,
+            seed,
+        );
+
+        let mut sum = 0.0;
+        let n = 100;
+        for _ in 0..n {
+            sum += source.value_at(&env).unwrap();
+        }
+        let mean = sum / n as f64;
+        assert!(
+            (mean - 38.0).abs() < 3.0,
+            "mean should cluster around 38.0, got {mean}"
+        );
+    }
+
+    #[test]
+    fn noisy_time_windows_deterministic_with_same_seed() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let seed = [11_u8; 32];
+        let windows = vec![TimeWindow::with_noise(
+            DayFilter::Any,
+            0,
+            1440,
+            10.0,
+            DistributionKind::Gaussian {
+                mean: 0.0,
+                std_dev: 3.0,
+            },
+            None,
+            None,
+        )];
+
+        let mut a = ScheduleSource::noisy_time_windows(windows.clone(), None, seed);
+        let mut b = ScheduleSource::noisy_time_windows(windows, None, seed);
+
+        for i in 0..20 {
+            let va = a.value_at(&env).unwrap();
+            let vb = b.value_at(&env).unwrap();
+            assert_eq!(va, vb, "draw {i} diverged");
+        }
+    }
+
+    #[test]
+    fn noisy_time_windows_different_seeds_differ() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let windows = vec![TimeWindow::with_noise(
+            DayFilter::Any,
+            0,
+            1440,
+            10.0,
+            DistributionKind::Gaussian {
+                mean: 0.0,
+                std_dev: 3.0,
+            },
+            None,
+            None,
+        )];
+
+        let mut a = ScheduleSource::noisy_time_windows(windows.clone(), None, [12_u8; 32]);
+        let mut b = ScheduleSource::noisy_time_windows(windows, None, [13_u8; 32]);
+
+        let mut any_differ = false;
+        for _ in 0..10 {
+            if a.value_at(&env).unwrap() != b.value_at(&env).unwrap() {
+                any_differ = true;
+                break;
+            }
+        }
+        assert!(any_differ, "different seeds should produce different values");
+    }
+
+    #[test]
+    fn noisy_time_windows_reset_replays() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let mut source = ScheduleSource::noisy_time_windows(
+            vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                20.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 4.0,
+                },
+                None,
+                None,
+            )],
+            None,
+            [14_u8; 32],
+        );
+
+        let mut first = Vec::with_capacity(5);
+        for _ in 0..5 {
+            first.push(source.value_at(&env).unwrap());
+        }
+        source.reset();
+        for (i, expected) in first.iter().enumerate() {
+            let v = source.value_at(&env).unwrap();
+            assert_eq!(v, *expected, "post-reset draw {i} diverged");
+        }
+    }
+
+    #[test]
+    fn noisy_time_windows_mixed_noisy_and_noiseless() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+
+        let mut source = ScheduleSource::noisy_time_windows(
+            vec![
+                // Weekdays: noisy
+                TimeWindow::with_noise(
+                    DayFilter::Weekdays,
+                    0,
+                    1440,
+                    12.0,
+                    DistributionKind::Gaussian {
+                        mean: 0.0,
+                        std_dev: 6.0,
+                    },
+                    Some(0.0),
+                    None,
+                ),
+                // Weekends: fixed
+                TimeWindow::new(DayFilter::Weekends, 0, 1440, 25.0),
+            ],
+            Some(0.0),
+            [15_u8; 32],
+        );
+
+        // Saturday → fixed, exact
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 3, 12, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        assert_eq!(source.value_at(&env).unwrap(), 25.0);
+
+        // Monday → noisy, varies
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 12, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let v = source.value_at(&env).unwrap();
+        assert!(v >= 0.0, "clamp should prevent negative: {v}");
+    }
+
+    #[test]
+    fn noisy_time_windows_no_match_uses_exact_default() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 3, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let mut source = ScheduleSource::noisy_time_windows(
+            vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                420,
+                780,
+                10.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 2.0,
+                },
+                None,
+                None,
+            )],
+            Some(0.0),
+            [16_u8; 32],
+        );
+        assert_eq!(source.value_at(&env).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn noisy_time_windows_errors_when_noise_without_rng() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let mut source = ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                10.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 1.0,
+                },
+                None,
+                None,
+            )],
+            default: None,
+            rng_state: None, // oops — no RNG
+        };
+
+        let err = source
+            .value_at(&env)
+            .expect_err("should error when noise set but no rng_state");
+        assert!(
+            err.to_string().contains("no rng_state"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn noisy_time_windows_clamp_min_prevents_negative() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let mut source = ScheduleSource::noisy_time_windows(
+            vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                5.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 10.0,
+                },
+                Some(0.0),
+                None,
+            )],
+            None,
+            [17_u8; 32],
+        );
+
+        for _ in 0..1000 {
+            let v = source.value_at(&env).unwrap();
+            assert!(v >= 0.0, "clamp_min violated: {v}");
+        }
+    }
+
+    #[test]
+    fn noisy_time_windows_clamp_max_caps_output() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let mut source = ScheduleSource::noisy_time_windows(
+            vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                90.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 20.0,
+                },
+                None,
+                Some(100.0),
+            )],
+            None,
+            [18_u8; 32],
+        );
+
+        for _ in 0..1000 {
+            let v = source.value_at(&env).unwrap();
+            assert!(v <= 100.0, "clamp_max violated: {v}");
+        }
+    }
+
+    #[test]
+    fn noiseless_window_with_clamp_returns_exact_value() {
+        let env = default_env();
+        let mut source = ScheduleSource::TimeWindows {
+            windows: vec![{
+                let mut w = TimeWindow::new(DayFilter::Any, 0, 1440, 50.0);
+                w.min_value = Some(0.0);
+                w.max_value = Some(100.0);
+                w
+            }],
+            default: None,
+            rng_state: None,
+        };
+        assert_eq!(source.value_at(&env).unwrap(), 50.0);
+    }
+
+    #[test]
+    fn noisy_time_windows_weekday_vs_weekend_distributions() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+
+        let mut source = ScheduleSource::noisy_time_windows(
+            vec![
+                TimeWindow::with_noise(
+                    DayFilter::Weekdays,
+                    0,
+                    1440,
+                    12.0,
+                    DistributionKind::Gaussian {
+                        mean: 0.0,
+                        std_dev: 6.0,
+                    },
+                    Some(0.0),
+                    None,
+                ),
+                TimeWindow::with_noise(
+                    DayFilter::Weekends,
+                    0,
+                    1440,
+                    25.0,
+                    DistributionKind::Gaussian {
+                        mean: 0.0,
+                        std_dev: 10.0,
+                    },
+                    Some(0.0),
+                    None,
+                ),
+            ],
+            Some(0.0),
+            [19_u8; 32],
+        );
+
+        // Collect weekday samples (center=12, clamped ≥ 0)
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 12, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let mut wd_sum = 0.0;
+        let n = 200;
+        for _ in 0..n {
+            wd_sum += source.value_at(&env).unwrap();
+        }
+        let wd_mean = wd_sum / n as f64;
+
+        // Collect weekend samples (center=25, clamped ≥ 0)
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 3, 12, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let mut we_sum = 0.0;
+        for _ in 0..n {
+            we_sum += source.value_at(&env).unwrap();
+        }
+        let we_mean = we_sum / n as f64;
+
+        // Each mean should be within a reasonable bound of its center.
+        assert!(
+            (wd_mean - 12.0).abs() < 4.0,
+            "weekday mean {wd_mean} should be near 12.0"
+        );
+        assert!(
+            (we_mean - 25.0).abs() < 6.0,
+            "weekend mean {we_mean} should be near 25.0"
+        );
+    }
+
+    // ── Validation tests ─────────────────────────────────────────────
+
+    #[test]
+    fn validate_rejects_nan_parameters() {
+        assert!(DistributionKind::Gaussian {
+            mean: f64::NAN,
+            std_dev: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(DistributionKind::Uniform {
+            low: f64::NAN,
+            high: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(DistributionKind::LogNormal {
+            mu: 0.0,
+            sigma: f64::NAN
+        }
+        .validate()
+        .is_err());
+        assert!(DistributionKind::Exponential { lambda: f64::NAN }
+            .validate()
+            .is_err());
+        assert!(DistributionKind::Poisson { lambda: f64::NAN }
+            .validate()
+            .is_err());
+        assert!(DistributionKind::Bernoulli { p: f64::NAN }
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn validate_rejects_infinity_parameters() {
+        assert!(DistributionKind::Gaussian {
+            mean: f64::INFINITY,
+            std_dev: 1.0
+        }
+        .validate()
+        .is_err());
+        assert!(DistributionKind::Exponential {
+            lambda: f64::INFINITY
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn validate_accepts_valid_parameters() {
+        assert!(DistributionKind::Gaussian {
+            mean: 0.0,
+            std_dev: 1.0
+        }
+        .validate()
+        .is_ok());
+        assert!(DistributionKind::Uniform {
+            low: 0.0,
+            high: 1.0
+        }
+        .validate()
+        .is_ok());
+        assert!(DistributionKind::LogNormal {
+            mu: 0.0,
+            sigma: 1.0
+        }
+        .validate()
+        .is_ok());
+        assert!(DistributionKind::Exponential { lambda: 2.0 }
+            .validate()
+            .is_ok());
+        assert!(DistributionKind::Poisson { lambda: 5.0 }
+            .validate()
+            .is_ok());
+        assert!(DistributionKind::Bernoulli { p: 0.5 }
+            .validate()
+            .is_ok());
     }
 }

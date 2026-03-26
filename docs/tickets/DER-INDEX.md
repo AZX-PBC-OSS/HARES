@@ -14,17 +14,18 @@ DER-001 (domain types)
   ├── DER-004 (chemistry OCV) ──┬── DER-003 (battery params)
   │                              └── DER-008 (battery catalog)
 DER-005 (outdoor temp) — standalone
+DER-011 (noisy TimeWindows) — standalone, used by DER-007/DER-010
 ```
 
 ## Parallel Groups
 
 | Phase | Tickets | Notes |
 |-------|---------|-------|
-| 1 | DER-001 | Foundation — all others depend on this |
-| 2 | DER-002, DER-004, DER-005 | Independent file sets |
+| 1 | DER-001, DER-005, DER-011 | Foundation types, outdoor temp, noisy schedules (independent) |
+| 2 | DER-002, DER-004 | EV key fix, chemistry OCV |
 | 3 | DER-003, DER-006 | Battery params (needs 004), EV strip-down (needs 002) |
-| 4 | DER-007, DER-008, DER-009 | Actor, battery catalog, vehicle catalog |
-| 5 | DER-010 | Archetype presets (needs actor + vehicle catalog) |
+| 4 | DER-007, DER-008, DER-009 | Actor (needs 006+011), battery catalog (needs 003+004), vehicle catalog (needs 006) |
+| 5 | DER-010 | Archetype presets (needs 007+009+011) |
 
 ## Tickets
 
@@ -37,7 +38,8 @@ DER-005 (outdoor temp) — standalone
 | [DER-004](DER-004.md) | Chemistry-aware OCV table selection | implement | DER-001 |
 | [DER-005](DER-005.md) | Add outdoor temperature to simulation output | implement | — |
 | [DER-006](DER-006.md) | Refactor EV equipment to dumb battery-on-wheels | implement | DER-001, DER-002 |
-| [DER-007](DER-007.md) | Implement EV Driver Actor | implement | DER-006 |
+| [DER-007](DER-007.md) | Implement EV Driver Actor | implement | DER-006, DER-011 |
 | [DER-008](DER-008.md) | Battery product catalog (Rust + Python) | implement | DER-003, DER-004 |
 | [DER-009](DER-009.md) | EV vehicle catalog (Rust + Python) | implement | DER-006 |
-| [DER-010](DER-010.md) | EV archetype presets (Rust + Python) | implement | DER-007, DER-009 |
+| [DER-010](DER-010.md) | EV archetype presets (Rust + Python) | implement | DER-007, DER-009, DER-011 |
+| [DER-011](DER-011.md) | Add optional noise to TimeWindows | implement | — |

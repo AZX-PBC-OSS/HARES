@@ -287,7 +287,7 @@ def _run_simulation(
                 dw.add_ev(EV("EV", capacity_kwh=ev_kwh, max_charging_kw=ev_kw))
             hares_df = dw.simulate()
 
-        ochre_df: pl.DataFrame | None = None
+        ochre_df = None
         if do_ochre:
             import datetime as _dt
             with mo.status.spinner(title="Running OCHRE comparison..."):
@@ -306,7 +306,7 @@ def _run_simulation(
                     verbosity=6,
                     save_results=False,
                 )
-                _pdf, _metrics, _hourly = _ochre_dw.simulate()
+                _pdf, _, _ = _ochre_dw.simulate()
                 ochre_df = pl.from_pandas(_pdf.reset_index())
 
         sim_meta = {
@@ -365,9 +365,8 @@ def _visualizations(
     _bat_soc_col = "Battery SOC (-)"
     _ev_pow_col = "EV Electric Power (kW)"
     _ev_soc_col = "EV SOC (-)"
-    _temp_col = "Temperature - Indoor (C)"
 
-    def _net_power_temp() -> go.Figure:
+    def _net_power_temp():
         times = hares_df[_time_col].to_list()
         power = hares_df[_power_col].to_numpy()
 
@@ -447,7 +446,7 @@ def _visualizations(
         )
         return fig
 
-    def _der_breakdown() -> go.Figure:
+    def _der_breakdown():
         times = hares_df[_time_col].to_list()
         total = hares_df[_power_col].to_numpy()
 
@@ -504,7 +503,7 @@ def _visualizations(
         )
         return fig
 
-    def _battery_soc() -> object:
+    def _battery_soc():
         if _bat_soc_col not in hares_df.columns:
             return mo.callout(mo.md("No battery in this simulation."), kind="neutral")
 
@@ -562,7 +561,7 @@ def _visualizations(
         )
         return fig
 
-    def _ev_charging() -> object:
+    def _ev_charging():
         if _ev_pow_col not in hares_df.columns:
             return mo.callout(mo.md("No EV in this simulation."), kind="neutral")
 
@@ -608,7 +607,7 @@ def _visualizations(
         )
         return fig
 
-    def _daily_energy() -> go.Figure:
+    def _daily_energy():
         daily = (
             hares_df
             .with_columns(pl.col(_time_col).dt.date().alias("date"))
@@ -632,7 +631,7 @@ def _visualizations(
         )
         return fig
 
-    def _summary() -> object:
+    def _summary():
         power = hares_df[_power_col].to_numpy()
         total_kwh = float((hares_df[_power_col] * (15.0 / 60.0)).sum())
         peak_kw = float(power.max())

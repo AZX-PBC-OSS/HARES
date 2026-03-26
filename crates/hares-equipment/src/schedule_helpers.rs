@@ -17,6 +17,12 @@ pub(crate) enum ScheduleSourceState {
     Stateless,
     Stochastic { draw_count: u64 },
     Shared { cursor: usize },
+    /// TimeWindows with noisy windows: save RNG word position directly since
+    /// we can't replay (the distribution sampled varies per matching window).
+    NoisyTimeWindows {
+        draw_count: u64,
+        rng_word_pos: u128,
+    },
 }
 
 pub(crate) fn capture_schedule_source_state(source: &ScheduleSource) -> ScheduleSourceState {
@@ -25,11 +31,17 @@ pub(crate) fn capture_schedule_source_state(source: &ScheduleSource) -> Schedule
         ScheduleSource::Stochastic { draw_count, .. } => ScheduleSourceState::Stochastic {
             draw_count: *draw_count,
         },
+        ScheduleSource::TimeWindows { rng_state, .. } => match rng_state.as_ref() {
+            Some(st) => ScheduleSourceState::NoisyTimeWindows {
+                draw_count: st.draw_count,
+                rng_word_pos: st.rng.get_word_pos(),
+            },
+            None => ScheduleSourceState::Stateless,
+        },
         ScheduleSource::Constant(_)
         | ScheduleSource::DailyProfile { .. }
         | ScheduleSource::ColumnRef { .. }
-        | ScheduleSource::SolarAware { .. }
-        | ScheduleSource::TimeWindows { .. } => ScheduleSourceState::Stateless,
+        | ScheduleSource::SolarAware { .. } => ScheduleSourceState::Stateless,
         // Wildcard required: ScheduleSource is #[non_exhaustive].
         _ => ScheduleSourceState::Stateless,
     }
@@ -50,6 +62,7 @@ pub(crate) fn restore_schedule_source_state(
                 seed,
                 draw_count,
                 rng,
+                ..
             },
             ScheduleSourceState::Stochastic {
                 draw_count: target_draw_count,
@@ -60,9 +73,30 @@ pub(crate) fn restore_schedule_source_state(
             // RNG word consumption (e.g. Poisson uses rejection sampling).
             *rng = ChaCha8Rng::from_seed(*seed);
             for _ in 0..*target_draw_count {
-                let _ = kind.sample(rng);
+                kind.sample(rng)?;
             }
             *draw_count = *target_draw_count;
+            Ok(())
+        }
+        (
+            ScheduleSource::TimeWindows { rng_state, .. },
+            ScheduleSourceState::NoisyTimeWindows {
+                draw_count,
+                rng_word_pos,
+            },
+        ) => {
+            let st = rng_state.as_mut().ok_or_else(|| {
+                HaresError::Equipment(
+                    "checkpoint contains NoisyTimeWindows state but source has no rng_state"
+                        .into(),
+                )
+            })?;
+            // Restore RNG to exact position via word-level seek.
+            // Replay isn't possible because the distribution sampled varies
+            // per matching window at each timestep.
+            st.rng = ChaCha8Rng::from_seed(st.seed);
+            st.rng.set_word_pos(*rng_word_pos);
+            st.draw_count = *draw_count;
             Ok(())
         }
         (
@@ -70,7 +104,9 @@ pub(crate) fn restore_schedule_source_state(
             | ScheduleSource::DailyProfile { .. }
             | ScheduleSource::ColumnRef { .. }
             | ScheduleSource::SolarAware { .. }
-            | ScheduleSource::TimeWindows { .. },
+            | ScheduleSource::TimeWindows {
+                rng_state: None, ..
+            },
             ScheduleSourceState::Stateless,
         ) => Ok(()),
         // Wildcard required: ScheduleSource is #[non_exhaustive].
