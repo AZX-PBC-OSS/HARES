@@ -50,7 +50,10 @@ fn assert_equipment_lifecycle(
 
     // 1. Descriptor must be populated after init.
     let desc = equipment.descriptor();
-    assert!(!desc.name.is_empty(), "descriptor.name must be non-empty after init");
+    assert!(
+        !desc.name.is_empty(),
+        "descriptor.name must be non-empty after init"
+    );
     assert!(
         !desc.telemetry_fields.is_empty(),
         "descriptor.telemetry_fields must be non-empty after init for '{}'",
@@ -72,8 +75,7 @@ fn assert_equipment_lifecycle(
 
     // 4. step must succeed and write at least one port contribution.
     let mut ports = ports_for(equipment);
-    equipment
-        .update_control(env);
+    equipment.update_control(env);
     equipment
         .step(env, dt, &mut ports)
         .expect("step must return Ok");
@@ -103,7 +105,8 @@ fn assert_equipment_lifecycle(
     let expected_field_count = equipment.descriptor().telemetry_fields.len();
     let actual_field_count = equipment.telemetry().len();
     assert_eq!(
-        actual_field_count, expected_field_count,
+        actual_field_count,
+        expected_field_count,
         "telemetry field count must match descriptor for '{}': got {actual_field_count}, expected {expected_field_count}",
         equipment.descriptor().name
     );
@@ -121,7 +124,9 @@ fn assert_equipment_lifecycle(
 
     let mut ports2 = ports_for(equipment);
     equipment.update_control(env);
-    equipment.step(env, dt, &mut ports2).expect("second step must return Ok");
+    equipment
+        .step(env, dt, &mut ports2)
+        .expect("second step must return Ok");
 
     // 8. Restore from snapshot and step again. Output must match step 1.
     equipment
@@ -169,7 +174,11 @@ fn config_with_floats(name: &str, class: &str, entries: &[(&str, f64)]) -> Equip
     for &(k, v) in entries {
         raw.insert(k.to_string(), ConfigValue::Float(v));
     }
-    EquipmentConfig { name: name.to_string(), ochre_class: class.to_string(), raw_config: raw }
+    EquipmentConfig {
+        name: name.to_string(),
+        ochre_class: class.to_string(),
+        raw_config: raw,
+    }
 }
 
 fn config_mixed(
@@ -185,7 +194,11 @@ fn config_mixed(
     for &(k, v) in strings {
         raw.insert(k.to_string(), ConfigValue::Text(v.to_string()));
     }
-    EquipmentConfig { name: name.to_string(), ochre_class: class.to_string(), raw_config: raw }
+    EquipmentConfig {
+        name: name.to_string(),
+        ochre_class: class.to_string(),
+        raw_config: raw,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +358,8 @@ fn scheduled_load_writes_positive_thermal_gain_to_port() {
     // PortSlots wired from equipment.ports() includes thermal for zone 1.
     let mut ports = ports_for(eq.as_ref());
     eq.update_control(&env);
-    eq.step(&env, Duration::from_secs(60), &mut ports).expect("step");
+    eq.step(&env, Duration::from_secs(60), &mut ports)
+        .expect("step");
 
     let thermal_acc = ports
         .thermal

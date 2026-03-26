@@ -65,7 +65,8 @@ pub fn parse_hpxml(path: &Path) -> Result<Building> {
 pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
     let root = parse_xml_document(xml).map_err(|e| HpxmlError::Parse(e.to_string()))?;
 
-    let schema_warnings = validate_hpxml_schema_node(&root).map_err(HpxmlError::SchemaValidation)?;
+    let schema_warnings =
+        validate_hpxml_schema_node(&root).map_err(HpxmlError::SchemaValidation)?;
     for w in &schema_warnings {
         tracing::warn!(field = %w.field, message = %w.message, "HPXML schema warning");
     }

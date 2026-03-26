@@ -84,7 +84,14 @@ pub fn typical_zone_temps(avg_ground_c: f64, avg_ambient_c: f64) -> [f64; 6] {
     let t_garage = t_conditioned + (t_outdoor - t_conditioned) * (1.0 / 3.0);
     let t_attic = t_conditioned + (t_outdoor - t_conditioned) * (2.0 / 3.0);
 
-    [t_ground, t_foundation, t_conditioned, t_garage, t_attic, t_outdoor]
+    [
+        t_ground,
+        t_foundation,
+        t_conditioned,
+        t_garage,
+        t_attic,
+        t_outdoor,
+    ]
 }
 
 /// TARP natural convection coefficient h [W/(m²·K)].
@@ -258,11 +265,27 @@ mod tests {
     fn typical_zone_temps_known_anchors_and_interpolation() {
         let temps = typical_zone_temps(10.0, 10.0);
         // Anchors
-        assert_approx(temps[ZoneLabel::Ground.height_order() as usize], 10.0, 1e-12);
-        assert_approx(temps[ZoneLabel::Conditioned.height_order() as usize], 20.0, 1e-12);
-        assert_approx(temps[ZoneLabel::Outdoor.height_order() as usize], 15.0, 1e-12);
+        assert_approx(
+            temps[ZoneLabel::Ground.height_order() as usize],
+            10.0,
+            1e-12,
+        );
+        assert_approx(
+            temps[ZoneLabel::Conditioned.height_order() as usize],
+            20.0,
+            1e-12,
+        );
+        assert_approx(
+            temps[ZoneLabel::Outdoor.height_order() as usize],
+            15.0,
+            1e-12,
+        );
         // Interpolated: Foundation = 10 + (20-10)*(1/2) = 15
-        assert_approx(temps[ZoneLabel::Foundation.height_order() as usize], 15.0, 1e-12);
+        assert_approx(
+            temps[ZoneLabel::Foundation.height_order() as usize],
+            15.0,
+            1e-12,
+        );
         // Garage = 20 + (15-20)*(1/3) = 20 - 5/3 ≈ 18.333...
         assert_approx(
             temps[ZoneLabel::Garage.height_order() as usize],

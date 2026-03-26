@@ -75,14 +75,11 @@ fn sniff_csv_header(path: &Path) -> Result<WeatherFormat, WeatherError> {
     let fields: Vec<&str> = line1.split(',').collect();
 
     // PSM3: line 1 starts with "Source" and has 10+ fields.
-    let looks_like_psm3_line1 = fields
-        .first()
-        .is_some_and(|f| {
-            f.trim()
-                .trim_start_matches('\u{FEFF}')
-                .eq_ignore_ascii_case("Source")
-        })
-        && fields.len() >= 10;
+    let looks_like_psm3_line1 = fields.first().is_some_and(|f| {
+        f.trim()
+            .trim_start_matches('\u{FEFF}')
+            .eq_ignore_ascii_case("Source")
+    }) && fields.len() >= 10;
 
     if looks_like_psm3_line1 {
         // Line 2: field values — skip (we only need lines 1 and 3 for detection).
@@ -200,15 +197,13 @@ pub fn parse_weather_with_location(
         WeatherFormat::Epw => crate::epw::parse_epw(path),
         WeatherFormat::Psm3 => crate::psm3::parse_psm3(path),
         WeatherFormat::Tmy3 => crate::tmy3::parse_tmy3(path),
-        WeatherFormat::ResStockCsv => {
-            crate::resstock_csv::parse_resstock_csv(
-                path,
-                elevation_m,
-                latitude,
-                longitude,
-                timezone_offset_h,
-            )
-        }
+        WeatherFormat::ResStockCsv => crate::resstock_csv::parse_resstock_csv(
+            path,
+            elevation_m,
+            latitude,
+            longitude,
+            timezone_offset_h,
+        ),
     }
 }
 
@@ -446,36 +441,72 @@ impl WeatherTimeSeries {
                 },
                 // Continuous instantaneous fields default to PCHIP (smooth, monotone).
                 // Override to ZOH for OCHRE parity or Linear for simpler interpolation.
-                dry_bulb_c: resample_field(&self.dry_bulb_c, factor,
-                    overrides.dry_bulb.unwrap_or(ResampleMethod::Pchip)),
-                dew_point_c: resample_field(&self.dew_point_c, factor,
-                    overrides.dew_point.unwrap_or(ResampleMethod::Pchip)),
+                dry_bulb_c: resample_field(
+                    &self.dry_bulb_c,
+                    factor,
+                    overrides.dry_bulb.unwrap_or(ResampleMethod::Pchip),
+                ),
+                dew_point_c: resample_field(
+                    &self.dew_point_c,
+                    factor,
+                    overrides.dew_point.unwrap_or(ResampleMethod::Pchip),
+                ),
                 rel_humidity_pct,
-                pressure_kpa: resample_field(&self.pressure_kpa, factor,
-                    overrides.pressure.unwrap_or(ResampleMethod::Pchip)),
-                horizontal_infrared_w_m2: resample_field(&self.horizontal_infrared_w_m2, factor,
-                    overrides.infrared.unwrap_or(ResampleMethod::Pchip)),
-                sky_temp_c: resample_field(&self.sky_temp_c, factor,
-                    overrides.sky_temp.unwrap_or(ResampleMethod::Pchip)),
-                ground_temp_c: resample_field(&self.ground_temp_c, factor,
-                    overrides.ground_temp.unwrap_or(ResampleMethod::Pchip)),
+                pressure_kpa: resample_field(
+                    &self.pressure_kpa,
+                    factor,
+                    overrides.pressure.unwrap_or(ResampleMethod::Pchip),
+                ),
+                horizontal_infrared_w_m2: resample_field(
+                    &self.horizontal_infrared_w_m2,
+                    factor,
+                    overrides.infrared.unwrap_or(ResampleMethod::Pchip),
+                ),
+                sky_temp_c: resample_field(
+                    &self.sky_temp_c,
+                    factor,
+                    overrides.sky_temp.unwrap_or(ResampleMethod::Pchip),
+                ),
+                ground_temp_c: resample_field(
+                    &self.ground_temp_c,
+                    factor,
+                    overrides.ground_temp.unwrap_or(ResampleMethod::Pchip),
+                ),
                 opaque_sky_cover,
                 // Period-average energy flux defaults to ZOH.
-                ghi_w_m2: resample_field(&self.ghi_w_m2, factor,
-                    overrides.ghi.unwrap_or(ResampleMethod::Zoh)),
-                dni_w_m2: resample_field(&self.dni_w_m2, factor,
-                    overrides.dni.unwrap_or(ResampleMethod::Zoh)),
-                dhi_w_m2: resample_field(&self.dhi_w_m2, factor,
-                    overrides.dhi.unwrap_or(ResampleMethod::Zoh)),
+                ghi_w_m2: resample_field(
+                    &self.ghi_w_m2,
+                    factor,
+                    overrides.ghi.unwrap_or(ResampleMethod::Zoh),
+                ),
+                dni_w_m2: resample_field(
+                    &self.dni_w_m2,
+                    factor,
+                    overrides.dni.unwrap_or(ResampleMethod::Zoh),
+                ),
+                dhi_w_m2: resample_field(
+                    &self.dhi_w_m2,
+                    factor,
+                    overrides.dhi.unwrap_or(ResampleMethod::Zoh),
+                ),
                 // Turbulent/stochastic → ZOH.
-                wind_speed_m_s: resample_field(&self.wind_speed_m_s, factor,
-                    overrides.wind_speed.unwrap_or(ResampleMethod::Zoh)),
-                wind_dir_deg: resample_field(&self.wind_dir_deg, factor,
-                    overrides.wind_dir.unwrap_or(ResampleMethod::Zoh)),
+                wind_speed_m_s: resample_field(
+                    &self.wind_speed_m_s,
+                    factor,
+                    overrides.wind_speed.unwrap_or(ResampleMethod::Zoh),
+                ),
+                wind_dir_deg: resample_field(
+                    &self.wind_dir_deg,
+                    factor,
+                    overrides.wind_dir.unwrap_or(ResampleMethod::Zoh),
+                ),
                 // Accumulated depth → distribute evenly so downstream sums are preserved.
                 liquid_precip_m: distribute_accumulated(&self.liquid_precip_m, factor),
                 // Surface property → ZOH (not interpolatable).
-                surface_albedo: self.surface_albedo.as_ref().map(|v| replicate_zoh(v, factor)),
+                surface_albedo: self
+                    .surface_albedo
+                    .as_ref()
+                    .map(|v| replicate_zoh(v, factor)),
             })
         } else {
             // Downsampling: source is finer → aggregate to coarser resolution.
@@ -503,10 +534,7 @@ impl WeatherTimeSeries {
                 dew_point_c: mean_downsample(&self.dew_point_c, ratio),
                 rel_humidity_pct: mean_downsample(&self.rel_humidity_pct, ratio),
                 pressure_kpa: mean_downsample(&self.pressure_kpa, ratio),
-                horizontal_infrared_w_m2: mean_downsample(
-                    &self.horizontal_infrared_w_m2,
-                    ratio,
-                ),
+                horizontal_infrared_w_m2: mean_downsample(&self.horizontal_infrared_w_m2, ratio),
                 sky_temp_c: mean_downsample(&self.sky_temp_c, ratio),
                 ground_temp_c: mean_downsample(&self.ground_temp_c, ratio),
                 opaque_sky_cover: mean_downsample(&self.opaque_sky_cover, ratio),
@@ -521,7 +549,10 @@ impl WeatherTimeSeries {
                 // Surface property → mean. Mean is acceptable for downsampling albedo
                 // because reflected solar is linear in albedo: mean(albedo) × GHI equals
                 // mean(albedo × GHI) when GHI is constant within the block.
-                surface_albedo: self.surface_albedo.as_ref().map(|v| mean_downsample(v, ratio)),
+                surface_albedo: self
+                    .surface_albedo
+                    .as_ref()
+                    .map(|v| mean_downsample(v, ratio)),
             })
         }
     }
@@ -697,9 +728,15 @@ fn replicate_zoh(values: &[f64], factor: usize) -> Vec<f64> {
 /// Linear interpolation between hourly knots (simpler than PCHIP, no overshoot).
 fn linear_resample(values: &[f64], factor: usize) -> Vec<f64> {
     let n = values.len();
-    if n == 0 { return vec![]; }
-    if factor <= 1 { return values.to_vec(); }
-    if n == 1 { return vec![values[0]; factor]; }
+    if n == 0 {
+        return vec![];
+    }
+    if factor <= 1 {
+        return values.to_vec();
+    }
+    if n == 1 {
+        return vec![values[0]; factor];
+    }
 
     let total = n * factor;
     let mut out = Vec::with_capacity(total);
@@ -925,7 +962,10 @@ mod tests {
         let mut series = sample_series_5pt();
         series.surface_albedo = Some(vec![0.2, 0.7, 0.5, 0.3, 0.2]);
         let resampled = series.resample(600).expect("resample should succeed");
-        let albedo = resampled.surface_albedo.as_ref().expect("albedo should be Some");
+        let albedo = resampled
+            .surface_albedo
+            .as_ref()
+            .expect("albedo should be Some");
         // ZOH: each source value replicated 6 times
         assert_eq!(albedo.len(), 5 * 6);
         assert!(albedo[..6].iter().all(|&v| (v - 0.2).abs() < 1e-12));

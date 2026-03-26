@@ -218,7 +218,10 @@ fn parse_timestamp(value: &str) -> Option<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(value).ok()
 }
 
-fn bucket_start(ts: DateTime<FixedOffset>, resolution: AggregationResolution) -> DateTime<FixedOffset> {
+fn bucket_start(
+    ts: DateTime<FixedOffset>,
+    resolution: AggregationResolution,
+) -> DateTime<FixedOffset> {
     match resolution {
         AggregationResolution::Hourly => ts
             .with_minute(0)

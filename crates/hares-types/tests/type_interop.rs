@@ -54,9 +54,12 @@ fn base_env() -> EnvironmentState {
             solar_azimuth_deg: 180.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
+            ground_albedo: 0.2,
         },
-        grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
         custom_domains: vec![],
         current_time: FixedOffset::east_opt(0)
             .unwrap()
@@ -127,8 +130,16 @@ fn electrical_contribution_routes_load_vs_generation() {
         .expect("accumulate load must succeed");
 
     approx_eq(slots.electrical.load_power_kw, 1.5, "load kW");
-    approx_eq(slots.electrical.generation_power_kw, 0.0, "generation kW must be zero");
-    approx_eq(slots.electrical.net_active_kw(), 1.5, "net must equal load when no generation");
+    approx_eq(
+        slots.electrical.generation_power_kw,
+        0.0,
+        "generation kW must be zero",
+    );
+    approx_eq(
+        slots.electrical.net_active_kw(),
+        1.5,
+        "net must equal load when no generation",
+    );
 
     slots
         .accumulate(&PortContribution::Electrical {
@@ -137,9 +148,17 @@ fn electrical_contribution_routes_load_vs_generation() {
         })
         .expect("accumulate generation must succeed");
 
-    approx_eq(slots.electrical.load_power_kw, 1.5, "load unchanged after adding generation");
+    approx_eq(
+        slots.electrical.load_power_kw,
+        1.5,
+        "load unchanged after adding generation",
+    );
     approx_eq(slots.electrical.generation_power_kw, -1.0, "generation kW");
-    approx_eq(slots.electrical.net_active_kw(), 0.5, "net = load + generation");
+    approx_eq(
+        slots.electrical.net_active_kw(),
+        0.5,
+        "net = load + generation",
+    );
 }
 
 /// PortSlots::zero() must reset all accumulators to zero while preserving the
@@ -147,7 +166,11 @@ fn electrical_contribution_routes_load_vs_generation() {
 #[test]
 fn zero_resets_all_slots_while_preserving_structure() {
     let zone = ZoneId(1);
-    let decls = [PortDeclaration::thermal(zone), PortDeclaration::electrical(), PortDeclaration::fuel()];
+    let decls = [
+        PortDeclaration::thermal(zone),
+        PortDeclaration::electrical(),
+        PortDeclaration::fuel(),
+    ];
     let mut slots = PortSlots::from_declarations(&decls);
 
     slots
@@ -166,13 +189,23 @@ fn zero_resets_all_slots_while_preserving_structure() {
         .expect("accumulate electrical");
 
     // Pre-zero state must be non-zero.
-    assert!(slots.thermal[0].sensible_gain_w > 0.0, "must have thermal gain before zero");
-    assert!(slots.electrical.load_power_kw > 0.0, "must have load before zero");
+    assert!(
+        slots.thermal[0].sensible_gain_w > 0.0,
+        "must have thermal gain before zero"
+    );
+    assert!(
+        slots.electrical.load_power_kw > 0.0,
+        "must have load before zero"
+    );
 
     slots.zero();
 
     // Post-zero: all numeric fields must be exactly 0.
-    let acc = slots.thermal.iter().find(|a| a.zone == zone).expect("zone must still exist");
+    let acc = slots
+        .thermal
+        .iter()
+        .find(|a| a.zone == zone)
+        .expect("zone must still exist");
     approx_eq(acc.sensible_gain_w, 0.0, "sensible after zero");
     approx_eq(acc.latent_gain_w, 0.0, "latent after zero");
     for cat in [
@@ -182,15 +215,31 @@ fn zero_resets_all_slots_while_preserving_structure() {
         ThermalCategory::JacketLoss,
         ThermalCategory::DuctLoss,
     ] {
-        approx_eq(acc.sensible_for_category(cat), 0.0, "category subtotal after zero");
+        approx_eq(
+            acc.sensible_for_category(cat),
+            0.0,
+            "category subtotal after zero",
+        );
     }
     approx_eq(slots.electrical.load_power_kw, 0.0, "load_power after zero");
-    approx_eq(slots.electrical.generation_power_kw, 0.0, "generation_power after zero");
-    approx_eq(slots.electrical.reactive_power_kvar, 0.0, "reactive after zero");
+    approx_eq(
+        slots.electrical.generation_power_kw,
+        0.0,
+        "generation_power after zero",
+    );
+    approx_eq(
+        slots.electrical.reactive_power_kvar,
+        0.0,
+        "reactive after zero",
+    );
     approx_eq(slots.electrical.net_active_kw(), 0.0, "net after zero");
 
     // Structure is preserved: the thermal accumulator for the declared zone still exists.
-    assert_eq!(slots.thermal.len(), 1, "thermal slot count must survive zero");
+    assert_eq!(
+        slots.thermal.len(),
+        1,
+        "thermal slot count must survive zero"
+    );
     assert_eq!(slots.thermal[0].zone, zone, "zone id must survive zero");
 }
 
@@ -214,7 +263,10 @@ fn environment_state_fields_accessible_and_custom_domains_empty() {
         (env.grid.voltage_pu - 1.0).abs() < 1e-9,
         "grid voltage must be 1.0 pu"
     );
-    assert!(env.custom_domains.is_empty(), "custom_domains must be empty by default");
+    assert!(
+        env.custom_domains.is_empty(),
+        "custom_domains must be empty by default"
+    );
 }
 
 /// ControlSignal::ThermalSetpoint is accepted by a capability set that
@@ -251,7 +303,10 @@ fn accumulate_to_undeclared_zone_is_rejected() {
         latent_gain_w: 0.0,
         category: ThermalCategory::InternalGain,
     });
-    assert!(result.is_err(), "accumulate to undeclared zone must return Err");
+    assert!(
+        result.is_err(),
+        "accumulate to undeclared zone must return Err"
+    );
 }
 
 /// ThermalAccumulator::new produces a zero-initialized accumulator bound to
@@ -270,7 +325,11 @@ fn thermal_accumulator_new_is_zero_and_bound_to_zone() {
         ThermalCategory::JacketLoss,
         ThermalCategory::DuctLoss,
     ] {
-        approx_eq(acc.sensible_for_category(cat), 0.0, "category subtotal must start at zero");
+        approx_eq(
+            acc.sensible_for_category(cat),
+            0.0,
+            "category subtotal must start at zero",
+        );
     }
 }
 
@@ -315,10 +374,26 @@ fn mixed_category_totals_are_consistent() {
     approx_eq(acc.latent_gain_w, 15.0, "total latent");
 
     // Per-category subtotals must match each contribution independently.
-    approx_eq(acc.sensible_for_category(ThermalCategory::HvacHeating), 400.0, "HvacHeating subtotal");
-    approx_eq(acc.sensible_for_category(ThermalCategory::InternalGain), 120.0, "InternalGain subtotal");
-    approx_eq(acc.sensible_for_category(ThermalCategory::JacketLoss), 30.0, "JacketLoss subtotal");
-    approx_eq(acc.sensible_for_category(ThermalCategory::HvacCooling), 0.0, "HvacCooling must be zero");
+    approx_eq(
+        acc.sensible_for_category(ThermalCategory::HvacHeating),
+        400.0,
+        "HvacHeating subtotal",
+    );
+    approx_eq(
+        acc.sensible_for_category(ThermalCategory::InternalGain),
+        120.0,
+        "InternalGain subtotal",
+    );
+    approx_eq(
+        acc.sensible_for_category(ThermalCategory::JacketLoss),
+        30.0,
+        "JacketLoss subtotal",
+    );
+    approx_eq(
+        acc.sensible_for_category(ThermalCategory::HvacCooling),
+        0.0,
+        "HvacCooling must be zero",
+    );
 
     // Invariant: per-category sum equals the total.
     let cat_sum = acc.sensible_for_category(ThermalCategory::HvacHeating)
@@ -326,5 +401,9 @@ fn mixed_category_totals_are_consistent() {
         + acc.sensible_for_category(ThermalCategory::InternalGain)
         + acc.sensible_for_category(ThermalCategory::JacketLoss)
         + acc.sensible_for_category(ThermalCategory::DuctLoss);
-    approx_eq(cat_sum, acc.sensible_gain_w, "sum of category subtotals must equal total sensible");
+    approx_eq(
+        cat_sum,
+        acc.sensible_gain_w,
+        "sum of category subtotals must equal total sensible",
+    );
 }

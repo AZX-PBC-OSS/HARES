@@ -246,7 +246,9 @@ pub fn compute_usable_area(
                     .then_with(|| {
                         let area_a = roof.planes[*ia].area_m2;
                         let area_b = roof.planes[*ib].area_m2;
-                        area_b.partial_cmp(&area_a).unwrap_or(std::cmp::Ordering::Equal)
+                        area_b
+                            .partial_cmp(&area_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .then_with(|| {
                         let wa = if *az_a > 180.0 { 0 } else { 1 };
@@ -317,7 +319,9 @@ pub fn compute_usable_area(
     let max_capacity_kw = (max_panels as f64) * (panel_watts as f64) / 1000.0;
 
     let tilt_deg = if roof_shape == RoofShape::Flat || best_plane.tilt_deg < 1.0 {
-        latitude.map(|l| l.min(25.0)).unwrap_or(FLAT_TILT_FALLBACK_DEG)
+        latitude
+            .map(|l| l.min(25.0))
+            .unwrap_or(FLAT_TILT_FALLBACK_DEG)
     } else {
         best_plane.tilt_deg
     };
@@ -356,8 +360,8 @@ pub fn size_pv_system(
 
     let upper_bound = max_kw.min(usable.max_capacity_kw);
     let clamped_kw = target_kw.clamp(min_kw, upper_bound);
-    let num_panels = ((clamped_kw * 1000.0 / panel_watts as f64).ceil() as u32)
-        .min(usable.max_panels);
+    let num_panels =
+        ((clamped_kw * 1000.0 / panel_watts as f64).ceil() as u32).min(usable.max_panels);
     let capacity_kw = (num_panels as f64) * (panel_watts as f64) / 1000.0;
     let collector_area_m2 = (num_panels as f64) * panel_area_m2;
 
@@ -417,7 +421,9 @@ pub fn enumerate_pv_candidates(
             let max_capacity_kw = (max_panels as f64) * (panel_watts as f64) / 1000.0;
 
             let tilt_deg = if roof_shape == RoofShape::Flat || plane.tilt_deg < 1.0 {
-                latitude.map(|l| l.min(25.0)).unwrap_or(FLAT_TILT_FALLBACK_DEG)
+                latitude
+                    .map(|l| l.min(25.0))
+                    .unwrap_or(FLAT_TILT_FALLBACK_DEG)
             } else {
                 plane.tilt_deg
             };
@@ -497,12 +503,10 @@ pub fn infer_roof_shape(
 
     // Material hint: tile/slate common on hip roofs.
     let has_tile_slate = roof.planes.iter().any(|p| {
-        p.material
-            .as_ref()
-            .is_some_and(|m| {
-                let ml = m.to_lowercase();
-                ml.contains("tile") || ml.contains("slate")
-            })
+        p.material.as_ref().is_some_and(|m| {
+            let ml = m.to_lowercase();
+            ml.contains("tile") || ml.contains("slate")
+        })
     });
     if has_tile_slate && distinct_azimuths.len() >= 2 {
         return RoofShape::Hip;
@@ -555,7 +559,8 @@ mod tests {
             planes: vec![plane(100.0, 26.0, Some(180.0))],
             total_roof_area_m2: 100.0,
         };
-        let usable = compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None).unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None).unwrap();
         // Single gable plane → halved, then ×0.75.
         assert!((usable.usable_m2 - 100.0 / 2.0 * 0.75).abs() < 0.01);
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
@@ -571,7 +576,8 @@ mod tests {
             ],
             total_roof_area_m2: 100.0,
         };
-        let usable = compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None).unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Gable, &[], Some(40.0), None, None).unwrap();
         // Two planes → no halving; south plane used directly.
         assert!((usable.usable_m2 - 50.0 * 0.75).abs() < 0.01);
     }
@@ -592,7 +598,8 @@ mod tests {
             planes: vec![plane(200.0, 0.0, Some(180.0))],
             total_roof_area_m2: 200.0,
         };
-        let usable = compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None).unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Flat, &[], Some(35.0), None, None).unwrap();
         // Flat: effective = 200 × 0.70 = 140 m².
         // Panel footprint = 2.0 / 0.40 = 5.0 m² (lat 35 → GCR 0.40).
         // Max panels = floor(140 / 5) = 28.
@@ -609,7 +616,8 @@ mod tests {
             ],
             total_roof_area_m2: 140.0,
         };
-        let usable = compute_usable_area(&roof, RoofShape::Hip, &[], Some(40.0), None, None).unwrap();
+        let usable =
+            compute_usable_area(&roof, RoofShape::Hip, &[], Some(40.0), None, None).unwrap();
         assert!(usable.max_panels > 0);
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
     }
@@ -647,14 +655,26 @@ mod tests {
 
     #[test]
     fn infer_flat_from_apartment() {
-        let roof = RoofInfo { planes: vec![plane(100.0, 0.0, Some(180.0))], total_roof_area_m2: 100.0 };
-        assert_eq!(infer_roof_shape(&roof, Some("apartment"), None), RoofShape::Flat);
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 100.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("apartment"), None),
+            RoofShape::Flat
+        );
     }
 
     #[test]
     fn infer_flat_from_zero_pitch() {
-        let roof = RoofInfo { planes: vec![plane(100.0, 0.0, Some(180.0))], total_roof_area_m2: 100.0 };
-        assert_eq!(infer_roof_shape(&roof, Some("single-family detached"), None), RoofShape::Flat);
+        let roof = RoofInfo {
+            planes: vec![plane(100.0, 0.0, Some(180.0))],
+            total_roof_area_m2: 100.0,
+        };
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), None),
+            RoofShape::Flat
+        );
     }
 
     #[test]
@@ -663,7 +683,10 @@ mod tests {
             planes: vec![plane(50.0, 26.0, Some(180.0)), plane(50.0, 26.0, Some(0.0))],
             total_roof_area_m2: 100.0,
         };
-        assert_eq!(infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)), RoofShape::Gable);
+        assert_eq!(
+            infer_roof_shape(&roof, Some("single-family detached"), Some(40.0)),
+            RoofShape::Gable
+        );
     }
 
     #[test]
@@ -690,7 +713,8 @@ mod tests {
             ],
             total_roof_area_m2: 180.0,
         };
-        let candidates = enumerate_pv_candidates(&roof, RoofShape::Gable, &[], Some(40.0), None, None);
+        let candidates =
+            enumerate_pv_candidates(&roof, RoofShape::Gable, &[], Some(40.0), None, None);
         // 3 non-north planes.
         assert_eq!(candidates.len(), 3);
         // Best first (south with most area).
@@ -715,7 +739,8 @@ mod tests {
             Some(40.0),
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!((usable.azimuth_deg - 180.0).abs() < 0.01);
     }
 }

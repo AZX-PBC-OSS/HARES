@@ -133,9 +133,11 @@ impl ThermalSolver {
                         category,
                     } => {
                         let t_node = self.x[*inner_state_index];
-                        let t_surface =
-                            radiation_frac * t_node + (1.0 - radiation_frac) * t_zone;
-                        ((t_surface - t_zone) * area_m2 / r_film_int_m2_k_w, *category)
+                        let t_surface = radiation_frac * t_node + (1.0 - radiation_frac) * t_zone;
+                        (
+                            (t_surface - t_zone) * area_m2 / r_film_int_m2_k_w,
+                            *category,
+                        )
                     }
                     BoundaryDiagnosticInfo::SteadyState {
                         ua_w_k,

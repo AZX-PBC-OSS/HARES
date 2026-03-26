@@ -359,10 +359,9 @@ impl PortSlots {
                 }
                 PortType::Fluid => {
                     if let (Some(loop_id), Some(fluid_type)) = (decl.loop_id, decl.fluid_type) {
-                        if !fluid
-                            .iter()
-                            .any(|f: &FluidAccumulator| f.loop_id == loop_id && f.fluid_type == fluid_type)
-                        {
+                        if !fluid.iter().any(|f: &FluidAccumulator| {
+                            f.loop_id == loop_id && f.fluid_type == fluid_type
+                        }) {
                             fluid.push(FluidAccumulator::new(loop_id, fluid_type));
                         }
                     }
@@ -634,8 +633,7 @@ mod tests {
         approx_eq(slots.thermal[0].sensible_gain_w, 0.0);
         approx_eq(slots.thermal[0].latent_gain_w, 0.0);
         assert_eq!(
-            slots.thermal[0].sensible_by_category,
-            [0.0; THERMAL_CATEGORY_COUNT],
+            slots.thermal[0].sensible_by_category, [0.0; THERMAL_CATEGORY_COUNT],
             "zero() must clear per-category array"
         );
         approx_eq(slots.electrical.reactive_power_kvar, 0.0);

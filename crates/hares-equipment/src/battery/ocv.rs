@@ -1,5 +1,6 @@
 //! Open-circuit voltage and negative electrode potential tables.
 
+use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -8,15 +9,15 @@ use serde::{Deserialize, Serialize};
 
 /// Table-based open-circuit voltage curve indexed by SOC.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct OcvTable {
-    soc_points: Vec<f64>,
-    voltage_v: Vec<f64>,
+pub struct OcvTable {
+    pub soc_points: Vec<f64>,
+    pub voltage_v: Vec<f64>,
 }
 
 impl OcvTable {
     /// 11-point Li-NMC OCV curve (per cell).
     /// SOC 0.0 .. 1.0 in 0.1 steps. Calibrated values from NREL SSC / OCHRE.
-    pub(crate) fn default_li_nmc() -> Self {
+    pub fn default_li_nmc() -> Self {
         Self {
             soc_points: vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
             voltage_v: vec![
@@ -27,7 +28,7 @@ impl OcvTable {
     }
 
     /// Linear interpolation of cell OCV at a given SOC, clamped to table bounds.
-    pub(crate) fn voltage_at_soc(&self, soc: f64) -> f64 {
+    pub fn voltage_at_soc(&self, soc: f64) -> f64 {
         // SAFETY: soc_points and voltage_v are non-empty by construction (hardcoded LUT).
         let soc = soc.clamp(
             self.soc_points[0],
@@ -49,6 +50,41 @@ impl OcvTable {
         }
         *self.voltage_v.last().expect("non-empty LUT")
     }
+
+    pub fn new(soc_points: Vec<f64>, voltage_v: Vec<f64>) -> crate::Result<Self> {
+        if soc_points.len() != voltage_v.len() {
+            return Err(HaresError::Equipment(format!(
+                "OCV table soc_points and voltage_v must have same length, got {} and {}",
+                soc_points.len(),
+                voltage_v.len()
+            )));
+        }
+        if soc_points.is_empty() {
+            return Err(HaresError::Equipment(
+                "OCV table cannot be empty".to_string(),
+            ));
+        }
+        for i in 1..soc_points.len() {
+            if soc_points[i] <= soc_points[i - 1] {
+                return Err(HaresError::Equipment(format!(
+                    "OCV table soc_points must be strictly increasing, got {:?}",
+                    soc_points
+                )));
+            }
+        }
+        for v in &voltage_v {
+            if *v <= 0.0 {
+                return Err(HaresError::Equipment(format!(
+                    "OCV table voltage_v must be positive, got {:?}",
+                    voltage_v
+                )));
+            }
+        }
+        Ok(Self {
+            soc_points,
+            voltage_v,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -58,15 +94,15 @@ impl OcvTable {
 /// Table-based negative electrode half-cell potential curve indexed by SOC.
 /// Used by the Smith 2017 SEI Tafel correction in `DegradationState`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct UNegTable {
-    soc_points: Vec<f64>,
-    potential_v: Vec<f64>,
+pub struct UNegTable {
+    pub soc_points: Vec<f64>,
+    pub potential_v: Vec<f64>,
 }
 
 impl UNegTable {
     /// 11-point Li-NMC U_neg curve (graphite anode, vs Li/Li+).
     /// Values from NREL SSC / OCHRE Smith 2017 calibration.
-    pub(crate) fn default_li_nmc() -> Self {
+    pub fn default_li_nmc() -> Self {
         Self {
             soc_points: vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
             potential_v: vec![
@@ -77,7 +113,7 @@ impl UNegTable {
     }
 
     /// Linear interpolation of U_neg at a given SOC, clamped to table bounds.
-    pub(crate) fn potential_at_soc(&self, soc: f64) -> f64 {
+    pub fn potential_at_soc(&self, soc: f64) -> f64 {
         // SAFETY: soc_points and potential_v are non-empty by construction (hardcoded LUT).
         let soc = soc.clamp(
             self.soc_points[0],
@@ -98,5 +134,40 @@ impl UNegTable {
             }
         }
         *self.potential_v.last().expect("non-empty LUT")
+    }
+
+    pub fn new(soc_points: Vec<f64>, potential_v: Vec<f64>) -> crate::Result<Self> {
+        if soc_points.len() != potential_v.len() {
+            return Err(HaresError::Equipment(format!(
+                "UNeg table soc_points and potential_v must have same length, got {} and {}",
+                soc_points.len(),
+                potential_v.len()
+            )));
+        }
+        if soc_points.is_empty() {
+            return Err(HaresError::Equipment(
+                "UNeg table cannot be empty".to_string(),
+            ));
+        }
+        for i in 1..soc_points.len() {
+            if soc_points[i] <= soc_points[i - 1] {
+                return Err(HaresError::Equipment(format!(
+                    "UNeg table soc_points must be strictly increasing, got {:?}",
+                    soc_points
+                )));
+            }
+        }
+        for v in &potential_v {
+            if !v.is_finite() || v.is_nan() {
+                return Err(HaresError::Equipment(format!(
+                    "UNeg table potential_v must be finite, got {:?}",
+                    potential_v
+                )));
+            }
+        }
+        Ok(Self {
+            soc_points,
+            potential_v,
+        })
     }
 }

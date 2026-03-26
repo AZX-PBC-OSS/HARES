@@ -18,17 +18,19 @@ use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceS
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
-use hares_equipment::{Equipment, EquipmentRegistry};
+use hares_equipment::{
+    BatteryLutType, Equipment, EquipmentRegistry, OcvTable, RegularGridInterpolator, UNegTable,
+};
 use hares_io::{
     Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig, StreamingRecorder,
     WeatherTimeSeries, build_schema, parse_hpxml, parse_schedule_csv, parse_weather,
     resolve_equipment,
 };
-use hares_physics::pv_sizing::RoofInfo;
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
     OCCUPANT_SENSIBLE_GAIN_W,
 };
+use hares_physics::pv_sizing::RoofInfo;
 use hares_types::{
     ControlSignal, DomainSolver, DomainUpdate, EndUse, EnvironmentState, ExecutionStage, GridState,
     HaresError, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, THERMAL, ThermalCategory, ZoneId,
@@ -313,10 +315,7 @@ fn compute_equipment_dispatch_targets(equipment: &[Box<dyn Equipment>]) -> Vec<D
 /// Register PV array orientations as environment surfaces so Perez irradiance
 /// is computed for them. PV orientations use quantised surface IDs that differ
 /// from the sequential envelope boundary IDs.
-fn register_pv_surfaces(
-    specs: &[hares_io::EquipmentSpec],
-    env: &mut EnvironmentManager,
-) {
+fn register_pv_surfaces(specs: &[hares_io::EquipmentSpec], env: &mut EnvironmentManager) {
     use hares_equipment::pv::surface_id_for_orientation;
     for spec in specs.iter().filter(|s| s.name == "PV") {
         let tilt = spec
@@ -343,10 +342,7 @@ fn register_pv_surfaces(
 /// Auto-attach PV arrays to the closest matching roof boundary by orientation.
 /// Sets `attached_boundary_id` on matching specs so the thermal model can
 /// account for PV shading.
-fn attach_pv_to_roofs(
-    specs: &mut [hares_io::EquipmentSpec],
-    building: &Building,
-) {
+fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building) {
     use hares_io::hpxml::building::BoundaryType;
 
     let roofs: Vec<(u32, f64, f64, f64)> = building
@@ -416,10 +412,7 @@ fn register_pv_roof_shading(
             .parameters
             .get("attached_boundary_id")
             .and_then(|v| v.as_u64());
-        let capacity_kw = spec
-            .parameters
-            .get("capacity_kw")
-            .and_then(|v| v.as_f64());
+        let capacity_kw = spec.parameters.get("capacity_kw").and_then(|v| v.as_f64());
 
         if let (Some(bid), Some(cap)) = (boundary_id, capacity_kw) {
             let roof_area = building
@@ -946,11 +939,91 @@ impl Dwelling {
     pub fn actor_count(&self) -> usize {
         self.actors.len()
     }
+}
 
+/// Typed payload for `set_battery_lut` — ensures the data matches the LUT type at compile time.
+pub enum BatteryLutData {
+    ChargingCurve(RegularGridInterpolator),
+    Ocv(OcvTable),
+    UNeg(UNegTable),
+}
+
+impl Dwelling {
     /// Returns a slice of equipment for read-only access.
     #[must_use]
     pub fn equipment(&self) -> &[Box<dyn Equipment>] {
         &self.equipment
+    }
+
+    /// Set a LUT on a battery equipment by name.
+    ///
+    /// For `BatteryLutType::ChargingCurve`, pass a pre-built `RegularGridInterpolator`.
+    /// For `Ocv` / `UNeg`, pass validated tables.
+    /// Returns `Err` if the equipment doesn't exist or doesn't support the LUT type.
+    pub fn set_battery_lut(
+        &mut self,
+        name: &str,
+        lut_type: BatteryLutType,
+        lut: BatteryLutData,
+    ) -> Result<()> {
+        let eq = self
+            .equipment
+            .iter_mut()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
+
+        match (lut_type, lut) {
+            (BatteryLutType::ChargingCurve, BatteryLutData::ChargingCurve(interp)) => {
+                eq.set_charging_curve_lut(Some(interp))
+            }
+            (BatteryLutType::Ocv, BatteryLutData::Ocv(table)) => eq.set_ocv_table(table),
+            (BatteryLutType::UNeg, BatteryLutData::UNeg(table)) => eq.set_u_neg_table(table),
+            _ => Err(HaresError::Equipment(format!(
+                "mismatched lut_type and data for equipment '{}'",
+                name
+            ))),
+        }
+    }
+
+    /// Clear / reset a LUT on a battery equipment by name.
+    pub fn clear_battery_lut(&mut self, name: &str, lut_type: BatteryLutType) -> Result<()> {
+        let eq = self
+            .equipment
+            .iter_mut()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
+
+        match lut_type {
+            BatteryLutType::ChargingCurve => eq.set_charging_curve_lut(None),
+            BatteryLutType::Ocv => eq.reset_ocv_table(),
+            BatteryLutType::UNeg => eq.reset_u_neg_table(),
+        }
+    }
+
+    /// Set a 4D charging curve LUT on an EV equipment by name.
+    pub fn set_ev_charging_curve_lut(
+        &mut self,
+        name: &str,
+        lut: RegularGridInterpolator,
+    ) -> Result<()> {
+        let eq = self
+            .equipment
+            .iter_mut()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
+
+        eq.set_charging_curve_lut(Some(lut))
+    }
+
+    /// Clear the charging curve LUT on an EV equipment by name.
+    pub fn clear_ev_charging_curve_lut(&mut self, name: &str) -> Result<()> {
+        let eq = self
+            .equipment
+            .iter_mut()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
+
+        eq.set_charging_curve_lut(None)
     }
 
     /// Returns the current environment state (zone temps, weather, grid, time).
@@ -986,6 +1059,38 @@ impl Dwelling {
     pub fn clear_equipment(&mut self) {
         self.equipment.clear();
         self.refresh_equipment_caches();
+    }
+
+    /// Removes equipment by name and returns it.
+    ///
+    /// Returns `Err` if no equipment with the given name exists.
+    pub fn remove_equipment(&mut self, name: &str) -> Result<Box<dyn Equipment>> {
+        let pos = self
+            .equipment
+            .iter()
+            .position(|e| e.descriptor().name == name)
+            .ok_or_else(|| HaresError::Dwelling(format!("equipment '{}' not found", name)))?;
+        let removed = self.equipment.remove(pos);
+        self.refresh_equipment_caches();
+        Ok(removed)
+    }
+
+    /// Replaces equipment by name with new equipment, returning the old equipment.
+    ///
+    /// Returns `Err` if no equipment with the given name exists.
+    pub fn replace_equipment(
+        &mut self,
+        name: &str,
+        new_equipment: Box<dyn Equipment>,
+    ) -> Result<Box<dyn Equipment>> {
+        let pos = self
+            .equipment
+            .iter()
+            .position(|e| e.descriptor().name == name)
+            .ok_or_else(|| HaresError::Dwelling(format!("equipment '{}' not found", name)))?;
+        let old = std::mem::replace(&mut self.equipment[pos], new_equipment);
+        self.refresh_equipment_caches();
+        Ok(old)
     }
 
     /// Refreshes internal caches after equipment list modification.

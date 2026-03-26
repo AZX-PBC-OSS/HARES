@@ -4,8 +4,8 @@
 //! ohmic loss efficiency, self-consumption control, rainflow cycle counting,
 //! and degradation tracking (stubbed in v1).
 
-mod degradation;
-mod ocv;
+pub(crate) mod degradation;
+pub mod ocv;
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -19,8 +19,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
+pub use ocv::{OcvTable, UNegTable};
+
 use degradation::{DegradationState, RainflowCounter};
-use ocv::{OcvTable, UNegTable};
+
+pub use hares_types::BatteryLutType;
 
 // ---------------------------------------------------------------------------
 // Config keys
@@ -261,6 +264,7 @@ pub struct Battery {
     cell_resistance_ohm: f64,
     ocv_table: OcvTable,
     u_neg_table: UNegTable,
+    charging_curve_lut: Option<crate::ndinterp::RegularGridInterpolator>,
     self_discharge_rate_per_s: f64,
     standby_power_w: f64,
     min_soc: f64,
@@ -361,6 +365,7 @@ impl Battery {
             cell_resistance_ohm: DEFAULT_CELL_RESISTANCE_OHM,
             ocv_table: OcvTable::default_li_nmc(),
             u_neg_table: UNegTable::default_li_nmc(),
+            charging_curve_lut: None,
             self_discharge_rate_per_s: DEFAULT_SELF_DISCHARGE_PCT_PER_DAY / 100.0 / SECONDS_PER_DAY,
             standby_power_w: DEFAULT_STANDBY_POWER_W,
             min_soc: DEFAULT_MIN_SOC,
@@ -526,7 +531,17 @@ impl Battery {
             .clamp(0.0, 1.0);
         let dr_fraction = self.dr_power_fraction();
         if power_kw > 0.0 {
-            let hw_max = self.max_charge_kw * temp_derate * dr_fraction;
+            let mut hw_max = self.max_charge_kw * temp_derate * dr_fraction;
+            if let Some(ref lut) = self.charging_curve_lut {
+                let soh = 1.0 - self.degradation.capacity_fade_pct();
+                let pack_kwh = self.capacity_kwh_nominal * soh;
+                let c_rate = if pack_kwh > 0.0 {
+                    power_kw / pack_kwh
+                } else {
+                    0.0
+                };
+                hw_max *= lut.interpolate(&[self.soc, self.cell_temp_c, c_rate, soh]) as f64;
+            }
             let limit = self
                 .import_limit_kw
                 .map(|lim| hw_max.min(lim))
@@ -1168,6 +1183,34 @@ impl Equipment for Battery {
                 )));
             }
         }
+        Ok(())
+    }
+
+    fn set_charging_curve_lut(
+        &mut self,
+        lut: Option<crate::ndinterp::RegularGridInterpolator>,
+    ) -> crate::Result<()> {
+        self.charging_curve_lut = lut;
+        Ok(())
+    }
+
+    fn set_ocv_table(&mut self, table: OcvTable) -> crate::Result<()> {
+        self.ocv_table = table;
+        Ok(())
+    }
+
+    fn set_u_neg_table(&mut self, table: UNegTable) -> crate::Result<()> {
+        self.u_neg_table = table;
+        Ok(())
+    }
+
+    fn reset_ocv_table(&mut self) -> crate::Result<()> {
+        self.ocv_table = OcvTable::default_li_nmc();
+        Ok(())
+    }
+
+    fn reset_u_neg_table(&mut self) -> crate::Result<()> {
+        self.u_neg_table = UNegTable::default_li_nmc();
         Ok(())
     }
 }
@@ -3381,6 +3424,96 @@ mod tests {
         assert!(
             power < -1.0,
             "after DR expiry, discharge should be available again, got {power}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 4D LUT and Equipment trait LUT method tests
+    // ---------------------------------------------------------------
+
+    fn make_4d_lut(soc_pf: &[(f64, f32)]) -> crate::ndinterp::RegularGridInterpolator {
+        let soc_grid: Vec<f64> = soc_pf.iter().map(|(s, _)| *s).collect();
+        let values: Vec<f32> = soc_pf.iter().map(|(_, p)| *p).collect();
+        crate::ndinterp::RegularGridInterpolator::new(
+            vec![soc_grid, vec![25.0], vec![1.0], vec![1.0]],
+            values,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn set_charging_curve_lut_via_equipment_trait() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        assert!(bat.charging_curve_lut.is_some());
+    }
+
+    #[test]
+    fn clear_charging_curve_lut_via_equipment_trait() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        bat.set_charging_curve_lut(None).unwrap();
+        assert!(bat.charging_curve_lut.is_none());
+    }
+
+    #[test]
+    fn set_ocv_table_via_equipment_trait() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = OcvTable::new(vec![0.0, 0.5, 1.0], vec![3.0, 3.5, 4.2]).unwrap();
+        bat.set_ocv_table(table).unwrap();
+        let v = bat.ocv_table.voltage_at_soc(0.5);
+        assert!((v - 3.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn set_u_neg_table_via_equipment_trait() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let table = UNegTable::new(vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.1]).unwrap();
+        bat.set_u_neg_table(table).unwrap();
+        let p = bat.u_neg_table.potential_at_soc(0.5);
+        assert!((p - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn reset_ocv_table_restores_default() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
+        bat.set_ocv_table(custom).unwrap();
+        bat.reset_ocv_table().unwrap();
+        let v = bat.ocv_table.voltage_at_soc(0.0);
+        assert!((v - 3.0).abs() < 1e-3, "should be default NMC voltage");
+    }
+
+    #[test]
+    fn reset_u_neg_table_restores_default() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        let custom = UNegTable::new(vec![0.0, 1.0], vec![0.5, 0.01]).unwrap();
+        bat.set_u_neg_table(custom).unwrap();
+        bat.reset_u_neg_table().unwrap();
+        let p = bat.u_neg_table.potential_at_soc(0.0);
+        assert!((p - 1.2868).abs() < 1e-3, "should be default NMC U_neg");
+    }
+
+    #[test]
+    fn lut_tapers_battery_charge_at_high_soc() {
+        let lut = make_4d_lut(&[(0.0, 1.0), (0.5, 1.0), (0.8, 0.5), (1.0, 0.0)]);
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        bat.soc = 0.9;
+
+        let clamped = bat.clamp_power(5.0);
+        assert!(
+            clamped < 2.0,
+            "charge should be tapered at high SOC with LUT, got {clamped}"
         );
     }
 }

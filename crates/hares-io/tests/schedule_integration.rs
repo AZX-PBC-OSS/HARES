@@ -4,9 +4,9 @@ use std::time::Duration;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, FixedOffset, TimeZone, Timelike};
 use hares_equipment::{Equipment, EquipmentConfig, config::ConfigValue};
 use hares_equipment::{event_load::EventBasedLoad, scheduled_load::ScheduledLoad};
-use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
+use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
 use hares_types::{
     DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, WeatherState, ZoneId,
     ZoneState, schedule_domain_id,
@@ -165,7 +165,8 @@ fn io_injection_to_scheduled_load_step_column_source() {
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
 
     let env = base_env(payload_for_row(&schedule, 0));
-    eq.init(&config, &env).expect("scheduled load init should pass");
+    eq.init(&config, &env)
+        .expect("scheduled load init should pass");
 
     let mut ports = PortSlots::from_declarations(eq.ports());
     eq.step(&env, Duration::from_secs(60), &mut ports)
@@ -196,7 +197,8 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
 
     let env = base_env(payload_for_row(&schedule, 0));
-    eq.init(&config, &env).expect("scheduled load init should pass");
+    eq.init(&config, &env)
+        .expect("scheduled load init should pass");
 
     let mut ports = PortSlots::from_declarations(eq.ports());
     eq.step(&env, Duration::from_secs(60), &mut ports)
@@ -251,7 +253,8 @@ fn io_injection_to_scheduled_load_step_constant_source() {
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
 
     let env = base_env(payload_for_row(&schedule, 0));
-    eq.init(&config, &env).expect("scheduled load init should pass");
+    eq.init(&config, &env)
+        .expect("scheduled load init should pass");
 
     let mut ports = PortSlots::from_declarations(eq.ports());
     eq.step(&env, Duration::from_secs(60), &mut ports)

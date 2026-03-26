@@ -209,6 +209,14 @@ pub enum FluidType {
     Refrigerant,
 }
 
+/// Lookup table type for battery/EV LUT injection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BatteryLutType {
+    ChargingCurve,
+    Ocv,
+    UNeg,
+}
+
 /// Describes one telemetry channel exposed by an equipment model.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TelemetryField {
@@ -333,6 +341,11 @@ mod tests {
         let fluid_json = serde_json::to_string(&FluidType::Glycol).expect("serialize fluid type");
         let fluid: FluidType = serde_json::from_str(&fluid_json).expect("deserialize fluid type");
         assert_eq!(fluid, FluidType::Glycol);
+
+        let lut_json =
+            serde_json::to_string(&BatteryLutType::ChargingCurve).expect("serialize lut type");
+        let lut: BatteryLutType = serde_json::from_str(&lut_json).expect("deserialize lut type");
+        assert_eq!(lut, BatteryLutType::ChargingCurve);
     }
 
     #[test]

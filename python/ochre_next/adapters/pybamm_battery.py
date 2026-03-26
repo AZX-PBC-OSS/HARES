@@ -411,3 +411,246 @@ def generate_degradation_params(
         result.save(cached_path)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 4D CC-CV charging curve LUT generation
+# ---------------------------------------------------------------------------
+
+# Default grid axes matching DER_Detection convention
+_DEFAULT_SOC_GRID: list[float] = [
+    0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35,
+    0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75,
+    0.80, 0.85, 0.88, 0.91, 0.94, 0.96, 0.98, 1.00,
+]
+_DEFAULT_TEMP_GRID: list[float] = [-15.0, -5.0, 5.0, 15.0, 25.0, 35.0, 45.0]
+_DEFAULT_CRATE_GRID: list[float] = [0.04, 0.08, 0.15, 0.25, 0.50, 1.00, 1.50, 2.00]
+_DEFAULT_SOH_GRID: list[float] = [0.70, 0.80, 0.90, 1.00]
+
+
+def generate_charging_curve_lut(
+    param_set: str = "Chen2020",
+    *,
+    v_upper: float = 4.2,
+    v_lower: float = 2.5,
+    cv_taper_cutoff: str = "C/20",
+    soc_grid: list[float] | None = None,
+    temp_grid: list[float] | None = None,
+    crate_grid: list[float] | None = None,
+    soh_grid: list[float] | None = None,
+    thermal_model: str | None = None,
+    thermal_patch_source: str | None = None,
+    parameter_overrides: dict[str, Any] | None = None,
+    cache_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Generate a 4D CC-CV charging curve LUT using PyBaMM.
+
+    Runs PyBaMM SPMe CC-CV simulations across the full grid of
+    (temperature × C-rate × SOH) conditions and interpolates the resulting
+    power-fraction trajectories onto the SOC grid.
+
+    Returns a dict with keys ``soc_grid``, ``temp_grid``, ``crate_grid``,
+    ``soh_grid``, ``lut`` (numpy arrays) that can be passed directly to
+    ``Battery(charging_curve_lut=...)`` or ``EV(charging_curve_lut=...)``.
+
+    Parameters
+    ----------
+    param_set:
+        PyBaMM parameter set name (e.g. "Chen2020", "Mohtat2020", "Prada2013").
+    v_upper:
+        Upper voltage cut-off for CC-CV (V).
+    v_lower:
+        Lower voltage cut-off (V).
+    cv_taper_cutoff:
+        CV phase termination current (e.g. "C/20", "C/50").
+    soc_grid, temp_grid, crate_grid, soh_grid:
+        Custom axis grids.  Defaults match DER_Detection convention.
+    thermal_model:
+        PyBaMM thermal option ("lumped" or None for isothermal).
+    thermal_patch_source:
+        Donor parameter set for thermal parameters (e.g. "Chen2020").
+    parameter_overrides:
+        Additional PyBaMM parameter overrides.
+    cache_path:
+        Path to save/load the LUT as an NPZ file.
+
+    Returns
+    -------
+    dict with numpy arrays ready for Rust ``RegularGridInterpolator``.
+    """
+    import itertools
+
+    import numpy as np
+
+    if not _HAS_PYBAMM:
+        raise ImportError(
+            "PyBaMM is required for LUT generation. "
+            "Install with: uv pip install -e '.[pybamm]'"
+        )
+
+    soc_arr = np.array(soc_grid or _DEFAULT_SOC_GRID, dtype=np.float64)
+    temp_arr = np.array(temp_grid or _DEFAULT_TEMP_GRID, dtype=np.float64)
+    crate_arr = np.array(crate_grid or _DEFAULT_CRATE_GRID, dtype=np.float64)
+    soh_arr = np.array(soh_grid or _DEFAULT_SOH_GRID, dtype=np.float64)
+
+    # Check cache
+    if cache_path is not None:
+        cache_path = Path(cache_path)
+        if cache_path.exists():
+            LOGGER.info("Loading cached charging curve LUT from %s", cache_path)
+            data = np.load(cache_path, allow_pickle=False)
+            return {
+                "soc_grid": data["soc_grid"],
+                "temp_grid": data["temp_grid"],
+                "crate_grid": data["crate_grid"],
+                "soh_grid": data["soh_grid"],
+                "lut": data["lut"],
+            }
+
+    shape = (len(soc_arr), len(temp_arr), len(crate_arr), len(soh_arr))
+    lut = np.zeros(shape, dtype=np.float32)
+    total = len(temp_arr) * len(crate_arr) * len(soh_arr)
+    done = 0
+
+    for (j, T), (k, cr), (h, soh) in itertools.product(
+        enumerate(temp_arr),
+        enumerate(crate_arr),
+        enumerate(soh_arr),
+    ):
+        soc_traj, pfrac = _simulate_cc_cv_single(
+            param_set=param_set,
+            v_upper=v_upper,
+            v_lower=v_lower,
+            cv_taper_cutoff=cv_taper_cutoff,
+            initial_soc=float(soc_arr[0]),
+            T_celsius=float(T),
+            c_rate=float(cr),
+            soh=float(soh),
+            thermal_model=thermal_model,
+            thermal_patch_source=thermal_patch_source,
+            parameter_overrides=parameter_overrides,
+        )
+
+        # Deduplicate SOC for monotonic interp
+        _, unique_idx = np.unique(soc_traj, return_index=True)
+        soc_unique = soc_traj[unique_idx]
+        pfrac_unique = pfrac[unique_idx]
+
+        lut[:, j, k, h] = np.clip(
+            np.interp(
+                soc_arr, soc_unique, pfrac_unique,
+                left=float(pfrac_unique[0]), right=0.0,
+            ),
+            0.0, 1.0,
+        )
+
+        done += 1
+        LOGGER.info(
+            "LUT %3d/%d (%.0f%%)  T=%+.0f°C  C=%.2fC  SOH=%.0f%%",
+            done, total, 100.0 * done / total, T, cr, soh * 100,
+        )
+
+    result = {
+        "soc_grid": soc_arr,
+        "temp_grid": temp_arr,
+        "crate_grid": crate_arr,
+        "soh_grid": soh_arr,
+        "lut": lut,
+    }
+
+    if cache_path is not None:
+        cache_path = Path(cache_path)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(cache_path, **result)
+        LOGGER.info("Saved charging curve LUT → %s", cache_path)
+
+    return result
+
+
+def _simulate_cc_cv_single(
+    *,
+    param_set: str,
+    v_upper: float,
+    v_lower: float,
+    cv_taper_cutoff: str,
+    initial_soc: float,
+    T_celsius: float,
+    c_rate: float,
+    soh: float,
+    thermal_model: str | None,
+    thermal_patch_source: str | None,
+    parameter_overrides: dict[str, Any] | None,
+) -> tuple[Any, Any]:
+    """Run one CC-CV simulation and return (soc_trajectory, power_fraction)."""
+    import numpy as np
+
+    param = _pybamm.ParameterValues(param_set)
+    param["Upper voltage cut-off [V]"] = v_upper
+    param["Lower voltage cut-off [V]"] = v_lower
+
+    if soh < 0.999:
+        nominal = float(param["Nominal cell capacity [A.h]"])
+        param["Nominal cell capacity [A.h]"] = nominal * soh
+
+    T_kelvin = T_celsius + 273.15
+    param["Ambient temperature [K]"] = T_kelvin
+    param["Initial temperature [K]"] = T_kelvin
+
+    if thermal_model == "lumped" and thermal_patch_source is not None:
+        donor = _pybamm.ParameterValues(thermal_patch_source)
+        thermal_keys = [
+            "Negative current collector thickness [m]",
+            "Negative current collector density [kg.m-3]",
+            "Negative current collector specific heat capacity [J.kg-1.K-1]",
+            "Negative current collector thermal conductivity [W.m-1.K-1]",
+            "Positive current collector thickness [m]",
+            "Positive current collector density [kg.m-3]",
+            "Positive current collector specific heat capacity [J.kg-1.K-1]",
+            "Positive current collector thermal conductivity [W.m-1.K-1]",
+            "Negative electrode density [kg.m-3]",
+            "Negative electrode specific heat capacity [J.kg-1.K-1]",
+            "Negative electrode thermal conductivity [W.m-1.K-1]",
+            "Positive electrode density [kg.m-3]",
+            "Positive electrode specific heat capacity [J.kg-1.K-1]",
+            "Positive electrode thermal conductivity [W.m-1.K-1]",
+            "Separator density [kg.m-3]",
+            "Separator specific heat capacity [J.kg-1.K-1]",
+            "Separator thermal conductivity [W.m-1.K-1]",
+        ]
+        param.update(
+            {k: donor[k] for k in thermal_keys},
+            check_already_exists=False,
+        )
+
+    if parameter_overrides:
+        param.update(parameter_overrides, check_already_exists=False)
+
+    options = {"thermal": "lumped"} if thermal_model == "lumped" else {}
+    model = _pybamm.lithium_ion.SPMe(options=options) if options else _pybamm.lithium_ion.SPMe()
+
+    soc_start = max(initial_soc, 0.01)
+    experiment = _pybamm.Experiment([
+        f"Charge at {c_rate:.4f}C until {v_upper:.3f}V",
+        f"Hold at {v_upper:.3f}V until {cv_taper_cutoff}",
+    ])
+
+    sim = _pybamm.Simulation(model, parameter_values=param, experiment=experiment)
+
+    try:
+        sol = sim.solve(initial_soc=soc_start)
+    except Exception as exc:
+        LOGGER.warning(
+            "PyBaMM solve failed T=%.0f°C C=%.3fC SOH=%.0f%%: %s",
+            T_celsius, c_rate, soh * 100, exc,
+        )
+        return np.array([soc_start, 1.0]), np.array([0.0, 0.0])
+
+    cap_nom = float(param["Nominal cell capacity [A.h]"])
+    throughput = sol["Throughput capacity [A.h]"].entries
+    current = sol["Current [A]"].entries
+
+    soc_traj = np.clip(soc_start + throughput / cap_nom, 0.0, 1.0)
+    i_cc = max(float(np.abs(current[0])), 1e-8)
+    power_fraction = np.clip(np.abs(current) / i_cc, 0.0, 1.0)
+
+    return soc_traj, power_fraction

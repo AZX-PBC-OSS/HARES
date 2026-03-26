@@ -397,7 +397,9 @@ impl ScriptFCoefficients {
     pub fn net_flux_w_into(&self, t_surfaces_c: &[f64], buf: &mut Vec<f64>) {
         let n = self.e_sigma_a.len();
         buf.clear();
-        if n == 0 || t_surfaces_c.len() != n || self.total_ea <= 0.0
+        if n == 0
+            || t_surfaces_c.len() != n
+            || self.total_ea <= 0.0
             || t_surfaces_c.iter().any(|t| !t.is_finite())
         {
             buf.resize(t_surfaces_c.len(), 0.0);
@@ -495,10 +497,15 @@ pub fn interior_longwave_linearised_w_into(
         .sum::<f64>()
         / total_ea;
 
-    buf.extend(surfaces.iter().zip(t_surfaces_c.iter()).map(|(s, &t_surf)| {
-        let h_r = linearised_h_r(s.emissivity, t_zone_c);
-        h_r * s.area_m2 * (t_mrt - t_surf)
-    }));
+    buf.extend(
+        surfaces
+            .iter()
+            .zip(t_surfaces_c.iter())
+            .map(|(s, &t_surf)| {
+                let h_r = linearised_h_r(s.emissivity, t_zone_c);
+                h_r * s.area_m2 * (t_mrt - t_surf)
+            }),
+    );
 }
 
 #[cfg(test)]
@@ -1178,10 +1185,22 @@ mod tests {
     #[test]
     fn scriptf_isothermal_enclosure_zero_net_flux() {
         let surfaces = vec![
-            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },
-            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },
-            InteriorSurface { area_m2: 30.0, emissivity: 0.9 },
-            InteriorSurface { area_m2: 30.0, emissivity: 0.9 },
+            InteriorSurface {
+                area_m2: 40.0,
+                emissivity: 0.9,
+            },
+            InteriorSurface {
+                area_m2: 40.0,
+                emissivity: 0.9,
+            },
+            InteriorSurface {
+                area_m2: 30.0,
+                emissivity: 0.9,
+            },
+            InteriorSurface {
+                area_m2: 30.0,
+                emissivity: 0.9,
+            },
         ];
         let sf = ScriptFCoefficients::compute(&surfaces);
         let t = vec![20.0, 20.0, 20.0, 20.0];
@@ -1197,10 +1216,22 @@ mod tests {
     #[test]
     fn scriptf_energy_conservation() {
         let surfaces = vec![
-            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },  // floor
-            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },  // ceiling
-            InteriorSurface { area_m2: 20.0, emissivity: 0.9 },  // wall 1
-            InteriorSurface { area_m2: 20.0, emissivity: 0.9 },  // wall 2
+            InteriorSurface {
+                area_m2: 40.0,
+                emissivity: 0.9,
+            }, // floor
+            InteriorSurface {
+                area_m2: 40.0,
+                emissivity: 0.9,
+            }, // ceiling
+            InteriorSurface {
+                area_m2: 20.0,
+                emissivity: 0.9,
+            }, // wall 1
+            InteriorSurface {
+                area_m2: 20.0,
+                emissivity: 0.9,
+            }, // wall 2
         ];
         let sf = ScriptFCoefficients::compute(&surfaces);
         let t = vec![40.0, 20.0, 25.0, 30.0]; // different temperatures
@@ -1215,8 +1246,14 @@ mod tests {
     #[test]
     fn scriptf_hot_surface_loses_heat() {
         let surfaces = vec![
-            InteriorSurface { area_m2: 10.0, emissivity: 0.9 },
-            InteriorSurface { area_m2: 10.0, emissivity: 0.9 },
+            InteriorSurface {
+                area_m2: 10.0,
+                emissivity: 0.9,
+            },
+            InteriorSurface {
+                area_m2: 10.0,
+                emissivity: 0.9,
+            },
         ];
         let sf = ScriptFCoefficients::compute(&surfaces);
         let t = vec![40.0, 20.0];
@@ -1230,9 +1267,18 @@ mod tests {
         // Enclosure with mixed emissivities — tests that the T⁴ method
         // conserves energy even when emissivities differ significantly.
         let surfaces = vec![
-            InteriorSurface { area_m2: 40.0, emissivity: 0.9 },
-            InteriorSurface { area_m2: 30.0, emissivity: 0.5 },  // low emissivity
-            InteriorSurface { area_m2: 20.0, emissivity: 0.05 }, // radiant barrier
+            InteriorSurface {
+                area_m2: 40.0,
+                emissivity: 0.9,
+            },
+            InteriorSurface {
+                area_m2: 30.0,
+                emissivity: 0.5,
+            }, // low emissivity
+            InteriorSurface {
+                area_m2: 20.0,
+                emissivity: 0.05,
+            }, // radiant barrier
         ];
         let sf = ScriptFCoefficients::compute(&surfaces);
         let t = vec![30.0, 20.0, 25.0];
@@ -1247,8 +1293,14 @@ mod tests {
     #[test]
     fn scriptf_diverges_from_linearized_for_large_delta_t() {
         let surfaces = vec![
-            InteriorSurface { area_m2: 20.0, emissivity: 0.9 },
-            InteriorSurface { area_m2: 20.0, emissivity: 0.9 },
+            InteriorSurface {
+                area_m2: 20.0,
+                emissivity: 0.9,
+            },
+            InteriorSurface {
+                area_m2: 20.0,
+                emissivity: 0.9,
+            },
         ];
         let sf = ScriptFCoefficients::compute(&surfaces);
         let t = vec![60.0, 0.0]; // 60°C delta — large enough for T⁴ nonlinearity
@@ -1278,7 +1330,10 @@ mod tests {
 
     #[test]
     fn scriptf_single_surface_net_zero() {
-        let surfaces = vec![InteriorSurface { area_m2: 20.0, emissivity: 0.9 }];
+        let surfaces = vec![InteriorSurface {
+            area_m2: 20.0,
+            emissivity: 0.9,
+        }];
         let sf = ScriptFCoefficients::compute(&surfaces);
         let q = sf.net_flux_w(&[25.0]);
         assert_eq!(q.len(), 1);
@@ -1292,8 +1347,14 @@ mod tests {
     #[test]
     fn scriptf_zero_emissivity_returns_zero() {
         let surfaces = vec![
-            InteriorSurface { area_m2: 20.0, emissivity: 0.0 },
-            InteriorSurface { area_m2: 20.0, emissivity: 0.0 },
+            InteriorSurface {
+                area_m2: 20.0,
+                emissivity: 0.0,
+            },
+            InteriorSurface {
+                area_m2: 20.0,
+                emissivity: 0.0,
+            },
         ];
         let sf = ScriptFCoefficients::compute(&surfaces);
         let q = sf.net_flux_w(&[30.0, 20.0]);

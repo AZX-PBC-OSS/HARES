@@ -103,8 +103,7 @@ struct ClimateStation {
 
 static CLIMATE_DATA: OnceLock<Vec<ClimateStation>> = OnceLock::new();
 
-const CLIMATE_CSV: &str =
-    include_str!("../data/ASHRAE152_climate_data.csv");
+const CLIMATE_CSV: &str = include_str!("../data/ASHRAE152_climate_data.csv");
 
 fn climate_data() -> &'static [ClimateStation] {
     CLIMATE_DATA.get_or_init(parse_climate_csv)
@@ -139,7 +138,9 @@ fn parse_climate_csv() -> Vec<ClimateStation> {
         let Some(clg_des) = parse(7) else { continue };
         let Some(clg_seas) = parse(8) else { continue };
         let Some(w_seas) = parse(10) else { continue };
-        let Some(seas_h_out) = parse(14) else { continue };
+        let Some(seas_h_out) = parse(14) else {
+            continue;
+        };
         let Some(seas_h_in) = parse(16) else { continue };
 
         stations.push(ClimateStation {
@@ -458,14 +459,8 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     // 9. Low-speed duct factors (multi-speed only)
     // ------------------------------------------------------------------
     let (as_low, ar_low, dte_low, bs_low, br_low) = if input.n_speeds > 1 {
-        let cap_low = input
-            .capacity_low_w
-            .unwrap_or(input.capacity_w)
-            * W_TO_BTU_H;
-        let flow_low = input
-            .fan_flow_low_m3_s
-            .unwrap_or(input.fan_flow_m3_s)
-            * M3S_TO_CFM;
+        let cap_low = input.capacity_low_w.unwrap_or(input.capacity_w) * W_TO_BTU_H;
+        let flow_low = input.fan_flow_low_m3_s.unwrap_or(input.fan_flow_m3_s) * M3S_TO_CFM;
 
         let sdl_low = flow_low * input.supply_leakage_frac;
         let rdl_low = flow_low * input.return_leakage_frac;
@@ -507,8 +502,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
                     + 0.24 * (bs_high - 1.0) * (55.0 - seas_supply_zone_temp))
         } else {
             let cap_low_btu = input.capacity_low_w.unwrap_or(input.capacity_w) * W_TO_BTU_H;
-            let flow_low_cfm =
-                input.fan_flow_low_m3_s.unwrap_or(input.fan_flow_m3_s) * M3S_TO_CFM;
+            let flow_low_cfm = input.fan_flow_low_m3_s.unwrap_or(input.fan_flow_m3_s) * M3S_TO_CFM;
             as_low * flow_low_cfm * 60.0 * 0.075 / (-cap_low_btu)
                 * (-cap_low_btu / flow_low_cfm / (0.075 * 60.0)
                     + (1.0 - ar_low) * (seas_return_zone_enthalpy - seas_in_enthalpy)
@@ -544,8 +538,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     } else {
         // Cooling; TXV control assumed throughout
         if input.n_speeds == 1 {
-            1.62 - 0.62 * fan_flow_cfm / manu_fan_flow
-                + 0.647 * (fan_flow_cfm / manu_fan_flow).ln()
+            1.62 - 0.62 * fan_flow_cfm / manu_fan_flow + 0.647 * (fan_flow_cfm / manu_fan_flow).ln()
         } else {
             (0.82 + 0.18 * seas_uncorr_de) * (1.62 - 0.62 * fan_flow_cfm / manu_fan_flow)
                 + 0.647 * (fan_flow_cfm / manu_fan_flow).ln()
@@ -555,8 +548,7 @@ pub fn calculate_dse(input: &DuctDseInput) -> f64 {
     // ------------------------------------------------------------------
     // 13. Delivery effectiveness with thermal regain
     // ------------------------------------------------------------------
-    let seas_de = seas_uncorr_de
-        + supply_regain * (1.0 - seas_uncorr_de)
+    let seas_de = seas_uncorr_de + supply_regain * (1.0 - seas_uncorr_de)
         - (supply_regain - return_regain - br_high * (ar_high * supply_regain - return_regain))
             * seas_return_temp_diff
             / dte_high;
@@ -597,8 +589,14 @@ mod tests {
     fn attic_vented_heating_seas_temp_formula() {
         // Dummy climate values — only h_seas matters for this formula.
         let h_seas = 40.0_f64;
-        let (_htg_des, htg_seas, _clg_des, _clg_seas, _sr, _rr) =
-            zone_temps(Ashrae152ZoneType::AtticVented, 10.0, h_seas, 90.0, 75.0, 50.0);
+        let (_htg_des, htg_seas, _clg_des, _clg_seas, _sr, _rr) = zone_temps(
+            Ashrae152ZoneType::AtticVented,
+            10.0,
+            h_seas,
+            90.0,
+            75.0,
+            50.0,
+        );
         assert!(
             (htg_seas - 47.0).abs() < 1e-9,
             "expected htg_seas=47.0, got {htg_seas}"
@@ -631,16 +629,16 @@ mod tests {
             zone_type: Ashrae152ZoneType::AtticVented,
             latitude_deg: 39.74,
             longitude_deg: -104.87,
-            house_volume_m3: 340.0,    // ~12 000 ft³
+            house_volume_m3: 340.0, // ~12 000 ft³
             supply_leakage_frac: 0.10,
-            supply_area_m2: 9.29,      // ~100 ft²
+            supply_area_m2: 9.29,          // ~100 ft²
             supply_r_nominal_m2_k_w: 1.76, // ~R-10 IP
             return_leakage_frac: 0.06,
-            return_area_m2: 4.65,      // ~50 ft²
+            return_area_m2: 4.65, // ~50 ft²
             return_r_nominal_m2_k_w: 1.76,
             is_heating: true,
-            capacity_w: 14_650.0,      // ~50 000 Btu/h
-            fan_flow_m3_s: 0.566,      // ~1 200 CFM
+            capacity_w: 14_650.0, // ~50 000 Btu/h
+            fan_flow_m3_s: 0.566, // ~1 200 CFM
             n_speeds: 1,
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
@@ -667,8 +665,8 @@ mod tests {
             return_area_m2: 4.65,
             return_r_nominal_m2_k_w: 1.76,
             is_heating: false,
-            capacity_w: 10_550.0,   // ~36 000 Btu/h (3 ton)
-            fan_flow_m3_s: 0.472,   // ~1 000 CFM
+            capacity_w: 10_550.0, // ~36 000 Btu/h (3 ton)
+            fan_flow_m3_s: 0.472, // ~1 000 CFM
             n_speeds: 1,
             capacity_low_w: None,
             fan_flow_low_m3_s: None,
@@ -700,7 +698,10 @@ mod tests {
             is_heat_pump: false,
         };
         let dse = calculate_dse(&input);
-        assert!(dse > 0.0 && dse <= 1.0, "multi-speed cooling DSE out of bounds: {dse}");
+        assert!(
+            dse > 0.0 && dse <= 1.0,
+            "multi-speed cooling DSE out of bounds: {dse}"
+        );
     }
 
     #[test]

@@ -126,7 +126,11 @@ fn time_varying_lighting_schedule_is_not_constant() {
 
     let kw_series = resolved_kw_series(&specs[0], &schedule);
 
-    assert_eq!(kw_series.len(), 8760, "resolved series should cover all 8760 hours");
+    assert_eq!(
+        kw_series.len(),
+        8760,
+        "resolved series should cover all 8760 hours"
+    );
 
     // Must NOT be constant — at least two distinct values must exist.
     let min_kw = kw_series.iter().copied().fold(f64::INFINITY, f64::min);
@@ -249,12 +253,7 @@ fn missing_required_column_returns_typed_error_not_silent_fallback() {
     path.push(format!("hares-schedule-parity-missing-{nanos}.csv"));
     std::fs::write(&path, csv_content).expect("write temp csv");
 
-    let result = parse_schedule_csv(
-        &path,
-        &["lighting_interior"],
-        None,
-        None,
-    );
+    let result = parse_schedule_csv(&path, &["lighting_interior"], None, None);
     let _ = std::fs::remove_file(path);
 
     match result {
@@ -265,7 +264,9 @@ fn missing_required_column_returns_typed_error_not_silent_fallback() {
             );
         }
         Err(other) => panic!("expected MissingRequiredColumns, got: {other}"),
-        Ok(_) => panic!("expected error for missing column, got success (silent fallback detected)"),
+        Ok(_) => {
+            panic!("expected error for missing column, got success (silent fallback detected)")
+        }
     }
 }
 
@@ -316,7 +317,12 @@ fn ochre_parity_24h_lighting_schedule_reference_values() {
     let kw_series = resolved_kw_series(&specs[0], &schedule);
 
     // Check the first 24 hours against reference values within 0.1%.
-    for (h, (&actual, &expected)) in kw_series.iter().zip(expected_kw.iter()).enumerate().take(24) {
+    for (h, (&actual, &expected)) in kw_series
+        .iter()
+        .zip(expected_kw.iter())
+        .enumerate()
+        .take(24)
+    {
         let rel_err = (actual - expected).abs() / expected.max(1e-9);
         assert!(
             rel_err < 0.001,

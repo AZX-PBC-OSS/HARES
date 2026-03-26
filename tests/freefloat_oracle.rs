@@ -10,13 +10,13 @@
 #[cfg(feature = "observe")]
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::fs;
-    use std::path::PathBuf;
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
     use hares_io::OutputFormat;
     use hares_types::ZoneId;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
 
     fn vendor_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendors/OCHRE")
@@ -53,8 +53,7 @@ mod tests {
         };
 
         DwellingConfig {
-            hpxml_path: vendor_dir()
-                .join("ochre/defaults/Input Files/BEopt_example.xml"),
+            hpxml_path: vendor_dir().join("ochre/defaults/Input Files/BEopt_example.xml"),
             schedule_path: vendor_dir()
                 .join("ochre/defaults/Input Files/BEopt_example_schedule.csv"),
             weather_path: vendor_dir()
@@ -168,8 +167,7 @@ mod tests {
     }
 
     fn run_freefloat_scenario(scenario: &str) {
-        let output_path =
-            std::env::temp_dir().join(format!("hares_freefloat_{scenario}.csv"));
+        let output_path = std::env::temp_dir().join(format!("hares_freefloat_{scenario}.csv"));
         let _ = fs::remove_file(&output_path);
 
         let config = beopt_freefloat_config(scenario, output_path.clone());
@@ -262,32 +260,72 @@ mod tests {
 
         // Load OCHRE reference CSV.
         let ochre_csv = fixture_dir(scenario).join("ochre_reference.csv");
-        assert!(ochre_csv.exists(), "OCHRE reference fixture not found: {}", ochre_csv.display());
+        assert!(
+            ochre_csv.exists(),
+            "OCHRE reference fixture not found: {}",
+            ochre_csv.display()
+        );
 
         // Hourly time-of-day comparison for first 24 hours.
         eprintln!("\n--- HOURLY COMPARISON (first 24h): {scenario} ---");
-        eprintln!("  {:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-            "Hour", "H_ind", "O_ind", "Δ_ind", "H_atc", "O_atc", "Δ_atc",
-            "H_out", "O_out", "H_wsol", "O_wsol");
+        eprintln!(
+            "  {:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "Hour",
+            "H_ind",
+            "O_ind",
+            "Δ_ind",
+            "H_atc",
+            "O_atc",
+            "Δ_atc",
+            "H_out",
+            "O_out",
+            "H_wsol",
+            "O_wsol"
+        );
         // Pre-load OCHRE columns for hourly dump
         let ochre_data = parse_csv_columns(&ochre_csv);
-        let o_ind = ochre_data.get("Temperature - Indoor (C)").cloned().unwrap_or_default();
-        let o_atc = ochre_data.get("Temperature - Attic (C)").cloned().unwrap_or_default();
-        let o_out = ochre_data.get("Temperature - Outdoor (C)").cloned().unwrap_or_default();
-        let o_wsol = ochre_data.get("Window Transmitted Solar Gain (W)").cloned().unwrap_or_default();
-        let o_inf_in = ochre_data.get("Infiltration Heat Gain - Indoor (W)").cloned().unwrap_or_default();
-        let o_vent = ochre_data.get("Forced Ventilation Heat Gain - Indoor (W)").cloned().unwrap_or_default();
-        let o_inf_atc = ochre_data.get("Infiltration Heat Gain - Attic (W)").cloned().unwrap_or_default();
+        let o_ind = ochre_data
+            .get("Temperature - Indoor (C)")
+            .cloned()
+            .unwrap_or_default();
+        let o_atc = ochre_data
+            .get("Temperature - Attic (C)")
+            .cloned()
+            .unwrap_or_default();
+        let o_out = ochre_data
+            .get("Temperature - Outdoor (C)")
+            .cloned()
+            .unwrap_or_default();
+        let o_wsol = ochre_data
+            .get("Window Transmitted Solar Gain (W)")
+            .cloned()
+            .unwrap_or_default();
+        let o_inf_in = ochre_data
+            .get("Infiltration Heat Gain - Indoor (W)")
+            .cloned()
+            .unwrap_or_default();
+        let o_vent = ochre_data
+            .get("Forced Ventilation Heat Gain - Indoor (W)")
+            .cloned()
+            .unwrap_or_default();
+        let o_inf_atc = ochre_data
+            .get("Infiltration Heat Gain - Attic (W)")
+            .cloned()
+            .unwrap_or_default();
         for hour in 0..24 {
             let step = hour * 60;
-            if step >= hares_indoor_temp.len() { break; }
+            if step >= hares_indoor_temp.len() {
+                break;
+            }
             let hi = hares_indoor_temp[step];
             let ha = hares_attic_temp[step];
             let oi = o_ind.get(step).copied().unwrap_or(f64::NAN);
             let oa = o_atc.get(step).copied().unwrap_or(f64::NAN);
-            let ho = snapshots.get(step)
+            let ho = snapshots
+                .get(step)
                 .and_then(|s| s.phases.post_environment.as_ref())
-                .map(|e| e.outdoor_temp_c).unwrap_or(f64::NAN);
+                .map(|e| e.outdoor_temp_c)
+                .unwrap_or(f64::NAN);
             let oo = o_out.get(step).copied().unwrap_or(f64::NAN);
             let hw = hares_window_solar.get(step).copied().unwrap_or(0.0);
             let ow = o_wsol.get(step).copied().unwrap_or(0.0);
@@ -295,15 +333,30 @@ mod tests {
             let o_i = o_inf_in.get(step).copied().unwrap_or(0.0);
             eprintln!(
                 "  {:>4} {:>8.2} {:>8.2} {:>+8.2} {:>8.2} {:>8.2} {:>+8.2} {:>8.1} {:>8.1} {:>8.0} {:>8.0}",
-                hour, hi, oi, hi-oi, ha, oa, ha-oa, ho, oo, hw, ow
+                hour,
+                hi,
+                oi,
+                hi - oi,
+                ha,
+                oa,
+                ha - oa,
+                ho,
+                oo,
+                hw,
+                ow
             );
         }
         let ochre = parse_csv_columns(&ochre_csv);
 
         // Solver config diagnostics.
         let n_int_zones = dwelling.thermal_solver.config().interior_lwr_zones.len();
-        let n_int_surfaces: usize = dwelling.thermal_solver.config().interior_lwr_zones.iter()
-            .map(|z| z.surfaces.len()).sum();
+        let n_int_surfaces: usize = dwelling
+            .thermal_solver
+            .config()
+            .interior_lwr_zones
+            .iter()
+            .map(|z| z.surfaces.len())
+            .sum();
         let n_bd_diag = dwelling.thermal_solver.config().boundary_diagnostics.len();
         let n_windows = dwelling.thermal_solver.config().window_properties.len();
         let n_window_zone_ids = dwelling.thermal_solver.config().window_zone_ids.len();
@@ -311,28 +364,56 @@ mod tests {
         eprintln!("  interior_lwr_zones: {n_int_zones} zones, {n_int_surfaces} total surfaces");
         eprintln!("  boundary_diagnostics: {n_bd_diag} entries");
         eprintln!("  window_properties: {n_windows}, window_zone_ids: {n_window_zone_ids}");
-        for (i, z) in dwelling.thermal_solver.config().interior_lwr_zones.iter().enumerate() {
+        for (i, z) in dwelling
+            .thermal_solver
+            .config()
+            .interior_lwr_zones
+            .iter()
+            .enumerate()
+        {
             let has_scriptf = z.scriptf.is_some();
-            eprintln!("  zone {i}: zone_id={:?}, surfaces={}, scriptf={has_scriptf}", z.zone_id, z.surfaces.len());
+            eprintln!(
+                "  zone {i}: zone_id={:?}, surfaces={}, scriptf={has_scriptf}",
+                z.zone_id,
+                z.surfaces.len()
+            );
             for (j, s) in z.surfaces.iter().enumerate() {
                 eprintln!(
                     "    [{j}] state={} input={} area={:.1}m² e={:.3} abs={:.3} rad_frac={:.4} floor={}",
-                    s.state_index, s.input_index, s.area_m2, s.emissivity, s.solar_absorptance, s.radiation_frac, s.is_floor
+                    s.state_index,
+                    s.input_index,
+                    s.area_m2,
+                    s.emissivity,
+                    s.solar_absorptance,
+                    s.radiation_frac,
+                    s.is_floor
                 );
             }
         }
         // Boundary diagnostics
-        for (i, bd) in dwelling.thermal_solver.config().boundary_diagnostics.iter().enumerate() {
+        for (i, bd) in dwelling
+            .thermal_solver
+            .config()
+            .boundary_diagnostics
+            .iter()
+            .enumerate()
+        {
             match bd {
                 hares_envelope::BoundaryDiagnosticInfo::RCNode {
-                    inner_state_index, area_m2, r_film_int_m2_k_w, radiation_frac, category,
+                    inner_state_index,
+                    area_m2,
+                    r_film_int_m2_k_w,
+                    radiation_frac,
+                    category,
                 } => {
                     eprintln!(
                         "  bd_diag[{i}]: RC state={inner_state_index} area={area_m2:.1}m² r_film={r_film_int_m2_k_w:.4} rad_frac={radiation_frac:.4} cat={category:?}",
                     );
                 }
                 hares_envelope::BoundaryDiagnosticInfo::SteadyState {
-                    ua_w_k, driving_temp, category,
+                    ua_w_k,
+                    driving_temp,
+                    category,
                 } => {
                     eprintln!(
                         "  bd_diag[{i}]: SS ua={ua_w_k:.2}W/K driving={driving_temp:?} cat={category:?}",
@@ -344,13 +425,26 @@ mod tests {
         eprintln!("  infiltration config:");
         for (zone_id, method) in &dwelling.thermal_solver.config().infiltration {
             match method {
-                hares_envelope::InfiltrationMethod::AshraeWindStack { c_s, c_w, shielding_coeff, n_i } => {
-                    eprintln!("    Zone {:?}: ASHRAE c_s={:.10}, c_w={:.10}, shelter={:.6}, n_i={:.2}", 
-                              zone_id, c_s, c_w, shielding_coeff, n_i);
+                hares_envelope::InfiltrationMethod::AshraeWindStack {
+                    c_s,
+                    c_w,
+                    shielding_coeff,
+                    n_i,
+                } => {
+                    eprintln!(
+                        "    Zone {:?}: ASHRAE c_s={:.10}, c_w={:.10}, shelter={:.6}, n_i={:.2}",
+                        zone_id, c_s, c_w, shielding_coeff, n_i
+                    );
                 }
-                hares_envelope::InfiltrationMethod::Ela { ela_m2, stack_coeff, wind_coeff } => {
-                    eprintln!("    Zone {:?}: ELA ela={:.6} m², stack={:.10}, wind={:.10}", 
-                              zone_id, ela_m2, stack_coeff, wind_coeff);
+                hares_envelope::InfiltrationMethod::Ela {
+                    ela_m2,
+                    stack_coeff,
+                    wind_coeff,
+                } => {
+                    eprintln!(
+                        "    Zone {:?}: ELA ela={:.6} m², stack={:.10}, wind={:.10}",
+                        zone_id, ela_m2, stack_coeff, wind_coeff
+                    );
                 }
                 hares_envelope::InfiltrationMethod::Ach { ach } => {
                     eprintln!("    Zone {:?}: ACH={:.4}", zone_id, ach);
@@ -368,16 +462,30 @@ mod tests {
         if let Some(snap) = snapshots.first() {
             if let Some(e) = snap.phases.post_environment.as_ref() {
                 eprintln!("\n--- STEP-0 SOLAR & WEATHER: {scenario} ---");
-                eprintln!("  T_out={:.1}°C  T_ground={:.1}°C  T_sky={:.1}°C  wind={:.1}m/s",
-                    e.outdoor_temp_c, e.ground_temp_c, e.sky_temp_c, e.wind_speed_m_s);
-                eprintln!("  GHI={:.1}  DNI={:.1}  DHI={:.1} W/m²", e.ghi_w_m2, e.dni_w_m2, e.dhi_w_m2);
-                eprintln!("  Solar alt={:.2}°  az={:.2}°", e.solar_altitude_deg, e.solar_azimuth_deg);
+                eprintln!(
+                    "  T_out={:.1}°C  T_ground={:.1}°C  T_sky={:.1}°C  wind={:.1}m/s",
+                    e.outdoor_temp_c, e.ground_temp_c, e.sky_temp_c, e.wind_speed_m_s
+                );
+                eprintln!(
+                    "  GHI={:.1}  DNI={:.1}  DHI={:.1} W/m²",
+                    e.ghi_w_m2, e.dni_w_m2, e.dhi_w_m2
+                );
+                eprintln!(
+                    "  Solar alt={:.2}°  az={:.2}°",
+                    e.solar_altitude_deg, e.solar_azimuth_deg
+                );
                 eprintln!("  Per-surface POA irradiance:");
                 for irr in &e.solar_irradiance {
                     let total = irr.direct_w_m2 + irr.diffuse_w_m2 + irr.reflected_w_m2;
-                    eprintln!("    srf {:2}: direct={:>7.1} diffuse={:>6.1} refl={:>5.1} total={:>7.1} aoi={:.2}°",
-                        irr.surface_id, irr.direct_w_m2, irr.diffuse_w_m2, irr.reflected_w_m2,
-                        total, irr.angle_of_incidence_rad.to_degrees());
+                    eprintln!(
+                        "    srf {:2}: direct={:>7.1} diffuse={:>6.1} refl={:>5.1} total={:>7.1} aoi={:.2}°",
+                        irr.surface_id,
+                        irr.direct_w_m2,
+                        irr.diffuse_w_m2,
+                        irr.reflected_w_m2,
+                        total,
+                        irr.angle_of_incidence_rad.to_degrees()
+                    );
                 }
             }
         }
@@ -388,11 +496,23 @@ mod tests {
             let g = snap.phases.post_solvers.as_ref().map(|s| &s.envelope_gains);
             // OCHRE step-0 values from fixture CSV (row index 0)
             let o = |col: &str| -> f64 {
-                ochre.get(col).and_then(|v| v.first().copied()).unwrap_or(f64::NAN)
+                ochre
+                    .get(col)
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or(f64::NAN)
             };
 
-            eprintln!("  {:40} {:>10} {:>10} {:>10}", "Component", "HARES", "OCHRE", "Δ");
-            eprintln!("  {:40} {:>10} {:>10} {:>10}", "─".repeat(40), "─".repeat(10), "─".repeat(10), "─".repeat(10));
+            eprintln!(
+                "  {:40} {:>10} {:>10} {:>10}",
+                "Component", "HARES", "OCHRE", "Δ"
+            );
+            eprintln!(
+                "  {:40} {:>10} {:>10} {:>10}",
+                "─".repeat(40),
+                "─".repeat(10),
+                "─".repeat(10),
+                "─".repeat(10)
+            );
 
             let row = |name: &str, h: f64, ochre_val: f64| {
                 let delta = h - ochre_val;
@@ -400,38 +520,114 @@ mod tests {
             };
 
             // Temperatures
-            row("Temperature - Indoor (C)", hares_indoor_temp[0], o("Temperature - Indoor (C)"));
-            row("Temperature - Attic (C)", hares_attic_temp[0], o("Temperature - Attic (C)"));
-            let t_out = snap.phases.post_environment.as_ref().map(|e| e.outdoor_temp_c).unwrap_or(f64::NAN);
-            row("Temperature - Outdoor (C)", t_out, o("Temperature - Outdoor (C)"));
+            row(
+                "Temperature - Indoor (C)",
+                hares_indoor_temp[0],
+                o("Temperature - Indoor (C)"),
+            );
+            row(
+                "Temperature - Attic (C)",
+                hares_attic_temp[0],
+                o("Temperature - Attic (C)"),
+            );
+            let t_out = snap
+                .phases
+                .post_environment
+                .as_ref()
+                .map(|e| e.outdoor_temp_c)
+                .unwrap_or(f64::NAN);
+            row(
+                "Temperature - Outdoor (C)",
+                t_out,
+                o("Temperature - Outdoor (C)"),
+            );
 
             // Zone heat gains (indoor)
             if let Some(g) = g {
-                row("Window Transmitted Solar (W)", g.window_solar_w, o("Window Transmitted Solar Gain (W)"));
-                row("Infiltration - Indoor (W)", g.infiltration_w, o("Infiltration Heat Gain - Indoor (W)"));
-                row("Forced Ventilation - Indoor (W)", g.ventilation_w, o("Forced Ventilation Heat Gain - Indoor (W)"));
-                row("Natural Ventilation - Indoor (W)", g.natural_ventilation_w, o("Natural Ventilation Heat Gain - Indoor (W)"));
-                row("Internal Heat Gain - Indoor (W)", g.internal_gain_w, o("Internal Heat Gain - Indoor (W)"));
-                row("Interior LWR - Indoor (W)", g.interior_lwr_w, o("Radiation Heat Gain - Indoor (W)"));
+                row(
+                    "Window Transmitted Solar (W)",
+                    g.window_solar_w,
+                    o("Window Transmitted Solar Gain (W)"),
+                );
+                row(
+                    "Infiltration - Indoor (W)",
+                    g.infiltration_w,
+                    o("Infiltration Heat Gain - Indoor (W)"),
+                );
+                row(
+                    "Forced Ventilation - Indoor (W)",
+                    g.ventilation_w,
+                    o("Forced Ventilation Heat Gain - Indoor (W)"),
+                );
+                row(
+                    "Natural Ventilation - Indoor (W)",
+                    g.natural_ventilation_w,
+                    o("Natural Ventilation Heat Gain - Indoor (W)"),
+                );
+                row(
+                    "Internal Heat Gain - Indoor (W)",
+                    g.internal_gain_w,
+                    o("Internal Heat Gain - Indoor (W)"),
+                );
+                row(
+                    "Interior LWR - Indoor (W)",
+                    g.interior_lwr_w,
+                    o("Radiation Heat Gain - Indoor (W)"),
+                );
                 row("Opaque Solar (W)", g.opaque_solar_w, f64::NAN);
                 row("Exterior LWR (W)", g.exterior_lwr_w, f64::NAN);
-                row("Opaque Solar+LWR combined (W)", g.opaque_solar_lwr_w, f64::NAN);
+                row(
+                    "Opaque Solar+LWR combined (W)",
+                    g.opaque_solar_lwr_w,
+                    f64::NAN,
+                );
                 row("HVAC Heating (W)", g.hvac_heating_w, 0.0);
                 row("HVAC Cooling (W)", g.hvac_cooling_w, 0.0);
 
                 // Per-boundary conduction
-                row("Wall Heat Gain - Indoor (W)", g.wall_heat_gain_w, o("Wall Heat Gain - Indoor (W)"));
-                row("Floor Heat Gain - Indoor (W)", g.floor_heat_gain_w, o("Floor Heat Gain - Indoor (W)"));
-                row("Roof Heat Gain - Indoor (W)", g.roof_heat_gain_w, o("Roof Heat Gain - Indoor (W)"));
-                row("Window Heat Gain - Indoor (W)", g.window_heat_gain_w, o("Window Heat Gain - Indoor (W)"));
-                row("Internal Mass Heat Gain (W)", g.internal_mass_heat_gain_w, o("Internal Mass Heat Gain - Indoor (W)"));
+                row(
+                    "Wall Heat Gain - Indoor (W)",
+                    g.wall_heat_gain_w,
+                    o("Wall Heat Gain - Indoor (W)"),
+                );
+                row(
+                    "Floor Heat Gain - Indoor (W)",
+                    g.floor_heat_gain_w,
+                    o("Floor Heat Gain - Indoor (W)"),
+                );
+                row(
+                    "Roof Heat Gain - Indoor (W)",
+                    g.roof_heat_gain_w,
+                    o("Roof Heat Gain - Indoor (W)"),
+                );
+                row(
+                    "Window Heat Gain - Indoor (W)",
+                    g.window_heat_gain_w,
+                    o("Window Heat Gain - Indoor (W)"),
+                );
+                row(
+                    "Internal Mass Heat Gain (W)",
+                    g.internal_mass_heat_gain_w,
+                    o("Internal Mass Heat Gain - Indoor (W)"),
+                );
 
                 // Net sensible
-                let hares_net = g.window_solar_w + g.infiltration_w + g.ventilation_w
-                    + g.natural_ventilation_w + g.internal_gain_w + g.interior_lwr_w
-                    + g.wall_heat_gain_w + g.floor_heat_gain_w + g.roof_heat_gain_w
-                    + g.window_heat_gain_w + g.internal_mass_heat_gain_w;
-                row("Net Sensible (sum of above) (W)", hares_net, o("Net Sensible Heat Gain - Indoor (W)"));
+                let hares_net = g.window_solar_w
+                    + g.infiltration_w
+                    + g.ventilation_w
+                    + g.natural_ventilation_w
+                    + g.internal_gain_w
+                    + g.interior_lwr_w
+                    + g.wall_heat_gain_w
+                    + g.floor_heat_gain_w
+                    + g.roof_heat_gain_w
+                    + g.window_heat_gain_w
+                    + g.internal_mass_heat_gain_w;
+                row(
+                    "Net Sensible (sum of above) (W)",
+                    hares_net,
+                    o("Net Sensible Heat Gain - Indoor (W)"),
+                );
 
                 // Per-zone infiltration
                 for (z, w) in &g.infiltration_by_zone {
@@ -446,13 +642,19 @@ mod tests {
                 // Exterior surface solar (OCHRE per-boundary)
                 eprintln!("\n  Exterior surface solar+LWR (OCHRE gross absorbed):");
                 let ext_surfaces = [
-                    "Exterior Wall", "Attic Wall", "Attic Roof", "Window", "Door",
+                    "Exterior Wall",
+                    "Attic Wall",
+                    "Attic Roof",
+                    "Window",
+                    "Door",
                 ];
                 for name in ext_surfaces {
                     let solar = o(&format!("{name} Ext. Solar Gain (W)"));
                     let lwr = o(&format!("{name} Ext. LWR Gain (W)"));
                     let t_surf = o(&format!("{name} Ext. Surface Temperature (C)"));
-                    eprintln!("    {name:20} solar={solar:>10.1}  lwr={lwr:>10.1}  T_surf={t_surf:>6.1}°C");
+                    eprintln!(
+                        "    {name:20} solar={solar:>10.1}  lwr={lwr:>10.1}  T_surf={t_surf:>6.1}°C"
+                    );
                 }
 
                 // HARES per-exterior-surface diagnostics
@@ -464,7 +666,12 @@ mod tests {
                             for d in &g.ext_surface_diag {
                                 eprintln!(
                                     "    id={:2} cat={:?}  solar={:>8.1}  lwr={:>8.1}  T_surf={:>6.1}°C  injected={:>8.1}",
-                                    d.surface_id, d.category, d.solar_absorbed_w, d.lwr_gain_w, d.surface_temp_c, d.injected_w
+                                    d.surface_id,
+                                    d.category,
+                                    d.solar_absorbed_w,
+                                    d.lwr_gain_w,
+                                    d.surface_temp_c,
+                                    d.injected_w
                                 );
                             }
                         }
@@ -479,8 +686,13 @@ mod tests {
                         }
                     }
                     // Combined airflow diagnostic
-                    eprintln!("\n  Airflow: combined={:.4} m³/s  raw_inf={:.4}  forced={:.4}  natural={:.4}",
-                        g.total_airflow_m3_s, g.raw_infiltration_m3_s, g.forced_vent_m3_s, g.natural_vent_m3_s);
+                    eprintln!(
+                        "\n  Airflow: combined={:.4} m³/s  raw_inf={:.4}  forced={:.4}  natural={:.4}",
+                        g.total_airflow_m3_s,
+                        g.raw_infiltration_m3_s,
+                        g.forced_vent_m3_s,
+                        g.natural_vent_m3_s
+                    );
                 }
             }
         }
@@ -664,12 +876,30 @@ mod tests {
 
         // Per-boundary heat gains (conduction + interior LWR per category).
         // These are 0.0 until per-boundary conduction tracking is implemented.
-        let ochre_wall_heat = ochre.get("Wall Heat Gain - Indoor (W)").cloned().unwrap_or_default();
-        let ochre_floor_heat = ochre.get("Floor Heat Gain - Indoor (W)").cloned().unwrap_or_default();
-        let ochre_roof_heat = ochre.get("Roof Heat Gain - Indoor (W)").cloned().unwrap_or_default();
-        let ochre_window_heat = ochre.get("Window Heat Gain - Indoor (W)").cloned().unwrap_or_default();
-        let ochre_internal_mass = ochre.get("Internal Mass Heat Gain - Indoor (W)").cloned().unwrap_or_default();
-        let ochre_net_sensible = ochre.get("Net Sensible Heat Gain - Indoor (W)").cloned().unwrap_or_default();
+        let ochre_wall_heat = ochre
+            .get("Wall Heat Gain - Indoor (W)")
+            .cloned()
+            .unwrap_or_default();
+        let ochre_floor_heat = ochre
+            .get("Floor Heat Gain - Indoor (W)")
+            .cloned()
+            .unwrap_or_default();
+        let ochre_roof_heat = ochre
+            .get("Roof Heat Gain - Indoor (W)")
+            .cloned()
+            .unwrap_or_default();
+        let ochre_window_heat = ochre
+            .get("Window Heat Gain - Indoor (W)")
+            .cloned()
+            .unwrap_or_default();
+        let ochre_internal_mass = ochre
+            .get("Internal Mass Heat Gain - Indoor (W)")
+            .cloned()
+            .unwrap_or_default();
+        let ochre_net_sensible = ochre
+            .get("Net Sensible Heat Gain - Indoor (W)")
+            .cloned()
+            .unwrap_or_default();
 
         // Collect per-boundary from observer
         let mut hares_wall_heat: Vec<f64> = Vec::with_capacity(n_steps);
@@ -819,9 +1049,13 @@ mod tests {
         if let Some(snap) = snapshots.first() {
             if let Some(solver) = snap.phases.post_solvers.as_ref() {
                 let g = &solver.envelope_gains;
-                eprintln!("    Step-0: total={:.6} raw_inf={:.6} forced={:.6} nat={:.6} m³/s",
-                    g.total_airflow_m3_s, g.raw_infiltration_m3_s,
-                    g.forced_vent_m3_s, g.natural_vent_m3_s);
+                eprintln!(
+                    "    Step-0: total={:.6} raw_inf={:.6} forced={:.6} nat={:.6} m³/s",
+                    g.total_airflow_m3_s,
+                    g.raw_infiltration_m3_s,
+                    g.forced_vent_m3_s,
+                    g.natural_vent_m3_s
+                );
             }
         }
 
@@ -903,11 +1137,18 @@ mod tests {
     // Inject pvlib-computed POA (matching OCHRE exactly) to prove the
     // RC network physics is correct and remaining MAE is from solar inputs.
 
-    fn load_solar_override(scenario: &str, n_surfaces: usize) -> Vec<Vec<hares_types::SurfaceIrradiance>> {
-        let path = project_root()
-            .join(format!("tests/fixtures/freefloat/{scenario}/pvlib_solar_override.csv"));
+    fn load_solar_override(
+        scenario: &str,
+        n_surfaces: usize,
+    ) -> Vec<Vec<hares_types::SurfaceIrradiance>> {
+        let path = project_root().join(format!(
+            "tests/fixtures/freefloat/{scenario}/pvlib_solar_override.csv"
+        ));
         if !path.exists() {
-            panic!("pvlib solar override not found: {}\nRun: PYTHONPATH=vendors/OCHRE vendors/OCHRE/.venv/bin/python tests/python/generate_pvlib_solar_override.py", path.display());
+            panic!(
+                "pvlib solar override not found: {}\nRun: PYTHONPATH=vendors/OCHRE vendors/OCHRE/.venv/bin/python tests/python/generate_pvlib_solar_override.py",
+                path.display()
+            );
         }
         let contents = fs::read_to_string(&path).expect("read pvlib CSV");
         let mut lines = contents.lines();
@@ -915,8 +1156,11 @@ mod tests {
 
         let mut steps: Vec<Vec<hares_types::SurfaceIrradiance>> = Vec::new();
         for line in lines {
-            if line.trim().is_empty() { continue; }
-            let fields: Vec<f64> = line.split(',')
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields: Vec<f64> = line
+                .split(',')
                 .filter_map(|s| s.trim().parse::<f64>().ok())
                 .collect();
             // fields[0] = step, then 4 fields per surface (direct, diffuse, reflected, aoi)
@@ -955,7 +1199,11 @@ mod tests {
         // Load pvlib solar override and inject.
         let n_surfaces = dwelling.environment.surface_count();
         let solar_data = load_solar_override(scenario, n_surfaces);
-        eprintln!("[solar_override] loaded {} steps × {} surfaces", solar_data.len(), n_surfaces);
+        eprintln!(
+            "[solar_override] loaded {} steps × {} surfaces",
+            solar_data.len(),
+            n_surfaces
+        );
         dwelling.environment.set_solar_override(solar_data);
 
         // Run simulation.
@@ -968,43 +1216,73 @@ mod tests {
         let results = dwelling.results();
         let zone_indoor = ZoneId(1);
         let zone_attic = ZoneId(2);
-        let hares_indoor: Vec<f64> = results.steps.iter()
-            .map(|s| s.zone_temperatures_c.iter()
-                .find(|(z, _)| *z == zone_indoor)
-                .map(|(_, t)| *t).unwrap_or(f64::NAN))
+        let hares_indoor: Vec<f64> = results
+            .steps
+            .iter()
+            .map(|s| {
+                s.zone_temperatures_c
+                    .iter()
+                    .find(|(z, _)| *z == zone_indoor)
+                    .map(|(_, t)| *t)
+                    .unwrap_or(f64::NAN)
+            })
             .collect();
-        let hares_attic: Vec<f64> = results.steps.iter()
-            .map(|s| s.zone_temperatures_c.iter()
-                .find(|(z, _)| *z == zone_attic)
-                .map(|(_, t)| *t).unwrap_or(f64::NAN))
+        let hares_attic: Vec<f64> = results
+            .steps
+            .iter()
+            .map(|s| {
+                s.zone_temperatures_c
+                    .iter()
+                    .find(|(z, _)| *z == zone_attic)
+                    .map(|(_, t)| *t)
+                    .unwrap_or(f64::NAN)
+            })
             .collect();
 
         // Load OCHRE reference.
         let ochre_csv = fixture_dir(scenario).join("ochre_reference.csv");
         let ochre = parse_csv_columns(&ochre_csv);
-        let ochre_indoor = ochre.get("Temperature - Indoor (C)").cloned().unwrap_or_default();
-        let ochre_attic = ochre.get("Temperature - Attic (C)").cloned().unwrap_or_default();
+        let ochre_indoor = ochre
+            .get("Temperature - Indoor (C)")
+            .cloned()
+            .unwrap_or_default();
+        let ochre_attic = ochre
+            .get("Temperature - Attic (C)")
+            .cloned()
+            .unwrap_or_default();
 
         // Compute MAE.
         let mae = |a: &[f64], b: &[f64]| -> f64 {
-            let diffs: Vec<f64> = a.iter().zip(b.iter())
+            let diffs: Vec<f64> = a
+                .iter()
+                .zip(b.iter())
                 .filter(|(x, y)| x.is_finite() && y.is_finite())
                 .map(|(x, y)| (x - y).abs())
                 .collect();
-            if diffs.is_empty() { f64::INFINITY } else { diffs.iter().sum::<f64>() / diffs.len() as f64 }
+            if diffs.is_empty() {
+                f64::INFINITY
+            } else {
+                diffs.iter().sum::<f64>() / diffs.len() as f64
+            }
         };
 
         let indoor_mae = mae(&hares_indoor, &ochre_indoor);
         let attic_mae = mae(&hares_attic, &ochre_attic);
 
-        let h_ind_mean = hares_indoor.iter().filter(|t| t.is_finite()).sum::<f64>() / hares_indoor.len() as f64;
+        let h_ind_mean =
+            hares_indoor.iter().filter(|t| t.is_finite()).sum::<f64>() / hares_indoor.len() as f64;
         let o_ind_mean = ochre_indoor.iter().sum::<f64>() / ochre_indoor.len().max(1) as f64;
-        let h_atc_mean = hares_attic.iter().filter(|t| t.is_finite()).sum::<f64>() / hares_attic.len() as f64;
+        let h_atc_mean =
+            hares_attic.iter().filter(|t| t.is_finite()).sum::<f64>() / hares_attic.len() as f64;
         let o_atc_mean = ochre_attic.iter().sum::<f64>() / ochre_attic.len().max(1) as f64;
 
         eprintln!("\n{:=^70}", format!(" SOLAR OVERRIDE: {scenario} "));
-        eprintln!("  Indoor: HARES={h_ind_mean:.2}°C  OCHRE={o_ind_mean:.2}°C  MAE={indoor_mae:.3}°C");
-        eprintln!("  Attic:  HARES={h_atc_mean:.2}°C  OCHRE={o_atc_mean:.2}°C  MAE={attic_mae:.3}°C");
+        eprintln!(
+            "  Indoor: HARES={h_ind_mean:.2}°C  OCHRE={o_ind_mean:.2}°C  MAE={indoor_mae:.3}°C"
+        );
+        eprintln!(
+            "  Attic:  HARES={h_atc_mean:.2}°C  OCHRE={o_atc_mean:.2}°C  MAE={attic_mae:.3}°C"
+        );
 
         // With matching solar, physics should produce <0.5°C indoor MAE.
         assert!(

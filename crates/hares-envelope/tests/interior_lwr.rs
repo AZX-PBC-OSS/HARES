@@ -14,10 +14,22 @@ use hares_envelope::{InteriorSurface, interior_longwave_net_w};
 #[test]
 fn test_interior_lwr_net_flux_is_zero() {
     let surfaces = vec![
-        InteriorSurface { area_m2: 20.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 15.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 25.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 10.0, emissivity: 0.90 },
+        InteriorSurface {
+            area_m2: 20.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 15.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 25.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 10.0,
+            emissivity: 0.90,
+        },
     ];
     let temps = vec![20.0, 20.0, 20.0, 20.0];
 
@@ -43,10 +55,22 @@ fn test_interior_lwr_net_flux_is_zero() {
 #[test]
 fn test_interior_lwr_hot_surface_loses_heat() {
     let surfaces = vec![
-        InteriorSurface { area_m2: 20.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 15.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 25.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 10.0, emissivity: 0.90 },
+        InteriorSurface {
+            area_m2: 20.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 15.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 25.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 10.0,
+            emissivity: 0.90,
+        },
     ];
     let temps = vec![30.0, 20.0, 20.0, 20.0];
 
@@ -86,8 +110,14 @@ fn test_interior_lwr_hot_surface_loses_heat() {
 #[test]
 fn test_interior_lwr_identical_surfaces_symmetric() {
     let surfaces = vec![
-        InteriorSurface { area_m2: 20.0, emissivity: 0.90 },
-        InteriorSurface { area_m2: 20.0, emissivity: 0.90 },
+        InteriorSurface {
+            area_m2: 20.0,
+            emissivity: 0.90,
+        },
+        InteriorSurface {
+            area_m2: 20.0,
+            emissivity: 0.90,
+        },
     ];
     let temps = vec![25.0, 15.0];
 
@@ -114,8 +144,5 @@ fn test_interior_lwr_identical_surfaces_symmetric() {
 
     // Energy conservation
     let total: f64 = fluxes.iter().sum();
-    assert!(
-        total.abs() < 1e-6,
-        "net flux sum must be ~0, got {total}"
-    );
+    assert!(total.abs() < 1e-6, "net flux sum must be ~0, got {total}");
 }

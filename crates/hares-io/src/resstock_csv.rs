@@ -83,7 +83,13 @@ pub fn parse_resstock_csv(
         path: path_ref.display().to_string(),
         source,
     })?;
-    parse_resstock_csv_str(&contents, elevation_m, latitude, longitude, timezone_offset_h)
+    parse_resstock_csv_str(
+        &contents,
+        elevation_m,
+        latitude,
+        longitude,
+        timezone_offset_h,
+    )
 }
 
 /// Parse a ResStock CSV from an in-memory string (useful for testing).
@@ -158,7 +164,9 @@ pub fn parse_resstock_csv_str(
         // Parse datetime to extract month/day/hour.
         let dt_str = fields[col_indices.date_time].trim();
         let dt = NaiveDateTime::parse_from_str(dt_str, "%Y-%m-%d %H:%M:%S").map_err(|e| {
-            WeatherError::Parse(format!("row {row_num}: failed to parse date_time `{dt_str}`: {e}"))
+            WeatherError::Parse(format!(
+                "row {row_num}: failed to parse date_time `{dt_str}`: {e}"
+            ))
         })?;
 
         // ResStock uses end-of-interval timestamps (01:00 = hour 1).
@@ -467,7 +475,8 @@ mod tests {
     #[test]
     fn parse_basic_resstock_csv() {
         let csv = build_test_csv(8760);
-        let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0).expect("should parse 8760-row CSV");
+        let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
+            .expect("should parse 8760-row CSV");
 
         assert_eq!(result.len(), 8760);
         assert_eq!(result.meta.source_step_secs, 3600);
@@ -619,7 +628,8 @@ mod tests {
         }
         csv = new_lines.join("\n");
 
-        let err = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0).expect_err("should reject bad temperature");
+        let err = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
+            .expect_err("should reject bad temperature");
         assert!(
             matches!(err, WeatherError::Validation(_)),
             "expected Validation error, got {err:?}"
@@ -637,8 +647,7 @@ mod tests {
         let csv = build_test_csv(24);
         std::fs::write(&path, &csv).expect("write temp file");
 
-        let fmt =
-            crate::weather::detect_weather_format(&path).expect("should detect ResStock CSV");
+        let fmt = crate::weather::detect_weather_format(&path).expect("should detect ResStock CSV");
         assert_eq!(fmt, crate::weather::WeatherFormat::ResStockCsv);
     }
 
@@ -701,8 +710,14 @@ Diffuse Horizontal Radiation [W/m2]
         // Beyond troposphere (~44 km), formula base goes negative.
         // Should return the safety floor, not NaN or negative.
         let p = isa_pressure_kpa(50_000.0);
-        assert!(p > 0.0, "extreme elevation should return positive pressure: {p}");
-        assert!(p.is_finite(), "extreme elevation should return finite pressure: {p}");
+        assert!(
+            p > 0.0,
+            "extreme elevation should return positive pressure: {p}"
+        );
+        assert!(
+            p.is_finite(),
+            "extreme elevation should return finite pressure: {p}"
+        );
     }
 
     #[test]
@@ -732,8 +747,7 @@ Diffuse Horizontal Radiation [W/m2]
     #[test]
     fn resstock_csv_surface_albedo_is_none() {
         let csv = build_test_csv(8760);
-        let result =
-            parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0).expect("should parse");
+        let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0).expect("should parse");
         assert!(
             result.surface_albedo.is_none(),
             "ResStock CSV has no albedo column; surface_albedo should be None"

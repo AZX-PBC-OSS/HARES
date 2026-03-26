@@ -9,8 +9,7 @@ use hares_types::FuelType;
 use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec};
 use super::xml_helpers::{
-    capitalize, child_f64, child_load_kwh, child_load_therms, child_text,
-    parse_fuel,
+    capitalize, child_f64, child_load_kwh, child_load_therms, child_text, parse_fuel,
 };
 use hares_physics::units as conv;
 
@@ -74,7 +73,10 @@ pub(super) fn resolve_scheduled_loads(
                 match tag {
                     "ClothesWasher" => {
                         if let Some(capacity_ft3) = child_f64(node, "Capacity") {
-                            params.insert("capacity_m3".to_string(), json!(conv::volume_ft3_to_m3(capacity_ft3)));
+                            params.insert(
+                                "capacity_m3".to_string(),
+                                json!(conv::volume_ft3_to_m3(capacity_ft3)),
+                            );
                         }
                         if let Some(usage) = child_f64(node, "LabelUsage") {
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
@@ -403,7 +405,10 @@ pub(super) fn resolve_ventilation(
         let sensible_re = child_f64(fan, "SensibleRecoveryEfficiency").unwrap_or(0.0);
         let total_re = child_f64(fan, "TotalRecoveryEfficiency").unwrap_or(0.0);
         if sensible_re > 0.0 {
-            params.insert("sensible_recovery_efficiency".to_string(), json!(sensible_re));
+            params.insert(
+                "sensible_recovery_efficiency".to_string(),
+                json!(sensible_re),
+            );
         }
         // OCHRE hpxml.py:560: latent_recovery = total_recovery - sensible_recovery
         let latent_re = (total_re - sensible_re).max(0.0);
@@ -631,8 +636,8 @@ fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String,
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::building::parse_xml_document;
+    use super::*;
 
     /// Verify that `parse_schedule_extension_params` emits `month_multipliers` only once.
     /// Before the fix, a duplicated code block would emit it twice.

@@ -11,12 +11,12 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
+#[cfg(test)]
+use crate::epw::monthly_day_counts;
 use crate::epw::{
     clark_allen_sky_temp_c, doe2_ground_temp_from_monthly_avg, doe2_ground_temp_monthly,
     interpolate_ground_temp_c,
 };
-#[cfg(test)]
-use crate::epw::monthly_day_counts;
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 
 /// Valid PSM3 timestep intervals in seconds.
@@ -210,7 +210,10 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
             if !(0.0..=1.0).contains(&val) {
                 tracing::warn!("row {row}: Surface Albedo {val} outside [0, 1], clamped");
             }
-            surface_albedo.as_mut().expect("pre-allocated").push(val.clamp(0.0, 1.0));
+            surface_albedo
+                .as_mut()
+                .expect("pre-allocated")
+                .push(val.clamp(0.0, 1.0));
         }
 
         dry_bulb_c.push(db);
@@ -229,7 +232,10 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     validate_record_count(n, step_secs)?;
 
     // Determine if leap year from record count.
-    let step_idx = VALID_STEP_SECS.iter().position(|&s| s == step_secs).expect("validated step");
+    let step_idx = VALID_STEP_SECS
+        .iter()
+        .position(|&s| s == step_secs)
+        .expect("validated step");
     let is_leap_year = n == RECORDS_PER_YEAR_LEAP[step_idx];
 
     // Compute sky temperature via Clark-Allen (PSM3 has no horizontal IR data).
@@ -242,10 +248,9 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     // Compute ground temperature via DOE-2 model.
     // monthly_average_dry_bulb expects hourly data, so we compute monthly means
     // directly from the sub-hourly data using the known timestep.
-    let monthly_ground_temps =
-        compute_monthly_means_sub_hourly(&dry_bulb_c, &timestamps)
-            .map(|monthly_avg| doe2_ground_temp_from_monthly_avg(&monthly_avg))
-            .unwrap_or_else(|| doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year));
+    let monthly_ground_temps = compute_monthly_means_sub_hourly(&dry_bulb_c, &timestamps)
+        .map(|monthly_avg| doe2_ground_temp_from_monthly_avg(&monthly_avg))
+        .unwrap_or_else(|| doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year));
 
     let mut ground_temp_c = Vec::with_capacity(n);
     for &(month, day, hour) in &timestamps {
@@ -321,9 +326,7 @@ fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
         col_names
             .iter()
             .position(|c| c.eq_ignore_ascii_case(name))
-            .ok_or_else(|| {
-                WeatherError::Parse(format!("PSM3 missing required column: {name}"))
-            })
+            .ok_or_else(|| WeatherError::Parse(format!("PSM3 missing required column: {name}")))
     };
 
     // Surface Albedo is optional — not all PSM3 files include it.
@@ -350,24 +353,19 @@ fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
     })
 }
 
-fn detect_timestep(
-    row1: &str,
-    row2: &str,
-    col_map: &Psm3ColumnMap,
-) -> Result<u32, WeatherError> {
+fn detect_timestep(row1: &str, row2: &str, col_map: &Psm3ColumnMap) -> Result<u32, WeatherError> {
     let fields1: Vec<&str> = row1.split(',').collect();
     let fields2: Vec<&str> = row2.split(',').collect();
 
     let ts1 = row_to_epoch_secs(&fields1, col_map, 1)?;
     let ts2 = row_to_epoch_secs(&fields2, col_map, 2)?;
 
-    let diff = ts2
-        .checked_sub(ts1)
-        .ok_or_else(|| WeatherError::Parse("PSM3 timestamps not monotonically increasing".into()))?;
-
-    let step = u32::try_from(diff).map_err(|_| {
-        WeatherError::Parse(format!("PSM3 timestep overflow: {diff} seconds"))
+    let diff = ts2.checked_sub(ts1).ok_or_else(|| {
+        WeatherError::Parse("PSM3 timestamps not monotonically increasing".into())
     })?;
+
+    let step = u32::try_from(diff)
+        .map_err(|_| WeatherError::Parse(format!("PSM3 timestep overflow: {diff} seconds")))?;
 
     if !VALID_STEP_SECS.contains(&step) {
         return Err(WeatherError::Validation(format!(
@@ -403,9 +401,10 @@ fn row_to_epoch_secs(
 }
 
 fn validate_record_count(n: usize, step_secs: u32) -> Result<(), WeatherError> {
-    let step_idx = VALID_STEP_SECS.iter().position(|&s| s == step_secs).ok_or_else(|| {
-        WeatherError::Validation(format!("unexpected timestep: {step_secs}"))
-    })?;
+    let step_idx = VALID_STEP_SECS
+        .iter()
+        .position(|&s| s == step_secs)
+        .ok_or_else(|| WeatherError::Validation(format!("unexpected timestep: {step_secs}")))?;
 
     let expected_std = RECORDS_PER_YEAR_STANDARD[step_idx];
     let expected_leap = RECORDS_PER_YEAR_LEAP[step_idx];
@@ -448,9 +447,12 @@ fn compute_monthly_means_sub_hourly(
 }
 
 fn parse_meta_f64(raw: &str, name: &str) -> Result<f64, WeatherError> {
-    raw.trim()
-        .parse::<f64>()
-        .map_err(|_| WeatherError::Parse(format!("PSM3 metadata: failed to parse `{name}`: `{}`", raw.trim())))
+    raw.trim().parse::<f64>().map_err(|_| {
+        WeatherError::Parse(format!(
+            "PSM3 metadata: failed to parse `{name}`: `{}`",
+            raw.trim()
+        ))
+    })
 }
 
 fn parse_data_f64(
@@ -462,9 +464,12 @@ fn parse_data_f64(
     let raw = fields.get(idx).ok_or_else(|| {
         WeatherError::Parse(format!("row {row}: missing field `{name}` at index {idx}"))
     })?;
-    raw.trim()
-        .parse::<f64>()
-        .map_err(|_| WeatherError::Parse(format!("row {row}: failed to parse `{name}`: `{}`", raw.trim())))
+    raw.trim().parse::<f64>().map_err(|_| {
+        WeatherError::Parse(format!(
+            "row {row}: failed to parse `{name}`: `{}`",
+            raw.trim()
+        ))
+    })
 }
 
 fn parse_data_u32(
@@ -476,9 +481,12 @@ fn parse_data_u32(
     let raw = fields.get(idx).ok_or_else(|| {
         WeatherError::Parse(format!("row {row}: missing field `{name}` at index {idx}"))
     })?;
-    raw.trim()
-        .parse::<u32>()
-        .map_err(|_| WeatherError::Parse(format!("row {row}: failed to parse `{name}` as u32: `{}`", raw.trim())))
+    raw.trim().parse::<u32>().map_err(|_| {
+        WeatherError::Parse(format!(
+            "row {row}: failed to parse `{name}` as u32: `{}`",
+            raw.trim()
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -488,7 +496,8 @@ mod tests {
     /// Build a minimal PSM3 CSV string for testing.
     fn make_psm3_csv(step_minutes: u32, is_leap: bool) -> String {
         let day_counts = monthly_day_counts(is_leap);
-        let total_records: usize = day_counts.iter().sum::<usize>() * 24 * (60 / step_minutes as usize);
+        let total_records: usize =
+            day_counts.iter().sum::<usize>() * 24 * (60 / step_minutes as usize);
 
         let mut lines = Vec::with_capacity(total_records + 3);
 
@@ -499,10 +508,7 @@ mod tests {
         );
 
         // Line 2: field values
-        lines.push(
-            "NSRDB,12345,TestCity,-,-,39.74,-104.99,-7,1609.0,-7"
-                .to_string(),
-        );
+        lines.push("NSRDB,12345,TestCity,-,-,39.74,-104.99,-7,1609.0,-7".to_string());
 
         // Line 3: column names
         lines.push(
@@ -667,7 +673,10 @@ mod tests {
 
         let csv = lines.join("\n");
         let ts = parse_psm3_str(&csv).expect("should parse PSM3 with albedo");
-        let albedo = ts.surface_albedo.as_ref().expect("should be Some when column present");
+        let albedo = ts
+            .surface_albedo
+            .as_ref()
+            .expect("should be Some when column present");
         assert_eq!(albedo.len(), ts.len());
 
         // January row should have snow albedo (0.7).

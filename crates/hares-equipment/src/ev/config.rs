@@ -32,7 +32,6 @@ pub(super) const KEY_TOU_PEAK_START_HOUR: &str = "tou_peak_start_hour";
 pub(super) const KEY_TOU_PEAK_END_HOUR: &str = "tou_peak_end_hour";
 pub(super) const KEY_READY_BY_HOUR: &str = "ready_by_hour";
 pub(super) const KEY_READY_TARGET_SOC: &str = "ready_target_soc";
-pub(super) const KEY_PYBAMM_LUT_PATH: &str = "pybamm_lut_path";
 pub(super) const KEY_BATTERY_TEMP_C: &str = "battery_temp_c";
 pub(super) const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
 pub(super) const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";

@@ -1,8 +1,6 @@
 //! Python bindings for PV sizing and roof plane introspection.
 
-use hares_physics::pv_sizing::{
-    self, PvCandidate, PvSizingResult, RoofInfo, RoofPlane, RoofShape,
-};
+use hares_physics::pv_sizing::{self, PvCandidate, PvSizingResult, RoofInfo, RoofPlane, RoofShape};
 use pyo3::prelude::*;
 
 /// A single roof plane from the parsed HPXML building.
@@ -194,9 +192,7 @@ impl PyPvSizingResult {
 // Helpers called from py_dwelling
 // ---------------------------------------------------------------------------
 
-pub(crate) fn roof_planes_from_dwelling(
-    roof_info: &RoofInfo,
-) -> Vec<PyRoofPlane> {
+pub(crate) fn roof_planes_from_dwelling(roof_info: &RoofInfo) -> Vec<PyRoofPlane> {
     roof_info
         .planes
         .iter()
@@ -229,8 +225,9 @@ pub(crate) fn size_pv_from_dwelling(
     min_kw: f64,
     max_kw: f64,
 ) -> Result<PyPvSizingResult, String> {
-    let usable = pv_sizing::compute_usable_area(roof_info, roof_shape, wall_azimuths, latitude, None, None)
-        .map_err(|e| e.to_string())?;
+    let usable =
+        pv_sizing::compute_usable_area(roof_info, roof_shape, wall_azimuths, latitude, None, None)
+            .map_err(|e| e.to_string())?;
     let result = pv_sizing::size_pv_system(&usable, target_kw, min_kw, max_kw, None, None, None)
         .map_err(|e| e.to_string())?;
     Ok(PyPvSizingResult { inner: result })

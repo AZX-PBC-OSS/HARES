@@ -208,7 +208,10 @@ impl DrAction {
     ///
     /// Panics if `max_kw` is negative.
     pub fn limit_power(max_kw: f64) -> Self {
-        debug_assert!(max_kw >= 0.0, "power limit must be non-negative, got {max_kw}");
+        debug_assert!(
+            max_kw >= 0.0,
+            "power limit must be non-negative, got {max_kw}"
+        );
         Self::PowerLimit { max_kw }
     }
 }

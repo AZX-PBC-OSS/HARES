@@ -9,12 +9,11 @@ use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_envelope::{
-    OutputMapping, StateSpaceModel, StateSpaceWiring,
-    ThermalSolver, ThermalSolverConfig,
+    OutputMapping, StateSpaceModel, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
 };
 use hares_types::{
-    DomainSolver, EnvironmentState, GridState, PortSlots,
-    ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+    DomainSolver, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+    ZoneState,
 };
 use nalgebra::DMatrix;
 
@@ -96,14 +95,14 @@ fn ground_temperature_drives_zone() {
     let ua_ground = 2.0; // W/K — typical slab
 
     // A_c: dT/dt = -(UA_out + UA_gnd)/C * T + UA_out/C * T_out + UA_gnd/C * T_gnd
-    let a_c = DMatrix::from_row_slice(1, 1, &[
-        -(ua_outdoor + ua_ground) / c_zone,
-    ]);
+    let a_c = DMatrix::from_row_slice(1, 1, &[-(ua_outdoor + ua_ground) / c_zone]);
 
     // B_c: inputs [outdoor(0), ground(1), sensible(2)]
-    let b_c = DMatrix::from_row_slice(1, 3, &[
-        ua_outdoor / c_zone, ua_ground / c_zone, 1.0 / c_zone,
-    ]);
+    let b_c = DMatrix::from_row_slice(
+        1,
+        3,
+        &[ua_outdoor / c_zone, ua_ground / c_zone, 1.0 / c_zone],
+    );
 
     let mapping = OutputMapping {
         output_count: 1,
@@ -133,8 +132,7 @@ fn ground_temperature_drives_zone() {
     let zone_init = 20.0;
     let env = make_env(zone_init, outdoor_temp, ground_temp);
 
-    let mut solver =
-        ThermalSolver::new(model, wiring, config, DT_S, &env, zone_init).unwrap();
+    let mut solver = ThermalSolver::new(model, wiring, config, DT_S, &env, zone_init).unwrap();
 
     let ports = PortSlots {
         thermal: vec![ThermalAccumulator::new(ZONE)],
@@ -153,8 +151,8 @@ fn ground_temperature_drives_zone() {
     // Expected steady state:
     // T_ss = (UA_out × T_out + UA_gnd × T_gnd) / (UA_out + UA_gnd)
     //      = (86 × -5 + 2 × 12) / 88 = (-430 + 24) / 88 = -4.61°C
-    let t_expected = (ua_outdoor * outdoor_temp + ua_ground * ground_temp)
-        / (ua_outdoor + ua_ground);
+    let t_expected =
+        (ua_outdoor * outdoor_temp + ua_ground * ground_temp) / (ua_outdoor + ua_ground);
 
     assert!(
         (t_zone - t_expected).abs() < 0.5,
@@ -163,8 +161,7 @@ fn ground_temperature_drives_zone() {
 
     // If ground temp were 0°C (the bug), the steady state would be:
     // (86 × -5 + 2 × 0) / 88 = -4.89°C — noticeably different
-    let t_if_ground_zero = (ua_outdoor * outdoor_temp + ua_ground * 0.0)
-        / (ua_outdoor + ua_ground);
+    let t_if_ground_zero = (ua_outdoor * outdoor_temp + ua_ground * 0.0) / (ua_outdoor + ua_ground);
     // Verify we're closer to the correct value than the bugged value
     assert!(
         (t_zone - t_expected).abs() < (t_zone - t_if_ground_zero).abs(),
@@ -252,13 +249,9 @@ fn interior_solar_distribution_damps_peak_temp() {
     let c_zone = 500_000.0; // J/K — zone air
     let ua_zone_out = 100.0; // W/K — zone-to-outdoor conductance
 
-    let a_c = DMatrix::from_row_slice(1, 1, &[
-        -ua_zone_out / c_zone,
-    ]);
+    let a_c = DMatrix::from_row_slice(1, 1, &[-ua_zone_out / c_zone]);
 
-    let b_c = DMatrix::from_row_slice(1, 2, &[
-        ua_zone_out / c_zone, 1.0 / c_zone,
-    ]);
+    let b_c = DMatrix::from_row_slice(1, 2, &[ua_zone_out / c_zone, 1.0 / c_zone]);
 
     let mapping = OutputMapping {
         output_count: 1,
@@ -286,8 +279,7 @@ fn interior_solar_distribution_damps_peak_temp() {
         indoor_zone_id: ZONE,
         ..ThermalSolverConfig::default()
     };
-    let mut solver =
-        ThermalSolver::new(model, wiring, config, 60.0, &env, init_temp).unwrap();
+    let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, init_temp).unwrap();
 
     let dt = Duration::from_secs(60);
     let solar_w = 5000.0;
@@ -323,7 +315,10 @@ fn interior_solar_distribution_damps_peak_temp() {
 
     // After solar ends (10h cooldown), zone should approach outdoor temp
     let t_final = zone_temp(&solver.resolve(
-        &PortSlots { thermal: vec![ThermalAccumulator::new(ZONE)], ..Default::default() },
+        &PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZONE)],
+            ..Default::default()
+        },
         &env,
         dt,
     ));

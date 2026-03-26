@@ -48,7 +48,11 @@ fn assert_approx(actual: f64, expected: f64, tol: f64) {
 fn solar_declination_near_zero_at_vernal_equinox() {
     // March 20, 2024 at 12:00 UTC → solar noon at longitude 0°, latitude 0°.
     // Expected declination ≈ 0° (equinox); altitude ≈ 90°.
-    let dt = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2024, 3, 20, 12, 0, 0).single().unwrap();
+    let dt = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2024, 3, 20, 12, 0, 0)
+        .single()
+        .unwrap();
     let pos = solar_position(0.0, 0.0, dt);
 
     // At equinox on equator at solar noon: altitude ≈ 90° (sun nearly overhead).
@@ -65,7 +69,11 @@ fn solar_declination_approx_23_4_at_summer_solstice() {
     // June 21, 2024 at 12:00 UTC, latitude 0°, longitude 0°.
     // Summer solstice: declination ≈ +23.44°.
     // At equator noon: altitude = 90° - 23.44° ≈ 66.56°.
-    let dt = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2024, 6, 21, 12, 0, 0).single().unwrap();
+    let dt = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2024, 6, 21, 12, 0, 0)
+        .single()
+        .unwrap();
     let pos = solar_position(0.0, 0.0, dt);
 
     // Altitude at equator = 90° - declination ≈ 66.5°.
@@ -79,7 +87,11 @@ fn solar_declination_approx_neg_23_4_at_winter_solstice() {
     // December 21, 2024 at 12:00 UTC, latitude 0°, longitude 0°.
     // Winter solstice: declination ≈ -23.44°.
     // At equator noon: altitude = 90° - 23.44° ≈ 66.56°.
-    let dt = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2024, 12, 21, 12, 0, 0).single().unwrap();
+    let dt = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2024, 12, 21, 12, 0, 0)
+        .single()
+        .unwrap();
     let pos = solar_position(0.0, 0.0, dt);
 
     let expected_altitude = 90.0 - 23.44;
@@ -114,7 +126,12 @@ fn perez_diffuse_south_facing_30_tilt_day80_reasonable_range() {
     // Compute angle of incidence: for south-facing tilt, solar azimuth ≈ 180° at noon.
     let solar_azimuth_deg = 180.0_f64; // solar noon, looking south
     let solar_alt_deg = 90.0 - zenith_deg;
-    let aoi_deg = angle_of_incidence(tilt_deg, surface_azimuth_deg, solar_alt_deg, solar_azimuth_deg);
+    let aoi_deg = angle_of_incidence(
+        tilt_deg,
+        surface_azimuth_deg,
+        solar_alt_deg,
+        solar_azimuth_deg,
+    );
 
     let dni_extra = extraterrestrial_irradiance(day_of_year);
     let diffuse_w_m2 = perez_sky_diffuse(dhi, dni, zenith_deg, aoi_deg, tilt_deg, dni_extra);
@@ -269,7 +286,11 @@ fn poa_total_matches_pvlib_reference() {
 fn solar_position_at_lat40_equinox_noon() {
     // March 20, 2024 at 12:00 UTC at longitude 0° (prime meridian).
     // At equinox, declination ≈ 0°, so altitude ≈ latitude complement = 50°.
-    let dt = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2024, 3, 20, 12, 0, 0).single().unwrap();
+    let dt = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2024, 3, 20, 12, 0, 0)
+        .single()
+        .unwrap();
     let pos = solar_position(40.0, 0.0, dt);
 
     // Altitude ≈ 50° (90° - 40° latitude at zero declination).
@@ -290,7 +311,11 @@ fn solar_position_at_lat40_equinox_noon() {
 #[test]
 fn solar_altitude_negative_at_midnight_utc() {
     // Midnight UTC at latitude 40°N, longitude 0°: sun well below horizon.
-    let dt = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2024, 6, 21, 0, 0, 0).single().unwrap();
+    let dt = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2024, 6, 21, 0, 0, 0)
+        .single()
+        .unwrap();
     let pos = solar_position(40.0, 0.0, dt);
 
     assert!(
@@ -396,7 +421,10 @@ fn window_decomposition_high_u_linear_fit() {
 #[test]
 fn window_decomposition_triple_pane() {
     let (r_glass, r_int) = window_u_factor_decomposition(1.0);
-    assert!(r_glass > 0.5, "triple-pane glass R should be substantial: {r_glass}");
+    assert!(
+        r_glass > 0.5,
+        "triple-pane glass R should be substantial: {r_glass}"
+    );
     assert!((r_glass + r_int - 1.0).abs() < 1e-10, "must equal 1/U=1.0");
 }
 

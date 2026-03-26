@@ -394,8 +394,7 @@ impl MetricsCalculator {
             optional_float64_column(schema, &["HVAC Heating Electric Power (kW)"])?;
         let hvac_cooling_kw_idx =
             optional_float64_column(schema, &["HVAC Cooling Electric Power (kW)"])?;
-        let battery_kw_idx =
-            optional_float64_column(schema, &["Battery Electric Power (kW)"])?;
+        let battery_kw_idx = optional_float64_column(schema, &["Battery Electric Power (kW)"])?;
 
         let timestep_h = f64::from(time_res_secs) / 3600.0;
         let energy_by_end_use = end_use_columns
@@ -953,7 +952,11 @@ mod tests {
 
     fn test_config(deadband: Option<f64>) -> SimulationConfig {
         SimulationConfig {
-            start_time: FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap(),
+            start_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .unwrap(),
             duration: Duration::hours(1),
             time_res: Duration::hours(1),
             output_verbosity: 0,
@@ -1195,8 +1198,7 @@ mod tests {
             "HVAC Heating Delivered (W)",
             "HVAC Heating Capacity (W)",
         ]);
-        let mut calc =
-            MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
 
         let rows = 24;
         calc.accumulate(&build_batch(vec![
@@ -1239,8 +1241,7 @@ mod tests {
             "HVAC Heating Delivered (W)",
             "HVAC Heating Capacity (W)",
         ]);
-        let mut calc =
-            MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
 
         // Row with output nearly equal to capacity at high wattage (50,000 W = 50 kW).
         // Difference = 0.00005 W → relative = 0.00005 / 50000 = 1e-9, well within 1e-6.
@@ -1280,8 +1281,15 @@ mod tests {
         ]));
         let metrics = calc.finish();
 
-        let cop = metrics.metrics.efficiency.hvac_heating_cop.expect("COP should be present");
-        assert!((cop - 5.0).abs() < 1e-9, "heating COP should be 5.0, got {cop}");
+        let cop = metrics
+            .metrics
+            .efficiency
+            .hvac_heating_cop
+            .expect("COP should be present");
+        assert!(
+            (cop - 5.0).abs() < 1e-9,
+            "heating COP should be 5.0, got {cop}"
+        );
     }
 
     #[test]
@@ -1301,16 +1309,20 @@ mod tests {
         ]));
         let metrics = calc.finish();
 
-        let cop = metrics.metrics.efficiency.hvac_cooling_cop.expect("COP should be present");
-        assert!((cop - 4.0).abs() < 1e-9, "cooling COP should be 4.0, got {cop}");
+        let cop = metrics
+            .metrics
+            .efficiency
+            .hvac_cooling_cop
+            .expect("COP should be present");
+        assert!(
+            (cop - 4.0).abs() < 1e-9,
+            "cooling COP should be 4.0, got {cop}"
+        );
     }
 
     #[test]
     fn cop_none_when_no_electric_draw() {
-        let schema = schema_from_columns(&[
-            TOTAL_ELECTRIC_POWER_KW,
-            "HVAC Heating Delivered (W)",
-        ]);
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "HVAC Heating Delivered (W)"]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
         calc.accumulate(&build_batch(vec![
             (TOTAL_ELECTRIC_POWER_KW, vec![0.0]),
@@ -1323,10 +1335,7 @@ mod tests {
 
     #[test]
     fn battery_round_trip_efficiency_computed() {
-        let schema = schema_from_columns(&[
-            TOTAL_ELECTRIC_POWER_KW,
-            "Battery Electric Power (kW)",
-        ]);
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "Battery Electric Power (kW)"]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
 
         // 10 kWh in, 9 kWh out → 90% round trip
@@ -1336,7 +1345,10 @@ mod tests {
         ]));
         let metrics = calc.finish();
 
-        let rte = metrics.metrics.efficiency.battery_round_trip_efficiency
+        let rte = metrics
+            .metrics
+            .efficiency
+            .battery_round_trip_efficiency
             .expect("RTE should be present");
         assert!((rte - 0.9).abs() < 1e-9, "RTE should be 0.9, got {rte}");
     }
@@ -1358,9 +1370,15 @@ mod tests {
         ]));
         let metrics = calc.finish();
 
-        let loads = metrics.metrics.envelope_loads_kwh.expect("envelope loads present");
-        assert!((loads.ventilation_kwh - 0.8).abs() < 1e-9,
-            "ventilation should be 0.8 kWh, got {}", loads.ventilation_kwh);
+        let loads = metrics
+            .metrics
+            .envelope_loads_kwh
+            .expect("envelope loads present");
+        assert!(
+            (loads.ventilation_kwh - 0.8).abs() < 1e-9,
+            "ventilation should be 0.8 kWh, got {}",
+            loads.ventilation_kwh
+        );
     }
 
     #[test]
@@ -1392,7 +1410,10 @@ mod tests {
             ("HVAC Cooling Delivered (W)", vec![-3000.0]),
         ]));
         let metrics = calc.finish();
-        let loads = metrics.metrics.envelope_loads_kwh.expect("envelope loads present");
+        let loads = metrics
+            .metrics
+            .envelope_loads_kwh
+            .expect("envelope loads present");
 
         assert!((loads.window_solar_kwh - 1.0).abs() < 1e-9);
         assert!((loads.opaque_solar_lwr_kwh - 0.2).abs() < 1e-9);

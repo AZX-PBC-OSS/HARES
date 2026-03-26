@@ -264,10 +264,8 @@ fn full_pipeline_synthetic_weather() {
     let time_res = StdDuration::from_secs(300); // 5-minute steps (factor 12)
     let total_steps = 288u64; // 24h * 12 steps/h
 
-    let mut mgr = EnvironmentManager::new(
-        weather, schedule, &building, time_res, start, None,
-    )
-    .expect("EnvironmentManager::new failed");
+    let mut mgr = EnvironmentManager::new(weather, schedule, &building, time_res, start, None)
+        .expect("EnvironmentManager::new failed");
 
     let mut clock = SimClock::new(start, Duration::seconds(300), Duration::hours(24));
 
@@ -468,10 +466,8 @@ fn solar_irradiance_physical_bounds() {
     let time_res = StdDuration::from_secs(300);
     let total_steps = 288u64;
 
-    let mut mgr = EnvironmentManager::new(
-        weather, schedule, &building, time_res, start, None,
-    )
-    .expect("EnvironmentManager::new failed");
+    let mut mgr = EnvironmentManager::new(weather, schedule, &building, time_res, start, None)
+        .expect("EnvironmentManager::new failed");
 
     let mut clock = SimClock::new(start, Duration::seconds(300), Duration::hours(24));
 
@@ -546,10 +542,8 @@ fn resampled_weather_produces_smooth_environment() {
     let time_res = StdDuration::from_secs(60);
     let total_steps = 1440u64; // 24h * 60 steps/h
 
-    let mut mgr = EnvironmentManager::new(
-        weather, schedule, &building, time_res, start, None,
-    )
-    .expect("EnvironmentManager::new failed");
+    let mut mgr = EnvironmentManager::new(weather, schedule, &building, time_res, start, None)
+        .expect("EnvironmentManager::new failed");
 
     let mut clock = SimClock::new(start, Duration::seconds(60), Duration::hours(24));
 

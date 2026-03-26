@@ -9,9 +9,7 @@ mod tests {
     use std::path::PathBuf;
 
     use hares_core::{building_to_boundary_inputs, building_to_zone_inputs};
-    use hares_envelope::{
-        ExteriorTarget, RCPath, assemble_building_rc, derive_zone_capacitances,
-    };
+    use hares_envelope::{ExteriorTarget, RCPath, assemble_building_rc, derive_zone_capacitances};
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
     use hares_io::{DefaultsStore, parse_hpxml};
@@ -552,19 +550,18 @@ mod tests {
         eprintln!("OCHRE effective total UA: ~559 W/K (with film + halving)");
 
         // LUT resolution per boundary
-        let lut = defaults.envelope_lut().expect("envelope LUT must be loaded");
+        let lut = defaults
+            .envelope_lut()
+            .expect("envelope LUT must be loaded");
         eprintln!("\n=== LUT Resolution per Boundary ===");
         for bd in &building.boundaries {
-            let name = bd
-                .lut_boundary_name
-                .as_deref()
-                .or_else(|| {
-                    resolve_boundary_name(
-                        &bd.boundary_type,
-                        bd.interior_zone.as_ref(),
-                        bd.exterior_zone.as_ref(),
-                    )
-                });
+            let name = bd.lut_boundary_name.as_deref().or_else(|| {
+                resolve_boundary_name(
+                    &bd.boundary_type,
+                    bd.interior_zone.as_ref(),
+                    bd.exterior_zone.as_ref(),
+                )
+            });
             let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
                 let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
                 if sum > 0.0 { Some(sum) } else { None }
@@ -622,16 +619,22 @@ mod tests {
             diag.total_ua_w_per_k
         );
         for d in &diag.boundaries {
-            assert!(d.area_m2 > 0.0, "boundary {} area must be > 0", d.boundary_idx);
+            assert!(
+                d.area_m2 > 0.0,
+                "boundary {} area must be > 0",
+                d.boundary_idx
+            );
             assert!(
                 d.r_total_m2_k_w > 0.0,
                 "boundary {} R_total must be > 0, got {}",
-                d.boundary_idx, d.r_total_m2_k_w
+                d.boundary_idx,
+                d.r_total_m2_k_w
             );
             assert!(
                 d.ua_w_per_k > 0.0,
                 "boundary {} UA must be > 0, got {}",
-                d.boundary_idx, d.ua_w_per_k
+                d.boundary_idx,
+                d.ua_w_per_k
             );
         }
     }
@@ -654,16 +657,13 @@ mod tests {
             .expect("assemble_building_rc must succeed");
 
         // Load OCHRE reference from JSON
-        let ref_json_path =
-            project_root().join("tests/fixtures/parity/ochre_rc_reference.json");
+        let ref_json_path = project_root().join("tests/fixtures/parity/ochre_rc_reference.json");
         let ref_json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&ref_json_path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", ref_json_path.display())),
         )
         .expect("parse ochre_rc_reference.json");
-        let ochre_boundaries = ref_json["boundaries"]
-            .as_array()
-            .expect("boundaries array");
+        let ochre_boundaries = ref_json["boundaries"].as_array().expect("boundaries array");
         let ochre_total_ua = ref_json["total_ua_w_k"].as_f64().unwrap_or(0.0);
 
         // Aggregate HARES boundary diagnostics by LUT name
@@ -724,11 +724,21 @@ mod tests {
         eprintln!("\n{:=^120}", " RC PARITY: HARES vs OCHRE (per-boundary) ");
         eprintln!(
             "{:<20} {:>8} {:>8} {:>6}  {:>8} {:>8} {:>6}  {:>8} {:>8} {:>6}  {:>7} {:>7} {:>6}  {:>3} {:>3}",
-            "Boundary", "H_UA", "O_UA", "Δ%",
-            "H_Ri", "O_Ri", "Δ%",
-            "H_Re", "O_Re", "Δ%",
-            "H_Cap", "O_Cap", "Δ%",
-            "H_n", "O_n"
+            "Boundary",
+            "H_UA",
+            "O_UA",
+            "Δ%",
+            "H_Ri",
+            "O_Ri",
+            "Δ%",
+            "H_Re",
+            "O_Re",
+            "Δ%",
+            "H_Cap",
+            "O_Cap",
+            "Δ%",
+            "H_n",
+            "O_n"
         );
         eprintln!("{}", "-".repeat(120));
 
@@ -769,36 +779,59 @@ mod tests {
             let re_pct = pct(h_re, o_re);
             let cap_pct = pct(h_cap_kj, o_cap_kj);
 
-            let flag = |p: f64, tol: f64| -> &str {
-                if p.abs() <= tol { " " } else { "!" }
-            };
+            let flag = |p: f64, tol: f64| -> &str { if p.abs() <= tol { " " } else { "!" } };
 
             eprintln!(
                 "{:<20} {:>8.2} {:>8.2} {:>+5.1}%{} {:>8.4} {:>8.4} {:>+5.1}%{} {:>8.4} {:>8.4} {:>+5.1}%{} {:>7.1} {:>7.1} {:>+5.1}%{} {:>3} {:>3} {}",
                 name,
-                h.ua_w_k, o_ua, ua_pct, flag(ua_pct, 1.0),
-                h_ri, o_ri, ri_pct, flag(ri_pct, 5.0),
-                h_re, o_re, re_pct, flag(re_pct, 5.0),
-                h_cap_kj, o_cap_kj, cap_pct, flag(cap_pct, 10.0),
-                h.n_rc_nodes, o_nodes,
+                h.ua_w_k,
+                o_ua,
+                ua_pct,
+                flag(ua_pct, 1.0),
+                h_ri,
+                o_ri,
+                ri_pct,
+                flag(ri_pct, 5.0),
+                h_re,
+                o_re,
+                re_pct,
+                flag(re_pct, 5.0),
+                h_cap_kj,
+                o_cap_kj,
+                cap_pct,
+                flag(cap_pct, 10.0),
+                h.n_rc_nodes,
+                o_nodes,
                 if h.n_rc_nodes == o_nodes { " " } else { "!" },
             );
 
             // UA within 1% (existing tolerance)
             if o_ua >= 1.0 && ua_pct.abs() > 1.0 {
-                failures.push(format!("{name} UA: {:.2} vs {:.2} ({:+.1}%)", h.ua_w_k, o_ua, ua_pct));
+                failures.push(format!(
+                    "{name} UA: {:.2} vs {:.2} ({:+.1}%)",
+                    h.ua_w_k, o_ua, ua_pct
+                ));
             }
             // Film R_int within 5% or 0.01
             if o_ri > 0.01 && ri_pct.abs() > 5.0 && (h_ri - o_ri).abs() > 0.01 {
-                failures.push(format!("{name} R_film_int: {:.4} vs {:.4} ({:+.1}%)", h_ri, o_ri, ri_pct));
+                failures.push(format!(
+                    "{name} R_film_int: {:.4} vs {:.4} ({:+.1}%)",
+                    h_ri, o_ri, ri_pct
+                ));
             }
             // Film R_ext within 5% or 0.01
             if o_re > 0.01 && re_pct.abs() > 5.0 && (h_re - o_re).abs() > 0.01 {
-                failures.push(format!("{name} R_film_ext: {:.4} vs {:.4} ({:+.1}%)", h_re, o_re, re_pct));
+                failures.push(format!(
+                    "{name} R_film_ext: {:.4} vs {:.4} ({:+.1}%)",
+                    h_re, o_re, re_pct
+                ));
             }
             // Capacitance within 10% or 50 kJ/K
             if o_cap_kj > 10.0 && cap_pct.abs() > 10.0 && (h_cap_kj - o_cap_kj).abs() > 50.0 {
-                failures.push(format!("{name} capacitance: {:.1} vs {:.1} kJ/K ({:+.1}%)", h_cap_kj, o_cap_kj, cap_pct));
+                failures.push(format!(
+                    "{name} capacitance: {:.1} vs {:.1} kJ/K ({:+.1}%)",
+                    h_cap_kj, o_cap_kj, cap_pct
+                ));
             }
             // Node count exact
             if h.n_rc_nodes != o_nodes {
@@ -807,7 +840,10 @@ mod tests {
             // Area within 1%
             let area_pct = pct(h.area_m2, o_area);
             if o_area > 0.1 && area_pct.abs() > 1.0 {
-                failures.push(format!("{name} area: {:.2} vs {:.2} m² ({:+.1}%)", h.area_m2, o_area, area_pct));
+                failures.push(format!(
+                    "{name} area: {:.2} vs {:.2} m² ({:+.1}%)",
+                    h.area_m2, o_area, area_pct
+                ));
             }
         }
 
@@ -837,19 +873,51 @@ mod tests {
         if let Some(ow) = ochre_window {
             let o_win_ua = ow["ua_w_k"].as_f64().unwrap_or(0.0);
             let o_win_area = ow["area_m2"].as_f64().unwrap_or(0.0);
-            let hares_u = if hares_window_area > 0.0 { hares_window_ua / hares_window_area } else { 0.0 };
-            let ochre_u = if o_win_area > 0.0 { o_win_ua / o_win_area } else { 0.0 };
+            let hares_u = if hares_window_area > 0.0 {
+                hares_window_ua / hares_window_area
+            } else {
+                0.0
+            };
+            let ochre_u = if o_win_area > 0.0 {
+                o_win_ua / o_win_area
+            } else {
+                0.0
+            };
             eprintln!("\n  Window comparison (aggregated):");
-            eprintln!("    HARES: UA={:.2} W/K, area={:.2} m², U={:.3} W/(m²·K)", hares_window_ua, hares_window_area, hares_u);
-            eprintln!("    OCHRE: UA={:.2} W/K, area={:.2} m², U={:.3} W/(m²·K)", o_win_ua, o_win_area, ochre_u);
-            eprintln!("    Delta UA: {:.2} W/K ({:+.1}%)", hares_window_ua - o_win_ua, pct(hares_window_ua, o_win_ua));
-            eprintln!("    NOTE: OCHRE uses raw HPXML UFactor={:.2} as SI W/(m²·K).", ochre_u);
-            eprintln!("          HPXML UFactor is in BTU/(hr·ft²·°F). Correct SI = {:.2} × 5.678 = {:.3} W/(m²·K).", ochre_u, ochre_u * 5.678);
-            eprintln!("          HARES correctly converts: U={:.3} W/(m²·K). OCHRE window R is {:.1}× too high.", hares_u, (1.0/ochre_u) / (1.0/hares_u));
+            eprintln!(
+                "    HARES: UA={:.2} W/K, area={:.2} m², U={:.3} W/(m²·K)",
+                hares_window_ua, hares_window_area, hares_u
+            );
+            eprintln!(
+                "    OCHRE: UA={:.2} W/K, area={:.2} m², U={:.3} W/(m²·K)",
+                o_win_ua, o_win_area, ochre_u
+            );
+            eprintln!(
+                "    Delta UA: {:.2} W/K ({:+.1}%)",
+                hares_window_ua - o_win_ua,
+                pct(hares_window_ua, o_win_ua)
+            );
+            eprintln!(
+                "    NOTE: OCHRE uses raw HPXML UFactor={:.2} as SI W/(m²·K).",
+                ochre_u
+            );
+            eprintln!(
+                "          HPXML UFactor is in BTU/(hr·ft²·°F). Correct SI = {:.2} × 5.678 = {:.3} W/(m²·K).",
+                ochre_u,
+                ochre_u * 5.678
+            );
+            eprintln!(
+                "          HARES correctly converts: U={:.3} W/(m²·K). OCHRE window R is {:.1}× too high.",
+                hares_u,
+                (1.0 / ochre_u) / (1.0 / hares_u)
+            );
             // Area should match within 1%
             let area_pct = pct(hares_window_area, o_win_area);
             if o_win_area > 0.1 && area_pct.abs() > 1.0 {
-                failures.push(format!("Window area: {:.2} vs {:.2} m² ({:+.1}%)", hares_window_area, o_win_area, area_pct));
+                failures.push(format!(
+                    "Window area: {:.2} vs {:.2} m² ({:+.1}%)",
+                    hares_window_area, o_win_area, area_pct
+                ));
             }
         }
 

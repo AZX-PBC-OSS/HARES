@@ -1,7 +1,6 @@
 //! Electric vehicle charging equipment model.
 
 use std::borrow::Cow;
-use std::path::Path;
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
@@ -21,8 +20,9 @@ mod charging_curve;
 mod config;
 mod schedule;
 
+pub use charging_curve::{ChargingCurveLut, parse_pybamm_lut_csv};
+
 use archetype::{DriverArchetype, default_distribution};
-use charging_curve::{ChargingCurveLut, parse_pybamm_lut_csv};
 use config::*;
 use schedule::{EventDistributionRow, parse_distribution_rows, sample_distribution};
 
@@ -113,6 +113,9 @@ struct EvCheckpoint {
     v2g_soc_reserve: f64,
     v2g_max_discharge_kw: f64,
     driver_archetype: DriverArchetype,
+    degradation: crate::battery::degradation::DegradationState,
+    rainflow: crate::battery::degradation::RainflowCounter,
+    last_daily_update_day: i32,
 }
 
 pub struct Ev {
@@ -135,7 +138,7 @@ pub struct Ev {
     tou_peak_end_hour: Option<f64>,
     ready_by_hour: Option<f64>,
     ready_target_soc: Option<f64>,
-    charging_curve_lut: Option<ChargingCurveLut>,
+    charging_curve_lut: Option<crate::ndinterp::RegularGridInterpolator>,
     distributions: Vec<EventDistributionRow>,
     min_charge_temp_c: f64,
     full_power_temp_c: f64,
@@ -171,6 +174,13 @@ pub struct Ev {
     todays_event: Option<SampledEvent>,
     arrival_soc_applied: bool,
     shift_phase_days: u32,
+
+    // Degradation tracking (Smith 2017, shared with Battery)
+    degradation: crate::battery::degradation::DegradationState,
+    rainflow: crate::battery::degradation::RainflowCounter,
+    ocv_table: crate::battery::ocv::OcvTable,
+    u_neg_table: crate::battery::ocv::UNegTable,
+    last_daily_update_day: i32,
 
     v2l_active: bool,
     v2l_power_kw: f64,
@@ -295,6 +305,11 @@ impl Ev {
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
+            degradation: crate::battery::degradation::DegradationState::default(),
+            rainflow: crate::battery::degradation::RainflowCounter::default(),
+            ocv_table: crate::battery::ocv::OcvTable::default_li_nmc(),
+            u_neg_table: crate::battery::ocv::UNegTable::default_li_nmc(),
+            last_daily_update_day: 0,
         }
     }
 
@@ -378,10 +393,9 @@ impl Ev {
             ));
         }
 
-        self.charging_curve_lut = match config.get_str(KEY_PYBAMM_LUT_PATH) {
-            Some(path) => Some(parse_pybamm_lut_csv(Path::new(path))?),
-            None => None,
-        };
+        // Charging curve LUT is injected via set_charging_curve_lut() as a
+        // 4D RegularGridInterpolator (soc × temp × c_rate × soh).
+        self.charging_curve_lut = None;
         self.min_charge_temp_c = config
             .get_f64(KEY_MIN_CHARGE_TEMP_C)
             .unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
@@ -747,7 +761,13 @@ impl Ev {
             ChargingLevel::L2 => self.rated_power_kw,
         };
         let curve_limited_rated = if let Some(lut) = &self.charging_curve_lut {
-            rated * lut.power_fraction_at(self.soc)
+            let c_rate = if self.battery_capacity_kwh > 0.0 {
+                rated / self.battery_capacity_kwh
+            } else {
+                0.0
+            };
+            let soh = 1.0 - self.degradation.capacity_fade_pct();
+            rated * lut.interpolate(&[self.soc, self.battery_temp_c, c_rate, soh]) as f64
         } else {
             rated
         };
@@ -935,6 +955,30 @@ impl Ev {
         self.telemetry
             .set("v2l_active", if self.v2l_active { 1.0 } else { 0.0 });
         self.telemetry.set("v2l_power_kw", self.v2l_power_kw);
+        self.telemetry
+            .set("capacity_fade_pct", self.degradation.capacity_fade_pct());
+    }
+
+    /// Accumulate degradation and run daily update. Called at the end of each step.
+    fn update_degradation(&mut self, env: &EnvironmentState, dt_s: f64) {
+        let cell_temp_k = self.battery_temp_c + 273.15;
+        let v_oc = self.ocv_table.voltage_at_soc(self.soc);
+        self.rainflow.push(self.soc);
+        self.degradation
+            .accumulate(dt_s, cell_temp_k, v_oc, self.soc);
+
+        let current_day = {
+            use chrono::Datelike;
+            env.current_time.date_naive().num_days_from_ce()
+        };
+        if current_day != self.last_daily_update_day {
+            let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
+            self.degradation
+                .update_daily(&self.u_neg_table, cell_temp_k, sum_sq_dod);
+            self.degradation.reset_day_tracking(self.soc);
+            self.rainflow.reset_daily();
+            self.last_daily_update_day = current_day;
+        }
     }
 }
 
@@ -1051,6 +1095,7 @@ impl Equipment for Ev {
             self.v2l_power_kw = 0.0;
         }
 
+        self.update_degradation(env, dt.as_secs_f64());
         self.write_telemetry();
         Ok(())
     }
@@ -1088,6 +1133,9 @@ impl Equipment for Ev {
             v2g_soc_reserve: self.v2g_soc_reserve,
             v2g_max_discharge_kw: self.v2g_max_discharge_kw,
             driver_archetype: self.driver_archetype,
+            degradation: self.degradation.clone(),
+            rainflow: self.rainflow.clone(),
+            last_daily_update_day: self.last_daily_update_day,
         })
     }
 
@@ -1124,6 +1172,9 @@ impl Equipment for Ev {
         self.v2g_soc_reserve = cp.v2g_soc_reserve;
         self.v2g_max_discharge_kw = cp.v2g_max_discharge_kw;
         self.driver_archetype = cp.driver_archetype;
+        self.degradation = cp.degradation;
+        self.rainflow = cp.rainflow;
+        self.last_daily_update_day = cp.last_daily_update_day;
 
         self.rng = ChaCha8Rng::from_seed(self.rng_seed);
         // Each random::<f64>() consumes 2 u32 words from the ChaCha8 stream.
@@ -1196,6 +1247,14 @@ impl Equipment for Ev {
 
         Ok(())
     }
+
+    fn set_charging_curve_lut(
+        &mut self,
+        lut: Option<crate::ndinterp::RegularGridInterpolator>,
+    ) -> crate::Result<()> {
+        self.charging_curve_lut = lut;
+        Ok(())
+    }
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
@@ -1215,6 +1274,7 @@ fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert("daily_drive_miles", 0.0);
     t.insert("v2l_active", 0.0);
     t.insert("v2l_power_kw", 0.0);
+    t.insert("capacity_fade_pct", 0.0);
     t
 }
 
@@ -1742,17 +1802,22 @@ mod tests {
     }
 
     #[test]
-    fn pybamm_csv_lut_limits_power() {
-        let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join("hares_ev_pybamm_lut_test.csv");
-        let data = "soc,power_fraction\n0.0,1.0\n0.5,0.5\n1.0,0.0\n";
-        std::fs::write(&path, data).unwrap();
+    fn charging_curve_lut_limits_power() {
+        // Build a 4D LUT: soc × temp × c_rate × soh → power_fraction.
+        // At soc=0.5, power_fraction=0.5 regardless of other axes.
+        let soc_grid = vec![0.0, 0.5, 1.0];
+        let temp_grid = vec![25.0];
+        let crate_grid = vec![1.0];
+        let soh_grid = vec![1.0];
+        // Values: full power at soc=0, half at soc=0.5, zero at soc=1.0
+        let values = vec![1.0f32, 0.5, 0.0];
+        let lut = crate::ndinterp::RegularGridInterpolator::new(
+            vec![soc_grid, temp_grid, crate_grid, soh_grid],
+            values,
+        )
+        .unwrap();
 
         let mut raw = base_raw();
-        raw.insert(
-            KEY_PYBAMM_LUT_PATH.to_string(),
-            path.to_string_lossy().to_string().into(),
-        );
         raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
         raw.insert("schedule_start_soc_0".to_string(), 0.5.into());
         raw.insert(KEY_DAILY_DRIVE_MILES_MEAN.to_string(), 0.0.into());
@@ -1762,13 +1827,15 @@ mod tests {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
+        // Inject LUT after init
+        ev.set_charging_curve_lut(Some(lut)).unwrap();
+
         env.current_time = dt(2026, 1, 1, 18, 0, 0);
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
         let power_kw = ev.telemetry().get("active_power_kw").unwrap();
+        // At soc=0.5, power fraction=0.5, rated=7.2 kW → max ~3.6 kW
         assert!(power_kw <= 3.6 + 1e-9);
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -2763,5 +2830,113 @@ mod tests {
         let config = ev_config(base_raw());
         let ev = Ev::new(config);
         assert!(!ev.v2g_enabled, "V2G should be disabled by default");
+    }
+
+    // ---------------------------------------------------------------
+    // 4D LUT and degradation tests
+    // ---------------------------------------------------------------
+
+    fn make_4d_lut(soc_pf: &[(f64, f32)]) -> crate::ndinterp::RegularGridInterpolator {
+        let soc_grid: Vec<f64> = soc_pf.iter().map(|(s, _)| *s).collect();
+        let values: Vec<f32> = soc_pf.iter().map(|(_, p)| *p).collect();
+        crate::ndinterp::RegularGridInterpolator::new(
+            vec![soc_grid, vec![25.0], vec![1.0], vec![1.0]],
+            values,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn set_charging_curve_lut_via_equipment_trait() {
+        let config = ev_config(base_raw());
+        let mut ev = Ev::new(config);
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        ev.set_charging_curve_lut(Some(lut)).unwrap();
+        assert!(ev.charging_curve_lut.is_some());
+    }
+
+    #[test]
+    fn clear_charging_curve_lut_via_equipment_trait() {
+        let config = ev_config(base_raw());
+        let mut ev = Ev::new(config);
+        let lut = make_4d_lut(&[(0.0, 1.0), (1.0, 0.0)]);
+        ev.set_charging_curve_lut(Some(lut)).unwrap();
+        ev.set_charging_curve_lut(None).unwrap();
+        assert!(ev.charging_curve_lut.is_none());
+    }
+
+    #[test]
+    fn lut_tapers_charge_power_at_high_soc() {
+        let lut = make_4d_lut(&[(0.0, 1.0), (0.5, 1.0), (0.8, 0.5), (1.0, 0.0)]);
+        let mut raw = base_raw();
+        raw.insert(KEY_INITIAL_SOC.to_string(), 0.9.into());
+        raw.insert("schedule_start_soc_0".to_string(), 0.9.into());
+        raw.insert(KEY_DAILY_DRIVE_MILES_MEAN.to_string(), 0.0.into());
+        raw.insert(KEY_DAILY_DRIVE_MILES_STDDEV.to_string(), 0.0.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let mut env = sample_env();
+        ev.init(&config, &env).unwrap();
+        ev.set_charging_curve_lut(Some(lut)).unwrap();
+
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+        let power = ev.telemetry().get("active_power_kw").unwrap();
+        // At soc=0.9, power fraction ~0.25 (interpolated between 0.5@0.8 and 0.0@1.0)
+        // Rated ~7.2 kW → max ~1.8 kW
+        assert!(
+            power <= 2.0,
+            "power should be tapered at high SOC, got {power}"
+        );
+    }
+
+    #[test]
+    fn unsupported_lut_methods_return_err() {
+        let config = ev_config(base_raw());
+        let mut ev = Ev::new(config);
+        assert!(
+            ev.set_ocv_table(crate::battery::ocv::OcvTable::default_li_nmc())
+                .is_err()
+        );
+        assert!(
+            ev.set_u_neg_table(crate::battery::ocv::UNegTable::default_li_nmc())
+                .is_err()
+        );
+        assert!(ev.reset_ocv_table().is_err());
+        assert!(ev.reset_u_neg_table().is_err());
+    }
+
+    #[test]
+    fn degradation_starts_at_zero() {
+        let config = ev_config(base_raw());
+        let ev = Ev::new(config);
+        assert_eq!(ev.degradation.capacity_fade_pct(), 0.0);
+    }
+
+    #[test]
+    fn capacity_fade_pct_in_telemetry() {
+        let config = ev_config(base_raw());
+        let mut ev = Ev::new(config.clone());
+        let env = sample_env();
+        ev.init(&config, &env).unwrap();
+        assert_eq!(ev.telemetry().get("capacity_fade_pct"), Some(0.0));
+    }
+
+    #[test]
+    fn degradation_state_survives_checkpoint() {
+        let config = ev_config(base_raw());
+        let mut ev1 = Ev::new(config.clone());
+        let env = sample_env();
+        ev1.init(&config, &env).unwrap();
+
+        let saved = ev1.save_state();
+        let mut ev2 = Ev::new(config.clone());
+        ev2.init(&config, &env).unwrap();
+        ev2.load_state(&saved).unwrap();
+        assert_eq!(
+            ev2.degradation.capacity_fade_pct(),
+            ev1.degradation.capacity_fade_pct(),
+        );
     }
 }

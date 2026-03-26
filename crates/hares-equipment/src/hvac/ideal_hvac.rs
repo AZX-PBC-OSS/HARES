@@ -1388,7 +1388,9 @@ mod tests {
         assert_eq!(eq.mode, super::ThermostatMode::Heating);
 
         // Solver returns negative capacity (zone overshot, cooling needed).
-        let signal = hares_types::ControlSignal::IdealCapacity { capacity_w: -2000.0 };
+        let signal = hares_types::ControlSignal::IdealCapacity {
+            capacity_w: -2000.0,
+        };
         eq.apply_control_unchecked(&signal).unwrap();
 
         let mut ports = PortSlots {

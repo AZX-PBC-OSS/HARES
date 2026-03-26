@@ -37,13 +37,15 @@ pub(super) fn resolve_water_heaters(
         let recovery_efficiency = child_f64(wh, "RecoveryEfficiency");
 
         // Convert to SI at the parse boundary. All downstream params are SI.
-        let volume_correction = if fuel == FuelType::Electric { 0.9 } else { 0.95 };
-        let tank_volume_m3 = tank_volume_rated_gal
-            .map(|gal| conv::volume_gal_to_m3(gal * volume_correction));
-        let first_hour_rating_m3 = first_hour_rating_gal
-            .map(conv::volume_gal_to_m3);
-        let heating_capacity_w = heating_capacity_btu_hr
-            .map(conv::power_btu_h_to_w);
+        let volume_correction = if fuel == FuelType::Electric {
+            0.9
+        } else {
+            0.95
+        };
+        let tank_volume_m3 =
+            tank_volume_rated_gal.map(|gal| conv::volume_gal_to_m3(gal * volume_correction));
+        let first_hour_rating_m3 = first_hour_rating_gal.map(conv::volume_gal_to_m3);
+        let heating_capacity_w = heating_capacity_btu_hr.map(conv::power_btu_h_to_w);
         let tank_height_m = child_f64(wh, "TankHeight")
             .map(conv::length_ft_to_m)
             .unwrap_or(conv::length_ft_to_m(4.0));

@@ -82,7 +82,9 @@ pub fn validate_hpxml_schema(xml: &str) -> Result<Vec<ValidationWarning>, Valida
 }
 
 /// Structural completeness check for a pre-parsed HPXML document tree.
-pub fn validate_hpxml_schema_node(root: &super::building::XmlNode) -> Result<Vec<ValidationWarning>, ValidationError> {
+pub fn validate_hpxml_schema_node(
+    root: &super::building::XmlNode,
+) -> Result<Vec<ValidationWarning>, ValidationError> {
     let mut warnings = Vec::new();
 
     if root.name != "HPXML" {

@@ -40,9 +40,12 @@ fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
             solar_azimuth_deg: 180.0,
             mains_temp_c: 10.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
+            ground_albedo: 0.2,
         },
-        grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
         custom_domains: vec![],
         current_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
@@ -66,7 +69,11 @@ fn heating_config(name: &str, class: &str) -> EquipmentConfig {
     raw.insert("capacity_w".to_string(), ConfigValue::Float(10_000.0));
     raw.insert("heating_setpoint_c".to_string(), ConfigValue::Float(21.0));
     raw.insert("cooling_setpoint_c".to_string(), ConfigValue::Float(27.0));
-    EquipmentConfig { name: name.to_string(), ochre_class: class.to_string(), raw_config: raw }
+    EquipmentConfig {
+        name: name.to_string(),
+        ochre_class: class.to_string(),
+        raw_config: raw,
+    }
 }
 
 fn ports_for_zone1() -> PortSlots {
@@ -248,8 +255,14 @@ fn ashp_heating_cop_above_unity() {
     let thermal_w = ports.thermal[0].sensible_gain_w;
     let electric_kw = ports.electrical.net_active_kw();
 
-    assert!(thermal_w > 1e-6, "ASHP must deliver positive heat, got {thermal_w:.3} W");
-    assert!(electric_kw > 1e-6, "ASHP must draw positive electricity, got {electric_kw:.4} kW");
+    assert!(
+        thermal_w > 1e-6,
+        "ASHP must deliver positive heat, got {thermal_w:.3} W"
+    );
+    assert!(
+        electric_kw > 1e-6,
+        "ASHP must draw positive electricity, got {electric_kw:.4} kW"
+    );
 
     let cop = thermal_w / (electric_kw * 1_000.0);
     // AHRI 210/240-2023 Tier 1 minimum COP at 47°F (8.3°C) is 2.0.
@@ -282,7 +295,9 @@ fn hvac_port_contributions_are_correct_sign() {
 
     let mut heat_ports = ports_for_zone1();
     heater.update_control(&heat_env);
-    heater.step(&heat_env, Duration::from_secs(60), &mut heat_ports).unwrap();
+    heater
+        .step(&heat_env, Duration::from_secs(60), &mut heat_ports)
+        .unwrap();
 
     assert!(
         heat_ports.thermal[0].sensible_gain_w > 1e-6,
@@ -301,7 +316,9 @@ fn hvac_port_contributions_are_correct_sign() {
         ochre_class: "Air Conditioner".to_string(),
         raw_config: cool_raw,
     };
-    let mut cooler = registry.create("Air Conditioner", cool_cfg.clone()).unwrap();
+    let mut cooler = registry
+        .create("Air Conditioner", cool_cfg.clone())
+        .unwrap();
     // Use a hot environment to ensure cooling is demanded.
     let cool_env = env_with_zone_temp_hot(30.0);
     cooler.init(&cool_cfg, &cool_env).unwrap();
@@ -311,7 +328,9 @@ fn hvac_port_contributions_are_correct_sign() {
         ..PortSlots::default()
     };
     cooler.update_control(&cool_env);
-    cooler.step(&cool_env, Duration::from_secs(60), &mut cool_ports).unwrap();
+    cooler
+        .step(&cool_env, Duration::from_secs(60), &mut cool_ports)
+        .unwrap();
 
     assert!(
         cool_ports.thermal[0].sensible_gain_w < -1e-6,
@@ -350,8 +369,14 @@ fn baseboard_electric_resistance_cop_unity() {
     let thermal_w = ports.thermal[0].sensible_gain_w;
     let electric_w = ports.electrical.net_active_kw() * 1_000.0;
 
-    assert!(thermal_w > 1e-6, "baseboard must deliver positive heat, got {thermal_w:.3} W");
-    assert!(electric_w > 1e-6, "baseboard must draw electricity, got {electric_w:.3} W");
+    assert!(
+        thermal_w > 1e-6,
+        "baseboard must deliver positive heat, got {thermal_w:.3} W"
+    );
+    assert!(
+        electric_w > 1e-6,
+        "baseboard must draw electricity, got {electric_w:.3} W"
+    );
 
     // COP = thermal_output / electrical_input; for resistive heating this is 1.0.
     // The space_fraction default is 1.0, so the ratio should be unity.
@@ -462,10 +487,11 @@ fn checkpoint_round_trip_preserves_mode() {
     // The restored equipment must reproduce the same thermal output on the next step.
     let mut ports_restored = ports_for_zone1();
     // update_control is NOT called here; the loaded duty_cycle drives the step.
-    restored.step(&env, Duration::from_secs(60), &mut ports_restored).unwrap();
+    restored
+        .step(&env, Duration::from_secs(60), &mut ports_restored)
+        .unwrap();
     assert!(
-        (ports_restored.thermal[0].sensible_gain_w - ports.thermal[0].sensible_gain_w).abs()
-            < 1e-6,
+        (ports_restored.thermal[0].sensible_gain_w - ports.thermal[0].sensible_gain_w).abs() < 1e-6,
         "restored furnace must reproduce same thermal output: expected {:.3} W, got {:.3} W",
         ports.thermal[0].sensible_gain_w,
         ports_restored.thermal[0].sensible_gain_w,

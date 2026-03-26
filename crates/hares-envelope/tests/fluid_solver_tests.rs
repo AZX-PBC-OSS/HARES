@@ -50,8 +50,7 @@ fn env() -> EnvironmentState {
             solar_azimuth_deg: 180.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
-
+            ground_albedo: 0.2,
         },
         grid: GridState {
             voltage_pu: 1.0,

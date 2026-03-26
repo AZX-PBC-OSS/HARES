@@ -216,10 +216,7 @@ mod tests {
         let q = slab_perimeter_loss_w(40.0, 1.17, 20.0, 5.0);
         assert!(q > 0.0, "heat loss should be positive when indoor > ground");
         // Expected: 1.17 × 40 × 15 = 702 W
-        assert!(
-            (q - 702.0).abs() < 1.0,
-            "expected ~702 W, got {q}"
-        );
+        assert!((q - 702.0).abs() < 1.0, "expected ~702 W, got {q}");
     }
 
     #[test]
@@ -245,7 +242,10 @@ mod tests {
     #[test]
     fn foundation_wall_zero_r_returns_zero() {
         let q = foundation_wall_loss_w(10.0, 0.0, 20.0, 8.0);
-        assert_eq!(q, 0.0, "zero R-value should return zero loss (not infinite)");
+        assert_eq!(
+            q, 0.0,
+            "zero R-value should return zero loss (not infinite)"
+        );
     }
 
     #[test]

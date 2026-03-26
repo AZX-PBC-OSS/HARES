@@ -18,12 +18,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
-use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_equipment::battery::Battery;
 use hares_equipment::pv::surface_id_for_orientation;
+use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_types::{
-    ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
-    WeatherState, ZoneId, ZoneState,
+    ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState, ZoneId,
+    ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -64,9 +64,12 @@ fn base_env() -> EnvironmentState {
             solar_azimuth_deg: 180.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
+            ground_albedo: 0.2,
         },
-        grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
         custom_domains: vec![],
         current_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
@@ -85,7 +88,10 @@ fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> Equipm
     raw.insert("initial_soc".to_string(), ConfigValue::Float(initial_soc));
     raw.insert("min_soc".to_string(), ConfigValue::Float(0.05));
     raw.insert("max_soc".to_string(), ConfigValue::Float(0.95));
-    raw.insert("inverter_efficiency".to_string(), ConfigValue::Float(inverter_eta));
+    raw.insert(
+        "inverter_efficiency".to_string(),
+        ConfigValue::Float(inverter_eta),
+    );
     raw.insert("standby_power_w".to_string(), ConfigValue::Float(0.0));
     EquipmentConfig {
         name: "Battery".to_string(),
@@ -131,7 +137,10 @@ fn battery_charge_cycle_soc_accounting() {
     let soc_after = bat.telemetry().get("soc").unwrap();
     let delta_soc = soc_after - soc_before;
 
-    assert!(delta_soc > 0.0, "charging must increase SOC; before={soc_before:.4} after={soc_after:.4}");
+    assert!(
+        delta_soc > 0.0,
+        "charging must increase SOC; before={soc_before:.4} after={soc_after:.4}"
+    );
 
     // OCHRE accounting: ΔSOC = P_ac × eta_inv × hours / capacity
     let expected_delta = 3.0 * 1.0 * 0.97 / 10.0;
@@ -177,7 +186,10 @@ fn battery_discharge_cycle_soc_accounting() {
     let soc_after = bat.telemetry().get("soc").unwrap();
     let delta_soc = soc_before - soc_after;
 
-    assert!(delta_soc > 0.0, "discharging must decrease SOC; before={soc_before:.4} after={soc_after:.4}");
+    assert!(
+        delta_soc > 0.0,
+        "discharging must decrease SOC; before={soc_before:.4} after={soc_after:.4}"
+    );
 
     let expected_delta = 2.0 * 1.0 / (0.97 * 10.0);
     assert!(
@@ -325,7 +337,10 @@ fn pv_cell_temperature_noct_model() {
     raw.insert("azimuth_deg".to_string(), ConfigValue::Float(180.0));
     raw.insert("noct_c".to_string(), ConfigValue::Float(47.0));
     raw.insert("inverter_efficiency".to_string(), ConfigValue::Float(0.96));
-    raw.insert("system_losses_fraction".to_string(), ConfigValue::Float(0.0)); // isolate cell temp
+    raw.insert(
+        "system_losses_fraction".to_string(),
+        ConfigValue::Float(0.0),
+    ); // isolate cell temp
 
     let cfg = EquipmentConfig {
         name: "PV".to_string(),
@@ -358,8 +373,14 @@ fn pv_cell_temperature_noct_model() {
     let mut ports = PortSlots::default();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    let cell_temp_c = eq.telemetry().get("cell_temp_c").expect("cell_temp_c must exist");
-    let ac_power_kw = eq.telemetry().get("ac_power_kw").expect("ac_power_kw must exist");
+    let cell_temp_c = eq
+        .telemetry()
+        .get("cell_temp_c")
+        .expect("cell_temp_c must exist");
+    let ac_power_kw = eq
+        .telemetry()
+        .get("ac_power_kw")
+        .expect("ac_power_kw must exist");
 
     eprintln!(
         "[der_parity] pv_cell_temp: cell_temp={cell_temp_c:.2}°C, \
@@ -409,7 +430,10 @@ fn pv_power_temperature_derating() {
         raw.insert("azimuth_deg".to_string(), ConfigValue::Float(180.0));
         raw.insert("noct_c".to_string(), ConfigValue::Float(47.0));
         raw.insert("inverter_efficiency".to_string(), ConfigValue::Float(1.0)); // remove inv loss
-        raw.insert("system_losses_fraction".to_string(), ConfigValue::Float(0.0)); // isolate temp
+        raw.insert(
+            "system_losses_fraction".to_string(),
+            ConfigValue::Float(0.0),
+        ); // isolate temp
         let cfg = EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
@@ -432,8 +456,12 @@ fn pv_power_temperature_derating() {
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         (
-            eq.telemetry().get("ac_power_kw").expect("ac_power_kw must exist"),
-            eq.telemetry().get("cell_temp_c").expect("cell_temp_c must exist"),
+            eq.telemetry()
+                .get("ac_power_kw")
+                .expect("ac_power_kw must exist"),
+            eq.telemetry()
+                .get("cell_temp_c")
+                .expect("cell_temp_c must exist"),
         )
     };
 
@@ -507,7 +535,9 @@ fn generator_fuel_efficiency_at_half_load() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let tel = eq.telemetry();
-    let electric_kw = tel.get("electric_output_kw").expect("electric_output_kw must exist");
+    let electric_kw = tel
+        .get("electric_output_kw")
+        .expect("electric_output_kw must exist");
     let fuel_w = tel.get("fuel_input_w").expect("fuel_input_w must exist");
     let eta = tel.get("eta_electric").expect("eta_electric must exist");
 
@@ -555,7 +585,10 @@ fn generator_ramp_rate_is_kw_per_second() {
     let mut raw = HashMap::new();
     raw.insert("rated_power_kw".to_string(), ConfigValue::Float(10.0));
     raw.insert("eta_electric".to_string(), ConfigValue::Float(0.30));
-    raw.insert("delta_kw_per_s".to_string(), ConfigValue::Float(delta_kw_per_s));
+    raw.insert(
+        "delta_kw_per_s".to_string(),
+        ConfigValue::Float(delta_kw_per_s),
+    );
     let cfg = EquipmentConfig {
         name: "Gen".to_string(),
         ochre_class: "Gas Generator".to_string(),
@@ -579,7 +612,10 @@ fn generator_ramp_rate_is_kw_per_second() {
     let mut ports = PortSlots::default();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    let electric_kw = eq.telemetry().get("electric_output_kw").expect("electric_output_kw must exist");
+    let electric_kw = eq
+        .telemetry()
+        .get("electric_output_kw")
+        .expect("electric_output_kw must exist");
 
     eprintln!(
         "[der_parity] ramp_rate: after 60s with ramp=1.0 kW/s → electric_kw={electric_kw:.3} kW \
@@ -667,7 +703,9 @@ fn battery_control_signal_not_a_stub() {
         .unwrap();
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).unwrap();
-        bat.telemetry().get("active_power_kw").expect("active_power_kw must exist")
+        bat.telemetry()
+            .get("active_power_kw")
+            .expect("active_power_kw must exist")
     };
 
     // Step with charge setpoint → expect positive power draw
@@ -680,7 +718,9 @@ fn battery_control_signal_not_a_stub() {
         .unwrap();
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).unwrap();
-        bat.telemetry().get("active_power_kw").expect("active_power_kw must exist")
+        bat.telemetry()
+            .get("active_power_kw")
+            .expect("active_power_kw must exist")
     };
 
     // Step with discharge setpoint → expect negative power
@@ -693,7 +733,9 @@ fn battery_control_signal_not_a_stub() {
         .unwrap();
         let mut ports = PortSlots::default();
         bat.step(&env, dt, &mut ports).unwrap();
-        bat.telemetry().get("active_power_kw").expect("active_power_kw must exist")
+        bat.telemetry()
+            .get("active_power_kw")
+            .expect("active_power_kw must exist")
     };
 
     eprintln!(
@@ -772,14 +814,24 @@ fn battery_round_trip_efficiency_below_unity() {
         }
     }
 
-    let rte = if energy_in_kwh > 0.0 { energy_out_kwh / energy_in_kwh } else { 0.0 };
+    let rte = if energy_in_kwh > 0.0 {
+        energy_out_kwh / energy_in_kwh
+    } else {
+        0.0
+    };
 
     eprintln!(
         "[der_parity] rte: E_in={energy_in_kwh:.4} kWh, E_out={energy_out_kwh:.4} kWh, RTE={rte:.4}"
     );
 
-    assert!(energy_in_kwh > 0.0, "no energy recorded during charge phase");
-    assert!(energy_out_kwh > 0.0, "no energy recorded during discharge phase");
+    assert!(
+        energy_in_kwh > 0.0,
+        "no energy recorded during charge phase"
+    );
+    assert!(
+        energy_out_kwh > 0.0,
+        "no energy recorded during discharge phase"
+    );
     assert!(
         rte < 1.0,
         "round-trip efficiency must be below 1.0 (losses are real); got RTE={rte:.4}"

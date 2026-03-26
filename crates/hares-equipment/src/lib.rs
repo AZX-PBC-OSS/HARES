@@ -9,6 +9,7 @@ pub mod ev;
 pub mod event_load;
 pub mod generator;
 pub mod hvac;
+pub mod ndinterp;
 pub mod pv;
 pub mod registry;
 pub(crate) mod schedule_helpers;
@@ -24,9 +25,12 @@ use hares_types::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 
+pub use battery::{BatteryLutType, OcvTable, UNegTable};
 pub use config::EquipmentConfig;
+pub use ev::ChargingCurveLut;
 pub use hares_types::Telemetry;
 pub use hvac::{EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride};
+pub use ndinterp::RegularGridInterpolator;
 pub use registry::{EquipmentFactory, EquipmentRegistry};
 pub use water_heater::DHW_DEMAND_LOOP;
 
@@ -66,6 +70,53 @@ pub trait Equipment: Send + Sync {
     /// equipment wants the thermal solver to back-calculate.
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         None
+    }
+
+    // -----------------------------------------------------------------
+    // LUT injection (overridden by Battery and EV)
+    // -----------------------------------------------------------------
+
+    /// Set or clear the CC-CV charging curve LUT.
+    fn set_charging_curve_lut(
+        &mut self,
+        _lut: Option<ndinterp::RegularGridInterpolator>,
+    ) -> Result<()> {
+        Err(HaresError::Equipment(format!(
+            "equipment '{}' does not support charging curve LUT",
+            self.descriptor().name
+        )))
+    }
+
+    /// Replace the OCV table with a custom one (e.g. LFP, NCA chemistry).
+    fn set_ocv_table(&mut self, _table: battery::OcvTable) -> Result<()> {
+        Err(HaresError::Equipment(format!(
+            "equipment '{}' does not support OCV table",
+            self.descriptor().name
+        )))
+    }
+
+    /// Replace the negative electrode potential table.
+    fn set_u_neg_table(&mut self, _table: battery::UNegTable) -> Result<()> {
+        Err(HaresError::Equipment(format!(
+            "equipment '{}' does not support UNeg table",
+            self.descriptor().name
+        )))
+    }
+
+    /// Reset OCV table to hardcoded Li-NMC default.
+    fn reset_ocv_table(&mut self) -> Result<()> {
+        Err(HaresError::Equipment(format!(
+            "equipment '{}' does not support OCV table",
+            self.descriptor().name
+        )))
+    }
+
+    /// Reset UNeg table to hardcoded Li-NMC default.
+    fn reset_u_neg_table(&mut self) -> Result<()> {
+        Err(HaresError::Equipment(format!(
+            "equipment '{}' does not support UNeg table",
+            self.descriptor().name
+        )))
     }
 }
 

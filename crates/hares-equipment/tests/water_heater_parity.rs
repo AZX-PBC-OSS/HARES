@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
-use hares_equipment::{Equipment, EquipmentConfig, config::ConfigValue};
-use hares_equipment::water_heater::resistance::ResistanceWH;
 use hares_equipment::water_heater::gas::GasWH;
+use hares_equipment::water_heater::resistance::ResistanceWH;
+use hares_equipment::{Equipment, EquipmentConfig, config::ConfigValue};
 use hares_types::{
     EnvironmentState, FuelType, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
 };
@@ -49,9 +49,12 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
             solar_azimuth_deg: 180.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
+            ground_albedo: 0.2,
         },
-        grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
         custom_domains: vec![],
         current_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
@@ -72,8 +75,14 @@ fn resistance_cfg(
     let mut raw = HashMap::new();
     raw.insert("setpoint_c".to_string(), ConfigValue::Float(setpoint_c));
     raw.insert("deadband_c".to_string(), ConfigValue::Float(deadband_c));
-    raw.insert("initial_tank_temp_c".to_string(), ConfigValue::Float(initial_tank_temp_c));
-    raw.insert("draw_flow_rate_kg_s".to_string(), ConfigValue::Float(draw_kg_s));
+    raw.insert(
+        "initial_tank_temp_c".to_string(),
+        ConfigValue::Float(initial_tank_temp_c),
+    );
+    raw.insert(
+        "draw_flow_rate_kg_s".to_string(),
+        ConfigValue::Float(draw_kg_s),
+    );
     raw.insert("max_tank_temp_c".to_string(), ConfigValue::Float(300.0));
     raw.insert("ua_w_per_k".to_string(), ConfigValue::Float(ua_w_per_k));
     EquipmentConfig {
@@ -125,8 +134,14 @@ fn standby_loss_over_24h() {
         step_wh(&mut wh, &env, &mut ports);
     }
 
-    let final_temp = wh.telemetry().get("tank_avg_temp_c").expect("tank_avg_temp_c must exist");
-    let power = wh.telemetry().get("electric_power_w").expect("electric_power_w must exist");
+    let final_temp = wh
+        .telemetry()
+        .get("tank_avg_temp_c")
+        .expect("tank_avg_temp_c must exist");
+    let power = wh
+        .telemetry()
+        .get("electric_power_w")
+        .expect("electric_power_w must exist");
 
     // Element must be off (setpoint is 30°C < current tank temp for most of the run)
     // It might fire briefly near 30°C, but long-run the tank settles far above ambient.
@@ -192,7 +207,10 @@ fn element_cycling_deadband_matches_ochre_default() {
 
     // Tank starts at 40°C, below deadband floor (43.34°C) → element should fire immediately
     step_wh(&mut wh, &env, &mut ports);
-    let power_step1 = wh.telemetry().get("electric_power_w").expect("electric_power_w must exist");
+    let power_step1 = wh
+        .telemetry()
+        .get("electric_power_w")
+        .expect("electric_power_w must exist");
     assert!(
         power_step1 > 0.0,
         "element must fire when tank (40°C) is below deadband floor (~43.3°C); got {power_step1:.2} W"
@@ -204,8 +222,14 @@ fn element_cycling_deadband_matches_ochre_default() {
     while steps < 200 {
         steps += 1;
         step_wh(&mut wh, &env, &mut ports);
-        let power = wh.telemetry().get("electric_power_w").expect("electric_power_w must exist");
-        let temp = wh.telemetry().get("tank_avg_temp_c").expect("tank_avg_temp_c must exist");
+        let power = wh
+            .telemetry()
+            .get("electric_power_w")
+            .expect("electric_power_w must exist");
+        let temp = wh
+            .telemetry()
+            .get("tank_avg_temp_c")
+            .expect("tank_avg_temp_c must exist");
         if power < 1.0 {
             turned_off = true;
             // Verify temperature at shutoff: must be at or above setpoint
@@ -220,7 +244,10 @@ fn element_cycling_deadband_matches_ochre_default() {
             break;
         }
     }
-    assert!(turned_off, "element must turn off after reaching setpoint within 200 steps");
+    assert!(
+        turned_off,
+        "element must turn off after reaching setpoint within 200 steps"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -255,14 +282,20 @@ fn gas_wh_fuel_not_electricity() {
     let gas_w = ports.fuel.get(FuelType::Gas);
     let elec_kw = ports.electrical.load_power_kw;
 
-    assert!(gas_w > 0.0, "gas WH must consume gas when cold (40°C < 49.2°C floor); got {gas_w:.2} W");
+    assert!(
+        gas_w > 0.0,
+        "gas WH must consume gas when cold (40°C < 49.2°C floor); got {gas_w:.2} W"
+    );
     assert_eq!(
         elec_kw, 0.0,
         "gas WH with no fan must draw zero electricity; got {elec_kw:.6} kW"
     );
 
     // Telemetry must be consistent
-    let tel_gas = wh.telemetry().get("fuel_input_w").expect("fuel_input_w must exist");
+    let tel_gas = wh
+        .telemetry()
+        .get("fuel_input_w")
+        .expect("fuel_input_w must exist");
     assert!(
         (tel_gas - gas_w).abs() < 1e-6,
         "telemetry fuel_input_w ({tel_gas:.2}) must match port ({gas_w:.2})"
@@ -289,8 +322,10 @@ fn tank_temp_never_below_mains_during_draw() {
 
     for step in 0..60 {
         step_wh(&mut wh, &env, &mut ports);
-        let temp =
-            wh.telemetry().get("tank_avg_temp_c").expect("tank_avg_temp_c must exist");
+        let temp = wh
+            .telemetry()
+            .get("tank_avg_temp_c")
+            .expect("tank_avg_temp_c must exist");
         assert!(
             temp >= mains_temp_c - 0.1,
             "tank ({temp:.4}°C) must not drop below mains ({mains_temp_c}°C) at step {step}"
@@ -323,7 +358,10 @@ fn standby_loss_ua_magnitude() {
     let mut raw = HashMap::new();
     raw.insert("setpoint_c".to_string(), ConfigValue::Float(10.0)); // below ambient
     raw.insert("deadband_c".to_string(), ConfigValue::Float(2.0));
-    raw.insert("initial_tank_temp_c".to_string(), ConfigValue::Float(tank_temp_c));
+    raw.insert(
+        "initial_tank_temp_c".to_string(),
+        ConfigValue::Float(tank_temp_c),
+    );
     raw.insert("draw_flow_rate_kg_s".to_string(), ConfigValue::Float(0.0));
     raw.insert("max_tank_temp_c".to_string(), ConfigValue::Float(300.0));
     raw.insert("ua_w_per_k".to_string(), ConfigValue::Float(ua_w_per_k));
@@ -341,10 +379,11 @@ fn standby_loss_ua_magnitude() {
 
     step_wh(&mut wh, &env, &mut ports);
 
-    let temp_after = wh.telemetry().get("tank_avg_temp_c").expect("tank_avg_temp_c must exist");
-    let actual_loss_w = (tank_temp_c - temp_after)
-        * (50.0 * 3.78541 /* gal→kg */ * 4183.0)
-        / dt_s;
+    let temp_after = wh
+        .telemetry()
+        .get("tank_avg_temp_c")
+        .expect("tank_avg_temp_c must exist");
+    let actual_loss_w = (tank_temp_c - temp_after) * (50.0 * 3.78541 /* gal→kg */ * 4183.0) / dt_s;
 
     let expected_loss_w = ua_w_per_k * (tank_temp_c - ambient_c);
 
@@ -389,7 +428,10 @@ fn hpwh_cop_at_multiple_ambient_temps() {
         let mut raw = HashMap::new();
         raw.insert("setpoint_c".to_string(), ConfigValue::Float(setpoint_c));
         raw.insert("deadband_c".to_string(), ConfigValue::Float(5.556));
-        raw.insert("initial_tank_temp_c".to_string(), ConfigValue::Float(tank_temp_c));
+        raw.insert(
+            "initial_tank_temp_c".to_string(),
+            ConfigValue::Float(tank_temp_c),
+        );
         raw.insert("draw_flow_rate_kg_s".to_string(), ConfigValue::Float(0.0));
         raw.insert("max_tank_temp_c".to_string(), ConfigValue::Float(300.0));
         let cfg = EquipmentConfig {
@@ -405,12 +447,16 @@ fn hpwh_cop_at_multiple_ambient_temps() {
         // Force tank cold to trigger compressor
         step_wh(&mut wh, &env, &mut ports);
 
-        let cop = wh.telemetry().get("cop").expect("cop must exist after step");
-        let elec_w = wh.telemetry().get("electric_power_w").expect("electric_power_w must exist");
+        let cop = wh
+            .telemetry()
+            .get("cop")
+            .expect("cop must exist after step");
+        let elec_w = wh
+            .telemetry()
+            .get("electric_power_w")
+            .expect("electric_power_w must exist");
 
-        eprintln!(
-            "[wh_parity] hpwh_cop: ambient={ambient_c}°C cop={cop:.3} elec={elec_w:.1} W"
-        );
+        eprintln!("[wh_parity] hpwh_cop: ambient={ambient_c}°C cop={cop:.3} elec={elec_w:.1} W");
 
         // HPWH COP should be above 1.0 (heat pump thermodynamics)
         assert!(

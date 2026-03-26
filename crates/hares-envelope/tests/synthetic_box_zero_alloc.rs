@@ -40,8 +40,7 @@ fn test_step_into_zero_allocations() {
         input_to_output: vec![],
     };
 
-    let model = StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping)
-        .expect("model");
+    let model = StateSpaceModel::from_continuous(&a_c, &b_c, DT_S, &mapping).expect("model");
 
     let mut x = DVector::from_element(1, 20.0);
     let u = DVector::from_column_slice(&[0.0, 0.0]);

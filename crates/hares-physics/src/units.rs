@@ -6,23 +6,21 @@
 //!   is explicit in the function name/signature/docs.
 //! - This module provides aliases and helpers so boundary conversions stay explicit.
 
+use uom::si::area::{square_foot, square_meter};
 use uom::si::f64::{
     Area as UomArea, Energy as UomEnergy, HeatCapacity as UomHeatCapacity,
     HeatTransfer as UomHeatTransfer, Length as UomLength, MassDensity as UomMassDensity,
     MassRate as UomMassRate, Power as UomPower, Pressure as UomPressure,
-    SpecificHeatCapacity as UomSpecificHeatCapacity,
-    ThermodynamicTemperature as UomTemperature, Velocity as UomVelocity, Volume as UomVolume,
+    SpecificHeatCapacity as UomSpecificHeatCapacity, ThermodynamicTemperature as UomTemperature,
+    Velocity as UomVelocity, Volume as UomVolume,
 };
-use uom::si::area::{square_foot, square_meter};
 use uom::si::heat_transfer::{
     btu_it_per_hour_square_foot_degree_fahrenheit, watt_per_square_meter_kelvin,
 };
 use uom::si::length::{foot, inch, meter};
 use uom::si::mass_density::{kilogram_per_cubic_meter, pound_per_cubic_foot};
 use uom::si::pressure::pascal;
-use uom::si::specific_heat_capacity::{
-    btu_per_pound_degree_fahrenheit, joule_per_kilogram_kelvin,
-};
+use uom::si::specific_heat_capacity::{btu_per_pound_degree_fahrenheit, joule_per_kilogram_kelvin};
 use uom::si::thermodynamic_temperature::{degree_celsius, degree_fahrenheit, kelvin};
 use uom::si::volume::{cubic_foot, cubic_meter, gallon};
 
@@ -271,11 +269,7 @@ mod tests {
 
     #[test]
     fn conductivity_btu_hr_ft_f_matches_old_constant() {
-        approx_eq(
-            conductivity_btu_h_ft_f_to_w_m_k(1.0),
-            1.730_734_67,
-            1e-12,
-        );
+        approx_eq(conductivity_btu_h_ft_f_to_w_m_k(1.0), 1.730_734_67, 1e-12);
     }
 
     #[test]
@@ -296,7 +290,11 @@ mod tests {
     #[test]
     fn specific_heat_btu_lb_f_matches_old_constant() {
         // uom uses the IT BTU → 4183.9987 J/(kg·K), not the thermochemical 4186.8.
-        approx_eq(specific_heat_btu_lb_f_to_j_kg_k(1.0), 4_183.998_673_699_118, 1e-9);
+        approx_eq(
+            specific_heat_btu_lb_f_to_j_kg_k(1.0),
+            4_183.998_673_699_118,
+            1e-9,
+        );
     }
 
     #[test]
@@ -327,7 +325,11 @@ mod tests {
     #[test]
     fn temperature_f_c_round_trip() {
         let original = 98.6;
-        approx_eq(temperature_c_to_f(temperature_f_to_c(original)), original, 1e-10);
+        approx_eq(
+            temperature_c_to_f(temperature_f_to_c(original)),
+            original,
+            1e-10,
+        );
     }
 
     #[test]

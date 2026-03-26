@@ -2,14 +2,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
-use hares_equipment::{
-    Equipment, EquipmentConfig,
-    battery::Battery,
-    config::ConfigValue,
-};
+use hares_equipment::{Equipment, EquipmentConfig, battery::Battery, config::ConfigValue};
 use hares_types::{
-    ControlSignal, EnvironmentState, GridState, PortContribution, PortSlots, WeatherState,
-    ZoneId, ZoneState,
+    ControlSignal, EnvironmentState, GridState, PortContribution, PortSlots, WeatherState, ZoneId,
+    ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,11 +40,18 @@ fn base_env() -> EnvironmentState {
             solar_azimuth_deg: 180.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
+            ground_albedo: 0.2,
         },
-        grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
         custom_domains: vec![],
-        current_time: FixedOffset::east_opt(0).expect("UTC offset").with_ymd_and_hms(2026, 6, 21, 12, 0, 0).single().expect("valid"),
+        current_time: FixedOffset::east_opt(0)
+            .expect("UTC offset")
+            .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+            .single()
+            .expect("valid"),
         time_res: chrono::Duration::seconds(60),
     }
 }
@@ -327,7 +330,10 @@ fn self_consumption_charges_when_exporting() {
     // The battery should have charged — active_power_kw at the port is positive (load).
     // The port net after both PV and battery contributions will still be negative, but
     // battery's own telemetry shows it absorbed power.
-    let active_kw = bat.telemetry().get("active_power_kw").expect("active_power_kw");
+    let active_kw = bat
+        .telemetry()
+        .get("active_power_kw")
+        .expect("active_power_kw");
     assert!(
         active_kw > 0.0,
         "Battery should charge (positive active_power_kw) when there is PV export: got {active_kw:.4}"
@@ -359,7 +365,10 @@ fn self_consumption_discharges_when_importing() {
     bat.step(&env, dt, &mut ports).expect("step");
 
     // Battery discharges — active_power_kw in telemetry is negative (generation).
-    let active_kw = bat.telemetry().get("active_power_kw").expect("active_power_kw");
+    let active_kw = bat
+        .telemetry()
+        .get("active_power_kw")
+        .expect("active_power_kw");
     assert!(
         active_kw < 0.0,
         "Battery should discharge (negative active_power_kw) when there is net load: got {active_kw:.4}"
@@ -433,12 +442,18 @@ fn power_limits_respected() {
     let mut ports = PortSlots::default();
     bat.step(&env, dt, &mut ports).expect("step");
 
-    let active_kw = bat.telemetry().get("active_power_kw").expect("active_power_kw");
+    let active_kw = bat
+        .telemetry()
+        .get("active_power_kw")
+        .expect("active_power_kw");
     assert!(
         active_kw <= 5.0 + 1e-6,
         "Active power must be clamped to max_charge_kw=5.0 kW: got {active_kw:.4}"
     );
-    assert!(active_kw > 0.0, "Battery should be charging: got {active_kw:.4}");
+    assert!(
+        active_kw > 0.0,
+        "Battery should be charging: got {active_kw:.4}"
+    );
 }
 
 #[test]
@@ -463,7 +478,10 @@ fn idle_no_power_flow() {
     let mut ports = PortSlots::default();
     bat.step(&env, dt, &mut ports).expect("step");
 
-    let active_kw = bat.telemetry().get("active_power_kw").expect("active_power_kw");
+    let active_kw = bat
+        .telemetry()
+        .get("active_power_kw")
+        .expect("active_power_kw");
     // standby_power_w was set to 0.0 in test config.
     assert!(
         active_kw.abs() < 1e-6,

@@ -49,9 +49,12 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, zone_wb_c: f64) -> Environmen
             solar_azimuth_deg: 180.0,
             mains_temp_c: 15.0,
             rainfall_m: 0.0,
-                ground_albedo: 0.2,
+            ground_albedo: 0.2,
         },
-        grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
         custom_domains: vec![],
         current_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
@@ -74,7 +77,11 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
     for &(k, v) in pairs {
         raw.insert(k.to_string(), ConfigValue::Float(v));
     }
-    EquipmentConfig { name: name.to_string(), ochre_class: class.to_string(), raw_config: raw }
+    EquipmentConfig {
+        name: name.to_string(),
+        ochre_class: class.to_string(),
+        raw_config: raw,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +146,9 @@ fn gas_furnace_energy_balance() {
     // HARES telemetry reports this via fuel_input_w and thermal_output_w.
     let tel = eq.telemetry();
     let fuel_input_w = tel.get("fuel_input_w").expect("fuel_input_w must exist");
-    let thermal_output_w = tel.get("thermal_output_w").expect("thermal_output_w must exist");
+    let thermal_output_w = tel
+        .get("thermal_output_w")
+        .expect("thermal_output_w must exist");
     let gas_cop = thermal_output_w / fuel_input_w;
     assert!(
         (gas_cop - 0.80).abs() < 0.01,
@@ -235,8 +244,14 @@ fn electric_baseboard_cop_is_unity() {
     let thermal_w = ports.thermal[0].sensible_gain_w;
     let electric_w = ports.electrical.net_active_kw() * 1_000.0;
 
-    assert!(thermal_w > 0.0, "baseboard must deliver heat; got {thermal_w:.3} W");
-    assert!(electric_w > 0.0, "baseboard must draw electricity; got {electric_w:.3} W");
+    assert!(
+        thermal_w > 0.0,
+        "baseboard must deliver heat; got {thermal_w:.3} W"
+    );
+    assert!(
+        electric_w > 0.0,
+        "baseboard must draw electricity; got {electric_w:.3} W"
+    );
 
     let cop = thermal_w / electric_w;
     // OCHRE uses space_fraction=1.0 by default → full heat delivered to zone.
@@ -282,12 +297,21 @@ fn ashp_heating_cop_above_unity_at_ahri_h1() {
     let electric_kw = ports.electrical.net_active_kw();
     let electric_w = electric_kw * 1_000.0;
 
-    assert!(thermal_w > 0.0, "ASHP must deliver positive heat; got {thermal_w:.3} W");
-    assert!(electric_w > 0.0, "ASHP must draw electricity; got {electric_w:.3} W");
+    assert!(
+        thermal_w > 0.0,
+        "ASHP must deliver positive heat; got {thermal_w:.3} W"
+    );
+    assert!(
+        electric_w > 0.0,
+        "ASHP must draw electricity; got {electric_w:.3} W"
+    );
 
     let cop = thermal_w / electric_w;
     // Telemetry COP should match the computed ratio within rounding
-    let tel_cop = eq.telemetry().get("cop").expect("cop must exist in telemetry");
+    let tel_cop = eq
+        .telemetry()
+        .get("cop")
+        .expect("cop must exist in telemetry");
 
     assert!(
         cop > 2.0,
@@ -457,7 +481,8 @@ fn air_conditioner_setpoint_override() {
     // With original setpoint 24°C, zone at 25°C → cooling should be active
     let mode_before = eq.update_control(&env);
     assert_eq!(
-        mode_before, OperatingMode::Cooling,
+        mode_before,
+        OperatingMode::Cooling,
         "AC must cool at zone=25°C > setpoint=24°C"
     );
 
@@ -471,7 +496,8 @@ fn air_conditioner_setpoint_override() {
 
     let mode_after = eq.update_control(&env);
     assert_ne!(
-        mode_after, OperatingMode::Cooling,
+        mode_after,
+        OperatingMode::Cooling,
         "AC must stop cooling when setpoint raised to 28°C (zone=25°C < 28°C)"
     );
 }
@@ -519,10 +545,15 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     }
 
     let tel = eq.telemetry();
-    let defrost_active = tel.get("defrost_active").expect("defrost_active must exist in telemetry");
-    let thermal_output_w =
-        tel.get("thermal_output_w").expect("thermal_output_w must exist in telemetry");
-    let electric_kw = tel.get("electric_kw").expect("electric_kw must exist in telemetry");
+    let defrost_active = tel
+        .get("defrost_active")
+        .expect("defrost_active must exist in telemetry");
+    let thermal_output_w = tel
+        .get("thermal_output_w")
+        .expect("thermal_output_w must exist in telemetry");
+    let electric_kw = tel
+        .get("electric_kw")
+        .expect("electric_kw must exist in telemetry");
 
     eprintln!(
         "[hvac_parity] defrost_at_0C: defrost_active={defrost_active:.0}, \
@@ -590,7 +621,11 @@ fn furnace_thermostat_off_above_setpoint() {
         let mode = eq.update_control(&env);
         let mut ports = make_ports();
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        assert_eq!(mode, OperatingMode::Heating, "must heat at 18°C with 21°C setpoint");
+        assert_eq!(
+            mode,
+            OperatingMode::Heating,
+            "must heat at 18°C with 21°C setpoint"
+        );
         assert!(
             ports.fuel.get(FuelType::Gas) > 0.0,
             "gas must flow when heating at 18°C"
@@ -605,7 +640,11 @@ fn furnace_thermostat_off_above_setpoint() {
         let mode = eq.update_control(&env);
         let mut ports = make_ports();
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        assert_ne!(mode, OperatingMode::Heating, "must not heat at 23°C with 21°C setpoint");
+        assert_ne!(
+            mode,
+            OperatingMode::Heating,
+            "must not heat at 23°C with 21°C setpoint"
+        );
         assert!(
             ports.fuel.get(FuelType::Gas) < 1e-6,
             "no gas when unit is off at 23°C"
@@ -773,7 +812,10 @@ fn ashp_cop_drops_with_defrost() {
 
     assert!(cop_7 > 0.0, "COP must be positive at 7°C; got {cop_7:.3}");
     assert!(cop_0 > 0.0, "COP must be positive at 0°C; got {cop_0:.3}");
-    assert!(cop_m10 > 0.0, "COP must be positive at -10°C; got {cop_m10:.3}");
+    assert!(
+        cop_m10 > 0.0,
+        "COP must be positive at -10°C; got {cop_m10:.3}"
+    );
 
     // At 0°C and -10°C defrost is active; at 7°C it is not.
     // COP with defrost must be lower than COP without defrost.
@@ -848,8 +890,14 @@ fn ac_sensible_plus_latent_equals_total() {
     let total_port_w = sensible_port_w.abs() + latent_port_w.abs();
 
     // Telemetry reports post-DSE delivered values (DSE=1.0 by default).
-    let sens_tel = eq.telemetry().get("sensible_cooling_w").expect("sensible_cooling_w");
-    let lat_tel = eq.telemetry().get("latent_cooling_w").expect("latent_cooling_w");
+    let sens_tel = eq
+        .telemetry()
+        .get("sensible_cooling_w")
+        .expect("sensible_cooling_w");
+    let lat_tel = eq
+        .telemetry()
+        .get("latent_cooling_w")
+        .expect("latent_cooling_w");
     let total_tel = sens_tel + lat_tel;
 
     // First law: telemetry total must equal port total within floating-point error.

@@ -31,9 +31,7 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
 
-use crate::epw::{
-    clark_allen_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c,
-};
+use crate::epw::{clark_allen_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c};
 use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
@@ -54,9 +52,9 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
     let mut lines = contents.lines();
 
     // --- Line 1: station metadata ---
-    let meta_line = lines
-        .next()
-        .ok_or_else(|| WeatherError::Parse("missing TMY3 station metadata header (line 1)".into()))?;
+    let meta_line = lines.next().ok_or_else(|| {
+        WeatherError::Parse("missing TMY3 station metadata header (line 1)".into())
+    })?;
     let meta_line = meta_line.trim_start_matches('\u{FEFF}');
     let meta = parse_station_header(meta_line)?;
 
@@ -326,12 +324,12 @@ fn parse_hhmm(s: &str, row: usize) -> Result<(u32, u32), WeatherError> {
             "row {row}: invalid time `{s}`; expected HH:MM"
         )));
     }
-    let hh = parts[0].parse::<u32>().map_err(|_| {
-        WeatherError::Parse(format!("row {row}: invalid hour in time `{s}`"))
-    })?;
-    let mm = parts[1].parse::<u32>().map_err(|_| {
-        WeatherError::Parse(format!("row {row}: invalid minute in time `{s}`"))
-    })?;
+    let hh = parts[0]
+        .parse::<u32>()
+        .map_err(|_| WeatherError::Parse(format!("row {row}: invalid hour in time `{s}`")))?;
+    let mm = parts[1]
+        .parse::<u32>()
+        .map_err(|_| WeatherError::Parse(format!("row {row}: invalid minute in time `{s}`")))?;
     Ok((hh, mm))
 }
 
@@ -344,12 +342,7 @@ fn parse_meta_f64(raw: &str, name: &str) -> Result<f64, WeatherError> {
     })
 }
 
-fn parse_f64(
-    fields: &[&str],
-    idx: usize,
-    row: usize,
-    name: &str,
-) -> Result<f64, WeatherError> {
+fn parse_f64(fields: &[&str], idx: usize, row: usize, name: &str) -> Result<f64, WeatherError> {
     let raw = fields.get(idx).ok_or_else(|| {
         WeatherError::Parse(format!("row {row}: missing field `{name}` at index {idx}"))
     })?;

@@ -342,16 +342,14 @@ pub fn resolve_boundary_name(
             (ZoneType::Conditioned, ZoneType::Outdoor) => Some("Roof"),
             _ => Some("Attic Roof"),
         },
-        BoundaryType::Floor => {
-            match (int, ext) {
-                (ZoneType::Conditioned, ZoneType::Attic) => Some("Attic Floor"),
-                (ZoneType::Conditioned, ZoneType::Foundation) => Some("Foundation Ceiling"),
-                (ZoneType::Conditioned, ZoneType::Garage) => Some("Garage Interior Ceiling"),
-                (ZoneType::Garage, ZoneType::Attic) => Some("Garage Ceiling"),
-                (ZoneType::Conditioned, ZoneType::Outdoor) => Some("Raised Floor"),
-                _ => Some("Attic Floor"),
-            }
-        }
+        BoundaryType::Floor => match (int, ext) {
+            (ZoneType::Conditioned, ZoneType::Attic) => Some("Attic Floor"),
+            (ZoneType::Conditioned, ZoneType::Foundation) => Some("Foundation Ceiling"),
+            (ZoneType::Conditioned, ZoneType::Garage) => Some("Garage Interior Ceiling"),
+            (ZoneType::Garage, ZoneType::Attic) => Some("Garage Ceiling"),
+            (ZoneType::Conditioned, ZoneType::Outdoor) => Some("Raised Floor"),
+            _ => Some("Attic Floor"),
+        },
         BoundaryType::Slab => match (int, ext) {
             (ZoneType::Foundation, _) => Some("Foundation Floor"),
             (ZoneType::Conditioned, _) => Some("Floor"),

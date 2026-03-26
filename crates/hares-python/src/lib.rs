@@ -34,8 +34,8 @@ use py_metrics::{
     PyAnnualEnergyKwh, PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics,
     PyGridInteractionMetrics, PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics,
 };
-use py_telemetry::PyTelemetry;
 use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane};
+use py_telemetry::PyTelemetry;
 use py_weather::PyWeatherTimeSeries;
 
 #[pymodule]

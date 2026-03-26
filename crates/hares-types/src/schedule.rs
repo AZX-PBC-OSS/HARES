@@ -435,9 +435,7 @@ mod tests {
 
     use crate::{DomainUpdate, ZoneId, test_utils::default_env};
 
-    use super::{
-        BoundaryPolicy, DayFilter, SCHEDULE_DOMAIN_ID, ScheduleSource, TimeWindow,
-    };
+    use super::{BoundaryPolicy, DayFilter, SCHEDULE_DOMAIN_ID, ScheduleSource, TimeWindow};
 
     #[test]
     fn constant_returns_constant() {
@@ -714,10 +712,7 @@ mod tests {
             default: Some(15.0),
         };
 
-        assert_eq!(
-            source.value_at(&env).expect("should use default"),
-            15.0
-        );
+        assert_eq!(source.value_at(&env).expect("should use default"), 15.0);
     }
 
     #[test]

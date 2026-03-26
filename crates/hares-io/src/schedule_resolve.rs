@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde_json::Value;
 use hares_types::{normalize_ascii, parse_trimmed_f64};
+use serde_json::Value;
 use tracing::warn;
 
 use crate::EquipmentSpec;

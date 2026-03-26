@@ -110,14 +110,26 @@ fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
     } else {
         0.0
     };
-    params.insert("duct_supply_leakage_frac".to_string(), json!(supply_leakage));
+    params.insert(
+        "duct_supply_leakage_frac".to_string(),
+        json!(supply_leakage),
+    );
     params.insert("duct_supply_area_m2".to_string(), json!(supply_area_m2));
     params.insert("duct_supply_r_m2_k_w".to_string(), json!(supply_r_m2_k_w));
-    params.insert("duct_return_leakage_frac".to_string(), json!(return_leakage));
+    params.insert(
+        "duct_return_leakage_frac".to_string(),
+        json!(return_leakage),
+    );
     params.insert("duct_return_area_m2".to_string(), json!(return_area_m2));
     params.insert("duct_return_r_m2_k_w".to_string(), json!(return_r_m2_k_w));
-    params.insert("duct_latitude_deg".to_string(), json!(building.site.latitude_deg));
-    params.insert("duct_longitude_deg".to_string(), json!(building.site.longitude_deg));
+    params.insert(
+        "duct_latitude_deg".to_string(),
+        json!(building.site.latitude_deg),
+    );
+    params.insert(
+        "duct_longitude_deg".to_string(),
+        json!(building.site.longitude_deg),
+    );
 
     if let Some(zt) = duct_zone_type_str {
         params.insert("duct_zone_type".to_string(), Value::String(zt));
@@ -170,7 +182,11 @@ fn foundation_wall_is_insulated(boundaries: &[Boundary]) -> bool {
 fn zone_type_to_ashrae152_str(zone: &Zone, building: &Building) -> String {
     match zone.zone_type {
         ZoneType::Attic => {
-            if zone.vented { "attic_vented".into() } else { "attic_unvented".into() }
+            if zone.vented {
+                "attic_vented".into()
+            } else {
+                "attic_unvented".into()
+            }
         }
         ZoneType::Garage => "garage".into(),
         ZoneType::Foundation => {
@@ -196,7 +212,11 @@ fn zone_type_to_ashrae152_str(zone: &Zone, building: &Building) -> String {
                 }
             } else {
                 // Unknown foundation sub-type: fall back to uninsulated crawlspace.
-                if zone.vented { "vent_unins_crawlspace".into() } else { "unvent_unins_crawlspace".into() }
+                if zone.vented {
+                    "vent_unins_crawlspace".into()
+                } else {
+                    "unvent_unins_crawlspace".into()
+                }
             }
         }
         _ => "attic_vented".into(),
@@ -226,7 +246,11 @@ fn compute_basement_params(building: &Building) -> Map<String, Value> {
     params
 }
 
-pub(super) fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) -> std::result::Result<(), HpxmlError> {
+pub(super) fn resolve_hvac(
+    building: &Building,
+    defaults: &DefaultsStore,
+    specs: &mut Vec<EquipmentSpec>,
+) -> std::result::Result<(), HpxmlError> {
     let details = &building.details_xml;
     let Some(hvac) = details.path(&["Systems", "HVAC"]) else {
         return Ok(());
@@ -244,10 +268,9 @@ pub(super) fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs:
                 .as_deref()
                 .or(child_text(heating, "FuelType").as_deref()),
         );
-        let system_type = parse_named_type(heating, "HeatingSystemType")
-            .ok_or_else(|| HpxmlError::Parse(
-                "HeatingSystem is missing required HeatingSystemType element".into(),
-            ))?;
+        let system_type = parse_named_type(heating, "HeatingSystemType").ok_or_else(|| {
+            HpxmlError::Parse("HeatingSystem is missing required HeatingSystemType element".into())
+        })?;
         let name = canonical_hvac_heating_name(&system_type, fuel);
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, heating, "HeatingCapacity");
@@ -292,10 +315,9 @@ pub(super) fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs:
                 .as_deref()
                 .or(Some("electricity")),
         );
-        let system_type = child_text(cooling, "CoolingSystemType")
-            .ok_or_else(|| HpxmlError::Parse(
-                "CoolingSystem is missing required CoolingSystemType element".into(),
-            ))?;
+        let system_type = child_text(cooling, "CoolingSystemType").ok_or_else(|| {
+            HpxmlError::Parse("CoolingSystem is missing required CoolingSystemType element".into())
+        })?;
         let name = canonical_hvac_cooling_name(&system_type, fuel);
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, cooling, "CoolingCapacity");
@@ -343,9 +365,9 @@ pub(super) fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs:
 
     for heat_pump in descendants_named(hvac, "HeatPump") {
         let heat_pump_type = child_text(heat_pump, "HeatPumpType")
-            .ok_or_else(|| HpxmlError::Parse(
-                "HeatPump is missing required HeatPumpType element".into(),
-            ))?
+            .ok_or_else(|| {
+                HpxmlError::Parse("HeatPump is missing required HeatPumpType element".into())
+            })?
             .to_ascii_lowercase();
 
         let split = match heat_pump_type.as_str() {
@@ -412,7 +434,10 @@ pub(super) fn resolve_hvac(building: &Building, defaults: &DefaultsStore, specs:
         ] {
             for xml_key in xml_keys {
                 if let Some(f_val) = child_f64(heat_pump, xml_key) {
-                    params.insert(param_key.to_string(), json!(conv::temperature_f_to_c(f_val)));
+                    params.insert(
+                        param_key.to_string(),
+                        json!(conv::temperature_f_to_c(f_val)),
+                    );
                     break;
                 }
             }
@@ -706,10 +731,21 @@ fn apply_default_hvac_speed_fallback(params: &mut Map<String, Value>) {
 
 /// Startup capacity degradation coefficient per Winkler (2011) / EnergyPlus.
 /// OCHRE `utils/equipment.py:470-500`.
-fn calc_startup_degradation(is_heating: bool, equipment_name: &str, efficiency_ip: f64, n_speeds: usize) -> f64 {
+fn calc_startup_degradation(
+    is_heating: bool,
+    equipment_name: &str,
+    efficiency_ip: f64,
+    n_speeds: usize,
+) -> f64 {
     if is_heating {
         match n_speeds {
-            1 => if efficiency_ip < 7.0 { 0.20 } else { 0.11 },
+            1 => {
+                if efficiency_ip < 7.0 {
+                    0.20
+                } else {
+                    0.11
+                }
+            }
             2 => 0.11,
             _ => 0.0,
         }
@@ -717,7 +753,13 @@ fn calc_startup_degradation(is_heating: bool, equipment_name: &str, efficiency_i
         0.22
     } else {
         match n_speeds {
-            1 => if efficiency_ip < 13.0 { 0.20 } else { 0.07 },
+            1 => {
+                if efficiency_ip < 13.0 {
+                    0.20
+                } else {
+                    0.07
+                }
+            }
             2 => 0.11,
             _ => 0.0,
         }
@@ -725,7 +767,11 @@ fn calc_startup_degradation(is_heating: bool, equipment_name: &str, efficiency_i
 }
 
 /// Insert startup capacity degradation for compressor-driven equipment.
-fn insert_startup_degradation(params: &mut Map<String, Value>, equipment_name: &str, is_heating: bool) {
+fn insert_startup_degradation(
+    params: &mut Map<String, Value>,
+    equipment_name: &str,
+    is_heating: bool,
+) {
     let n_speeds = params
         .get("number_of_speeds")
         .and_then(Value::as_u64)
@@ -733,9 +779,14 @@ fn insert_startup_degradation(params: &mut Map<String, Value>, equipment_name: &
 
     // Get efficiency in IP units (HSPF for heating, SEER for cooling).
     let efficiency_ip = if is_heating {
-        params.get("efficiency_hspf").and_then(Value::as_f64).unwrap_or(8.0)
+        params
+            .get("efficiency_hspf")
+            .and_then(Value::as_f64)
+            .unwrap_or(8.0)
     } else {
-        params.get("efficiency_seer").and_then(Value::as_f64)
+        params
+            .get("efficiency_seer")
+            .and_then(Value::as_f64)
             .or_else(|| params.get("cooling_efficiency").and_then(Value::as_f64))
             .unwrap_or(13.0)
     };
@@ -912,7 +963,9 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
     for (hvac_type, param_prefix) in [("Heating", "heating"), ("Cooling", "cooling")] {
         for (weekday, day_suffix) in [(true, "weekday"), (false, "weekend")] {
             let param_key = format!("{param_prefix}_{day_suffix}_setpoints_c");
-            if let Some(vals) = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday) {
+            if let Some(vals) =
+                super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday)
+            {
                 out.push((param_key, json!(vals)));
             }
         }
@@ -923,8 +976,8 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::building::{DuctSystem, DuctType, Site, XmlNode, Zone};
+    use super::*;
     use std::collections::HashMap;
 
     fn empty_building(zones: Vec<Zone>) -> Building {
@@ -1052,22 +1105,30 @@ mod tests {
 
     #[test]
     fn c_d_cooling_single_speed_low_seer() {
-        assert!((calc_startup_degradation(false, "central ac", 12.0, 1) - 0.20).abs() < f64::EPSILON);
+        assert!(
+            (calc_startup_degradation(false, "central ac", 12.0, 1) - 0.20).abs() < f64::EPSILON
+        );
     }
 
     #[test]
     fn c_d_cooling_single_speed_high_seer() {
-        assert!((calc_startup_degradation(false, "central ac", 14.0, 1) - 0.07).abs() < f64::EPSILON);
+        assert!(
+            (calc_startup_degradation(false, "central ac", 14.0, 1) - 0.07).abs() < f64::EPSILON
+        );
     }
 
     #[test]
     fn c_d_cooling_two_speed() {
-        assert!((calc_startup_degradation(false, "central ac", 18.0, 2) - 0.11).abs() < f64::EPSILON);
+        assert!(
+            (calc_startup_degradation(false, "central ac", 18.0, 2) - 0.11).abs() < f64::EPSILON
+        );
     }
 
     #[test]
     fn c_d_cooling_variable_speed() {
-        assert!((calc_startup_degradation(false, "central ac", 22.0, 4) - 0.0).abs() < f64::EPSILON);
+        assert!(
+            (calc_startup_degradation(false, "central ac", 22.0, 4) - 0.0).abs() < f64::EPSILON
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1149,10 +1210,7 @@ mod tests {
         }
     }
 
-    fn building_with(
-        foundation_name: Option<&str>,
-        boundaries: Vec<Boundary>,
-    ) -> Building {
+    fn building_with(foundation_name: Option<&str>, boundaries: Vec<Boundary>) -> Building {
         let mut b = empty_building(vec![]);
         b.foundation_name = foundation_name.map(String::from);
         b.boundaries = boundaries;
@@ -1175,7 +1233,10 @@ mod tests {
     fn attic_unvented_maps_correctly() {
         let zone = attic_zone(false);
         let building = building_with(None, vec![]);
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "attic_unvented");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "attic_unvented"
+        );
     }
 
     #[test]
@@ -1185,7 +1246,10 @@ mod tests {
             Some("Crawlspace"),
             vec![foundation_wall_boundary(Some("Uninsulated"))],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "vent_unins_crawlspace");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "vent_unins_crawlspace"
+        );
     }
 
     #[test]
@@ -1198,7 +1262,10 @@ mod tests {
                 foundation_wall_boundary(Some("Uninsulated")),
             ],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "vent_crawlspace_ins_floor");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "vent_crawlspace_ins_floor"
+        );
     }
 
     #[test]
@@ -1224,7 +1291,10 @@ mod tests {
             Some("Crawlspace"),
             vec![foundation_wall_boundary(Some("Uninsulated"))],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "unvent_unins_crawlspace");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "unvent_unins_crawlspace"
+        );
     }
 
     #[test]
@@ -1237,7 +1307,10 @@ mod tests {
                 foundation_wall_boundary(Some("Uninsulated")),
             ],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "unvent_crawlspace_ins_floor");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "unvent_crawlspace_ins_floor"
+        );
     }
 
     #[test]
@@ -1263,7 +1336,10 @@ mod tests {
             Some("Unfinished Basement"),
             vec![foundation_wall_boundary(Some("Uninsulated"))],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "unins_basement");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "unins_basement"
+        );
     }
 
     #[test]
@@ -1273,7 +1349,10 @@ mod tests {
             Some("Unfinished Basement"),
             vec![foundation_wall_boundary(Some("R-15"))],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "basement_ins_walls");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "basement_ins_walls"
+        );
     }
 
     #[test]
@@ -1286,7 +1365,10 @@ mod tests {
                 foundation_wall_boundary(Some("Uninsulated")),
             ],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "basement_ins_ceiling");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "basement_ins_ceiling"
+        );
     }
 
     #[test]
@@ -1300,7 +1382,10 @@ mod tests {
                 foundation_wall_boundary(Some("R-10")),
             ],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "basement_ins_walls");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "basement_ins_walls"
+        );
     }
 
     #[test]
@@ -1313,21 +1398,30 @@ mod tests {
                 foundation_wall_boundary(Some("Uninsulated")),
             ],
         );
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "vent_unins_crawlspace");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "vent_unins_crawlspace"
+        );
     }
 
     #[test]
     fn foundation_no_name_falls_back_to_vented_uninsulated() {
         let zone = foundation_zone(true);
         let building = building_with(None, vec![]);
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "vent_unins_crawlspace");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "vent_unins_crawlspace"
+        );
     }
 
     #[test]
     fn foundation_no_name_unvented_falls_back() {
         let zone = foundation_zone(false);
         let building = building_with(None, vec![]);
-        assert_eq!(zone_type_to_ashrae152_str(&zone, &building), "unvent_unins_crawlspace");
+        assert_eq!(
+            zone_type_to_ashrae152_str(&zone, &building),
+            "unvent_unins_crawlspace"
+        );
     }
 
     // -----------------------------------------------------------------------

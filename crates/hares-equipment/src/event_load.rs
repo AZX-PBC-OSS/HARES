@@ -645,7 +645,6 @@ impl WetAppliance {
         };
         let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
 
-        // Thermal gains come from all input energy regardless of fuel type.
         let gain_source_w = active_power_kw * 1_000.0;
         let sensible_gain_w = gain_source_w * self.sensible_gain_fraction;
         let latent_gain_w = gain_source_w * self.latent_gain_fraction;

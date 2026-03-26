@@ -387,7 +387,10 @@ pub(crate) fn monthly_day_counts(is_leap_year: bool) -> [usize; 12] {
     }
 }
 
-pub(crate) fn monthly_average_dry_bulb(dry_bulb_c: &[f64], is_leap_year: bool) -> Option<[f64; 12]> {
+pub(crate) fn monthly_average_dry_bulb(
+    dry_bulb_c: &[f64],
+    is_leap_year: bool,
+) -> Option<[f64; 12]> {
     let day_counts = monthly_day_counts(is_leap_year);
     let expected_hours = day_counts.iter().sum::<usize>() * 24;
     if dry_bulb_c.len() != expected_hours {
@@ -781,9 +784,9 @@ mod tests {
         DOE2_GROUND_DAYS_PER_YEAR, DOE2_GROUND_DEPTH_FACTOR, DOE2_GROUND_DIFFUSIVITY,
         DOE2_GROUND_HOURS_PER_YEAR, DOE2_GROUND_PHASE_OFFSET_RAD, DOE2_MID_MONTH_DAYS,
         STEFAN_BOLTZMANN, WeatherError, berdahl_martin_sky_emissivity, brunt_sky_emissivity,
-        clark_allen_sky_temp_c, compute_sky_temp_c, doe2_ground_temp_monthly,
-        idso_sky_emissivity, monthly_day_counts, parse_epw, parse_epw_str,
-        sky_temp_from_emissivity, walton_cloud_correction,
+        clark_allen_sky_temp_c, compute_sky_temp_c, doe2_ground_temp_monthly, idso_sky_emissivity,
+        monthly_day_counts, parse_epw, parse_epw_str, sky_temp_from_emissivity,
+        walton_cloud_correction,
     };
 
     fn write_temp_epw(epw_contents: &str) -> PathBuf {
@@ -1240,10 +1243,7 @@ mod tests {
         // exp(0.6988) ≈ 2.0114 => P_wv ≈ 12.283 hPa
         // ε = 0.618 + 0.056 * sqrt(12.283) = 0.618 + 0.056 * 3.5047 ≈ 0.8143
         let eps = brunt_sky_emissivity(10.0);
-        assert!(
-            (eps - 0.8143).abs() < 0.005,
-            "Brunt at T_dp=10C: got {eps}"
-        );
+        assert!((eps - 0.8143).abs() < 0.005, "Brunt at T_dp=10C: got {eps}");
     }
 
     #[test]
@@ -1335,11 +1335,20 @@ mod tests {
     fn sky_temp_clamped_at_high_humidity_overcast() {
         // T_dp=35°C (tropical), N=10 (overcast): ε_berdahl > 1.0 before clamping
         let eps_clear = berdahl_martin_sky_emissivity(35.0);
-        assert!(eps_clear > 0.95, "high dew point should give high emissivity");
+        assert!(
+            eps_clear > 0.95,
+            "high dew point should give high emissivity"
+        );
         let eps_cloud = walton_cloud_correction(eps_clear, 10.0);
-        assert!(eps_cloud <= 1.0, "emissivity must be clamped to <= 1.0, got {eps_cloud}");
+        assert!(
+            eps_cloud <= 1.0,
+            "emissivity must be clamped to <= 1.0, got {eps_cloud}"
+        );
         let t_sky = sky_temp_from_emissivity(38.0, eps_cloud);
-        assert!(t_sky <= 38.0, "sky temp must not exceed dry bulb: got {t_sky}");
+        assert!(
+            t_sky <= 38.0,
+            "sky temp must not exceed dry bulb: got {t_sky}"
+        );
     }
 
     #[test]

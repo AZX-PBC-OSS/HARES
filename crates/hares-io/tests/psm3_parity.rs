@@ -9,7 +9,7 @@
 
 use std::io::Write;
 
-use hares_io::{parse_psm3, WeatherTimeSeries};
+use hares_io::{WeatherTimeSeries, parse_psm3};
 
 /// Absolute path to the synthetic 5-minute PSM3 fixture.
 fn fixture_path() -> std::path::PathBuf {
@@ -25,8 +25,7 @@ fn load_fixture() -> WeatherTimeSeries {
 /// Write a temporary PSM3 file from a string, returning the path.
 /// The file is deleted when the returned handle is dropped.
 fn write_temp_psm3(contents: &str) -> tempfile::NamedTempFile {
-    let mut f = tempfile::NamedTempFile::with_suffix(".csv")
-        .expect("should create temp file");
+    let mut f = tempfile::NamedTempFile::with_suffix(".csv").expect("should create temp file");
     f.write_all(contents.as_bytes())
         .expect("should write temp file");
     f.flush().expect("should flush");
@@ -62,14 +61,28 @@ fn parses_synthetic_psm3_fixture() {
 
     // Temperature range check: fixture sinusoid is 15 ± 10 → [5, 25].
     let t_min = ts.dry_bulb_c.iter().cloned().fold(f64::INFINITY, f64::min);
-    let t_max = ts.dry_bulb_c.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let t_max = ts
+        .dry_bulb_c
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     assert!((4.9..=5.1).contains(&t_min), "unexpected t_min: {t_min}");
     assert!((24.9..=25.1).contains(&t_max), "unexpected t_max: {t_max}");
 
     // GHI range: [0, 800].
-    let ghi_max = ts.ghi_w_m2.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    assert!((799.0..=801.0).contains(&ghi_max), "unexpected ghi_max: {ghi_max}");
-    assert!(ts.ghi_w_m2.iter().all(|&v| v >= 0.0), "GHI should be non-negative");
+    let ghi_max = ts
+        .ghi_w_m2
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        (799.0..=801.0).contains(&ghi_max),
+        "unexpected ghi_max: {ghi_max}"
+    );
+    assert!(
+        ts.ghi_w_m2.iter().all(|&v| v >= 0.0),
+        "GHI should be non-negative"
+    );
 }
 
 /// PSM3 pressure is in millibar; the parser must convert to kPa (÷ 10).
@@ -117,7 +130,8 @@ fn psm3_ground_temp_uses_doe2_model() {
         }
         idx += count;
     }
-    let monthly_avg: [f64; 12] = std::array::from_fn(|i| month_sums[i] / f64::from(month_counts[i]));
+    let monthly_avg: [f64; 12] =
+        std::array::from_fn(|i| month_sums[i] / f64::from(month_counts[i]));
 
     // All monthly averages should be ~15 °C (uniform sinusoid).
     for (i, &avg) in monthly_avg.iter().enumerate() {
@@ -129,10 +143,22 @@ fn psm3_ground_temp_uses_doe2_model() {
     }
 
     // Ground temp swing should be much smaller than dry-bulb swing (damped).
-    let g_min = ts.ground_temp_c.iter().cloned().fold(f64::INFINITY, f64::min);
-    let g_max = ts.ground_temp_c.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let g_min = ts
+        .ground_temp_c
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let g_max = ts
+        .ground_temp_c
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     let t_min = ts.dry_bulb_c.iter().cloned().fold(f64::INFINITY, f64::min);
-    let t_max = ts.dry_bulb_c.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let t_max = ts
+        .dry_bulb_c
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let ground_swing = g_max - g_min;
     let air_swing = t_max - t_min;
@@ -208,7 +234,9 @@ fn psm3_5min_no_resample_at_300s() {
 #[test]
 fn psm3_downsample_preserves_daily_solar_integral() {
     let ts = load_fixture();
-    let hourly = ts.resample(3600).expect("downsample to hourly should succeed");
+    let hourly = ts
+        .resample(3600)
+        .expect("downsample to hourly should succeed");
     assert_eq!(hourly.len(), 8_760);
 
     // Compare total GHI energy over the full year.
@@ -286,7 +314,9 @@ fn psm3_5min_downsample_to_hourly() {
     let ts = load_fixture();
     assert_eq!(ts.meta.source_step_secs, 300);
 
-    let hourly = ts.resample(3600).expect("downsample to hourly should succeed");
+    let hourly = ts
+        .resample(3600)
+        .expect("downsample to hourly should succeed");
     assert_eq!(hourly.len(), 8_760);
 
     // Dry bulb: mean of each 12-record block.
@@ -376,19 +406,11 @@ fn build_full_year_csv(step_minutes: u32, is_leap: bool) -> String {
 }
 
 /// Build a full-year PSM3 CSV string with a single-row override for rejection tests.
-fn build_full_year_csv_with_override(
-    step_minutes: u32,
-    is_leap: bool,
-    ovr: Override,
-) -> String {
+fn build_full_year_csv_with_override(step_minutes: u32, is_leap: bool, ovr: Override) -> String {
     build_full_year_csv_inner(step_minutes, is_leap, Some(ovr))
 }
 
-fn build_full_year_csv_inner(
-    step_minutes: u32,
-    is_leap: bool,
-    ovr: Option<Override>,
-) -> String {
+fn build_full_year_csv_inner(step_minutes: u32, is_leap: bool, ovr: Option<Override>) -> String {
     use std::fmt::Write;
 
     let days_in_month: [u32; 12] = if is_leap {

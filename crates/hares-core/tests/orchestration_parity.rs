@@ -559,10 +559,10 @@ fn hvac_heating_energy_reaches_thermal_solver() {
     // Dwelling B: same conditions but we'll clear equipment (no heating)
     write_synthetic_toml(&path_unheated, -10.0, "electricity", 30.0, 600);
 
-    let mut dwelling_heated = Dwelling::from_toml_config(&path_heated)
-        .expect("heated dwelling must load");
-    let mut dwelling_unheated = Dwelling::from_toml_config(&path_unheated)
-        .expect("unheated dwelling must load");
+    let mut dwelling_heated =
+        Dwelling::from_toml_config(&path_heated).expect("heated dwelling must load");
+    let mut dwelling_unheated =
+        Dwelling::from_toml_config(&path_unheated).expect("unheated dwelling must load");
     let _ = fs::remove_file(&path_heated);
     let _ = fs::remove_file(&path_unheated);
 
@@ -605,8 +605,7 @@ fn step_result_hvac_heating_w_positive_when_furnace_fires() {
     let path = unique_temp_toml("hvac-heat-w");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
-    let mut dwelling =
-        Dwelling::from_toml_config(&path).expect("must load");
+    let mut dwelling = Dwelling::from_toml_config(&path).expect("must load");
     let _ = fs::remove_file(&path);
 
     let mut ever_heating = false;
@@ -636,15 +635,16 @@ fn normal_operation_produces_no_dispatch_warnings() {
     let path = unique_temp_toml("no-warnings");
     write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
 
-    let mut dwelling =
-        Dwelling::from_toml_config(&path).expect("must load");
+    let mut dwelling = Dwelling::from_toml_config(&path).expect("must load");
     let _ = fs::remove_file(&path);
 
     for _ in 0..10 {
         dwelling.step().expect("step");
     }
 
-    let dispatch_warnings: Vec<&String> = dwelling.warnings.iter()
+    let dispatch_warnings: Vec<&String> = dwelling
+        .warnings
+        .iter()
         .filter(|w| w.contains("control target not found") || w.contains("control apply failed"))
         .collect();
     assert!(

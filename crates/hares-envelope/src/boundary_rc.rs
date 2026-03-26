@@ -322,7 +322,8 @@ pub fn assemble_building_rc(
         // Precomputed RC path (OCHRE LUT) takes priority over raw material layers.
         if !bd.precomputed_rc.is_empty() {
             let nodes_before = graph.next_layer_id;
-            if let Some((inner, outer)) = graph.build_precomputed_boundary(&bd.precomputed_rc, &bp) {
+            if let Some((inner, outer)) = graph.build_precomputed_boundary(&bd.precomputed_rc, &bp)
+            {
                 layer_info.insert(
                     bd_idx,
                     SurfaceLayerInfo {
@@ -338,21 +339,39 @@ pub fn assemble_building_rc(
             let r_effective = if same_zone { r_layers / 2.0 } else { r_layers };
             let r_total = r_effective
                 + bd.r_film_interior_m2_k_w
-                + if same_zone { 0.0 } else { bd.r_film_exterior_m2_k_w };
-            debug_assert!(r_total > 0.0, "boundary {bd_idx}: precomputed R_total must be > 0");
+                + if same_zone {
+                    0.0
+                } else {
+                    bd.r_film_exterior_m2_k_w
+                };
+            debug_assert!(
+                r_total > 0.0,
+                "boundary {bd_idx}: precomputed R_total must be > 0"
+            );
             let cap_total: f64 = bd
                 .precomputed_rc
                 .iter()
                 .map(|l| l.capacitance_kj_m2_k * 1000.0 * bd.area_m2)
                 .sum();
-            debug_assert!(cap_total >= 0.0, "boundary {bd_idx}: capacitance must be >= 0");
-            let inner_node = if n_nodes > 0 { Some(NodeId(nodes_before)) } else { None };
+            debug_assert!(
+                cap_total >= 0.0,
+                "boundary {bd_idx}: capacitance must be >= 0"
+            );
+            let inner_node = if n_nodes > 0 {
+                Some(NodeId(nodes_before))
+            } else {
+                None
+            };
             let r_zone_to_inner = if n_nodes > 0 {
-                let r_inner_half = bd.precomputed_rc.first()
+                let r_inner_half = bd
+                    .precomputed_rc
+                    .first()
                     .map(|l| l.resistance_m2_k_w / 2.0)
                     .unwrap_or(0.0);
                 Some(bd.r_film_interior_m2_k_w + r_inner_half)
-            } else { None };
+            } else {
+                None
+            };
             boundary_diagnostics.push(BoundaryDiagnostic {
                 boundary_idx: bd_idx,
                 ua_w_per_k: bd.area_m2 / r_total.max(1e-6),
@@ -398,8 +417,15 @@ pub fn assemble_building_rc(
             let r_effective = if same_zone { r_layers / 2.0 } else { r_layers };
             let r_total = r_effective
                 + bd.r_film_interior_m2_k_w
-                + if same_zone { 0.0 } else { bd.r_film_exterior_m2_k_w };
-            debug_assert!(r_total > 0.0, "boundary {bd_idx}: material-layer R_total must be > 0");
+                + if same_zone {
+                    0.0
+                } else {
+                    bd.r_film_exterior_m2_k_w
+                };
+            debug_assert!(
+                r_total > 0.0,
+                "boundary {bd_idx}: material-layer R_total must be > 0"
+            );
             let cap_total: f64 = valid_layers
                 .iter()
                 .map(|l| {
@@ -407,13 +433,23 @@ pub fn assemble_building_rc(
                     l.density_kg_m3 * l.specific_heat_j_kg_k * l.thickness_m * a
                 })
                 .sum();
-            debug_assert!(cap_total >= 0.0, "boundary {bd_idx}: capacitance must be >= 0");
-            let inner_node = if n_nodes > 0 { Some(NodeId(nodes_before)) } else { None };
+            debug_assert!(
+                cap_total >= 0.0,
+                "boundary {bd_idx}: capacitance must be >= 0"
+            );
+            let inner_node = if n_nodes > 0 {
+                Some(NodeId(nodes_before))
+            } else {
+                None
+            };
             let r_zone_to_inner = if n_nodes > 0 {
                 let inner_layer = valid_layers[0];
-                let k = parallel_path_conductivity(inner_layer.conductivity_w_m_k, bd.framing_factor);
+                let k =
+                    parallel_path_conductivity(inner_layer.conductivity_w_m_k, bd.framing_factor);
                 Some(bd.r_film_interior_m2_k_w + inner_layer.thickness_m / (2.0 * k))
-            } else { None };
+            } else {
+                None
+            };
             boundary_diagnostics.push(BoundaryDiagnostic {
                 boundary_idx: bd_idx,
                 ua_w_per_k: bd.area_m2 / r_total.max(1e-6),
@@ -436,7 +472,10 @@ pub fn assemble_building_rc(
             // (the RC graph also doesn't add films separately here).
             let r_total =
                 bd.fallback_r_m2_k_w + bd.r_film_interior_m2_k_w + bd.r_film_exterior_m2_k_w;
-            debug_assert!(r_total > 0.0, "boundary {bd_idx}: fallback R_total must be > 0");
+            debug_assert!(
+                r_total > 0.0,
+                "boundary {bd_idx}: fallback R_total must be > 0"
+            );
             let r_ohm = r_total.max(1e-6) / bd.area_m2;
             graph.add_resistance(interior_node, exterior_node, r_ohm);
             boundary_diagnostics.push(BoundaryDiagnostic {
@@ -654,8 +693,8 @@ impl RcGraphState {
         let inner = effective_layers[0];
         let inner_area = inner.effective_area(params.boundary_area);
         let k_inner = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
-        let r_int = params.r_film_interior / inner_area
-            + inner.thickness_m / (2.0 * k_inner * inner_area);
+        let r_int =
+            params.r_film_interior / inner_area + inner.thickness_m / (2.0 * k_inner * inner_area);
         self.add_resistance(params.interior_node, layer_nodes[0], r_int);
 
         // Adjacent layer connections.
@@ -666,8 +705,7 @@ impl RcGraphState {
             let aj = lj.effective_area(params.boundary_area);
             let ki = parallel_path_conductivity(li.conductivity_w_m_k, ff);
             let kj = parallel_path_conductivity(lj.conductivity_w_m_k, ff);
-            let r = li.thickness_m / (2.0 * ki * ai)
-                + lj.thickness_m / (2.0 * kj * aj);
+            let r = li.thickness_m / (2.0 * ki * ai) + lj.thickness_m / (2.0 * kj * aj);
             self.add_resistance(layer_nodes[i], layer_nodes[i + 1], r);
         }
 
@@ -1569,7 +1607,10 @@ mod tests {
         let k_eff = parallel_path_conductivity(0.04, Some(0.25));
         let expected = 0.25 * SOFTWOOD_CONDUCTIVITY_W_M_K + 0.75 * 0.04;
         assert!((k_eff - expected).abs() < 1e-12);
-        assert!(k_eff > 0.04, "framing should increase effective conductivity");
+        assert!(
+            k_eff > 0.04,
+            "framing should increase effective conductivity"
+        );
     }
 
     #[test]
@@ -1580,10 +1621,12 @@ mod tests {
         //                   R_layer = 0.089 / 0.066 = 1.348 m²·K/W
         // Effective R reduced by ~39%
         let layer = make_layer(0.089, 0.04, 50.0, 840.0, 10.0);
-        let caps = vec![derive_zone_capacitances(&[ZoneInput {
-            floor_area_m2: Some(100.0),
-            volume_m3: Some(250.0),
-        }])[0]];
+        let caps = vec![
+            derive_zone_capacitances(&[ZoneInput {
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+            }])[0],
+        ];
 
         // Without framing
         let bd_no_ff = BoundaryInput {

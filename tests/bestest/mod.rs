@@ -3,7 +3,7 @@ mod reference_bands;
 
 use std::collections::BTreeMap;
 
-use cases::{core_cases, extended_cases, BestestCase};
+use cases::{BestestCase, core_cases, extended_cases};
 use hares_core::Dwelling;
 use reference_bands::{BestestMetric, ReferenceBand, core_reference_bands};
 
@@ -116,7 +116,12 @@ fn run_case(case: &BestestCase) -> CaseObservation {
     let results = dwelling
         .simulate()
         .unwrap_or_else(|err| panic!("simulation failed for BESTEST case {}: {err}", case.id));
-    eprintln!("[bestest] case={} simulated {} steps in {:?}", case.id, results.steps.len(), t1.elapsed());
+    eprintln!(
+        "[bestest] case={} simulated {} steps in {:?}",
+        case.id,
+        results.steps.len(),
+        t1.elapsed()
+    );
 
     let dt_hours = case.timestep_seconds as f64 / 3600.0;
     let mut max_temp = f64::NEG_INFINITY;

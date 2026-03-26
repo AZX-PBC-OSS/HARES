@@ -127,7 +127,10 @@ impl std::fmt::Debug for StateSpaceModel {
             .field("b_eff", &self.b_eff)
             .field("c", &self.c)
             .field("d", &self.d)
-            .field("max_discrete_eigenvalue_magnitude", &self.max_discrete_eigenvalue_magnitude)
+            .field(
+                "max_discrete_eigenvalue_magnitude",
+                &self.max_discrete_eigenvalue_magnitude,
+            )
             .finish()
     }
 }
@@ -1663,7 +1666,17 @@ mod tests {
 
         // Solve for input_index=1 to hit y_target
         let solved_u = model
-            .solve_for_scalar_input_coupled(&x, &u, y_target, 0, 1, &CouplingData { lu: &lu, couplings: &couplings })
+            .solve_for_scalar_input_coupled(
+                &x,
+                &u,
+                y_target,
+                0,
+                1,
+                &CouplingData {
+                    lu: &lu,
+                    couplings: &couplings,
+                },
+            )
             .expect("coupled solve should succeed");
 
         // Step with the solved input and verify output matches target

@@ -16,6 +16,8 @@ pub enum HaresError {
     Io(String),
     #[error("control error: {0}")]
     Control(String),
+    #[error("dwelling error: {0}")]
+    Dwelling(String),
     #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]
     InvariantViolation {
         check_name: String,

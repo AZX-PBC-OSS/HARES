@@ -668,8 +668,7 @@ impl CoolingCore {
         self.telemetry.set("fan_kw", fan_kw);
         self.telemetry
             .set("supply_temp_c", self.hvac.supply_air_temp_c);
-        self.telemetry
-            .set("apparatus_dew_point_c", self.last_adp_c);
+        self.telemetry.set("apparatus_dew_point_c", self.last_adp_c);
         self.telemetry.set("bypass_factor", self.last_bypass_factor);
 
         Ok(())

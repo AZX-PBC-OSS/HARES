@@ -61,10 +61,7 @@ fn psychrometric_round_trip() {
 
     // Forward: W → RH
     let rh = relative_humidity(t_db_c, w_original, p_pa);
-    assert!(
-        (0.0..=1.0).contains(&rh),
-        "RH must be in [0,1], got {rh}"
-    );
+    assert!((0.0..=1.0).contains(&rh), "RH must be in [0,1], got {rh}");
 
     // Backward: RH → W using saturation pressure
     let p_sat = saturation_pressure_pa(t_db_c);
@@ -551,7 +548,10 @@ fn psychrometric_multi_point_round_trip() {
 
             // Enthalpy must be finite and monotonically increase with W at fixed T
             let h = moist_air_enthalpy(t_db_c, w);
-            assert!(h.is_finite(), "enthalpy must be finite at T={t_db_c}°C W={w:.6}");
+            assert!(
+                h.is_finite(),
+                "enthalpy must be finite at T={t_db_c}°C W={w:.6}"
+            );
 
             checked += 1;
         }

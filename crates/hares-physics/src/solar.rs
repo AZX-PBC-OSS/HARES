@@ -355,8 +355,7 @@ pub fn perez_tilted_irradiance(
     let direct = (dni * aoi_rad.cos()).max(0.0);
 
     // Ground-reflected (same as isotropic)
-    let reflected =
-        (ghi * ground_albedo * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
+    let reflected = (ghi * ground_albedo * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
 
     SurfaceIrradiance {
         surface_id,
@@ -395,8 +394,7 @@ pub fn isotropic_tilted_irradiance(
 
     let direct = (dni * aoi_rad.cos()).max(0.0);
     let diffuse = (dhi * (1.0 + tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
-    let reflected =
-        (ghi * ground_albedo * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
+    let reflected = (ghi * ground_albedo * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
 
     SurfaceIrradiance {
         surface_id,
@@ -740,7 +738,18 @@ mod tests {
 
     #[test]
     fn nighttime_irradiance_is_exactly_zero() {
-        let irr = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 90.0, 180.0, 45.0, 180.0, 1, DEFAULT_GROUND_ALBEDO);
+        let irr = perez_tilted_irradiance(
+            0,
+            0.0,
+            0.0,
+            0.0,
+            90.0,
+            180.0,
+            45.0,
+            180.0,
+            1,
+            DEFAULT_GROUND_ALBEDO,
+        );
         assert_eq!(irr.direct_w_m2, 0.0);
         assert_eq!(irr.diffuse_w_m2, 0.0);
         assert_eq!(irr.reflected_w_m2, 0.0);
@@ -750,7 +759,8 @@ mod tests {
     fn isotropic_horizontal_receives_full_diffuse() {
         // Liu & Jordan (1963): horizontal surface (tilt=0°) receives full diffuse sky
         // and zero ground-reflected. Diffuse = DHI * (1+cos(0))/2 = DHI
-        let irr = isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 0.0, 0.0, DEFAULT_GROUND_ALBEDO);
+        let irr =
+            isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 0.0, 0.0, DEFAULT_GROUND_ALBEDO);
         assert!(
             (irr.diffuse_w_m2 - 200.0).abs() < 0.01,
             "horizontal diffuse: {}",
@@ -767,7 +777,8 @@ mod tests {
     fn isotropic_vertical_receives_half_diffuse() {
         // Liu & Jordan (1963): vertical surface (tilt=90°) receives half diffuse
         // Diffuse = DHI * (1+cos(90°))/2 = DHI/2
-        let irr = isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 45.0, 90.0, DEFAULT_GROUND_ALBEDO);
+        let irr =
+            isotropic_tilted_irradiance(0, 500.0, 300.0, 200.0, 45.0, 90.0, DEFAULT_GROUND_ALBEDO);
         assert!(
             (irr.diffuse_w_m2 - 100.0).abs() < 0.5,
             "vertical diffuse: {}",
@@ -816,7 +827,18 @@ mod tests {
         let surf_az = 180.0;
         let doy = 172; // summer solstice
 
-        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
+        let perez = perez_tilted_irradiance(
+            0,
+            ghi,
+            dni,
+            dhi,
+            zenith,
+            solar_az,
+            tilt,
+            surf_az,
+            doy,
+            DEFAULT_GROUND_ALBEDO,
+        );
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
         let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
 
@@ -841,7 +863,18 @@ mod tests {
         let surf_az = 180.0;
         let doy = 80;
 
-        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
+        let perez = perez_tilted_irradiance(
+            0,
+            ghi,
+            dni,
+            dhi,
+            zenith,
+            solar_az,
+            tilt,
+            surf_az,
+            doy,
+            DEFAULT_GROUND_ALBEDO,
+        );
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
         let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
 
@@ -865,8 +898,18 @@ mod tests {
         let surf_az = 180.0;
         let doy = 172;
 
-        let result =
-            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
+        let result = perez_tilted_irradiance(
+            0,
+            ghi,
+            dni,
+            dhi,
+            zenith,
+            solar_az,
+            tilt,
+            surf_az,
+            doy,
+            DEFAULT_GROUND_ALBEDO,
+        );
         // Should not panic and all components should be >= 0
         assert!(result.direct_w_m2 >= 0.0);
         assert!(result.diffuse_w_m2 >= 0.0);
@@ -884,8 +927,10 @@ mod tests {
         let surf_az = 180.0;
         let doy = 172;
 
-        let bare = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.2);
-        let snow = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.8);
+        let bare =
+            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.2);
+        let snow =
+            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, 0.8);
 
         assert!(
             snow.reflected_w_m2 > bare.reflected_w_m2,
@@ -948,7 +993,11 @@ mod tests {
         // 21 March at 40°N, 0° longitude.  Scan morning minutes.
         let lat = 40.0;
         let lon = 0.0;
-        let day = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 3, 21, 0, 0, 0).single().unwrap();
+        let day = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 3, 21, 0, 0, 0)
+            .single()
+            .unwrap();
 
         // Find first minute where sun is just above horizon.
         let sunrise_pos = (0u32..(12 * 60))
@@ -988,7 +1037,11 @@ mod tests {
         let expected_deg = 90.0 - lat + 23.44; // ≈ 53.44°
 
         // Scan full day and find peak altitude (true solar noon).
-        let day = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 6, 21, 0, 0, 0).single().unwrap();
+        let day = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 21, 0, 0, 0)
+            .single()
+            .unwrap();
         let max_altitude = (0u32..(24 * 60))
             .map(|m| {
                 let dt = day + chrono::Duration::minutes(m as i64);
@@ -1073,7 +1126,10 @@ mod tests {
         // Lat 39.742476°N, Lon -105.1786° (Denver)
         // SPA result: zenith = 50.11162°, azimuth = 194.34024°
         // Spencer model should be within ±1.5° of SPA
-        let dt = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2003, 10, 17, 19, 30, 30).unwrap();
+        let dt = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2003, 10, 17, 19, 30, 30)
+            .unwrap();
         let pos = solar_position(39.742476, -105.1786, dt);
         let zenith = 90.0 - pos.altitude_deg;
         assert!(
@@ -1122,7 +1178,11 @@ mod tests {
     fn summer_solstice_daylight_exceeds_18h_at_60n() {
         let lat = 60.0;
         let lon = 0.0;
-        let day = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 6, 21, 0, 0, 0).single().unwrap();
+        let day = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 21, 0, 0, 0)
+            .single()
+            .unwrap();
 
         let daylight_minutes = (0u32..(24 * 60))
             .filter(|&m| {
@@ -1196,7 +1256,18 @@ mod tests {
     fn perez_nighttime_zenith_above_90_returns_zero() {
         // When solar zenith > 90 degrees (sun below horizon), GHI/DNI/DHI
         // should be zero and the model must return zero for all components
-        let result = perez_tilted_irradiance(0, 0.0, 0.0, 0.0, 100.0, 180.0, 30.0, 180.0, 172, DEFAULT_GROUND_ALBEDO);
+        let result = perez_tilted_irradiance(
+            0,
+            0.0,
+            0.0,
+            0.0,
+            100.0,
+            180.0,
+            30.0,
+            180.0,
+            172,
+            DEFAULT_GROUND_ALBEDO,
+        );
         assert_eq!(result.direct_w_m2, 0.0);
         assert_eq!(result.diffuse_w_m2, 0.0);
         assert_eq!(result.reflected_w_m2, 0.0);
@@ -1207,8 +1278,18 @@ mod tests {
         // Zenith angles between 87-90 degrees should fall back to isotropic
         // without producing NaN or infinity
         for zenith in [87.5, 88.0, 89.0, 89.5, 89.9] {
-            let result =
-                perez_tilted_irradiance(0, 50.0, 20.0, 30.0, zenith, 180.0, 30.0, 180.0, 172, DEFAULT_GROUND_ALBEDO);
+            let result = perez_tilted_irradiance(
+                0,
+                50.0,
+                20.0,
+                30.0,
+                zenith,
+                180.0,
+                30.0,
+                180.0,
+                172,
+                DEFAULT_GROUND_ALBEDO,
+            );
             assert!(
                 result.direct_w_m2.is_finite(),
                 "direct NaN/Inf at zenith={zenith}"
@@ -1244,8 +1325,18 @@ mod tests {
         let surf_az = 180.0;
         let doy = 172;
 
-        let result =
-            perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
+        let result = perez_tilted_irradiance(
+            0,
+            ghi,
+            dni,
+            dhi,
+            zenith,
+            solar_az,
+            tilt,
+            surf_az,
+            doy,
+            DEFAULT_GROUND_ALBEDO,
+        );
 
         // Direct beam on a 30-degree tilted surface facing the sun at 30-degree zenith
         // should be approximately DNI * cos(0) = 700 (AOI ~ 0)
@@ -1304,7 +1395,18 @@ mod tests {
         let surf_az = 180.0;
         let doy = 172;
 
-        let perez = perez_tilted_irradiance(0, ghi, dni, dhi, zenith, solar_az, tilt, surf_az, doy, DEFAULT_GROUND_ALBEDO);
+        let perez = perez_tilted_irradiance(
+            0,
+            ghi,
+            dni,
+            dhi,
+            zenith,
+            solar_az,
+            tilt,
+            surf_az,
+            doy,
+            DEFAULT_GROUND_ALBEDO,
+        );
         let aoi = angle_of_incidence(tilt, surf_az, 90.0 - zenith, solar_az);
         let iso = isotropic_tilted_irradiance(0, ghi, dni, dhi, aoi, tilt, DEFAULT_GROUND_ALBEDO);
 
@@ -1325,7 +1427,11 @@ mod tests {
         // Equinox at 40°N, 0° longitude: solar path is symmetric about solar noon.
         let lat = 40.0;
         let lon = 0.0;
-        let day = FixedOffset::east_opt(0).unwrap().with_ymd_and_hms(2026, 3, 20, 0, 0, 0).single().unwrap();
+        let day = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 3, 20, 0, 0, 0)
+            .single()
+            .unwrap();
 
         let ghi = 700.0_f64;
         let dni = 800.0_f64;
@@ -1879,7 +1985,10 @@ mod tests {
         assert!(t > 0.0 && t < 0.60, "transmittance {t:.4}");
         assert!(n_i > 0.0 && n_i < 1.0, "radiation_frac {n_i:.4}");
         // Single-pane: transmittance should be majority of SHGC.
-        assert!(t > 0.60 * 0.5, "single-pane transmittance should be >50% of SHGC");
+        assert!(
+            t > 0.60 * 0.5,
+            "single-pane transmittance should be >50% of SHGC"
+        );
     }
 
     /// Debug test: POA irradiance on 6 windows (N/S/E/W orientation) at Denver May 5 noon.
@@ -1950,8 +2059,13 @@ mod tests {
 
             eprintln!(
                 "{:8} (az={:3.0}°): direct={:6.1}, diffuse={:6.1}, reflected={:5.1}, total={:6.1} W/m², AOI={:5.1}°",
-                name, azimuth,
-                irr.direct_w_m2, irr.diffuse_w_m2, irr.reflected_w_m2, total_poa_window, aoi
+                name,
+                azimuth,
+                irr.direct_w_m2,
+                irr.diffuse_w_m2,
+                irr.reflected_w_m2,
+                total_poa_window,
+                aoi
             );
         }
 

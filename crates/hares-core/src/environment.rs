@@ -257,7 +257,11 @@ impl EnvironmentManager {
     /// Used to add PV array orientations that don't correspond to an envelope
     /// boundary. Deduplicates by `surface_id`.
     pub fn register_surface(&mut self, geom: SurfaceGeometry) {
-        if !self.surfaces.iter().any(|s| s.surface_id == geom.surface_id) {
+        if !self
+            .surfaces
+            .iter()
+            .any(|s| s.surface_id == geom.surface_id)
+        {
             self.surfaces.push(geom);
         }
     }
@@ -1532,8 +1536,11 @@ mod tests {
         )
         .unwrap();
 
-        let clock =
-            SimClock::new(start, ChronoDuration::seconds(3600), ChronoDuration::hours(1));
+        let clock = SimClock::new(
+            start,
+            ChronoDuration::seconds(3600),
+            ChronoDuration::hours(1),
+        );
 
         // Get baseline irradiance on first surface.
         let baseline = env.update(&clock, &[]);
@@ -1836,6 +1843,5 @@ mod tests {
                 "expected InvalidTimezone error, got {result:?}"
             );
         }
-
     }
 }

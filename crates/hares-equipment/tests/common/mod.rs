@@ -2,7 +2,6 @@
 ///
 /// Provides factory functions for EnvironmentState, EquipmentConfig, and PortSlots
 /// with sensible defaults and chainable setters.
-
 use std::collections::HashMap;
 use std::time::Duration;
 

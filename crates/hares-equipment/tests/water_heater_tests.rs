@@ -248,8 +248,14 @@ fn draw_cools_tank_proportionally() {
          smaller draw (0.01 kg/s → {temp_small:.4}°C)"
     );
     // Both draws must produce a detectable cooling from the 52°C start.
-    assert!(temp_small < 52.0, "small draw must cool below 52°C; got {temp_small:.4}°C");
-    assert!(temp_large < 52.0, "large draw must cool below 52°C; got {temp_large:.4}°C");
+    assert!(
+        temp_small < 52.0,
+        "small draw must cool below 52°C; got {temp_small:.4}°C"
+    );
+    assert!(
+        temp_large < 52.0,
+        "large draw must cool below 52°C; got {temp_large:.4}°C"
+    );
 }
 
 // ── Test 5: gas_wh_consumes_gas_not_electricity ───────────────────────────────

@@ -424,7 +424,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .path(&["BuildingConstruction", "NumberofConditionedFloors"])
         .and_then(|node| parse_value_with_units(Some(node), ValueKind::Raw));
     let floors_above_grade = summary
-        .path(&["BuildingConstruction", "NumberofConditionedFloorsAboveGrade"])
+        .path(&[
+            "BuildingConstruction",
+            "NumberofConditionedFloorsAboveGrade",
+        ])
         .and_then(|node| parse_value_with_units(Some(node), ValueKind::Raw));
 
     let residential_facility_type = summary
@@ -538,8 +541,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         for bd in &mut boundaries {
             if bd.boundary_type == BoundaryType::FoundationWall {
                 bd.construction_type = Some(fnd_name.clone());
-                let (insulation, area_scale) =
-                    extract_foundation_wall_insulation(details, &bd.id);
+                let (insulation, area_scale) = extract_foundation_wall_insulation(details, &bd.id);
                 bd.insulation_details = insulation;
                 bd.area_m2 *= area_scale;
             }
@@ -569,7 +571,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // Auto-generate interior wall boundary (partition thermal mass).
     // Area = conditioned floor area, same-zone (Conditioned→Conditioned).
-    if let Some(cond_zone) = zones.values().find(|z| z.zone_type == ZoneType::Conditioned) {
+    if let Some(cond_zone) = zones
+        .values()
+        .find(|z| z.zone_type == ZoneType::Conditioned)
+    {
         if let Some(area) = cond_zone.floor_area_m2 {
             if area > 0.0 {
                 boundaries.push(Boundary {
@@ -654,7 +659,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // OCHRE only creates thermal zones for Conditioned, Attic, Garage, Foundation.
     let mut zones_vec: Vec<Zone> = zones
         .into_values()
-        .filter(|z| !matches!(z.zone_type, ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent))
+        .filter(|z| {
+            !matches!(
+                z.zone_type,
+                ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent
+            )
+        })
         .collect();
     zones_vec.sort_by_key(|zone| zone_sort_key(&zone.zone_type));
 
@@ -908,16 +918,10 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
 
     // Solar absorptance and emittance from HPXML, validated to [0, 1].
     // Ref: OCHRE hpxml.py:155-158, OCHRE Envelope.py:222.
-    let solar_absorptance = parse_value_with_units(
-        node.child("SolarAbsorptance"),
-        ValueKind::Raw,
-    )
-    .map(|v| v.clamp(0.0, 1.0));
-    let emittance = parse_value_with_units(
-        node.child("Emittance"),
-        ValueKind::Raw,
-    )
-    .map(|v| v.clamp(0.0, 1.0));
+    let solar_absorptance = parse_value_with_units(node.child("SolarAbsorptance"), ValueKind::Raw)
+        .map(|v| v.clamp(0.0, 1.0));
+    let emittance =
+        parse_value_with_units(node.child("Emittance"), ValueKind::Raw).map(|v| v.clamp(0.0, 1.0));
 
     // Extract construction metadata for OCHRE LUT matching.
     let (construction_type, finish_type) = extract_construction_metadata(node, &boundary_type);
@@ -928,13 +932,10 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
     // Ref: OCHRE hpxml.py pitch2deg().
     let tilt_deg = match boundary_type {
         BoundaryType::Roof => {
-            let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw)
-                .unwrap_or(0.0);
+            let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw).unwrap_or(0.0);
             Some((pitch / 12.0).atan().to_degrees())
         }
-        BoundaryType::Wall | BoundaryType::FoundationWall | BoundaryType::RimJoist => {
-            Some(90.0)
-        }
+        BoundaryType::Wall | BoundaryType::FoundationWall | BoundaryType::RimJoist => Some(90.0),
         BoundaryType::Floor => Some(0.0),
         BoundaryType::Slab => Some(180.0),
         BoundaryType::Door => Some(90.0),
@@ -1075,22 +1076,17 @@ fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
 /// - Insulation details: "Half R{n}", "R{n}", or "Uninsulated".
 ///
 /// `details` is the BuildingDetails node; `wall_id` identifies which FoundationWall.
-fn extract_foundation_wall_insulation(
-    details: &XmlNode,
-    wall_id: &str,
-) -> (Option<String>, f64) {
+fn extract_foundation_wall_insulation(details: &XmlNode, wall_id: &str) -> (Option<String>, f64) {
     // Find the FoundationWall element matching this boundary's ID.
     let wall_node = details
         .path(&["Enclosure", "FoundationWalls"])
         .and_then(|group| {
-            group
-                .children_named("FoundationWall")
-                .find(|n| {
-                    n.child("SystemIdentifier")
-                        .and_then(|si| si.attrs.get("id"))
-                        .map(|id| id == wall_id)
-                        .unwrap_or(false)
-                })
+            group.children_named("FoundationWall").find(|n| {
+                n.child("SystemIdentifier")
+                    .and_then(|si| si.attrs.get("id"))
+                    .map(|id| id == wall_id)
+                    .unwrap_or(false)
+            })
         });
     let Some(node) = wall_node else {
         return (Some("Uninsulated".to_string()), 1.0);
@@ -1115,11 +1111,7 @@ fn extract_foundation_wall_insulation(
     }
     let r_ip: f64 = insulation_layers
         .iter()
-        .filter_map(|layer| {
-            layer
-                .child("NominalRValue")
-                .and_then(|n| n.text_as_f64())
-        })
+        .filter_map(|layer| layer.child("NominalRValue").and_then(|n| n.text_as_f64()))
         .sum();
 
     let insulation_details = if r_ip > 0.0 {
@@ -1327,9 +1319,7 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
         _ => {
             // If there's a Value child element, try that path too
             let value_node = vr.child("Value").and_then(|n| n.text_as_f64());
-            let unit_node = vr
-                .child("UnitofMeasure")
-                .map(|n| normalize_ascii(&n.text));
+            let unit_node = vr.child("UnitofMeasure").map(|n| normalize_ascii(&n.text));
             match (value_node, unit_node.as_deref()) {
                 (Some(v), Some("achnatural")) => (Some(v), None),
                 (Some(v), Some("sla")) => (None, Some(v)),
@@ -1629,7 +1619,10 @@ fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
         }
         Some(_) => value,
         None => {
-            tracing::debug!(value, "Area value has no units attribute; assuming ft² and converting to m²");
+            tracing::debug!(
+                value,
+                "Area value has no units attribute; assuming ft² and converting to m²"
+            );
             conv::area_ft2_to_m2(value)
         }
     }
@@ -1637,12 +1630,13 @@ fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
 
 fn convert_volume_to_m3(value: f64, units: Option<&str>) -> f64 {
     match units {
-        Some("ft3") | Some("ft^3") | Some("cubic feet") => {
-            conv::volume_ft3_to_m3(value)
-        }
+        Some("ft3") | Some("ft^3") | Some("cubic feet") => conv::volume_ft3_to_m3(value),
         Some(_) => value,
         None => {
-            tracing::warn!(value, "Volume value has no units attribute; assuming ft³ and converting to m³");
+            tracing::warn!(
+                value,
+                "Volume value has no units attribute; assuming ft³ and converting to m³"
+            );
             conv::volume_ft3_to_m3(value)
         }
     }
@@ -1655,7 +1649,10 @@ fn convert_u_to_w_m2_k(value: f64, units: Option<&str>) -> f64 {
         }
         Some(_) => value,
         None => {
-            tracing::debug!(value, "U-value has no units attribute; assuming BTU/(hr*ft2*F) and converting to W/(m2*K)");
+            tracing::debug!(
+                value,
+                "U-value has no units attribute; assuming BTU/(hr*ft2*F) and converting to W/(m2*K)"
+            );
             conv::u_value_ip_to_si(value)
         }
     }
@@ -1668,7 +1665,10 @@ fn convert_r_to_m2_k_w(value: f64, units: Option<&str>) -> f64 {
         }
         Some(_) => value,
         None => {
-            tracing::debug!(value, "R-value has no units attribute; assuming hr*ft2*F/BTU and converting to m2*K/W");
+            tracing::debug!(
+                value,
+                "R-value has no units attribute; assuming hr*ft2*F/BTU and converting to m2*K/W"
+            );
             conv::r_value_ip_to_si(value)
         }
     }
@@ -1676,9 +1676,7 @@ fn convert_r_to_m2_k_w(value: f64, units: Option<&str>) -> f64 {
 
 fn convert_conductivity_to_w_m_k(value: f64, units: Option<&str>) -> f64 {
     match units {
-        Some("btu/hr-ft-f") | Some("btu/(h*ft*f)") => {
-            conv::conductivity_btu_h_ft_f_to_w_m_k(value)
-        }
+        Some("btu/hr-ft-f") | Some("btu/(h*ft*f)") => conv::conductivity_btu_h_ft_f_to_w_m_k(value),
         Some("btu-in/hr-ft2-f") | Some("btu in/hr ft2 f") | Some("btu*in/(h*ft2*f)") => {
             conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value)
         }
@@ -1692,7 +1690,10 @@ fn convert_length_to_m(value: f64, units: Option<&str>) -> f64 {
         Some("ft") | Some("feet") => conv::length_ft_to_m(value),
         Some(_) => value,
         None => {
-            tracing::debug!(value, "Length value has no units attribute; assuming feet and converting to meters");
+            tracing::debug!(
+                value,
+                "Length value has no units attribute; assuming feet and converting to meters"
+            );
             conv::length_ft_to_m(value)
         }
     }
@@ -1700,9 +1701,7 @@ fn convert_length_to_m(value: f64, units: Option<&str>) -> f64 {
 
 fn convert_density_to_kg_m3(value: f64, units: Option<&str>) -> f64 {
     match units {
-        Some("lb/ft3") | Some("lb/ft^3") | Some("lbm/ft3") => {
-            conv::density_lb_ft3_to_kg_m3(value)
-        }
+        Some("lb/ft3") | Some("lb/ft^3") | Some("lbm/ft3") => conv::density_lb_ft3_to_kg_m3(value),
         _ => value,
     }
 }
@@ -1722,7 +1721,10 @@ fn convert_temperature_to_c(value: f64, units: Option<&str>) -> f64 {
         Some("C") | Some("c") | Some("degC") | Some("degc") | Some("celsius") => value,
         Some(_) => value,
         None => {
-            tracing::debug!(value, "Temperature value has no units attribute; assuming F and converting to C");
+            tracing::debug!(
+                value,
+                "Temperature value has no units attribute; assuming F and converting to C"
+            );
             conv::temperature_f_to_c(value)
         }
     }
@@ -1779,10 +1781,7 @@ pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
         ZoneType::Attic
     } else if norm.contains("garage") {
         ZoneType::Garage
-    } else if norm.contains("foundation")
-        || norm.contains("basement")
-        || norm.contains("crawl")
-    {
+    } else if norm.contains("foundation") || norm.contains("basement") || norm.contains("crawl") {
         ZoneType::Foundation
     } else if norm == "ground" {
         ZoneType::Ground
@@ -1860,10 +1859,7 @@ fn compute_attic_volume(boundaries: &[Boundary], attic_floor_area_m2: Option<f64
         .filter(|b| {
             b.boundary_type == BoundaryType::Wall
                 && b.interior_zone.as_ref() == Some(&ZoneType::Attic)
-                && matches!(
-                    b.exterior_zone.as_ref(),
-                    Some(&ZoneType::Outdoor) | None
-                )
+                && matches!(b.exterior_zone.as_ref(), Some(&ZoneType::Outdoor) | None)
         })
         .map(|b| b.area_m2)
         .collect();
@@ -2079,7 +2075,8 @@ mod tests {
         assert!(
             (wall.area_m2 - expected_wall_area).abs() < 1.0e-4,
             "wall area should be net of window: got {}, expected {}",
-            wall.area_m2, expected_wall_area
+            wall.area_m2,
+            expected_wall_area
         );
 
         let layer = wall
@@ -2120,9 +2117,7 @@ mod tests {
         // Ceiling height: volume / floor_area
         let expected_floor_area_m2 = 2152.0 * 0.092_903_04;
         let expected_ceiling_height = expected_volume_m3 / expected_floor_area_m2;
-        assert!(
-            (building.ceiling_height_m.unwrap() - expected_ceiling_height).abs() < 1e-6,
-        );
+        assert!((building.ceiling_height_m.unwrap() - expected_ceiling_height).abs() < 1e-6,);
 
         // Conditioned zone should have volume derived from ceiling height × floor area
         let conditioned = building
@@ -2243,7 +2238,6 @@ mod tests {
         assert!(!ff.r_value_layers_m2_k_w.is_empty());
         let total_r: f64 = ff.r_value_layers_m2_k_w.iter().sum();
         assert!((total_r - 5.283).abs() < 0.01, "R-value: got {total_r}");
-
     }
 
     fn xml_with_window(window_xml: &str) -> String {
@@ -2356,10 +2350,7 @@ mod tests {
             fnd_wall.construction_type.as_deref(),
             Some("Unfinished Basement"),
         );
-        assert_eq!(
-            fnd_wall.insulation_details.as_deref(),
-            Some("Uninsulated"),
-        );
+        assert_eq!(fnd_wall.insulation_details.as_deref(), Some("Uninsulated"),);
     }
 
     #[test]
@@ -2439,7 +2430,10 @@ mod tests {
             "<Foundation>\n            <FoundationType><Basement><Conditioned>true</Conditioned></Basement></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
         );
         let building = parse_building(&xml).expect("parse should succeed");
-        assert_eq!(building.foundation_name.as_deref(), Some("Finished Basement"));
+        assert_eq!(
+            building.foundation_name.as_deref(),
+            Some("Finished Basement")
+        );
     }
 
     #[test]
@@ -2449,7 +2443,10 @@ mod tests {
             "<Foundation>\n            <FoundationType><Basement><Conditioned>false</Conditioned></Basement></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
         );
         let building = parse_building(&xml).expect("parse should succeed");
-        assert_eq!(building.foundation_name.as_deref(), Some("Unfinished Basement"));
+        assert_eq!(
+            building.foundation_name.as_deref(),
+            Some("Unfinished Basement")
+        );
     }
 
     #[test]
@@ -2466,7 +2463,10 @@ mod tests {
                 "<NumberofConditionedFloors>2</NumberofConditionedFloors>\n          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>\n        </BuildingConstruction>",
             );
         let building = parse_building(&xml).expect("parse should succeed");
-        assert_eq!(building.foundation_name.as_deref(), Some("Finished Basement"));
+        assert_eq!(
+            building.foundation_name.as_deref(),
+            Some("Finished Basement")
+        );
     }
 
     #[test]
@@ -2482,7 +2482,10 @@ mod tests {
                 "<NumberofConditionedFloors>1</NumberofConditionedFloors>\n          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>\n        </BuildingConstruction>",
             );
         let building = parse_building(&xml).expect("parse should succeed");
-        assert_eq!(building.foundation_name.as_deref(), Some("Unfinished Basement"));
+        assert_eq!(
+            building.foundation_name.as_deref(),
+            Some("Unfinished Basement")
+        );
     }
 
     #[test]
@@ -2499,7 +2502,10 @@ mod tests {
             );
         let building = parse_building(&xml).expect("parse should succeed");
         // Explicit Conditioned=false wins over floor count heuristic (which would say Finished).
-        assert_eq!(building.foundation_name.as_deref(), Some("Unfinished Basement"));
+        assert_eq!(
+            building.foundation_name.as_deref(),
+            Some("Unfinished Basement")
+        );
     }
 
     #[test]
@@ -2538,7 +2544,10 @@ mod tests {
             .iter()
             .find(|b| b.boundary_type == BoundaryType::Slab)
             .expect("slab expected");
-        assert_eq!(slab.insulation_details.as_deref(), Some("2ft R10 Perimeter"));
+        assert_eq!(
+            slab.insulation_details.as_deref(),
+            Some("2ft R10 Perimeter")
+        );
     }
 
     #[test]
@@ -2634,7 +2643,8 @@ mod tests {
         assert!(
             (gf.area_m2 - expected).abs() < 0.1,
             "garage furniture area: got {}, expected {}",
-            gf.area_m2, expected
+            gf.area_m2,
+            expected
         );
     }
 
@@ -2654,7 +2664,8 @@ mod tests {
         assert!(
             (ff.area_m2 - expected).abs() < 0.1,
             "foundation furniture area: got {}, expected {}",
-            ff.area_m2, expected
+            ff.area_m2,
+            expected
         );
     }
 
@@ -2665,7 +2676,10 @@ mod tests {
             .boundaries
             .iter()
             .find(|b| b.id == "attic_furniture");
-        assert!(attic_furn.is_none(), "attic should not have furniture boundary");
+        assert!(
+            attic_furn.is_none(),
+            "attic should not have furniture boundary"
+        );
     }
 
     #[test]
@@ -2769,7 +2783,8 @@ mod tests {
         assert!(
             (wall.area_m2 - original).abs() < 0.01,
             "wall area unchanged without windows: got {}, expected {}",
-            wall.area_m2, original
+            wall.area_m2,
+            original
         );
     }
 
@@ -2808,7 +2823,10 @@ mod tests {
             .iter()
             .find(|b| b.id == "foundation_furniture")
             .expect("foundation furniture expected");
-        assert_eq!(ff.lut_boundary_name.as_deref(), Some("Foundation Furniture"));
+        assert_eq!(
+            ff.lut_boundary_name.as_deref(),
+            Some("Foundation Furniture")
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
-use hares_core::{ActorConfig, ActorRegistry, Dwelling, DwellingConfig};
-use hares_equipment::config::ConfigValue;
+use hares_core::{ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingConfig};
+use hares_equipment::{BatteryLutType, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_io::{OutputFormat, SimulationConfig, output::metrics::MetricsCalculator};
 use hares_types::SurfaceIrradiance;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -18,7 +18,11 @@ use crate::conversions::batches_or_steps_to_polars_df;
 use crate::py_actor::PyActor;
 use crate::py_config::PySimulationConfig;
 use crate::py_control::PyControlSignal;
-use crate::py_equipment::PyEquipmentDescriptor;
+use crate::py_enums::PyLutType;
+use crate::py_equipment::{
+    PyBattery, PyEquipmentDescriptor, PyEv, PyPv, extract_charging_lut, extract_ocv_table,
+    extract_u_neg_table,
+};
 use crate::py_metrics::PySimulationMetrics;
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::extract_datetime;
@@ -286,6 +290,7 @@ pub struct PyDwelling {
     initial_state: Option<Vec<u8>>,
     initialized: bool,
     registry: ActorRegistry,
+    equipment_registry: EquipmentRegistry,
     zone_keys: Option<Vec<String>>,
 }
 
@@ -310,6 +315,7 @@ impl PyDwelling {
             initial_state: None,
             initialized: false,
             registry: ActorRegistry::new(),
+            equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
         })
     }
@@ -497,6 +503,246 @@ impl PyDwelling {
             .collect())
     }
 
+    pub fn add_battery(&mut self, battery: &PyBattery) -> PyResult<()> {
+        let mut raw_config = std::collections::HashMap::new();
+        raw_config.insert(
+            "capacity_kwh".to_string(),
+            hares_equipment::config::ConfigValue::Float(battery.capacity_kwh),
+        );
+        if let Some(v) = battery.max_charge_kw {
+            raw_config.insert(
+                "max_charge_kw".to_string(),
+                hares_equipment::config::ConfigValue::Float(v),
+            );
+        }
+        if let Some(v) = battery.max_discharge_kw {
+            raw_config.insert(
+                "max_discharge_kw".to_string(),
+                hares_equipment::config::ConfigValue::Float(v),
+            );
+        }
+
+        let config = hares_equipment::EquipmentConfig {
+            name: battery.name.clone(),
+            ochre_class: "Battery".to_string(),
+            raw_config,
+        };
+
+        let mut eq = self
+            .equipment_registry
+            .create("Battery", config)
+            .map_err(to_py_err)?;
+
+        if let Some(ref lut) = battery.charging_curve_lut {
+            eq.set_charging_curve_lut(Some(lut.clone()))
+                .map_err(to_py_err)?;
+        }
+
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling.add_equipment(eq);
+        Ok(())
+    }
+
+    pub fn add_pv(&mut self, pv: &PyPv) -> PyResult<()> {
+        let mut raw_config = std::collections::HashMap::new();
+        raw_config.insert(
+            "capacity_kw".to_string(),
+            hares_equipment::config::ConfigValue::Float(pv.capacity_kw),
+        );
+        raw_config.insert(
+            "tilt".to_string(),
+            hares_equipment::config::ConfigValue::Float(pv.tilt),
+        );
+        raw_config.insert(
+            "azimuth".to_string(),
+            hares_equipment::config::ConfigValue::Float(pv.azimuth),
+        );
+
+        let config = hares_equipment::EquipmentConfig {
+            name: pv.name.clone(),
+            ochre_class: "PV".to_string(),
+            raw_config,
+        };
+
+        let eq = self
+            .equipment_registry
+            .create("PV", config)
+            .map_err(to_py_err)?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling.add_equipment(eq);
+        Ok(())
+    }
+
+    pub fn add_ev(&mut self, ev: &PyEv) -> PyResult<()> {
+        let mut raw_config = std::collections::HashMap::new();
+        if let Some(v) = ev.capacity_kwh {
+            raw_config.insert(
+                "capacity_kwh".to_string(),
+                hares_equipment::config::ConfigValue::Float(v),
+            );
+        }
+        if let Some(v) = ev.max_charging_kw {
+            raw_config.insert(
+                "max_charging_kw".to_string(),
+                hares_equipment::config::ConfigValue::Float(v),
+            );
+        }
+
+        let config = hares_equipment::EquipmentConfig {
+            name: ev.name.clone(),
+            ochre_class: "EV".to_string(),
+            raw_config,
+        };
+
+        let mut eq = self
+            .equipment_registry
+            .create("EV", config)
+            .map_err(to_py_err)?;
+
+        if let Some(ref lut) = ev.charging_curve_lut {
+            eq.set_charging_curve_lut(Some(lut.clone()))
+                .map_err(to_py_err)?;
+        }
+
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling.add_equipment(eq);
+        Ok(())
+    }
+
+    pub fn remove_equipment(&mut self, name: &str) -> PyResult<()> {
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling.remove_equipment(name).map_err(to_py_err)?;
+        Ok(())
+    }
+
+    /// Replace equipment by name with a new equipment config object (Battery, PV, or EV).
+    pub fn replace_equipment(
+        &mut self,
+        name: String,
+        equipment: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let new_eq = self.py_any_to_equipment(equipment)?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling
+            .replace_equipment(&name, new_eq)
+            .map_err(to_py_err)?;
+        Ok(())
+    }
+
+    /// Update LUT parameters on existing equipment by name.
+    ///
+    /// Supported kwargs:
+    /// - `charging_curve`: 4D charging curve LUT (Battery, EV)
+    /// - `ocv_table`: open-circuit voltage table (Battery)
+    /// - `uneg_table`: negative electrode potential table (Battery)
+    #[pyo3(signature = (name, **kwargs))]
+    pub fn update_equipment(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let kwargs = kwargs.ok_or_else(|| {
+            PyValueError::new_err("update_equipment requires at least one keyword argument")
+        })?;
+
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+
+        if let Some(cc) = kwargs.get_item("charging_curve")? {
+            let lut = extract_charging_lut(py, &cc)?;
+            // Works for both Battery and EV via the trait method
+            dwelling
+                .set_battery_lut(
+                    &name,
+                    BatteryLutType::ChargingCurve,
+                    BatteryLutData::ChargingCurve(lut.clone()),
+                )
+                .or_else(|_| dwelling.set_ev_charging_curve_lut(&name, lut))
+                .map_err(to_py_err)?;
+        }
+        if let Some(ocv) = kwargs.get_item("ocv_table")? {
+            let table = extract_ocv_table(py, &ocv)?;
+            dwelling
+                .set_battery_lut(&name, BatteryLutType::Ocv, BatteryLutData::Ocv(table))
+                .map_err(to_py_err)?;
+        }
+        if let Some(uneg) = kwargs.get_item("uneg_table")? {
+            let table = extract_u_neg_table(py, &uneg)?;
+            dwelling
+                .set_battery_lut(&name, BatteryLutType::UNeg, BatteryLutData::UNeg(table))
+                .map_err(to_py_err)?;
+        }
+
+        Ok(())
+    }
+
+    /// Set a lookup table on equipment by name and LUT type.
+    ///
+    /// `lut_type` is a `LutType` enum value. `data` depends on the LUT type:
+    /// - `LutType.ChargingCurve`: NPZ path (str) or dict with numpy arrays
+    /// - `LutType.Ocv`: list of (soc, voltage) tuples, dict, or polars DataFrame
+    /// - `LutType.UNeg`: list of (soc, potential) tuples, dict, or polars DataFrame
+    pub fn set_equipment_lut(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        lut_type: &PyLutType,
+        data: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        match lut_type {
+            PyLutType::ChargingCurve => {
+                let lut = extract_charging_lut(py, data)?;
+                // Try battery first, then EV
+                dwelling
+                    .set_battery_lut(
+                        &name,
+                        BatteryLutType::ChargingCurve,
+                        BatteryLutData::ChargingCurve(lut.clone()),
+                    )
+                    .or_else(|_| dwelling.set_ev_charging_curve_lut(&name, lut))
+                    .map_err(to_py_err)?;
+            }
+            PyLutType::Ocv => {
+                let table = extract_ocv_table(py, data)?;
+                dwelling
+                    .set_battery_lut(&name, BatteryLutType::Ocv, BatteryLutData::Ocv(table))
+                    .map_err(to_py_err)?;
+            }
+            PyLutType::UNeg => {
+                let table = extract_u_neg_table(py, data)?;
+                dwelling
+                    .set_battery_lut(&name, BatteryLutType::UNeg, BatteryLutData::UNeg(table))
+                    .map_err(to_py_err)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear / reset a LUT on equipment by name and LUT type.
+    pub fn clear_equipment_lut(&mut self, name: String, lut_type: &PyLutType) -> PyResult<()> {
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        match lut_type {
+            PyLutType::ChargingCurve => {
+                dwelling
+                    .clear_battery_lut(&name, BatteryLutType::ChargingCurve)
+                    .or_else(|_| dwelling.clear_ev_charging_curve_lut(&name))
+                    .map_err(to_py_err)?;
+            }
+            PyLutType::Ocv => {
+                dwelling
+                    .clear_battery_lut(&name, BatteryLutType::Ocv)
+                    .map_err(to_py_err)?;
+            }
+            PyLutType::UNeg => {
+                dwelling
+                    .clear_battery_lut(&name, BatteryLutType::UNeg)
+                    .map_err(to_py_err)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_control(&self, name: &str, signal: &PyControlSignal) -> PyResult<bool> {
         let dwelling = lock_dwelling(&self.dwelling)?;
         let required_cap = signal.signal.required_capability();
@@ -619,7 +865,9 @@ impl PyDwelling {
     /// Return all roof planes from the parsed HPXML building.
     pub fn roof_planes(&self) -> PyResult<Vec<crate::py_pv_sizing::PyRoofPlane>> {
         let dwelling = lock_dwelling(&self.dwelling)?;
-        Ok(crate::py_pv_sizing::roof_planes_from_dwelling(&dwelling.roof_info))
+        Ok(crate::py_pv_sizing::roof_planes_from_dwelling(
+            &dwelling.roof_info,
+        ))
     }
 
     /// Enumerate all viable PV candidate placements, one per non-north-facing
@@ -681,6 +929,84 @@ impl PyDwelling {
         telemetry
             .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_rh"])
             .map_err(|err| err.to_string())
+    }
+
+    /// Convert a Python equipment config object (Battery, PV, or EV) to a boxed Equipment.
+    fn py_any_to_equipment(
+        &self,
+        obj: &Bound<'_, PyAny>,
+    ) -> PyResult<Box<dyn hares_equipment::Equipment>> {
+        if let Ok(battery) = obj.extract::<PyRef<'_, PyBattery>>() {
+            let mut raw_config = std::collections::HashMap::new();
+            raw_config.insert(
+                "capacity_kwh".to_string(),
+                ConfigValue::Float(battery.capacity_kwh),
+            );
+            if let Some(v) = battery.max_charge_kw {
+                raw_config.insert("max_charge_kw".to_string(), ConfigValue::Float(v));
+            }
+            if let Some(v) = battery.max_discharge_kw {
+                raw_config.insert("max_discharge_kw".to_string(), ConfigValue::Float(v));
+            }
+            let config = EquipmentConfig {
+                name: battery.name.clone(),
+                ochre_class: "Battery".to_string(),
+                raw_config,
+            };
+            let mut eq = self
+                .equipment_registry
+                .create("Battery", config)
+                .map_err(to_py_err)?;
+            if let Some(ref lut) = battery.charging_curve_lut {
+                eq.set_charging_curve_lut(Some(lut.clone()))
+                    .map_err(to_py_err)?;
+            }
+            return Ok(eq);
+        }
+        if let Ok(pv) = obj.extract::<PyRef<'_, PyPv>>() {
+            let mut raw_config = std::collections::HashMap::new();
+            raw_config.insert(
+                "capacity_kw".to_string(),
+                ConfigValue::Float(pv.capacity_kw),
+            );
+            raw_config.insert("tilt".to_string(), ConfigValue::Float(pv.tilt));
+            raw_config.insert("azimuth".to_string(), ConfigValue::Float(pv.azimuth));
+            let config = EquipmentConfig {
+                name: pv.name.clone(),
+                ochre_class: "PV".to_string(),
+                raw_config,
+            };
+            return self
+                .equipment_registry
+                .create("PV", config)
+                .map_err(to_py_err);
+        }
+        if let Ok(ev) = obj.extract::<PyRef<'_, PyEv>>() {
+            let mut raw_config = std::collections::HashMap::new();
+            if let Some(v) = ev.capacity_kwh {
+                raw_config.insert("capacity_kwh".to_string(), ConfigValue::Float(v));
+            }
+            if let Some(v) = ev.max_charging_kw {
+                raw_config.insert("max_charging_kw".to_string(), ConfigValue::Float(v));
+            }
+            let config = EquipmentConfig {
+                name: ev.name.clone(),
+                ochre_class: "EV".to_string(),
+                raw_config,
+            };
+            let mut eq = self
+                .equipment_registry
+                .create("EV", config)
+                .map_err(to_py_err)?;
+            if let Some(ref lut) = ev.charging_curve_lut {
+                eq.set_charging_curve_lut(Some(lut.clone()))
+                    .map_err(to_py_err)?;
+            }
+            return Ok(eq);
+        }
+        Err(PyValueError::new_err(
+            "equipment must be a Battery, PV, or EV instance",
+        ))
     }
 }
 
