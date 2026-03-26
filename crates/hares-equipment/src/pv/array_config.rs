@@ -53,6 +53,8 @@ pub struct PvArray {
     pub module_type: ModuleType,
     pub surface_id: Option<u32>,
     pub sam_lut_path: Option<String>,
+    /// Envelope boundary index this array is attached to (for roof shading).
+    pub attached_boundary_id: Option<u32>,
 }
 
 impl PvArray {
@@ -76,6 +78,7 @@ impl PvArray {
         let module_type = ModuleType::from_config(config, KEY_MODULE_TYPE);
         let noct_c = config.get_f64(KEY_NOCT_C).unwrap_or(DEFAULT_NOCT_C);
         let sam_lut_path = config.get_str(KEY_SAM_LUT_PATH).map(ToOwned::to_owned);
+        let attached_boundary_id = parse_u32_from_f64(config.get_f64("attached_boundary_id"));
         Self::validate(capacity_kw, tilt_deg, azimuth_deg, noct_c)?;
         Ok(Self {
             tilt_deg,
@@ -85,6 +88,7 @@ impl PvArray {
             module_type,
             surface_id: None,
             sam_lut_path,
+            attached_boundary_id,
         })
     }
 
@@ -121,6 +125,11 @@ impl PvArray {
             .get_str(&key(KEY_SAM_LUT_PATH))
             .or_else(|| config.get_str(KEY_SAM_LUT_PATH))
             .map(ToOwned::to_owned);
+        let attached_boundary_id = parse_u32_from_f64(
+            config
+                .get_f64(&key("attached_boundary_id"))
+                .or_else(|| config.get_f64("attached_boundary_id")),
+        );
         Self::validate(capacity_kw, tilt_deg, azimuth_deg, noct_c)?;
         Ok(Self {
             tilt_deg,
@@ -130,6 +139,7 @@ impl PvArray {
             module_type,
             surface_id: None,
             sam_lut_path,
+            attached_boundary_id,
         })
     }
 

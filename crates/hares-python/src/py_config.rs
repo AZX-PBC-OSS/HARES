@@ -85,8 +85,8 @@ impl PySimulationConfig {
     #[pyo3(
         signature = (
             start_time = None,
-            duration = None,
-            time_res = None,
+            duration_s = None,
+            time_res_s = None,
             output_verbosity = None,
             output_path = None,
             output_to_parquet = None,
@@ -100,8 +100,8 @@ impl PySimulationConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         start_time: Option<String>,
-        duration: Option<i64>,
-        time_res: Option<i64>,
+        duration_s: Option<i64>,
+        time_res_s: Option<i64>,
         output_verbosity: Option<u8>,
         output_path: Option<String>,
         output_to_parquet: Option<bool>,
@@ -115,19 +115,19 @@ impl PySimulationConfig {
             .transpose()?
             .unwrap_or_else(default_start_time);
 
-        let duration = duration.unwrap_or(DEFAULT_DURATION_S);
+        let duration = duration_s.unwrap_or(DEFAULT_DURATION_S);
         if duration <= 0 {
-            return Err(PyValueError::new_err("duration must be positive"));
+            return Err(PyValueError::new_err("duration_s must be positive"));
         }
 
-        let time_res = time_res.unwrap_or(DEFAULT_STEP_S);
+        let time_res = time_res_s.unwrap_or(DEFAULT_STEP_S);
         if time_res <= 0 {
-            return Err(PyValueError::new_err("time_res must be positive"));
+            return Err(PyValueError::new_err("time_res_s must be positive"));
         }
 
         if duration % time_res != 0 {
             return Err(PyValueError::new_err(format!(
-                "duration ({}) must be divisible by time_res ({})",
+                "duration_s ({}) must be divisible by time_res_s ({})",
                 duration, time_res
             )));
         }
@@ -173,28 +173,28 @@ impl PySimulationConfig {
     }
 
     #[getter]
-    pub fn duration(&self) -> i64 {
+    pub fn duration_s(&self) -> i64 {
         self.duration
     }
 
     #[setter]
-    pub fn set_duration(&mut self, value: i64) -> PyResult<()> {
+    pub fn set_duration_s(&mut self, value: i64) -> PyResult<()> {
         if value <= 0 {
-            return Err(PyValueError::new_err("duration must be positive"));
+            return Err(PyValueError::new_err("duration_s must be positive"));
         }
         self.duration = value;
         Ok(())
     }
 
     #[getter]
-    pub fn time_res(&self) -> i64 {
+    pub fn time_res_s(&self) -> i64 {
         self.time_res
     }
 
     #[setter]
-    pub fn set_time_res(&mut self, value: i64) -> PyResult<()> {
+    pub fn set_time_res_s(&mut self, value: i64) -> PyResult<()> {
         if value <= 0 {
-            return Err(PyValueError::new_err("time_res must be positive"));
+            return Err(PyValueError::new_err("time_res_s must be positive"));
         }
         self.time_res = value;
         Ok(())
@@ -284,7 +284,7 @@ impl PySimulationConfig {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "SimulationConfig(start_time='{}', duration={}, time_res={}, output_to_parquet={}, master_seed={})",
+            "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, output_to_parquet={}, master_seed={})",
             self.start_time.to_rfc3339(),
             self.duration,
             self.time_res,
@@ -298,7 +298,7 @@ impl PySimulationConfig {
     pub fn to_sim_config(&self) -> PyResult<SimulationConfig> {
         if self.duration % self.time_res != 0 {
             return Err(PyValueError::new_err(format!(
-                "duration ({}) must be divisible by time_res ({})",
+                "duration_s ({}) must be divisible by time_res_s ({})",
                 self.duration, self.time_res
             )));
         }

@@ -54,8 +54,8 @@ def _normalize_config(config: DwellingConfig | Mapping[str, Any]) -> DwellingCon
     kwargs = dict(config.get("kwargs", {}))
     for key in (
         "start_time",
-        "time_res",
-        "duration",
+        "time_res_s",
+        "duration_s",
         "initialization_duration",
         "output_to_parquet",
         "output_path",
@@ -273,7 +273,7 @@ class DwellingGymEnv(_GYM_BASE):
             dtype=np.float64,
         )
 
-        time_res_seconds = _coerce_seconds(self._config.kwargs.get("time_res", 60.0))
+        time_res_seconds = _coerce_seconds(self._config.kwargs.get("time_res_s", 60.0))
         self._max_steps = max(1, int(math.ceil(episode_length.total_seconds() / time_res_seconds)))
         self._steps_elapsed = 0
         self._active_seed: int | None = None

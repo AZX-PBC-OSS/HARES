@@ -18,6 +18,7 @@ hares-fleet = { workspace = true }
 hares-control = { workspace = true }
 hares-equipment = { workspace = true }
 hares-io = { workspace = true }
+hares-physics = { workspace = true }
 hares-types = { workspace = true }
 pyo3 = { workspace = true, features = ["extension-module"] }
 numpy = { workspace = true }

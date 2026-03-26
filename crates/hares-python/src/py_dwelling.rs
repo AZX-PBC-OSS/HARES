@@ -531,7 +531,7 @@ impl PyDwelling {
         }
 
         let schema = batches[0].schema();
-        let time_res_secs = self.sim_config.time_res() as u32;
+        let time_res_secs = self.sim_config.time_res_s() as u32;
 
         let mut calculator =
             MetricsCalculator::new(&schema, time_res_secs, &self.config.sim_config).map_err(
@@ -614,6 +614,58 @@ impl PyDwelling {
             .iter()
             .map(|s| s.surface_id)
             .collect())
+    }
+
+    /// Return all roof planes from the parsed HPXML building.
+    pub fn roof_planes(&self) -> PyResult<Vec<crate::py_pv_sizing::PyRoofPlane>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        Ok(crate::py_pv_sizing::roof_planes_from_dwelling(&dwelling.roof_info))
+    }
+
+    /// Enumerate all viable PV candidate placements, one per non-north-facing
+    /// roof plane, sorted by solar production score (best first).
+    pub fn pv_candidates(&self) -> PyResult<Vec<crate::py_pv_sizing::PyPvCandidate>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let roof_shape = hares_physics::pv_sizing::infer_roof_shape(
+            &dwelling.roof_info,
+            dwelling.facility_type.as_deref(),
+            dwelling.latitude_deg,
+        );
+        Ok(crate::py_pv_sizing::pv_candidates_from_dwelling(
+            &dwelling.roof_info,
+            roof_shape,
+            &dwelling.wall_azimuths,
+            dwelling.latitude_deg,
+        ))
+    }
+
+    /// Size a PV system to a target capacity, constrained by roof geometry.
+    ///
+    /// Returns the best single-array sizing result. Use `pv_candidates()` to
+    /// see all viable placements.
+    #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0))]
+    pub fn estimate_pv_capacity(
+        &self,
+        target_kw: f64,
+        min_kw: f64,
+        max_kw: f64,
+    ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let roof_shape = hares_physics::pv_sizing::infer_roof_shape(
+            &dwelling.roof_info,
+            dwelling.facility_type.as_deref(),
+            dwelling.latitude_deg,
+        );
+        crate::py_pv_sizing::size_pv_from_dwelling(
+            &dwelling.roof_info,
+            roof_shape,
+            &dwelling.wall_azimuths,
+            dwelling.latitude_deg,
+            target_kw,
+            min_kw,
+            max_kw,
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)
     }
 }
 
@@ -699,7 +751,7 @@ fn build_config(
         let time_res = Duration::seconds(
             kwargs
                 .as_ref()
-                .and_then(|k| k.get_item("time_res").ok().flatten())
+                .and_then(|k| k.get_item("time_res_s").ok().flatten())
                 .map(|obj| extract_seconds(&obj))
                 .transpose()?
                 .unwrap_or(DEFAULT_STEP_S),
@@ -708,7 +760,7 @@ fn build_config(
         let duration = Duration::seconds(
             kwargs
                 .as_ref()
-                .and_then(|k| k.get_item("duration").ok().flatten())
+                .and_then(|k| k.get_item("duration_s").ok().flatten())
                 .map(|obj| extract_seconds(&obj))
                 .transpose()?
                 .unwrap_or(DEFAULT_DURATION_S),

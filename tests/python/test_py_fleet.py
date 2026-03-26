@@ -79,7 +79,7 @@ def _build_simulatable_fleet(n: int = 1):
     schedule = str(OCHRE_INPUTS / "BEopt_example_schedule.csv")
     weather = str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(duration=3600, time_res=60)
+    sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
     configs = [
         DwellingConfig(
             hpxml=hpxml, schedule=schedule, weather=weather,
@@ -333,7 +333,7 @@ def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
     from ochre_next._hares import SimulationConfig
 
     # Use invalid paths to force simulation failure
-    sim_config = SimulationConfig(duration=3600, time_res=60)
+    sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
     config = DwellingConfig(
         hpxml="/nonexistent/building.xml",
         schedule="/nonexistent/schedule.csv",
@@ -360,7 +360,7 @@ def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     schedule = str(OCHRE_INPUTS / "BEopt_example_schedule.csv")
     weather = str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(duration=3600, time_res=60)
+    sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
 
     # One valid config, one invalid — partial failure
     good = DwellingConfig(

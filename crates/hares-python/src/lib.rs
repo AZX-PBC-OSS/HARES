@@ -12,6 +12,7 @@ mod py_equipment;
 mod py_fleet;
 mod py_gym;
 mod py_metrics;
+mod py_pv_sizing;
 mod py_telemetry;
 mod py_weather;
 mod utils;
@@ -34,6 +35,7 @@ use py_metrics::{
     PyGridInteractionMetrics, PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics,
 };
 use py_telemetry::PyTelemetry;
+use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane};
 use py_weather::PyWeatherTimeSeries;
 
 #[pymodule]
@@ -81,6 +83,9 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEfficiencyMetrics>()?;
     m.add_class::<PyGasEnergyMetrics>()?;
     m.add_class::<PyWeatherTimeSeries>()?;
+    m.add_class::<PyRoofPlane>()?;
+    m.add_class::<PyPvCandidate>()?;
+    m.add_class::<PyPvSizingResult>()?;
 
     m.add("OperatingMode", m.getattr("Mode")?)?;
     m.add("Mode", m.getattr("Mode")?)?;

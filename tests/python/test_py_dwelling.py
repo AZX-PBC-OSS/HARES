@@ -27,8 +27,8 @@ class TestStep:
             SCHEDULE,
             WEATHER,
             start_time="2019-01-01T00:00:00",
-            duration=3600,
-            time_res=60,
+            duration_s=3600,
+            time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
@@ -60,8 +60,8 @@ class TestTelemetry:
             SCHEDULE,
             WEATHER,
             start_time="2019-01-01T00:00:00",
-            duration=3600,
-            time_res=60,
+            duration_s=3600,
+            time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
@@ -86,8 +86,8 @@ class TestStepError:
             SCHEDULE,
             WEATHER,
             start_time="2019-01-01T00:00:00",
-            duration=180,
-            time_res=60,
+            duration_s=180,
+            time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
@@ -105,8 +105,9 @@ class TestStepError:
 
         assert isinstance(zone, dict), "zone() should return a dict"
         assert "temperature_c" in zone, "zone should have temperature_c"
-        assert isinstance(zone["temperature_c"], (int, float)), (
-            "temperature_c should be a number"
+        temp = zone["temperature_c"]
+        assert isinstance(temp, (int, float, list)), (
+            "temperature_c should be a number or list of numbers"
         )
 
     def test_telemetry_equipment_returns_correct_data(self):
@@ -117,8 +118,8 @@ class TestStepError:
             SCHEDULE,
             WEATHER,
             start_time="2019-01-01T00:00:00",
-            duration=3600,
-            time_res=60,
+            duration_s=3600,
+            time_res_s=60,
             defaults_path=str(HARES_DEFAULTS),
             bldg_id=42,
             master_seed=0,
@@ -132,68 +133,4 @@ class TestStepError:
         assert isinstance(equipment, dict), "equipment() should return a dict"
 
 
-class TestStepError:
-    def test_step_past_end_raises_runtime_error(self):
-        from ochre_next import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration=180,
-            time_res=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-        )
-        dw.initialize()
-
-        for _ in range(3):
-            dw.step()
-
-        with pytest.raises(RuntimeError):
-            dw.step()
-
-        t = dw.telemetry()
-        zone = t.zone()
-
-        assert isinstance(zone, dict), "zone() should return a dict"
-        assert "temperature_c" in zone, "zone should have temperature_c"
-        assert isinstance(zone["temperature_c"], (int, float)), (
-            "temperature_c should be a number"
-        )
-
-    def test_telemetry_equipment_returns_correct_data(self, sample_dwelling):
-        hpxml_path, schedule_path, weather_path = sample_dwelling
-
-        dw = Dwelling.from_hpxml(
-            hpxml=hpxml_path,
-            schedule=schedule_path,
-            weather=weather_path,
-        )
-        dw.initialize()
-        dw.step()
-
-        t = dw.telemetry()
-        equipment = t.equipment()
-
-        assert isinstance(equipment, dict), "equipment() should return a dict"
-
-
-class TestStepError:
-    def test_step_past_end_raises_runtime_error(self, sample_dwelling):
-        hpxml_path, schedule_path, weather_path = sample_dwelling
-
-        dw = Dwelling.from_hpxml(
-            hpxml=hpxml_path,
-            schedule=schedule_path,
-            weather=weather_path,
-        )
-        dw.initialize()
-
-        for _ in range(5):
-            dw.step()
-
-        with pytest.raises(RuntimeError):
-            dw.step()

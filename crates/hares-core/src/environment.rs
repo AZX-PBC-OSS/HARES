@@ -85,6 +85,10 @@ pub struct EnvironmentManager {
     /// in `update()`. Indexed as `solar_override[step % len][surface_idx]`.
     /// Use for parity testing with OCHRE (pvlib) or injecting PySAM/PVWatts data.
     solar_override: Option<Vec<Vec<SurfaceIrradiance>>>,
+    /// Per-roof PV coverage fractions. When PV panels are attached to a roof
+    /// surface, the covered fraction reduces incident solar irradiance on that
+    /// envelope surface (shading effect).
+    pv_roof_coverage: std::collections::HashMap<u32, f64>,
 }
 
 impl EnvironmentManager {
@@ -212,6 +216,7 @@ impl EnvironmentManager {
             #[cfg(feature = "dst")]
             civil_tz,
             solar_override: None,
+            pv_roof_coverage: std::collections::HashMap::new(),
         })
     }
 
@@ -245,6 +250,25 @@ impl EnvironmentManager {
     /// Surface geometry for building Python/external override data.
     pub fn surface_geometry(&self) -> &[SurfaceGeometry] {
         &self.surfaces
+    }
+
+    /// Register an additional surface for Perez irradiance computation.
+    ///
+    /// Used to add PV array orientations that don't correspond to an envelope
+    /// boundary. Deduplicates by `surface_id`.
+    pub fn register_surface(&mut self, geom: SurfaceGeometry) {
+        if !self.surfaces.iter().any(|s| s.surface_id == geom.surface_id) {
+            self.surfaces.push(geom);
+        }
+    }
+
+    /// Record the fraction of a roof surface covered by PV panels.
+    ///
+    /// When nonzero, `update()` reduces incident solar irradiance on the
+    /// corresponding envelope surface by `(1 - coverage)` to model shading.
+    pub fn set_pv_roof_coverage(&mut self, surface_id: u32, fraction: f64) {
+        self.pv_roof_coverage
+            .insert(surface_id, fraction.clamp(0.0, 1.0));
     }
 
     /// Override default grid state for subsequent updates.
@@ -406,6 +430,24 @@ impl EnvironmentManager {
                         day_of_year,
                         ground_albedo,
                     )
+                })
+                .collect()
+        };
+
+        // Apply PV roof shading: reduce irradiance on covered roof surfaces.
+        let solar_irradiance = if self.pv_roof_coverage.is_empty() {
+            solar_irradiance
+        } else {
+            solar_irradiance
+                .into_iter()
+                .map(|mut irr| {
+                    if let Some(&coverage) = self.pv_roof_coverage.get(&irr.surface_id) {
+                        let exposed = 1.0 - coverage;
+                        irr.direct_w_m2 *= exposed;
+                        irr.diffuse_w_m2 *= exposed;
+                        irr.reflected_w_m2 *= exposed;
+                    }
+                    irr
                 })
                 .collect()
         };
@@ -1446,6 +1488,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn register_surface_deduplicates() {
+        let start = ts(0);
+        let mut env = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building(Some(21.0)),
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .unwrap();
+        let initial_count = env.surface_count();
+        env.register_surface(SurfaceGeometry {
+            surface_id: 999_999,
+            azimuth_deg: 180.0,
+            tilt_deg: 30.0,
+            area_m2: 1.0,
+        });
+        assert_eq!(env.surface_count(), initial_count + 1);
+        // Duplicate should be ignored.
+        env.register_surface(SurfaceGeometry {
+            surface_id: 999_999,
+            azimuth_deg: 180.0,
+            tilt_deg: 30.0,
+            area_m2: 1.0,
+        });
+        assert_eq!(env.surface_count(), initial_count + 1);
+    }
+
+    #[test]
+    fn pv_roof_shading_reduces_irradiance() {
+        use chrono::Duration as ChronoDuration;
+        let start = ts(0);
+        let mut env = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building(Some(21.0)),
+            StdDuration::from_secs(3600),
+            start,
+            None,
+        )
+        .unwrap();
+
+        let clock =
+            SimClock::new(start, ChronoDuration::seconds(3600), ChronoDuration::hours(1));
+
+        // Get baseline irradiance on first surface.
+        let baseline = env.update(&clock, &[]);
+        let surface_0_id = baseline.weather.solar_irradiance[0].surface_id;
+        let baseline_direct = baseline.weather.solar_irradiance[0].direct_w_m2;
+
+        // Set 50% coverage on that surface.
+        env.set_pv_roof_coverage(surface_0_id, 0.5);
+        let shaded = env.update(&clock, &[]);
+        let shaded_direct = shaded.weather.solar_irradiance[0].direct_w_m2;
+
+        // Irradiance should be halved.
+        let ratio = if baseline_direct > 0.0 {
+            shaded_direct / baseline_direct
+        } else {
+            0.5 // If baseline is zero, shaded should also be zero.
+        };
+        assert!(
+            (ratio - 0.5).abs() < 0.01,
+            "expected ~50% reduction, got ratio={ratio:.4}"
+        );
+    }
+
     // ---- DST-aware schedule tests (require `dst` feature) ----
 
     #[cfg(feature = "dst")]
@@ -1725,5 +1836,6 @@ mod tests {
                 "expected InvalidTimezone error, got {result:?}"
             );
         }
+
     }
 }

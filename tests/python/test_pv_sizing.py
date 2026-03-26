@@ -1,0 +1,280 @@
+"""Tests for PV sizing, roof plane introspection, and PV power production."""
+
+import datetime as dt
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+OCHRE_DEFAULTS = REPO / "vendors" / "OCHRE" / "ochre" / "defaults"
+HPXML = str(OCHRE_DEFAULTS / "Input Files" / "BEopt_example.xml")
+HPXML_PV = str(REPO / "tests" / "fixtures" / "hpxml" / "ochre_samples" / "base-pv.xml")
+SCHEDULE = str(OCHRE_DEFAULTS / "Input Files" / "BEopt_example_schedule.csv")
+WEATHER = str(OCHRE_DEFAULTS / "Weather" / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+HARES_DEFAULTS = REPO / "defaults"
+
+
+@pytest.fixture
+def dwelling_summer_24h():
+    """Dwelling configured for a July day, 15-min steps, 24 hours."""
+    from ochre_next import Dwelling
+
+    return Dwelling.from_hpxml(
+        hpxml=HPXML,
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        start_time="2019-07-15T00:00:00Z",
+        duration_s=86400,
+        time_res_s=900,
+    )
+
+
+@pytest.fixture
+def dwelling_winter_24h():
+    """Dwelling configured for a January day, 15-min steps, 24 hours."""
+    from ochre_next import Dwelling
+
+    return Dwelling.from_hpxml(
+        hpxml=HPXML,
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        start_time="2019-01-15T00:00:00Z",
+        duration_s=86400,
+        time_res_s=900,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Roof plane introspection
+# ---------------------------------------------------------------------------
+
+
+class TestRoofPlanes:
+    def test_roof_planes_returns_nonempty(self, dwelling_summer_24h):
+        planes = dwelling_summer_24h.roof_planes()
+        assert len(planes) >= 1
+
+    def test_roof_planes_have_area(self, dwelling_summer_24h):
+        for p in dwelling_summer_24h.roof_planes():
+            assert p.area_m2 > 0
+
+    def test_roof_planes_have_tilt(self, dwelling_summer_24h):
+        for p in dwelling_summer_24h.roof_planes():
+            assert 0 <= p.tilt_deg <= 90
+
+    def test_roof_planes_have_boundary_index(self, dwelling_summer_24h):
+        for p in dwelling_summer_24h.roof_planes():
+            assert p.boundary_index is not None
+            assert isinstance(p.boundary_index, int)
+
+    def test_beopt_has_two_roof_planes(self, dwelling_summer_24h):
+        planes = dwelling_summer_24h.roof_planes()
+        assert len(planes) == 2
+        azimuths = {p.azimuth_deg for p in planes}
+        assert 0.0 in azimuths  # north
+        assert 180.0 in azimuths  # south
+
+    def test_repr_contains_area(self, dwelling_summer_24h):
+        planes = dwelling_summer_24h.roof_planes()
+        r = repr(planes[0])
+        assert "area_m2" in r
+        assert "RoofPlane" in r
+
+
+# ---------------------------------------------------------------------------
+# PV candidate enumeration
+# ---------------------------------------------------------------------------
+
+
+class TestPvCandidates:
+    def test_candidates_exclude_north(self, dwelling_summer_24h):
+        candidates = dwelling_summer_24h.pv_candidates()
+        for c in candidates:
+            # No north-facing candidates (az < 46 or az > 314).
+            assert not (c.azimuth_deg >= 315 or c.azimuth_deg <= 45)
+
+    def test_beopt_has_one_south_candidate(self, dwelling_summer_24h):
+        candidates = dwelling_summer_24h.pv_candidates()
+        assert len(candidates) == 1
+        assert abs(candidates[0].azimuth_deg - 180.0) < 1.0
+
+    def test_candidates_have_capacity(self, dwelling_summer_24h):
+        for c in dwelling_summer_24h.pv_candidates():
+            assert c.max_capacity_kw > 0
+            assert c.max_panels > 0
+
+    def test_candidates_sorted_by_score(self, dwelling_summer_24h):
+        candidates = dwelling_summer_24h.pv_candidates()
+        for i in range(len(candidates) - 1):
+            assert candidates[i].solar_score >= candidates[i + 1].solar_score
+
+    def test_candidates_carry_boundary_index(self, dwelling_summer_24h):
+        candidates = dwelling_summer_24h.pv_candidates()
+        assert len(candidates) >= 1
+        # The south-facing candidate should have a boundary_index matching
+        # the south roof plane.
+        c = candidates[0]
+        assert c.boundary_index is not None
+        south_planes = [
+            p for p in dwelling_summer_24h.roof_planes() if p.azimuth_deg == 180.0
+        ]
+        assert c.boundary_index == south_planes[0].boundary_index
+
+    def test_repr_contains_capacity(self, dwelling_summer_24h):
+        candidates = dwelling_summer_24h.pv_candidates()
+        r = repr(candidates[0])
+        assert "PvCandidate" in r
+        assert "kW" in r
+
+
+# ---------------------------------------------------------------------------
+# PV sizing
+# ---------------------------------------------------------------------------
+
+
+class TestPvSizing:
+    def test_sizing_returns_result(self, dwelling_summer_24h):
+        result = dwelling_summer_24h.estimate_pv_capacity(6.0)
+        assert result.capacity_kw > 0
+
+    def test_sizing_respects_target(self, dwelling_summer_24h):
+        result = dwelling_summer_24h.estimate_pv_capacity(4.0)
+        # Should be close to 4 kW (rounded up to next panel).
+        assert 3.5 <= result.capacity_kw <= 5.0
+
+    def test_sizing_clamps_to_roof(self, dwelling_summer_24h):
+        result = dwelling_summer_24h.estimate_pv_capacity(20.0)
+        assert result.capacity_kw <= result.max_roof_capacity_kw + 0.1
+
+    def test_sizing_errors_below_minimum(self, dwelling_summer_24h):
+        with pytest.raises(ValueError, match="below minimum"):
+            dwelling_summer_24h.estimate_pv_capacity(0.5, min_kw=100.0)
+
+    def test_sizing_panel_count(self, dwelling_summer_24h):
+        result = dwelling_summer_24h.estimate_pv_capacity(6.0)
+        # 420 W panels: 6 kW ≈ 15 panels.
+        expected_panels = round(result.capacity_kw * 1000 / result.panel_watts)
+        assert result.num_panels == expected_panels
+
+    def test_sizing_azimuth_matches_candidate(self, dwelling_summer_24h):
+        result = dwelling_summer_24h.estimate_pv_capacity(6.0)
+        candidates = dwelling_summer_24h.pv_candidates()
+        assert abs(result.array_azimuth_deg - candidates[0].azimuth_deg) < 1.0
+
+    def test_repr_contains_panels(self, dwelling_summer_24h):
+        result = dwelling_summer_24h.estimate_pv_capacity(6.0)
+        r = repr(result)
+        assert "PvSizingResult" in r
+        assert "panels=" in r
+
+
+# ---------------------------------------------------------------------------
+# PV power production (summer 24h simulation)
+# ---------------------------------------------------------------------------
+
+
+class TestPvPowerProduction:
+    """Integration tests using base-pv.xml which has 4 kW south + 1.5 kW east PV."""
+
+    @staticmethod
+    def _make_pv_dwelling(start: str, duration_s: int = 86400, time_res_s: int = 900):
+        from ochre_next import Dwelling
+
+        return Dwelling.from_hpxml(
+            hpxml=HPXML_PV,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            start_time=start,
+            duration_s=duration_s,
+            time_res_s=time_res_s,
+            defaults_path=str(HARES_DEFAULTS),
+        )
+
+    @pytest.mark.slow
+    def test_pv_dwelling_initializes_without_error(self):
+        """PV surface registration should allow the dwelling to init."""
+        dw = self._make_pv_dwelling("2019-07-15T00:00:00Z")
+        dw.initialize()
+        # If we get here, PV surface registration worked.
+
+    @pytest.mark.slow
+    def test_pv_dwelling_steps_without_error(self):
+        """PV equipment should step without surface_id mismatch errors."""
+        dw = self._make_pv_dwelling("2019-07-15T00:00:00Z")
+        dw.initialize()
+        result = dw.step()
+        assert "net_electric_power_kw" in result
+
+    @pytest.mark.slow
+    def test_summer_midday_produces_negative_net_power(self):
+        """With 5.5 kW PV in Denver in July, net power should go negative
+        during peak solar hours (roughly 10am-2pm local)."""
+        dw = self._make_pv_dwelling("2019-07-15T00:00:00Z")
+        dw.initialize()
+
+        powers = []
+        for _ in range(96):
+            step = dw.step()
+            powers.append(step["net_electric_power_kw"])
+
+        # Steps 40-56 correspond roughly to 10:00-14:00 (peak solar in MDT).
+        midday_powers = powers[40:56]
+        min_midday = min(midday_powers)
+        assert min_midday < 0, (
+            f"Expected net negative power at midday with 5.5 kW PV, "
+            f"but min midday power was {min_midday:.2f} kW. "
+            f"All midday powers: {[f'{p:.2f}' for p in midday_powers]}"
+        )
+
+    @pytest.mark.slow
+    def test_night_power_is_non_negative(self):
+        """At night (first few hours), PV produces nothing, so net >= 0."""
+        dw = self._make_pv_dwelling("2019-07-15T00:00:00Z")
+        dw.initialize()
+
+        # First 16 steps = midnight to 4am.
+        night_powers = []
+        for _ in range(16):
+            step = dw.step()
+            night_powers.append(step["net_electric_power_kw"])
+
+        for p in night_powers:
+            assert p >= -0.01, f"Expected non-negative power at night, got {p:.4f} kW"
+
+    @pytest.mark.slow
+    def test_winter_lower_pv_than_summer(self):
+        """Winter PV production should be lower than summer."""
+        dw_summer = self._make_pv_dwelling("2019-07-15T00:00:00Z")
+        dw_summer.initialize()
+        summer_powers = [dw_summer.step()["net_electric_power_kw"] for _ in range(96)]
+
+        dw_winter = self._make_pv_dwelling("2019-01-15T00:00:00Z")
+        dw_winter.initialize()
+        winter_powers = [dw_winter.step()["net_electric_power_kw"] for _ in range(96)]
+
+        # Summer should have more negative power (more PV export).
+        assert min(summer_powers) < min(winter_powers), (
+            f"Summer min ({min(summer_powers):.2f}) should be more negative "
+            f"than winter min ({min(winter_powers):.2f})"
+        )
+
+    @pytest.mark.slow
+    def test_no_pv_all_positive_power(self):
+        """Without PV, net power should always be non-negative."""
+        from ochre_next import Dwelling
+
+        dw = Dwelling.from_hpxml(
+            hpxml=HPXML,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            start_time="2019-07-15T00:00:00Z",
+            duration_s=86400,
+            time_res_s=900,
+        )
+        dw.initialize()
+
+        powers = [dw.step()["net_electric_power_kw"] for _ in range(96)]
+        min_power = min(powers)
+        assert min_power >= -0.01, (
+            f"Expected non-negative net power without PV, got {min_power:.4f} kW"
+        )

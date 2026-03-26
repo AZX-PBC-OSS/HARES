@@ -24,6 +24,7 @@ use hares_io::{
     WeatherTimeSeries, build_schema, parse_hpxml, parse_schedule_csv, parse_weather,
     resolve_equipment,
 };
+use hares_physics::pv_sizing::RoofInfo;
 use hares_physics::constants::{
     GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
     OCCUPANT_SENSIBLE_GAIN_W,
@@ -103,6 +104,49 @@ pub struct DwellingProfilingSummary {
     pub other: StdDuration,
     pub memory_high_water_kb: u64,
     pub hot_path_alloc_violations: u64,
+}
+
+/// Pre-resolved output column indices for one equipment piece.
+#[derive(Debug, Clone, Default)]
+struct EquipmentColumns {
+    electric_power: Option<usize>,
+    gas_power: Option<usize>,
+    mode: Option<usize>,
+}
+
+/// Build column index maps for each equipment piece using instance-qualified
+/// names (matching `hares_io::output::columns::instance_qualified_names`).
+fn build_equipment_column_map(
+    equipment: &[Box<dyn Equipment>],
+    column_index: &HashMap<String, usize>,
+) -> Vec<EquipmentColumns> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for eq in equipment {
+        *counts.entry(&eq.descriptor().name).or_default() += 1;
+    }
+    let mut indices: HashMap<&str, usize> = HashMap::new();
+    equipment
+        .iter()
+        .map(|eq| {
+            let base = &eq.descriptor().name;
+            let name = if counts[base.as_str()] > 1 {
+                let idx = indices.entry(base).or_insert(0);
+                *idx += 1;
+                format!("{base} #{idx}")
+            } else {
+                base.clone()
+            };
+            EquipmentColumns {
+                electric_power: column_index
+                    .get(&format!("{name} Electric Power (kW)"))
+                    .copied(),
+                gas_power: column_index
+                    .get(&format!("{name} Gas Power (therms/hour)"))
+                    .copied(),
+                mode: column_index.get(&format!("{name} Mode (-)")).copied(),
+            }
+        })
+        .collect()
 }
 
 /// Single-step observable output.
@@ -266,6 +310,134 @@ fn compute_equipment_dispatch_targets(equipment: &[Box<dyn Equipment>]) -> Vec<D
         .collect()
 }
 
+/// Register PV array orientations as environment surfaces so Perez irradiance
+/// is computed for them. PV orientations use quantised surface IDs that differ
+/// from the sequential envelope boundary IDs.
+fn register_pv_surfaces(
+    specs: &[hares_io::EquipmentSpec],
+    env: &mut EnvironmentManager,
+) {
+    use hares_equipment::pv::surface_id_for_orientation;
+    for spec in specs.iter().filter(|s| s.name == "PV") {
+        let tilt = spec
+            .parameters
+            .get("tilt_deg")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(20.0);
+        let az = spec
+            .parameters
+            .get("azimuth_deg")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(180.0);
+        if let Ok(sid) = surface_id_for_orientation(tilt, az, 5.0) {
+            env.register_surface(crate::environment::SurfaceGeometry {
+                surface_id: sid,
+                azimuth_deg: az,
+                tilt_deg: tilt,
+                area_m2: 1.0, // area irrelevant for Perez — only orientation matters
+            });
+        }
+    }
+}
+
+/// Auto-attach PV arrays to the closest matching roof boundary by orientation.
+/// Sets `attached_boundary_id` on matching specs so the thermal model can
+/// account for PV shading.
+fn attach_pv_to_roofs(
+    specs: &mut [hares_io::EquipmentSpec],
+    building: &Building,
+) {
+    use hares_io::hpxml::building::BoundaryType;
+
+    let roofs: Vec<(u32, f64, f64, f64)> = building
+        .boundaries
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.boundary_type == BoundaryType::Roof)
+        .map(|(idx, b)| {
+            (
+                idx as u32,
+                b.azimuth_deg.unwrap_or(180.0),
+                b.tilt_deg.unwrap_or(0.0),
+                b.area_m2,
+            )
+        })
+        .collect();
+
+    for spec in specs.iter_mut().filter(|s| s.name == "PV") {
+        if spec.parameters.contains_key("attached_boundary_id") {
+            continue;
+        }
+        let pv_az = spec
+            .parameters
+            .get("azimuth_deg")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(180.0);
+        let pv_tilt = spec
+            .parameters
+            .get("tilt_deg")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(20.0);
+
+        // Find the closest roof within tolerance (15° azimuth, 10° tilt).
+        let best = roofs
+            .iter()
+            .filter(|(_, az, tilt, _)| {
+                let az_diff = (*az - pv_az).abs().min(360.0 - (*az - pv_az).abs());
+                az_diff <= 15.0 && (*tilt - pv_tilt).abs() <= 10.0
+            })
+            .min_by(|(_, az_a, tilt_a, _), (_, az_b, tilt_b, _)| {
+                let da = (*az_a - pv_az).abs().min(360.0 - (*az_a - pv_az).abs())
+                    + (*tilt_a - pv_tilt).abs();
+                let db = (*az_b - pv_az).abs().min(360.0 - (*az_b - pv_az).abs())
+                    + (*tilt_b - pv_tilt).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+        if let Some(&(roof_id, _, _, _)) = best {
+            spec.parameters
+                .insert("attached_boundary_id".into(), serde_json::json!(roof_id));
+        }
+    }
+}
+
+/// Compute PV panel coverage on attached roofs and register shading with the
+/// environment. Reduces incident solar on envelope surfaces proportionally.
+fn register_pv_roof_shading(
+    specs: &[hares_io::EquipmentSpec],
+    building: &Building,
+    env: &mut EnvironmentManager,
+) {
+    let mut coverage_by_roof: std::collections::HashMap<u32, f64> =
+        std::collections::HashMap::new();
+
+    for spec in specs.iter().filter(|s| s.name == "PV") {
+        let boundary_id = spec
+            .parameters
+            .get("attached_boundary_id")
+            .and_then(|v| v.as_u64());
+        let capacity_kw = spec
+            .parameters
+            .get("capacity_kw")
+            .and_then(|v| v.as_f64());
+
+        if let (Some(bid), Some(cap)) = (boundary_id, capacity_kw) {
+            let roof_area = building
+                .boundaries
+                .get(bid as usize)
+                .map(|b| b.area_m2)
+                .unwrap_or(1.0);
+            // ~2 m² per 420 W panel
+            let collector_area = cap * 1000.0 / 420.0 * 2.0;
+            *coverage_by_roof.entry(bid as u32).or_default() += collector_area / roof_area;
+        }
+    }
+
+    for (surface_id, coverage) in coverage_by_roof {
+        env.set_pv_roof_coverage(surface_id, coverage);
+    }
+}
+
 /// Top-level single-dwelling simulation orchestrator.
 pub struct Dwelling {
     pub bldg_id: i64,
@@ -281,6 +453,15 @@ pub struct Dwelling {
     pub rng: ChaCha8Rng,
     pub warnings: Vec<String>,
 
+    /// Roof geometry extracted from HPXML at construction time.
+    pub roof_info: RoofInfo,
+    /// Wall azimuths from HPXML, for PV sizing fallback orientation.
+    pub wall_azimuths: Vec<f64>,
+    /// Site latitude from HPXML, for PV sizing.
+    pub latitude_deg: Option<f64>,
+    /// Facility type from HPXML, for roof shape inference.
+    pub facility_type: Option<String>,
+
     control_dispatcher: ControlDispatcher,
     price_signal: PriceSignal,
     latest_env: EnvironmentState,
@@ -288,6 +469,9 @@ pub struct Dwelling {
     custom_domain_solvers: Vec<Box<dyn DomainSolver>>,
     stage_snapshot: Option<StageSnapshot>,
     output_column_index: HashMap<String, usize>,
+    /// Pre-resolved output column indices for each equipment piece, avoiding
+    /// per-timestep name allocation in `record_step`.
+    equipment_column_map: Vec<EquipmentColumns>,
     /// Number of numeric columns expected by the recorder (schema fields minus timestamp).
     output_value_count: usize,
     /// Schedule column index for the occupancy time series, or `None` if the
@@ -481,8 +665,6 @@ impl Dwelling {
 
         let occupancy_column_idx = environment.occupancy_column_idx();
 
-        let initial_env = environment.update(&clock, &[]);
-
         let mut warnings = Vec::new();
         let defaults_dir = config
             .defaults_path
@@ -503,6 +685,17 @@ impl Dwelling {
             .map_err(|e| HaresError::Io(e.to_string()))?;
 
         eprintln!("DEBUG: equipment_specs count = {}", equipment_specs.len());
+
+        // Register PV surfaces with the environment so Perez irradiance is
+        // computed for PV orientations (which may not match any envelope surface).
+        register_pv_surfaces(&equipment_specs, &mut environment);
+
+        // Auto-attach PV arrays to the closest matching roof surface and
+        // register shading coverage on attached roofs.
+        attach_pv_to_roofs(&mut equipment_specs, &building);
+        register_pv_roof_shading(&equipment_specs, &building, &mut environment);
+
+        let initial_env = environment.update(&clock, &[]);
 
         let solvers = build_default_solvers(
             &initial_env,
@@ -613,8 +806,13 @@ impl Dwelling {
         )
         .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?;
 
+        let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&building);
+        let latitude_deg = building.site.latitude_deg;
+        let facility_type = building.residential_facility_type.clone();
+
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
 
+        let equipment_column_map = build_equipment_column_map(&equipment, &output_column_index);
         let equipment_execution_order = compute_equipment_execution_order(&equipment);
         let mut solver_feedback_actor = SolverFeedbackActor::new();
         solver_feedback_actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
@@ -632,12 +830,17 @@ impl Dwelling {
             recorder,
             rng,
             warnings,
+            roof_info,
+            wall_azimuths,
+            latitude_deg,
+            facility_type,
             control_dispatcher: ControlDispatcher::default(),
             price_signal: PriceSignal::default(),
             latest_env: initial_env,
             simulation_results: SimulationResults::default(),
             custom_domain_solvers: Vec::new(),
             stage_snapshot: None,
+            equipment_column_map,
             output_column_index,
             output_value_count,
             occupancy_column_idx,
@@ -1479,32 +1682,21 @@ impl Dwelling {
             row[idx] = self.electrical_solver.net_reactive_kvar();
         }
 
-        // Per-equipment power columns: "{Name} Electric Power (kW)"
-        for eq in &self.equipment {
-            let name = &eq.descriptor().name;
-            let col_key = format!("{name} Electric Power (kW)");
-            if let Some(&idx) = self.output_column_index.get(&col_key) {
-                let telem = eq.telemetry();
-                let kw = telem
+        // Per-equipment columns via pre-resolved index map.
+        for (eq, cols) in self.equipment.iter().zip(&self.equipment_column_map) {
+            let telem = eq.telemetry();
+            if let Some(idx) = cols.electric_power {
+                row[idx] = telem
                     .get("electric_kw")
                     .or_else(|| telem.get("active_power_kw"))
                     .or_else(|| telem.get("ac_power_kw"))
                     .unwrap_or(0.0);
-                row[idx] = kw;
             }
-            // Gas power column
-            let gas_col_key = format!("{name} Gas Power (therms/hour)");
-            if let Some(&idx) = self.output_column_index.get(&gas_col_key) {
-                let telem = eq.telemetry();
-                let gas_w = telem.get("fuel_input_w").unwrap_or(0.0);
-                row[idx] = gas_w / GAS_THERMS_PER_HOUR_TO_W;
+            if let Some(idx) = cols.gas_power {
+                row[idx] = telem.get("fuel_input_w").unwrap_or(0.0) / GAS_THERMS_PER_HOUR_TO_W;
             }
-            // Mode column
-            let mode_col_key = format!("{name} Mode (-)");
-            if let Some(&idx) = self.output_column_index.get(&mode_col_key) {
-                let telem = eq.telemetry();
-                let mode = telem.get("mode").unwrap_or(0.0);
-                row[idx] = mode;
+            if let Some(idx) = cols.mode {
+                row[idx] = telem.get("mode").unwrap_or(0.0);
             }
         }
 

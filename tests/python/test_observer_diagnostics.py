@@ -64,8 +64,8 @@ def _run_hares_observed() -> tuple[list[dict], list[dict]]:
     dwelling = HaresDwelling.from_hpxml(
         HPXML, SCHEDULE, WEATHER,
         start_time=START_UTC.isoformat(),
-        time_res=TIME_RES_MIN * 60,
-        duration=DURATION_H * 3600,
+        time_res_s=TIME_RES_MIN * 60,
+        duration_s=DURATION_H * 3600,
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,

@@ -8,6 +8,7 @@ pub mod epw;
 pub mod hpxml;
 pub mod output;
 pub mod psm3;
+pub mod pv_sizing;
 pub mod resstock;
 pub mod resstock_csv;
 pub mod schedule;

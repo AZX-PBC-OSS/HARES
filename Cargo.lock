@@ -981,6 +981,7 @@ dependencies = [
  "hares-equipment",
  "hares-fleet",
  "hares-io",
+ "hares-physics",
  "hares-types",
  "numpy",
  "pyo3",

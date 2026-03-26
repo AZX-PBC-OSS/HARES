@@ -45,8 +45,8 @@ class Dwelling:
 
         py_kwargs: dict[str, Any] = {
             "start_time": start_time,
-            "time_res": time_res,
-            "duration": duration,
+            "time_res_s": time_res,
+            "duration_s": duration,
         }
         if initialization_time is not None:
             py_kwargs["initialization_duration"] = initialization_time

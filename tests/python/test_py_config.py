@@ -12,8 +12,8 @@ class TestSimulationConfig:
         """Verify SimulationConfig() default construction yields expected default values."""
         cfg = SimulationConfig()
         assert cfg.start_time == "2019-01-01T00:00:00+00:00"
-        assert cfg.duration == 86400
-        assert cfg.time_res == 60
+        assert cfg.duration_s == 86400
+        assert cfg.time_res_s == 60
         assert cfg.output_verbosity == 0
         assert cfg.output_path is None
         assert cfg.output_to_parquet is False
@@ -24,9 +24,9 @@ class TestSimulationConfig:
 
     def test_construction_with_kwargs(self):
         """Verify SimulationConfig accepts kwargs in constructor."""
-        cfg = SimulationConfig(duration=3600, time_res=60, master_seed=42)
-        assert cfg.duration == 3600
-        assert cfg.time_res == 60
+        cfg = SimulationConfig(duration_s=3600, time_res_s=60, master_seed=42)
+        assert cfg.duration_s == 3600
+        assert cfg.time_res_s == 60
         assert cfg.master_seed == 42
         assert cfg.start_time == "2019-01-01T00:00:00+00:00"
         assert cfg.output_verbosity == 0
@@ -35,8 +35,8 @@ class TestSimulationConfig:
         """Verify custom values are accepted and round-trip through getters."""
         cfg = SimulationConfig()
         cfg.start_time = "2024-06-15T12:00:00Z"
-        cfg.duration = 7200
-        cfg.time_res = 300
+        cfg.duration_s = 7200
+        cfg.time_res_s = 300
         cfg.output_verbosity = 5
         cfg.output_path = "/tmp/output.csv"
         cfg.output_to_parquet = True
@@ -46,8 +46,8 @@ class TestSimulationConfig:
         cfg.setpoint_deadband_c = 1.5
 
         assert cfg.start_time == "2024-06-15T12:00:00+00:00"
-        assert cfg.duration == 7200
-        assert cfg.time_res == 300
+        assert cfg.duration_s == 7200
+        assert cfg.time_res_s == 300
         assert cfg.output_verbosity == 5
         assert cfg.output_path == "/tmp/output.csv"
         assert cfg.output_to_parquet is True
@@ -73,26 +73,26 @@ class TestSimulationConfig:
             cfg.start_time = "not-a-valid-date"
 
     def test_invalid_duration_raises_value_error(self):
-        """Verify invalid duration raises ValueError."""
+        """Verify invalid duration_s raises ValueError."""
         cfg = SimulationConfig()
-        with pytest.raises(ValueError, match="duration must be positive"):
-            cfg.duration = 0
+        with pytest.raises(ValueError, match="duration_s must be positive"):
+            cfg.duration_s = 0
 
     def test_invalid_time_res_raises_value_error(self):
-        """Verify invalid time_res raises ValueError."""
+        """Verify invalid time_res_s raises ValueError."""
         cfg = SimulationConfig()
-        with pytest.raises(ValueError, match="time_res must be positive"):
-            cfg.time_res = 0
+        with pytest.raises(ValueError, match="time_res_s must be positive"):
+            cfg.time_res_s = 0
 
     def test_duration_not_divisible_by_time_res_raises_in_conversion(self):
-        """Verify duration not divisible by time_res raises when converting to Rust config."""
+        """Verify duration_s not divisible by time_res_s raises when converting to Rust config."""
         cfg = SimulationConfig()
-        cfg.duration = 100
-        cfg.time_res = 60
+        cfg.duration_s = 100
+        cfg.time_res_s = 60
         # Validation happens in to_sim_config(), not in setters.
         # This test verifies it raises when you try to use the config.
-        with pytest.raises(ValueError, match="divisible by time_res"):
-            cfg2 = SimulationConfig(duration=100, time_res=60)
+        with pytest.raises(ValueError, match="divisible by time_res_s"):
+            cfg2 = SimulationConfig(duration_s=100, time_res_s=60)
 
     def test_invalid_output_verbosity_raises_value_error(self):
         """Verify output_verbosity > 8 raises ValueError."""
@@ -148,7 +148,7 @@ class TestDwellingConfig:
     def test_with_simulation_config_round_trips(self):
         """Verify DwellingConfig with config parameter round-trips."""
         sim_cfg = SimulationConfig()
-        sim_cfg.duration = 7200
+        sim_cfg.duration_s = 7200
 
         dw_cfg = DwellingConfig(
             hpxml="path/to/building.xml",
@@ -158,7 +158,7 @@ class TestDwellingConfig:
         )
 
         assert dw_cfg.config is not None
-        assert dw_cfg.config.duration == 7200
+        assert dw_cfg.config.duration_s == 7200
 
     def test_missing_required_fields_raises_type_error(self):
         """Verify DwellingConfig with missing required fields raises TypeError."""
@@ -188,10 +188,10 @@ class TestDwellingConfigIntegration:
         # Note: This test would require actual HPXML/weather files to run from_hpxml.
         # We just verify the config object can be created and manipulated.
         config = SimulationConfig()
-        config.duration = 3600
-        config.time_res = 60
+        config.duration_s = 3600
+        config.time_res_s = 60
         config.master_seed = 42
 
         # The config object can be used as kwarg
-        assert config.duration == 3600
+        assert config.duration_s == 3600
         assert config.master_seed == 42

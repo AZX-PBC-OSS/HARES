@@ -10,6 +10,7 @@ pub mod infiltration;
 pub mod psychrometrics;
 pub mod solar;
 pub mod units;
+pub mod pv_sizing;
 pub mod water_mains;
 
 #[cfg(test)]
