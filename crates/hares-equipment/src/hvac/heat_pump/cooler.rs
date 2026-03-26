@@ -56,7 +56,8 @@ impl HpCooler {
                 zone: Some(zone),
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
-                control_capabilities: ControlCapabilities::THERMAL_SETPOINT,
+                control_capabilities: ControlCapabilities::THERMAL_SETPOINT
+                    | ControlCapabilities::THERMAL_SETPOINT_DELTA,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
             },
             ports: inner.ports().to_vec(),

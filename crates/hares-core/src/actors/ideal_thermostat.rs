@@ -19,8 +19,6 @@
 //! 3. When no override is active, emit nothing — equipment uses its internal schedule
 //! 4. Override signals use `PriorityTier::UserOverride` (higher than Schedule)
 
-use std::sync::Arc;
-
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{ControlSignal, EnvironmentState};
 
@@ -69,7 +67,15 @@ impl OverrideState {
     }
 
     /// Creates a dual heating/cooling override.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics if `heating_c >= cooling_c` — physically impossible setpoint inversion.
     pub fn dual(heating_c: f64, cooling_c: f64) -> Self {
+        debug_assert!(
+            heating_c < cooling_c,
+            "heating setpoint ({heating_c}°C) must be below cooling setpoint ({cooling_c}°C)"
+        );
         Self {
             heating_setpoint_c: Some(heating_c),
             cooling_setpoint_c: Some(cooling_c),
@@ -100,7 +106,7 @@ impl OverrideState {
 /// # Example
 ///
 /// ```ignore
-/// use hares_core::actors::IdealThermostat;
+/// use hares_core::actors::{IdealThermostat, OverrideState};
 /// use hares_core::Actor;
 ///
 /// // Create an actor that holds heating at 20°C
@@ -113,8 +119,6 @@ impl OverrideState {
 /// assert_eq!(requests.len(), 1);
 /// ```
 pub struct IdealThermostat {
-    /// Target equipment name.
-    target_name: Arc<str>,
     /// Current override state.
     override_state: OverrideState,
     /// Pre-allocated dispatch target (avoids per-step Arc construction).
@@ -124,10 +128,8 @@ pub struct IdealThermostat {
 impl IdealThermostat {
     /// Creates a new IdealThermostat actor targeting the named equipment.
     pub fn new(target_name: &str) -> Self {
-        let arc_name: Arc<str> = Arc::from(target_name);
         Self {
-            dispatch_target: DispatchTarget::ByName(arc_name.clone()),
-            target_name: arc_name,
+            dispatch_target: DispatchTarget::ByName(target_name.into()),
             override_state: OverrideState::default(),
         }
     }
@@ -151,7 +153,15 @@ impl IdealThermostat {
     }
 
     /// Sets dual heating and cooling overrides (convenience method).
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics if `heating_c >= cooling_c` — physically impossible setpoint inversion.
     pub fn with_setpoints(mut self, heating_c: f64, cooling_c: f64) -> Self {
+        debug_assert!(
+            heating_c < cooling_c,
+            "heating setpoint ({heating_c}°C) must be below cooling setpoint ({cooling_c}°C)"
+        );
         self.override_state.heating_setpoint_c = Some(heating_c);
         self.override_state.cooling_setpoint_c = Some(cooling_c);
         self
@@ -185,7 +195,10 @@ impl IdealThermostat {
 
     /// Returns the target equipment name.
     pub fn target_name(&self) -> &str {
-        &self.target_name
+        match &self.dispatch_target {
+            DispatchTarget::ByName(n) => n,
+            DispatchTarget::ByEndUse(_) => unreachable!("IdealThermostat always targets by name"),
+        }
     }
 }
 
@@ -198,6 +211,15 @@ impl Actor for IdealThermostat {
         if !self.override_state.is_active() {
             return;
         }
+
+        tracing::debug!(
+            actor = "IdealThermostat",
+            target = self.target_name(),
+            heating_c = ?self.override_state.heating_setpoint_c,
+            cooling_c = ?self.override_state.cooling_setpoint_c,
+            deadband_c = ?self.override_state.deadband_c,
+            "dispatching thermal setpoint override",
+        );
 
         out.push(DispatchRequest {
             target: self.dispatch_target.clone(),
@@ -216,7 +238,7 @@ mod tests {
     use hares_types::ControlSignal;
 
     use super::*;
-    use crate::actor::testing::test_env;
+    use crate::actor::testing::{assert_target_by_name, test_env};
 
     #[test]
     fn override_state_is_active_when_any_set() {
@@ -299,7 +321,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
 
         let req = &requests[0];
-        assert_eq!(req.target, DispatchTarget::ByName(Arc::from("HVAC")));
+        assert_target_by_name(&requests, "HVAC");
         assert_eq!(req.priority, PriorityTier::UserOverride);
 
         match &req.signal {

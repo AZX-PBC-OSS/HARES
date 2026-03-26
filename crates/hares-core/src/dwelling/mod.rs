@@ -15,9 +15,9 @@ use std::time::Instant;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal};
-use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
+use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
 use hares_equipment::{Equipment, EquipmentRegistry};
 use hares_io::{
     Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig, StreamingRecorder,
@@ -183,12 +183,9 @@ impl ControlDispatcher {
 
         for (tier_idx, tier_que) in self.by_tier.iter_mut().enumerate() {
             for request in tier_que.drain(..) {
-                let overwrote = self
-                    .seen_targets
-                    .iter()
-                    .any(|&(ref t, prev_tier)| {
-                        t.conflicts_with(&request.target) && tier_idx > prev_tier
-                    });
+                let overwrote = self.seen_targets.iter().any(|&(ref t, prev_tier)| {
+                    t.conflicts_with(&request.target) && tier_idx > prev_tier
+                });
                 if overwrote {
                     tracing::debug!(
                         target_equipment = ?request.target,
@@ -603,8 +600,7 @@ impl Dwelling {
 
         let equipment_execution_order = compute_equipment_execution_order(&equipment);
         let mut solver_feedback_actor = SolverFeedbackActor::new();
-        solver_feedback_actor
-            .set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
+        solver_feedback_actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
 
         let mut dwelling = Self {
             bldg_id: config.bldg_id,
@@ -708,6 +704,21 @@ impl Dwelling {
     /// by [`PriorityTier`].
     pub fn add_actor(&mut self, actor: Box<dyn Actor>) {
         self.actors.push(actor);
+    }
+
+    /// Creates and adds an actor from the registry using the provided config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the actor type is not registered.
+    pub fn add_actor_by_name(
+        &mut self,
+        registry: &crate::actor_registry::ActorRegistry,
+        config: crate::actor_registry::ActorConfig,
+    ) -> Result<()> {
+        let actor = registry.create(config)?;
+        self.actors.push(actor);
+        Ok(())
     }
 
     /// Returns the number of registered actors.
@@ -2205,7 +2216,10 @@ mod tests {
         actor.decide(&env, &mut requests);
 
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].target, DispatchTarget::ByName(Arc::from("IdealHVAC")));
+        assert_eq!(
+            requests[0].target,
+            DispatchTarget::ByName(Arc::from("IdealHVAC"))
+        );
         assert_eq!(requests[0].priority, PriorityTier::Schedule);
 
         // Step 3: dispatch to equipment
@@ -2218,7 +2232,13 @@ mod tests {
 
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
         assert!(
-            (equipment[0].telemetry().get("ideal_capacity_w").unwrap_or(0.0) - 5000.0).abs() < 1e-9,
+            (equipment[0]
+                .telemetry()
+                .get("ideal_capacity_w")
+                .unwrap_or(0.0)
+                - 5000.0)
+                .abs()
+                < 1e-9,
             "equipment should have received 5000W ideal capacity"
         );
     }
@@ -2241,8 +2261,14 @@ mod tests {
         actor.decide(&env, &mut requests);
 
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].target, DispatchTarget::ByName(Arc::from("HVAC_Zone1")));
-        assert_eq!(requests[1].target, DispatchTarget::ByName(Arc::from("HVAC_Zone2")));
+        assert_eq!(
+            requests[0].target,
+            DispatchTarget::ByName(Arc::from("HVAC_Zone1"))
+        );
+        assert_eq!(
+            requests[1].target,
+            DispatchTarget::ByName(Arc::from("HVAC_Zone2"))
+        );
     }
 
     #[test]
@@ -2265,8 +2291,15 @@ mod tests {
         let mut requests = Vec::new();
         actor.decide(&env, &mut requests);
 
-        assert_eq!(requests.len(), 1, "only ideal equipment should produce a signal");
-        assert_eq!(requests[0].target, DispatchTarget::ByName(Arc::from("HVAC")));
+        assert_eq!(
+            requests.len(),
+            1,
+            "only ideal equipment should produce a signal"
+        );
+        assert_eq!(
+            requests[0].target,
+            DispatchTarget::ByName(Arc::from("HVAC"))
+        );
     }
 
     #[test]
@@ -2343,17 +2376,26 @@ mod tests {
         // Queue 3 signals to 2 different equipment
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Eq1")),
-            signal: ControlSignal::PowerSetpoint { active_power_kw: 1.0, reactive_power_kvar: None },
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
             priority: PriorityTier::Schedule,
         });
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Eq2")),
-            signal: ControlSignal::PowerSetpoint { active_power_kw: 2.0, reactive_power_kvar: None },
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 2.0,
+                reactive_power_kvar: None,
+            },
             priority: PriorityTier::Schedule,
         });
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Eq1")),
-            signal: ControlSignal::PowerSetpoint { active_power_kw: 3.0, reactive_power_kvar: None },
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 3.0,
+                reactive_power_kvar: None,
+            },
             priority: PriorityTier::Grid,
         });
 
@@ -2361,7 +2403,9 @@ mod tests {
         let mut delivered_count = 0u32;
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
         dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, delivered, _| {
-            if delivered { delivered_count += 1; }
+            if delivered {
+                delivered_count += 1;
+            }
         });
 
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
@@ -2383,12 +2427,18 @@ mod tests {
         // Two Schedule-tier signals to same equipment
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
-            signal: ControlSignal::PowerSetpoint { active_power_kw: 1.0, reactive_power_kvar: None },
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 1.0,
+                reactive_power_kvar: None,
+            },
             priority: PriorityTier::Schedule,
         });
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
-            signal: ControlSignal::PowerSetpoint { active_power_kw: 9.0, reactive_power_kvar: None },
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 9.0,
+                reactive_power_kvar: None,
+            },
             priority: PriorityTier::Schedule,
         });
 
@@ -2417,14 +2467,16 @@ mod tests {
         let mut dispatcher = ControlDispatcher::default();
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
-            signal: ControlSignal::PowerSetpoint { active_power_kw: 5.0, reactive_power_kvar: None },
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            },
             priority: PriorityTier::Schedule,
         });
 
         let mut warnings = Vec::new();
-        let mut equipment: Vec<Box<dyn Equipment>> = vec![
-            Box::new(eq1), Box::new(eq2), Box::new(eq3),
-        ];
+        let mut equipment: Vec<Box<dyn Equipment>> =
+            vec![Box::new(eq1), Box::new(eq2), Box::new(eq3)];
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
         assert!(warnings.is_empty());
@@ -2446,7 +2498,10 @@ mod tests {
         let mut dispatcher = ControlDispatcher::default();
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
-            signal: ControlSignal::PowerSetpoint { active_power_kw: 5.0, reactive_power_kvar: None },
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 5.0,
+                reactive_power_kvar: None,
+            },
             priority: PriorityTier::Schedule,
         });
 
@@ -2460,9 +2515,14 @@ mod tests {
         // Second dispatch with nothing queued — queues should be empty
         let mut delivered_count = 0u32;
         dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, delivered, _| {
-            if delivered { delivered_count += 1; }
+            if delivered {
+                delivered_count += 1;
+            }
         });
-        assert_eq!(delivered_count, 0, "no signals should be delivered on second dispatch");
+        assert_eq!(
+            delivered_count, 0,
+            "no signals should be delivered on second dispatch"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2480,15 +2540,17 @@ mod tests {
         let ideal2 = TestIdealEquipment::new("HVAC_2", ZoneId(2), 22.0);
         let battery = TestEquipment::new("Battery", ControlCapabilities::POWER_SETPOINT);
 
-        let equipment: Vec<Box<dyn Equipment>> = vec![
-            Box::new(ideal1), Box::new(ideal2), Box::new(battery),
-        ];
+        let equipment: Vec<Box<dyn Equipment>> =
+            vec![Box::new(ideal1), Box::new(ideal2), Box::new(battery)];
 
         let mut actor = SolverFeedbackActor::new();
         actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
-        actor.collect_and_solve_test(&equipment, |zone, _target_c| {
-            if zone == ZoneId(1) { 3000.0 } else { -2000.0 }
-        });
+        actor.collect_and_solve_test(
+            &equipment,
+            |zone, _target_c| {
+                if zone == ZoneId(1) { 3000.0 } else { -2000.0 }
+            },
+        );
 
         let env = crate::actor::testing::test_env().build();
         let mut requests = Vec::new();
@@ -2552,7 +2614,13 @@ mod tests {
         // Grid priority (0W) should overwrite Schedule priority (5000W)
         assert!(warnings.is_empty());
         assert!(
-            (equipment[0].telemetry().get("ideal_capacity_w").unwrap_or(999.0) - 0.0).abs() < 1e-9,
+            (equipment[0]
+                .telemetry()
+                .get("ideal_capacity_w")
+                .unwrap_or(999.0)
+                - 0.0)
+                .abs()
+                < 1e-9,
             "Grid priority override should zero out the ideal capacity"
         );
     }
@@ -2572,7 +2640,10 @@ mod tests {
         let mut dispatcher = ControlDispatcher::default();
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::OTHER),
-            signal: ControlSignal::PowerSetpoint { active_power_kw: 7.0, reactive_power_kvar: None },
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: 7.0,
+                reactive_power_kvar: None,
+            },
             priority: PriorityTier::Schedule,
         });
 
@@ -2583,7 +2654,10 @@ mod tests {
         // eq1 should generate a warning but eq2 should still receive the signal
         assert_eq!(warnings.len(), 1, "one warning for rejected signal");
         assert!(warnings[0].contains("control apply failed"));
-        assert_eq!(equipment[1].telemetry().get("last_power_kw"), Some(7.0),
-            "second equipment should still receive signal despite first rejecting");
+        assert_eq!(
+            equipment[1].telemetry().get("last_power_kw"),
+            Some(7.0),
+            "second equipment should still receive signal despite first rejecting"
+        );
     }
 }

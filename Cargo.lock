@@ -986,6 +986,7 @@ dependencies = [
  "pyo3",
  "rayon",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

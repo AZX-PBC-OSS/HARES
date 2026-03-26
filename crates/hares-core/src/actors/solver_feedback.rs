@@ -92,6 +92,12 @@ impl Actor for SolverFeedbackActor {
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         for (idx, capacity_w) in self.pending.drain(..) {
+            debug_assert!(
+                idx < self.dispatch_targets.len(),
+                "dispatch_targets not synced with equipment (idx={}, len={})",
+                idx,
+                self.dispatch_targets.len()
+            );
             out.push(DispatchRequest {
                 target: self.dispatch_targets[idx].clone(),
                 signal: ControlSignal::IdealCapacity { capacity_w },

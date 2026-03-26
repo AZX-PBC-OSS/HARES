@@ -5,12 +5,10 @@ use std::collections::HashMap;
 use hares_envelope::{
     BoundaryCategory, BoundaryDiagnostic, BoundaryDiagnosticInfo, BoundaryInput, BuildingRC,
     DrivingTemp, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, ElectricalSolver,
-    ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo, ExteriorTarget,
-    FluidSolver,
-    FluidSolverConfig, HumiditySolver, HumiditySolverConfig, NodeId,
-    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring,
-    SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
-    assemble_building_rc, derive_zone_capacitances,
+    ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo, ExteriorTarget, FluidSolver,
+    FluidSolverConfig, HumiditySolver, HumiditySolverConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT,
+    SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring, SurfaceLayerInfo, ThermalSolver,
+    ThermalSolverConfig, WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
@@ -87,7 +85,8 @@ fn build_solver_boundaries(
     }
 
     // Index diagnostics by boundary_idx for O(1) lookup.
-    let diag_by_idx: HashMap<usize, &BoundaryDiagnostic> = rc.envelope_diagnostics
+    let diag_by_idx: HashMap<usize, &BoundaryDiagnostic> = rc
+        .envelope_diagnostics
         .boundaries
         .iter()
         .map(|d| (d.boundary_idx, d))
@@ -163,8 +162,8 @@ fn build_solver_boundaries(
 
         // Boundary category.
         // Same-zone boundaries (interior == exterior) are internal thermal mass.
-        let is_same_zone = boundary.interior_zone == boundary.exterior_zone
-            && boundary.interior_zone.is_some();
+        let is_same_zone =
+            boundary.interior_zone == boundary.exterior_zone && boundary.interior_zone.is_some();
         let boundary_category = if is_same_zone {
             Some(BoundaryCategory::InternalMass)
         } else {
@@ -187,8 +186,9 @@ fn build_solver_boundaries(
                     }
                 }
                 hares_io::hpxml::BoundaryType::Window => Some(BoundaryCategory::Window),
-                hares_io::hpxml::BoundaryType::Door
-                | hares_io::hpxml::BoundaryType::Other(_) => None,
+                hares_io::hpxml::BoundaryType::Door | hares_io::hpxml::BoundaryType::Other(_) => {
+                    None
+                }
             }
         };
 
@@ -700,7 +700,6 @@ pub(crate) fn build_default_solvers(
             }
         }
     }
-
 
     // Group surfaces_by_zone into interior_lwr_zones.
     for (zid, surfaces) in surfaces_by_zone {

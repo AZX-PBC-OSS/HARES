@@ -6,7 +6,7 @@
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-use crate::{HaresError, OperatingMode, ProtocolId};
+use crate::{HaresError, IdealCapacityMode, OperatingMode, ProtocolId};
 
 /// Target component for split duty cycle control (HPWH compressor vs backup element).
 ///
@@ -24,12 +24,13 @@ pub enum DutyCycleComponent {
 
 /// Demand response severity levels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum DRLevel {
-    Normal,
-    Moderate,
-    High,
-    Critical,
-    GridEmergency,
+    Normal = 0,
+    Moderate = 1,
+    High = 2,
+    Critical = 3,
+    GridEmergency = 4,
 }
 
 /// Typed external control signals consumed by equipment models.
@@ -103,6 +104,17 @@ pub enum ControlSignal {
     IdealCapacity {
         capacity_w: f64,
     },
+    /// Relative setpoint adjustment applied on top of the equipment's current
+    /// effective setpoints. Positive `heating_delta_c` raises the heating
+    /// setpoint; positive `cooling_delta_c` raises the cooling setpoint.
+    ThermalSetpointDelta {
+        heating_delta_c: Option<f64>,
+        cooling_delta_c: Option<f64>,
+    },
+    /// Override the ideal capacity mode at runtime (Auto/On/Off).
+    IdealCapacityModeOverride {
+        mode: IdealCapacityMode,
+    },
 }
 
 /// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
@@ -134,6 +146,8 @@ bitflags! {
         const POWER_FACTOR_SETPOINT = 1 << 14;
         const INVERTER_PRIORITY_MODE = 1 << 15;
         const IDEAL_CAPACITY = 1 << 16;
+        const THERMAL_SETPOINT_DELTA = 1 << 17;
+        const IDEAL_CAPACITY_MODE_OVERRIDE = 1 << 18;
     }
 }
 
@@ -157,6 +171,10 @@ impl ControlSignal {
             Self::PowerFactorSetpoint { .. } => ControlCapabilities::POWER_FACTOR_SETPOINT,
             Self::InverterPriorityMode { .. } => ControlCapabilities::INVERTER_PRIORITY_MODE,
             Self::IdealCapacity { .. } => ControlCapabilities::IDEAL_CAPACITY,
+            Self::ThermalSetpointDelta { .. } => ControlCapabilities::THERMAL_SETPOINT_DELTA,
+            Self::IdealCapacityModeOverride { .. } => {
+                ControlCapabilities::IDEAL_CAPACITY_MODE_OVERRIDE
+            }
         }
     }
 }
@@ -240,6 +258,13 @@ mod tests {
                 payload: vec![1, 2, 3, 4, 5],
             },
             ControlSignal::IdealCapacity { capacity_w: 3500.0 },
+            ControlSignal::ThermalSetpointDelta {
+                heating_delta_c: Some(2.0),
+                cooling_delta_c: Some(-2.0),
+            },
+            ControlSignal::IdealCapacityModeOverride {
+                mode: crate::IdealCapacityMode::On,
+            },
         ];
 
         for signal in signals {

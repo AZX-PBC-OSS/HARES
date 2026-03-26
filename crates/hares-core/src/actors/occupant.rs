@@ -89,14 +89,27 @@ impl EquipmentBehavior {
     }
 
     /// Set power setpoint for equipment.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics if `kw` is negative.
     pub fn with_power_setpoint(mut self, kw: f64) -> Self {
+        debug_assert!(kw >= 0.0, "power setpoint must be non-negative, got {kw}");
         self.power_setpoint_kw = Some(kw);
         self
     }
 
     /// Set load fraction for equipment.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics if `fraction` is outside `[0.0, 1.0]`.
     pub fn with_load_fraction(mut self, fraction: f64) -> Self {
-        self.load_fraction = Some(fraction.clamp(0.0, 1.0));
+        debug_assert!(
+            (0.0..=1.0).contains(&fraction),
+            "load fraction must be in [0.0, 1.0], got {fraction}"
+        );
+        self.load_fraction = Some(fraction);
         self
     }
 }
@@ -115,50 +128,28 @@ pub struct Occupant {
     current_step: usize,
     /// Previous presence state for transition detection.
     previous_presence: Presence,
-    /// Target equipment name for lighting control.
-    lighting_target: Option<Arc<str>>,
-    /// Behavior configuration for lighting.
-    lighting_behavior: EquipmentBehavior,
-    /// Target equipment name for appliance (washing machine, dryer, etc.) control.
-    appliance_target: Option<Arc<str>>,
-    /// Behavior configuration for appliances.
-    appliance_behavior: EquipmentBehavior,
-    /// Target equipment name for EV control.
-    ev_target: Option<Arc<str>>,
-    /// Behavior configuration for EV.
-    ev_behavior: EquipmentBehavior,
-    /// Target end-use category for bulk plug load control.
-    plug_loads_target: Option<EndUse>,
-    /// Behavior configuration for plug loads.
-    plug_loads_behavior: EquipmentBehavior,
-    /// Pre-cached dispatch targets (avoid per-step Arc construction).
-    cached_lighting_target: Option<DispatchTarget>,
-    cached_appliance_target: Option<DispatchTarget>,
-    cached_ev_target: Option<DispatchTarget>,
-    cached_plug_loads_target: Option<DispatchTarget>,
+    /// Pre-cached dispatch target + behavior for lighting.
+    lighting: Option<(DispatchTarget, EquipmentBehavior)>,
+    /// Pre-cached dispatch target + behavior for appliances.
+    appliance: Option<(DispatchTarget, EquipmentBehavior)>,
+    /// Pre-cached dispatch target + behavior for EV.
+    ev: Option<(DispatchTarget, EquipmentBehavior)>,
+    /// Pre-cached dispatch target + behavior for plug loads.
+    plug_loads: Option<(DispatchTarget, EquipmentBehavior)>,
 }
 
 impl Occupant {
     /// Creates a new Occupant actor with the given name.
     pub fn new(name: &str) -> Self {
-        let arc_name: Arc<str> = Arc::from(name);
         Self {
-            name: arc_name,
+            name: Arc::from(name),
             presence_schedule: vec![Presence::Home],
             current_step: 0,
             previous_presence: Presence::Home,
-            lighting_target: None,
-            lighting_behavior: EquipmentBehavior::none(),
-            appliance_target: None,
-            appliance_behavior: EquipmentBehavior::none(),
-            ev_target: None,
-            ev_behavior: EquipmentBehavior::none(),
-            plug_loads_target: None,
-            plug_loads_behavior: EquipmentBehavior::none(),
-            cached_lighting_target: None,
-            cached_appliance_target: None,
-            cached_ev_target: None,
-            cached_plug_loads_target: None,
+            lighting: None,
+            appliance: None,
+            ev: None,
+            plug_loads: None,
         }
     }
 
@@ -173,41 +164,41 @@ impl Occupant {
 
     /// Configures lighting equipment target and behavior.
     pub fn with_lighting(mut self, target_name: &str, behavior: EquipmentBehavior) -> Self {
-        let arc_name: Arc<str> = Arc::from(target_name);
-        self.cached_lighting_target = Some(DispatchTarget::ByName(arc_name.clone()));
-        self.lighting_target = Some(arc_name);
-        self.lighting_behavior = behavior;
+        self.lighting = Some((DispatchTarget::ByName(target_name.into()), behavior));
         self
     }
 
     /// Configures appliance equipment target and behavior.
     pub fn with_appliance(mut self, target_name: &str, behavior: EquipmentBehavior) -> Self {
-        let arc_name: Arc<str> = Arc::from(target_name);
-        self.cached_appliance_target = Some(DispatchTarget::ByName(arc_name.clone()));
-        self.appliance_target = Some(arc_name);
-        self.appliance_behavior = behavior;
+        self.appliance = Some((DispatchTarget::ByName(target_name.into()), behavior));
         self
     }
 
     /// Configures EV equipment target and behavior.
     pub fn with_ev(mut self, target_name: &str, behavior: EquipmentBehavior) -> Self {
-        let arc_name: Arc<str> = Arc::from(target_name);
-        self.cached_ev_target = Some(DispatchTarget::ByName(arc_name.clone()));
-        self.ev_target = Some(arc_name);
-        self.ev_behavior = behavior;
+        self.ev = Some((DispatchTarget::ByName(target_name.into()), behavior));
         self
     }
 
     /// Configures plug loads by end-use category.
     pub fn with_plug_loads(mut self, end_use: EndUse, behavior: EquipmentBehavior) -> Self {
-        self.cached_plug_loads_target = Some(DispatchTarget::ByEndUse(end_use.clone()));
-        self.plug_loads_target = Some(end_use);
-        self.plug_loads_behavior = behavior;
+        self.plug_loads = Some((DispatchTarget::ByEndUse(end_use), behavior));
         self
     }
 
     /// Returns the current presence state.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics if `current_step` exceeds the schedule length — the schedule
+    /// must cover the full simulation duration.
     pub fn current_presence(&self) -> Presence {
+        debug_assert!(
+            self.current_step < self.presence_schedule.len(),
+            "presence schedule exhausted at step {} (schedule length {})",
+            self.current_step,
+            self.presence_schedule.len(),
+        );
         self.presence_schedule
             .get(self.current_step)
             .copied()
@@ -228,20 +219,20 @@ impl Occupant {
     }
 
     /// Generates control signals for equipment based on behavior and presence.
+    ///
+    /// Mode signals (`off_when_away`, `on_when_home`) are event-driven — they fire
+    /// on transitions or while the triggering condition holds (away → Off each step).
+    /// Continuous controls (`power_setpoint_kw`, `load_fraction`) are re-sent every
+    /// step while present, keeping the equipment override active for the duration.
     fn dispatch_for_behavior(
-        &self,
         target: &DispatchTarget,
         behavior: &EquipmentBehavior,
         presence: Presence,
         is_transition: bool,
         out: &mut Vec<DispatchRequest>,
     ) {
-        // Check if there's any continuous control to apply
         let has_continuous_control =
             behavior.load_fraction.is_some() || behavior.power_setpoint_kw.is_some();
-
-        // Only dispatch on transitions or when explicitly configured for mode changes,
-        // or when there's continuous control to apply
         let has_mode_control = behavior.off_when_away || behavior.on_when_home;
         if !is_transition && !has_mode_control && !has_continuous_control {
             return;
@@ -261,7 +252,6 @@ impl Occupant {
 
         // Handle returning home: turn on equipment if configured
         if presence.is_present() && is_transition && behavior.on_when_home {
-            // For appliances, ModeOverride On triggers them to run
             out.push(DispatchRequest {
                 target: target.clone(),
                 signal: ControlSignal::ModeOverride {
@@ -271,78 +261,81 @@ impl Occupant {
             });
         }
 
-        // Apply power setpoint if configured (regardless of presence for EV, only when home for others)
-        if let Some(power_kw) = behavior.power_setpoint_kw {
-            if presence.is_present() || self.ev_target.is_some() {
-                out.push(DispatchRequest {
-                    target: target.clone(),
-                    signal: ControlSignal::PowerSetpoint {
-                        active_power_kw: power_kw,
-                        reactive_power_kvar: None,
-                    },
-                    priority: PriorityTier::UserOverride,
-                });
-            }
-        }
-
-        // Apply load fraction if configured
-        if let Some(fraction) = behavior.load_fraction {
-            if presence.is_present() {
-                out.push(DispatchRequest {
-                    target: target.clone(),
-                    signal: ControlSignal::LoadFraction { fraction },
-                    priority: PriorityTier::UserOverride,
-                });
-            }
+        if presence.is_present() {
+            push_power_setpoint_if(target, behavior, out);
+            push_load_fraction_if(target, behavior, out);
         }
     }
 
     /// Generates EV-specific control signals.
+    ///
+    /// EV mode changes (plug/unplug) are transition-only — dispatched once when
+    /// presence changes, not every step. Non-EV equipment re-sends `Off` each step
+    /// while away (idempotent) because the equipment has no "plugged in" concept.
     fn dispatch_for_ev(
-        &self,
         target: &DispatchTarget,
         behavior: &EquipmentBehavior,
         presence: Presence,
         is_transition: bool,
         out: &mut Vec<DispatchRequest>,
     ) {
-        // EV plug/unplug: treat On as plug in, Off as unplug
         if is_transition {
             if presence.is_present() && behavior.on_when_home {
-                // Plug in EV (connect)
                 out.push(DispatchRequest {
                     target: target.clone(),
                     signal: ControlSignal::ModeOverride {
-                        mode: OperatingMode::Standby, // Standby = plugged in but not necessarily charging
+                        mode: OperatingMode::Standby,
                     },
                     priority: PriorityTier::UserOverride,
                 });
             } else if presence.is_away() && behavior.off_when_away {
-                // Unplug EV (disconnect)
                 out.push(DispatchRequest {
                     target: target.clone(),
                     signal: ControlSignal::ModeOverride {
-                        mode: OperatingMode::Off, // Off = disconnected
+                        mode: OperatingMode::Off,
                     },
                     priority: PriorityTier::UserOverride,
                 });
             }
         }
 
-        // EV power limit (charge rate control)
-        if let Some(power_kw) = behavior.power_setpoint_kw {
-            // Only adjust charge rate when plugged in
-            if presence.is_present() {
-                out.push(DispatchRequest {
-                    target: target.clone(),
-                    signal: ControlSignal::PowerSetpoint {
-                        active_power_kw: power_kw,
-                        reactive_power_kvar: None,
-                    },
-                    priority: PriorityTier::UserOverride,
-                });
-            }
+        // EV power limit (charge rate control) — only when plugged in
+        if presence.is_present() {
+            push_power_setpoint_if(target, behavior, out);
         }
+    }
+}
+
+/// Pushes a `PowerSetpoint` if the behavior has one configured.
+fn push_power_setpoint_if(
+    target: &DispatchTarget,
+    behavior: &EquipmentBehavior,
+    out: &mut Vec<DispatchRequest>,
+) {
+    if let Some(power_kw) = behavior.power_setpoint_kw {
+        out.push(DispatchRequest {
+            target: target.clone(),
+            signal: ControlSignal::PowerSetpoint {
+                active_power_kw: power_kw,
+                reactive_power_kvar: None,
+            },
+            priority: PriorityTier::UserOverride,
+        });
+    }
+}
+
+/// Pushes a `LoadFraction` if the behavior has one configured.
+fn push_load_fraction_if(
+    target: &DispatchTarget,
+    behavior: &EquipmentBehavior,
+    out: &mut Vec<DispatchRequest>,
+) {
+    if let Some(fraction) = behavior.load_fraction {
+        out.push(DispatchRequest {
+            target: target.clone(),
+            signal: ControlSignal::LoadFraction { fraction },
+            priority: PriorityTier::UserOverride,
+        });
     }
 }
 
@@ -355,51 +348,35 @@ impl Actor for Occupant {
         let current_presence = self.current_presence();
         let is_transition = current_presence != self.previous_presence;
 
-        // Dispatch lighting control signals
-        if let Some(target) = &self.cached_lighting_target {
-            self.dispatch_for_behavior(
-                target,
-                &self.lighting_behavior,
-                current_presence,
-                is_transition,
-                out,
+        let before = out.len();
+
+        if let Some((target, behavior)) = &self.lighting {
+            Self::dispatch_for_behavior(target, behavior, current_presence, is_transition, out);
+        }
+
+        if let Some((target, behavior)) = &self.appliance {
+            Self::dispatch_for_behavior(target, behavior, current_presence, is_transition, out);
+        }
+
+        if let Some((target, behavior)) = &self.ev {
+            Self::dispatch_for_ev(target, behavior, current_presence, is_transition, out);
+        }
+
+        if let Some((target, behavior)) = &self.plug_loads {
+            Self::dispatch_for_behavior(target, behavior, current_presence, is_transition, out);
+        }
+
+        let dispatched = out.len() - before;
+        if dispatched > 0 || is_transition {
+            tracing::debug!(
+                actor = %self.name,
+                presence = ?current_presence,
+                transition = is_transition,
+                signals = dispatched,
+                "occupant decision",
             );
         }
 
-        // Dispatch appliance control signals
-        if let Some(target) = &self.cached_appliance_target {
-            self.dispatch_for_behavior(
-                target,
-                &self.appliance_behavior,
-                current_presence,
-                is_transition,
-                out,
-            );
-        }
-
-        // Dispatch EV control signals
-        if let Some(target) = &self.cached_ev_target {
-            self.dispatch_for_ev(
-                target,
-                &self.ev_behavior,
-                current_presence,
-                is_transition,
-                out,
-            );
-        }
-
-        // Dispatch plug loads control signals
-        if let Some(target) = &self.cached_plug_loads_target {
-            self.dispatch_for_behavior(
-                target,
-                &self.plug_loads_behavior,
-                current_presence,
-                is_transition,
-                out,
-            );
-        }
-
-        // Advance step counter for next call
         self.advance_step();
     }
 }
@@ -471,20 +448,19 @@ mod tests {
         let env = test_env().build();
         let mut requests = Vec::new();
 
-        // Step 0: Home
+        // Step 0: Home — after decide, step advances to 1
+        assert_eq!(occupant.current_presence(), Presence::Home);
         occupant.decide(&env, &mut requests);
         assert_eq!(occupant.current_presence(), Presence::Away);
 
-        // Step 1: Away
+        // Step 1: Away — after decide, step advances to 2
         requests.clear();
         occupant.decide(&env, &mut requests);
         assert_eq!(occupant.current_presence(), Presence::Home);
 
-        // Step 2: Home
+        // Step 2: Home — final step
         requests.clear();
         occupant.decide(&env, &mut requests);
-        // After last step, stays at last value
-        assert_eq!(occupant.current_presence(), Presence::Home);
     }
 
     #[test]
@@ -800,5 +776,61 @@ mod tests {
             requests.is_empty(),
             "no off signal when going to sleep (still present)"
         );
+    }
+
+    #[test]
+    fn lighting_power_setpoint_not_sent_when_away() {
+        // Regression: power setpoint must NOT leak to non-EV equipment when away
+        let schedule = vec![Presence::Away];
+        let mut occupant = Occupant::new("Test")
+            .with_presence_schedule(schedule)
+            .with_lighting("Lights", EquipmentBehavior::none().with_power_setpoint(1.0))
+            .with_ev("MyEV", EquipmentBehavior::none());
+
+        let env = test_env().build();
+        let mut requests = Vec::new();
+
+        occupant.decide(&env, &mut requests);
+
+        let has_power_for_lights = requests.iter().any(|r| {
+            matches!(&r.target, DispatchTarget::ByName(n) if &**n == "Lights")
+                && matches!(r.signal, ControlSignal::PowerSetpoint { .. })
+        });
+        assert!(
+            !has_power_for_lights,
+            "lighting must not receive PowerSetpoint when occupant is away"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "presence schedule exhausted")]
+    fn schedule_exhaustion_panics_in_debug() {
+        let schedule = vec![Presence::Home];
+        let mut occupant = Occupant::new("Test").with_presence_schedule(schedule);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+
+        // Step 0: consumes the only entry, advances to step 1
+        occupant.decide(&env, &mut requests);
+        // Step 1: schedule exhausted — debug_assert fires
+        occupant.decide(&env, &mut requests);
+    }
+
+    #[test]
+    fn continuous_power_setpoint_sent_every_step_while_present() {
+        let schedule = vec![Presence::Home, Presence::Home];
+        let mut occupant = Occupant::new("Test")
+            .with_presence_schedule(schedule)
+            .with_lighting("Lights", EquipmentBehavior::none().with_power_setpoint(1.0));
+
+        let env = test_env().build();
+        let mut requests = Vec::new();
+
+        occupant.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1, "power setpoint sent on first step");
+
+        requests.clear();
+        occupant.decide(&env, &mut requests);
+        assert_eq!(requests.len(), 1, "power setpoint re-sent on second step");
     }
 }

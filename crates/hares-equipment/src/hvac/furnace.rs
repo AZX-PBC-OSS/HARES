@@ -77,7 +77,8 @@ impl ElectricFurnace {
             zone: Some(zone),
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
-            control_capabilities: ControlCapabilities::THERMAL_SETPOINT,
+            control_capabilities: ControlCapabilities::THERMAL_SETPOINT
+                | ControlCapabilities::THERMAL_SETPOINT_DELTA,
             telemetry_fields: electric_furnace_telemetry_fields(),
         };
 
@@ -238,7 +239,8 @@ impl GasFurnace {
             zone: Some(zone),
             fuel: FuelType::Gas,
             stage: ExecutionStage::Thermal,
-            control_capabilities: ControlCapabilities::THERMAL_SETPOINT,
+            control_capabilities: ControlCapabilities::THERMAL_SETPOINT
+                | ControlCapabilities::THERMAL_SETPOINT_DELTA,
             telemetry_fields: gas_furnace_telemetry_fields(),
         };
 

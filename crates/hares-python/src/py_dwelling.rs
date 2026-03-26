@@ -5,13 +5,15 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, TimeZone};
 use hares_control::PriceSignal;
-use hares_core::{Dwelling, DwellingConfig};
+use hares_core::{ActorConfig, ActorRegistry, Dwelling, DwellingConfig};
+use hares_equipment::config::ConfigValue;
 use hares_io::{OutputFormat, SimulationConfig};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyType};
 
 use crate::conversions::{record_batches_to_polars_df, steps_to_polars_df};
+use crate::py_actor::PyActor;
 use crate::py_control::PyControlSignal;
 use crate::py_telemetry::PyTelemetry;
 
@@ -25,6 +27,7 @@ pub struct PyDwelling {
     pub(crate) config: DwellingConfig,
     initial_state: Option<Vec<u8>>,
     initialized: bool,
+    registry: ActorRegistry,
 }
 
 #[pymethods]
@@ -45,6 +48,7 @@ impl PyDwelling {
             config,
             initial_state: None,
             initialized: false,
+            registry: ActorRegistry::new(),
         })
     }
 
@@ -136,6 +140,50 @@ impl PyDwelling {
             .lock()
             .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
         dwelling.apply_control(&name, signal.signal.clone());
+        Ok(())
+    }
+
+    /// Adds a Python actor to the dwelling's decision-making loop.
+    pub fn add_actor(&self, py: Python<'_>, actor: Py<PyActor>) -> PyResult<()> {
+        let mut dwelling = self
+            .dwelling
+            .lock()
+            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        let wrapper = crate::py_actor::PyActorWrapper::new(py, actor);
+        dwelling.add_actor(Box::new(wrapper));
+        Ok(())
+    }
+
+    /// Creates and adds an actor from the registry using configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `actor_type` - Registered actor type name (e.g., "IdealThermostat", "Occupant", "DrCompliance")
+    /// * `name` - Actor instance name
+    /// * `params` - Configuration parameters as a dictionary
+    pub fn add_actor_by_name(
+        &self,
+        actor_type: String,
+        name: String,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let mut config = ActorConfig::new(name, actor_type);
+
+        if let Some(dict) = params {
+            for (key, value) in dict.iter() {
+                let key: String = key.extract()?;
+                let config_value = py_to_config_value(&value)?;
+                config = config.with_param(key, config_value);
+            }
+        }
+
+        let mut dwelling = self
+            .dwelling
+            .lock()
+            .map_err(|_| PyValueError::new_err("failed to lock dwelling state"))?;
+        dwelling
+            .add_actor_by_name(&self.registry, config)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -619,4 +667,23 @@ fn snapshot_to_py(
     }
 
     Ok(dict.unbind().into())
+}
+
+fn py_to_config_value(value: &Bound<'_, PyAny>) -> PyResult<ConfigValue> {
+    // Bool must be checked before f64 because Python bool extracts as f64 (True → 1.0)
+    if let Ok(b) = value.extract::<bool>() {
+        return Ok(ConfigValue::Bool(b));
+    }
+    if let Ok(f) = value.extract::<f64>() {
+        return Ok(ConfigValue::Float(f));
+    }
+    if let Ok(s) = value.extract::<String>() {
+        return Ok(ConfigValue::Text(s));
+    }
+    if let Ok(arr) = value.extract::<Vec<f64>>() {
+        return Ok(ConfigValue::FloatArray(arr));
+    }
+    Err(PyValueError::new_err(
+        "config value must be bool, float, string, or list of floats",
+    ))
 }

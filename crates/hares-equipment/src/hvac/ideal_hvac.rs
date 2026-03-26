@@ -75,7 +75,9 @@ impl IdealHvac {
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::IDEAL_CAPACITY
+                | ControlCapabilities::IDEAL_CAPACITY_MODE_OVERRIDE
                 | ControlCapabilities::THERMAL_SETPOINT
+                | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::MODE_OVERRIDE,
             telemetry_fields: ideal_hvac_telemetry_fields(),
         };
@@ -499,8 +501,29 @@ impl Equipment for IdealHvac {
                         self.set_mode(ThermostatMode::Deadband, sim_time);
                     } else {
                         self.mode = ThermostatMode::Deadband;
+                        self.ideal_capacity_w = 0.0;
                     }
                 }
+            }
+            ControlSignal::ThermalSetpointDelta {
+                heating_delta_c,
+                cooling_delta_c,
+            } => {
+                let base = self
+                    .static_setpoints
+                    .with_schedule_override(self.schedule_setpoints);
+                let prior = self.runtime_setpoints.unwrap_or_default();
+                self.runtime_setpoints = Some(RuntimeSetpointOverride {
+                    heating_c: heating_delta_c
+                        .map(|d| base.heating_c + d)
+                        .or(prior.heating_c),
+                    cooling_c: cooling_delta_c
+                        .map(|d| base.cooling_c + d)
+                        .or(prior.cooling_c),
+                });
+            }
+            ControlSignal::IdealCapacityModeOverride { mode } => {
+                self.ideal_capacity_mode = *mode;
             }
             ControlSignal::LoadFraction { fraction } => {
                 self.load_fraction = fraction.clamp(0.0, 1.0);
@@ -1097,6 +1120,58 @@ mod tests {
             hares_types::OperatingMode::Heating,
             "should recover to heating after mode override clears"
         );
+    }
+
+    #[test]
+    fn mode_override_off_before_first_step_clears_capacity() {
+        let cfg = config("IH");
+        let mut eq = IdealHvac::new(cfg);
+
+        // Before init/step, last_sim_time is None. Set a stale capacity.
+        eq.ideal_capacity_w = 5000.0;
+
+        eq.apply_control_unchecked(&hares_types::ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Off,
+        })
+        .unwrap();
+
+        assert_eq!(
+            eq.ideal_capacity_w, 0.0,
+            "ModeOverride(Off) before first step must clear ideal_capacity_w"
+        );
+    }
+
+    #[test]
+    fn ideal_capacity_mode_override_switches_at_runtime() {
+        let mut cfg = config("IH");
+        cfg.raw_config.insert("zone_id".into(), 1.0.into());
+        cfg.raw_config
+            .insert("ideal_capacity_mode".into(), "off".into());
+        cfg.raw_config
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.raw_config
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let environment = env(18.0, 60, 0);
+        eq.init(&cfg, &environment).unwrap();
+
+        // Initially off — should NOT use ideal capacity
+        assert!(!eq.use_ideal_capacity(&environment));
+
+        // Override to On at runtime
+        eq.apply_control_unchecked(&hares_types::ControlSignal::IdealCapacityModeOverride {
+            mode: hares_types::IdealCapacityMode::On,
+        })
+        .unwrap();
+        assert!(eq.use_ideal_capacity(&environment));
+
+        // Override back to Off
+        eq.apply_control_unchecked(&hares_types::ControlSignal::IdealCapacityModeOverride {
+            mode: hares_types::IdealCapacityMode::Off,
+        })
+        .unwrap();
+        assert!(!eq.use_ideal_capacity(&environment));
     }
 
     #[test]

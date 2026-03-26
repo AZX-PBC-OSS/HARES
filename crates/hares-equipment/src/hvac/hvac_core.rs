@@ -465,16 +465,37 @@ impl HvacEquipment {
     /// OCHRE HVAC.py lines 853–857: `disable_speeds` is updated from the external
     /// control signal. The highest non-disabled speed is cached as `max_enabled_speed`.
     pub fn apply_control_signal(&mut self, signal: &ControlSignal) {
-        if let ControlSignal::ThermalSetpoint {
-            heating_setpoint_c,
-            cooling_setpoint_c,
-            ..
-        } = signal
-        {
-            self.runtime_setpoints = Some(RuntimeSetpointOverride {
-                heating_c: *heating_setpoint_c,
-                cooling_c: *cooling_setpoint_c,
-            });
+        match signal {
+            ControlSignal::ThermalSetpoint {
+                heating_setpoint_c,
+                cooling_setpoint_c,
+                ..
+            } => {
+                self.runtime_setpoints = Some(RuntimeSetpointOverride {
+                    heating_c: *heating_setpoint_c,
+                    cooling_c: *cooling_setpoint_c,
+                });
+            }
+            ControlSignal::ThermalSetpointDelta {
+                heating_delta_c,
+                cooling_delta_c,
+            } => {
+                // Anchor to base (static + schedule), not full effective chain,
+                // so repeated delta dispatch is idempotent rather than compounding.
+                let base = self
+                    .static_setpoints
+                    .with_schedule_override(self.schedule_setpoints);
+                let prior = self.runtime_setpoints.unwrap_or_default();
+                self.runtime_setpoints = Some(RuntimeSetpointOverride {
+                    heating_c: heating_delta_c
+                        .map(|d| base.heating_c + d)
+                        .or(prior.heating_c),
+                    cooling_c: cooling_delta_c
+                        .map(|d| base.cooling_c + d)
+                        .or(prior.cooling_c),
+                });
+            }
+            _ => {}
         }
     }
 

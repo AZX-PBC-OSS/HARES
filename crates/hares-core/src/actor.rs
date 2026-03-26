@@ -11,12 +11,6 @@
 //! 2. **Actors only dispatch ControlSignals** — they never directly mutate state.
 //! 3. **Equipment receives signals and adjusts internal operational state**.
 //! 4. **Config is separate from control signals.** Config sets up equipment at init time.
-//!
-//! # Ordering Contract
-//!
-//! Actors execute in registration order. Dispatch applies signals sorted by
-//! [`PriorityTier`] — highest priority wins when multiple signals target the
-//! same equipment.
 
 use std::sync::Arc;
 

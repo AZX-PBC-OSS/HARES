@@ -40,6 +40,53 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (heating_delta_c=None, cooling_delta_c=None))]
+    pub fn thermal_setpoint_delta(
+        heating_delta_c: Option<f64>,
+        cooling_delta_c: Option<f64>,
+    ) -> Self {
+        Self {
+            signal: ControlSignal::ThermalSetpointDelta {
+                heating_delta_c,
+                cooling_delta_c,
+            },
+        }
+    }
+
+    #[staticmethod]
+    pub fn ideal_capacity(capacity_w: f64) -> Self {
+        Self {
+            signal: ControlSignal::IdealCapacity { capacity_w },
+        }
+    }
+
+    #[staticmethod]
+    pub fn load_fraction(fraction: f64) -> Self {
+        Self {
+            signal: ControlSignal::LoadFraction { fraction },
+        }
+    }
+
+    #[staticmethod]
+    pub fn mode_override(mode: &str) -> PyResult<Self> {
+        Ok(Self {
+            signal: ControlSignal::ModeOverride {
+                mode: parse_mode(mode)?,
+            },
+        })
+    }
+
+    #[staticmethod]
+    pub fn demand_response(level: &str, duration_s: Option<f64>) -> PyResult<Self> {
+        Ok(Self {
+            signal: ControlSignal::DemandResponse {
+                level: parse_dr_level(level)?,
+                duration_s,
+            },
+        })
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (target, min=None, max=None))]
     pub fn soc_target(target: f64, min: Option<f64>, max: Option<f64>) -> Self {
         Self {
@@ -128,6 +175,27 @@ impl PyControlSignal {
             "InverterPriorityMode" => ControlSignal::InverterPriorityMode {
                 priority: parse_inverter_priority(&dict_required::<String>(d, "priority")?)?,
             },
+            "IdealCapacity" => ControlSignal::IdealCapacity {
+                capacity_w: dict_required(d, "capacity_w")?,
+            },
+            "ThermalSetpointDelta" => ControlSignal::ThermalSetpointDelta {
+                heating_delta_c: dict_optional(d, "heating_delta_c")?,
+                cooling_delta_c: dict_optional(d, "cooling_delta_c")?,
+            },
+            "IdealCapacityModeOverride" => {
+                let mode_str: String = dict_required(d, "mode")?;
+                let mode = match mode_str.to_lowercase().as_str() {
+                    "auto" => hares_types::IdealCapacityMode::Auto,
+                    "on" => hares_types::IdealCapacityMode::On,
+                    "off" => hares_types::IdealCapacityMode::Off,
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unsupported IdealCapacityMode `{mode_str}`"
+                        )));
+                    }
+                };
+                ControlSignal::IdealCapacityModeOverride { mode }
+            }
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "unsupported control signal type `{kind}`"

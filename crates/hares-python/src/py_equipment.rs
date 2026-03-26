@@ -34,7 +34,7 @@ impl PyBattery {
     }
 }
 
-#[pyclass(name = "PvSoilingConfig")]
+#[pyclass(name = "PvSoilingConfig", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyPvSoilingConfig {
     #[pyo3(get)]

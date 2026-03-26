@@ -303,6 +303,7 @@ impl CoolingCore {
                 fuel: FuelType::Electric,
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
+                    | ControlCapabilities::THERMAL_SETPOINT_DELTA
                     | ControlCapabilities::DUTY_CYCLE
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT

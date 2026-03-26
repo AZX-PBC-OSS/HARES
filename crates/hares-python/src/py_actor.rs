@@ -1,0 +1,710 @@
+//! Python bindings for actors.
+//!
+//! Provides Python actors that implement the Rust [`Actor`] trait.
+//! Python users subclass the `Actor` base class and implement `decide(env)`.
+//!
+//! # Strong Types
+//!
+//! All signal types are strongly typed enums to prevent runtime errors:
+//! - [`Mode`]: Off, Heating, Cooling, Standby
+//! - [`Priority`]: Schedule, UserOverride, Grid, Safety
+//! - [`Signal`]: ThermalSetpoint, ModeOverride, LoadFraction, PowerLimit
+//!
+//! # Example (Python)
+//!
+//! ```python
+//! from hares import Actor, DispatchRequest, Signal, Mode, Priority
+//!
+//! class MyThermostat(Actor):
+//!     def __init__(self, target: str):
+//!         self.target = target
+//!         self.name = f"Thermostat({target})"
+//!
+//!     def decide(self, env) -> list[DispatchRequest]:
+//!         zones = env["zones"]
+//!         if zones and zones[0]["temperature_c"] < 18.0:
+//!             return [DispatchRequest.thermal_setpoint(
+//!                 target=self.target,
+//!                 heating_c=20.0,
+//!                 priority=Priority.user_override(),
+//!             )]
+//!         return []
+//! ```
+
+use std::sync::Arc;
+
+use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
+use hares_types::{ControlSignal, EnvironmentState, OperatingMode};
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+
+/// Python actor base class.
+#[pyclass(name = "Actor", subclass)]
+pub struct PyActor {
+    cached_name: Arc<str>,
+}
+
+#[pymethods]
+impl PyActor {
+    #[new]
+    fn new() -> Self {
+        Self {
+            cached_name: Arc::from("PyActor"),
+        }
+    }
+
+    #[setter]
+    fn set_name(&mut self, name: String) {
+        self.cached_name = Arc::from(name);
+    }
+
+    #[getter]
+    fn name(&self) -> &str {
+        &self.cached_name
+    }
+}
+
+/// Rust wrapper for Python actor that implements the Actor trait.
+pub struct PyActorWrapper {
+    obj: Py<PyActor>,
+    name: Arc<str>,
+}
+
+impl PyActorWrapper {
+    pub fn new(py: Python<'_>, obj: Py<PyActor>) -> Self {
+        let name = obj
+            .bind(py)
+            .getattr("name")
+            .and_then(|n| n.extract::<String>())
+            .unwrap_or_else(|_| "PyActor".to_string());
+        Self {
+            name: Arc::from(name),
+            obj,
+        }
+    }
+}
+
+impl hares_core::Actor for PyActorWrapper {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        let executed = Python::try_attach(|py| {
+            let obj = self.obj.bind(py);
+
+            // Refresh cached name in case Python code updated it
+            if let Ok(n) = obj.getattr("name").and_then(|v| v.extract::<String>()) {
+                if n.as_str() != &*self.name {
+                    self.name = Arc::from(n);
+                }
+            }
+
+            let env_dict = environment_to_py_dict(py, env);
+
+            let result = obj.call_method1("decide", (&env_dict,));
+            match result {
+                Ok(result) => match result.extract::<Vec<PyDispatchRequest>>() {
+                    Ok(requests) => {
+                        for req in requests {
+                            out.push(req.into_dispatch_request());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            actor = %self.name,
+                            error = %e,
+                            "Python actor decide() returned invalid type"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        actor = %self.name,
+                        error = %e,
+                        "Python actor decide() raised exception"
+                    );
+                }
+            }
+            true
+        });
+
+        if executed.is_none() {
+            tracing::error!(
+                actor = %self.name,
+                "Python GIL not available for actor decide() - this should not happen in Python-driven simulations"
+            );
+        }
+    }
+}
+
+fn environment_to_py_dict<'py>(py: Python<'py>, env: &EnvironmentState) -> Bound<'py, PyDict> {
+    let dict = PyDict::new(py);
+
+    let zones: Vec<Bound<'py, PyDict>> = env
+        .zones
+        .iter()
+        .map(|zone| {
+            let z = PyDict::new(py);
+            let _ = z.set_item("id", zone.id.0);
+            let _ = z.set_item("temperature_c", zone.temperature_c);
+            let _ = z.set_item("humidity_ratio", zone.humidity_ratio);
+            let _ = z.set_item("relative_humidity", zone.relative_humidity);
+            let _ = z.set_item("volume_m3", zone.volume_m3);
+            z
+        })
+        .collect();
+    let _ = dict.set_item("zones", zones);
+
+    let weather = PyDict::new(py);
+    let _ = weather.set_item("outdoor_temp_c", env.weather.outdoor_temp_c);
+    let _ = weather.set_item("outdoor_humidity_ratio", env.weather.outdoor_humidity_ratio);
+    let _ = weather.set_item("wind_speed_m_s", env.weather.wind_speed_m_s);
+    let _ = weather.set_item("wind_dir_deg", env.weather.wind_dir_deg);
+    let _ = weather.set_item("ground_temp_c", env.weather.ground_temp_c);
+    let _ = weather.set_item("sky_temp_c", env.weather.sky_temp_c);
+    let _ = weather.set_item("pressure_kpa", env.weather.pressure_kpa);
+    let _ = weather.set_item("ghi_w_m2", env.weather.ghi_w_m2);
+    let _ = weather.set_item("dni_w_m2", env.weather.dni_w_m2);
+    let _ = weather.set_item("dhi_w_m2", env.weather.dhi_w_m2);
+    let _ = weather.set_item("solar_altitude_deg", env.weather.solar_altitude_deg);
+    let _ = dict.set_item("weather", weather);
+
+    let grid = PyDict::new(py);
+    let _ = grid.set_item("voltage_pu", env.grid.voltage_pu);
+    let _ = grid.set_item("frequency_hz", env.grid.frequency_hz);
+    let _ = dict.set_item("grid", grid);
+
+    let _ = dict.set_item("current_time", env.current_time.to_rfc3339());
+    let _ = dict.set_item("time_res_s", env.time_res.num_seconds());
+
+    dict
+}
+
+/// Python dispatch request with strongly typed fields.
+#[pyclass(name = "DispatchRequest", from_py_object)]
+#[derive(Clone)]
+pub struct PyDispatchRequest {
+    #[pyo3(get)]
+    pub target: String,
+    #[pyo3(get)]
+    pub signal: PySignal,
+    #[pyo3(get)]
+    pub priority: PyPriority,
+}
+
+/// Strongly typed signal variants.
+#[pyclass(name = "Signal", from_py_object)]
+#[derive(Clone, Debug)]
+pub enum PySignal {
+    ThermalSetpoint {
+        heating_c: Option<f64>,
+        cooling_c: Option<f64>,
+        deadband_c: Option<f64>,
+    },
+    ThermalSetpointDelta {
+        heating_delta_c: Option<f64>,
+        cooling_delta_c: Option<f64>,
+    },
+    ModeOverride {
+        mode: PyMode,
+    },
+    LoadFraction {
+        fraction: f64,
+    },
+    PowerLimit {
+        max_kw: f64,
+    },
+    PowerSetpoint {
+        active_power_kw: f64,
+        reactive_power_kvar: Option<f64>,
+    },
+    SOCTarget {
+        target_soc: f64,
+        min_soc: Option<f64>,
+        max_soc: Option<f64>,
+    },
+    DutyCycle {
+        on_fraction: f64,
+        period_s: Option<f64>,
+    },
+    DemandResponse {
+        level: PyDRLevel,
+        duration_s: Option<f64>,
+    },
+    IdealCapacity {
+        capacity_w: f64,
+    },
+}
+
+/// Strongly typed DR levels.
+#[pyclass(name = "DRLevel", from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PyDRLevel {
+    Normal,
+    Moderate,
+    High,
+    Critical,
+    GridEmergency,
+}
+
+/// Strongly typed operating modes.
+#[pyclass(name = "Mode", from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PyMode {
+    Off,
+    Heating,
+    Cooling,
+    Standby,
+}
+
+/// Strongly typed priority tiers.
+#[pyclass(name = "Priority", from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PyPriority {
+    Schedule,
+    UserOverride,
+    Grid,
+    Safety,
+}
+
+impl PyDispatchRequest {
+    pub fn into_dispatch_request(self) -> DispatchRequest {
+        DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from(self.target)),
+            signal: self.signal.into_control_signal(),
+            priority: self.priority.into_priority_tier(),
+        }
+    }
+}
+
+impl PySignal {
+    pub fn into_control_signal(self) -> ControlSignal {
+        match self {
+            PySignal::ThermalSetpoint {
+                heating_c,
+                cooling_c,
+                deadband_c,
+            } => ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: heating_c,
+                cooling_setpoint_c: cooling_c,
+                deadband_c,
+            },
+            PySignal::ThermalSetpointDelta {
+                heating_delta_c,
+                cooling_delta_c,
+            } => ControlSignal::ThermalSetpointDelta {
+                heating_delta_c,
+                cooling_delta_c,
+            },
+            PySignal::ModeOverride { mode } => ControlSignal::ModeOverride {
+                mode: mode.into_operating_mode(),
+            },
+            PySignal::LoadFraction { fraction } => ControlSignal::LoadFraction { fraction },
+            PySignal::PowerLimit { max_kw } => ControlSignal::PowerLimit {
+                max_power_kw: max_kw,
+                ramp_rate_kw_per_s: None,
+            },
+            PySignal::PowerSetpoint {
+                active_power_kw,
+                reactive_power_kvar,
+            } => ControlSignal::PowerSetpoint {
+                active_power_kw,
+                reactive_power_kvar,
+            },
+            PySignal::SOCTarget {
+                target_soc,
+                min_soc,
+                max_soc,
+            } => ControlSignal::SOCTarget {
+                target_soc,
+                min_soc,
+                max_soc,
+            },
+            PySignal::DutyCycle {
+                on_fraction,
+                period_s,
+            } => ControlSignal::DutyCycle {
+                on_fraction,
+                period_s,
+                component: None,
+            },
+            PySignal::DemandResponse { level, duration_s } => ControlSignal::DemandResponse {
+                level: level.into_dr_level(),
+                duration_s,
+            },
+            PySignal::IdealCapacity { capacity_w } => ControlSignal::IdealCapacity { capacity_w },
+        }
+    }
+}
+
+impl PyDRLevel {
+    pub fn into_dr_level(self) -> hares_types::DRLevel {
+        match self {
+            PyDRLevel::Normal => hares_types::DRLevel::Normal,
+            PyDRLevel::Moderate => hares_types::DRLevel::Moderate,
+            PyDRLevel::High => hares_types::DRLevel::High,
+            PyDRLevel::Critical => hares_types::DRLevel::Critical,
+            PyDRLevel::GridEmergency => hares_types::DRLevel::GridEmergency,
+        }
+    }
+}
+
+impl PyMode {
+    pub fn into_operating_mode(self) -> OperatingMode {
+        match self {
+            PyMode::Off => OperatingMode::Off,
+            PyMode::Heating => OperatingMode::Heating,
+            PyMode::Cooling => OperatingMode::Cooling,
+            PyMode::Standby => OperatingMode::Standby,
+        }
+    }
+}
+
+impl PyPriority {
+    pub fn into_priority_tier(self) -> PriorityTier {
+        match self {
+            PyPriority::Schedule => PriorityTier::Schedule,
+            PyPriority::UserOverride => PriorityTier::UserOverride,
+            PyPriority::Grid => PriorityTier::Grid,
+            PyPriority::Safety => PriorityTier::Safety,
+        }
+    }
+}
+
+#[pymethods]
+impl PyDispatchRequest {
+    #[staticmethod]
+    #[pyo3(signature = (target, heating_c=None, cooling_c=None, deadband_c=None, priority=None))]
+    fn thermal_setpoint(
+        target: String,
+        heating_c: Option<f64>,
+        cooling_c: Option<f64>,
+        deadband_c: Option<f64>,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::ThermalSetpoint {
+                heating_c,
+                cooling_c,
+                deadband_c,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, heating_delta_c=None, cooling_delta_c=None, priority=None))]
+    fn thermal_setpoint_delta(
+        target: String,
+        heating_delta_c: Option<f64>,
+        cooling_delta_c: Option<f64>,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::ThermalSetpointDelta {
+                heating_delta_c,
+                cooling_delta_c,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, mode, priority=None))]
+    fn mode_override(target: String, mode: PyMode, priority: Option<PyPriority>) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::ModeOverride { mode },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, fraction, priority=None))]
+    fn load_fraction(
+        target: String,
+        fraction: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::LoadFraction { fraction },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, max_kw, priority=None))]
+    fn power_limit(target: String, max_kw: f64, priority: Option<PyPriority>) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::PowerLimit { max_kw },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, active_power_kw, reactive_power_kvar=None, priority=None))]
+    fn power_setpoint(
+        target: String,
+        active_power_kw: f64,
+        reactive_power_kvar: Option<f64>,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::PowerSetpoint {
+                active_power_kw,
+                reactive_power_kvar,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, target_soc, min_soc=None, max_soc=None, priority=None))]
+    fn soc_target(
+        target: String,
+        target_soc: f64,
+        min_soc: Option<f64>,
+        max_soc: Option<f64>,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::SOCTarget {
+                target_soc,
+                min_soc,
+                max_soc,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, on_fraction, period_s=None, priority=None))]
+    fn duty_cycle(
+        target: String,
+        on_fraction: f64,
+        period_s: Option<f64>,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::DutyCycle {
+                on_fraction,
+                period_s,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, level, duration_s=None, priority=None))]
+    fn demand_response(
+        target: String,
+        level: PyDRLevel,
+        duration_s: Option<f64>,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::DemandResponse { level, duration_s },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, capacity_w, priority=None))]
+    fn ideal_capacity(
+        target: String,
+        capacity_w: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::IdealCapacity { capacity_w },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DispatchRequest(target={:?}, signal={:?}, priority={:?})",
+            self.target, self.signal, self.priority
+        )
+    }
+}
+
+#[pymethods]
+impl PySignal {
+    #[staticmethod]
+    #[pyo3(signature = (heating_c=None, cooling_c=None, deadband_c=None))]
+    fn thermal_setpoint(
+        heating_c: Option<f64>,
+        cooling_c: Option<f64>,
+        deadband_c: Option<f64>,
+    ) -> Self {
+        PySignal::ThermalSetpoint {
+            heating_c,
+            cooling_c,
+            deadband_c,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (heating_delta_c=None, cooling_delta_c=None))]
+    fn thermal_setpoint_delta(heating_delta_c: Option<f64>, cooling_delta_c: Option<f64>) -> Self {
+        PySignal::ThermalSetpointDelta {
+            heating_delta_c,
+            cooling_delta_c,
+        }
+    }
+
+    #[staticmethod]
+    fn mode_override(mode: PyMode) -> Self {
+        PySignal::ModeOverride { mode }
+    }
+
+    #[staticmethod]
+    fn load_fraction(fraction: f64) -> Self {
+        PySignal::LoadFraction { fraction }
+    }
+
+    #[staticmethod]
+    fn power_limit(max_kw: f64) -> Self {
+        PySignal::PowerLimit { max_kw }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (active_power_kw, reactive_power_kvar=None))]
+    fn power_setpoint(active_power_kw: f64, reactive_power_kvar: Option<f64>) -> Self {
+        PySignal::PowerSetpoint {
+            active_power_kw,
+            reactive_power_kvar,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target_soc, min_soc=None, max_soc=None))]
+    fn soc_target(target_soc: f64, min_soc: Option<f64>, max_soc: Option<f64>) -> Self {
+        PySignal::SOCTarget {
+            target_soc,
+            min_soc,
+            max_soc,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (on_fraction, period_s=None))]
+    fn duty_cycle(on_fraction: f64, period_s: Option<f64>) -> Self {
+        PySignal::DutyCycle {
+            on_fraction,
+            period_s,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (level, duration_s=None))]
+    fn demand_response(level: PyDRLevel, duration_s: Option<f64>) -> Self {
+        PySignal::DemandResponse { level, duration_s }
+    }
+
+    #[staticmethod]
+    fn ideal_capacity(capacity_w: f64) -> Self {
+        PySignal::IdealCapacity { capacity_w }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self)
+    }
+}
+
+#[pymethods]
+impl PyMode {
+    #[staticmethod]
+    fn off() -> Self {
+        PyMode::Off
+    }
+
+    #[staticmethod]
+    fn heating() -> Self {
+        PyMode::Heating
+    }
+
+    #[staticmethod]
+    fn cooling() -> Self {
+        PyMode::Cooling
+    }
+
+    #[staticmethod]
+    fn standby() -> Self {
+        PyMode::Standby
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self)
+    }
+}
+
+#[pymethods]
+impl PyPriority {
+    #[staticmethod]
+    fn schedule() -> Self {
+        PyPriority::Schedule
+    }
+
+    #[staticmethod]
+    fn user_override() -> Self {
+        PyPriority::UserOverride
+    }
+
+    #[staticmethod]
+    fn grid() -> Self {
+        PyPriority::Grid
+    }
+
+    #[staticmethod]
+    fn safety() -> Self {
+        PyPriority::Safety
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self)
+    }
+}
+
+#[pymethods]
+impl PyDRLevel {
+    #[staticmethod]
+    fn normal() -> Self {
+        PyDRLevel::Normal
+    }
+
+    #[staticmethod]
+    fn moderate() -> Self {
+        PyDRLevel::Moderate
+    }
+
+    #[staticmethod]
+    fn high() -> Self {
+        PyDRLevel::High
+    }
+
+    #[staticmethod]
+    fn critical() -> Self {
+        PyDRLevel::Critical
+    }
+
+    #[staticmethod]
+    fn grid_emergency() -> Self {
+        PyDRLevel::GridEmergency
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self)
+    }
+}
