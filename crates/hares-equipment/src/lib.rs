@@ -424,4 +424,48 @@ mod tests {
         let result = eq.apply_control(&signal);
         assert!(result.is_err());
     }
+
+    // ---------------------------------------------------------------
+    // Equipment trait LUT default tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn default_set_charging_curve_lut_returns_err() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        let lut =
+            crate::ndinterp::RegularGridInterpolator::new(vec![vec![0.0, 1.0]], vec![1.0, 0.0])
+                .unwrap();
+        let result = eq.set_charging_curve_lut(Some(lut));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not support"));
+    }
+
+    #[test]
+    fn default_set_ocv_table_returns_err() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        let table = crate::battery::ocv::OcvTable::default_li_nmc();
+        let result = eq.set_ocv_table(table);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not support"));
+    }
+
+    #[test]
+    fn default_set_u_neg_table_returns_err() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        let table = crate::battery::ocv::UNegTable::default_li_nmc();
+        let result = eq.set_u_neg_table(table);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_reset_ocv_table_returns_err() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        assert!(eq.reset_ocv_table().is_err());
+    }
+
+    #[test]
+    fn default_reset_u_neg_table_returns_err() {
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        assert!(eq.reset_u_neg_table().is_err());
+    }
 }

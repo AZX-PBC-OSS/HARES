@@ -43,7 +43,7 @@ impl Default for ThermostatConfig {
 }
 
 impl ThermostatConfig {
-    pub fn validate(self, env: &EnvironmentState) -> crate::Result<()> {
+    pub fn validate(&mut self, env: &EnvironmentState) -> crate::Result<()> {
         if !(0.0..=1.0).contains(&self.cutout_ratio) {
             return Err(HaresError::Equipment(format!(
                 "cutout_ratio must be in [0.0, 1.0], got {}",
@@ -71,10 +71,10 @@ impl ThermostatConfig {
         if self.min_cycle_time_s > 0.0 {
             let time_res_s = env.time_res.num_milliseconds() as f64 / 1000.0;
             if self.min_cycle_time_s < time_res_s {
-                return Err(HaresError::Equipment(format!(
-                    "min_cycle_time_s must be 0 or >= simulation timestep ({time_res_s} s), got {}",
-                    self.min_cycle_time_s
-                )));
+                // A cycle time shorter than the timestep is meaningless — clamp
+                // it up so that coarse-resolution simulations (e.g. 15-min) work
+                // without requiring the user to override every thermostat spec.
+                self.min_cycle_time_s = time_res_s;
             }
         }
         if !self.deadband_offset.is_finite() || !(0.0..=1.0).contains(&self.deadband_offset) {

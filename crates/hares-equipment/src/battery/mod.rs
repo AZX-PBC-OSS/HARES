@@ -3516,4 +3516,66 @@ mod tests {
             "charge should be tapered at high SOC with LUT, got {clamped}"
         );
     }
+
+    #[test]
+    fn no_lut_allows_full_charge_power() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.soc = 0.5;
+        // Without LUT, charge power should be near max (5 kW)
+        let clamped = bat.clamp_power(5.0);
+        assert!(
+            clamped > 4.0,
+            "without LUT, charge should be near max, got {clamped}"
+        );
+    }
+
+    #[test]
+    fn lut_with_temperature_variation() {
+        // 4D LUT where temperature affects power fraction:
+        // cold (-10C) → 0.5, warm (25C) → 1.0
+        let axes = vec![
+            vec![0.0, 1.0],    // soc
+            vec![-10.0, 25.0], // temp
+            vec![1.0],         // c_rate
+            vec![1.0],         // soh
+        ];
+        // Row-major: [soc=0,t=-10], [soc=0,t=25], [soc=1,t=-10], [soc=1,t=25]
+        let values = vec![0.5f32, 1.0, 0.5, 1.0];
+        let lut = crate::ndinterp::RegularGridInterpolator::new(axes, values).unwrap();
+
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.soc = 0.5;
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+
+        // At 25C → power fraction 1.0, full power
+        bat.cell_temp_c = 25.0;
+        let warm = bat.clamp_power(5.0);
+
+        // At -10C → power fraction 0.5, half power
+        bat.cell_temp_c = -10.0;
+        let cold = bat.clamp_power(5.0);
+
+        assert!(
+            cold < warm,
+            "cold ({cold}) should produce less power than warm ({warm})"
+        );
+    }
+
+    #[test]
+    fn discharge_unaffected_by_charging_lut() {
+        let lut = make_4d_lut(&[(0.0, 0.1), (1.0, 0.0)]);
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.set_charging_curve_lut(Some(lut)).unwrap();
+        bat.soc = 0.5;
+
+        // Discharge (negative power) should not be affected by charging LUT
+        let clamped = bat.clamp_power(-5.0);
+        assert!(
+            clamped < -4.0,
+            "discharge should not be limited by charging LUT, got {clamped}"
+        );
+    }
 }

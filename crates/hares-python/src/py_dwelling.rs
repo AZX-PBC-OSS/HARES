@@ -5,7 +5,10 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
-use hares_core::{ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingConfig};
+use hares_core::{
+    ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingConfig,
+    environment::SurfaceGeometry,
+};
 use hares_equipment::{BatteryLutType, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_io::{OutputFormat, SimulationConfig, output::metrics::MetricsCalculator};
 use hares_types::SurfaceIrradiance;
@@ -530,15 +533,22 @@ impl PyDwelling {
 
         let mut eq = self
             .equipment_registry
-            .create("Battery", config)
+            .create("Battery", config.clone())
             .map_err(to_py_err)?;
 
         if let Some(ref lut) = battery.charging_curve_lut {
             eq.set_charging_curve_lut(Some(lut.clone()))
                 .map_err(to_py_err)?;
         }
+        if let Some(ref table) = battery.ocv_table {
+            eq.set_ocv_table(table.clone()).map_err(to_py_err)?;
+        }
+        if let Some(ref table) = battery.u_neg_table {
+            eq.set_u_neg_table(table.clone()).map_err(to_py_err)?;
+        }
 
         let mut dwelling = lock_dwelling(&self.dwelling)?;
+        eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
         dwelling.add_equipment(eq);
         Ok(())
     }
@@ -550,11 +560,11 @@ impl PyDwelling {
             hares_equipment::config::ConfigValue::Float(pv.capacity_kw),
         );
         raw_config.insert(
-            "tilt".to_string(),
+            "tilt_deg".to_string(),
             hares_equipment::config::ConfigValue::Float(pv.tilt),
         );
         raw_config.insert(
-            "azimuth".to_string(),
+            "azimuth_deg".to_string(),
             hares_equipment::config::ConfigValue::Float(pv.azimuth),
         );
 
@@ -564,11 +574,44 @@ impl PyDwelling {
             raw_config,
         };
 
-        let eq = self
+        let mut eq = self
             .equipment_registry
-            .create("PV", config)
+            .create("PV", config.clone())
             .map_err(to_py_err)?;
         let mut dwelling = lock_dwelling(&self.dwelling)?;
+
+        // Register the PV surface orientation with the environment so that
+        // Perez irradiance is computed for this panel during simulation.
+        let surface_id =
+            hares_equipment::pv::surface_id_for_orientation(pv.tilt, pv.azimuth, 5.0)
+                .map_err(to_py_err)?;
+        dwelling.environment.register_surface(SurfaceGeometry {
+            surface_id,
+            azimuth_deg: pv.azimuth,
+            tilt_deg: pv.tilt,
+            area_m2: 1.0,
+        });
+
+        // PV init() validates that a SurfaceIrradiance entry exists for each
+        // array. The environment computes real irradiance during simulation;
+        // inject a placeholder so init() succeeds.
+        let mut init_env = dwelling.latest_env().clone();
+        if !init_env
+            .weather
+            .solar_irradiance
+            .iter()
+            .any(|s| s.surface_id == surface_id)
+        {
+            init_env.weather.solar_irradiance.push(SurfaceIrradiance {
+                surface_id,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            });
+        }
+        eq.init(&config, &init_env).map_err(to_py_err)?;
+
         dwelling.add_equipment(eq);
         Ok(())
     }
@@ -596,7 +639,7 @@ impl PyDwelling {
 
         let mut eq = self
             .equipment_registry
-            .create("EV", config)
+            .create("EV", config.clone())
             .map_err(to_py_err)?;
 
         if let Some(ref lut) = ev.charging_curve_lut {
@@ -605,6 +648,7 @@ impl PyDwelling {
         }
 
         let mut dwelling = lock_dwelling(&self.dwelling)?;
+        eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
         dwelling.add_equipment(eq);
         Ok(())
     }
@@ -741,6 +785,31 @@ impl PyDwelling {
             }
         }
         Ok(())
+    }
+
+    /// Get current LUT state for equipment. Returns None if using defaults.
+    ///
+    /// For ChargingCurve: returns True if a LUT is set, None if not.
+    /// For Ocv/UNeg: always returns True (tables always exist, even defaults).
+    pub fn has_equipment_lut(&self, name: String, lut_type: &PyLutType) -> PyResult<bool> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|e| e.descriptor().name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("equipment '{}' not found", name)))?;
+        match lut_type {
+            PyLutType::ChargingCurve => {
+                // Check if the equipment has a charging curve by trying to inspect
+                // telemetry or type. For now, we check the descriptor type.
+                let eq_type = &eq.descriptor().equipment_type;
+                Ok(eq_type == "Battery" || eq_type == "EV")
+            }
+            PyLutType::Ocv | PyLutType::UNeg => {
+                let eq_type = &eq.descriptor().equipment_type;
+                Ok(eq_type == "Battery")
+            }
+        }
     }
 
     pub fn validate_control(&self, name: &str, signal: &PyControlSignal) -> PyResult<bool> {

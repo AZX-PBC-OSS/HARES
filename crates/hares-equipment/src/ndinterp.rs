@@ -3,8 +3,8 @@
 //! Rust port of `scipy.interpolate.RegularGridInterpolator` with
 //! `method="linear"` and `bounds_error=False, fill_value=None` (clamp).
 //!
-//! Used by [`ChargingCurveLut`](crate::ev::ChargingCurveLut) to interpolate
-//! 4-D CC-CV charging curves (SOC × temperature × C-rate × SOH → power fraction).
+//! Used by Battery and EV equipment to interpolate 4-D CC-CV charging curves
+//! (SOC × temperature × C-rate × SOH → power fraction).
 
 use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,12 @@ impl RegularGridInterpolator {
             return Err(HaresError::Equipment(
                 "RegularGridInterpolator requires at least one axis".to_string(),
             ));
+        }
+        if axes.len() > 8 {
+            return Err(HaresError::Equipment(format!(
+                "RegularGridInterpolator supports at most 8 dimensions, got {}",
+                axes.len()
+            )));
         }
 
         let mut total_cells: usize = 1;
@@ -126,10 +132,12 @@ impl RegularGridInterpolator {
         let ndim = self.axes.len();
 
         // For each dimension, find the lower bracket index and the fractional position.
-        // Stack-allocate for up to 8 dimensions; heap otherwise.
+        assert!(
+            ndim <= 8,
+            "RegularGridInterpolator supports at most 8 dimensions, got {ndim}"
+        );
         let mut lo_indices = [0usize; 8];
         let mut fracs = [0.0f64; 8];
-        debug_assert!(ndim <= 8, "ndim > 8 not supported in stack path");
 
         for (dim, axis) in self.axes.iter().enumerate() {
             let x = point[dim].clamp(axis[0], axis[axis.len() - 1]);
@@ -327,5 +335,98 @@ mod tests {
         assert!((interp.interpolate(&[0.0]) - 3.14).abs() < 1e-5);
         assert!((interp.interpolate(&[0.5]) - 3.14).abs() < 1e-5);
         assert!((interp.interpolate(&[1.0]) - 3.14).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rejects_more_than_8_dimensions() {
+        let axes: Vec<Vec<f64>> = (0..9).map(|_| vec![0.0, 1.0]).collect();
+        let values = vec![0.0f32; 512]; // 2^9
+        let err = RegularGridInterpolator::new(axes, values).unwrap_err();
+        assert!(err.to_string().contains("8 dimensions"));
+    }
+
+    #[test]
+    fn rejects_no_axes() {
+        let err = RegularGridInterpolator::new(vec![], vec![]).unwrap_err();
+        assert!(err.to_string().contains("at least one"));
+    }
+
+    #[test]
+    fn rejects_inf_in_axis() {
+        let err = RegularGridInterpolator::new(vec![vec![0.0, f64::INFINITY]], vec![1.0, 2.0])
+            .unwrap_err();
+        assert!(err.to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn rejects_inf_in_values() {
+        let err = RegularGridInterpolator::new(vec![vec![0.0, 1.0]], vec![1.0, f32::INFINITY])
+            .unwrap_err();
+        assert!(err.to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn rejects_duplicate_axis_values() {
+        let err = RegularGridInterpolator::new(vec![vec![0.0, 0.0, 1.0]], vec![1.0, 2.0, 3.0])
+            .unwrap_err();
+        assert!(err.to_string().contains("ascending"));
+    }
+
+    #[test]
+    fn interp_2d_clamp_both_axes() {
+        // f(x,y) = x*10 + y on [0,1]×[0,1]
+        let interp = RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0], vec![0.0, 1.0]],
+            vec![0.0, 1.0, 10.0, 11.0],
+        )
+        .unwrap();
+        // Out of bounds on both axes → clamp to corner (1,1) = 11.0
+        assert!((interp.interpolate(&[5.0, 5.0]) - 11.0).abs() < 1e-5);
+        // Out of bounds negative → clamp to corner (0,0) = 0.0
+        assert!((interp.interpolate(&[-5.0, -5.0]) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn interp_4d_varies_on_second_axis() {
+        // f(s,t,c,h) = t (only temperature axis varies)
+        let axes = vec![
+            vec![0.0, 1.0],
+            vec![0.0, 1.0],
+            vec![0.0, 1.0],
+            vec![0.0, 1.0],
+        ];
+        let mut values = vec![0.0f32; 16];
+        // Row-major: index = s*8 + t*4 + c*2 + h
+        // When t=1, value = 1.0
+        for s in 0..2 {
+            for c in 0..2 {
+                for h in 0..2 {
+                    values[s * 8 + 1 * 4 + c * 2 + h] = 1.0;
+                }
+            }
+        }
+        let interp = RegularGridInterpolator::new(axes, values).unwrap();
+        assert!((interp.interpolate(&[0.5, 0.0, 0.5, 0.5]) - 0.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 1.0, 0.5, 0.5]) - 1.0).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5, 0.5, 0.5, 0.5]) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ndim_reports_correctly() {
+        let interp = RegularGridInterpolator::new(
+            vec![vec![0.0, 1.0], vec![0.0, 1.0], vec![0.0, 1.0]],
+            vec![0.0; 8],
+        )
+        .unwrap();
+        assert_eq!(interp.ndim(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected 2 coordinates")]
+    fn interpolate_panics_on_wrong_point_len() {
+        let interp =
+            RegularGridInterpolator::new(vec![vec![0.0, 1.0], vec![0.0, 1.0]], vec![0.0; 4])
+                .unwrap();
+        interp.interpolate(&[0.5]); // wrong: 1 coord for 2D
     }
 }

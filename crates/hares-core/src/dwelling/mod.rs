@@ -485,6 +485,11 @@ pub struct Dwelling {
     /// Pre-computed equipment execution order (sorted by stage rank).
     /// Computed once at init time, reused each timestep.
     equipment_execution_order: Vec<usize>,
+    /// Output config retained for schema rebuilds when equipment changes.
+    output_verbosity: u8,
+    output_chunk_size: usize,
+    output_format: hares_io::OutputFormat,
+    output_path: PathBuf,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
     #[cfg(feature = "actor_profiling")]
@@ -842,6 +847,10 @@ impl Dwelling {
             actor_dispatch_buf: Vec::with_capacity(16),
             solver_feedback_actor,
             equipment_execution_order,
+            output_verbosity: config.sim_config.output_verbosity,
+            output_chunk_size: config.sim_config.output_chunk_size,
+            output_format: config.sim_config.output_format,
+            output_path: output_path.clone(),
             #[cfg(feature = "profiling")]
             profiling: DwellingProfilingSummary::default(),
             #[cfg(feature = "actor_profiling")]
@@ -1094,10 +1103,49 @@ impl Dwelling {
     }
 
     /// Refreshes internal caches after equipment list modification.
+    ///
+    /// Rebuilds execution order, dispatch targets, and — if no rows have been
+    /// recorded yet — the output schema, column index, equipment column map,
+    /// and streaming recorder so that dynamically added equipment appears in
+    /// simulation output.
     pub fn refresh_equipment_caches(&mut self) {
         self.equipment_execution_order = compute_equipment_execution_order(&self.equipment);
         self.solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&self.equipment));
+
+        // Rebuild output schema so dynamically added equipment gets columns.
+        // Only safe before any rows have been recorded; mid-simulation schema
+        // changes would corrupt the output file.
+        if self.recorder.total_rows() == 0 {
+            let specs: Vec<hares_io::EquipmentSpec> = self
+                .equipment
+                .iter()
+                .map(|eq| {
+                    let d = eq.descriptor();
+                    hares_io::EquipmentSpec {
+                        name: d.name.clone(),
+                        fuel_type: d.fuel,
+                        parameters: Map::new(),
+                        zip_params: None,
+                    }
+                })
+                .collect();
+
+            let schema = build_schema(&specs, self.output_verbosity);
+            self.output_value_count = schema.fields().len() - 1;
+            self.output_column_index = build_output_column_index(&schema);
+            self.equipment_column_map =
+                build_equipment_column_map(&self.equipment, &self.output_column_index);
+
+            if let Ok(recorder) = StreamingRecorder::new(
+                schema,
+                self.output_chunk_size,
+                self.output_format,
+                &self.output_path,
+            ) {
+                self.recorder = recorder;
+            }
+        }
     }
 
     /// Returns per-actor timing from the simulation (requires `actor_profiling` feature).

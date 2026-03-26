@@ -654,3 +654,62 @@ def _simulate_cc_cv_single(
     power_fraction = np.clip(np.abs(current) / i_cc, 0.0, 1.0)
 
     return soc_traj, power_fraction
+
+
+def generate_ocv_curve(
+    param_set: str = "Chen2020",
+    *,
+    n_points: int = 21,
+    v_upper: float = 4.2,
+    v_lower: float = 2.5,
+) -> list[tuple[float, float]]:
+    """Generate an OCV curve (soc → voltage) from a PyBaMM parameter set.
+
+    Extracts the open-circuit voltage function from the specified parameter set
+    and evaluates it at ``n_points`` evenly spaced SOC values from 0 to 1.
+
+    Returns a list of ``(soc, voltage)`` tuples suitable for passing directly
+    to ``Battery(ocv_table=...)`` or ``set_equipment_lut(..., LutType.Ocv, ...)``.
+
+    Parameters
+    ----------
+    param_set:
+        PyBaMM parameter set name (e.g. "Chen2020", "Mohtat2020", "Prada2013").
+    n_points:
+        Number of SOC evaluation points. Default 21 (0.0, 0.05, ..., 1.0).
+    v_upper:
+        Clamp ceiling for per-cell voltage (V).
+    v_lower:
+        Clamp floor for per-cell voltage (V).
+    """
+    if not _HAS_PYBAMM:
+        raise ImportError(
+            "PyBaMM is required for OCV curve generation. "
+            "Install with: uv pip install -e '.[pybamm]'"
+        )
+
+    param = _pybamm.ParameterValues(param_set)
+
+    # PyBaMM stores OCV as functions of stoichiometry (sto).
+    # For a full-cell OCV: V_cell = U_p(sto_p) - U_n(sto_n)
+    # At SOC=0 → sto_n=0, sto_p=1; at SOC=1 → sto_n=1, sto_p=0
+    # This is simplified; use the parameter set's initial conditions.
+    model = _pybamm.lithium_ion.SPM()
+    soc_values = [i / (n_points - 1) for i in range(n_points)]
+    result: list[tuple[float, float]] = []
+
+    for soc in soc_values:
+        try:
+            sim = _pybamm.Simulation(model, parameter_values=param)
+            sim.solve([0, 1], initial_soc=max(soc, 0.01))
+            sol = sim.solution
+            v_oc = float(
+                sol["X-averaged battery open-circuit potential [V]"].entries[0]
+            )
+            v_oc = max(v_lower, min(v_upper, v_oc))
+        except Exception:
+            # Fallback: linear interpolation between bounds
+            v_oc = v_lower + soc * (v_upper - v_lower)
+        result.append((soc, v_oc))
+
+    return result

@@ -342,7 +342,11 @@ fn is_hvac_or_wh(name: &str) -> bool {
 
 fn has_soc(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.contains("battery") || lower.contains("electric vehicle")
+    lower.contains("battery")
+        || lower.contains("electric vehicle")
+        || lower == "ev"
+        || lower.starts_with("ev ")
+        || lower.starts_with("ev#")
 }
 
 #[cfg(test)]

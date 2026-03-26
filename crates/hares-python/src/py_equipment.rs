@@ -97,14 +97,23 @@ pub struct PyBattery {
     pub max_charge_kw: Option<f64>,
     #[pyo3(get)]
     pub max_discharge_kw: Option<f64>,
-    /// Optional 4D charging curve LUT (soc × temp × c_rate × soh → power_fraction).
     pub charging_curve_lut: Option<RegularGridInterpolator>,
+    pub ocv_table: Option<OcvTable>,
+    pub u_neg_table: Option<UNegTable>,
 }
 
 #[pymethods]
 impl PyBattery {
     #[new]
-    #[pyo3(signature = (name, capacity_kwh, max_charge_kw=None, max_discharge_kw=None, charging_curve_lut=None))]
+    #[pyo3(signature = (
+        name,
+        capacity_kwh,
+        max_charge_kw=None,
+        max_discharge_kw=None,
+        charging_curve_lut=None,
+        ocv_table=None,
+        uneg_table=None,
+    ))]
     fn new(
         py: Python<'_>,
         name: String,
@@ -112,9 +121,19 @@ impl PyBattery {
         max_charge_kw: Option<f64>,
         max_discharge_kw: Option<f64>,
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
+        ocv_table: Option<&Bound<'_, PyAny>>,
+        uneg_table: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let lut = match charging_curve_lut {
             Some(obj) => Some(extract_charging_lut(py, obj)?),
+            None => None,
+        };
+        let ocv = match ocv_table {
+            Some(obj) => Some(extract_ocv_table(py, obj)?),
+            None => None,
+        };
+        let u_neg = match uneg_table {
+            Some(obj) => Some(extract_u_neg_table(py, obj)?),
             None => None,
         };
         Ok(Self {
@@ -123,17 +142,14 @@ impl PyBattery {
             max_charge_kw,
             max_discharge_kw,
             charging_curve_lut: lut,
+            ocv_table: ocv,
+            u_neg_table: u_neg,
         })
     }
 
     fn __repr__(&self) -> String {
-        let lut_info = if self.charging_curve_lut.is_some() {
-            ", lut=loaded"
-        } else {
-            ""
-        };
         format!(
-            "Battery(name={:?}, capacity_kwh={}{lut_info})",
+            "Battery(name={:?}, capacity_kwh={})",
             self.name, self.capacity_kwh
         )
     }
