@@ -21,10 +21,11 @@ import pvlib
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OCHRE_ROOT = REPO_ROOT / "vendors" / "OCHRE"
+EXAMPLES = REPO_ROOT / "data" / "examples"
 sys.path.insert(0, str(OCHRE_ROOT))
 
-EPW_PATH = OCHRE_ROOT / "ochre" / "defaults" / "Weather" / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
-HPXML_PATH = OCHRE_ROOT / "ochre" / "defaults" / "Input Files" / "BEopt_example.xml"
+EPW_PATH = EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
+HPXML_PATH = EXAMPLES / "BEopt_example.xml"
 OUTPUT_DIR = REPO_ROOT / "tests" / "fixtures" / "freefloat"
 
 # BEopt building surface geometry (from HARES surface_geometry output).

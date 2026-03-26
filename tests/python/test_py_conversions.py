@@ -7,9 +7,7 @@ import polars as pl
 
 
 ROOT = Path(__file__).resolve().parents[2]
-VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
-OCHRE_INPUTS = VENDOR_OCHRE / "ochre" / "defaults" / "Input Files"
-OCHRE_WEATHER = VENDOR_OCHRE / "ochre" / "defaults" / "Weather"
+EXAMPLES = ROOT / "data" / "examples"
 
 
 def _dwelling_class():
@@ -33,10 +31,10 @@ def dwelling():
     """Create a Dwelling using the test fixtures."""
     dwelling_class = _dwelling_class()
 
-    if OCHRE_INPUTS.exists():
-        hpxml = str(OCHRE_INPUTS / "BEopt_example.xml")
-        schedule = str(OCHRE_INPUTS / "BEopt_example_schedule.csv")
-        weather = str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+    if (EXAMPLES / "BEopt_example.xml").exists():
+        hpxml = str(EXAMPLES / "BEopt_example.xml")
+        schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
+        weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
     else:
         pytest.skip("OCHRE fixtures not available")
 
@@ -93,13 +91,13 @@ def test_results_before_simulate_returns_dataframe(dwelling):
     """
     dwelling_class = _dwelling_class()
 
-    if not OCHRE_INPUTS.exists():
+    if not (EXAMPLES / "BEopt_example.xml").exists():
         pytest.skip("OCHRE fixtures not available")
 
     fresh = dwelling_class.from_hpxml(
-        str(OCHRE_INPUTS / "BEopt_example.xml"),
-        str(OCHRE_INPUTS / "BEopt_example_schedule.csv"),
-        str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        str(EXAMPLES / "BEopt_example.xml"),
+        str(EXAMPLES / "BEopt_example_schedule.csv"),
+        str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
     )
     df = fresh.results()
 

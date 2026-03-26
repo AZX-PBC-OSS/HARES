@@ -27,6 +27,7 @@ pybamm = ["pybamm>=26.3.0"]
 resstock = ["boto3>=1.42.76", "httpx>=0.28.1"]
 helics = ["helics>=3.6.1"]
 rl = ["gymnasium>=1.2.3"]
+notebook = ["marimo>=0.20.0", "plotly>=6.0.0"]
 dev = [
     "pytest>=9.0.2",
     "maturin>=1.12.6",

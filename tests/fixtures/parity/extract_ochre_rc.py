@@ -21,9 +21,7 @@ sys.path.insert(0, ochre_dir)
 
 from ochre.utils import hpxml, envelope  # noqa: E402
 
-HPXML_FILE = os.path.join(
-    ochre_dir, "ochre", "defaults", "Input Files", "BEopt_example.xml"
-)
+HPXML_FILE = os.path.join(repo_root, "data", "examples", "BEopt_example.xml")
 OUTPUT_FILE = os.path.join(script_dir, "ochre_rc_reference.json")
 
 # Match HARES defaults for film resistance computation.

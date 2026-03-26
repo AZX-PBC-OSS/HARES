@@ -25,8 +25,8 @@ mod tests {
     use hares_physics::solar::GlazingCurve;
     use hares_types::{EndUse, ZoneId};
 
-    fn vendor_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendors/OCHRE")
+    fn examples_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
     }
 
     fn project_root() -> PathBuf {
@@ -59,11 +59,9 @@ mod tests {
         };
 
         DwellingConfig {
-            hpxml_path: vendor_dir().join("ochre/defaults/Input Files/BEopt_example.xml"),
-            schedule_path: vendor_dir()
-                .join("ochre/defaults/Input Files/BEopt_example_schedule.csv"),
-            weather_path: vendor_dir()
-                .join("ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            hpxml_path: examples_dir().join("BEopt_example.xml"),
+            schedule_path: examples_dir().join("BEopt_example_schedule.csv"),
+            weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 start_time,

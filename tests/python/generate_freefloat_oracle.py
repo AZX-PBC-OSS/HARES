@@ -20,23 +20,16 @@ from typing import TypedDict
 # Add OCHRE to path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OCHRE_ROOT = REPO_ROOT / "vendors" / "OCHRE"
+EXAMPLES = REPO_ROOT / "data" / "examples"
 sys.path.insert(0, str(OCHRE_ROOT))
 
 from ochre import Dwelling  # noqa: E402
 
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "freefloat"
 
-HPXML_FILE = OCHRE_ROOT / "ochre" / "defaults" / "Input Files" / "BEopt_example.xml"
-SCHEDULE_FILE = (
-    OCHRE_ROOT / "ochre" / "defaults" / "Input Files" / "BEopt_example_schedule.csv"
-)
-WEATHER_FILE = (
-    OCHRE_ROOT
-    / "ochre"
-    / "defaults"
-    / "Weather"
-    / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
-)
+HPXML_FILE = EXAMPLES / "BEopt_example.xml"
+SCHEDULE_FILE = EXAMPLES / "BEopt_example_schedule.csv"
+WEATHER_FILE = EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
 
 class Scenario(TypedDict):
     name: str

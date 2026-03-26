@@ -6,9 +6,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
-OCHRE_INPUTS = VENDOR_OCHRE / "ochre" / "defaults" / "Input Files"
-OCHRE_WEATHER = VENDOR_OCHRE / "ochre" / "defaults" / "Weather"
+EXAMPLES = ROOT / "data" / "examples"
 
 
 def _pyfleet_class():
@@ -64,7 +62,7 @@ TestSite,2019,T Dry Bulb (C),5,6,7,8,10,15,20,19,15,10,7,5
 
 
 def _ochre_fixtures_available() -> bool:
-    return OCHRE_INPUTS.exists() and OCHRE_WEATHER.exists()
+    return (EXAMPLES / "BEopt_example.xml").exists() and (EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw").exists()
 
 
 def _build_simulatable_fleet(n: int = 1):
@@ -75,9 +73,9 @@ def _build_simulatable_fleet(n: int = 1):
     if not _ochre_fixtures_available():
         pytest.skip("OCHRE fixtures not available")
 
-    hpxml = str(OCHRE_INPUTS / "BEopt_example.xml")
-    schedule = str(OCHRE_INPUTS / "BEopt_example_schedule.csv")
-    weather = str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+    hpxml = str(EXAMPLES / "BEopt_example.xml")
+    schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
+    weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
     sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
     configs = [
@@ -356,9 +354,9 @@ def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     if not _ochre_fixtures_available():
         pytest.skip("OCHRE fixtures not available")
 
-    hpxml = str(OCHRE_INPUTS / "BEopt_example.xml")
-    schedule = str(OCHRE_INPUTS / "BEopt_example_schedule.csv")
-    weather = str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+    hpxml = str(EXAMPLES / "BEopt_example.xml")
+    schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
+    weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
     sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
 

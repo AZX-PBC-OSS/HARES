@@ -908,16 +908,25 @@ fn scale_schedule_source(source: &mut ScheduleSource, scale: f64) {
     match source {
         ScheduleSource::Constant(v) => *v *= scale,
         ScheduleSource::DailyProfile { max_value, .. } => *max_value *= scale,
-        ScheduleSource::SeededNoise {
-            base,
-            std_dev,
-            seed: _,
-            draw_count: _,
-            rng: _,
-        } => {
-            *base *= scale;
-            *std_dev *= scale.abs();
-        }
+        ScheduleSource::Stochastic { kind, .. } => match kind {
+            hares_types::DistributionKind::Gaussian { mean, std_dev } => {
+                *mean *= scale;
+                *std_dev *= scale.abs();
+            }
+            hares_types::DistributionKind::Uniform { low, high } => {
+                *low *= scale;
+                *high *= scale;
+            }
+            hares_types::DistributionKind::Exponential { lambda } => {
+                // E[Exp(λ)] = 1/λ; scaling output by `scale` ⟹ λ′ = λ/scale.
+                *lambda /= scale;
+            }
+            hares_types::DistributionKind::Poisson { lambda } => {
+                *lambda *= scale;
+            }
+            hares_types::DistributionKind::LogNormal { .. }
+            | hares_types::DistributionKind::Bernoulli { .. } => {}
+        },
         ScheduleSource::Shared { data, .. } => {
             let scaled: Vec<f64> = data.iter().map(|v| v * scale).collect();
             *data = Arc::from(scaled);
@@ -936,7 +945,7 @@ fn is_schedule_source_zero(source: &ScheduleSource) -> bool {
         ScheduleSource::Shared { data, .. } => data.iter().all(|v| *v == 0.0),
         ScheduleSource::ColumnRef { .. }
         | ScheduleSource::SolarAware { .. }
-        | ScheduleSource::SeededNoise { .. } => false,
+        | ScheduleSource::Stochastic { .. } => false,
         // Wildcard required: ScheduleSource is #[non_exhaustive].
         // New variants must be handled explicitly here.
         _ => false,
@@ -1432,7 +1441,7 @@ mod tests {
     }
 
     #[test]
-    fn seeded_noise_source_is_deterministic_across_save_restore() {
+    fn stochastic_source_is_deterministic_across_save_restore() {
         let mut config = config_with_schedule("s", "Lighting", &[0.0]);
         config
             .raw_config
@@ -1440,9 +1449,11 @@ mod tests {
         let mut env = base_env();
         let mut a = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         a.init(&config, &env).unwrap();
-        a.power_source = ScheduleSource::SeededNoise {
-            base: 1.0,
-            std_dev: 0.2,
+        a.power_source = ScheduleSource::Stochastic {
+            kind: hares_types::DistributionKind::Gaussian {
+                mean: 1.0,
+                std_dev: 0.2,
+            },
             seed: [9_u8; 32],
             draw_count: 0,
             rng: ChaCha8Rng::from_seed([9_u8; 32]),
@@ -1460,9 +1471,11 @@ mod tests {
 
         let mut b = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         b.init(&config, &env).unwrap();
-        b.power_source = ScheduleSource::SeededNoise {
-            base: 1.0,
-            std_dev: 0.2,
+        b.power_source = ScheduleSource::Stochastic {
+            kind: hares_types::DistributionKind::Gaussian {
+                mean: 1.0,
+                std_dev: 0.2,
+            },
             seed: [9_u8; 32],
             draw_count: 0,
             rng: ChaCha8Rng::from_seed([9_u8; 32]),

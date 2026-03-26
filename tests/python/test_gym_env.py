@@ -17,8 +17,8 @@ from ochre_next.rl.vec_env import VecDwellingGymEnv
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
-WEATHER = str(ROOT / "vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
-SCHEDULE = str(ROOT / "vendors/OCHRE/ochre/defaults/Input Files/BEopt_example_schedule.csv")
+WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 _DWELLING_CONFIG = {
     "hpxml": HPXML,

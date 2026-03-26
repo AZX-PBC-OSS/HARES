@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::{Datelike, Timelike, Weekday};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use rand_distr::{Distribution, StandardNormal};
+use rand_distr::Distribution;
 
 use crate::{DomainId, EnvironmentState, HaresError};
 
@@ -119,6 +119,66 @@ pub enum BoundaryPolicy {
     Error,
 }
 
+/// Parameters for a specific probability distribution.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DistributionKind {
+    /// Gaussian (normal): result = mean + std_dev × N(0,1).
+    Gaussian { mean: f64, std_dev: f64 },
+    /// Uniform: result ~ U(low, high).
+    Uniform { low: f64, high: f64 },
+    /// Log-normal: result ~ LogNormal(mu, sigma) where mu/sigma parameterise
+    /// the underlying normal distribution.
+    LogNormal { mu: f64, sigma: f64 },
+    /// Exponential: result ~ Exp(lambda), mean = 1/lambda.
+    Exponential { lambda: f64 },
+    /// Poisson: result = Poisson(lambda) cast to f64.
+    Poisson { lambda: f64 },
+    /// Bernoulli: result is 1.0 with probability p, else 0.0.
+    Bernoulli { p: f64 },
+}
+
+impl DistributionKind {
+    /// Draw a single sample from this distribution using the given RNG.
+    pub fn sample(&self, rng: &mut ChaCha8Rng) -> f64 {
+        match self {
+            Self::Gaussian { mean, std_dev } => {
+                let z: f64 = rand_distr::StandardNormal.sample(rng);
+                mean + std_dev * z
+            }
+            Self::Uniform { low, high } => {
+                rand_distr::Uniform::new(*low, *high)
+                    .expect("invalid uniform params")
+                    .sample(rng)
+            }
+            Self::LogNormal { mu, sigma } => {
+                rand_distr::LogNormal::new(*mu, *sigma)
+                    .expect("invalid lognormal params")
+                    .sample(rng)
+            }
+            Self::Exponential { lambda } => {
+                rand_distr::Exp::new(*lambda)
+                    .expect("invalid exponential params")
+                    .sample(rng)
+            }
+            Self::Poisson { lambda } => {
+                let dist =
+                    rand_distr::Poisson::new(*lambda).expect("invalid poisson params");
+                let sample: f64 = dist.sample(rng);
+                sample.floor()
+            }
+            Self::Bernoulli { p } => {
+                let dist =
+                    rand_distr::Bernoulli::new(*p).expect("invalid bernoulli params");
+                if dist.sample(rng) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
 /// A lazily-evaluated source for schedule values.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
@@ -148,9 +208,8 @@ pub enum ScheduleSource {
         dusk_altitude_threshold_deg: f64,
     },
     /// Stateful pseudo-random source, deterministic by `seed` + call order.
-    SeededNoise {
-        base: f64,
-        std_dev: f64,
+    Stochastic {
+        kind: DistributionKind,
         seed: [u8; 32],
         draw_count: u64,
         rng: ChaCha8Rng,
@@ -229,21 +288,19 @@ impl PartialEq for ScheduleSource {
                     && a_dusk == b_dusk
             }
             (
-                Self::SeededNoise {
-                    base: a_base,
-                    std_dev: a_std,
+                Self::Stochastic {
+                    kind: a_kind,
                     seed: a_seed,
                     draw_count: a_count,
                     rng: _,
                 },
-                Self::SeededNoise {
-                    base: b_base,
-                    std_dev: b_std,
+                Self::Stochastic {
+                    kind: b_kind,
                     seed: b_seed,
                     draw_count: b_count,
                     rng: _,
                 },
-            ) => a_base == b_base && a_std == b_std && a_seed == b_seed && a_count == b_count,
+            ) => a_kind == b_kind && a_seed == b_seed && a_count == b_count,
             (
                 Self::Shared {
                     data: a_data,
@@ -329,16 +386,15 @@ impl ScheduleSource {
 
                 Ok(frac * month_multipliers[month_idx] * *max_value)
             }
-            Self::SeededNoise {
-                base,
-                std_dev,
+            Self::Stochastic {
+                kind,
                 seed: _,
                 draw_count,
                 rng,
             } => {
-                let z: f64 = StandardNormal.sample(rng);
+                let value = kind.sample(rng);
                 *draw_count = draw_count.checked_add(1).expect("draw_count overflow");
-                Ok(*base + *std_dev * z)
+                Ok(value)
             }
             Self::Shared {
                 data,
@@ -374,12 +430,11 @@ impl ScheduleSource {
     /// Reset any internal mutable state (for checkpoint restart consistency).
     pub fn reset(&mut self) {
         match self {
-            Self::SeededNoise {
-                base: _,
-                std_dev: _,
+            Self::Stochastic {
                 seed,
                 draw_count,
                 rng,
+                ..
             } => {
                 *rng = ChaCha8Rng::from_seed(*seed);
                 *draw_count = 0;
@@ -435,7 +490,10 @@ mod tests {
 
     use crate::{DomainUpdate, ZoneId, test_utils::default_env};
 
-    use super::{BoundaryPolicy, DayFilter, SCHEDULE_DOMAIN_ID, ScheduleSource, TimeWindow};
+    use super::{
+        BoundaryPolicy, DayFilter, DistributionKind, SCHEDULE_DOMAIN_ID, ScheduleSource,
+        TimeWindow,
+    };
 
     #[test]
     fn constant_returns_constant() {
@@ -536,20 +594,24 @@ mod tests {
     }
 
     #[test]
-    fn seeded_noise_is_deterministic_given_seed() {
+    fn stochastic_gaussian_is_deterministic_given_seed() {
         let env = default_env();
         let seed = [7_u8; 32];
 
-        let mut a = ScheduleSource::SeededNoise {
-            base: 5.0,
-            std_dev: 1.2,
+        let mut a = ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean: 5.0,
+                std_dev: 1.2,
+            },
             seed,
             draw_count: 0,
             rng: ChaCha8Rng::from_seed(seed),
         };
-        let mut b = ScheduleSource::SeededNoise {
-            base: 5.0,
-            std_dev: 1.2,
+        let mut b = ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean: 5.0,
+                std_dev: 1.2,
+            },
             seed,
             draw_count: 0,
             rng: ChaCha8Rng::from_seed(seed),
@@ -915,5 +977,129 @@ mod tests {
             .single()
             .expect("valid timestamp");
         assert_eq!(source.value_at(&env).expect("weekend"), 24.0);
+    }
+
+    // ── Stochastic distribution tests ────────────────────────────────
+
+    /// Helper: build a `Stochastic` source with the given kind and seed.
+    fn stochastic(kind: DistributionKind, seed: [u8; 32]) -> ScheduleSource {
+        ScheduleSource::Stochastic {
+            kind,
+            seed,
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed(seed),
+        }
+    }
+
+    /// Assert two identically-seeded sources produce the same sequence.
+    fn assert_deterministic(kind: DistributionKind, n: usize) {
+        let env = default_env();
+        let seed = [42_u8; 32];
+        let mut a = stochastic(kind.clone(), seed);
+        let mut b = stochastic(kind, seed);
+        for i in 0..n {
+            let va = a.value_at(&env).unwrap();
+            let vb = b.value_at(&env).unwrap();
+            assert_eq!(va, vb, "draw {i} diverged");
+        }
+    }
+
+    #[test]
+    fn stochastic_uniform_deterministic_and_in_range() {
+        let kind = DistributionKind::Uniform {
+            low: 2.0,
+            high: 5.0,
+        };
+        assert_deterministic(kind.clone(), 20);
+
+        let env = default_env();
+        let mut src = stochastic(kind, [1_u8; 32]);
+        for _ in 0..100 {
+            let v = src.value_at(&env).unwrap();
+            assert!((2.0..5.0).contains(&v), "uniform out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn stochastic_lognormal_deterministic_and_positive() {
+        let kind = DistributionKind::LogNormal {
+            mu: 0.0,
+            sigma: 1.0,
+        };
+        assert_deterministic(kind.clone(), 20);
+
+        let env = default_env();
+        let mut src = stochastic(kind, [2_u8; 32]);
+        for _ in 0..100 {
+            let v = src.value_at(&env).unwrap();
+            assert!(v > 0.0, "lognormal should be positive: {v}");
+        }
+    }
+
+    #[test]
+    fn stochastic_exponential_deterministic_and_non_negative() {
+        let kind = DistributionKind::Exponential { lambda: 2.0 };
+        assert_deterministic(kind.clone(), 20);
+
+        let env = default_env();
+        let mut src = stochastic(kind, [3_u8; 32]);
+        for _ in 0..100 {
+            let v = src.value_at(&env).unwrap();
+            assert!(v >= 0.0, "exponential should be non-negative: {v}");
+        }
+    }
+
+    #[test]
+    fn stochastic_poisson_deterministic_and_integer_valued() {
+        let kind = DistributionKind::Poisson { lambda: 5.0 };
+        assert_deterministic(kind.clone(), 20);
+
+        let env = default_env();
+        let mut src = stochastic(kind, [4_u8; 32]);
+        for _ in 0..100 {
+            let v = src.value_at(&env).unwrap();
+            assert!(v >= 0.0, "poisson should be non-negative: {v}");
+            assert_eq!(v, v.floor(), "poisson should be integer-valued: {v}");
+        }
+    }
+
+    #[test]
+    fn stochastic_bernoulli_deterministic_and_binary() {
+        let kind = DistributionKind::Bernoulli { p: 0.5 };
+        assert_deterministic(kind.clone(), 20);
+
+        let env = default_env();
+        let mut src = stochastic(kind, [5_u8; 32]);
+        let mut saw_zero = false;
+        let mut saw_one = false;
+        for _ in 0..100 {
+            let v = src.value_at(&env).unwrap();
+            assert!(v == 0.0 || v == 1.0, "bernoulli should be 0 or 1: {v}");
+            if v == 0.0 {
+                saw_zero = true;
+            } else {
+                saw_one = true;
+            }
+        }
+        assert!(saw_zero && saw_one, "p=0.5 should produce both 0 and 1");
+    }
+
+    #[test]
+    fn stochastic_poisson_reset_replays_sequence() {
+        let env = default_env();
+        let kind = DistributionKind::Poisson { lambda: 3.0 };
+        let mut src = stochastic(kind, [6_u8; 32]);
+
+        let mut first_values = Vec::with_capacity(10);
+        for _ in 0..10 {
+            first_values.push(src.value_at(&env).unwrap());
+        }
+
+        src.reset();
+
+        for (i, expected) in first_values.iter().enumerate() {
+            let v = src.value_at(&env).unwrap();
+            assert_eq!(v, *expected, "post-reset draw {i} diverged");
+        }
     }
 }

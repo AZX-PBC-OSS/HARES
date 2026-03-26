@@ -19,7 +19,7 @@ mod tests {
     }
 
     fn beopt_xml_path() -> PathBuf {
-        project_root().join("vendors/OCHRE/ochre/defaults/Input Files/BEopt_example.xml")
+        project_root().join("data/examples/BEopt_example.xml")
     }
 
     // ── OCHRE reference constants (from extract_structure.py) ─────────────

@@ -12,12 +12,8 @@ HARES_DEFAULTS = ROOT / "defaults"
 
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 HPXML_PV = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml")
-WEATHER = str(
-    ROOT / "vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"
-)
-SCHEDULE = str(
-    ROOT / "vendors/OCHRE/ochre/defaults/Input Files/BEopt_example_schedule.csv"
-)
+WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 PVLIB_SOLAR_CSV = str(
     ROOT / "tests/fixtures/freefloat/beopt_winter_48h/pvlib_solar_override.csv"

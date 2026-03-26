@@ -16,13 +16,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
-OCHRE_INPUTS = VENDOR_OCHRE / "ochre" / "defaults" / "Input Files"
-OCHRE_WEATHER = VENDOR_OCHRE / "ochre" / "defaults" / "Weather"
+EXAMPLES = ROOT / "data" / "examples"
 HARES_DEFAULTS = ROOT / "defaults"
 
-HPXML = str(OCHRE_INPUTS / "BEopt_example.xml")
-SCHEDULE = str(OCHRE_INPUTS / "BEopt_example_schedule.csv")
-WEATHER = str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+HPXML = str(EXAMPLES / "BEopt_example.xml")
+SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
+WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
 # Denver LST = UTC-7.  13:00 local = 20:00 UTC.
 # Both OCHRE and HARES take local standard time as the start time.

@@ -15,13 +15,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
-OCHRE_INPUTS = VENDOR_OCHRE / "ochre" / "defaults" / "Input Files"
-OCHRE_WEATHER = VENDOR_OCHRE / "ochre" / "defaults" / "Weather"
+EXAMPLES = ROOT / "data" / "examples"
 HARES_DEFAULTS = ROOT / "defaults"
 
-HPXML = str(OCHRE_INPUTS / "BEopt_example.xml")
-SCHEDULE = str(OCHRE_INPUTS / "BEopt_example_schedule.csv")
-WEATHER = str(OCHRE_WEATHER / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+HPXML = str(EXAMPLES / "BEopt_example.xml")
+SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
+WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
 START_UTC = dt.datetime(2019, 5, 5, 19, 0, 0, tzinfo=dt.timezone.utc)
 START_LOCAL = dt.datetime(2019, 5, 5, 13, 0)

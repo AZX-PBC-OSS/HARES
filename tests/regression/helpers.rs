@@ -26,28 +26,28 @@ pub fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
     p
 }
 
-fn vendor_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendors/OCHRE")
+fn examples_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
 }
 
 pub fn ochre_hpxml_path() -> PathBuf {
-    vendor_dir().join("ochre/defaults/Input Files/BEopt_example.xml")
+    examples_dir().join("BEopt_example.xml")
 }
 
 pub fn ochre_schedule_path() -> PathBuf {
-    vendor_dir().join("ochre/defaults/Input Files/BEopt_example_schedule.csv")
+    examples_dir().join("BEopt_example_schedule.csv")
 }
 
 pub fn ochre_weather_path() -> PathBuf {
-    vendor_dir().join("ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+    examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 }
 
 pub fn resstock_hpxml_path() -> PathBuf {
-    vendor_dir().join("ochre/defaults/Input Files/bldg0112631-up00.xml")
+    examples_dir().join("bldg0112631-up00.xml")
 }
 
 pub fn resstock_schedule_path() -> PathBuf {
-    vendor_dir().join("ochre/defaults/Input Files/bldg0112631_schedule.csv")
+    examples_dir().join("bldg0112631_schedule.csv")
 }
 
 pub fn assert_vendor_fixtures_exist() {
@@ -67,11 +67,7 @@ pub fn assert_vendor_fixtures_exist() {
     }
 }
 
-pub fn build_beopt_dwelling_config(
-    bldg_id: i64,
-    duration: Duration,
-    seed: u64,
-) -> DwellingConfig {
+pub fn build_beopt_dwelling_config(bldg_id: i64, duration: Duration, seed: u64) -> DwellingConfig {
     DwellingConfig {
         hpxml_path: ochre_hpxml_path(),
         schedule_path: ochre_schedule_path(),

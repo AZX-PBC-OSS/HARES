@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use hares_types::{HaresError, ScheduleSource, ZoneId};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigValue;
@@ -14,22 +15,22 @@ use crate::config::ConfigValue;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ScheduleSourceState {
     Stateless,
-    SeededNoise { draw_count: u64 },
+    Stochastic { draw_count: u64 },
     Shared { cursor: usize },
 }
 
 pub(crate) fn capture_schedule_source_state(source: &ScheduleSource) -> ScheduleSourceState {
     match source {
         ScheduleSource::Shared { cursor, .. } => ScheduleSourceState::Shared { cursor: *cursor },
-        ScheduleSource::SeededNoise { draw_count, .. } => ScheduleSourceState::SeededNoise {
+        ScheduleSource::Stochastic { draw_count, .. } => ScheduleSourceState::Stochastic {
             draw_count: *draw_count,
         },
         ScheduleSource::Constant(_)
         | ScheduleSource::DailyProfile { .. }
         | ScheduleSource::ColumnRef { .. }
-        | ScheduleSource::SolarAware { .. } => ScheduleSourceState::Stateless,
+        | ScheduleSource::SolarAware { .. }
+        | ScheduleSource::TimeWindows { .. } => ScheduleSourceState::Stateless,
         // Wildcard required: ScheduleSource is #[non_exhaustive].
-        // New variants must be handled explicitly here.
         _ => ScheduleSourceState::Stateless,
     }
 }
@@ -44,18 +45,23 @@ pub(crate) fn restore_schedule_source_state(
             Ok(())
         }
         (
-            ScheduleSource::SeededNoise {
+            ScheduleSource::Stochastic {
+                kind,
                 seed,
                 draw_count,
                 rng,
-                ..
             },
-            ScheduleSourceState::SeededNoise {
+            ScheduleSourceState::Stochastic {
                 draw_count: target_draw_count,
             },
         ) => {
+            // Re-seed and replay draws to advance the RNG to the correct state.
+            // This is safe for all distribution kinds regardless of per-draw
+            // RNG word consumption (e.g. Poisson uses rejection sampling).
             *rng = ChaCha8Rng::from_seed(*seed);
-            rng.set_word_pos((*target_draw_count as u128) * 2);
+            for _ in 0..*target_draw_count {
+                let _ = kind.sample(rng);
+            }
             *draw_count = *target_draw_count;
             Ok(())
         }
@@ -63,11 +69,11 @@ pub(crate) fn restore_schedule_source_state(
             ScheduleSource::Constant(_)
             | ScheduleSource::DailyProfile { .. }
             | ScheduleSource::ColumnRef { .. }
-            | ScheduleSource::SolarAware { .. },
+            | ScheduleSource::SolarAware { .. }
+            | ScheduleSource::TimeWindows { .. },
             ScheduleSourceState::Stateless,
         ) => Ok(()),
         // Wildcard required: ScheduleSource is #[non_exhaustive].
-        // New variants must be handled explicitly here.
         _ => Err(HaresError::Equipment(
             "checkpoint schedule source state does not match current schedule source variant"
                 .to_string(),

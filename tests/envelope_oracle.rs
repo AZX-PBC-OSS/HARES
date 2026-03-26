@@ -15,8 +15,8 @@ mod tests {
     use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
     use hares_io::OutputFormat;
 
-    fn vendor_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendors/OCHRE")
+    fn examples_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
     }
 
     fn project_root() -> PathBuf {
@@ -29,11 +29,9 @@ mod tests {
 
     fn beopt_config(output_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
-            hpxml_path: vendor_dir().join("ochre/defaults/Input Files/BEopt_example.xml"),
-            schedule_path: vendor_dir()
-                .join("ochre/defaults/Input Files/BEopt_example_schedule.csv"),
-            weather_path: vendor_dir()
-                .join("ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            hpxml_path: examples_dir().join("BEopt_example.xml"),
+            schedule_path: examples_dir().join("BEopt_example_schedule.csv"),
+            weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
                 // Denver is UTC-7. OCHRE starts at 12:00 local = 19:00 UTC.

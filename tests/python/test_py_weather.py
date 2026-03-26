@@ -5,9 +5,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-EPW_PATH = str(
-    ROOT / "vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"
-)
+EPW_PATH = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
 EXPECTED_COLUMNS = [
     "index",

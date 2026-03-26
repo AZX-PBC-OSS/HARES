@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-OCHRE_DEFAULTS = REPO / "vendors" / "OCHRE" / "ochre" / "defaults"
-HPXML = str(OCHRE_DEFAULTS / "Input Files" / "BEopt_example.xml")
+EXAMPLES = REPO / "data" / "examples"
+HPXML = str(EXAMPLES / "BEopt_example.xml")
 HPXML_PV = str(REPO / "tests" / "fixtures" / "hpxml" / "ochre_samples" / "base-pv.xml")
-SCHEDULE = str(OCHRE_DEFAULTS / "Input Files" / "BEopt_example_schedule.csv")
-WEATHER = str(OCHRE_DEFAULTS / "Weather" / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
+WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 HARES_DEFAULTS = REPO / "defaults"
 
 

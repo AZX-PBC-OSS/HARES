@@ -17,13 +17,14 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OCHRE_ROOT = REPO_ROOT / "vendors" / "OCHRE"
+EXAMPLES = REPO_ROOT / "data" / "examples"
 sys.path.insert(0, str(OCHRE_ROOT))
 
 from ochre import Dwelling  # noqa: E402
 
-HPXML = OCHRE_ROOT / "ochre" / "defaults" / "Input Files" / "BEopt_example.xml"
-SCHEDULE = OCHRE_ROOT / "ochre" / "defaults" / "Input Files" / "BEopt_example_schedule.csv"
-WEATHER = OCHRE_ROOT / "ochre" / "defaults" / "Weather" / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
+HPXML = EXAMPLES / "BEopt_example.xml"
+SCHEDULE = EXAMPLES / "BEopt_example_schedule.csv"
+WEATHER = EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
 
 N_STEPS = 10
 
