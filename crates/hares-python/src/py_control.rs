@@ -1,15 +1,16 @@
 //! Python bindings for control signals.
 
 use hares_types::{
-    ControlSignal, DRLevel, DutyCycleComponent as RustDutyCycleComponent, IdealCapacityMode,
-    InverterPriority, OperatingMode, ProtocolId,
+    ControlSignal, DRLevel, DutyCycleComponent as RustDutyCycleComponent,
+    EvConnectionState as RustEvConnectionState, IdealCapacityMode, InverterPriority, OperatingMode,
+    ProtocolId,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyType};
 
 use crate::py_actor::{PyDRLevel, PyMode};
-use crate::py_enums::{PyDutyCycleComponent, PyInverterPriority};
+use crate::py_enums::{PyDutyCycleComponent, PyEvConnectionState, PyInverterPriority};
 
 #[pyclass(name = "ControlSignal")]
 #[derive(Debug)]
@@ -239,6 +240,39 @@ impl PyControlSignal {
         })
     }
 
+    #[staticmethod]
+    pub fn ev_plug_in(state: PyEvConnectionState) -> Self {
+        Self {
+            signal: ControlSignal::EvPlugIn {
+                state: RustEvConnectionState::from(state),
+            },
+        }
+    }
+
+    #[staticmethod]
+    pub fn ev_drive(kwh: f64) -> Self {
+        Self {
+            signal: ControlSignal::EvDrive { kwh },
+        }
+    }
+
+    #[staticmethod]
+    pub fn ev_away_charge(power_kw: f64) -> Self {
+        Self {
+            signal: ControlSignal::EvAwayCharge { power_kw },
+        }
+    }
+
+    #[staticmethod]
+    pub fn ev_set_ready_by(departure_hour: f64, target_soc: f64) -> Self {
+        Self {
+            signal: ControlSignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            },
+        }
+    }
+
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, d: &Bound<'_, PyDict>) -> PyResult<Self> {
         let kind: String = dict_required(d, "type")?;
@@ -325,6 +359,23 @@ impl PyControlSignal {
                 };
                 ControlSignal::IdealCapacityModeOverride { mode }
             }
+            "EvPlugIn" => {
+                let state_str: String = dict_required(d, "state")?;
+                let state = state_str
+                    .parse::<hares_types::EvConnectionState>()
+                    .map_err(PyValueError::new_err)?;
+                ControlSignal::EvPlugIn { state }
+            }
+            "EvDrive" => ControlSignal::EvDrive {
+                kwh: dict_required(d, "kwh")?,
+            },
+            "EvAwayCharge" => ControlSignal::EvAwayCharge {
+                power_kw: dict_required(d, "power_kw")?,
+            },
+            "EvSetReadyBy" => ControlSignal::EvSetReadyBy {
+                departure_hour: dict_required(d, "departure_hour")?,
+                target_soc: dict_required(d, "target_soc")?,
+            },
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "unsupported control signal type `{kind}`"
@@ -518,6 +569,26 @@ impl PyControlSignal {
                     IdealCapacityMode::Off => "Off",
                 };
                 dict.set_item("mode", m_str)?;
+            }
+            ControlSignal::EvPlugIn { state } => {
+                dict.set_item("type", "EvPlugIn")?;
+                dict.set_item("state", format!("{state}"))?;
+            }
+            ControlSignal::EvDrive { kwh } => {
+                dict.set_item("type", "EvDrive")?;
+                dict.set_item("kwh", kwh)?;
+            }
+            ControlSignal::EvAwayCharge { power_kw } => {
+                dict.set_item("type", "EvAwayCharge")?;
+                dict.set_item("power_kw", power_kw)?;
+            }
+            ControlSignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            } => {
+                dict.set_item("type", "EvSetReadyBy")?;
+                dict.set_item("departure_hour", departure_hour)?;
+                dict.set_item("target_soc", target_soc)?;
             }
         }
         Ok(dict)

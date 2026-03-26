@@ -358,18 +358,186 @@ pub enum PlugInPolicy {
     LowSoc { threshold: f64 },
 }
 
+/// A departure deadline with day-of-week filter and required SoC.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DepartureConstraint {
+    pub day_filter: DayFilter,
+    /// Minute of day the vehicle must depart; valid range [0, 1439].
+    pub departure_minute: u32,
+    pub target_soc: f64,
+}
+
+impl DepartureConstraint {
+    pub fn validate(&self) -> Result<(), crate::HaresError> {
+        if self.departure_minute >= 1440 {
+            return Err(crate::HaresError::Equipment(format!(
+                "departure_minute must be < 1440, got {}",
+                self.departure_minute
+            )));
+        }
+        validate_fraction("target_soc", self.target_soc)
+    }
+}
+
+fn default_charge_buffer_hours() -> f64 {
+    2.0
+}
+
 /// Charging strategy governing when and how fast to charge.
 ///
 /// `TouAware` references the TOU rate schedule from the environment/simulation
 /// config — the EV just knows "be TOU-aware" and reads peak periods externally.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ChargingStrategy {
-    Immediate { target_soc: f64 },
-    Nightly { off_peak_start_hour: f64, off_peak_end_hour: f64, target_soc: f64 },
-    LowSoc { threshold: f64, target_soc: f64 },
-    QuickThenWait { partial_soc: f64 },
-    PreDeparture { target_soc: f64 },
-    TouAware { target_soc: f64 },
+    Immediate {
+        target_soc: f64,
+    },
+    Nightly {
+        off_peak_start_hour: f64,
+        off_peak_end_hour: f64,
+        target_soc: f64,
+    },
+    LowSoc {
+        threshold: f64,
+        target_soc: f64,
+    },
+    QuickThenWait {
+        partial_soc: f64,
+    },
+    PreDeparture {
+        target_soc: f64,
+        #[serde(default)]
+        departure_schedule: Vec<DepartureConstraint>,
+    },
+    TouAware {
+        target_soc: f64,
+        #[serde(default)]
+        departure_schedule: Vec<DepartureConstraint>,
+        #[serde(default = "default_charge_buffer_hours")]
+        charge_buffer_hours: f64,
+    },
+    SolarSurplus {
+        min_charge_rate_kw: f64,
+        #[serde(default)]
+        departure_schedule: Vec<DepartureConstraint>,
+    },
+    V2H {
+        discharge_threshold_soc: f64,
+        min_soc: f64,
+    },
+    V2G {
+        min_soc: f64,
+        max_export_kw: f64,
+        price_threshold: f64,
+    },
+}
+
+impl ChargingStrategy {
+    /// Validate all fraction/SoC fields and nested departure constraints.
+    pub fn validate(&self) -> Result<(), crate::HaresError> {
+        match self {
+            Self::Immediate { target_soc }
+            | Self::QuickThenWait { partial_soc: target_soc } => {
+                validate_fraction("target_soc", *target_soc)
+            }
+            Self::Nightly {
+                off_peak_start_hour,
+                off_peak_end_hour,
+                target_soc,
+            } => {
+                if !off_peak_start_hour.is_finite()
+                    || !off_peak_end_hour.is_finite()
+                    || *off_peak_start_hour < 0.0
+                    || *off_peak_start_hour >= 24.0
+                    || *off_peak_end_hour < 0.0
+                    || *off_peak_end_hour >= 24.0
+                {
+                    return Err(crate::HaresError::Equipment(
+                        "off_peak hours must be finite and in [0.0, 24.0)".into(),
+                    ));
+                }
+                validate_fraction("target_soc", *target_soc)
+            }
+            Self::LowSoc {
+                threshold,
+                target_soc,
+            } => {
+                validate_fraction("threshold", *threshold)?;
+                validate_fraction("target_soc", *target_soc)
+            }
+            Self::PreDeparture {
+                target_soc,
+                departure_schedule,
+            } => {
+                validate_fraction("target_soc", *target_soc)?;
+                for dc in departure_schedule {
+                    dc.validate()?;
+                }
+                Ok(())
+            }
+            Self::TouAware {
+                target_soc,
+                departure_schedule,
+                charge_buffer_hours,
+            } => {
+                validate_fraction("target_soc", *target_soc)?;
+                if !charge_buffer_hours.is_finite() || *charge_buffer_hours < 0.0 {
+                    return Err(crate::HaresError::Equipment(format!(
+                        "charge_buffer_hours must be finite and >= 0, got {charge_buffer_hours}"
+                    )));
+                }
+                for dc in departure_schedule {
+                    dc.validate()?;
+                }
+                Ok(())
+            }
+            Self::SolarSurplus {
+                min_charge_rate_kw,
+                departure_schedule,
+            } => {
+                if !min_charge_rate_kw.is_finite() || *min_charge_rate_kw < 0.0 {
+                    return Err(crate::HaresError::Equipment(format!(
+                        "min_charge_rate_kw must be finite and >= 0, got {min_charge_rate_kw}"
+                    )));
+                }
+                for dc in departure_schedule {
+                    dc.validate()?;
+                }
+                Ok(())
+            }
+            Self::V2H {
+                discharge_threshold_soc,
+                min_soc,
+            } => {
+                validate_fraction("discharge_threshold_soc", *discharge_threshold_soc)?;
+                validate_fraction("min_soc", *min_soc)?;
+                if min_soc > discharge_threshold_soc {
+                    return Err(crate::HaresError::Equipment(
+                        "min_soc must be <= discharge_threshold_soc".into(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::V2G {
+                min_soc,
+                max_export_kw,
+                price_threshold,
+            } => {
+                validate_fraction("min_soc", *min_soc)?;
+                if !max_export_kw.is_finite() || *max_export_kw < 0.0 {
+                    return Err(crate::HaresError::Equipment(format!(
+                        "max_export_kw must be finite and >= 0, got {max_export_kw}"
+                    )));
+                }
+                if !price_threshold.is_finite() {
+                    return Err(crate::HaresError::Equipment(
+                        "price_threshold must be finite".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -380,9 +548,8 @@ pub enum GridExportRule {
     Disabled,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StormWatchTrigger {
-    #[default]
     ManualEnable,
     WeatherSignal,
 }
@@ -413,6 +580,29 @@ pub struct BmsTimeWindow {
     pub day: DayFilter,
     pub start_minute: u16,
     pub end_minute: u16,
+}
+
+impl BmsTimeWindow {
+    pub fn validate(&self) -> Result<(), crate::HaresError> {
+        if self.start_minute >= 1440 {
+            return Err(crate::HaresError::Equipment(format!(
+                "start_minute must be < 1440, got {}",
+                self.start_minute
+            )));
+        }
+        if self.end_minute > 1440 {
+            return Err(crate::HaresError::Equipment(format!(
+                "end_minute must be <= 1440, got {}",
+                self.end_minute
+            )));
+        }
+        if self.start_minute == self.end_minute {
+            return Err(crate::HaresError::Equipment(
+                "zero-width window (start_minute == end_minute) is invalid".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -511,6 +701,7 @@ impl BmsMode {
             }
             Self::Scheduled { windows } => {
                 for w in windows {
+                    w.time_window.validate()?;
                     w.action.validate()?;
                 }
                 Ok(())
@@ -936,8 +1127,28 @@ mod tests {
             },
             ChargingStrategy::LowSoc { threshold: 0.2, target_soc: 0.8 },
             ChargingStrategy::QuickThenWait { partial_soc: 0.5 },
-            ChargingStrategy::PreDeparture { target_soc: 0.95 },
-            ChargingStrategy::TouAware { target_soc: 0.85 },
+            ChargingStrategy::PreDeparture {
+                target_soc: 0.95,
+                departure_schedule: vec![],
+            },
+            ChargingStrategy::TouAware {
+                target_soc: 0.85,
+                departure_schedule: vec![],
+                charge_buffer_hours: 2.0,
+            },
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.8,
+                min_soc: 0.2,
+            },
+            ChargingStrategy::V2G {
+                min_soc: 0.2,
+                max_export_kw: 7.0,
+                price_threshold: 0.15,
+            },
+            ChargingStrategy::SolarSurplus {
+                min_charge_rate_kw: 1.4,
+                departure_schedule: vec![],
+            },
         ];
         for strategy in strategies {
             let json = serde_json::to_string(&strategy).expect("serialize");
@@ -1171,5 +1382,385 @@ mod tests {
     fn bms_action_validate_accepts_valid() {
         assert!(BmsAction::Charge { rate_fraction: 0.5 }.validate().is_ok());
         assert!(BmsAction::Idle.validate().is_ok());
+    }
+
+    #[test]
+    fn bms_time_window_validate_rejects_invalid() {
+        let out_of_range_start = BmsTimeWindow {
+            day: crate::DayFilter::Any,
+            start_minute: 1440,
+            end_minute: 1440,
+        };
+        assert!(out_of_range_start.validate().is_err());
+
+        let out_of_range_end = BmsTimeWindow {
+            day: crate::DayFilter::Any,
+            start_minute: 0,
+            end_minute: 1441,
+        };
+        assert!(out_of_range_end.validate().is_err());
+
+        let zero_width = BmsTimeWindow {
+            day: crate::DayFilter::Any,
+            start_minute: 300,
+            end_minute: 300,
+        };
+        assert!(zero_width.validate().is_err());
+    }
+
+    #[test]
+    fn bms_time_window_validate_accepts_valid() {
+        let normal = BmsTimeWindow {
+            day: crate::DayFilter::Weekdays,
+            start_minute: 0,
+            end_minute: 360,
+        };
+        assert!(normal.validate().is_ok());
+
+        let full_day = BmsTimeWindow {
+            day: crate::DayFilter::Any,
+            start_minute: 0,
+            end_minute: 1440,
+        };
+        assert!(full_day.validate().is_ok());
+
+        let wrapping = BmsTimeWindow {
+            day: crate::DayFilter::Any,
+            start_minute: 1320,
+            end_minute: 360,
+        };
+        assert!(wrapping.validate().is_ok());
+    }
+
+    #[test]
+    fn bms_mode_scheduled_validate_checks_time_windows() {
+        let mode = BmsMode::Scheduled {
+            windows: vec![BmsScheduleWindow {
+                time_window: BmsTimeWindow {
+                    day: crate::DayFilter::Any,
+                    start_minute: 1500,
+                    end_minute: 360,
+                },
+                action: BmsAction::Idle,
+            }],
+        };
+        assert!(mode.validate().is_err());
+    }
+
+    // ── TARIFF-003: ChargingStrategy extensions ─────────────────────
+
+    #[test]
+    fn charging_strategy_v2h_serde() {
+        let s = ChargingStrategy::V2H {
+            discharge_threshold_soc: 0.8,
+            min_soc: 0.2,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ChargingStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn charging_strategy_v2g_serde() {
+        let s = ChargingStrategy::V2G {
+            min_soc: 0.2,
+            max_export_kw: 7.6,
+            price_threshold: 0.15,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ChargingStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn charging_strategy_solar_surplus_serde() {
+        let s = ChargingStrategy::SolarSurplus {
+            min_charge_rate_kw: 1.4,
+            departure_schedule: vec![
+                DepartureConstraint {
+                    day_filter: crate::DayFilter::Weekdays,
+                    departure_minute: 450,
+                    target_soc: 0.9,
+                },
+                DepartureConstraint {
+                    day_filter: crate::DayFilter::Weekends,
+                    departure_minute: 600,
+                    target_soc: 0.7,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ChargingStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn charging_strategy_tou_aware_backward_compat() {
+        let raw = r#"{"TouAware":{"target_soc":0.85}}"#;
+        let decoded: ChargingStrategy = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            decoded,
+            ChargingStrategy::TouAware {
+                target_soc: 0.85,
+                departure_schedule: vec![],
+                charge_buffer_hours: 2.0,
+            }
+        );
+    }
+
+    #[test]
+    fn charging_strategy_pre_departure_backward_compat() {
+        let raw = r#"{"PreDeparture":{"target_soc":0.95}}"#;
+        let decoded: ChargingStrategy = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            decoded,
+            ChargingStrategy::PreDeparture {
+                target_soc: 0.95,
+                departure_schedule: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn departure_constraint_serde() {
+        use chrono::Weekday;
+        let constraints = vec![
+            DepartureConstraint {
+                day_filter: crate::DayFilter::Weekdays,
+                departure_minute: 480,
+                target_soc: 0.9,
+            },
+            DepartureConstraint {
+                day_filter: crate::DayFilter::Day(Weekday::Sat),
+                departure_minute: 600,
+                target_soc: 0.8,
+            },
+            DepartureConstraint {
+                day_filter: crate::DayFilter::Any,
+                departure_minute: 0,
+                target_soc: 1.0,
+            },
+        ];
+        for dc in &constraints {
+            let json = serde_json::to_string(dc).unwrap();
+            let back: DepartureConstraint = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, dc);
+        }
+    }
+
+    #[test]
+    fn charging_strategy_tou_aware_with_departures() {
+        let s = ChargingStrategy::TouAware {
+            target_soc: 0.9,
+            departure_schedule: vec![DepartureConstraint {
+                day_filter: crate::DayFilter::Weekdays,
+                departure_minute: 420,
+                target_soc: 0.85,
+            }],
+            charge_buffer_hours: 3.0,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ChargingStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn departure_constraint_validate_rejects_invalid() {
+        let bad_minute = DepartureConstraint {
+            day_filter: crate::DayFilter::Any,
+            departure_minute: 1440,
+            target_soc: 0.9,
+        };
+        assert!(bad_minute.validate().is_err());
+
+        let bad_soc = DepartureConstraint {
+            day_filter: crate::DayFilter::Any,
+            departure_minute: 480,
+            target_soc: 1.5,
+        };
+        assert!(bad_soc.validate().is_err());
+
+        let nan_soc = DepartureConstraint {
+            day_filter: crate::DayFilter::Any,
+            departure_minute: 480,
+            target_soc: f64::NAN,
+        };
+        assert!(nan_soc.validate().is_err());
+    }
+
+    #[test]
+    fn departure_constraint_validate_accepts_valid() {
+        let dc = DepartureConstraint {
+            day_filter: crate::DayFilter::Weekdays,
+            departure_minute: 420,
+            target_soc: 0.9,
+        };
+        assert!(dc.validate().is_ok());
+
+        let edge = DepartureConstraint {
+            day_filter: crate::DayFilter::Any,
+            departure_minute: 1439,
+            target_soc: 1.0,
+        };
+        assert!(edge.validate().is_ok());
+    }
+
+    #[test]
+    fn charging_strategy_validate_v2h_rejects_inverted_soc() {
+        let s = ChargingStrategy::V2H {
+            discharge_threshold_soc: 0.2,
+            min_soc: 0.8,
+        };
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn charging_strategy_validate_v2h_accepts_valid() {
+        let s = ChargingStrategy::V2H {
+            discharge_threshold_soc: 0.8,
+            min_soc: 0.2,
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn charging_strategy_validate_v2g_rejects_invalid() {
+        let bad_kw = ChargingStrategy::V2G {
+            min_soc: 0.2,
+            max_export_kw: -1.0,
+            price_threshold: 0.15,
+        };
+        assert!(bad_kw.validate().is_err());
+
+        let bad_price = ChargingStrategy::V2G {
+            min_soc: 0.2,
+            max_export_kw: 7.0,
+            price_threshold: f64::NAN,
+        };
+        assert!(bad_price.validate().is_err());
+    }
+
+    #[test]
+    fn charging_strategy_validate_v2g_accepts_valid() {
+        let s = ChargingStrategy::V2G {
+            min_soc: 0.2,
+            max_export_kw: 7.6,
+            price_threshold: 0.15,
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn charging_strategy_validate_solar_surplus_rejects_invalid() {
+        let bad = ChargingStrategy::SolarSurplus {
+            min_charge_rate_kw: -1.0,
+            departure_schedule: vec![],
+        };
+        assert!(bad.validate().is_err());
+
+        let bad_nested = ChargingStrategy::SolarSurplus {
+            min_charge_rate_kw: 1.4,
+            departure_schedule: vec![DepartureConstraint {
+                day_filter: crate::DayFilter::Any,
+                departure_minute: 1440,
+                target_soc: 0.9,
+            }],
+        };
+        assert!(bad_nested.validate().is_err());
+    }
+
+    #[test]
+    fn charging_strategy_validate_solar_surplus_accepts_valid() {
+        let s = ChargingStrategy::SolarSurplus {
+            min_charge_rate_kw: 1.4,
+            departure_schedule: vec![DepartureConstraint {
+                day_filter: crate::DayFilter::Weekdays,
+                departure_minute: 420,
+                target_soc: 0.9,
+            }],
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn charging_strategy_validate_tou_aware_rejects_invalid_buffer() {
+        let s = ChargingStrategy::TouAware {
+            target_soc: 0.9,
+            departure_schedule: vec![],
+            charge_buffer_hours: -1.0,
+        };
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn charging_strategy_validate_nightly_rejects_invalid_hours() {
+        let s = ChargingStrategy::Nightly {
+            off_peak_start_hour: 25.0,
+            off_peak_end_hour: 6.0,
+            target_soc: 0.9,
+        };
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn charging_strategy_validate_accepts_all_variants() {
+        let valid = vec![
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            ChargingStrategy::LowSoc { threshold: 0.2, target_soc: 0.8 },
+            ChargingStrategy::QuickThenWait { partial_soc: 0.5 },
+            ChargingStrategy::PreDeparture {
+                target_soc: 0.95,
+                departure_schedule: vec![],
+            },
+            ChargingStrategy::TouAware {
+                target_soc: 0.85,
+                departure_schedule: vec![],
+                charge_buffer_hours: 2.0,
+            },
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.8,
+                min_soc: 0.2,
+            },
+            ChargingStrategy::V2G {
+                min_soc: 0.2,
+                max_export_kw: 7.6,
+                price_threshold: 0.15,
+            },
+            ChargingStrategy::SolarSurplus {
+                min_charge_rate_kw: 1.4,
+                departure_schedule: vec![],
+            },
+        ];
+        for s in &valid {
+            assert!(s.validate().is_ok(), "expected valid: {s:?}");
+        }
+    }
+
+    #[test]
+    fn charging_strategy_v2g_accepts_negative_price_threshold() {
+        let s = ChargingStrategy::V2G {
+            min_soc: 0.2,
+            max_export_kw: 7.0,
+            price_threshold: -0.05,
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn charging_strategy_solar_surplus_backward_compat() {
+        let raw = r#"{"SolarSurplus":{"min_charge_rate_kw":1.4}}"#;
+        let decoded: ChargingStrategy = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            decoded,
+            ChargingStrategy::SolarSurplus {
+                min_charge_rate_kw: 1.4,
+                departure_schedule: vec![],
+            }
+        );
     }
 }

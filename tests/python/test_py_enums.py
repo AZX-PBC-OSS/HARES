@@ -423,6 +423,9 @@ class TestChargingStrategy:
             ChargingStrategy.quick_then_wait(0.5),
             ChargingStrategy.pre_departure(0.95),
             ChargingStrategy.tou_aware(0.85),
+            ChargingStrategy.v2h(0.8, 0.2),
+            ChargingStrategy.v2g(0.2, 7.6, 0.15),
+            ChargingStrategy.solar_surplus(1.4),
         ]
         for i, a in enumerate(strategies):
             for j, b in enumerate(strategies):
@@ -452,3 +455,39 @@ class TestChargingStrategy:
             ChargingStrategy.nightly(25.0, 6.0, 0.9)
         with pytest.raises(ValueError):
             ChargingStrategy.nightly(22.0, -1.0, 0.9)
+
+    def test_v2h_construction(self):
+        s = ChargingStrategy.v2h(0.8, 0.2)
+        assert "V2H" in str(s)
+
+    def test_v2h_rejects_inverted_soc(self):
+        with pytest.raises(ValueError):
+            ChargingStrategy.v2h(0.2, 0.8)
+
+    def test_v2g_construction(self):
+        s = ChargingStrategy.v2g(0.2, 7.6, 0.15)
+        assert "V2G" in str(s)
+
+    def test_v2g_accepts_negative_price(self):
+        s = ChargingStrategy.v2g(0.2, 7.0, -0.05)
+        assert "V2G" in str(s)
+
+    def test_v2g_rejects_invalid_kw(self):
+        with pytest.raises(ValueError):
+            ChargingStrategy.v2g(0.2, -1.0, 0.15)
+        with pytest.raises(ValueError):
+            ChargingStrategy.v2g(0.2, float("nan"), 0.15)
+
+    def test_v2g_rejects_nan_price(self):
+        with pytest.raises(ValueError):
+            ChargingStrategy.v2g(0.2, 7.0, float("nan"))
+
+    def test_solar_surplus_construction(self):
+        s = ChargingStrategy.solar_surplus(1.4)
+        assert "SolarSurplus" in str(s)
+
+    def test_solar_surplus_rejects_invalid_kw(self):
+        with pytest.raises(ValueError):
+            ChargingStrategy.solar_surplus(-1.0)
+        with pytest.raises(ValueError):
+            ChargingStrategy.solar_surplus(float("nan"))

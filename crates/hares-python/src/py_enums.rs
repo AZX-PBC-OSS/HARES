@@ -1437,13 +1437,78 @@ impl PyChargingStrategy {
     #[staticmethod]
     fn pre_departure(target_soc: f64) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
-        Ok(Self { inner: RustChargingStrategy::PreDeparture { target_soc } })
+        Ok(Self {
+            inner: RustChargingStrategy::PreDeparture {
+                target_soc,
+                departure_schedule: Vec::new(),
+            },
+        })
     }
 
     #[staticmethod]
     fn tou_aware(target_soc: f64) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
-        Ok(Self { inner: RustChargingStrategy::TouAware { target_soc } })
+        Ok(Self {
+            inner: RustChargingStrategy::TouAware {
+                target_soc,
+                departure_schedule: Vec::new(),
+                charge_buffer_hours: 2.0,
+            },
+        })
+    }
+
+    #[staticmethod]
+    fn v2h(discharge_threshold_soc: f64, min_soc: f64) -> PyResult<Self> {
+        validate_soc("discharge_threshold_soc", discharge_threshold_soc)?;
+        validate_soc("min_soc", min_soc)?;
+        if min_soc > discharge_threshold_soc {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "min_soc must be <= discharge_threshold_soc",
+            ));
+        }
+        Ok(Self {
+            inner: RustChargingStrategy::V2H {
+                discharge_threshold_soc,
+                min_soc,
+            },
+        })
+    }
+
+    #[staticmethod]
+    fn v2g(min_soc: f64, max_export_kw: f64, price_threshold: f64) -> PyResult<Self> {
+        validate_soc("min_soc", min_soc)?;
+        if !max_export_kw.is_finite() || max_export_kw < 0.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "max_export_kw must be finite and >= 0, got {max_export_kw}"
+            )));
+        }
+        if !price_threshold.is_finite() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "price_threshold must be finite".to_string(),
+            ));
+        }
+        Ok(Self {
+            inner: RustChargingStrategy::V2G {
+                min_soc,
+                max_export_kw,
+                price_threshold,
+            },
+        })
+    }
+
+    #[staticmethod]
+    fn solar_surplus(min_charge_rate_kw: f64) -> PyResult<Self> {
+        if !min_charge_rate_kw.is_finite() || min_charge_rate_kw < 0.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "min_charge_rate_kw must be finite and >= 0, got {min_charge_rate_kw}"
+            )));
+        }
+        Ok(Self {
+            inner: RustChargingStrategy::SolarSurplus {
+                min_charge_rate_kw,
+                departure_schedule: Vec::new(),
+            },
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -1464,11 +1529,20 @@ impl PyChargingStrategy {
             RustChargingStrategy::QuickThenWait { partial_soc } => {
                 format!("QuickThenWait(partial_soc={partial_soc})")
             }
-            RustChargingStrategy::PreDeparture { target_soc } => {
+            RustChargingStrategy::PreDeparture { target_soc, .. } => {
                 format!("PreDeparture(target_soc={target_soc})")
             }
-            RustChargingStrategy::TouAware { target_soc } => {
-                format!("TouAware(target_soc={target_soc})")
+            RustChargingStrategy::TouAware { target_soc, charge_buffer_hours, .. } => {
+                format!("TouAware(target_soc={target_soc}, buffer_hours={charge_buffer_hours})")
+            }
+            RustChargingStrategy::SolarSurplus { min_charge_rate_kw, .. } => {
+                format!("SolarSurplus(min_charge_rate_kw={min_charge_rate_kw})")
+            }
+            RustChargingStrategy::V2H { discharge_threshold_soc, min_soc } => {
+                format!("V2H(discharge_threshold_soc={discharge_threshold_soc}, min_soc={min_soc})")
+            }
+            RustChargingStrategy::V2G { min_soc, max_export_kw, price_threshold } => {
+                format!("V2G(min_soc={min_soc}, max_export_kw={max_export_kw}, price_threshold={price_threshold})")
             }
         }
     }

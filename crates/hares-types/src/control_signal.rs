@@ -6,7 +6,7 @@
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-use crate::{HaresError, IdealCapacityMode, OperatingMode, ProtocolId};
+use crate::{EvConnectionState, HaresError, IdealCapacityMode, OperatingMode, ProtocolId};
 
 /// Target component for split duty cycle control (HPWH compressor vs backup element).
 ///
@@ -115,6 +115,23 @@ pub enum ControlSignal {
     IdealCapacityModeOverride {
         mode: IdealCapacityMode,
     },
+    /// Set EV connection state (HomePluggedIn, AwayPluggedIn, Disconnected).
+    EvPlugIn {
+        state: EvConnectionState,
+    },
+    /// Deduct driving energy from EV SOC. Only valid when Disconnected.
+    EvDrive {
+        kwh: f64,
+    },
+    /// Set external charger power for away charging. Only valid when AwayPluggedIn.
+    EvAwayCharge {
+        power_kw: f64,
+    },
+    /// Tell EV BMS to be at target_soc by departure_hour.
+    EvSetReadyBy {
+        departure_hour: f64,
+        target_soc: f64,
+    },
 }
 
 /// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
@@ -148,6 +165,10 @@ bitflags! {
         const IDEAL_CAPACITY = 1 << 16;
         const THERMAL_SETPOINT_DELTA = 1 << 17;
         const IDEAL_CAPACITY_MODE_OVERRIDE = 1 << 18;
+        const EV_PLUG_IN = 1 << 19;
+        const EV_DRIVE = 1 << 20;
+        const EV_AWAY_CHARGE = 1 << 21;
+        const EV_SET_READY_BY = 1 << 22;
     }
 }
 
@@ -175,6 +196,10 @@ impl ControlSignal {
             Self::IdealCapacityModeOverride { .. } => {
                 ControlCapabilities::IDEAL_CAPACITY_MODE_OVERRIDE
             }
+            Self::EvPlugIn { .. } => ControlCapabilities::EV_PLUG_IN,
+            Self::EvDrive { .. } => ControlCapabilities::EV_DRIVE,
+            Self::EvAwayCharge { .. } => ControlCapabilities::EV_AWAY_CHARGE,
+            Self::EvSetReadyBy { .. } => ControlCapabilities::EV_SET_READY_BY,
         }
     }
 }
@@ -264,6 +289,15 @@ mod tests {
             },
             ControlSignal::IdealCapacityModeOverride {
                 mode: crate::IdealCapacityMode::On,
+            },
+            ControlSignal::EvPlugIn {
+                state: EvConnectionState::HomePluggedIn,
+            },
+            ControlSignal::EvDrive { kwh: 5.0 },
+            ControlSignal::EvAwayCharge { power_kw: 11.5 },
+            ControlSignal::EvSetReadyBy {
+                departure_hour: 7.0,
+                target_soc: 0.8,
             },
         ];
 
