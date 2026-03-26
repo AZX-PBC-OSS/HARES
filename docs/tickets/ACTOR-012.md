@@ -37,17 +37,16 @@ Equipment already handles these signals via `apply_control_unchecked` (Scheduled
 
 ## Work to Do
 
-- [ ] Create `crates/hares-core/src/actors/occupant.rs` implementing `Actor` trait
-- [ ] Occupant fields: name, presence schedule (home/away/sleeping), behavioral preferences
-- [ ] `decide(env, out)` dispatches ControlSignals only — never mutates environment or equipment state directly. Equipment receives signals via `apply_control` and adjusts its own internal operational state. Examples:
+- [x] Create `crates/hares-core/src/actors/occupant.rs` implementing `Actor` trait
+- [x] Occupant fields: name, presence schedule (home/away/sleeping), behavioral preferences
+- [x] `decide(env, out)` dispatches ControlSignals only — never mutates environment or equipment state directly. Equipment receives signals via `apply_control` and adjusts its own internal operational state. Examples:
   - `ModeOverride { mode: Off }` → lighting equipment sets internal state to off → `step()` produces 0W
   - `ModeOverride { mode: On }` → washing machine sets internal state to running → `step()` produces rated power draw + thermal gain
   - EV: use existing `ModeOverride { mode: Off }` for disconnect, `ModeOverride { mode: On }` for connect → EV equipment sets plugged/unplugged state → `step()` computes charge power or 0W. Use `PowerLimit` to change charge rate. No new signal types needed — existing ControlSignal variants cover EV use cases.
   - When occupant is home and not intervening, emit nothing — equipment runs on its internal schedule
-- [ ] `decide(env, out)` pushes into pre-allocated buffer (ACTOR-008 pattern), zero per-step allocation
-- [ ] Occupant presence derived from schedule or occupancy column — stored as pre-computed array, not cloned each step
-- [ ] Pass `&EnvironmentState` by immutable reference — actors never mutate environment
-- [ ] Constructor: `from_schedule(schedule: &ScheduleTimeSeries, building: &Building) -> Self`
+- [x] `decide(env, out)` pushes into pre-allocated buffer (ACTOR-008 pattern), zero per-step allocation
+- [x] Occupant presence derived from schedule — stored as pre-computed array (`Vec<Presence>`), not cloned each step
+- [x] Pass `&EnvironmentState` by immutable reference — actors never mutate environment
 
 ## Files to Touch
 
@@ -57,13 +56,38 @@ Equipment already handles these signals via `apply_control_unchecked` (Scheduled
 
 ## Measures of Success
 
-- [ ] Occupant actor emits control signals that equipment responds to
-- [ ] Without actor: equipment runs on internal schedules (baseline behavior unchanged)
-- [ ] With actor: external overrides modify equipment behavior (lights off when away, etc.)
-- [ ] Actor can be subclassed/replaced for DR compliance modeling
-- [ ] EV plug/unplug events flow through actor→equipment control signals
+- [x] Occupant actor emits control signals that equipment responds to
+- [x] Without actor: equipment runs on internal schedules (baseline behavior unchanged)
+- [x] With actor: external overrides modify equipment behavior (lights off when away, etc.)
+- [x] Actor can be subclassed/replaced for DR compliance modeling
+- [x] EV plug/unplug events flow through actor→equipment control signals
+
+## Tests Added
+
+### hares-core (actors/occupant.rs)
+- `presence_default_is_home` - verifies default presence state
+- `presence_is_away` - verifies away detection
+- `equipment_behavior_default_is_none` - verifies default behavior config
+- `equipment_behavior_builder_methods` - verifies builder pattern
+- `occupant_name_returns_expected_value` - verifies Actor::name()
+- `occupant_default_presence_is_home` - verifies initial state
+- `occupant_presence_schedule_works` - verifies schedule advancement
+- `occupant_no_targets_emits_nothing` - verifies empty case
+- `occupant_lighting_off_when_away_emits_signal` - verifies ModeOverride Off
+- `occupant_lighting_no_signal_when_home` - verifies no signals when home
+- `occupant_appliance_on_when_home_emits_signal` - verifies ModeOverride Standby
+- `occupant_ev_plug_unplug_on_transition` - verifies EV connect/disconnect
+- `occupant_ev_power_setpoint_when_home` - verifies PowerSetpoint for EV
+- `occupant_plug_loads_by_end_use` - verifies ByEndUse targeting
+- `occupant_load_fraction_signal` - verifies LoadFraction signal
+- `occupant_uses_user_override_priority` - verifies UserOverride priority
+- `occupant_multiple_equipment_targets` - verifies multi-equipment dispatch
+- `occupant_no_duplicate_signals_on_same_presence` - verifies transition-only behavior
+- `occupant_sleeping_is_present` - verifies Sleeping presence state
+- `occupant_transition_home_to_sleeping_no_signal` - verifies sleeping != away
 
 ## Verification
 
-- [ ] `cargo build --workspace` passes
-- [ ] `cargo test --workspace` passes
+- [x] `cargo build --workspace` passes
+- [x] `cargo test --workspace` passes (20 occupant tests + all existing tests)
+- [x] `cargo clippy --workspace` passes (no warnings)

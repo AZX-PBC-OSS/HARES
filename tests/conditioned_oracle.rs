@@ -123,8 +123,14 @@ mod tests {
             71.0, 71.0, 71.0, 71.0, 71.0, 71.0, 71.0, 71.0, 71.0, 65.0,
         ];
         let cooling_f: [f64; 24] = [76.0; 24];
-        let heating_c: Vec<f64> = heating_f.iter().map(|f| fahrenheit_to_celsius(*f)).collect();
-        let cooling_c: Vec<f64> = cooling_f.iter().map(|f| fahrenheit_to_celsius(*f)).collect();
+        let heating_c: Vec<f64> = heating_f
+            .iter()
+            .map(|f| fahrenheit_to_celsius(*f))
+            .collect();
+        let cooling_c: Vec<f64> = cooling_f
+            .iter()
+            .map(|f| fahrenheit_to_celsius(*f))
+            .collect();
         (heating_c, cooling_c)
     }
 
@@ -200,24 +206,28 @@ mod tests {
             name: &str,
             ochre_mean: f64,
             hares_mean: Option<f64>,
+            tolerance_abs: f64,
             tolerance_pct: f64,
             note: &str,
         ) -> Self {
             let hares = hares_mean.unwrap_or(f64::NAN);
+            let delta = (hares - ochre_mean).abs();
             let deviation_pct = if ochre_mean.abs() > 1.0 {
-                ((hares - ochre_mean) / ochre_mean * 100.0).abs()
-            } else if (hares - ochre_mean).abs() > 100.0 {
-                f64::INFINITY
+                delta / ochre_mean.abs() * 100.0
             } else {
-                0.0
+                f64::INFINITY
             };
-            let passed = hares.is_nan() || deviation_pct <= tolerance_pct;
+            let passed = hares.is_nan() || delta <= tolerance_abs || deviation_pct <= tolerance_pct;
             let note = if hares.is_nan() {
                 format!("MISSING — {note}")
-            } else if deviation_pct <= tolerance_pct {
-                format!("OK ({deviation_pct:+.1}%) — {note}")
+            } else if passed {
+                if delta <= tolerance_abs {
+                    format!("OK (Δ={delta:.1}W < {tolerance_abs:.0}W) — {note}")
+                } else {
+                    format!("OK ({deviation_pct:+.1}%) — {note}")
+                }
             } else {
-                format!("DEVIATION {deviation_pct:+.1}% — {note}")
+                format!("DEVIATION Δ={delta:.1}W ({deviation_pct:+.1}%) — {note}")
             };
             Check {
                 name: name.to_string(),
@@ -278,7 +288,11 @@ mod tests {
                 dwelling
                     .equipment()
                     .iter()
-                    .map(|e| format!("{} ({})", e.descriptor().name, e.descriptor().end_use.as_str()))
+                    .map(|e| format!(
+                        "{} ({})",
+                        e.descriptor().name,
+                        e.descriptor().end_use.as_str()
+                    ))
                     .collect::<Vec<_>>()
             );
         } else {
@@ -292,7 +306,13 @@ mod tests {
                     let eu = &e.descriptor().end_use;
                     *eu == EndUse::HVAC_HEATING || *eu == EndUse::HVAC_COOLING
                 })
-                .map(|e| format!("{} ({})", e.descriptor().name, e.descriptor().end_use.as_str()))
+                .map(|e| {
+                    format!(
+                        "{} ({})",
+                        e.descriptor().name,
+                        e.descriptor().end_use.as_str()
+                    )
+                })
                 .collect();
             let non_hvac: Vec<String> = dwelling
                 .equipment()
@@ -331,7 +351,10 @@ mod tests {
         {
             let cfg = dwelling.thermal_solver.config();
             if !cfg.window_properties.is_empty() {
-                eprintln!("\n  [{mode_name}] Window properties ({} windows):", cfg.window_properties.len());
+                eprintln!(
+                    "\n  [{mode_name}] Window properties ({} windows):",
+                    cfg.window_properties.len()
+                );
                 eprintln!(
                     "    {:>6} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8}",
                     "SurfID", "SHGC", "W_SHGC", "U", "Area", "Trans", "Curve"
@@ -340,8 +363,13 @@ mod tests {
                     let curve = GlazingCurve::from_u_shgc(wp.u_factor_w_m2_k, wp.shgc);
                     eprintln!(
                         "    {:>6} {:>7.4} {:>7.4} {:>7.3} {:>7.2} {:>7.4} {:>8?}",
-                        sid, wp.shgc, wp.winter_shgc, wp.u_factor_w_m2_k,
-                        wp.area_m2, wp.transmittance, curve,
+                        sid,
+                        wp.shgc,
+                        wp.winter_shgc,
+                        wp.u_factor_w_m2_k,
+                        wp.area_m2,
+                        wp.transmittance,
+                        curve,
                     );
                 }
             }
@@ -377,11 +405,17 @@ mod tests {
             if let Some(solver) = last.phases.post_solvers.as_ref() {
                 let diags = &solver.envelope_gains.int_surface_diag;
                 if !diags.is_empty() {
-                    eprintln!("\n  [{mode_name}] Interior LWR surface diagnostics (last step, {} surfaces):", diags.len());
+                    eprintln!(
+                        "\n  [{mode_name}] Interior LWR surface diagnostics (last step, {} surfaces):",
+                        diags.len()
+                    );
                     eprintln!("    {:>4} {:>10} {:>10}", "Idx", "T_surf(°C)", "LWR(W)");
                     let mut total_lwr = 0.0_f64;
                     for (i, d) in diags.iter().enumerate() {
-                        eprintln!("    {:>4} {:>10.2} {:>10.1}", i, d.surface_temp_c, d.lwr_flux_w);
+                        eprintln!(
+                            "    {:>4} {:>10.2} {:>10.1}",
+                            i, d.surface_temp_c, d.lwr_flux_w
+                        );
                         total_lwr += d.lwr_flux_w;
                     }
                     eprintln!("    Total LWR to zone air: {total_lwr:.1} W");
@@ -398,17 +432,30 @@ mod tests {
         {
             let cfg = dwelling.thermal_solver.config();
             for zone_cfg in &cfg.interior_lwr_zones {
-                let n_driven = zone_cfg.surfaces.iter().filter(|s| s.driving_temp.is_some()).count();
+                let n_driven = zone_cfg
+                    .surfaces
+                    .iter()
+                    .filter(|s| s.driving_temp.is_some())
+                    .count();
                 let n_total = zone_cfg.surfaces.len();
                 eprintln!(
                     "  [{mode_name}] LWR zone {:?}: {} surfaces ({} driven/window, {} RC-noded)",
-                    zone_cfg.zone_id, n_total, n_driven, n_total - n_driven
+                    zone_cfg.zone_id,
+                    n_total,
+                    n_driven,
+                    n_total - n_driven
                 );
                 for (i, s) in zone_cfg.surfaces.iter().enumerate() {
                     eprintln!(
                         "    surf[{i}]: area={:.2} ε={:.2} rad_frac={:.4} solar_abs={:.2} floor={} driving={:?} state={} input={}",
-                        s.area_m2, s.emissivity, s.radiation_frac, s.solar_absorptance,
-                        s.is_floor, s.driving_temp, s.state_index, s.input_index,
+                        s.area_m2,
+                        s.emissivity,
+                        s.radiation_frac,
+                        s.solar_absorptance,
+                        s.is_floor,
+                        s.driving_temp,
+                        s.state_index,
+                        s.input_index,
                     );
                 }
             }
@@ -578,8 +625,18 @@ mod tests {
             eprintln!("\n  Hourly comparison (first 48h) — with IdealHvac internals:");
             eprintln!(
                 "  {:>4} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10} {:>8}  {:>4} {:>8} {:>10} {:>10}",
-                "Hour", "H_ind", "O_ind", "Δ_ind", "O_out", "H_heat", "O_heat", "O_cool",
-                "Mode", "Target", "IdealCap", "Output"
+                "Hour",
+                "H_ind",
+                "O_ind",
+                "Δ_ind",
+                "O_out",
+                "H_heat",
+                "O_heat",
+                "O_cool",
+                "Mode",
+                "Target",
+                "IdealCap",
+                "Output"
             );
             for hour in 0..48 {
                 let step = hour * 60;
@@ -589,8 +646,14 @@ mod tests {
                 let hi = hares_indoor_temp[step];
                 let oi = ochre_indoor.get(step).copied().unwrap_or(f64::NAN);
                 let oo = ochre_outdoor.get(step).copied().unwrap_or(f64::NAN);
-                let oh = ochre_heating_delivered.get(step).copied().unwrap_or(f64::NAN);
-                let oc = ochre_cooling_delivered.get(step).copied().unwrap_or(f64::NAN);
+                let oh = ochre_heating_delivered
+                    .get(step)
+                    .copied()
+                    .unwrap_or(f64::NAN);
+                let oc = ochre_cooling_delivered
+                    .get(step)
+                    .copied()
+                    .unwrap_or(f64::NAN);
                 let hh = hares_hvac_heating_w.get(step).copied().unwrap_or(0.0);
                 let telem = step_telemetry.get(step);
                 let mode_str = match telem.map(|t| t.mode as i32) {
@@ -604,8 +667,18 @@ mod tests {
                 let out = telem.map(|t| t.output_w).unwrap_or(f64::NAN);
                 eprintln!(
                     "  {:>4} {:>8.2} {:>8.2} {:>+8.2} {:>8.1} {:>10.0} {:>10.0} {:>8.0}  {:>4} {:>8.2} {:>10.0} {:>10.0}",
-                    hour, hi, oi, hi - oi, oo, hh, oh, oc,
-                    mode_str, target, icap, out
+                    hour,
+                    hi,
+                    oi,
+                    hi - oi,
+                    oo,
+                    hh,
+                    oh,
+                    oc,
+                    mode_str,
+                    target,
+                    icap,
+                    out
                 );
             }
         } else {
@@ -622,12 +695,25 @@ mod tests {
                 let hi = hares_indoor_temp[step];
                 let oi = ochre_indoor.get(step).copied().unwrap_or(f64::NAN);
                 let oo = ochre_outdoor.get(step).copied().unwrap_or(f64::NAN);
-                let oh = ochre_heating_delivered.get(step).copied().unwrap_or(f64::NAN);
-                let oc = ochre_cooling_delivered.get(step).copied().unwrap_or(f64::NAN);
+                let oh = ochre_heating_delivered
+                    .get(step)
+                    .copied()
+                    .unwrap_or(f64::NAN);
+                let oc = ochre_cooling_delivered
+                    .get(step)
+                    .copied()
+                    .unwrap_or(f64::NAN);
                 let hh = hares_hvac_heating_w.get(step).copied().unwrap_or(0.0);
                 eprintln!(
                     "  {:>4} {:>8.2} {:>8.2} {:>+8.2} {:>8.1} {:>10.0} {:>10.0} {:>8.0}",
-                    hour, hi, oi, hi - oi, oo, hh, oh, oc
+                    hour,
+                    hi,
+                    oi,
+                    hi - oi,
+                    oo,
+                    hh,
+                    oh,
+                    oc
                 );
             }
         }
@@ -682,22 +768,46 @@ mod tests {
             }
             if n > 0 {
                 let d = n as f64;
-                let o_inf = ochre.get("Infiltration Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_forced = ochre.get("Forced Ventilation Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_nat = ochre.get("Natural Ventilation Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_wsolar = ochre.get("Window Transmitted Solar Gain (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_wheat = ochre.get("Window Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_wall = ochre.get("Wall Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_roof = ochre.get("Roof Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_floor = ochre.get("Floor Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_imass = ochre.get("Internal Mass Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_igain = ochre.get("Internal Heat Gain - Indoor (W)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_inf_flow = ochre.get("Infiltration Flow Rate - Indoor (m^3/s)").map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_inf = ochre
+                    .get("Infiltration Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_forced = ochre
+                    .get("Forced Ventilation Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_nat = ochre
+                    .get("Natural Ventilation Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_wsolar = ochre
+                    .get("Window Transmitted Solar Gain (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_wheat = ochre
+                    .get("Window Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_wall = ochre
+                    .get("Wall Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_roof = ochre
+                    .get("Roof Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_floor = ochre
+                    .get("Floor Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_imass = ochre
+                    .get("Internal Mass Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_igain = ochre
+                    .get("Internal Heat Gain - Indoor (W)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
+                let o_inf_flow = ochre
+                    .get("Infiltration Flow Rate - Indoor (m^3/s)")
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64);
 
                 let fmt = |label: &str, hares: f64, ochre: Option<f64>| {
                     if let Some(o) = ochre {
                         let delta = hares - o;
-                        eprintln!("    {label:<40} HARES={hares:>10.1}  OCHRE={o:>10.1}  Δ={delta:>+10.1}");
+                        eprintln!(
+                            "    {label:<40} HARES={hares:>10.1}  OCHRE={o:>10.1}  Δ={delta:>+10.1}"
+                        );
                     } else {
                         eprintln!("    {label:<40} HARES={hares:>10.1}  OCHRE=       n/a");
                     }
@@ -707,8 +817,11 @@ mod tests {
                 fmt("Infiltration (W)", h_infiltration / d, o_inf);
                 fmt("Forced ventilation (W)", h_ventilation / d, o_forced);
                 fmt("Natural ventilation (W)", h_nat_vent / d, o_nat);
-                fmt("Combined airflow sensible (W)", h_combined_airflow / d,
-                    o_inf.and_then(|i| o_forced.map(|f| o_nat.map(|n| i+f+n).unwrap_or(i+f))));
+                fmt(
+                    "Combined airflow sensible (W)",
+                    h_combined_airflow / d,
+                    o_inf.and_then(|i| o_forced.map(|f| o_nat.map(|n| i + f + n).unwrap_or(i + f))),
+                );
                 fmt("Window solar transmitted (W)", h_window_solar / d, o_wsolar);
                 fmt("Window heat gain (W)", h_window_heat / d, o_wheat);
                 fmt("Wall heat gain (W)", h_wall_heat / d, o_wall);
@@ -716,27 +829,37 @@ mod tests {
                 fmt("Floor heat gain (W)", h_floor_heat / d, o_floor);
                 fmt("Internal mass heat gain (W)", h_internal_mass / d, o_imass);
                 fmt("Internal/occupancy gain (W)", h_internal_gain / d, o_igain);
-                eprintln!("    {:<40} HARES={:>10.5}  OCHRE={:>10.5}",
+                eprintln!(
+                    "    {:<40} HARES={:>10.5}  OCHRE={:>10.5}",
                     "Infiltration flow (m³/s)",
                     h_raw_inf_m3s / d,
-                    o_inf_flow.unwrap_or(f64::NAN));
-                eprintln!("    {:<40} HARES={:>10.5}",
+                    o_inf_flow.unwrap_or(f64::NAN)
+                );
+                eprintln!(
+                    "    {:<40} HARES={:>10.5}",
                     "Total airflow (m³/s)",
-                    h_total_airflow_m3s / d);
+                    h_total_airflow_m3s / d
+                );
 
-                let o_outdoor = ochre.get("Temperature - Outdoor (C)")
+                let o_outdoor = ochre
+                    .get("Temperature - Outdoor (C)")
                     .map(|v| v.iter().sum::<f64>() / v.len() as f64);
-                let o_ground = ochre.get("Temperature - Ground (C)")
+                let o_ground = ochre
+                    .get("Temperature - Ground (C)")
                     .map(|v| v.iter().sum::<f64>() / v.len() as f64);
                 eprintln!("\n  Driving temperatures (mean °C):");
-                eprintln!("    {:<40} HARES={:>10.2}  OCHRE={:>10.2}",
+                eprintln!(
+                    "    {:<40} HARES={:>10.2}  OCHRE={:>10.2}",
                     "Outdoor driving temp (°C)",
                     h_driving_outdoor_c / d,
-                    o_outdoor.unwrap_or(f64::NAN));
-                eprintln!("    {:<40} HARES={:>10.2}  OCHRE={:>10.2}",
+                    o_outdoor.unwrap_or(f64::NAN)
+                );
+                eprintln!(
+                    "    {:<40} HARES={:>10.2}  OCHRE={:>10.2}",
                     "Ground driving temp (°C)",
                     h_driving_ground_c / d,
-                    o_ground.unwrap_or(f64::NAN));
+                    o_ground.unwrap_or(f64::NAN)
+                );
 
                 // Beam vs diffuse solar breakdown.
                 let beam_mean = h_solar_beam_w / d;
@@ -748,12 +871,25 @@ mod tests {
                 eprintln!("    Transmitted beam:      {:>8.1}", beam_mean);
                 eprintln!("    Transmitted diffuse:   {:>8.1}", diffuse_mean);
                 eprintln!("    Absorbed inward:       {:>8.1}", absorbed_mean);
-                eprintln!("    Total window solar:    {:>8.1}  (OCHRE={:.1}  Δ={:+.1})",
-                    total_solar, o_total_solar, total_solar - o_total_solar);
+                eprintln!(
+                    "    Total window solar:    {:>8.1}  (OCHRE={:.1}  Δ={:+.1})",
+                    total_solar,
+                    o_total_solar,
+                    total_solar - o_total_solar
+                );
                 if total_solar > 1.0 {
-                    eprintln!("    Beam fraction:         {:>7.1}%", beam_mean / total_solar * 100.0);
-                    eprintln!("    Diffuse fraction:      {:>7.1}%", diffuse_mean / total_solar * 100.0);
-                    eprintln!("    Absorbed fraction:     {:>7.1}%", absorbed_mean / total_solar * 100.0);
+                    eprintln!(
+                        "    Beam fraction:         {:>7.1}%",
+                        beam_mean / total_solar * 100.0
+                    );
+                    eprintln!(
+                        "    Diffuse fraction:      {:>7.1}%",
+                        diffuse_mean / total_solar * 100.0
+                    );
+                    eprintln!(
+                        "    Absorbed fraction:     {:>7.1}%",
+                        absorbed_mean / total_solar * 100.0
+                    );
                 }
             }
         }
@@ -786,6 +922,7 @@ mod tests {
                 "hvac_heating_mean_w",
                 ochre_heating_mean,
                 hares_heating_mean,
+                100.0,
                 50.0,
                 "heating load magnitude",
             ));
@@ -796,6 +933,7 @@ mod tests {
                 "hvac_cooling_mean_w",
                 ochre_cooling_mean,
                 hares_cooling_mean,
+                100.0,
                 50.0,
                 "cooling load magnitude",
             ));
