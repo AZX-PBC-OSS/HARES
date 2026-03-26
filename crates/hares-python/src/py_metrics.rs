@@ -7,7 +7,7 @@ use hares_io::output::metrics::{
 };
 use pyo3::prelude::*;
 
-#[pyclass(frozen)]
+#[pyclass(frozen, name = "AnnualEnergyKwh")]
 pub struct PyAnnualEnergyKwh {
     pub(crate) inner: hares_io::output::metrics::AnnualEnergyKwh,
 }
@@ -29,7 +29,7 @@ impl PyAnnualEnergyKwh {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, name = "RollingPeakKw")]
 pub struct PyRollingPeakKw {
     pub(crate) inner: hares_io::output::metrics::RollingPeakKw,
 }
@@ -59,7 +59,7 @@ impl PyRollingPeakKw {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, name = "PeakPowerKw")]
 pub struct PyPeakPowerKw {
     pub(crate) inner: hares_io::output::metrics::PeakPowerKw,
 }
@@ -95,7 +95,7 @@ impl PyPeakPowerKw {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, name = "GridInteractionMetrics")]
 pub struct PyGridInteractionMetrics {
     pub(crate) inner: hares_io::output::metrics::GridInteractionMetrics,
 }
@@ -120,7 +120,7 @@ impl PyGridInteractionMetrics {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, name = "EnvelopeComponentLoadsKwh")]
 pub struct PyEnvelopeComponentLoadsKwh {
     pub(crate) inner: EnvelopeComponentLoadsKwh,
 }
@@ -180,7 +180,7 @@ impl PyEnvelopeComponentLoadsKwh {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, name = "EfficiencyMetrics")]
 pub struct PyEfficiencyMetrics {
     pub(crate) inner: hares_io::output::metrics::EfficiencyMetrics,
 }
@@ -217,7 +217,7 @@ impl PyEfficiencyMetrics {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, name = "GasEnergyMetrics")]
 pub struct PyGasEnergyMetrics {
     pub(crate) inner: GasEnergyMetrics,
 }
@@ -242,7 +242,7 @@ impl PyGasEnergyMetrics {
     }
 }
 
-#[pyclass(frozen)]
+#[pyclass(frozen, name = "SimulationMetrics")]
 pub struct PySimulationMetrics {
     pub(crate) inner: FullSimulationMetrics,
 }

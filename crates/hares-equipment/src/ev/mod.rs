@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField,
+    ChargingLevel, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage, FuelType, HaresError,
+    OperatingMode, PlugInPolicy, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    TelemetryField,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -26,54 +27,39 @@ use archetype::{DriverArchetype, default_distribution};
 use config::*;
 use schedule::{EventDistributionRow, parse_distribution_rows, sample_distribution};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum ChargingLevel {
-    L1,
-    L2,
-}
+fn charging_level_from_config(config: &EquipmentConfig) -> ChargingLevel {
+    let level = config
+        .get_str(KEY_CHARGING_LEVEL)
+        .or_else(|| config.get_str(KEY_CHARGING_LEVEL_HPIXML))
+        .unwrap_or("L2")
+        .trim()
+        .replace(' ', "")
+        .to_ascii_lowercase();
 
-impl ChargingLevel {
-    fn from_config(config: &EquipmentConfig) -> Self {
-        let level = config
-            .get_str(KEY_CHARGING_LEVEL)
-            .or_else(|| config.get_str(KEY_CHARGING_LEVEL_HPIXML))
-            .unwrap_or("L2")
-            .trim()
-            .replace(' ', "")
-            .to_ascii_lowercase();
-
-        match level.as_str() {
-            "l1" | "level1" => Self::L1,
-            _ => Self::L2,
-        }
-    }
-
-    fn telemetry_code(self) -> f64 {
-        match self {
-            Self::L1 => 1.0,
-            Self::L2 => 2.0,
-        }
+    match level.as_str() {
+        "l1" | "level1" => ChargingLevel::L1,
+        _ => ChargingLevel::L2,
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum PlugInPolicy {
-    Always,
-    LowSoc,
+fn telemetry_code(level: ChargingLevel) -> f64 {
+    match level {
+        ChargingLevel::L1 => 1.0,
+        ChargingLevel::L2 => 2.0,
+    }
 }
 
-impl PlugInPolicy {
-    fn from_config(config: &EquipmentConfig) -> Self {
-        match config
-            .get_str(KEY_PLUG_IN_POLICY)
-            .unwrap_or("always")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "low_soc" | "lowsoc" => Self::LowSoc,
-            _ => Self::Always,
-        }
+fn plug_in_policy_from_config(config: &EquipmentConfig) -> PlugInPolicy {
+    let threshold = config.get_f64(KEY_PLUG_IN_SOC_THRESHOLD).unwrap_or(0.3);
+    match config
+        .get_str(KEY_PLUG_IN_POLICY)
+        .unwrap_or("always")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "low_soc" | "lowsoc" => PlugInPolicy::LowSoc { threshold },
+        _ => PlugInPolicy::Always,
     }
 }
 
@@ -88,6 +74,7 @@ struct SampledEvent {
 struct EvCheckpoint {
     soc: f64,
     connected: bool,
+    initial_connection_override: bool,
     active_power_kw: f64,
     time_until_departure_s: f64,
     current_day_ordinal: Option<i32>,
@@ -105,7 +92,6 @@ struct EvCheckpoint {
     current_day_drive_miles: f64,
     shift_phase_days: u32,
     plug_in_policy: PlugInPolicy,
-    plug_in_soc_threshold: f64,
     v2l_enabled: bool,
     v2l_soc_reserve: f64,
     v2l_max_discharge_kw: f64,
@@ -155,7 +141,6 @@ pub struct Ev {
     shift_on_days: u32,
     shift_duration_fuzz_minutes: f64,
     plug_in_policy: PlugInPolicy,
-    plug_in_soc_threshold: f64,
     v2l_enabled: bool,
     v2l_soc_reserve: f64,
     v2l_max_discharge_kw: f64,
@@ -167,6 +152,8 @@ pub struct Ev {
     battery_temp_c: f64,
     heater_active: bool,
     connected: bool,
+    /// When true, EV stays connected until the schedule explicitly sets a state.
+    initial_connection_override: bool,
     active_power_kw: f64,
     time_until_departure_s: f64,
     current_day_ordinal: Option<i32>,
@@ -215,11 +202,17 @@ impl Ev {
 
         let rng_seed = derive_rng_seed(&config);
         let rng = ChaCha8Rng::from_seed(rng_seed);
-        let charging_level = ChargingLevel::from_config(&config);
+        let charging_level = charging_level_from_config(&config);
         let battery_capacity_kwh = resolve_capacity_kwh(&config).unwrap_or(DEFAULT_CAPACITY_KWH);
         let rated_power_kw = resolve_rated_power_kw(&config, charging_level, battery_capacity_kwh)
             .unwrap_or_else(|| default_max_power_kw(&config, charging_level, battery_capacity_kwh));
         let driver_archetype = DriverArchetype::from_config(&config);
+        let initial_connected = config
+            .get_str(KEY_INITIAL_CONNECTION_STATE)
+            .and_then(|s| s.parse::<EvConnectionState>().ok())
+            .is_some_and(|s| {
+                matches!(s, EvConnectionState::HomePluggedIn | EvConnectionState::AwayPluggedIn)
+            });
 
         Self {
             descriptor,
@@ -266,10 +259,7 @@ impl Ev {
             shift_duration_fuzz_minutes: config
                 .get_f64(KEY_SHIFT_DURATION_FUZZ_MINUTES)
                 .unwrap_or(30.0),
-            plug_in_policy: PlugInPolicy::from_config(&config),
-            plug_in_soc_threshold: config
-                .get_f64(KEY_PLUG_IN_SOC_THRESHOLD)
-                .unwrap_or(DEFAULT_PLUG_IN_SOC_THRESHOLD),
+            plug_in_policy: plug_in_policy_from_config(&config),
             v2l_enabled: config.get_bool(KEY_V2L_ENABLED).unwrap_or(false),
             v2l_soc_reserve: config
                 .get_f64(KEY_V2L_SOC_RESERVE)
@@ -284,10 +274,14 @@ impl Ev {
             v2g_max_discharge_kw: config
                 .get_f64(KEY_V2G_MAX_DISCHARGE_KW)
                 .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW),
-            soc: config.get_f64(KEY_INITIAL_SOC).unwrap_or(DEFAULT_SOC),
+            soc: config
+                .get_f64(KEY_INITIAL_SOC)
+                .unwrap_or(DEFAULT_SOC)
+                .clamp(0.0, 1.0),
             battery_temp_c: config.get_f64(KEY_BATTERY_TEMP_C).unwrap_or(20.0),
             heater_active: false,
-            connected: false,
+            connected: initial_connected,
+            initial_connection_override: initial_connected,
             active_power_kw: 0.0,
             time_until_departure_s: 0.0,
             current_day_ordinal: None,
@@ -316,7 +310,7 @@ impl Ev {
     fn init_from_config(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         self.battery_capacity_kwh =
             resolve_capacity_kwh(config).unwrap_or(self.battery_capacity_kwh);
-        self.charging_level = ChargingLevel::from_config(config);
+        self.charging_level = charging_level_from_config(config);
         self.rated_power_kw =
             resolve_rated_power_kw(config, self.charging_level, self.battery_capacity_kwh)
                 .unwrap_or_else(|| {
@@ -473,16 +467,13 @@ impl Ev {
             ));
         }
 
-        self.plug_in_policy = PlugInPolicy::from_config(config);
-        self.plug_in_soc_threshold = config
-            .get_f64(KEY_PLUG_IN_SOC_THRESHOLD)
-            .unwrap_or(DEFAULT_PLUG_IN_SOC_THRESHOLD);
-        if !self.plug_in_soc_threshold.is_finite()
-            || !(0.0..=1.0).contains(&self.plug_in_soc_threshold)
-        {
-            return Err(HaresError::Equipment(
-                "EV plug_in_soc_threshold must be finite and within [0, 1]".to_string(),
-            ));
+        self.plug_in_policy = plug_in_policy_from_config(config);
+        if let PlugInPolicy::LowSoc { threshold } = &self.plug_in_policy {
+            if !threshold.is_finite() || !(0.0..=1.0).contains(threshold) {
+                return Err(HaresError::Equipment(
+                    "EV plug_in_soc_threshold must be finite and within [0, 1]".to_string(),
+                ));
+            }
         }
         self.v2l_enabled = config.get_bool(KEY_V2L_ENABLED).unwrap_or(false);
         self.v2l_soc_reserve = config
@@ -530,7 +521,17 @@ impl Ev {
             .get_f64(KEY_INITIAL_SOC)
             .unwrap_or(self.soc)
             .clamp(0.0, 1.0);
-        self.connected = false;
+        let initial_state = match config.get_str(KEY_INITIAL_CONNECTION_STATE) {
+            Some(s) => s
+                .parse::<EvConnectionState>()
+                .map_err(HaresError::Equipment)?,
+            None => EvConnectionState::Disconnected,
+        };
+        self.connected = matches!(
+            initial_state,
+            EvConnectionState::HomePluggedIn | EvConnectionState::AwayPluggedIn
+        );
+        self.initial_connection_override = self.connected;
         self.heater_active = false;
         self.battery_temp_c = config
             .get_f64(KEY_BATTERY_TEMP_C)
@@ -569,7 +570,14 @@ impl Ev {
             return;
         }
 
+        let is_first_roll = self.current_day_ordinal.is_none();
         self.current_day_ordinal = Some(day_ordinal);
+        // On subsequent days, the schedule has taken over — clear the override.
+        // The first roll preserves it so the EV stays in its initial state
+        // until the first event window begins.
+        if !is_first_roll {
+            self.initial_connection_override = false;
+        }
         self.arrival_soc_applied = false;
 
         let weekday = now.weekday().number_from_monday();
@@ -695,8 +703,10 @@ impl Ev {
                 sec_of_day >= event.start_second_of_day && sec_of_day < event.end_second_of_day;
             if in_window {
                 // Under LowSoc policy, skip connecting when SOC is above threshold
-                let policy_blocks = self.plug_in_policy == PlugInPolicy::LowSoc
-                    && self.soc >= self.plug_in_soc_threshold;
+                let policy_blocks = matches!(
+                    self.plug_in_policy,
+                    PlugInPolicy::LowSoc { threshold } if self.soc >= threshold
+                );
                 connected = !policy_blocks;
                 if connected {
                     if !self.arrival_soc_applied {
@@ -705,7 +715,14 @@ impl Ev {
                     }
                     time_until_departure_s = (event.end_second_of_day - sec_of_day).max(0) as f64;
                 }
+                self.initial_connection_override = false;
             }
+        }
+
+        // If initial_connection_override is still active (no schedule event yet),
+        // keep the EV in its initial connected state.
+        if self.initial_connection_override {
+            connected = true;
         }
 
         self.connected = connected;
@@ -937,7 +954,7 @@ impl Ev {
         self.telemetry
             .set("is_connected", if self.connected { 1.0 } else { 0.0 });
         self.telemetry
-            .set("charging_level", self.charging_level.telemetry_code());
+            .set("charging_level", telemetry_code(self.charging_level));
         self.telemetry
             .set("time_until_departure_s", self.time_until_departure_s);
         self.telemetry.set("battery_temp_c", self.battery_temp_c);
@@ -1109,6 +1126,7 @@ impl Equipment for Ev {
         save_postcard(&EvCheckpoint {
             soc: self.soc,
             connected: self.connected,
+            initial_connection_override: self.initial_connection_override,
             active_power_kw: self.active_power_kw,
             time_until_departure_s: self.time_until_departure_s,
             current_day_ordinal: self.current_day_ordinal,
@@ -1125,8 +1143,7 @@ impl Equipment for Ev {
             heater_active: self.heater_active,
             current_day_drive_miles: self.current_day_drive_miles,
             shift_phase_days: self.shift_phase_days,
-            plug_in_policy: self.plug_in_policy,
-            plug_in_soc_threshold: self.plug_in_soc_threshold,
+            plug_in_policy: self.plug_in_policy.clone(),
             v2l_enabled: self.v2l_enabled,
             v2l_soc_reserve: self.v2l_soc_reserve,
             v2l_max_discharge_kw: self.v2l_max_discharge_kw,
@@ -1148,6 +1165,7 @@ impl Equipment for Ev {
         let cp: EvCheckpoint = load_postcard(state)?;
         self.soc = cp.soc;
         self.connected = cp.connected;
+        self.initial_connection_override = cp.initial_connection_override;
         self.active_power_kw = cp.active_power_kw;
         self.time_until_departure_s = cp.time_until_departure_s;
         self.current_day_ordinal = cp.current_day_ordinal;
@@ -1165,7 +1183,6 @@ impl Equipment for Ev {
         self.current_day_drive_miles = cp.current_day_drive_miles;
         self.shift_phase_days = cp.shift_phase_days;
         self.plug_in_policy = cp.plug_in_policy;
-        self.plug_in_soc_threshold = cp.plug_in_soc_threshold;
         self.v2l_enabled = cp.v2l_enabled;
         self.v2l_soc_reserve = cp.v2l_soc_reserve;
         self.v2l_max_discharge_kw = cp.v2l_max_discharge_kw;
@@ -1271,7 +1288,7 @@ fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert("soc", DEFAULT_SOC);
     t.insert("active_power_kw", 0.0);
     t.insert("is_connected", 0.0);
-    t.insert("charging_level", charging_level.telemetry_code());
+    t.insert("charging_level", telemetry_code(charging_level));
     t.insert("time_until_departure_s", 0.0);
     t.insert("battery_temp_c", 20.0);
     t.insert("heater_power_w", 0.0);
@@ -2998,5 +3015,145 @@ mod tests {
         ev.set_charging_curve_lut(Some(lut)).unwrap();
         // The LUT should be queryable without panicking
         assert!(ev.charging_curve_lut.is_some());
+    }
+
+    // ── initial_connection_override lifecycle tests ──────────────────
+
+    #[test]
+    fn initial_connection_state_home_starts_connected() {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_INITIAL_CONNECTION_STATE.to_string(),
+            "HomePluggedIn".into(),
+        );
+        let config = ev_config(raw);
+        let ev = Ev::new(config);
+        assert!(ev.connected);
+        assert!(ev.initial_connection_override);
+    }
+
+    #[test]
+    fn initial_connection_state_disconnected_starts_disconnected() {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_INITIAL_CONNECTION_STATE.to_string(),
+            "Disconnected".into(),
+        );
+        let config = ev_config(raw);
+        let ev = Ev::new(config);
+        assert!(!ev.connected);
+        assert!(!ev.initial_connection_override);
+    }
+
+    #[test]
+    fn no_initial_connection_state_defaults_to_disconnected() {
+        let config = ev_config(base_raw());
+        let ev = Ev::new(config);
+        assert!(!ev.connected);
+        assert!(!ev.initial_connection_override);
+    }
+
+    #[test]
+    fn override_keeps_ev_connected_before_event_window() {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_INITIAL_CONNECTION_STATE.to_string(),
+            "HomePluggedIn".into(),
+        );
+        // Schedule event at 18:00 (1080 min), so at midnight the event window
+        // hasn't started yet. Override should keep EV connected.
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let mut env = sample_env();
+        ev.init(&config, &env).unwrap();
+
+        // Step at midnight — outside event window
+        env.current_time = dt(2026, 1, 1, 0, 0, 0);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(ev.connected, "override should keep EV connected at midnight");
+        let p = ev.telemetry().get("active_power_kw").unwrap();
+        assert!(p > 0.0, "EV should be charging while override-connected");
+    }
+
+    #[test]
+    fn override_clears_when_event_window_starts() {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_INITIAL_CONNECTION_STATE.to_string(),
+            "HomePluggedIn".into(),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let mut env = sample_env();
+        ev.init(&config, &env).unwrap();
+
+        // Step into the event window (18:00)
+        env.current_time = dt(2026, 1, 1, 18, 0, 0);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            !ev.initial_connection_override,
+            "override should clear once event window begins"
+        );
+        // EV should still be connected (event window is active)
+        assert!(ev.connected);
+    }
+
+    #[test]
+    fn override_clears_on_day_2_roll() {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_INITIAL_CONNECTION_STATE.to_string(),
+            "HomePluggedIn".into(),
+        );
+        // event_day_ratio=0 so no events are rolled — tests day-roll clearing
+        raw.insert(KEY_EVENT_DAY_RATIO.to_string(), 0.0.into());
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let mut env = sample_env();
+        ev.init(&config, &env).unwrap();
+
+        // Step on day 1 — override holds
+        env.current_time = dt(2026, 1, 1, 12, 0, 0);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(ev.connected, "should be connected on day 1 via override");
+
+        // Step on day 2 — override should clear
+        env.current_time = dt(2026, 1, 2, 12, 0, 0);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            !ev.initial_connection_override,
+            "override should clear on day 2 roll"
+        );
+        assert!(
+            !ev.connected,
+            "EV should disconnect on day 2 without events"
+        );
+    }
+
+    #[test]
+    fn checkpoint_round_trip_preserves_override() {
+        let mut raw = base_raw();
+        raw.insert(
+            KEY_INITIAL_CONNECTION_STATE.to_string(),
+            "HomePluggedIn".into(),
+        );
+        let config = ev_config(raw);
+        let mut ev = Ev::new(config.clone());
+        let env = sample_env();
+        ev.init(&config, &env).unwrap();
+
+        assert!(ev.initial_connection_override);
+        let state = ev.save_state();
+
+        let mut ev2 = Ev::new(ev_config(base_raw()));
+        ev2.load_state(&state).unwrap();
+        assert!(ev2.connected);
+        assert!(ev2.initial_connection_override);
     }
 }

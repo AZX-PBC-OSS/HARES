@@ -9,6 +9,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+use crate::py_enums::PyEvConnectionState;
+
 /// Extract a `RegularGridInterpolator` from a Python dict with numpy arrays or an NPZ path.
 ///
 /// Accepted forms:
@@ -262,6 +264,10 @@ pub struct PyEv {
     pub capacity_kwh: Option<f64>,
     #[pyo3(get)]
     pub max_charging_kw: Option<f64>,
+    #[pyo3(get)]
+    pub initial_soc: Option<f64>,
+    #[pyo3(get)]
+    pub initial_connection_state: Option<PyEvConnectionState>,
     /// Optional 4D charging curve LUT (soc × temp × c_rate × soh → power_fraction).
     pub charging_curve_lut: Option<RegularGridInterpolator>,
 }
@@ -269,12 +275,14 @@ pub struct PyEv {
 #[pymethods]
 impl PyEv {
     #[new]
-    #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, charging_curve_lut=None))]
+    #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, initial_soc=None, initial_connection_state=None, charging_curve_lut=None))]
     fn new(
         py: Python<'_>,
         name: String,
         capacity_kwh: Option<f64>,
         max_charging_kw: Option<f64>,
+        initial_soc: Option<f64>,
+        initial_connection_state: Option<PyEvConnectionState>,
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let lut = match charging_curve_lut {
@@ -285,6 +293,8 @@ impl PyEv {
             name,
             capacity_kwh,
             max_charging_kw,
+            initial_soc,
+            initial_connection_state,
             charging_curve_lut: lut,
         })
     }

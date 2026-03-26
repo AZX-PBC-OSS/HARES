@@ -11,7 +11,7 @@ use hares_core::{
 };
 use hares_equipment::{BatteryLutType, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_io::{OutputFormat, SimulationConfig, output::metrics::MetricsCalculator};
-use hares_types::SurfaceIrradiance;
+use hares_types::{EvConnectionState, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
@@ -102,23 +102,31 @@ fn parse_solar_override_from_dataframe(
         ));
     }
 
+    let col_names: Vec<(u32, String, String, String, String)> = surface_ids
+        .iter()
+        .map(|&sid| {
+            (
+                sid,
+                format!("s{}_direct", sid),
+                format!("s{}_diffuse", sid),
+                format!("s{}_reflected", sid),
+                format!("s{}_aoi", sid),
+            )
+        })
+        .collect();
+
     let mut result: Vec<Vec<SurfaceIrradiance>> = Vec::with_capacity(n_rows);
 
     for row_idx in 0..n_rows {
-        let mut surfaces = Vec::with_capacity(surface_ids.len());
-        for &sid in &surface_ids {
-            let direct_col = format!("s{}_direct", sid);
-            let diffuse_col = format!("s{}_diffuse", sid);
-            let reflected_col = format!("s{}_reflected", sid);
-            let aoi_col = format!("s{}_aoi", sid);
-
-            let direct: f64 = df.get_item(&direct_col)?.get_item(row_idx)?.extract()?;
-            let diffuse: f64 = df.get_item(&diffuse_col)?.get_item(row_idx)?.extract()?;
-            let reflected: f64 = df.get_item(&reflected_col)?.get_item(row_idx)?.extract()?;
-            let aoi: f64 = df.get_item(&aoi_col)?.get_item(row_idx)?.extract()?;
+        let mut surfaces = Vec::with_capacity(col_names.len());
+        for (sid, direct_col, diffuse_col, reflected_col, aoi_col) in &col_names {
+            let direct: f64 = df.get_item(direct_col.as_str())?.get_item(row_idx)?.extract()?;
+            let diffuse: f64 = df.get_item(diffuse_col.as_str())?.get_item(row_idx)?.extract()?;
+            let reflected: f64 = df.get_item(reflected_col.as_str())?.get_item(row_idx)?.extract()?;
+            let aoi: f64 = df.get_item(aoi_col.as_str())?.get_item(row_idx)?.extract()?;
 
             surfaces.push(SurfaceIrradiance {
-                surface_id: sid,
+                surface_id: *sid,
                 direct_w_m2: direct,
                 diffuse_w_m2: diffuse,
                 reflected_w_m2: reflected,
@@ -275,6 +283,9 @@ fn lock_dwelling(dwelling: &Mutex<Dwelling>) -> PyResult<MutexGuard<'_, Dwelling
     })
 }
 
+/// GIL-free variant of [`lock_dwelling`] required by `Send` contexts (e.g. Rayon threads).
+///
+/// Returns `Err(String)` instead of `PyErr` so it can be used without holding the GIL.
 pub(crate) fn lock_dwelling_string(
     dwelling: &Mutex<Dwelling>,
 ) -> Result<MutexGuard<'_, Dwelling>, String> {
@@ -285,7 +296,7 @@ pub(crate) fn lock_dwelling_string(
     })
 }
 
-#[pyclass(name = "PyDwelling")]
+#[pyclass(name = "Dwelling")]
 pub struct PyDwelling {
     pub(crate) dwelling: Mutex<Dwelling>,
     pub(crate) config: DwellingConfig,
@@ -628,8 +639,22 @@ impl PyDwelling {
         }
         if let Some(v) = ev.max_charging_kw {
             raw_config.insert(
-                "max_charging_kw".to_string(),
+                "max_charging_power_kw".to_string(),
                 hares_equipment::config::ConfigValue::Float(v),
+            );
+        }
+        if let Some(v) = ev.initial_soc {
+            raw_config.insert(
+                "initial_soc".to_string(),
+                hares_equipment::config::ConfigValue::Float(v),
+            );
+        }
+        if let Some(state) = &ev.initial_connection_state {
+            raw_config.insert(
+                "initial_connection_state".to_string(),
+                hares_equipment::config::ConfigValue::Text(
+                    EvConnectionState::from(*state).to_string(),
+                ),
             );
         }
 
@@ -910,12 +935,9 @@ impl PyDwelling {
         Ok(())
     }
 
-    pub fn has_solar_override(&self) -> bool {
-        if let Ok(dwelling) = self.dwelling.lock() {
-            dwelling.environment.has_solar_override()
-        } else {
-            false
-        }
+    pub fn has_solar_override(&self) -> PyResult<bool> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        Ok(dwelling.environment.has_solar_override())
     }
 
     pub fn surface_ids(&self) -> PyResult<Vec<u32>> {
@@ -1053,7 +1075,18 @@ impl PyDwelling {
                 raw_config.insert("capacity_kwh".to_string(), ConfigValue::Float(v));
             }
             if let Some(v) = ev.max_charging_kw {
-                raw_config.insert("max_charging_kw".to_string(), ConfigValue::Float(v));
+                raw_config.insert("max_charging_power_kw".to_string(), ConfigValue::Float(v));
+            }
+            if let Some(v) = ev.initial_soc {
+                raw_config.insert("initial_soc".to_string(), ConfigValue::Float(v));
+            }
+            if let Some(state) = &ev.initial_connection_state {
+                raw_config.insert(
+                    "initial_connection_state".to_string(),
+                    ConfigValue::Text(
+                        EvConnectionState::from(*state).to_string(),
+                    ),
+                );
             }
             let config = EquipmentConfig {
                 name: ev.name.clone(),
@@ -1305,9 +1338,7 @@ fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 }
 
 fn default_start() -> DateTime<FixedOffset> {
-    // SAFETY: DEFAULT_START is a compile-time constant that is a valid RFC3339 timestamp.
-    // This will not panic at runtime.
-    DateTime::parse_from_rfc3339(DEFAULT_START).unwrap()
+    DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START is a valid RFC3339 constant")
 }
 
 fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {

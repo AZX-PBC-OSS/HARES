@@ -8,42 +8,24 @@ GIL safety stress tests for batch_step.
 import math
 import threading
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 
+from conftest import make_dwelling
+
 pl = pytest.importorskip("polars")
-
-ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
-
-HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
-WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
-SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
-
-
-def _make_dwelling(duration_s=300, time_res_s=60, seed=0, output_verbosity=0, **kw):
-    from ochre_next import Dwelling
-
-    return Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=duration_s,
-        time_res_s=time_res_s,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42,
-        master_seed=seed,
-        output_verbosity=output_verbosity,
-        **kw,
-    )
 
 
 def _init_dwelling(**kw):
-    dw = _make_dwelling(**kw)
+    dw = make_dwelling(**kw)
     dw.initialize()
     return dw
+
+
+@pytest.fixture(scope="module")
+def initialized_dwelling():
+    """Single initialized dwelling shared across read-only test classes."""
+    return _init_dwelling()
 
 
 # ---------------------------------------------------------------------------
@@ -52,8 +34,8 @@ def _init_dwelling(**kw):
 
 
 class TestConstructionRoundTrip:
-    def test_from_hpxml_returns_config(self):
-        dw = _init_dwelling()
+    def test_from_hpxml_returns_config(self, initialized_dwelling):
+        dw = initialized_dwelling
         cfg = dw.config()
         assert cfg.duration_s == 300
         assert cfg.time_res_s == 60
@@ -109,40 +91,64 @@ class TestStepByStep:
 # ---------------------------------------------------------------------------
 
 
+def _find_thermal_equipment(dw) -> str:
+    from ochre_next import ControlCapabilities
+
+    descs = dw.equipment_descriptors()
+    for d in descs:
+        if ControlCapabilities.THERMAL_SETPOINT in d.control_capabilities:
+            return d.name
+    raise RuntimeError("No equipment with THERMAL_SETPOINT capability found")
+
+
 class TestControlInjection:
     def test_thermal_setpoint_applied(self):
         from ochre_next import ControlSignal
 
         dw = _init_dwelling()
+        name = _find_thermal_equipment(dw)
         signal = ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
-        dw.apply_control("Gas Furnace", signal)
+        dw.apply_control(name, signal)
         result = dw.step()
         assert "time" in result
 
     def test_control_reflected_in_telemetry(self):
         from ochre_next import ControlSignal
 
+        heat_c = 21.0
+        cool_c = 25.0
+
         dw = _init_dwelling()
-        signal = ControlSignal.thermal_setpoint(heat_c=21.0, cool_c=25.0)
-        dw.apply_control("Gas Furnace", signal)
+        name = _find_thermal_equipment(dw)
+        signal = ControlSignal.thermal_setpoint(heat_c=heat_c, cool_c=cool_c)
+        dw.apply_control(name, signal)
         dw.step()
         t = dw.telemetry()
+
         equip = t.equipment()
-        # Verify Gas Furnace appears in equipment telemetry
-        assert "Gas Furnace" in equip["names"]
-        idx = equip["names"].index("Gas Furnace")
+        assert name in equip["names"]
+        idx = equip["names"].index(name)
         assert math.isfinite(equip["power_kw"][idx])
+
+        zone = t.zone()
+        assert any(
+            abs(sp - heat_c) < 1e-9 for sp in zone["setpoint_heat_c"]
+        ), f"Expected heating setpoint {heat_c} in zone telemetry, got {zone['setpoint_heat_c']}"
+        assert any(
+            abs(sp - cool_c) < 1e-9 for sp in zone["setpoint_cool_c"]
+        ), f"Expected cooling setpoint {cool_c} in zone telemetry, got {zone['setpoint_cool_c']}"
 
     def test_validate_control(self):
         from ochre_next import ControlSignal
 
         dw = _init_dwelling()
+        name = _find_thermal_equipment(dw)
         valid = ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
-        assert dw.validate_control("Gas Furnace", valid) is True
+        assert dw.validate_control(name, valid) is True
 
         # Negative cases
         invalid = ControlSignal.soc_target(target=0.5)
-        assert dw.validate_control("Gas Furnace", invalid) is False
+        assert dw.validate_control(name, invalid) is False
         assert dw.validate_control("Nonexistent Equipment", valid) is False
 
     def test_all_control_signal_variants_construct(self):
@@ -240,8 +246,8 @@ class TestTelemetry:
 
 
 class TestEquipmentDescriptors:
-    def test_equipment_descriptors_have_required_fields(self):
-        dw = _init_dwelling()
+    def test_equipment_descriptors_have_required_fields(self, initialized_dwelling):
+        dw = initialized_dwelling
         descs = dw.equipment_descriptors()
         assert isinstance(descs, list)
         assert len(descs) > 0
@@ -611,11 +617,14 @@ class TestActorSystem:
     def test_python_actor_subclass(self):
         from ochre_next import Actor, DispatchRequest
 
+        dw = _init_dwelling(duration_s=300, time_res_s=60)
+        thermal_target = _find_thermal_equipment(dw)
+
         class MyThermostat(Actor):
             def __init__(self):
                 super().__init__()
                 self.name = "MyThermostat"
-                self._target = "HVAC Heating"
+                self._target = thermal_target
 
             def decide(self, env):
                 return [
@@ -626,7 +635,6 @@ class TestActorSystem:
                     )
                 ]
 
-        dw = _init_dwelling(duration_s=300, time_res_s=60)
         actor = MyThermostat()
         dw.add_actor(actor)
 
@@ -657,7 +665,7 @@ class TestDerSimulationExplorer:
 
         # 2-week simulation at 15-min resolution
         two_weeks_s = 14 * 24 * 3600
-        dw = _make_dwelling(
+        dw = make_dwelling(
             duration_s=two_weeks_s,
             time_res_s=900,  # 15 minutes
             seed=0,

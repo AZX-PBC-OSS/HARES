@@ -1,30 +1,12 @@
 """Tests for equipment mutation API — add, remove, replace, update equipment at runtime."""
 
 import pytest
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
-
-HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
-WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
-SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
+from conftest import make_dwelling
 
 
 def _make_dwelling():
-    from ochre_next import Dwelling
-
-    dw = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=3600,
-        time_res_s=60,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42,
-        master_seed=0,
-    )
+    dw = make_dwelling(duration_s=3600, time_res_s=60)
     dw.initialize()
     return dw
 
@@ -80,6 +62,38 @@ class TestAddEquipment:
         dw.add_ev(ev)
         result = dw.step()
         assert "time" in result
+
+
+    def test_ev_max_charging_kw_config_key_applied(self):
+        """Regression: max_charging_kw must map to max_charging_power_kw config key.
+
+        Starts the EV plugged in at home with low SOC so it charges on the first
+        step. Configures max_charging_kw=3.6 (below L2 default ~7.7 kW). If the
+        config key were wrong, the EV would charge at the default power.
+        """
+        from ochre_next import EV, EvConnectionState
+
+        dw = _make_dwelling()
+        ev = EV(
+            "TestEV",
+            capacity_kwh=60.0,
+            max_charging_kw=3.6,
+            initial_soc=0.2,
+            initial_connection_state=EvConnectionState.HomePluggedIn,
+        )
+        dw.add_ev(ev)
+
+        dw.step()
+        tel = dw.telemetry().equipment()
+        names = tel["names"]
+        powers = tel["power_kw"]
+        ev_idx = names.index("TestEV")
+        ev_power = powers[ev_idx]
+
+        assert ev_power > 0, "EV did not charge despite being plugged in with low SOC"
+        assert ev_power <= 3.6 + 1e-6, (
+            f"EV charged at {ev_power:.2f} kW, exceeding configured max of 3.6 kW"
+        )
 
 
 class TestRemoveEquipment:

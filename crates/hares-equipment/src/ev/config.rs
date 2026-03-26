@@ -2,7 +2,7 @@ use hares_types::HaresError;
 
 use crate::EquipmentConfig;
 
-use super::ChargingLevel;
+use hares_types::ChargingLevel;
 
 pub(super) use crate::config::KEY_EQUIPMENT_ID;
 pub(super) const KEY_MASTER_SEED: &str = "master_seed";
@@ -19,6 +19,7 @@ pub(super) const KEY_SCHEDULE_CSV_PATH: &str = "schedule_csv_path";
 pub(super) const KEY_SCHEDULE_CSV_REF: &str = "schedule_csv";
 pub(super) const KEY_EVENT_DAY_RATIO: &str = "event_day_ratio";
 pub(super) const KEY_INITIAL_SOC: &str = "initial_soc";
+pub(super) const KEY_INITIAL_CONNECTION_STATE: &str = "initial_connection_state";
 pub(super) const KEY_SOC_MAX: &str = "soc_max";
 pub(super) const KEY_EFFICIENCY: &str = "charging_efficiency";
 pub(super) const KEY_SCHEDULE_LEN: &str = "schedule_len";
@@ -75,7 +76,6 @@ pub(super) const DEFAULT_THERMAL_MASS_J_PER_K: f64 = 20_000.0;
 pub(super) const DEFAULT_UA_W_PER_K: f64 = 4.0;
 pub(super) const DEFAULT_DAILY_DRIVE_MILES_MEAN: f64 = 30.0;
 pub(super) const DEFAULT_DAILY_DRIVE_MILES_STDDEV: f64 = 12.0;
-pub(super) const DEFAULT_PLUG_IN_SOC_THRESHOLD: f64 = 0.3;
 pub(super) const DEFAULT_V2L_SOC_RESERVE: f64 = 0.2;
 pub(super) const DEFAULT_V2L_MAX_DISCHARGE_KW: f64 = 3.0;
 pub(super) const DEFAULT_V2G_SOC_RESERVE: f64 = 0.3;

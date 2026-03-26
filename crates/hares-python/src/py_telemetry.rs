@@ -4,7 +4,7 @@ use hares_core::DwellingTelemetry;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-#[pyclass(name = "PyTelemetry")]
+#[pyclass(name = "Telemetry")]
 #[derive(Debug)]
 pub struct PyTelemetry {
     pub(crate) inner: DwellingTelemetry,
@@ -45,7 +45,7 @@ impl PyTelemetry {
 
     fn __repr__(&self) -> String {
         format!(
-            "PyTelemetry(step={}, time={})",
+            "Telemetry(step={}, time={})",
             self.inner.timestep_index, self.inner.current_time
         )
     }

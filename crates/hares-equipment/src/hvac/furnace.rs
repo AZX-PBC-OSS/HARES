@@ -174,12 +174,15 @@ impl Equipment for ElectricFurnace {
         // Telemetry reports delivered capacity (post-DSE) for the conditioned zone,
         // consistent with OCHRE's "thermal_output_w" reporting.
         let thermal_output_w = gross_capacity_w * self.hvac.duct_dse.clamp(0.0, 1.0);
+        let sp = self.hvac.effective_setpoints();
         self.telemetry.set("electric_kw", electric_kw);
         self.telemetry.set("thermal_output_w", thermal_output_w);
         self.telemetry
             .set("operating_mode", operating_mode_code(self.operating_mode));
         self.telemetry
             .set("supply_air_temp_c", self.hvac.supply_air_temp_c);
+        self.telemetry.set("heating_setpoint_c", sp.heating_c);
+        self.telemetry.set("cooling_setpoint_c", sp.cooling_c);
 
         Ok(())
     }
@@ -369,6 +372,7 @@ impl Equipment for GasFurnace {
 
         // Telemetry reports delivered capacity (post-DSE) for the conditioned zone.
         let thermal_output_w = gross_capacity_w * self.hvac.duct_dse.clamp(0.0, 1.0);
+        let sp = self.hvac.effective_setpoints();
         self.telemetry.set("fan_kw", fan_kw);
         self.telemetry.set("electric_kw", fan_kw);
         self.telemetry.set("fuel_input_w", fuel_input_w);
@@ -377,6 +381,8 @@ impl Equipment for GasFurnace {
             .set("operating_mode", operating_mode_code(self.operating_mode));
         self.telemetry
             .set("supply_air_temp_c", self.hvac.supply_air_temp_c);
+        self.telemetry.set("heating_setpoint_c", sp.heating_c);
+        self.telemetry.set("cooling_setpoint_c", sp.cooling_c);
 
         Ok(())
     }
@@ -439,27 +445,46 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn electric_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(4);
+    let mut telemetry = Telemetry::with_capacity(6);
     telemetry.insert("electric_kw", 0.0);
     telemetry.insert("thermal_output_w", 0.0);
     telemetry.insert("operating_mode", 0.0);
     telemetry.insert("supply_air_temp_c", 0.0);
+    telemetry.insert("heating_setpoint_c", 0.0);
+    telemetry.insert("cooling_setpoint_c", 0.0);
     telemetry
 }
 
 fn gas_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(6);
+    let mut telemetry = Telemetry::with_capacity(8);
     telemetry.insert("fan_kw", 0.0);
     telemetry.insert("electric_kw", 0.0);
     telemetry.insert("fuel_input_w", 0.0);
     telemetry.insert("thermal_output_w", 0.0);
     telemetry.insert("operating_mode", 0.0);
     telemetry.insert("supply_air_temp_c", 0.0);
+    telemetry.insert("heating_setpoint_c", 0.0);
+    telemetry.insert("cooling_setpoint_c", 0.0);
     telemetry
 }
 
-fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
+fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
     vec![
+        TelemetryField {
+            name: "heating_setpoint_c".to_string(),
+            unit: "C".to_string(),
+            description: "Active heating setpoint from thermostat schedule".to_string(),
+        },
+        TelemetryField {
+            name: "cooling_setpoint_c".to_string(),
+            unit: "C".to_string(),
+            description: "Active cooling setpoint from thermostat schedule".to_string(),
+        },
+    ]
+}
+
+fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
+    let mut fields = vec![
         TelemetryField {
             name: "electric_kw".to_string(),
             unit: "kW".to_string(),
@@ -480,11 +505,13 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
             unit: "C".to_string(),
             description: "Configured furnace supply-air temperature".to_string(),
         },
-    ]
+    ];
+    fields.extend(setpoint_telemetry_fields());
+    fields
 }
 
 fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
-    vec![
+    let mut fields = vec![
         TelemetryField {
             name: "fan_kw".to_string(),
             unit: "kW".to_string(),
@@ -516,7 +543,9 @@ fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
             unit: "C".to_string(),
             description: "Configured furnace supply-air temperature".to_string(),
         },
-    ]
+    ];
+    fields.extend(setpoint_telemetry_fields());
+    fields
 }
 
 #[cfg(test)]

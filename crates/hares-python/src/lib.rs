@@ -22,9 +22,10 @@ use py_config::{PyDwellingConfig, PySimulationConfig};
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
 use py_enums::{
-    PyAggregationResolution, PyBatteryChemistry, PyChargingLevel, PyControlCapabilities,
-    PyDriverArchetype, PyDutyCycleComponent, PyEndUse, PyExecutionStage, PyFluidType, PyFuelType,
-    PyInverterPriority, PyLutType, PyResStockVersion, PySimStatus,
+    PyAggregationResolution, PyBatteryChemistry, PyChargingLevel, PyChargingStrategy,
+    PyControlCapabilities, PyDutyCycleComponent, PyEndUse, PyEvConnectionState, PyExecutionStage,
+    PyFluidType, PyFuelType, PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion,
+    PySimStatus, PyVehicleType,
 };
 use py_equipment::{
     PyBattery, PyEquipmentDescriptor, PyEv, PyPv, PyPvSoilingConfig, PyTelemetryField,
@@ -73,7 +74,10 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLutType>()?;
     m.add_class::<PyBatteryChemistry>()?;
     m.add_class::<PyChargingLevel>()?;
-    m.add_class::<PyDriverArchetype>()?;
+    m.add_class::<PyVehicleType>()?;
+    m.add_class::<PyEvConnectionState>()?;
+    m.add_class::<PyPlugInPolicy>()?;
+    m.add_class::<PyChargingStrategy>()?;
     m.add_class::<PySimulationMetrics>()?;
     m.add_class::<PyAnnualEnergyKwh>()?;
     m.add_class::<PyPeakPowerKw>()?;

@@ -1821,4 +1821,164 @@ mod tests {
             .validate()
             .is_ok());
     }
+
+    // ── Boundary / edge-case tests ───────────────────────────────────
+
+    #[test]
+    fn validate_boundary_gaussian_zero_std_dev() {
+        assert!(DistributionKind::Gaussian {
+            mean: 5.0,
+            std_dev: 0.0
+        }
+        .validate()
+        .is_ok());
+        // Zero std_dev degrades to constant — verify sampling returns mean.
+        let env = default_env();
+        let mut src = stochastic(
+            DistributionKind::Gaussian {
+                mean: 5.0,
+                std_dev: 0.0,
+            },
+            [20_u8; 32],
+        );
+        assert_eq!(src.value_at(&env).unwrap(), 5.0);
+    }
+
+    #[test]
+    fn validate_boundary_uniform_low_eq_high() {
+        assert!(DistributionKind::Uniform {
+            low: 3.0,
+            high: 3.0
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn validate_boundary_lognormal_zero_sigma() {
+        assert!(DistributionKind::LogNormal {
+            mu: 0.0,
+            sigma: 0.0
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn validate_boundary_bernoulli_zero_and_one() {
+        assert!(DistributionKind::Bernoulli { p: 0.0 }
+            .validate()
+            .is_ok());
+        assert!(DistributionKind::Bernoulli { p: 1.0 }
+            .validate()
+            .is_ok());
+
+        // p=0 always returns 0, p=1 always returns 1
+        let env = default_env();
+        let mut src0 = stochastic(DistributionKind::Bernoulli { p: 0.0 }, [21_u8; 32]);
+        for _ in 0..10 {
+            assert_eq!(src0.value_at(&env).unwrap(), 0.0);
+        }
+        let mut src1 = stochastic(DistributionKind::Bernoulli { p: 1.0 }, [22_u8; 32]);
+        for _ in 0..10 {
+            assert_eq!(src1.value_at(&env).unwrap(), 1.0);
+        }
+    }
+
+    #[test]
+    fn stochastic_partial_eq_differs_on_clamp() {
+        let seed = [23_u8; 32];
+        let kind = DistributionKind::Gaussian {
+            mean: 0.0,
+            std_dev: 1.0,
+        };
+        let a = ScheduleSource::Stochastic {
+            kind: kind.clone(),
+            seed,
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed(seed),
+            clamp_min: Some(0.0),
+            clamp_max: None,
+        };
+        let b = ScheduleSource::Stochastic {
+            kind,
+            seed,
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed(seed),
+            clamp_min: None,
+            clamp_max: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn stochastic_state_reset_zeroes_draw_count() {
+        let env = default_env();
+        let mut src = stochastic(
+            DistributionKind::Gaussian {
+                mean: 0.0,
+                std_dev: 1.0,
+            },
+            [24_u8; 32],
+        );
+        for _ in 0..5 {
+            src.value_at(&env).unwrap();
+        }
+        src.reset();
+        match &src {
+            ScheduleSource::Stochastic { draw_count, .. } => {
+                assert_eq!(*draw_count, 0, "reset should zero draw_count");
+            }
+            _ => panic!("expected Stochastic"),
+        }
+    }
+
+    #[test]
+    fn noisy_time_windows_reset_zeroes_draw_count() {
+        let mut env = default_env();
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let mut source = ScheduleSource::noisy_time_windows(
+            vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                10.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 1.0,
+                },
+                None,
+                None,
+            )],
+            None,
+            [25_u8; 32],
+        );
+        for _ in 0..5 {
+            source.value_at(&env).unwrap();
+        }
+        source.reset();
+        match &source {
+            ScheduleSource::TimeWindows { rng_state, .. } => {
+                let st = rng_state.as_ref().unwrap();
+                assert_eq!(st.draw_count, 0, "reset should zero draw_count");
+            }
+            _ => panic!("expected TimeWindows"),
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "no window has noise")]
+    fn noisy_time_windows_panics_without_any_noise() {
+        ScheduleSource::noisy_time_windows(
+            vec![TimeWindow::new(DayFilter::Any, 0, 1440, 10.0)],
+            None,
+            [26_u8; 32],
+        );
+    }
 }

@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from ochre_next._hares import PyDwelling
+from ochre_next._hares import Dwelling as PyDwelling
 
 try:
     from ochre_next._hares import batch_step as rust_batch_step

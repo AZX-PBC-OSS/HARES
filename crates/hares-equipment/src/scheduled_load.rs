@@ -945,9 +945,25 @@ fn scale_schedule_source(source: &mut ScheduleSource, scale: f64) {
             let scaled: Vec<f64> = data.iter().map(|v| v * scale).collect();
             *data = Arc::from(scaled);
         }
+        ScheduleSource::TimeWindows { windows, .. } => {
+            for w in windows.iter_mut() {
+                w.value *= scale;
+                if let Some(min) = &mut w.min_value {
+                    *min *= scale;
+                }
+                if let Some(max) = &mut w.max_value {
+                    *max *= scale;
+                }
+                // Ensure min ≤ max after scaling (negative scale inverts).
+                if let (Some(lo), Some(hi)) = (&mut w.min_value, &mut w.max_value) {
+                    if *lo > *hi {
+                        std::mem::swap(lo, hi);
+                    }
+                }
+            }
+        }
         ScheduleSource::ColumnRef { .. } | ScheduleSource::SolarAware { .. } => {}
         // Wildcard required: ScheduleSource is #[non_exhaustive].
-        // New variants must be handled explicitly here.
         _ => {}
     }
 }
@@ -959,7 +975,8 @@ fn is_schedule_source_zero(source: &ScheduleSource) -> bool {
         ScheduleSource::Shared { data, .. } => data.iter().all(|v| *v == 0.0),
         ScheduleSource::ColumnRef { .. }
         | ScheduleSource::SolarAware { .. }
-        | ScheduleSource::Stochastic { .. } => false,
+        | ScheduleSource::Stochastic { .. }
+        | ScheduleSource::TimeWindows { .. } => false,
         // Wildcard required: ScheduleSource is #[non_exhaustive].
         // New variants must be handled explicitly here.
         _ => false,

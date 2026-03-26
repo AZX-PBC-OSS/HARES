@@ -245,10 +245,11 @@ class TestInputFormats:
 
 
 class TestValidation:
+    def test_valid_ocv_single_point_does_not_raise(self):
+        Battery("TestBat", 10.0, ocv_table=[(0.0, 3.0)])
+
     def test_invalid_ocv_mismatched_lengths_raises(self):
         with pytest.raises(Exception):
-            Battery("TestBat", 10.0, ocv_table=[(0.0, 3.0)])  # too few points is ok
-            # But mismatched dict raises:
             Battery(
                 "TestBat",
                 10.0,

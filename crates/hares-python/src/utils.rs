@@ -14,11 +14,6 @@ pub fn parse_datetime_str(value: &str) -> PyResult<DateTime<FixedOffset>> {
         return Ok(dt);
     }
 
-    // Try appending Z (UTC suffix) and re-parsing
-    if let Ok(dt) = DateTime::parse_from_rfc3339(&format!("{}Z", value)) {
-        return Ok(dt);
-    }
-
     // Try NaiveDateTime with T separator and assume UTC
     if let Ok(naive) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S") {
         let utc_offset =

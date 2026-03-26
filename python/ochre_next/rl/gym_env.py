@@ -11,7 +11,7 @@ from typing import Any, TypedDict
 
 import numpy as np
 
-from ochre_next._hares import PyDwelling, SimulationConfig, ControlSignal as PyControlSignal
+from ochre_next._hares import Dwelling as PyDwelling, SimulationConfig, ControlSignal as PyControlSignal
 
 try:
     import gymnasium as gym

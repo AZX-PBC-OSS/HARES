@@ -9,9 +9,13 @@ use hares_core::engine::SimStatus as CoreSimStatus;
 use hares_fleet::fleet::SimStatus as FleetSimStatus;
 use hares_io::ResStockVersion as IoResStockVersion;
 use hares_types::{
-    ControlCapabilities as RustControlCapabilities, DutyCycleComponent as RustDutyCycleComponent,
-    EndUse as RustEndUse, ExecutionStage as RustExecutionStage, FluidType as RustFluidType,
-    FuelType as RustFuelType, InverterPriority as RustInverterPriority,
+    BatteryChemistry as RustBatteryChemistry, ChargingLevel as RustChargingLevel,
+    ChargingStrategy as RustChargingStrategy, ControlCapabilities as RustControlCapabilities,
+    DutyCycleComponent as RustDutyCycleComponent, EndUse as RustEndUse,
+    EvConnectionState as RustEvConnectionState, ExecutionStage as RustExecutionStage,
+    FluidType as RustFluidType, FuelType as RustFuelType,
+    InverterPriority as RustInverterPriority, PlugInPolicy as RustPlugInPolicy,
+    VehicleType as RustVehicleType,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyList;
@@ -1129,16 +1133,9 @@ impl PyBatteryChemistry {
 
     #[staticmethod]
     fn from_str(name: &str) -> PyResult<Self> {
-        match name.to_lowercase().as_str() {
-            "nmc" => Ok(PyBatteryChemistry::Nmc),
-            "lfp" => Ok(PyBatteryChemistry::Lfp),
-            "nca" => Ok(PyBatteryChemistry::Nca),
-            "lto" => Ok(PyBatteryChemistry::Lto),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "invalid BatteryChemistry variant: {}",
-                name
-            ))),
-        }
+        name.parse::<RustBatteryChemistry>()
+            .map(PyBatteryChemistry::from)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     fn __repr__(&self) -> String {
@@ -1146,11 +1143,28 @@ impl PyBatteryChemistry {
     }
 
     fn __str__(&self) -> String {
-        match self {
-            PyBatteryChemistry::Nmc => "Nmc".to_string(),
-            PyBatteryChemistry::Lfp => "Lfp".to_string(),
-            PyBatteryChemistry::Nca => "Nca".to_string(),
-            PyBatteryChemistry::Lto => "Lto".to_string(),
+        RustBatteryChemistry::from(*self).to_string()
+    }
+}
+
+impl From<RustBatteryChemistry> for PyBatteryChemistry {
+    fn from(c: RustBatteryChemistry) -> Self {
+        match c {
+            RustBatteryChemistry::Nmc => Self::Nmc,
+            RustBatteryChemistry::Lfp => Self::Lfp,
+            RustBatteryChemistry::Nca => Self::Nca,
+            RustBatteryChemistry::Lto => Self::Lto,
+        }
+    }
+}
+
+impl From<PyBatteryChemistry> for RustBatteryChemistry {
+    fn from(c: PyBatteryChemistry) -> Self {
+        match c {
+            PyBatteryChemistry::Nmc => Self::Nmc,
+            PyBatteryChemistry::Lfp => Self::Lfp,
+            PyBatteryChemistry::Nca => Self::Nca,
+            PyBatteryChemistry::Lto => Self::Lto,
         }
     }
 }
@@ -1160,7 +1174,6 @@ impl PyBatteryChemistry {
 pub enum PyChargingLevel {
     L1,
     L2,
-    DcFast,
 }
 
 #[pymethods]
@@ -1176,21 +1189,10 @@ impl PyChargingLevel {
     }
 
     #[staticmethod]
-    fn dc_fast() -> Self {
-        PyChargingLevel::DcFast
-    }
-
-    #[staticmethod]
     fn from_str(name: &str) -> PyResult<Self> {
-        match name.to_lowercase().as_str() {
-            "l1" => Ok(PyChargingLevel::L1),
-            "l2" => Ok(PyChargingLevel::L2),
-            "dcfast" | "dc_fast" => Ok(PyChargingLevel::DcFast),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "invalid ChargingLevel variant: {}",
-                name
-            ))),
-        }
+        name.parse::<RustChargingLevel>()
+            .map(PyChargingLevel::from)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     fn __repr__(&self) -> String {
@@ -1198,85 +1200,280 @@ impl PyChargingLevel {
     }
 
     fn __str__(&self) -> String {
-        match self {
-            PyChargingLevel::L1 => "L1".to_string(),
-            PyChargingLevel::L2 => "L2".to_string(),
-            PyChargingLevel::DcFast => "DcFast".to_string(),
+        RustChargingLevel::from(*self).to_string()
+    }
+}
+
+impl From<RustChargingLevel> for PyChargingLevel {
+    fn from(c: RustChargingLevel) -> Self {
+        match c {
+            RustChargingLevel::L1 => Self::L1,
+            RustChargingLevel::L2 => Self::L2,
         }
     }
 }
 
-#[pyclass(name = "DriverArchetype", from_py_object)]
+impl From<PyChargingLevel> for RustChargingLevel {
+    fn from(c: PyChargingLevel) -> Self {
+        match c {
+            PyChargingLevel::L1 => Self::L1,
+            PyChargingLevel::L2 => Self::L2,
+        }
+    }
+}
+
+#[pyclass(name = "VehicleType", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PyDriverArchetype {
-    Commuter,
-    WorkFromHome,
-    ShiftWorker,
-    WeekendWarrior,
-    SeniorRetiree,
-    SchoolRunFamily,
+pub enum PyVehicleType {
+    Bev,
+    Phev,
 }
 
 #[pymethods]
-impl PyDriverArchetype {
+impl PyVehicleType {
     #[staticmethod]
-    fn commuter() -> Self {
-        PyDriverArchetype::Commuter
+    fn bev() -> Self {
+        PyVehicleType::Bev
     }
 
     #[staticmethod]
-    fn work_from_home() -> Self {
-        PyDriverArchetype::WorkFromHome
-    }
-
-    #[staticmethod]
-    fn shift_worker() -> Self {
-        PyDriverArchetype::ShiftWorker
-    }
-
-    #[staticmethod]
-    fn weekend_warrior() -> Self {
-        PyDriverArchetype::WeekendWarrior
-    }
-
-    #[staticmethod]
-    fn senior_retiree() -> Self {
-        PyDriverArchetype::SeniorRetiree
-    }
-
-    #[staticmethod]
-    fn school_run_family() -> Self {
-        PyDriverArchetype::SchoolRunFamily
+    fn phev() -> Self {
+        PyVehicleType::Phev
     }
 
     #[staticmethod]
     fn from_str(name: &str) -> PyResult<Self> {
-        match name.to_lowercase().replace('-', "_").as_str() {
-            "commuter" => Ok(PyDriverArchetype::Commuter),
-            "workfromhome" | "work_from_home" => Ok(PyDriverArchetype::WorkFromHome),
-            "shiftworker" | "shift_worker" => Ok(PyDriverArchetype::ShiftWorker),
-            "weekendwarrior" | "weekend_warrior" => Ok(PyDriverArchetype::WeekendWarrior),
-            "seniorretiree" | "senior_retiree" => Ok(PyDriverArchetype::SeniorRetiree),
-            "schoolrunfamily" | "school_run_family" => Ok(PyDriverArchetype::SchoolRunFamily),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "invalid DriverArchetype variant: {}",
-                name
-            ))),
-        }
+        name.parse::<RustVehicleType>()
+            .map(PyVehicleType::from)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     fn __repr__(&self) -> String {
-        format!("DriverArchetype.{:?}", self)
+        format!("VehicleType.{:?}", self)
     }
 
     fn __str__(&self) -> String {
-        match self {
-            PyDriverArchetype::Commuter => "Commuter".to_string(),
-            PyDriverArchetype::WorkFromHome => "WorkFromHome".to_string(),
-            PyDriverArchetype::ShiftWorker => "ShiftWorker".to_string(),
-            PyDriverArchetype::WeekendWarrior => "WeekendWarrior".to_string(),
-            PyDriverArchetype::SeniorRetiree => "SeniorRetiree".to_string(),
-            PyDriverArchetype::SchoolRunFamily => "SchoolRunFamily".to_string(),
+        RustVehicleType::from(*self).to_string()
+    }
+}
+
+impl From<RustVehicleType> for PyVehicleType {
+    fn from(v: RustVehicleType) -> Self {
+        match v {
+            RustVehicleType::Bev => Self::Bev,
+            RustVehicleType::Phev => Self::Phev,
         }
+    }
+}
+
+impl From<PyVehicleType> for RustVehicleType {
+    fn from(v: PyVehicleType) -> Self {
+        match v {
+            PyVehicleType::Bev => Self::Bev,
+            PyVehicleType::Phev => Self::Phev,
+        }
+    }
+}
+
+#[pyclass(name = "EvConnectionState", from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PyEvConnectionState {
+    HomePluggedIn,
+    AwayPluggedIn,
+    Disconnected,
+}
+
+#[pymethods]
+impl PyEvConnectionState {
+    #[staticmethod]
+    fn home_plugged_in() -> Self {
+        PyEvConnectionState::HomePluggedIn
+    }
+
+    #[staticmethod]
+    fn away_plugged_in() -> Self {
+        PyEvConnectionState::AwayPluggedIn
+    }
+
+    #[staticmethod]
+    fn disconnected() -> Self {
+        PyEvConnectionState::Disconnected
+    }
+
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        name.parse::<RustEvConnectionState>()
+            .map(PyEvConnectionState::from)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("EvConnectionState.{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        RustEvConnectionState::from(*self).to_string()
+    }
+
+    fn __hash__(&self) -> u64 {
+        *self as u64
+    }
+}
+
+impl From<RustEvConnectionState> for PyEvConnectionState {
+    fn from(s: RustEvConnectionState) -> Self {
+        match s {
+            RustEvConnectionState::HomePluggedIn => Self::HomePluggedIn,
+            RustEvConnectionState::AwayPluggedIn => Self::AwayPluggedIn,
+            RustEvConnectionState::Disconnected => Self::Disconnected,
+        }
+    }
+}
+
+impl From<PyEvConnectionState> for RustEvConnectionState {
+    fn from(s: PyEvConnectionState) -> Self {
+        match s {
+            PyEvConnectionState::HomePluggedIn => Self::HomePluggedIn,
+            PyEvConnectionState::AwayPluggedIn => Self::AwayPluggedIn,
+            PyEvConnectionState::Disconnected => Self::Disconnected,
+        }
+    }
+}
+
+fn validate_soc(name: &str, value: f64) -> PyResult<()> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "{name} must be in [0.0, 1.0], got {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_hour(name: &str, value: f64) -> PyResult<()> {
+    if !value.is_finite() || !(0.0..24.0).contains(&value) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "{name} must be in [0.0, 24.0), got {value}"
+        )));
+    }
+    Ok(())
+}
+
+#[pyclass(name = "PlugInPolicy", from_py_object)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PyPlugInPolicy {
+    pub inner: RustPlugInPolicy,
+}
+
+#[pymethods]
+impl PyPlugInPolicy {
+    #[staticmethod]
+    fn always() -> Self {
+        Self { inner: RustPlugInPolicy::Always }
+    }
+
+    #[staticmethod]
+    fn low_soc(threshold: f64) -> PyResult<Self> {
+        validate_soc("threshold", threshold)?;
+        Ok(Self { inner: RustPlugInPolicy::LowSoc { threshold } })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
+
+    fn __str__(&self) -> String {
+        match &self.inner {
+            RustPlugInPolicy::Always => "Always".to_string(),
+            RustPlugInPolicy::LowSoc { threshold } => format!("LowSoc(threshold={threshold})"),
+        }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+#[pyclass(name = "ChargingStrategy", from_py_object)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PyChargingStrategy {
+    pub inner: RustChargingStrategy,
+}
+
+#[pymethods]
+impl PyChargingStrategy {
+    #[staticmethod]
+    fn immediate(target_soc: f64) -> PyResult<Self> {
+        validate_soc("target_soc", target_soc)?;
+        Ok(Self { inner: RustChargingStrategy::Immediate { target_soc } })
+    }
+
+    #[staticmethod]
+    fn nightly(off_peak_start_hour: f64, off_peak_end_hour: f64, target_soc: f64) -> PyResult<Self> {
+        validate_hour("off_peak_start_hour", off_peak_start_hour)?;
+        validate_hour("off_peak_end_hour", off_peak_end_hour)?;
+        validate_soc("target_soc", target_soc)?;
+        Ok(Self {
+            inner: RustChargingStrategy::Nightly {
+                off_peak_start_hour,
+                off_peak_end_hour,
+                target_soc,
+            },
+        })
+    }
+
+    #[staticmethod]
+    fn low_soc(threshold: f64, target_soc: f64) -> PyResult<Self> {
+        validate_soc("threshold", threshold)?;
+        validate_soc("target_soc", target_soc)?;
+        Ok(Self { inner: RustChargingStrategy::LowSoc { threshold, target_soc } })
+    }
+
+    #[staticmethod]
+    fn quick_then_wait(partial_soc: f64) -> PyResult<Self> {
+        validate_soc("partial_soc", partial_soc)?;
+        Ok(Self { inner: RustChargingStrategy::QuickThenWait { partial_soc } })
+    }
+
+    #[staticmethod]
+    fn pre_departure(target_soc: f64) -> PyResult<Self> {
+        validate_soc("target_soc", target_soc)?;
+        Ok(Self { inner: RustChargingStrategy::PreDeparture { target_soc } })
+    }
+
+    #[staticmethod]
+    fn tou_aware(target_soc: f64) -> PyResult<Self> {
+        validate_soc("target_soc", target_soc)?;
+        Ok(Self { inner: RustChargingStrategy::TouAware { target_soc } })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
+
+    fn __str__(&self) -> String {
+        match &self.inner {
+            RustChargingStrategy::Immediate { target_soc } => {
+                format!("Immediate(target_soc={target_soc})")
+            }
+            RustChargingStrategy::Nightly { off_peak_start_hour, off_peak_end_hour, target_soc } => {
+                format!("Nightly(off_peak_start={off_peak_start_hour}, off_peak_end={off_peak_end_hour}, target_soc={target_soc})")
+            }
+            RustChargingStrategy::LowSoc { threshold, target_soc } => {
+                format!("LowSoc(threshold={threshold}, target_soc={target_soc})")
+            }
+            RustChargingStrategy::QuickThenWait { partial_soc } => {
+                format!("QuickThenWait(partial_soc={partial_soc})")
+            }
+            RustChargingStrategy::PreDeparture { target_soc } => {
+                format!("PreDeparture(target_soc={target_soc})")
+            }
+            RustChargingStrategy::TouAware { target_soc } => {
+                format!("TouAware(target_soc={target_soc})")
+            }
+        }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
     }
 }

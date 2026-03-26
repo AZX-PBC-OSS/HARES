@@ -81,11 +81,12 @@ pub fn record_batches_to_polars_df(py: Python<'_>, batches: &[RecordBatch]) -> P
             .map_err(|e| PyValueError::new_err(format!("failed to finish IPC writer: {}", e)))?;
     }
 
-    let py_bytes = pyo3::types::PyBytes::new(py, &ipc_buffer);
+    let io = py.import("io")?;
+    let buf = io.getattr("BytesIO")?.call1((pyo3::types::PyBytes::new(py, &ipc_buffer),))?;
 
     let polars = py.import("polars")?;
     let read_ipc = polars.getattr("read_ipc")?;
-    let df = read_ipc.call1((py_bytes,))?;
+    let df = read_ipc.call1((buf,))?;
     Ok(df.unbind())
 }
 

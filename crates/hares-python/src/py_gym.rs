@@ -27,8 +27,10 @@ pub fn batch_step(dwellings: &mut [PyDwelling], actions: &[Vec<f64>]) -> Vec<Ste
         .par_iter_mut()
         .enumerate()
         .map(|(idx, dwelling)| {
-            // v1 baseline: actions are accepted for API shape but not yet mapped
-            // into equipment-specific controls.
+            // TODO(H-7): action mapping is not yet implemented. Actions are
+            // accepted to keep the Python API stable but are not forwarded to
+            // equipment controls. RL callers are not influencing the simulation
+            // until this is wired up.
             let _ = actions.get(idx);
 
             let mut info = HashMap::new();
@@ -48,13 +50,16 @@ pub fn batch_step(dwellings: &mut [PyDwelling], actions: &[Vec<f64>]) -> Vec<Ste
                         info,
                     }
                 }
-                Err(_) => StepResult {
-                    obs: Vec::new(),
-                    reward: 0.0,
-                    terminated: true,
-                    truncated: false,
-                    info,
-                },
+                Err(_e) => {
+                    info.insert("error".to_string(), 1.0);
+                    StepResult {
+                        obs: Vec::new(),
+                        reward: 0.0,
+                        terminated: true,
+                        truncated: false,
+                        info,
+                    }
+                }
             }
         })
         .collect()
@@ -125,6 +130,10 @@ pub fn batch_step_py(
                 // objects alive. step_core() and observation() are GIL-free
                 // (they only lock the internal Mutex<Dwelling>).
                 let dwelling = unsafe { &**ptr };
+                // TODO(H-7): action mapping is not yet implemented. Actions are
+                // accepted to keep the Python API stable but are not forwarded to
+                // equipment controls. RL callers are not influencing the simulation
+                // until this is wired up.
                 let _ = actions.get(idx);
 
                 let mut info = HashMap::new();
@@ -145,13 +154,17 @@ pub fn batch_step_py(
                             info,
                         }
                     }
-                    Err(_) => StepResult {
-                        obs: Vec::new(),
-                        reward: 0.0,
-                        terminated: true,
-                        truncated: false,
-                        info,
-                    },
+                    Err(e) => {
+                        info.insert("error".to_string(), 1.0);
+                        let _ = e;
+                        StepResult {
+                            obs: Vec::new(),
+                            reward: 0.0,
+                            terminated: true,
+                            truncated: false,
+                            info,
+                        }
+                    }
                 }
             })
             .collect()

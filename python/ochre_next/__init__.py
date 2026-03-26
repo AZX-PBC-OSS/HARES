@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from ._hares import PyDwelling as Dwelling
-from ._hares import PyFleet as Fleet
-from ._hares import PyFleetResults as FleetResults
+from ._hares import Dwelling
+from ._hares import Fleet
+from ._hares import FleetResults
 from ._hares import SimulationConfig
 from ._hares import DwellingConfig
 from ._hares import ControlSignal
-from ._hares import PyTelemetry as Telemetry
+from ._hares import Telemetry
 
 # Equipment types
 from ._hares import Battery
@@ -39,21 +39,24 @@ from ._hares import (
     LutType,
     BatteryChemistry,
     ChargingLevel,
-    DriverArchetype,
+    VehicleType,
+    EvConnectionState,
+    PlugInPolicy,
+    ChargingStrategy,
     DRLevel,
     EquipmentDescriptor,
     TelemetryField,
 )
 
 # Metrics types
-from ._hares import PySimulationMetrics as SimulationMetrics
-from ._hares import PyAnnualEnergyKwh as AnnualEnergyKwh
-from ._hares import PyPeakPowerKw as PeakPowerKw
-from ._hares import PyRollingPeakKw as RollingPeakKw
-from ._hares import PyGridInteractionMetrics as GridInteractionMetrics
-from ._hares import PyEnvelopeComponentLoadsKwh as EnvelopeComponentLoadsKwh
-from ._hares import PyEfficiencyMetrics as EfficiencyMetrics
-from ._hares import PyGasEnergyMetrics as GasEnergyMetrics
+from ._hares import SimulationMetrics
+from ._hares import AnnualEnergyKwh
+from ._hares import PeakPowerKw
+from ._hares import RollingPeakKw
+from ._hares import GridInteractionMetrics
+from ._hares import EnvelopeComponentLoadsKwh
+from ._hares import EfficiencyMetrics
+from ._hares import GasEnergyMetrics
 
 # PV sizing types
 from ._hares import RoofPlane
@@ -69,6 +72,9 @@ from ._hares import (
     parse_resstock_csv,
     WeatherTimeSeries,
 )
+
+# Iterator types
+from ._hares import TimestepsIter
 
 # Gym / RL
 from ._hares import batch_step
@@ -108,7 +114,10 @@ __all__ = [
     "LutType",
     "BatteryChemistry",
     "ChargingLevel",
-    "DriverArchetype",
+    "VehicleType",
+    "EvConnectionState",
+    "PlugInPolicy",
+    "ChargingStrategy",
     "DRLevel",
     "EquipmentDescriptor",
     "TelemetryField",
@@ -132,6 +141,8 @@ __all__ = [
     "parse_tmy3",
     "parse_resstock_csv",
     "WeatherTimeSeries",
+    # Iterator types
+    "TimestepsIter",
     # Gym / RL
     "batch_step",
 ]

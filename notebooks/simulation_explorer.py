@@ -11,13 +11,11 @@ def _imports():
     from pathlib import Path
 
     import marimo as mo
-    import numpy as np
-    import plotly.express as px
     import plotly.graph_objects as go
     import polars as pl
     from plotly.subplots import make_subplots
 
-    return datetime, mo, np, Path, pl, px, go, make_subplots, sys
+    return datetime, mo, Path, pl, go, make_subplots, sys
 
 
 @app.cell
@@ -211,24 +209,21 @@ def _controls_layout(
 
 
 @app.cell
-def _sim_gate(mo, run_btn):
-    mo.stop(
-        not run_btn.value,
-        mo.callout(mo.md("Configure the simulation and click **Run simulation**."), kind="neutral"),
-    )
-
-
-@app.cell
 def _run_simulation(
     mo,
     bldg_hpxml, bldg_schedule, bldg_weather, bldg_label,
     pv_enable, pv_capacity, pv_tilt, pv_azimuth,
     bat_enable, bat_capacity, bat_max_power,
     ev_enable, ev_capacity, ev_charger_kw,
-    season, seed, ochre_compare,
+    season, seed, ochre_compare, run_btn,
     HARES_DEFAULTS, VENDOR_OCHRE,
     pl, sys,
 ):
+    mo.stop(
+        not run_btn.value,
+        mo.callout(mo.md("Configure the simulation and click **Run simulation**."), kind="neutral"),
+    )
+
     from ochre_next import Dwelling, PV, Battery, EV, ControlSignal
 
     _SEASON_DATES: dict[str, str] = {
@@ -291,7 +286,8 @@ def _run_simulation(
         if do_ochre:
             import datetime as _dt
             with mo.status.spinner(title="Running OCHRE comparison..."):
-                sys.path.insert(0, vendor_ochre)
+                if vendor_ochre not in sys.path:
+                    sys.path.insert(0, vendor_ochre)
                 from ochre import Dwelling as OchreDwelling  # type: ignore[import-not-found]
 
                 _start = _dt.datetime.strptime(start_date, "%Y-%m-%d")
@@ -354,7 +350,7 @@ def _visualizations(
     mo,
     hares_df, ochre_df, sim_meta,
     bldg_weather,
-    go, make_subplots, np, pl,
+    go, make_subplots, pl,
 ):
     from ochre_next import parse_epw
 
@@ -417,23 +413,24 @@ def _visualizations(
             _wdf = _wts.to_polars()
             if "dry_bulb_c" in _wdf.columns:
                 import datetime as _dt
-                _start = _dt.datetime.fromisoformat(sim_meta["start_date"])
-                _hours = [_start + _dt.timedelta(hours=i) for i in range(len(_wdf))]
-                _end = _start + _dt.timedelta(days=14)
-                _mask = [_start <= h < _end for h in _hours]
-                _w_times = [h for h, m in zip(_hours, _mask) if m]
-                _w_temps = _wdf["dry_bulb_c"].to_numpy()
-                _w_temps = [float(_w_temps[i]) for i, m in enumerate(_mask) if m]
-                fig.add_trace(
-                    go.Scatter(
-                        x=_w_times, y=_w_temps,
-                        name="Outdoor temp (°C)",
-                        fill="tozeroy",
-                        fillcolor="rgba(255,152,0,0.15)",
-                        line={"color": "darkorange", "width": 1},
-                    ),
-                    row=2, col=1,
-                )
+                _sim_start = _dt.datetime.fromisoformat(sim_meta["start_date"])
+                _epw_start = _sim_start.replace(month=1, day=1, hour=0, minute=0, second=0)
+                _hours = [_epw_start + _dt.timedelta(hours=i) for i in range(len(_wdf))]
+                _sim_end = _sim_start + _dt.timedelta(days=14)
+                _temps = _wdf["dry_bulb_c"].to_numpy()
+                _w_times = [h for h in _hours if _sim_start <= h < _sim_end]
+                _w_vals = [float(_temps[i]) for i, h in enumerate(_hours) if _sim_start <= h < _sim_end]
+                if _w_times:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=_w_times, y=_w_vals,
+                            name="Outdoor temp (°C)",
+                            fill="tozeroy",
+                            fillcolor="rgba(255,152,0,0.15)",
+                            line={"color": "darkorange", "width": 1},
+                        ),
+                        row=2, col=1,
+                    )
         except Exception:
             pass
 
@@ -452,15 +449,16 @@ def _visualizations(
 
         fig = go.Figure()
 
-        known_ders = np.zeros(len(total))
+        # base_load = total + PV - battery - EV
+        # (total is net grid import; PV positive = generating; battery/EV positive = consuming)
+        base_load = total.copy()
 
         if _pv_col in hares_df.columns:
-            pv_raw = hares_df[_pv_col].to_numpy()
-            pv_gen = -pv_raw
-            known_ders += pv_raw
+            pv_gen = hares_df[_pv_col].to_numpy()
+            base_load += pv_gen  # add back PV generation to recover base load
             fig.add_trace(go.Scatter(
                 x=times, y=pv_gen,
-                name="PV generation",
+                name="PV generation (kW)",
                 fill="tozeroy",
                 fillcolor="rgba(255,210,0,0.4)",
                 line={"color": "rgba(255,180,0,0.9)", "width": 1},
@@ -468,16 +466,16 @@ def _visualizations(
 
         if _bat_pow_col in hares_df.columns:
             bat_pow = hares_df[_bat_pow_col].to_numpy()
-            known_ders += bat_pow
+            base_load -= bat_pow  # subtract battery contribution
             fig.add_trace(go.Scatter(
                 x=times, y=bat_pow,
-                name="Battery power",
+                name="Battery (+ charge / - discharge)",
                 line={"color": "rgba(40,160,80,0.9)", "width": 1.5},
             ))
 
         if _ev_pow_col in hares_df.columns:
             ev_pow = hares_df[_ev_pow_col].to_numpy()
-            known_ders += ev_pow
+            base_load -= ev_pow  # subtract EV contribution
             fig.add_trace(go.Scatter(
                 x=times, y=ev_pow,
                 name="EV charging",
@@ -485,8 +483,6 @@ def _visualizations(
                 fillcolor="rgba(120,60,200,0.3)",
                 line={"color": "rgba(120,60,200,0.8)", "width": 1},
             ))
-
-        base_load = total - known_ders
         fig.add_trace(go.Scatter(
             x=times, y=base_load,
             name="Base load",
@@ -682,7 +678,6 @@ def _visualizations(
             "Summary": mo.lazy(_summary),
         }
     )
-    results_tabs
     return (results_tabs,)
 
 

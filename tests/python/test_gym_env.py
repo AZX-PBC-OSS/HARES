@@ -10,7 +10,7 @@ import pytest
 np = pytest.importorskip("numpy")
 pytest.importorskip("gymnasium")
 
-from ochre_next._hares import PyDwelling
+from ochre_next._hares import Dwelling as PyDwelling
 from ochre_next.rl.gym_env import DwellingGymEnv, _sorted_action_layout
 from ochre_next.rl.vec_env import VecDwellingGymEnv
 

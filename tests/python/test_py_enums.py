@@ -17,7 +17,10 @@ from ochre_next import (
     LutType,
     BatteryChemistry,
     ChargingLevel,
-    DriverArchetype,
+    VehicleType,
+    EvConnectionState,
+    PlugInPolicy,
+    ChargingStrategy,
 )
 
 
@@ -342,29 +345,110 @@ class TestChargingLevel:
     def test_variants_accessible(self):
         assert ChargingLevel.L1 is not None
         assert ChargingLevel.L2 is not None
-        assert ChargingLevel.DcFast is not None
 
     def test_from_str_round_trip(self):
-        for level in [ChargingLevel.L1, ChargingLevel.L2, ChargingLevel.DcFast]:
+        for level in [ChargingLevel.L1, ChargingLevel.L2]:
             assert ChargingLevel.from_str(str(level)) == level
 
 
-class TestDriverArchetype:
+class TestVehicleType:
     def test_variants_accessible(self):
-        assert DriverArchetype.Commuter is not None
-        assert DriverArchetype.WorkFromHome is not None
-        assert DriverArchetype.ShiftWorker is not None
-        assert DriverArchetype.WeekendWarrior is not None
-        assert DriverArchetype.SeniorRetiree is not None
-        assert DriverArchetype.SchoolRunFamily is not None
+        assert VehicleType.Bev is not None
+        assert VehicleType.Phev is not None
 
     def test_from_str_round_trip(self):
-        for archetype in [
-            DriverArchetype.Commuter,
-            DriverArchetype.WorkFromHome,
-            DriverArchetype.ShiftWorker,
-            DriverArchetype.WeekendWarrior,
-            DriverArchetype.SeniorRetiree,
-            DriverArchetype.SchoolRunFamily,
+        for vt in [VehicleType.Bev, VehicleType.Phev]:
+            assert VehicleType.from_str(str(vt)) == vt
+
+    def test_from_str_invalid_raises(self):
+        with pytest.raises(ValueError):
+            VehicleType.from_str("invalid")
+
+
+class TestEvConnectionState:
+    def test_variants_are_distinct(self):
+        states = [
+            EvConnectionState.HomePluggedIn,
+            EvConnectionState.AwayPluggedIn,
+            EvConnectionState.Disconnected,
+        ]
+        for i, a in enumerate(states):
+            for j, b in enumerate(states):
+                assert (a == b) == (i == j)
+
+    def test_from_str_round_trip(self):
+        for state in [
+            EvConnectionState.HomePluggedIn,
+            EvConnectionState.AwayPluggedIn,
+            EvConnectionState.Disconnected,
         ]:
-            assert DriverArchetype.from_str(str(archetype)) == archetype
+            assert EvConnectionState.from_str(str(state)) == state
+
+    def test_from_str_invalid_raises(self):
+        with pytest.raises(ValueError):
+            EvConnectionState.from_str("invalid")
+
+    def test_hashable(self):
+        s = {EvConnectionState.HomePluggedIn, EvConnectionState.Disconnected}
+        assert len(s) == 2
+
+
+class TestPlugInPolicy:
+    def test_variants_are_distinct(self):
+        assert PlugInPolicy.always() != PlugInPolicy.low_soc(0.2)
+
+    def test_low_soc_threshold_matters(self):
+        assert PlugInPolicy.low_soc(0.2) != PlugInPolicy.low_soc(0.3)
+        assert PlugInPolicy.low_soc(0.2) == PlugInPolicy.low_soc(0.2)
+
+    def test_str_contains_variant_name(self):
+        assert "Always" in str(PlugInPolicy.always())
+        assert "LowSoc" in str(PlugInPolicy.low_soc(0.2))
+
+    def test_low_soc_rejects_invalid_threshold(self):
+        with pytest.raises(ValueError):
+            PlugInPolicy.low_soc(-0.1)
+        with pytest.raises(ValueError):
+            PlugInPolicy.low_soc(1.1)
+        with pytest.raises(ValueError):
+            PlugInPolicy.low_soc(float("nan"))
+
+
+class TestChargingStrategy:
+    def test_all_variants_are_distinct(self):
+        strategies = [
+            ChargingStrategy.immediate(0.9),
+            ChargingStrategy.nightly(22.0, 6.0, 0.9),
+            ChargingStrategy.low_soc(0.2, 0.8),
+            ChargingStrategy.quick_then_wait(0.5),
+            ChargingStrategy.pre_departure(0.95),
+            ChargingStrategy.tou_aware(0.85),
+        ]
+        for i, a in enumerate(strategies):
+            for j, b in enumerate(strategies):
+                if i != j:
+                    assert a != b, f"strategies[{i}] should != strategies[{j}]"
+
+    def test_same_params_are_equal(self):
+        assert ChargingStrategy.nightly(22.0, 6.0, 0.9) == ChargingStrategy.nightly(22.0, 6.0, 0.9)
+
+    def test_different_params_are_not_equal(self):
+        assert ChargingStrategy.immediate(0.8) != ChargingStrategy.immediate(0.9)
+
+    def test_str_contains_variant_and_params(self):
+        s = str(ChargingStrategy.nightly(22.0, 6.0, 0.9))
+        assert "Nightly" in s
+        assert "22" in s
+        assert "0.9" in s
+
+    def test_rejects_invalid_soc(self):
+        with pytest.raises(ValueError):
+            ChargingStrategy.immediate(1.5)
+        with pytest.raises(ValueError):
+            ChargingStrategy.immediate(-0.1)
+
+    def test_rejects_invalid_hours(self):
+        with pytest.raises(ValueError):
+            ChargingStrategy.nightly(25.0, 6.0, 0.9)
+        with pytest.raises(ValueError):
+            ChargingStrategy.nightly(22.0, -1.0, 0.9)

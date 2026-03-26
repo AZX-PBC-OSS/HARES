@@ -72,7 +72,7 @@ fn extract_aggregation_resolution(
     }
 }
 
-#[pyclass(name = "PyFleet")]
+#[pyclass(name = "Fleet")]
 pub struct PyFleet {
     fleet: Fleet,
 }
@@ -169,6 +169,9 @@ impl PyFleet {
         let raise_on_failure = raise_on_failure.unwrap_or(false);
 
         let outcomes = if let Some(callback) = progress {
+            // TODO(M-2): Fleet::set_progress requires &mut self but PyFleet::simulate
+            // takes &self (PyO3 constraint). Until Fleet exposes a simulate_with_progress
+            // that accepts an external callback without mutation, a clone is unavoidable.
             let mut fleet_clone = self.fleet.clone();
             let callback: Py<PyAny> = callback.clone().unbind();
             fleet_clone.set_progress(move |done: usize, total: usize| {
@@ -243,7 +246,7 @@ impl From<PyAggregationResolution> for AggregationResolution {
     }
 }
 
-#[pyclass(name = "PyFleetResults")]
+#[pyclass(name = "FleetResults")]
 pub struct PyFleetResults {
     pub(crate) results: FleetResults,
     pub(crate) failures: Vec<(i64, String)>,

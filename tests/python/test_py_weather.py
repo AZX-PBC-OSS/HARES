@@ -6,6 +6,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 EPW_PATH = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+TMY3_PATH = str(ROOT / "data/examples/703165TY.csv")
 
 EXPECTED_COLUMNS = [
     "index",
@@ -159,3 +160,68 @@ class TestDataFrameRowCount:
         df = weather.to_polars()
 
         assert len(df) == len(weather)
+
+
+class TestParseTmy3:
+    def test_len_equals_8760(self):
+        from ochre_next import parse_tmy3
+
+        weather = parse_tmy3(TMY3_PATH)
+        assert len(weather) == 8760
+
+    def test_to_polars_returns_dataframe(self):
+        from ochre_next import parse_tmy3
+
+        weather = parse_tmy3(TMY3_PATH)
+
+        import polars as pl
+
+        assert isinstance(weather.to_polars(), pl.DataFrame)
+
+    def test_latitude_accessible(self):
+        from ochre_next import parse_tmy3
+
+        weather = parse_tmy3(TMY3_PATH)
+        assert weather.latitude == pytest.approx(55.317, rel=0.01)
+
+    def test_longitude_accessible(self):
+        from ochre_next import parse_tmy3
+
+        weather = parse_tmy3(TMY3_PATH)
+        assert weather.longitude == pytest.approx(-160.517, rel=0.01)
+
+    def test_elevation_m_accessible(self):
+        from ochre_next import parse_tmy3
+
+        weather = parse_tmy3(TMY3_PATH)
+        assert weather.elevation_m == pytest.approx(7.0, abs=1.0)
+
+
+class TestParseWeather:
+    def test_len_equals_8760_epw(self):
+        from ochre_next import parse_weather
+
+        weather = parse_weather(EPW_PATH)
+        assert len(weather) == 8760
+
+    def test_len_equals_8760_tmy3(self):
+        from ochre_next import parse_weather
+
+        weather = parse_weather(TMY3_PATH)
+        assert len(weather) == 8760
+
+    def test_metadata_accessible(self):
+        from ochre_next import parse_weather
+
+        weather = parse_weather(TMY3_PATH)
+        assert weather.latitude == pytest.approx(55.317, rel=0.01)
+        assert weather.longitude == pytest.approx(-160.517, rel=0.01)
+        assert weather.elevation_m == pytest.approx(7.0, abs=1.0)
+
+
+class TestParsePsm3:
+    def test_invalid_path_raises(self):
+        from ochre_next import parse_psm3
+
+        with pytest.raises((FileNotFoundError, Exception)):
+            parse_psm3("/nonexistent/path/to/file.psm3")

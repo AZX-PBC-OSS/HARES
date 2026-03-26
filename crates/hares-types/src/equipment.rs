@@ -217,6 +217,161 @@ pub enum BatteryLutType {
     UNeg,
 }
 
+/// Battery cell chemistry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BatteryChemistry {
+    Nmc,
+    Lfp,
+    Nca,
+    Lto,
+}
+
+impl BatteryChemistry {
+    /// Returns a lowercase config key for the equipment config system.
+    pub fn as_config_str(&self) -> &'static str {
+        match self {
+            Self::Nmc => "nmc",
+            Self::Lfp => "lfp",
+            Self::Nca => "nca",
+            Self::Lto => "lto",
+        }
+    }
+}
+
+impl std::str::FromStr for BatteryChemistry {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "nmc" => Ok(Self::Nmc),
+            "lfp" => Ok(Self::Lfp),
+            "nca" => Ok(Self::Nca),
+            "lto" => Ok(Self::Lto),
+            _ => Err(format!("invalid BatteryChemistry: {s}")),
+        }
+    }
+}
+
+impl fmt::Display for BatteryChemistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Nmc => "NMC",
+            Self::Lfp => "LFP",
+            Self::Nca => "NCA",
+            Self::Lto => "LTO",
+        })
+    }
+}
+
+/// EV charging level (residential L1/L2 only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChargingLevel {
+    L1,
+    L2,
+}
+
+impl std::str::FromStr for ChargingLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "l1" => Ok(Self::L1),
+            "l2" => Ok(Self::L2),
+            _ => Err(format!("invalid ChargingLevel: {s}")),
+        }
+    }
+}
+
+impl fmt::Display for ChargingLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::L1 => "L1",
+            Self::L2 => "L2",
+        })
+    }
+}
+
+/// Electric vehicle powertrain type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VehicleType {
+    Bev,
+    Phev,
+}
+
+impl std::str::FromStr for VehicleType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "bev" => Ok(Self::Bev),
+            "phev" => Ok(Self::Phev),
+            _ => Err(format!("invalid VehicleType: {s}")),
+        }
+    }
+}
+
+impl fmt::Display for VehicleType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Bev => "BEV",
+            Self::Phev => "PHEV",
+        })
+    }
+}
+
+/// EV connection state: home charging, away charging, or disconnected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EvConnectionState {
+    #[default]
+    HomePluggedIn,
+    AwayPluggedIn,
+    Disconnected,
+}
+
+impl std::str::FromStr for EvConnectionState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().replace('_', "").as_str() {
+            "homepluggedin" => Ok(Self::HomePluggedIn),
+            "awaypluggedin" => Ok(Self::AwayPluggedIn),
+            "disconnected" => Ok(Self::Disconnected),
+            _ => Err(format!("invalid EvConnectionState: {s}")),
+        }
+    }
+}
+
+impl fmt::Display for EvConnectionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::HomePluggedIn => "HomePluggedIn",
+            Self::AwayPluggedIn => "AwayPluggedIn",
+            Self::Disconnected => "Disconnected",
+        })
+    }
+}
+
+/// When the EV should plug in at home.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PlugInPolicy {
+    Always,
+    LowSoc { threshold: f64 },
+}
+
+/// Charging strategy governing when and how fast to charge.
+///
+/// `TouAware` references the TOU rate schedule from the environment/simulation
+/// config — the EV just knows "be TOU-aware" and reads peak periods externally.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ChargingStrategy {
+    Immediate { target_soc: f64 },
+    Nightly { off_peak_start_hour: f64, off_peak_end_hour: f64, target_soc: f64 },
+    LowSoc { threshold: f64, target_soc: f64 },
+    QuickThenWait { partial_soc: f64 },
+    PreDeparture { target_soc: f64 },
+    TouAware { target_soc: f64 },
+}
+
 /// Describes one telemetry channel exposed by an equipment model.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TelemetryField {
@@ -487,5 +642,172 @@ mod tests {
             let decoded: IdealCapacityMode = serde_json::from_str(&json).expect("deserialize mode");
             assert_eq!(decoded, mode);
         }
+    }
+
+    #[test]
+    fn battery_chemistry_round_trips_through_json() {
+        for chem in [
+            BatteryChemistry::Nmc,
+            BatteryChemistry::Lfp,
+            BatteryChemistry::Nca,
+            BatteryChemistry::Lto,
+        ] {
+            let json = serde_json::to_string(&chem).expect("serialize");
+            let decoded: BatteryChemistry = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, chem);
+        }
+    }
+
+    #[test]
+    fn battery_chemistry_from_str_case_insensitive() {
+        assert_eq!("nmc".parse::<BatteryChemistry>().unwrap(), BatteryChemistry::Nmc);
+        assert_eq!("NMC".parse::<BatteryChemistry>().unwrap(), BatteryChemistry::Nmc);
+        assert_eq!("Lfp".parse::<BatteryChemistry>().unwrap(), BatteryChemistry::Lfp);
+        assert!("invalid".parse::<BatteryChemistry>().is_err());
+    }
+
+    #[test]
+    fn battery_chemistry_display() {
+        assert_eq!(BatteryChemistry::Nmc.to_string(), "NMC");
+        assert_eq!(BatteryChemistry::Lfp.to_string(), "LFP");
+        assert_eq!(BatteryChemistry::Nca.to_string(), "NCA");
+        assert_eq!(BatteryChemistry::Lto.to_string(), "LTO");
+    }
+
+    #[test]
+    fn battery_chemistry_config_str() {
+        assert_eq!(BatteryChemistry::Nmc.as_config_str(), "nmc");
+        assert_eq!(BatteryChemistry::Lfp.as_config_str(), "lfp");
+        assert_eq!(BatteryChemistry::Nca.as_config_str(), "nca");
+        assert_eq!(BatteryChemistry::Lto.as_config_str(), "lto");
+    }
+
+    #[test]
+    fn charging_level_round_trips_through_json() {
+        for level in [ChargingLevel::L1, ChargingLevel::L2] {
+            let json = serde_json::to_string(&level).expect("serialize");
+            let decoded: ChargingLevel = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, level);
+        }
+    }
+
+    #[test]
+    fn charging_level_from_str_and_display() {
+        assert_eq!("l1".parse::<ChargingLevel>().unwrap(), ChargingLevel::L1);
+        assert_eq!("L2".parse::<ChargingLevel>().unwrap(), ChargingLevel::L2);
+        assert_eq!(ChargingLevel::L1.to_string(), "L1");
+        assert_eq!(ChargingLevel::L2.to_string(), "L2");
+    }
+
+    #[test]
+    fn vehicle_type_round_trips_through_json() {
+        for vt in [VehicleType::Bev, VehicleType::Phev] {
+            let json = serde_json::to_string(&vt).expect("serialize");
+            let decoded: VehicleType = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, vt);
+        }
+    }
+
+    #[test]
+    fn vehicle_type_from_str_and_display() {
+        assert_eq!("bev".parse::<VehicleType>().unwrap(), VehicleType::Bev);
+        assert_eq!("PHEV".parse::<VehicleType>().unwrap(), VehicleType::Phev);
+        assert_eq!(VehicleType::Bev.to_string(), "BEV");
+        assert_eq!(VehicleType::Phev.to_string(), "PHEV");
+    }
+
+    #[test]
+    fn ev_connection_state_default_is_home_plugged_in() {
+        assert_eq!(EvConnectionState::default(), EvConnectionState::HomePluggedIn);
+    }
+
+    #[test]
+    fn ev_connection_state_from_str_and_display() {
+        for state in [
+            EvConnectionState::HomePluggedIn,
+            EvConnectionState::AwayPluggedIn,
+            EvConnectionState::Disconnected,
+        ] {
+            let s = state.to_string();
+            assert_eq!(s.parse::<EvConnectionState>().unwrap(), state);
+        }
+        assert!("invalid".parse::<EvConnectionState>().is_err());
+    }
+
+    #[test]
+    fn ev_connection_state_round_trips_through_json() {
+        for state in [
+            EvConnectionState::HomePluggedIn,
+            EvConnectionState::AwayPluggedIn,
+            EvConnectionState::Disconnected,
+        ] {
+            let json = serde_json::to_string(&state).expect("serialize");
+            let decoded: EvConnectionState = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, state);
+        }
+    }
+
+    #[test]
+    fn plug_in_policy_round_trips_through_json() {
+        let policies = vec![
+            PlugInPolicy::Always,
+            PlugInPolicy::LowSoc { threshold: 0.2 },
+        ];
+        for policy in policies {
+            let json = serde_json::to_string(&policy).expect("serialize");
+            let decoded: PlugInPolicy = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, policy);
+        }
+    }
+
+    #[test]
+    fn charging_strategy_round_trips_through_json() {
+        let strategies = vec![
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            ChargingStrategy::LowSoc { threshold: 0.2, target_soc: 0.8 },
+            ChargingStrategy::QuickThenWait { partial_soc: 0.5 },
+            ChargingStrategy::PreDeparture { target_soc: 0.95 },
+            ChargingStrategy::TouAware { target_soc: 0.85 },
+        ];
+        for strategy in strategies {
+            let json = serde_json::to_string(&strategy).expect("serialize");
+            let decoded: ChargingStrategy = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, strategy);
+        }
+    }
+
+    #[test]
+    fn charging_strategy_serde_produces_expected_json() {
+        let nightly = ChargingStrategy::Nightly {
+            off_peak_start_hour: 22.0,
+            off_peak_end_hour: 6.0,
+            target_soc: 0.9,
+        };
+        let json = serde_json::to_string(&nightly).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let inner = value.get("Nightly").expect("expected Nightly key");
+        assert_eq!(inner["off_peak_start_hour"], 22.0);
+        assert_eq!(inner["off_peak_end_hour"], 6.0);
+        assert_eq!(inner["target_soc"], 0.9);
+
+        let immediate = ChargingStrategy::Immediate { target_soc: 1.0 };
+        let json = serde_json::to_string(&immediate).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(value["Immediate"]["target_soc"], 1.0);
+    }
+
+    #[test]
+    fn charging_strategy_cross_deserialize_from_raw_json() {
+        let raw = r#"{"LowSoc":{"threshold":0.15,"target_soc":0.7}}"#;
+        let decoded: ChargingStrategy = serde_json::from_str(raw).expect("deserialize raw JSON");
+        assert_eq!(
+            decoded,
+            ChargingStrategy::LowSoc { threshold: 0.15, target_soc: 0.7 }
+        );
     }
 }
