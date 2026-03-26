@@ -22,6 +22,8 @@ target
 
 # Python / maturin
 *.so
+*.dylib
+*.dylib.dSYM/
 *.pyd
 __pycache__/
 *.egg-info/
