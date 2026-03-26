@@ -77,7 +77,7 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: "away_charge_power_kw".to_string(),
             unit: "kW".to_string(),
-            description: "Away charger rated power (non-residential)".to_string(),
+            description: "Away charging actual power intake (positive = charging, non-residential)".to_string(),
         },
         TelemetryField {
             name: "capacity_kwh".to_string(),

@@ -34,7 +34,9 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::{ControlSignal, EnvironmentState, OperatingMode};
+use hares_types::{ControlSignal, EnvironmentState, EvConnectionState, OperatingMode};
+
+use crate::py_enums::PyEvConnectionState;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -235,6 +237,16 @@ pub enum PySignal {
     IdealCapacity {
         capacity_w: f64,
     },
+    EvPlugIn {
+        state: PyEvConnectionState,
+    },
+    EvDrive {
+        kwh: f64,
+    },
+    EvSetReadyBy {
+        departure_hour: f64,
+        target_soc: f64,
+    },
 }
 
 /// Strongly typed DR levels.
@@ -342,6 +354,17 @@ impl PySignal {
                 duration_s,
             },
             PySignal::IdealCapacity { capacity_w } => ControlSignal::IdealCapacity { capacity_w },
+            PySignal::EvPlugIn { state } => ControlSignal::EvPlugIn {
+                state: EvConnectionState::from(state),
+            },
+            PySignal::EvDrive { kwh } => ControlSignal::EvDrive { kwh },
+            PySignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            } => ControlSignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            },
         }
     }
 }
@@ -632,6 +655,24 @@ impl PySignal {
     #[staticmethod]
     fn ideal_capacity(capacity_w: f64) -> Self {
         PySignal::IdealCapacity { capacity_w }
+    }
+
+    #[staticmethod]
+    fn ev_plug_in(state: PyEvConnectionState) -> Self {
+        PySignal::EvPlugIn { state }
+    }
+
+    #[staticmethod]
+    fn ev_drive(kwh: f64) -> Self {
+        PySignal::EvDrive { kwh }
+    }
+
+    #[staticmethod]
+    fn ev_set_ready_by(departure_hour: f64, target_soc: f64) -> Self {
+        PySignal::EvSetReadyBy {
+            departure_hour,
+            target_soc,
+        }
     }
 
     fn __repr__(&self) -> String {

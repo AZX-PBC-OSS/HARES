@@ -94,10 +94,6 @@ impl TimeWindow {
 
     /// Create a time window with additive noise and optional clamping.
     ///
-    /// `value` becomes the center of the distribution. The noise is added to
-    /// produce the final result, then clamped to `[min_value, max_value]`.
-    /// Create a time window with additive noise and optional clamping.
-    ///
     /// `value` becomes the center of the distribution. The `noise` distribution
     /// should typically have `mean: 0.0` (for Gaussian) so that `value` is the
     /// true center; the `mean` field of the distribution acts as an additional
@@ -615,7 +611,7 @@ impl ScheduleSource {
         default: Option<f64>,
         seed: [u8; 32],
     ) -> Self {
-        debug_assert!(
+        assert!(
             windows.iter().any(|w| w.noise.is_some()),
             "noisy_time_windows called but no window has noise; use TimeWindows directly"
         );

@@ -36,11 +36,9 @@ impl RatchetConfig {
                 "lookback_months must be > 0".into(),
             ));
         }
-        if !self.minimum_fraction.is_finite()
-            || !(0.0..=1.0).contains(&self.minimum_fraction)
-        {
+        if !self.minimum_fraction.is_finite() || self.minimum_fraction < 0.0 {
             return Err(HaresError::Tariff(format!(
-                "minimum_fraction must be finite and in [0.0, 1.0], got {}",
+                "minimum_fraction must be finite and >= 0, got {}",
                 self.minimum_fraction
             )));
         }
@@ -214,6 +212,9 @@ pub struct ElectricTariff {
 
 impl ElectricTariff {
     pub fn validate(&self) -> Result<(), HaresError> {
+        for tp in &self.tou_schedule {
+            tp.validate()?;
+        }
         for dr in &self.demand_rates {
             dr.validate()?;
         }
@@ -564,17 +565,26 @@ mod tests {
 
     #[test]
     fn ratchet_config_validate_rejects_invalid_fraction() {
-        let bad = RatchetConfig {
+        let negative = RatchetConfig {
             lookback_months: 11,
-            minimum_fraction: 1.5,
+            minimum_fraction: -0.1,
         };
-        assert!(bad.validate().is_err());
+        assert!(negative.validate().is_err());
 
         let nan = RatchetConfig {
             lookback_months: 11,
             minimum_fraction: f64::NAN,
         };
         assert!(nan.validate().is_err());
+    }
+
+    #[test]
+    fn ratchet_config_accepts_above_one() {
+        let above = RatchetConfig {
+            lookback_months: 11,
+            minimum_fraction: 1.1,
+        };
+        assert!(above.validate().is_ok());
     }
 
     #[test]

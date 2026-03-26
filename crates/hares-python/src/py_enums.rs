@@ -893,6 +893,36 @@ impl PyControlCapabilities {
         inner: RustControlCapabilities::INVERTER_PRIORITY_MODE,
     };
 
+    #[classattr]
+    const IDEAL_CAPACITY: Self = Self {
+        inner: RustControlCapabilities::IDEAL_CAPACITY,
+    };
+
+    #[classattr]
+    const IDEAL_CAPACITY_MODE_OVERRIDE: Self = Self {
+        inner: RustControlCapabilities::IDEAL_CAPACITY_MODE_OVERRIDE,
+    };
+
+    #[classattr]
+    const EV_PLUG_IN: Self = Self {
+        inner: RustControlCapabilities::EV_PLUG_IN,
+    };
+
+    #[classattr]
+    const EV_DRIVE: Self = Self {
+        inner: RustControlCapabilities::EV_DRIVE,
+    };
+
+    #[classattr]
+    const EV_AWAY_CHARGE: Self = Self {
+        inner: RustControlCapabilities::EV_AWAY_CHARGE,
+    };
+
+    #[classattr]
+    const EV_SET_READY_BY: Self = Self {
+        inner: RustControlCapabilities::EV_SET_READY_BY,
+    };
+
     #[staticmethod]
     fn from_list(_py: Python<'_>, names: &Bound<'_, PyList>) -> PyResult<Self> {
         let mut caps = RustControlCapabilities::empty();
@@ -915,6 +945,12 @@ impl PyControlCapabilities {
                 "REACTIVE_SETPOINT" => caps |= RustControlCapabilities::REACTIVE_SETPOINT,
                 "POWER_FACTOR_SETPOINT" => caps |= RustControlCapabilities::POWER_FACTOR_SETPOINT,
                 "INVERTER_PRIORITY_MODE" => caps |= RustControlCapabilities::INVERTER_PRIORITY_MODE,
+                "IDEAL_CAPACITY" => caps |= RustControlCapabilities::IDEAL_CAPACITY,
+                "IDEAL_CAPACITY_MODE_OVERRIDE" => caps |= RustControlCapabilities::IDEAL_CAPACITY_MODE_OVERRIDE,
+                "EV_PLUG_IN" => caps |= RustControlCapabilities::EV_PLUG_IN,
+                "EV_DRIVE" => caps |= RustControlCapabilities::EV_DRIVE,
+                "EV_AWAY_CHARGE" => caps |= RustControlCapabilities::EV_AWAY_CHARGE,
+                "EV_SET_READY_BY" => caps |= RustControlCapabilities::EV_SET_READY_BY,
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "invalid ControlCapabilities flag: {}",

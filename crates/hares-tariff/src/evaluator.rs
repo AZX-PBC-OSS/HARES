@@ -131,7 +131,8 @@ impl TariffEvaluator {
             .iter()
             .find_map(|dr| dr.ratchet.clone());
 
-        let demand_window_minutes = 15;
+        // Standard US utility 15-minute demand averaging window (FERC/NERC).
+        let demand_window_minutes: u32 = 15;
         let billing_state = BillingState::new(
             simulation_start,
             tariff.billing_cycle,
@@ -195,7 +196,8 @@ impl TariffEvaluator {
             return block.rates_per_kwh[block.thresholds_kwh.len()];
         }
 
-        0.0
+        // No tiered block for current season — return the current step's energy price.
+        self.price_array[self.step_index]
     }
 
     /// Returns a subslice of the price array, or `None` if indices are out of bounds.
@@ -213,9 +215,8 @@ impl TariffEvaluator {
         let export_price = self.current_export_price();
         self.billing_state
             .update(net_power_kw, dt_seconds, import_price, export_price);
-        self.advance();
 
-        if current_time >= self.billing_state.period_end {
+        let result = if current_time >= self.billing_state.period_end {
             let civil = self.billing_state.period_start.with_timezone(&self.timezone);
             let month = civil.month() as u8;
 
@@ -248,7 +249,10 @@ impl TariffEvaluator {
             Some(summary)
         } else {
             None
-        }
+        };
+
+        self.advance();
+        result
     }
 
     fn compute_demand_charge(&self, effective_peak_kw: f64, month: u8) -> f64 {

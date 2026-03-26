@@ -14,12 +14,8 @@ use crate::battery::ocv::{OcvTable, UNegTable};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 mod checkpoint;
-#[allow(dead_code)]
-mod archetype;
 mod charging_curve;
 mod config;
-#[allow(dead_code)]
-mod schedule;
 mod telemetry;
 
 pub use charging_curve::{ChargingCurveLut, parse_pybamm_lut_csv};

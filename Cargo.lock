@@ -878,6 +878,7 @@ dependencies = [
  "parquet",
  "rand",
  "rand_chacha",
+ "rand_distr",
  "rayon",
  "serde",
  "serde_json",
@@ -999,6 +1000,7 @@ dependencies = [
  "hares-types",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

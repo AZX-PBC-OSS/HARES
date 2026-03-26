@@ -44,40 +44,59 @@ impl DemandWindow {
             self.running_sum / self.count as f64
         }
     }
+
+    fn reset(&mut self) {
+        self.samples.fill(0.0);
+        self.head = 0;
+        self.count = 0;
+        self.running_sum = 0.0;
+    }
 }
 
 pub struct BillingState {
-    pub period_start: DateTime<Tz>,
-    pub period_end: DateTime<Tz>,
-    pub cumulative_import_kwh: f64,
-    pub cumulative_export_kwh: f64,
-    pub cumulative_energy_cost_usd: f64,
-    pub cumulative_export_credit_usd: f64,
-    pub peak_demand_kw: f64,
-    pub prior_peaks_kw: VecDeque<f64>,
+    pub(crate) period_start: DateTime<Tz>,
+    pub(crate) period_end: DateTime<Tz>,
+    pub(crate) cumulative_import_kwh: f64,
+    pub(crate) cumulative_export_kwh: f64,
+    pub(crate) cumulative_energy_cost_usd: f64,
+    pub(crate) cumulative_export_credit_usd: f64,
+    pub(crate) peak_demand_kw: f64,
+    pub(crate) prior_peaks_kw: VecDeque<f64>,
     demand_window: DemandWindow,
     billing_cycle: BillingCycle,
     ratchet_config: Option<RatchetConfig>,
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
 }
 
 fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> {
     match cycle {
         BillingCycle::Monthly => {
             let (year, month) = if start.month() == 12 {
-                (start.year() + 1, 1)
+                (start.year() + 1, 1u32)
             } else {
                 (start.year(), start.month() + 1)
             };
+            let max_day = days_in_month(year, month);
+            let day = start.day().min(max_day);
             start
                 .timezone()
-                .with_ymd_and_hms(year, month, start.day().min(28), 0, 0, 0)
+                .with_ymd_and_hms(year, month, day, 0, 0, 0)
                 .single()
-                .unwrap_or_else(|| {
-                    start
-                        .timezone()
-                        .with_ymd_and_hms(year, month, 1, 0, 0, 0)
-                        .unwrap()
-                })
+                .expect("computed billing period date must be valid after day clamp")
         }
         BillingCycle::Custom(days) => start + Duration::days(days as i64),
     }
@@ -130,6 +149,26 @@ impl BillingState {
         self.peak_demand_kw = self.peak_demand_kw.max(self.demand_window.average());
     }
 
+    pub fn period_start(&self) -> DateTime<Tz> {
+        self.period_start
+    }
+
+    pub fn period_end(&self) -> DateTime<Tz> {
+        self.period_end
+    }
+
+    pub fn cumulative_import_kwh(&self) -> f64 {
+        self.cumulative_import_kwh
+    }
+
+    pub fn cumulative_export_kwh(&self) -> f64 {
+        self.cumulative_export_kwh
+    }
+
+    pub fn peak_demand_kw(&self) -> f64 {
+        self.peak_demand_kw
+    }
+
     pub fn effective_peak_kw(&self) -> f64 {
         apply_ratchet(self.peak_demand_kw, &self.prior_peaks_kw, &self.ratchet_config)
     }
@@ -146,7 +185,7 @@ impl BillingState {
         self.cumulative_energy_cost_usd = 0.0;
         self.cumulative_export_credit_usd = 0.0;
         self.peak_demand_kw = 0.0;
-        self.demand_window = DemandWindow::new(self.demand_window.samples.len());
+        self.demand_window.reset();
     }
 }
 
@@ -201,8 +240,7 @@ mod tests {
         w.push(9.0);
         assert!((w.average() - 6.0).abs() < 1e-10);
         w.push(12.0);
-        // Window now holds [12.0, 3.0, 9.0] -> oldest (6.0) was evicted
-        // Actually ring buffer: samples = [12.0, 3.0, 9.0], sum = 24.0, avg = 8.0
+        // Ring buffer evicted oldest (6.0): samples = [12.0, 3.0, 9.0], avg = 8.0
         assert!((w.average() - 8.0).abs() < 1e-10);
     }
 
@@ -353,6 +391,59 @@ mod tests {
         assert_eq!(state.prior_peaks_kw.len(), 12);
         // Oldest (1.0) should have been evicted; front should be 2.0
         assert!((state.prior_peaks_kw[0] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn billing_ratchet_lookback_truncation() {
+        let ratchet = RatchetConfig {
+            lookback_months: 3,
+            minimum_fraction: 0.85,
+        };
+        let mut state = BillingState::new(
+            make_dt(2025, 1, 1),
+            BillingCycle::Monthly,
+            15,
+            3600,
+            Some(ratchet),
+        );
+        // Add 6 months of peaks: [5, 10, 15, 20, 25, 30]
+        for peak in [5.0, 10.0, 15.0, 20.0, 25.0, 30.0] {
+            state.prior_peaks_kw.push_back(peak);
+        }
+        // Lookback 3 → considers [20.0, 25.0, 30.0], max = 30.0
+        // Effective = max(2.0, 0.85 * 30.0) = 25.5
+        state.update(2.0, 3600.0, 0.0, 0.0);
+        let effective = state.effective_peak_kw();
+        assert!((effective - 25.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn compute_period_end_jan31_to_feb28() {
+        let start = make_dt(2025, 1, 31);
+        let end = compute_period_end(start, BillingCycle::Monthly);
+        // Feb 2025 has 28 days; day clamped to 28.
+        assert_eq!(end.month(), 2);
+        assert_eq!(end.day(), 28);
+    }
+
+    #[test]
+    fn compute_period_end_jan29_leap_year() {
+        let start = New_York
+            .with_ymd_and_hms(2024, 1, 29, 0, 0, 0)
+            .unwrap();
+        let end = compute_period_end(start, BillingCycle::Monthly);
+        // Feb 2024 has 29 days (leap year); day 29 fits.
+        assert_eq!(end.month(), 2);
+        assert_eq!(end.day(), 29);
+    }
+
+    #[test]
+    fn compute_period_end_dec_to_jan() {
+        let start = make_dt(2025, 12, 15);
+        let end = compute_period_end(start, BillingCycle::Monthly);
+        assert_eq!(end.year(), 2026);
+        assert_eq!(end.month(), 1);
+        assert_eq!(end.day(), 15);
     }
 
     #[test]

@@ -1,0 +1,699 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use hares_types::{BillingCycle, DayFilter, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod};
+use serde_json::Value;
+
+use crate::{
+    DemandRate, ElectricTariff, EnergyRate, ExportMode, ExportRate, FixedCharges, RatchetConfig,
+    TieredBlock,
+};
+
+#[derive(Debug, Clone)]
+pub struct UrdbParseError {
+    pub message: String,
+}
+
+impl std::fmt::Display for UrdbParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "URDB parse error: {}", self.message)
+    }
+}
+
+impl std::error::Error for UrdbParseError {}
+
+impl UrdbParseError {
+    fn missing(field: &str) -> Self {
+        Self {
+            message: format!("missing required field '{field}'"),
+        }
+    }
+
+    fn malformed(field: &str, detail: &str) -> Self {
+        Self {
+            message: format!("malformed field '{field}': {detail}"),
+        }
+    }
+}
+
+type Schedule = Vec<Vec<u64>>;
+
+fn extract_schedule(root: &Value, field: &str) -> Result<Schedule, UrdbParseError> {
+    let arr = root
+        .get(field)
+        .ok_or_else(|| UrdbParseError::missing(field))?;
+    let months = arr
+        .as_array()
+        .ok_or_else(|| UrdbParseError::malformed(field, "expected array of 12 arrays"))?;
+    if months.len() != 12 {
+        return Err(UrdbParseError::malformed(
+            field,
+            &format!("expected 12 month rows, got {}", months.len()),
+        ));
+    }
+    let mut result = Vec::with_capacity(12);
+    for (m, month_val) in months.iter().enumerate() {
+        let hours = month_val.as_array().ok_or_else(|| {
+            UrdbParseError::malformed(field, &format!("month {m} is not an array"))
+        })?;
+        if hours.len() != 24 {
+            return Err(UrdbParseError::malformed(
+                field,
+                &format!("month {m} has {} hours, expected 24", hours.len()),
+            ));
+        }
+        let mut row = Vec::with_capacity(24);
+        for (h, hval) in hours.iter().enumerate() {
+            let idx = hval.as_u64().ok_or_else(|| {
+                UrdbParseError::malformed(
+                    field,
+                    &format!("month {m} hour {h} is not an integer"),
+                )
+            })?;
+            row.push(idx);
+        }
+        result.push(row);
+    }
+    Ok(result)
+}
+
+fn try_extract_schedule(root: &Value, field: &str) -> Result<Option<Schedule>, UrdbParseError> {
+    if root.get(field).is_none() {
+        return Ok(None);
+    }
+    extract_schedule(root, field).map(Some)
+}
+
+fn unique_period_indices(weekday: &Schedule, weekend: &Schedule) -> BTreeSet<u64> {
+    let mut indices = BTreeSet::new();
+    for row in weekday.iter().chain(weekend.iter()) {
+        for &idx in row {
+            indices.insert(idx);
+        }
+    }
+    indices
+}
+
+/// For a given period index, determine which months (1-indexed) use it.
+fn months_for_period(weekday: &Schedule, weekend: &Schedule, period_idx: u64) -> BTreeSet<u8> {
+    let mut months = BTreeSet::new();
+    for (m, row) in weekday.iter().enumerate() {
+        if row.contains(&period_idx) {
+            months.insert((m + 1) as u8);
+        }
+    }
+    for (m, row) in weekend.iter().enumerate() {
+        if row.contains(&period_idx) {
+            months.insert((m + 1) as u8);
+        }
+    }
+    months
+}
+
+fn season_for_months(months: &BTreeSet<u8>) -> SeasonFilter {
+    let has_summer = months.iter().any(|&m| (6..=9).contains(&m));
+    let has_winter = months.iter().any(|&m| !(6..=9).contains(&m));
+    match (has_summer, has_winter) {
+        (true, false) => SeasonFilter::Summer,
+        (false, true) => SeasonFilter::Winter,
+        _ => SeasonFilter::All,
+    }
+}
+
+/// Find contiguous hour ranges for a period in a single schedule matrix,
+/// across the months that use that period. Uses the union of all active
+/// hours; warns if months have different hour patterns for the same period.
+fn hour_ranges_for_period(schedule: &Schedule, period_idx: u64) -> Vec<(u16, u16)> {
+    let mut active_hours: BTreeSet<u8> = BTreeSet::new();
+    let mut per_month_hours: Vec<BTreeSet<u8>> = Vec::new();
+    for row in schedule {
+        let mut month_hours = BTreeSet::new();
+        for (h, &val) in row.iter().enumerate() {
+            if val == period_idx {
+                active_hours.insert(h as u8);
+                month_hours.insert(h as u8);
+            }
+        }
+        if !month_hours.is_empty() {
+            per_month_hours.push(month_hours);
+        }
+    }
+    if per_month_hours.len() > 1 {
+        let first = &per_month_hours[0];
+        if per_month_hours.iter().any(|m| m != first) {
+            tracing::warn!(
+                period_idx,
+                "URDB period has different hour patterns across months; using union of all hours"
+            );
+        }
+    }
+
+    // Group contiguous hours into ranges.
+    let mut ranges = Vec::new();
+    let hours: Vec<u8> = active_hours.into_iter().collect();
+    if hours.is_empty() {
+        return ranges;
+    }
+
+    let mut start = hours[0] as u16;
+    let mut end = hours[0] as u16;
+    for &h in &hours[1..] {
+        let h16 = h as u16;
+        if h16 == end + 1 {
+            end = h16;
+        } else {
+            ranges.push((start * 60, (end + 1) * 60));
+            start = h16;
+            end = h16;
+        }
+    }
+    ranges.push((start * 60, (end + 1) * 60));
+    ranges
+}
+
+fn build_time_windows(
+    weekday_ranges: &[(u16, u16)],
+    weekend_ranges: &[(u16, u16)],
+) -> Vec<TimeWindow> {
+    let mut windows = Vec::new();
+
+    // Find ranges that are identical in both weekday and weekend -> DayFilter::Any
+    let mut weekday_used = vec![false; weekday_ranges.len()];
+    let mut weekend_used = vec![false; weekend_ranges.len()];
+
+    for (wi, &wr) in weekday_ranges.iter().enumerate() {
+        for (ei, &er) in weekend_ranges.iter().enumerate() {
+            if wr == er && !weekend_used[ei] {
+                windows.push(TimeWindow::new(DayFilter::Any, wr.0, wr.1, 0.0));
+                weekday_used[wi] = true;
+                weekend_used[ei] = true;
+                break;
+            }
+        }
+    }
+
+    for (i, &r) in weekday_ranges.iter().enumerate() {
+        if !weekday_used[i] {
+            windows.push(TimeWindow::new(DayFilter::Weekdays, r.0, r.1, 0.0));
+        }
+    }
+
+    for (i, &r) in weekend_ranges.iter().enumerate() {
+        if !weekend_used[i] {
+            windows.push(TimeWindow::new(DayFilter::Weekends, r.0, r.1, 0.0));
+        }
+    }
+
+    windows
+}
+
+fn extract_rate_tiers(
+    root: &Value,
+    field: &str,
+) -> Result<Option<Vec<Vec<Value>>>, UrdbParseError> {
+    let Some(val) = root.get(field) else {
+        return Ok(None);
+    };
+    let periods = val
+        .as_array()
+        .ok_or_else(|| UrdbParseError::malformed(field, "expected array of arrays"))?;
+    let mut result = Vec::with_capacity(periods.len());
+    for (i, period_val) in periods.iter().enumerate() {
+        let tiers = period_val.as_array().ok_or_else(|| {
+            UrdbParseError::malformed(field, &format!("period {i} is not an array"))
+        })?;
+        result.push(tiers.clone());
+    }
+    Ok(Some(result))
+}
+
+fn tier_rate(tier: &Value) -> f64 {
+    let rate = tier.get("rate").and_then(Value::as_f64).unwrap_or(0.0);
+    let adj = tier.get("adj").and_then(Value::as_f64).unwrap_or(0.0);
+    rate + adj
+}
+
+fn tier_max(tier: &Value) -> Option<f64> {
+    tier.get("max").and_then(Value::as_f64).filter(|&v| v > 0.0)
+}
+
+fn tier_sell(tier: &Value) -> Option<f64> {
+    tier.get("sell").and_then(Value::as_f64)
+}
+
+fn parse_export_mode(root: &Value) -> ExportMode {
+    match root.get("dgrules").and_then(Value::as_str) {
+        Some("Net Metering") => ExportMode::NetMetering,
+        Some("Net Billing Instantaneous" | "Net Billing Hourly") => ExportMode::NetBilling,
+        Some("Buy All Sell All") => {
+            // Try to find a sell rate from energy rate structure
+            let sell_rate = root
+                .get("energyratestructure")
+                .and_then(Value::as_array)
+                .and_then(|periods| periods.first())
+                .and_then(Value::as_array)
+                .and_then(|tiers| tiers.first())
+                .and_then(tier_sell)
+                .unwrap_or(0.0);
+            ExportMode::FlatRate(sell_rate)
+        }
+        _ => ExportMode::None,
+    }
+}
+
+fn parse_fixed_charges(root: &Value) -> FixedCharges {
+    let charge = root
+        .get("fixedchargefirstmeter")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let units = root
+        .get("fixedchargeunits")
+        .and_then(Value::as_str)
+        .unwrap_or("$/month");
+    match units {
+        "$/day" => FixedCharges {
+            monthly_usd: 0.0,
+            daily_usd: charge,
+        },
+        _ => FixedCharges {
+            monthly_usd: charge,
+            daily_usd: 0.0,
+        },
+    }
+}
+
+fn warn_unsupported(root: &Value) {
+    for field in ["reactivepowercharge", "voltagecategory", "phasewiring"] {
+        if root.get(field).is_some() {
+            tracing::warn!(field, "unsupported URDB field ignored");
+        }
+    }
+}
+
+/// Parse a URDB v7 JSON string into an `ElectricTariff`.
+///
+/// Returns `Err` only for structurally invalid JSON (missing required fields,
+/// malformed matrices). Unsupported fields produce `tracing::warn!` but not errors.
+pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
+    let root: Value = serde_json::from_str(json)
+        .map_err(|e| UrdbParseError::malformed("(root)", &e.to_string()))?;
+
+    warn_unsupported(&root);
+
+    let weekday_sched = extract_schedule(&root, "energyweekdayschedule")?;
+    let weekend_sched = extract_schedule(&root, "energyweekendschedule")?;
+
+    let energy_structure = extract_rate_tiers(&root, "energyratestructure")?
+        .ok_or_else(|| UrdbParseError::missing("energyratestructure"))?;
+
+    let period_indices = unique_period_indices(&weekday_sched, &weekend_sched);
+
+    // Build TOU periods and energy rates
+    let mut tou_schedule = Vec::new();
+    let mut energy_rates = Vec::new();
+    let mut tiered_rates = Vec::new();
+    // Track sell rates for export TOU credits
+    let mut sell_credits: Vec<EnergyRate> = Vec::new();
+
+    // Map period indices to their season for demand rate usage
+    let mut period_seasons: BTreeMap<u64, SeasonFilter> = BTreeMap::new();
+
+    for &period_idx in &period_indices {
+        let period_name = format!("period_{period_idx}");
+        let months = months_for_period(&weekday_sched, &weekend_sched, period_idx);
+        let season = season_for_months(&months);
+        period_seasons.insert(period_idx, season);
+
+        let weekday_ranges = hour_ranges_for_period(&weekday_sched, period_idx);
+        let weekend_ranges = hour_ranges_for_period(&weekend_sched, period_idx);
+        let windows = build_time_windows(&weekday_ranges, &weekend_ranges);
+
+        if !windows.is_empty() {
+            tou_schedule.push(TouPeriod {
+                name: period_name.clone(),
+                schedule: windows,
+                season,
+            });
+        }
+
+        // Energy rates from energyratestructure[period_idx]
+        let idx = period_idx as usize;
+        if idx < energy_structure.len() {
+            let tiers = &energy_structure[idx];
+            let base_rate = tiers.first().map(tier_rate).unwrap_or(0.0);
+
+            energy_rates.push(EnergyRate {
+                period_name: period_name.clone(),
+                season,
+                rate_per_kwh: base_rate,
+            });
+
+            // Check for sell rate on first tier
+            if let Some(sell) = tiers.first().and_then(tier_sell) {
+                sell_credits.push(EnergyRate {
+                    period_name: period_name.clone(),
+                    season,
+                    rate_per_kwh: sell,
+                });
+            }
+
+            // Build tiered block if multiple tiers
+            if tiers.len() > 1 {
+                let mut thresholds = Vec::new();
+                let mut rates = Vec::new();
+                for tier in tiers {
+                    rates.push(tier_rate(tier));
+                    if let Some(max_kwh) = tier_max(tier) {
+                        thresholds.push(max_kwh);
+                    }
+                }
+                if rates.len() == thresholds.len() + 1 {
+                    tiered_rates.push(TieredBlock {
+                        season,
+                        thresholds_kwh: thresholds,
+                        rates_per_kwh: rates,
+                    });
+                } else {
+                    tracing::warn!(
+                        period = %period_name,
+                        rates = rates.len(),
+                        thresholds = thresholds.len(),
+                        "tiered block invariant not satisfied (rates != thresholds+1); block dropped"
+                    );
+                }
+            }
+        }
+    }
+
+    // Demand rates
+    let mut demand_rates = Vec::new();
+    let ratchet = root
+        .get("demandratchetpercentage")
+        .and_then(Value::as_f64)
+        .filter(|&pct| pct > 0.0)
+        .map(|pct| RatchetConfig {
+            // 11-month lookback (12 months excluding current) is the US utility standard.
+            lookback_months: 11,
+            minimum_fraction: pct / 100.0,
+        });
+
+    // Flat demand (non-TOU). URDB outer array index maps to season:
+    // typically index 0 = summer, index 1 = winter for 2-entry structures.
+    if let Some(flat_demand) = extract_rate_tiers(&root, "flatdemandstructure")? {
+        for (idx, tiers) in flat_demand.iter().enumerate() {
+            let rate = tiers.first().map(tier_rate).unwrap_or(0.0);
+            if rate > 0.0 {
+                let season = match flat_demand.len() {
+                    1 => SeasonFilter::All,
+                    _ => match idx {
+                        0 => SeasonFilter::Summer,
+                        1 => SeasonFilter::Winter,
+                        _ => {
+                            tracing::warn!(
+                                index = idx,
+                                "flatdemandstructure has >2 entries; assigning All to extra entries"
+                            );
+                            SeasonFilter::All
+                        }
+                    },
+                };
+                demand_rates.push(DemandRate {
+                    period_name: None,
+                    season,
+                    rate_per_kw: rate,
+                    ratchet: ratchet.clone(),
+                });
+            }
+        }
+    }
+
+    // TOU demand
+    if let Some(tou_demand) = extract_rate_tiers(&root, "demandratestructure")? {
+        let demand_weekday = try_extract_schedule(&root, "demandweekdayschedule")?;
+        let demand_weekend = try_extract_schedule(&root, "demandweekendschedule")?;
+
+        for (idx, tiers) in tou_demand.iter().enumerate() {
+            let rate = tiers.first().map(tier_rate).unwrap_or(0.0);
+            if rate > 0.0 {
+                let period_name = format!("demand_{idx}");
+                let season = if let (Some(wd), Some(we)) = (&demand_weekday, &demand_weekend) {
+                    let months = months_for_period(wd, we, idx as u64);
+                    season_for_months(&months)
+                } else {
+                    SeasonFilter::All
+                };
+                demand_rates.push(DemandRate {
+                    period_name: Some(period_name),
+                    season,
+                    rate_per_kw: rate,
+                    ratchet: ratchet.clone(),
+                });
+            }
+        }
+    }
+
+    let export_mode = parse_export_mode(&root);
+    let clear_credits = matches!(export_mode, ExportMode::FlatRate(_) | ExportMode::None);
+    let export_rate = ExportRate {
+        mode: export_mode,
+        tou_credits: if clear_credits { Vec::new() } else { sell_credits },
+    };
+
+    let fixed_charges = parse_fixed_charges(&root);
+
+    let minimum_charge = root.get("minmonthlycharge").and_then(Value::as_f64);
+
+    let name = root.get("name").and_then(Value::as_str).map(String::from);
+
+    // Determine seasonal split based on whether any period is season-specific
+    let has_seasonal = period_seasons
+        .values()
+        .any(|s| matches!(s, SeasonFilter::Summer | SeasonFilter::Winter));
+    let seasonal_split = if has_seasonal {
+        SeasonalSplit::new(6, 9).ok()
+    } else {
+        None
+    };
+
+    let tariff = ElectricTariff {
+        name,
+        tou_schedule,
+        energy_rates,
+        demand_rates,
+        tiered_rates,
+        export_rate,
+        fixed_charges,
+        minimum_charge,
+        billing_cycle: BillingCycle::Monthly,
+        seasonal_split,
+    };
+
+    tariff.validate().map_err(|e| UrdbParseError {
+        message: format!("parsed tariff failed validation: {e}"),
+    })?;
+
+    Ok(tariff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FLAT_RATE_JSON: &str =
+        include_str!("../../../tests/fixtures/urdb/flat_rate.json");
+    const PGE_TOU_C_JSON: &str =
+        include_str!("../../../tests/fixtures/urdb/pge_e_tou_c.json");
+
+    #[test]
+    fn urdb_flat_rate_parses() {
+        let tariff = parse(FLAT_RATE_JSON).unwrap();
+        assert_eq!(tariff.name.as_deref(), Some("Flat Rate Test"));
+        assert_eq!(tariff.tou_schedule.len(), 1);
+        assert_eq!(tariff.tou_schedule[0].name, "period_0");
+        assert_eq!(tariff.tou_schedule[0].season, SeasonFilter::All);
+
+        // Single period covers all 24 hours
+        let windows = &tariff.tou_schedule[0].schedule;
+        assert!(!windows.is_empty());
+        // Should have a single window covering 0:00-24:00 for Any day
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].day, DayFilter::Any);
+        assert_eq!(windows[0].start_minute, 0);
+        assert_eq!(windows[0].end_minute, 1440);
+
+        assert_eq!(tariff.energy_rates.len(), 1);
+        assert!((tariff.energy_rates[0].rate_per_kwh - 0.12).abs() < 1e-6);
+        assert_eq!(tariff.fixed_charges.monthly_usd, 10.0);
+    }
+
+    #[test]
+    fn urdb_pge_tou_c_parses() {
+        let tariff = parse(PGE_TOU_C_JSON).unwrap();
+        assert_eq!(tariff.name.as_deref(), Some("PG&E E-TOU-C"));
+        // 3 periods: off-peak(0), partial-peak(1), on-peak(2)
+        assert_eq!(tariff.tou_schedule.len(), 3);
+        assert_eq!(tariff.energy_rates.len(), 3);
+
+        let find_rate = |name: &str| {
+            tariff
+                .energy_rates
+                .iter()
+                .find(|r| r.period_name == name)
+                .unwrap()
+                .rate_per_kwh
+        };
+        assert!((find_rate("period_0") - 0.12).abs() < 1e-6);
+        assert!((find_rate("period_1") - 0.18).abs() < 1e-6);
+        assert!((find_rate("period_2") - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn urdb_pge_tou_c_demand_rates() {
+        let tariff = parse(PGE_TOU_C_JSON).unwrap();
+        // Should have demand rates (flat + TOU)
+        assert!(!tariff.demand_rates.is_empty());
+
+        // Check ratchet config
+        let with_ratchet = tariff
+            .demand_rates
+            .iter()
+            .find(|d| d.ratchet.is_some())
+            .expect("should have at least one demand rate with ratchet");
+        let ratchet = with_ratchet.ratchet.as_ref().unwrap();
+        assert!((ratchet.minimum_fraction - 0.85).abs() < 1e-6);
+        assert_eq!(ratchet.lookback_months, 11);
+
+        // Demand rate value
+        assert!(with_ratchet.rate_per_kw > 0.0);
+    }
+
+    #[test]
+    fn urdb_pge_tou_c_seasonal_split() {
+        let tariff = parse(PGE_TOU_C_JSON).unwrap();
+
+        // period_2 (on-peak) should be summer-only (months 6-9)
+        let on_peak = tariff
+            .tou_schedule
+            .iter()
+            .find(|p| p.name == "period_2")
+            .expect("period_2 should exist");
+        assert_eq!(on_peak.season, SeasonFilter::Summer);
+
+        // period_1 (partial-peak) should be winter-only (months 1-5, 10-12)
+        let partial_peak = tariff
+            .tou_schedule
+            .iter()
+            .find(|p| p.name == "period_1")
+            .expect("period_1 should exist");
+        assert_eq!(partial_peak.season, SeasonFilter::Winter);
+
+        // period_0 (off-peak) should be all-season
+        let off_peak = tariff
+            .tou_schedule
+            .iter()
+            .find(|p| p.name == "period_0")
+            .expect("period_0 should exist");
+        assert_eq!(off_peak.season, SeasonFilter::All);
+
+        // Seasonal split should be set
+        assert!(tariff.seasonal_split.is_some());
+        let split = tariff.seasonal_split.unwrap();
+        assert_eq!(split.summer_start_month, 6);
+        assert_eq!(split.summer_end_month, 9);
+    }
+
+    #[test]
+    fn urdb_missing_energy_structure_errors() {
+        let json = r#"{
+            "energyweekdayschedule": [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]],
+            "energyweekendschedule": [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]]
+        }"#;
+        let result = parse(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("energyratestructure"),
+            "error should name the missing field: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn urdb_missing_optional_fields_ok() {
+        // Minimal valid JSON: only required fields
+        let json = r#"{
+            "energyweekdayschedule": [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]],
+            "energyweekendschedule": [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]],
+            "energyratestructure": [[{"rate": 0.10}]]
+        }"#;
+        let tariff = parse(json).unwrap();
+        assert!(tariff.demand_rates.is_empty());
+        assert_eq!(tariff.export_rate.mode, ExportMode::None);
+        assert_eq!(tariff.fixed_charges.monthly_usd, 0.0);
+        assert!(tariff.minimum_charge.is_none());
+        assert!(tariff.name.is_none());
+    }
+
+    #[test]
+    fn urdb_unknown_fields_tolerated() {
+        let json = r#"{
+            "energyweekdayschedule": [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]],
+            "energyweekendschedule": [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]],
+            "energyratestructure": [[{"rate": 0.10}]],
+            "totally_unknown_field": "should be ignored",
+            "another_unknown": 42
+        }"#;
+        let tariff = parse(json);
+        assert!(tariff.is_ok());
+    }
+
+    #[test]
+    fn urdb_rate_values_match_source() {
+        let tariff = parse(PGE_TOU_C_JSON).unwrap();
+
+        // Spot-check specific rate values against the fixture
+        let off_peak = tariff
+            .energy_rates
+            .iter()
+            .find(|r| r.period_name == "period_0")
+            .unwrap();
+        assert!(
+            (off_peak.rate_per_kwh - 0.12).abs() < 0.001,
+            "off-peak rate should be 0.12, got {}",
+            off_peak.rate_per_kwh
+        );
+
+        let partial_peak = tariff
+            .energy_rates
+            .iter()
+            .find(|r| r.period_name == "period_1")
+            .unwrap();
+        assert!(
+            (partial_peak.rate_per_kwh - 0.18).abs() < 0.001,
+            "partial-peak rate should be 0.18, got {}",
+            partial_peak.rate_per_kwh
+        );
+
+        let on_peak = tariff
+            .energy_rates
+            .iter()
+            .find(|r| r.period_name == "period_2")
+            .unwrap();
+        assert!(
+            (on_peak.rate_per_kwh - 0.35).abs() < 0.001,
+            "on-peak rate should be 0.35, got {}",
+            on_peak.rate_per_kwh
+        );
+
+        // Fixed charges
+        assert!(
+            (tariff.fixed_charges.monthly_usd - 10.0).abs() < 0.001,
+            "fixed charge should be 10.0"
+        );
+
+        // Minimum charge
+        assert_eq!(tariff.minimum_charge, Some(10.0));
+
+        // Export mode
+        assert_eq!(tariff.export_rate.mode, ExportMode::NetMetering);
+    }
+}

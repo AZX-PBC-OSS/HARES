@@ -36,3 +36,11 @@ build/
 .claude
 
 .recovery
+
+# Simulation outputs
+dwelling_*.csv
+dwelling_*.parquet
+*.parquet
+
+# Compiled binaries
+conditioned_oracle

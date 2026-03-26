@@ -30,10 +30,14 @@ use std::collections::HashMap;
 use hares_equipment::config::ConfigValue;
 use hares_types::HaresError;
 
+use hares_types::{ChargingStrategy, PlugInPolicy, ScheduleSource};
+
 use crate::Actor;
 use crate::actors::{
-    AlwaysComply, DrCompliance, EquipmentBehavior, IdealThermostat, Occupant, Probabilistic,
+    AlwaysComply, DrCompliance, EquipmentBehavior, EvDriverActor, IdealThermostat, Occupant,
+    Probabilistic,
 };
+use crate::actors::ev_driver::EventDistributionRow;
 
 pub type ActorFactory =
     Box<dyn Fn(ActorConfig) -> Result<Box<dyn Actor>, HaresError> + Send + Sync + 'static>;
@@ -120,6 +124,57 @@ impl ActorRegistry {
                         .with_lighting(target, EquipmentBehavior::default().off_when_away());
                 }
                 Ok(Box::new(occupant))
+            }),
+        );
+
+        registry.register(
+            "EvDriver",
+            Box::new(|config: ActorConfig| {
+                let target = config
+                    .get_str("target")
+                    .ok_or_else(|| {
+                        HaresError::Control("EvDriver requires 'target' parameter".into())
+                    })?
+                    .to_string();
+                let seed = config.get_f64("seed").ok_or_else(|| {
+                    HaresError::Control("EvDriver requires 'seed' parameter".into())
+                })? as u64;
+                let daily_miles_mean = config.get_f64("daily_drive_miles_mean").unwrap_or(30.0);
+                let event_day_ratio = config.get_f64("event_day_ratio").unwrap_or(0.8);
+                let fuel_economy = config.get_f64("fuel_economy_kwh_per_mi").unwrap_or(0.3);
+                let capacity_kwh = config.get_f64("capacity_kwh").unwrap_or(60.0);
+                let avg_speed = config.get_f64("average_speed_mph").unwrap_or(30.0);
+                let arrival_fuzz = config.get_f64("arrival_fuzz_minutes").unwrap_or(15.0);
+                let departure_fuzz = config.get_f64("departure_fuzz_minutes").unwrap_or(15.0);
+
+                let strategy = ChargingStrategy::Immediate { target_soc: 0.9 };
+                let policy = PlugInPolicy::Always;
+
+                let distributions = vec![EventDistributionRow {
+                    arrival_minute: 18 * 60,
+                    duration_minutes: 10 * 60,
+                    start_soc: 0.4,
+                    weight: 1.0,
+                }];
+
+                let actor = EvDriverActor::new(
+                    &config.name,
+                    &target,
+                    strategy,
+                    policy,
+                    ScheduleSource::Constant(daily_miles_mean),
+                    event_day_ratio,
+                    arrival_fuzz,
+                    departure_fuzz,
+                    distributions,
+                    fuel_economy,
+                    capacity_kwh,
+                    avg_speed,
+                    config.get_f64("range_anxiety_miles").unwrap_or(20.0),
+                    config.get_f64("away_charge_fraction").unwrap_or(0.0),
+                    seed,
+                );
+                Ok(Box::new(actor))
             }),
         );
 
