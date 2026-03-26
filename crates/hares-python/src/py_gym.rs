@@ -139,8 +139,13 @@ pub fn batch_step_py(
                 let mut info = HashMap::new();
                 match dwelling.step_core() {
                     Ok(step) => {
-                        let obs = observation_for_fields(dwelling, &observation_fields)
-                            .unwrap_or_else(|_| dwelling.observation().unwrap_or_default());
+                        let obs = match observation_for_fields(dwelling, &observation_fields) {
+                            Ok(o) => o,
+                            Err(_) => {
+                                info.insert("observation_error".to_string(), 1.0);
+                                dwelling.observation().unwrap_or_default()
+                            }
+                        };
                         let reward = -step.net_electric_power_kw;
                         info.insert(
                             "net_electric_power_kw".to_string(),

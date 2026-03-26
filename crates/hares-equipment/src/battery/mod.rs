@@ -11,9 +11,10 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    BatteryChemistry, ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +68,7 @@ const KEY_IMPORT_LIMIT_W: &str = "import_limit_w";
 /// Maximum grid export power while battery is discharging (W). None = unlimited.
 /// OCHRE: `export_limit` parameter on Generator (Battery inherits it).
 const KEY_EXPORT_LIMIT_W: &str = "export_limit_w";
+const KEY_CHEMISTRY: &str = "chemistry";
 
 // ---------------------------------------------------------------------------
 // Physical defaults (Li-NMC, Tesla Powerwall-class)
@@ -262,6 +264,7 @@ pub struct Battery {
     n_series: u32,
     n_parallel: u32,
     cell_resistance_ohm: f64,
+    chemistry: BatteryChemistry,
     ocv_table: OcvTable,
     u_neg_table: UNegTable,
     charging_curve_lut: Option<crate::ndinterp::RegularGridInterpolator>,
@@ -366,6 +369,7 @@ impl Battery {
             n_series: DEFAULT_N_SERIES,
             n_parallel: DEFAULT_N_PARALLEL,
             cell_resistance_ohm: DEFAULT_CELL_RESISTANCE_OHM,
+            chemistry: BatteryChemistry::Nmc,
             ocv_table: OcvTable::default_li_nmc(),
             u_neg_table: UNegTable::default_li_nmc(),
             charging_curve_lut: None,
@@ -664,6 +668,18 @@ impl Equipment for Battery {
         self.cell_resistance_ohm = config
             .get_f64(KEY_CELL_RESISTANCE_OHM)
             .unwrap_or(DEFAULT_CELL_RESISTANCE_OHM);
+
+        self.chemistry = config
+            .get_str(KEY_CHEMISTRY)
+            .and_then(|s| s.parse::<BatteryChemistry>().ok())
+            .unwrap_or(BatteryChemistry::Nmc);
+        if !self.custom_ocv {
+            self.ocv_table = OcvTable::for_chemistry(self.chemistry);
+        }
+        if !self.custom_u_neg {
+            self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
+        }
+
         self.standby_power_w = config
             .get_f64(KEY_STANDBY_POWER_W)
             .unwrap_or(DEFAULT_STANDBY_POWER_W);
@@ -1212,13 +1228,13 @@ impl Equipment for Battery {
     }
 
     fn reset_ocv_table(&mut self) -> crate::Result<()> {
-        self.ocv_table = OcvTable::default_li_nmc();
+        self.ocv_table = OcvTable::for_chemistry(self.chemistry);
         self.custom_ocv = false;
         Ok(())
     }
 
     fn reset_u_neg_table(&mut self) -> crate::Result<()> {
-        self.u_neg_table = UNegTable::default_li_nmc();
+        self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
         self.custom_u_neg = false;
         Ok(())
     }
@@ -1789,21 +1805,20 @@ mod tests {
     fn ocv_interpolation_at_known_points() {
         let table = OcvTable::default_li_nmc();
 
-        // Exact table points (NREL SSC / OCHRE calibrated values)
-        assert!((table.voltage_at_soc(0.0) - 3.0000).abs() < 1e-10);
-        assert!((table.voltage_at_soc(0.5) - 3.6876).abs() < 1e-10);
-        assert!((table.voltage_at_soc(1.0) - 4.1934).abs() < 1e-10);
+        // Exact table endpoints (PyBaMM Chen2020)
+        assert!((table.voltage_at_soc(0.0) - 2.5000).abs() < 1e-10);
+        assert!((table.voltage_at_soc(1.0) - 4.2000).abs() < 1e-10);
 
-        // Interpolated midpoint between 0.0 and 0.1: (3.0000 + 3.4679) / 2 = 3.23395
-        let v_05 = table.voltage_at_soc(0.05);
+        // Mid-SOC should be in a reasonable NMC range
+        let v50 = table.voltage_at_soc(0.5);
         assert!(
-            (v_05 - 3.23395).abs() < 1e-10,
-            "interpolated OCV at 0.05: {v_05}"
+            (3.70..=3.80).contains(&v50),
+            "NMC OCV at SOC=0.5 should be ~3.75V, got {v50}"
         );
 
         // Clamped below/above table bounds
-        assert!((table.voltage_at_soc(-0.5) - 3.0000).abs() < 1e-10);
-        assert!((table.voltage_at_soc(1.5) - 4.1934).abs() < 1e-10);
+        assert!((table.voltage_at_soc(-0.5) - 2.5000).abs() < 1e-10);
+        assert!((table.voltage_at_soc(1.5) - 4.2000).abs() < 1e-10);
     }
 
     #[test]
@@ -2886,17 +2901,12 @@ mod tests {
     #[test]
     fn u_neg_interpolation_at_known_points() {
         let table = UNegTable::default_li_nmc();
-        assert!((table.potential_at_soc(0.0) - 1.2868).abs() < 1e-10);
-        assert!((table.potential_at_soc(1.0) - 0.0859).abs() < 1e-10);
-        // Midpoint between 0.0 (1.2868) and 0.1 (0.2420): average = 0.7644
-        let mid = table.potential_at_soc(0.05);
-        assert!(
-            (mid - (1.2868 + 0.2420) / 2.0).abs() < 1e-10,
-            "U_neg at 0.05 should interpolate: got {mid}"
-        );
+        // PyBaMM Chen2020 graphite anode endpoints
+        assert!((table.potential_at_soc(0.0) - 1.1054).abs() < 1e-3);
+        assert!((table.potential_at_soc(1.0) - 0.0920).abs() < 1e-3);
         // Clamped below / above bounds
-        assert!((table.potential_at_soc(-0.1) - 1.2868).abs() < 1e-10);
-        assert!((table.potential_at_soc(1.5) - 0.0859).abs() < 1e-10);
+        assert!((table.potential_at_soc(-0.1) - table.potential_at_soc(0.0)).abs() < 1e-10);
+        assert!((table.potential_at_soc(1.5) - table.potential_at_soc(1.0)).abs() < 1e-10);
     }
 
     /// After zero simulated time, capacity fade must be exactly 0.0 (fresh cell).
@@ -3156,31 +3166,23 @@ mod tests {
         );
     }
 
-    /// All 11 calibrated points of the default Li-NMC OCV table must match
-    /// the NREL SSC / OCHRE reference values exactly (within 1e-10 V).
+    /// NMC OCV table grid points must exactly match the embedded array values.
     #[test]
-    fn ocv_table_all_11_calibrated_points_exact() {
+    fn ocv_table_grid_points_exact() {
         let table = OcvTable::default_li_nmc();
+        assert_eq!(table.soc_points.len(), 51);
+        assert_eq!(table.voltage_v.len(), 51);
 
-        let expected: [(f64, f64); 11] = [
-            (0.0, 3.0000),
-            (0.1, 3.4679),
-            (0.2, 3.5394),
-            (0.3, 3.5950),
-            (0.4, 3.6453),
-            (0.5, 3.6876),
-            (0.6, 3.7469),
-            (0.7, 3.8400),
-            (0.8, 3.9521),
-            (0.9, 4.0668),
-            (1.0, 4.1934),
-        ];
+        // Spot-check boundary and mid points (PyBaMM Chen2020)
+        assert!((table.voltage_at_soc(0.0) - 2.5000).abs() < 1e-4);
+        assert!((table.voltage_at_soc(1.0) - 4.2000).abs() < 1e-4);
 
-        for (soc, expected_v) in expected {
-            let actual_v = table.voltage_at_soc(soc);
+        // Every grid point must interpolate to its exact value
+        for (i, (soc, v)) in table.soc_points.iter().zip(table.voltage_v.iter()).enumerate() {
+            let actual = table.voltage_at_soc(*soc);
             assert!(
-                (actual_v - expected_v).abs() < 1e-10,
-                "OCV at SOC {soc:.1}: expected {expected_v:.4} V, got {actual_v:.10} V"
+                (actual - v).abs() < 1e-10,
+                "grid point {i} SOC={soc:.2}: expected {v:.6}, got {actual:.10}"
             );
         }
     }
@@ -3289,9 +3291,10 @@ mod tests {
         let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
         let charging_kw = bat.telemetry().get("active_power_kw").unwrap_or(0.0) - standby_kw;
         // Should be close to 5 kW (max_charge_kw), not capped lower.
+        // Ohmic losses from the OCV model reduce effective power slightly.
         assert!(
-            charging_kw > 4.9,
-            "without import limit, charge power {charging_kw:.4} kW should reach max_charge_kw"
+            charging_kw > 4.5,
+            "without import limit, charge power {charging_kw:.4} kW should reach near max_charge_kw"
         );
     }
 
@@ -3509,7 +3512,7 @@ mod tests {
         bat.set_ocv_table(custom).unwrap();
         bat.reset_ocv_table().unwrap();
         let v = bat.ocv_table.voltage_at_soc(0.0);
-        assert!((v - 3.0).abs() < 1e-3, "should be default NMC voltage");
+        assert!((v - 2.5).abs() < 1e-3, "should be default NMC voltage at SOC=0");
     }
 
     #[test]
@@ -3520,7 +3523,63 @@ mod tests {
         bat.set_u_neg_table(custom).unwrap();
         bat.reset_u_neg_table().unwrap();
         let p = bat.u_neg_table.potential_at_soc(0.0);
-        assert!((p - 1.2868).abs() < 1e-3, "should be default NMC U_neg");
+        assert!((p - 1.1054).abs() < 1e-3, "should be default NMC U_neg at SOC=0");
+    }
+
+    #[test]
+    fn lfp_chemistry_selects_lfp_ocv_on_init() {
+        let mut config = battery_config(&[]);
+        config
+            .raw_config
+            .insert(KEY_CHEMISTRY.to_string(), ConfigValue::Text("lfp".to_string()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let v = bat.ocv_table.voltage_at_soc(0.5);
+        let lfp_expected = OcvTable::default_lfp().voltage_at_soc(0.5);
+        assert!(
+            (v - lfp_expected).abs() < 1e-9,
+            "LFP battery should use LFP OCV, got {v}, expected {lfp_expected}"
+        );
+    }
+
+    #[test]
+    fn reset_ocv_on_lfp_battery_restores_lfp_default() {
+        let mut config = battery_config(&[]);
+        config
+            .raw_config
+            .insert(KEY_CHEMISTRY.to_string(), ConfigValue::Text("lfp".to_string()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
+        bat.set_ocv_table(custom).unwrap();
+        bat.reset_ocv_table().unwrap();
+
+        let v = bat.ocv_table.voltage_at_soc(0.5);
+        let lfp_expected = OcvTable::default_lfp().voltage_at_soc(0.5);
+        assert!(
+            (v - lfp_expected).abs() < 1e-9,
+            "reset should restore LFP default, not NMC. got {v}, expected {lfp_expected}"
+        );
+    }
+
+    #[test]
+    fn custom_ocv_not_overwritten_by_chemistry_on_init() {
+        let mut config = battery_config(&[]);
+        config
+            .raw_config
+            .insert(KEY_CHEMISTRY.to_string(), ConfigValue::Text("lfp".to_string()));
+        let mut bat = Battery::new(config.clone());
+        let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
+        bat.set_ocv_table(custom).unwrap();
+        bat.init(&config, &base_env()).unwrap();
+
+        let v = bat.ocv_table.voltage_at_soc(0.5);
+        assert!(
+            (v - 4.0).abs() < 1e-9,
+            "custom OCV should survive init, got {v}"
+        );
     }
 
     #[test]

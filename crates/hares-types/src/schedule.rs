@@ -4,11 +4,12 @@ use chrono::{Datelike, Timelike, Weekday};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::Distribution;
+use serde::{Deserialize, Serialize};
 
 use crate::{DomainId, EnvironmentState, HaresError};
 
 /// Which days a [`TimeWindow`] applies to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DayFilter {
     /// Every day of the week.
     Any,
@@ -51,7 +52,7 @@ impl DayFilter {
 /// When used inside [`ScheduleSource::TimeWindows`], windows are evaluated in
 /// declaration order and the first match wins. Overlapping windows are allowed
 /// — use ordering to express priority.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TimeWindow {
     pub day: DayFilter,
     pub start_minute: u16,
@@ -167,7 +168,7 @@ pub const fn schedule_domain_id() -> DomainId {
 }
 
 /// Out-of-range index behavior for schedule-backed sources.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryPolicy {
     /// Clamp indices to the first/last valid sample.
     Clamp,
@@ -178,7 +179,7 @@ pub enum BoundaryPolicy {
 }
 
 /// Parameters for a specific probability distribution.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DistributionKind {
     /// Gaussian (normal): result = mean + std_dev × N(0,1).
     Gaussian { mean: f64, std_dev: f64 },
@@ -674,6 +675,102 @@ fn resolve_index(raw_idx: i64, len: usize, boundary: BoundaryPolicy) -> Result<u
     Ok(idx as usize)
 }
 
+/// Which season a tariff rate applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum SeasonFilter {
+    #[default]
+    All,
+    Summer,
+    Winter,
+}
+
+impl SeasonFilter {
+    /// Returns `true` if the given 1-indexed month falls within this season.
+    ///
+    /// - `Summer` = June through September (months 6..=9)
+    /// - `Winter` = October through May (months 1..=5 and 10..=12)
+    /// - `All` = always true
+    ///
+    /// Debug-asserts that `month` is in 1..=12; in release, returns `false`
+    /// for out-of-range months.
+    pub fn contains_month(self, month: u8) -> bool {
+        debug_assert!(
+            (1..=12).contains(&month),
+            "month out of range: {month}"
+        );
+        if !(1..=12).contains(&month) {
+            return false;
+        }
+        match self {
+            Self::All => true,
+            Self::Summer => (6..=9).contains(&month),
+            Self::Winter => !(6..=9).contains(&month),
+        }
+    }
+}
+
+/// Configurable summer/winter boundary for tariffs that don't use the
+/// default June–September split. Supports wrapping (e.g. southern hemisphere
+/// where summer might be Nov–Feb).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SeasonalSplit {
+    /// First month of summer (1-indexed, inclusive).
+    pub summer_start_month: u8,
+    /// Last month of summer (1-indexed, inclusive).
+    pub summer_end_month: u8,
+}
+
+impl SeasonalSplit {
+    /// Create a new `SeasonalSplit`, validating that both months are in 1..=12.
+    pub fn new(summer_start_month: u8, summer_end_month: u8) -> Result<Self, HaresError> {
+        if !(1..=12).contains(&summer_start_month) || !(1..=12).contains(&summer_end_month) {
+            return Err(HaresError::Equipment(format!(
+                "SeasonalSplit months must be 1..=12, got start={summer_start_month}, end={summer_end_month}"
+            )));
+        }
+        Ok(Self {
+            summer_start_month,
+            summer_end_month,
+        })
+    }
+
+    /// Returns `true` if the given 1-indexed month is in the summer range.
+    ///
+    /// Handles wrapping: if `summer_start_month > summer_end_month` the range
+    /// spans the year boundary (e.g. start=11, end=2 → Nov, Dec, Jan, Feb).
+    pub fn is_summer(&self, month: u8) -> bool {
+        debug_assert!(
+            (1..=12).contains(&month),
+            "month out of range: {month}"
+        );
+        if !(1..=12).contains(&month) {
+            return false;
+        }
+        if self.summer_start_month <= self.summer_end_month {
+            month >= self.summer_start_month && month <= self.summer_end_month
+        } else {
+            month >= self.summer_start_month || month <= self.summer_end_month
+        }
+    }
+}
+
+/// How often billing periods reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum BillingCycle {
+    #[default]
+    Monthly,
+    /// Custom billing period length in days.
+    Custom(u32),
+}
+
+/// A named time-of-use period with day/time windows and season applicability.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TouPeriod {
+    pub name: String,
+    pub schedule: Vec<TimeWindow>,
+    pub season: SeasonFilter,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -685,8 +782,8 @@ mod tests {
     use crate::{DomainUpdate, ZoneId, test_utils::default_env};
 
     use super::{
-        BoundaryPolicy, DayFilter, DistributionKind, SCHEDULE_DOMAIN_ID, ScheduleSource,
-        TimeWindow,
+        BillingCycle, BoundaryPolicy, DayFilter, DistributionKind, SCHEDULE_DOMAIN_ID,
+        ScheduleSource, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod,
     };
 
     #[test]
@@ -1980,5 +2077,124 @@ mod tests {
             None,
             [26_u8; 32],
         );
+    }
+
+    #[test]
+    fn season_filter_contains_month_all() {
+        for m in 1..=12 {
+            assert!(SeasonFilter::All.contains_month(m), "All should match month {m}");
+        }
+    }
+
+    #[test]
+    fn season_filter_contains_month_summer() {
+        for m in 1..=12 {
+            let expected = (6..=9).contains(&m);
+            assert_eq!(
+                SeasonFilter::Summer.contains_month(m),
+                expected,
+                "Summer mismatch for month {m}"
+            );
+        }
+    }
+
+    #[test]
+    fn season_filter_contains_month_winter() {
+        for m in 1..=12 {
+            let expected = !(6..=9).contains(&m);
+            assert_eq!(
+                SeasonFilter::Winter.contains_month(m),
+                expected,
+                "Winter mismatch for month {m}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "month out of range")]
+    fn season_filter_debug_asserts_invalid_month_zero() {
+        SeasonFilter::All.contains_month(0);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "month out of range")]
+    fn season_filter_debug_asserts_invalid_month_thirteen() {
+        SeasonFilter::All.contains_month(13);
+    }
+
+    #[test]
+    fn seasonal_split_is_summer_normal_range() {
+        let split = SeasonalSplit::new(6, 9).unwrap();
+        assert!(split.is_summer(6));
+        assert!(split.is_summer(9));
+        assert!(!split.is_summer(5));
+        assert!(!split.is_summer(10));
+    }
+
+    #[test]
+    fn seasonal_split_is_summer_wrapping() {
+        let split = SeasonalSplit::new(11, 2).unwrap();
+        assert!(split.is_summer(11));
+        assert!(split.is_summer(12));
+        assert!(split.is_summer(1));
+        assert!(split.is_summer(2));
+        assert!(!split.is_summer(3));
+        assert!(!split.is_summer(10));
+    }
+
+    #[test]
+    fn seasonal_split_rejects_invalid_months() {
+        assert!(SeasonalSplit::new(0, 9).is_err());
+        assert!(SeasonalSplit::new(6, 13).is_err());
+        assert!(SeasonalSplit::new(0, 0).is_err());
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn season_filter_invalid_month_returns_false_in_release() {
+        assert!(!SeasonFilter::All.contains_month(0));
+        assert!(!SeasonFilter::All.contains_month(13));
+        assert!(!SeasonFilter::Summer.contains_month(0));
+        assert!(!SeasonFilter::Winter.contains_month(255));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn seasonal_split_invalid_month_returns_false_in_release() {
+        let split = SeasonalSplit::new(6, 9).unwrap();
+        assert!(!split.is_summer(0));
+        assert!(!split.is_summer(13));
+    }
+
+    #[test]
+    fn billing_cycle_default_is_monthly() {
+        assert_eq!(BillingCycle::default(), BillingCycle::Monthly);
+    }
+
+    #[test]
+    fn billing_cycle_serde_roundtrip() {
+        let monthly = BillingCycle::Monthly;
+        let json = serde_json::to_string(&monthly).unwrap();
+        let back: BillingCycle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, monthly);
+
+        let custom = BillingCycle::Custom(14);
+        let json = serde_json::to_string(&custom).unwrap();
+        let back: BillingCycle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, custom);
+    }
+
+    #[test]
+    fn tou_period_serde_roundtrip() {
+        let period = TouPeriod {
+            name: "on-peak".to_string(),
+            schedule: vec![TimeWindow::new(DayFilter::Weekdays, 780, 1260, 0.25)],
+            season: SeasonFilter::Summer,
+        };
+        let json = serde_json::to_string(&period).unwrap();
+        let back: TouPeriod = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, period);
     }
 }

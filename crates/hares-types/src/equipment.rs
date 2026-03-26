@@ -8,7 +8,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ControlCapabilities, ZoneId};
+use crate::{ControlCapabilities, DayFilter, ZoneId};
 
 /// Stable equipment instance identifier.
 #[derive(
@@ -370,6 +370,171 @@ pub enum ChargingStrategy {
     QuickThenWait { partial_soc: f64 },
     PreDeparture { target_soc: f64 },
     TouAware { target_soc: f64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum GridExportRule {
+    SolarOnly,
+    #[default]
+    Unrestricted,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum StormWatchTrigger {
+    #[default]
+    ManualEnable,
+    WeatherSignal,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum BmsAction {
+    Charge { rate_fraction: f64 },
+    Discharge { rate_fraction: f64 },
+    Idle,
+    Hold { target_soc: f64 },
+}
+
+impl BmsAction {
+    pub fn validate(&self) -> Result<(), crate::HaresError> {
+        match self {
+            Self::Charge { rate_fraction } | Self::Discharge { rate_fraction } => {
+                validate_fraction("rate_fraction", *rate_fraction)
+            }
+            Self::Hold { target_soc } => validate_fraction("target_soc", *target_soc),
+            Self::Idle => Ok(()),
+        }
+    }
+}
+
+/// Day/time range for BMS scheduling (no value/noise payload).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BmsTimeWindow {
+    pub day: DayFilter,
+    pub start_minute: u16,
+    pub end_minute: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BmsScheduleWindow {
+    pub time_window: BmsTimeWindow,
+    pub action: BmsAction,
+}
+
+/// Battery management system operating mode.
+///
+/// Configures how the `BatteryManagementActor` dispatches charge/discharge
+/// control signals relative to PV production, grid prices, and backup needs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub enum BmsMode {
+    SelfConsumption {
+        min_soc: f64,
+        max_soc: f64,
+        solar_only_charging: bool,
+    },
+    TimeOfUseOptimization {
+        reserve_soc: f64,
+        charge_threshold_percentile: f64,
+        discharge_threshold_percentile: f64,
+        solar_only_charging: bool,
+    },
+    BackupReserve {
+        target_soc: f64,
+        charge_from_grid: bool,
+        charge_rate_fraction: f64,
+    },
+    DemandResponse {
+        base_mode: Box<BmsMode>,
+        dr_discharge_rate: f64,
+        min_soc_during_dr: f64,
+    },
+    Scheduled {
+        windows: Vec<BmsScheduleWindow>,
+    },
+    StormWatch {
+        target_soc: f64,
+        trigger: StormWatchTrigger,
+        base_mode: Box<BmsMode>,
+    },
+    #[default]
+    Manual,
+}
+
+impl BmsMode {
+    /// Validate all fraction/SoC fields are finite and in `[0.0, 1.0]`.
+    pub fn validate(&self) -> Result<(), crate::HaresError> {
+        match self {
+            Self::SelfConsumption {
+                min_soc, max_soc, ..
+            } => {
+                validate_fraction("min_soc", *min_soc)?;
+                validate_fraction("max_soc", *max_soc)?;
+                if min_soc > max_soc {
+                    return Err(crate::HaresError::Equipment(
+                        "min_soc must be <= max_soc".into(),
+                    ));
+                }
+                Ok(())
+            }
+            Self::TimeOfUseOptimization {
+                reserve_soc,
+                charge_threshold_percentile,
+                discharge_threshold_percentile,
+                ..
+            } => {
+                validate_fraction("reserve_soc", *reserve_soc)?;
+                validate_fraction(
+                    "charge_threshold_percentile",
+                    *charge_threshold_percentile,
+                )?;
+                validate_fraction(
+                    "discharge_threshold_percentile",
+                    *discharge_threshold_percentile,
+                )
+            }
+            Self::BackupReserve {
+                target_soc,
+                charge_rate_fraction,
+                ..
+            } => {
+                validate_fraction("target_soc", *target_soc)?;
+                validate_fraction("charge_rate_fraction", *charge_rate_fraction)
+            }
+            Self::DemandResponse {
+                base_mode,
+                dr_discharge_rate,
+                min_soc_during_dr,
+            } => {
+                validate_fraction("dr_discharge_rate", *dr_discharge_rate)?;
+                validate_fraction("min_soc_during_dr", *min_soc_during_dr)?;
+                base_mode.validate()
+            }
+            Self::Scheduled { windows } => {
+                for w in windows {
+                    w.action.validate()?;
+                }
+                Ok(())
+            }
+            Self::StormWatch {
+                target_soc,
+                base_mode,
+                ..
+            } => {
+                validate_fraction("target_soc", *target_soc)?;
+                base_mode.validate()
+            }
+            Self::Manual => Ok(()),
+        }
+    }
+}
+
+fn validate_fraction(name: &str, v: f64) -> Result<(), crate::HaresError> {
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        return Err(crate::HaresError::Equipment(format!(
+            "{name} must be finite and in [0.0, 1.0], got {v}"
+        )));
+    }
+    Ok(())
 }
 
 /// Describes one telemetry channel exposed by an equipment model.
@@ -809,5 +974,202 @@ mod tests {
             decoded,
             ChargingStrategy::LowSoc { threshold: 0.15, target_soc: 0.7 }
         );
+    }
+
+    #[test]
+    fn bms_mode_default_is_manual() {
+        assert_eq!(BmsMode::default(), BmsMode::Manual);
+    }
+
+    #[test]
+    fn bms_mode_self_consumption_serde() {
+        let mode = BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: true,
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: BmsMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn bms_mode_tou_optimization_serde() {
+        let mode = BmsMode::TimeOfUseOptimization {
+            reserve_soc: 0.2,
+            charge_threshold_percentile: 0.25,
+            discharge_threshold_percentile: 0.75,
+            solar_only_charging: false,
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: BmsMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn bms_mode_backup_reserve_serde() {
+        let mode = BmsMode::BackupReserve {
+            target_soc: 0.8,
+            charge_from_grid: true,
+            charge_rate_fraction: 0.5,
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: BmsMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn bms_mode_demand_response_nested_serde() {
+        let mode = BmsMode::DemandResponse {
+            base_mode: Box::new(BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.9,
+                solar_only_charging: false,
+            }),
+            dr_discharge_rate: 0.8,
+            min_soc_during_dr: 0.15,
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: BmsMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn bms_mode_scheduled_serde() {
+        let mode = BmsMode::Scheduled {
+            windows: vec![BmsScheduleWindow {
+                time_window: BmsTimeWindow {
+                    day: crate::DayFilter::Weekdays,
+                    start_minute: 0,
+                    end_minute: 360,
+                },
+                action: BmsAction::Charge { rate_fraction: 1.0 },
+            }],
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: BmsMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn bms_mode_storm_watch_nested_serde() {
+        let mode = BmsMode::StormWatch {
+            target_soc: 1.0,
+            trigger: StormWatchTrigger::WeatherSignal,
+            base_mode: Box::new(BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: true,
+            }),
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: BmsMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn bms_mode_deep_nesting() {
+        let mode = BmsMode::StormWatch {
+            target_soc: 1.0,
+            trigger: StormWatchTrigger::ManualEnable,
+            base_mode: Box::new(BmsMode::DemandResponse {
+                base_mode: Box::new(BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.9,
+                    solar_only_charging: false,
+                }),
+                dr_discharge_rate: 0.7,
+                min_soc_during_dr: 0.2,
+            }),
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: BmsMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn grid_export_rule_default_is_unrestricted() {
+        assert_eq!(GridExportRule::default(), GridExportRule::Unrestricted);
+    }
+
+    #[test]
+    fn bms_mode_manual_serde() {
+        let mode = BmsMode::Manual;
+        let json = serde_json::to_string(&mode).unwrap();
+        assert_eq!(json, r#""Manual""#);
+        let back: BmsMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn grid_export_rule_serde() {
+        for rule in [
+            GridExportRule::SolarOnly,
+            GridExportRule::Unrestricted,
+            GridExportRule::Disabled,
+        ] {
+            let json = serde_json::to_string(&rule).unwrap();
+            let back: GridExportRule = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, rule);
+        }
+    }
+
+    #[test]
+    fn bms_mode_validate_rejects_invalid_fractions() {
+        let bad_soc = BmsMode::SelfConsumption {
+            min_soc: -0.1,
+            max_soc: 0.9,
+            solar_only_charging: false,
+        };
+        assert!(bad_soc.validate().is_err());
+
+        let nan_rate = BmsMode::BackupReserve {
+            target_soc: 0.8,
+            charge_from_grid: true,
+            charge_rate_fraction: f64::NAN,
+        };
+        assert!(nan_rate.validate().is_err());
+
+        let over_one = BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 1.5,
+            solar_only_charging: false,
+        };
+        assert!(over_one.validate().is_err());
+    }
+
+    #[test]
+    fn bms_mode_validate_rejects_inverted_soc() {
+        let inverted = BmsMode::SelfConsumption {
+            min_soc: 0.9,
+            max_soc: 0.1,
+            solar_only_charging: false,
+        };
+        assert!(inverted.validate().is_err());
+    }
+
+    #[test]
+    fn bms_mode_validate_accepts_valid() {
+        let mode = BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.9,
+            solar_only_charging: false,
+        };
+        assert!(mode.validate().is_ok());
+
+        assert!(BmsMode::Manual.validate().is_ok());
+    }
+
+    #[test]
+    fn bms_action_validate_rejects_invalid() {
+        assert!(BmsAction::Charge { rate_fraction: -0.1 }.validate().is_err());
+        assert!(BmsAction::Discharge { rate_fraction: 1.1 }.validate().is_err());
+        assert!(BmsAction::Hold { target_soc: f64::INFINITY }.validate().is_err());
+    }
+
+    #[test]
+    fn bms_action_validate_accepts_valid() {
+        assert!(BmsAction::Charge { rate_fraction: 0.5 }.validate().is_ok());
+        assert!(BmsAction::Idle.validate().is_ok());
     }
 }

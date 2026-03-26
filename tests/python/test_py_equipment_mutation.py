@@ -305,6 +305,106 @@ class TestMultipleMutations:
         assert "time" in result
 
 
+class TestBatteryConfigParams:
+    def test_soc_limits_add_and_step(self):
+        from ochre_next import Battery
+
+        dw = _make_dwelling()
+        bat = Battery("TestBat", 10.0, initial_soc=0.8, min_soc=0.15, max_soc=0.95)
+        dw.add_battery(bat)
+        result = dw.step()
+        assert "time" in result
+
+    def test_soc_limits_round_trip_via_getters(self):
+        from ochre_next import Battery
+
+        bat = Battery("B", 10.0, initial_soc=0.8, min_soc=0.15, max_soc=0.95)
+        assert bat.initial_soc == 0.8
+        assert bat.min_soc == 0.15
+        assert bat.max_soc == 0.95
+
+    def test_chemistry_lfp_add_and_step(self):
+        from ochre_next import Battery, BatteryChemistry
+
+        dw = _make_dwelling()
+        bat = Battery("TestBat", 10.0, chemistry=BatteryChemistry.Lfp)
+        dw.add_battery(bat)
+        result = dw.step()
+        assert "time" in result
+
+    def test_chemistry_getter_round_trips(self):
+        from ochre_next import Battery, BatteryChemistry
+
+        bat = Battery("B", 10.0, chemistry=BatteryChemistry.Lfp)
+        assert bat.chemistry == BatteryChemistry.Lfp
+
+    def test_standby_and_self_discharge_add_and_step(self):
+        from ochre_next import Battery
+
+        dw = _make_dwelling()
+        bat = Battery("TestBat", 10.0, standby_power_w=10.0, self_discharge_pct_per_day=0.05)
+        dw.add_battery(bat)
+        result = dw.step()
+        assert "time" in result
+
+    def test_standby_and_self_discharge_getters(self):
+        from ochre_next import Battery
+
+        bat = Battery("B", 10.0, standby_power_w=10.0, self_discharge_pct_per_day=0.05)
+        assert bat.standby_power_w == 10.0
+        assert bat.self_discharge_pct_per_day == 0.05
+
+    def test_repr_defaults_only(self):
+        from ochre_next import Battery
+
+        bat = Battery("MyBat", 5.0)
+        r = repr(bat)
+        assert "MyBat" in r
+        assert "capacity_kwh=5" in r
+        assert "initial_soc" not in r
+        assert "chemistry" not in r
+
+    def test_repr_with_params(self):
+        from ochre_next import Battery, BatteryChemistry
+
+        bat = Battery(
+            "MyBat",
+            5.0,
+            chemistry=BatteryChemistry.Nmc,
+            initial_soc=0.5,
+            standby_power_w=5.0,
+        )
+        r = repr(bat)
+        assert "initial_soc=0.5" in r
+        assert "standby_power_w=5" in r
+        assert "Nmc" in r
+
+    def test_inverted_thermal_params_handled_gracefully(self):
+        """Inverted min_charge_temp_c > full_power_temp_c must not silently corrupt state.
+
+        The Rust equipment should either clamp, swap, or return an error. What it must
+        not do is proceed with undefined behaviour. We verify by confirming the
+        simulation either raises a clear exception or completes a step without producing
+        a NaN power value.
+        """
+        from ochre_next import Battery
+
+        dw = _make_dwelling()
+        bat = Battery("TestBat", 10.0, min_charge_temp_c=5.0, full_power_temp_c=0.0)
+        try:
+            dw.add_battery(bat)
+            result = dw.step()
+            assert "time" in result
+            tel = dw.telemetry().equipment()
+            names = tel["names"]
+            powers = tel["power_kw"]
+            idx = names.index("TestBat")
+            import math
+            assert not math.isnan(powers[idx]), "Battery power is NaN with inverted thermal params"
+        except (ValueError, RuntimeError):
+            pass  # explicit error from Rust is also acceptable
+
+
 class TestCheckpointRoundTrip:
     @pytest.mark.xfail(
         reason="checkpoint deserialization does not yet support dynamically added equipment"

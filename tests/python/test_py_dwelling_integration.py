@@ -67,6 +67,20 @@ class TestFullSimulation:
         mode_cols = [c for c in cols if c.endswith("Mode (-)")]
         assert len(mode_cols) > 0
 
+    def test_verbosity_2_includes_outdoor_temp(self):
+        dw = _init_dwelling(output_verbosity=2)
+        df = dw.simulate()
+        assert "Outdoor Dry Bulb (C)" in df.columns
+        col = df["Outdoor Dry Bulb (C)"]
+        assert col.null_count() == 0
+        assert col.min() > -50.0
+        assert col.max() < 60.0
+
+    def test_verbosity_1_excludes_outdoor_temp(self):
+        dw = _init_dwelling(output_verbosity=1)
+        df = dw.simulate()
+        assert "Outdoor Dry Bulb (C)" not in df.columns
+
 
 # ---------------------------------------------------------------------------
 # Step-by-step

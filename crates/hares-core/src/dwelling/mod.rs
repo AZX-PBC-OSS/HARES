@@ -1852,6 +1852,11 @@ impl Dwelling {
             row[idx] = *temp_c;
         }
 
+        // Outdoor temperature (verbosity >= 2).
+        if let Some(&idx) = self.output_column_index.get("Outdoor Dry Bulb (C)") {
+            row[idx] = self.latest_env.weather.outdoor_temp_c;
+        }
+
         // Envelope component gains from the thermal solver (verbosity >= 6).
         let gains = self.thermal_solver.component_gains();
         let envelope_cols: &[(&str, f64)] = &[

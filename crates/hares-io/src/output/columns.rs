@@ -31,6 +31,7 @@ const GAS_POWER_SUFFIX: &str = "Gas Power (therms/hour)";
 const ZONE_TEMP_PREFIX: &str = "Temperature -";
 const ZONE_TEMP_UNIT: &str = "(C)";
 const ZONE_UNMET_LOAD_COL: &str = "Unmet HVAC Load (C)";
+const OUTDOOR_TEMP_COL: &str = "Outdoor Dry Bulb (C)";
 
 /// Equipment state column suffixes for verbosity 3.
 const MODE_SUFFIX: &str = "Mode (-)";
@@ -91,6 +92,7 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
             true,
         ));
         fields.push(Field::new(ZONE_UNMET_LOAD_COL, DataType::Float64, true));
+        fields.push(Field::new(OUTDOOR_TEMP_COL, DataType::Float64, true));
     }
 
     if verbosity >= 3 {
@@ -414,11 +416,24 @@ mod tests {
     }
 
     #[test]
-    fn verbosity_2_adds_zone_columns() {
+    fn verbosity_2_adds_zone_and_outdoor_temp_columns() {
         let schema = build_schema(&[], 2);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(names.contains(&"Temperature - Indoor (C)"));
         assert!(names.contains(&"Unmet HVAC Load (C)"));
+        assert!(names.contains(&"Outdoor Dry Bulb (C)"));
+    }
+
+    #[test]
+    fn verbosity_0_and_1_exclude_outdoor_temp() {
+        for v in [0, 1] {
+            let schema = build_schema(&[], v);
+            let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            assert!(
+                !names.contains(&"Outdoor Dry Bulb (C)"),
+                "verbosity {v} should not include outdoor temp"
+            );
+        }
     }
 
     #[test]

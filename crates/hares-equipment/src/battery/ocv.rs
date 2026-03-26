@@ -1,7 +1,22 @@
 //! Open-circuit voltage and negative electrode potential tables.
+//!
+//! Default OCV curves are 51-point tables generated from PyBaMM electrochemical
+//! models. Users can inject higher-fidelity PyBaMM-generated curves at runtime
+//! via `set_ocv_table()` / `set_charging_curve_lut()`.
+//!
+//! Sources:
+//! - NMC: Chen2020 (NMC811/Graphite, LG M50)
+//! - LFP: Prada2013 (LFP/Graphite, Afshar2017 LFP OCP)
+//! - NCA: NCA_Kim2011 (NCA/Graphite)
+//! - LTO: Chen2020 positive + Colclasure2011 LTO negative
 
-use hares_types::HaresError;
+use hares_types::{BatteryChemistry, HaresError};
 use serde::{Deserialize, Serialize};
+
+/// 51-point SOC grid from 0.00 to 1.00 in 0.02 steps.
+fn soc_51() -> Vec<f64> {
+    (0..=50).map(|i| i as f64 / 50.0).collect()
+}
 
 // ---------------------------------------------------------------------------
 // OCV table (open-circuit voltage vs SOC)
@@ -15,14 +30,76 @@ pub struct OcvTable {
 }
 
 impl OcvTable {
-    /// 11-point Li-NMC OCV curve (per cell).
-    /// SOC 0.0 .. 1.0 in 0.1 steps. Calibrated values from NREL SSC / OCHRE.
+    /// NMC811/Graphite OCV curve (PyBaMM Chen2020, LG M50 cell).
     pub fn default_li_nmc() -> Self {
         Self {
-            soc_points: vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            soc_points: soc_51(),
             voltage_v: vec![
-                3.0000, 3.4679, 3.5394, 3.5950, 3.6453, 3.6876, 3.7469, 3.8400, 3.9521, 4.0668,
-                4.1934,
+                2.500000, 2.862492, 3.050397, 3.155289, 3.227625, 3.295907, 3.363684, 3.415730,
+                3.447976, 3.468680, 3.485189, 3.501360, 3.518984, 3.538641, 3.559880, 3.581446,
+                3.601934, 3.620510, 3.637151, 3.652397, 3.667007, 3.681736, 3.697223, 3.713901,
+                3.731881, 3.750874, 3.770235, 3.789202, 3.807216, 3.824171, 3.840577, 3.857772,
+                3.877927, 3.902007, 3.926551, 3.947906, 3.966758, 3.985030, 4.003734, 4.022955,
+                4.042080, 4.059913, 4.074914, 4.085780, 4.092387, 4.096656, 4.102503, 4.114372,
+                4.135071, 4.164486, 4.200000,
+            ],
+        }
+    }
+
+    /// Select the default OCV curve for a given battery chemistry.
+    pub fn for_chemistry(chem: BatteryChemistry) -> Self {
+        match chem {
+            BatteryChemistry::Nmc => Self::default_li_nmc(),
+            BatteryChemistry::Lfp => Self::default_lfp(),
+            BatteryChemistry::Nca => Self::default_nca(),
+            BatteryChemistry::Lto => Self::default_lto(),
+        }
+    }
+
+    /// LFP/Graphite OCV curve (PyBaMM Prada2013, Afshar2017 LFP OCP).
+    pub fn default_lfp() -> Self {
+        Self {
+            soc_points: soc_51(),
+            voltage_v: vec![
+                2.000000, 2.460021, 2.707735, 2.843246, 2.922251, 2.978092, 3.030822, 3.084331,
+                3.127731, 3.154356, 3.168489, 3.176543, 3.182651, 3.188982, 3.196598, 3.205821,
+                3.216305, 3.227151, 3.237269, 3.245828, 3.252499, 3.257391, 3.260841, 3.263226,
+                3.264874, 3.266030, 3.266867, 3.267500, 3.268005, 3.268432, 3.268822, 3.269211,
+                3.269666, 3.270328, 3.271534, 3.274028, 3.279080, 3.287534, 3.297501, 3.305286,
+                3.309691, 3.311821, 3.312857, 3.313435, 3.313833, 3.314167, 3.314523, 3.315272,
+                3.319306, 3.350173, 3.600000,
+            ],
+        }
+    }
+
+    /// NCA/Graphite OCV curve (PyBaMM NCA_Kim2011).
+    pub fn default_nca() -> Self {
+        Self {
+            soc_points: soc_51(),
+            voltage_v: vec![
+                2.700000, 3.118097, 3.181584, 3.203576, 3.223429, 3.247134, 3.272386, 3.297458,
+                3.322372, 3.347261, 3.372073, 3.396694, 3.421031, 3.445020, 3.468617, 3.491772,
+                3.514416, 3.536448, 3.557753, 3.578226, 3.597802, 3.616487, 3.634354, 3.651538,
+                3.668213, 3.684568, 3.700789, 3.717052, 3.733522, 3.750372, 3.767814, 3.786154,
+                3.805815, 3.827212, 3.850303, 3.874153, 3.897430, 3.919441, 3.940313, 3.960468,
+                3.980262, 3.999932, 4.019633, 4.039492, 4.059647, 4.080265, 4.101561, 4.123806,
+                4.147338, 4.172570, 4.200000,
+            ],
+        }
+    }
+
+    /// NMC811/LTO OCV curve (Chen2020 positive + Colclasure2011 LTO negative).
+    pub fn default_lto() -> Self {
+        Self {
+            soc_points: soc_51(),
+            voltage_v: vec![
+                2.047412, 2.058342, 2.068098, 2.077679, 2.087235, 2.096788, 2.106343, 2.115902,
+                2.125466, 2.135039, 2.144625, 2.154231, 2.163869, 2.173556, 2.183317, 2.193191,
+                2.203238, 2.213545, 2.224240, 2.235502, 2.247568, 2.260721, 2.275250, 2.291351,
+                2.308985, 2.327768, 2.346992, 2.365844, 2.383690, 2.400265, 2.415656, 2.430178,
+                2.444246, 2.458282, 2.472680, 2.487784, 2.503866, 2.521082, 2.539394, 2.558458,
+                2.577501, 2.595272, 2.610212, 2.621009, 2.627534, 2.631703, 2.637430, 2.649154,
+                2.669678, 2.698881, 2.734138,
             ],
         }
     }
@@ -100,14 +177,46 @@ pub struct UNegTable {
 }
 
 impl UNegTable {
-    /// 11-point Li-NMC U_neg curve (graphite anode, vs Li/Li+).
-    /// Values from NREL SSC / OCHRE Smith 2017 calibration.
+    /// Graphite anode U_neg curve (PyBaMM Chen2020, LG M50).
     pub fn default_li_nmc() -> Self {
         Self {
-            soc_points: vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            soc_points: soc_51(),
             potential_v: vec![
-                1.2868, 0.2420, 0.1818, 0.1488, 0.1297, 0.1230, 0.1181, 0.1061, 0.0925, 0.0876,
-                0.0859,
+                1.105436, 0.752493, 0.574137, 0.478796, 0.416010, 0.357282, 0.299059, 0.256572,
+                0.233891, 0.222760, 0.215837, 0.209273, 0.201287, 0.191316, 0.179838, 0.168147,
+                0.157706, 0.149437, 0.143492, 0.139510, 0.136966, 0.135391, 0.134434, 0.133859,
+                0.133515, 0.133307, 0.133172, 0.133060, 0.132897, 0.132522, 0.131512, 0.128846,
+                0.122767, 0.112733, 0.102600, 0.096363, 0.093611, 0.092576, 0.092211, 0.092085,
+                0.092042, 0.092028, 0.092023, 0.092021, 0.092020, 0.092020, 0.092020, 0.092020,
+                0.092020, 0.092020, 0.092020,
+            ],
+        }
+    }
+
+    /// Select the default U_neg curve for a given battery chemistry.
+    /// LFP and NCA share the NMC graphite anode curve. LTO uses a flat
+    /// Li4Ti5O12 approximation (pending PyBaMM parametrisation).
+    pub fn for_chemistry(chem: BatteryChemistry) -> Self {
+        match chem {
+            BatteryChemistry::Nmc | BatteryChemistry::Lfp | BatteryChemistry::Nca => {
+                Self::default_li_nmc()
+            }
+            BatteryChemistry::Lto => Self::default_lto(),
+        }
+    }
+
+    /// LTO anode potential curve (Colclasure2011, flat ~1.556V plateau).
+    pub fn default_lto() -> Self {
+        Self {
+            soc_points: soc_51(),
+            potential_v: vec![
+                1.558024, 1.556643, 1.556436, 1.556406, 1.556401, 1.556400, 1.556400, 1.556400,
+                1.556401, 1.556401, 1.556401, 1.556401, 1.556401, 1.556401, 1.556402, 1.556402,
+                1.556402, 1.556403, 1.556403, 1.556404, 1.556405, 1.556406, 1.556407, 1.556409,
+                1.556411, 1.556413, 1.556416, 1.556419, 1.556423, 1.556427, 1.556433, 1.556440,
+                1.556448, 1.556459, 1.556471, 1.556486, 1.556504, 1.556525, 1.556552, 1.556583,
+                1.556622, 1.556668, 1.556724, 1.556792, 1.556874, 1.556973, 1.557093, 1.557238,
+                1.557413, 1.557625, 1.557882,
             ],
         }
     }
@@ -169,5 +278,85 @@ impl UNegTable {
             soc_points,
             potential_v,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_strictly_increasing(table: &OcvTable, label: &str) {
+        for i in 1..table.voltage_v.len() {
+            assert!(
+                table.voltage_v[i] > table.voltage_v[i - 1],
+                "{label} voltage must be strictly increasing: v[{i}]={} <= v[{}]={}",
+                table.voltage_v[i],
+                i - 1,
+                table.voltage_v[i - 1]
+            );
+        }
+    }
+
+    #[test]
+    fn lfp_mid_soc_voltage_in_plateau() {
+        let v = OcvTable::default_lfp().voltage_at_soc(0.5);
+        assert!(
+            (3.20..=3.35).contains(&v),
+            "LFP SOC=0.5 should be in [3.20, 3.35], got {v}"
+        );
+    }
+
+    #[test]
+    fn nca_mid_soc_voltage() {
+        let v = OcvTable::default_nca().voltage_at_soc(0.5);
+        assert!(
+            (3.60..=3.75).contains(&v),
+            "NCA SOC=0.5 should be in [3.60, 3.75], got {v}"
+        );
+    }
+
+    #[test]
+    fn lto_mid_soc_voltage() {
+        let v = OcvTable::default_lto().voltage_at_soc(0.5);
+        assert!(
+            (2.30..=2.40).contains(&v),
+            "LTO SOC=0.5 should be in [2.30, 2.40], got {v}"
+        );
+    }
+
+    #[test]
+    fn for_chemistry_dispatches_correctly() {
+        let lfp = OcvTable::for_chemistry(BatteryChemistry::Lfp);
+        let direct = OcvTable::default_lfp();
+        assert_eq!(lfp.voltage_v, direct.voltage_v);
+    }
+
+    #[test]
+    fn lfp_voltage_lower_than_nmc_at_mid_soc() {
+        let lfp = OcvTable::default_lfp().voltage_at_soc(0.5);
+        let nmc = OcvTable::default_li_nmc().voltage_at_soc(0.5);
+        assert!(lfp < nmc, "LFP ({lfp}V) should be < NMC ({nmc}V) at SOC=0.5");
+    }
+
+    #[test]
+    fn all_chemistries_strictly_increasing() {
+        assert_strictly_increasing(&OcvTable::default_li_nmc(), "NMC");
+        assert_strictly_increasing(&OcvTable::default_lfp(), "LFP");
+        assert_strictly_increasing(&OcvTable::default_nca(), "NCA");
+        assert_strictly_increasing(&OcvTable::default_lto(), "LTO");
+    }
+
+    #[test]
+    fn u_neg_for_chemistry_lfp_uses_graphite() {
+        let lfp = UNegTable::for_chemistry(BatteryChemistry::Lfp);
+        let nmc = UNegTable::default_li_nmc();
+        assert_eq!(lfp.potential_v, nmc.potential_v);
+    }
+
+    #[test]
+    fn u_neg_lto_differs_from_graphite() {
+        let lto = UNegTable::for_chemistry(BatteryChemistry::Lto);
+        let nmc = UNegTable::default_li_nmc();
+        assert_ne!(lto.potential_v, nmc.potential_v);
     }
 }

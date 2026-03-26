@@ -160,7 +160,13 @@ class TestControlSignalInterface:
             "reactive_setpoint",
             "load_fraction",
             "mode_override",
+            "mode_override_str",
             "demand_response",
+            "demand_response_str",
+            "inverter_priority_mode",
+            "protocol_native",
+            "power_factor_setpoint",
+            "ideal_capacity_mode_override",
         ]
         for name in factories:
             assert hasattr(ochre_next.ControlSignal, name), (

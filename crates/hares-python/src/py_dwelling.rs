@@ -11,7 +11,7 @@ use hares_core::{
 };
 use hares_equipment::{BatteryLutType, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
 use hares_io::{OutputFormat, SimulationConfig, output::metrics::MetricsCalculator};
-use hares_types::{EvConnectionState, SurfaceIrradiance};
+use hares_types::{BatteryChemistry, EvConnectionState, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
@@ -102,37 +102,46 @@ fn parse_solar_override_from_dataframe(
         ));
     }
 
-    let col_names: Vec<(u32, String, String, String, String)> = surface_ids
+    struct ColumnData {
+        surface_id: u32,
+        direct: Vec<f64>,
+        diffuse: Vec<f64>,
+        reflected: Vec<f64>,
+        aoi: Vec<f64>,
+    }
+
+    let extract_f64_series = |col_name: &str| -> PyResult<Vec<f64>> {
+        df.get_item(col_name)?
+            .call_method0("to_list")?
+            .extract::<Vec<f64>>()
+    };
+
+    let columns_data: Vec<ColumnData> = surface_ids
         .iter()
         .map(|&sid| {
-            (
-                sid,
-                format!("s{}_direct", sid),
-                format!("s{}_diffuse", sid),
-                format!("s{}_reflected", sid),
-                format!("s{}_aoi", sid),
-            )
+            Ok(ColumnData {
+                surface_id: sid,
+                direct: extract_f64_series(&format!("s{}_direct", sid))?,
+                diffuse: extract_f64_series(&format!("s{}_diffuse", sid))?,
+                reflected: extract_f64_series(&format!("s{}_reflected", sid))?,
+                aoi: extract_f64_series(&format!("s{}_aoi", sid))?,
+            })
         })
-        .collect();
+        .collect::<PyResult<Vec<_>>>()?;
 
     let mut result: Vec<Vec<SurfaceIrradiance>> = Vec::with_capacity(n_rows);
 
     for row_idx in 0..n_rows {
-        let mut surfaces = Vec::with_capacity(col_names.len());
-        for (sid, direct_col, diffuse_col, reflected_col, aoi_col) in &col_names {
-            let direct: f64 = df.get_item(direct_col.as_str())?.get_item(row_idx)?.extract()?;
-            let diffuse: f64 = df.get_item(diffuse_col.as_str())?.get_item(row_idx)?.extract()?;
-            let reflected: f64 = df.get_item(reflected_col.as_str())?.get_item(row_idx)?.extract()?;
-            let aoi: f64 = df.get_item(aoi_col.as_str())?.get_item(row_idx)?.extract()?;
-
-            surfaces.push(SurfaceIrradiance {
-                surface_id: *sid,
-                direct_w_m2: direct,
-                diffuse_w_m2: diffuse,
-                reflected_w_m2: reflected,
-                angle_of_incidence_rad: aoi,
-            });
-        }
+        let surfaces: Vec<SurfaceIrradiance> = columns_data
+            .iter()
+            .map(|col| SurfaceIrradiance {
+                surface_id: col.surface_id,
+                direct_w_m2: col.direct[row_idx],
+                diffuse_w_m2: col.diffuse[row_idx],
+                reflected_w_m2: col.reflected[row_idx],
+                angle_of_incidence_rad: col.aoi[row_idx],
+            })
+            .collect();
         result.push(surfaces);
     }
 
@@ -274,12 +283,87 @@ fn parse_solar_override_from_list(
     Ok(result)
 }
 
+fn insert_battery_optional_config(
+    raw_config: &mut std::collections::HashMap<String, ConfigValue>,
+    battery: &PyBattery,
+) {
+    if let Some(c) = battery.chemistry {
+        raw_config.insert(
+            "chemistry".to_string(),
+            ConfigValue::Text(BatteryChemistry::from(c).as_config_str().to_string()),
+        );
+    }
+    if let Some(v) = battery.initial_soc {
+        raw_config.insert("initial_soc".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.min_soc {
+        raw_config.insert("min_soc".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.max_soc {
+        raw_config.insert("max_soc".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.inverter_efficiency {
+        raw_config.insert("inverter_efficiency".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.charge_efficiency {
+        raw_config.insert("charge_efficiency".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.discharge_efficiency {
+        raw_config.insert("discharge_efficiency".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.self_discharge_pct_per_day {
+        raw_config.insert(
+            "self_discharge_pct_per_day".to_string(),
+            ConfigValue::Float(v),
+        );
+    }
+    if let Some(v) = battery.standby_power_w {
+        raw_config.insert("standby_power_w".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.import_limit_w {
+        raw_config.insert("import_limit_w".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.export_limit_w {
+        raw_config.insert("export_limit_w".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.n_series {
+        raw_config.insert("n_series".to_string(), ConfigValue::Float(f64::from(v)));
+    }
+    if let Some(v) = battery.n_parallel {
+        raw_config.insert("n_parallel".to_string(), ConfigValue::Float(f64::from(v)));
+    }
+    if let Some(v) = battery.cell_resistance_ohm {
+        raw_config.insert("cell_resistance_ohm".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.heater_power_w {
+        raw_config.insert("heater_power_w".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.heater_threshold_c {
+        raw_config.insert("heater_threshold_c".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.min_charge_temp_c {
+        raw_config.insert("min_charge_temp_c".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.full_power_temp_c {
+        raw_config.insert("full_power_temp_c".to_string(), ConfigValue::Float(v));
+    }
+    if let Some(v) = battery.cell_thermal_mass_j_per_k {
+        raw_config.insert(
+            "cell_thermal_mass_j_per_k".to_string(),
+            ConfigValue::Float(v),
+        );
+    }
+    if let Some(v) = battery.cell_ua_w_per_k {
+        raw_config.insert("cell_ua_w_per_k".to_string(), ConfigValue::Float(v));
+    }
+}
+
 fn lock_dwelling(dwelling: &Mutex<Dwelling>) -> PyResult<MutexGuard<'_, Dwelling>> {
-    dwelling.lock().map_err(|_| {
-        PyRuntimeError::new_err(
-            "dwelling state is corrupted (internal panic occurred); \
-             create a new Dwelling instance",
-        )
+    dwelling.lock().map_err(|e| {
+        PyRuntimeError::new_err(format!(
+            "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
+            e
+        ))
     })
 }
 
@@ -289,10 +373,11 @@ fn lock_dwelling(dwelling: &Mutex<Dwelling>) -> PyResult<MutexGuard<'_, Dwelling
 pub(crate) fn lock_dwelling_string(
     dwelling: &Mutex<Dwelling>,
 ) -> Result<MutexGuard<'_, Dwelling>, String> {
-    dwelling.lock().map_err(|_| {
-        "dwelling state is corrupted (internal panic occurred); \
-         create a new Dwelling instance"
-            .to_string()
+    dwelling.lock().map_err(|e| {
+        format!(
+            "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
+            e
+        )
     })
 }
 
@@ -535,6 +620,7 @@ impl PyDwelling {
                 hares_equipment::config::ConfigValue::Float(v),
             );
         }
+        insert_battery_optional_config(&mut raw_config, battery);
 
         let config = hares_equipment::EquipmentConfig {
             name: battery.name.clone(),
@@ -1036,6 +1122,7 @@ impl PyDwelling {
             if let Some(v) = battery.max_discharge_kw {
                 raw_config.insert("max_discharge_kw".to_string(), ConfigValue::Float(v));
             }
+            insert_battery_optional_config(&mut raw_config, &battery);
             let config = EquipmentConfig {
                 name: battery.name.clone(),
                 ochre_class: "Battery".to_string(),

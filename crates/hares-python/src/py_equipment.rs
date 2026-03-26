@@ -9,7 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::py_enums::PyEvConnectionState;
+use crate::py_enums::{PyBatteryChemistry, PyEvConnectionState};
 
 /// Extract a `RegularGridInterpolator` from a Python dict with numpy arrays or an NPZ path.
 ///
@@ -99,6 +99,46 @@ pub struct PyBattery {
     pub max_charge_kw: Option<f64>,
     #[pyo3(get)]
     pub max_discharge_kw: Option<f64>,
+    #[pyo3(get)]
+    pub chemistry: Option<PyBatteryChemistry>,
+    #[pyo3(get)]
+    pub initial_soc: Option<f64>,
+    #[pyo3(get)]
+    pub min_soc: Option<f64>,
+    #[pyo3(get)]
+    pub max_soc: Option<f64>,
+    #[pyo3(get)]
+    pub inverter_efficiency: Option<f64>,
+    #[pyo3(get)]
+    pub charge_efficiency: Option<f64>,
+    #[pyo3(get)]
+    pub discharge_efficiency: Option<f64>,
+    #[pyo3(get)]
+    pub self_discharge_pct_per_day: Option<f64>,
+    #[pyo3(get)]
+    pub standby_power_w: Option<f64>,
+    #[pyo3(get)]
+    pub import_limit_w: Option<f64>,
+    #[pyo3(get)]
+    pub export_limit_w: Option<f64>,
+    #[pyo3(get)]
+    pub n_series: Option<u32>,
+    #[pyo3(get)]
+    pub n_parallel: Option<u32>,
+    #[pyo3(get)]
+    pub cell_resistance_ohm: Option<f64>,
+    #[pyo3(get)]
+    pub heater_power_w: Option<f64>,
+    #[pyo3(get)]
+    pub heater_threshold_c: Option<f64>,
+    #[pyo3(get)]
+    pub min_charge_temp_c: Option<f64>,
+    #[pyo3(get)]
+    pub full_power_temp_c: Option<f64>,
+    #[pyo3(get)]
+    pub cell_thermal_mass_j_per_k: Option<f64>,
+    #[pyo3(get)]
+    pub cell_ua_w_per_k: Option<f64>,
     pub charging_curve_lut: Option<RegularGridInterpolator>,
     pub ocv_table: Option<OcvTable>,
     pub u_neg_table: Option<UNegTable>,
@@ -112,6 +152,26 @@ impl PyBattery {
         capacity_kwh,
         max_charge_kw=None,
         max_discharge_kw=None,
+        chemistry=None,
+        initial_soc=None,
+        min_soc=None,
+        max_soc=None,
+        inverter_efficiency=None,
+        charge_efficiency=None,
+        discharge_efficiency=None,
+        self_discharge_pct_per_day=None,
+        standby_power_w=None,
+        import_limit_w=None,
+        export_limit_w=None,
+        n_series=None,
+        n_parallel=None,
+        cell_resistance_ohm=None,
+        heater_power_w=None,
+        heater_threshold_c=None,
+        min_charge_temp_c=None,
+        full_power_temp_c=None,
+        cell_thermal_mass_j_per_k=None,
+        cell_ua_w_per_k=None,
         charging_curve_lut=None,
         ocv_table=None,
         uneg_table=None,
@@ -123,6 +183,26 @@ impl PyBattery {
         capacity_kwh: f64,
         max_charge_kw: Option<f64>,
         max_discharge_kw: Option<f64>,
+        chemistry: Option<PyBatteryChemistry>,
+        initial_soc: Option<f64>,
+        min_soc: Option<f64>,
+        max_soc: Option<f64>,
+        inverter_efficiency: Option<f64>,
+        charge_efficiency: Option<f64>,
+        discharge_efficiency: Option<f64>,
+        self_discharge_pct_per_day: Option<f64>,
+        standby_power_w: Option<f64>,
+        import_limit_w: Option<f64>,
+        export_limit_w: Option<f64>,
+        n_series: Option<u32>,
+        n_parallel: Option<u32>,
+        cell_resistance_ohm: Option<f64>,
+        heater_power_w: Option<f64>,
+        heater_threshold_c: Option<f64>,
+        min_charge_temp_c: Option<f64>,
+        full_power_temp_c: Option<f64>,
+        cell_thermal_mass_j_per_k: Option<f64>,
+        cell_ua_w_per_k: Option<f64>,
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
         ocv_table: Option<&Bound<'_, PyAny>>,
         uneg_table: Option<&Bound<'_, PyAny>>,
@@ -144,6 +224,26 @@ impl PyBattery {
             capacity_kwh,
             max_charge_kw,
             max_discharge_kw,
+            chemistry,
+            initial_soc,
+            min_soc,
+            max_soc,
+            inverter_efficiency,
+            charge_efficiency,
+            discharge_efficiency,
+            self_discharge_pct_per_day,
+            standby_power_w,
+            import_limit_w,
+            export_limit_w,
+            n_series,
+            n_parallel,
+            cell_resistance_ohm,
+            heater_power_w,
+            heater_threshold_c,
+            min_charge_temp_c,
+            full_power_temp_c,
+            cell_thermal_mass_j_per_k,
+            cell_ua_w_per_k,
             charging_curve_lut: lut,
             ocv_table: ocv,
             u_neg_table: u_neg,
@@ -151,10 +251,77 @@ impl PyBattery {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "Battery(name={:?}, capacity_kwh={})",
-            self.name, self.capacity_kwh
-        )
+        let mut parts = vec![
+            format!("name={:?}", self.name),
+            format!("capacity_kwh={}", self.capacity_kwh),
+        ];
+        if let Some(v) = self.max_charge_kw {
+            parts.push(format!("max_charge_kw={v}"));
+        }
+        if let Some(v) = self.max_discharge_kw {
+            parts.push(format!("max_discharge_kw={v}"));
+        }
+        if let Some(c) = self.chemistry {
+            parts.push(format!("chemistry={c:?}"));
+        }
+        if let Some(v) = self.initial_soc {
+            parts.push(format!("initial_soc={v}"));
+        }
+        if let Some(v) = self.min_soc {
+            parts.push(format!("min_soc={v}"));
+        }
+        if let Some(v) = self.max_soc {
+            parts.push(format!("max_soc={v}"));
+        }
+        if let Some(v) = self.inverter_efficiency {
+            parts.push(format!("inverter_efficiency={v}"));
+        }
+        if let Some(v) = self.charge_efficiency {
+            parts.push(format!("charge_efficiency={v}"));
+        }
+        if let Some(v) = self.discharge_efficiency {
+            parts.push(format!("discharge_efficiency={v}"));
+        }
+        if let Some(v) = self.self_discharge_pct_per_day {
+            parts.push(format!("self_discharge_pct_per_day={v}"));
+        }
+        if let Some(v) = self.standby_power_w {
+            parts.push(format!("standby_power_w={v}"));
+        }
+        if let Some(v) = self.import_limit_w {
+            parts.push(format!("import_limit_w={v}"));
+        }
+        if let Some(v) = self.export_limit_w {
+            parts.push(format!("export_limit_w={v}"));
+        }
+        if let Some(v) = self.n_series {
+            parts.push(format!("n_series={v}"));
+        }
+        if let Some(v) = self.n_parallel {
+            parts.push(format!("n_parallel={v}"));
+        }
+        if let Some(v) = self.cell_resistance_ohm {
+            parts.push(format!("cell_resistance_ohm={v}"));
+        }
+        if let Some(v) = self.heater_power_w {
+            parts.push(format!("heater_power_w={v}"));
+        }
+        if let Some(v) = self.heater_threshold_c {
+            parts.push(format!("heater_threshold_c={v}"));
+        }
+        if let Some(v) = self.min_charge_temp_c {
+            parts.push(format!("min_charge_temp_c={v}"));
+        }
+        if let Some(v) = self.full_power_temp_c {
+            parts.push(format!("full_power_temp_c={v}"));
+        }
+        if let Some(v) = self.cell_thermal_mass_j_per_k {
+            parts.push(format!("cell_thermal_mass_j_per_k={v}"));
+        }
+        if let Some(v) = self.cell_ua_w_per_k {
+            parts.push(format!("cell_ua_w_per_k={v}"));
+        }
+        format!("Battery({})", parts.join(", "))
     }
 }
 
