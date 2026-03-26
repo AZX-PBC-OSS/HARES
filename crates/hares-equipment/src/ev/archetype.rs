@@ -1,8 +1,9 @@
+// TODO(DER-007): Move to EvDriverActor
 use serde::{Deserialize, Serialize};
 
 use crate::EquipmentConfig;
 
-use super::config::KEY_DRIVER_ARCHETYPE;
+const KEY_DRIVER_ARCHETYPE: &str = "driver_archetype";
 use super::schedule::EventDistributionRow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

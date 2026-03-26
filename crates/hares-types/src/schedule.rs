@@ -734,6 +734,19 @@ impl SeasonalSplit {
         })
     }
 
+    /// Validate that both months are in 1..=12.
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if !(1..=12).contains(&self.summer_start_month)
+            || !(1..=12).contains(&self.summer_end_month)
+        {
+            return Err(HaresError::Tariff(format!(
+                "SeasonalSplit months must be 1..=12, got start={}, end={}",
+                self.summer_start_month, self.summer_end_month
+            )));
+        }
+        Ok(())
+    }
+
     /// Returns `true` if the given 1-indexed month is in the summer range.
     ///
     /// Handles wrapping: if `summer_start_month > summer_end_month` the range
@@ -769,6 +782,33 @@ pub struct TouPeriod {
     pub name: String,
     pub schedule: Vec<TimeWindow>,
     pub season: SeasonFilter,
+}
+
+impl TouPeriod {
+    /// Validate that all contained `TimeWindow`s have valid minute ranges.
+    pub fn validate(&self) -> Result<(), HaresError> {
+        for (i, tw) in self.schedule.iter().enumerate() {
+            if tw.start_minute >= 1440 {
+                return Err(HaresError::Tariff(format!(
+                    "TouPeriod '{}' schedule[{i}]: start_minute must be < 1440, got {}",
+                    self.name, tw.start_minute
+                )));
+            }
+            if tw.end_minute > 1440 {
+                return Err(HaresError::Tariff(format!(
+                    "TouPeriod '{}' schedule[{i}]: end_minute must be <= 1440, got {}",
+                    self.name, tw.end_minute
+                )));
+            }
+            if tw.start_minute == tw.end_minute {
+                return Err(HaresError::Tariff(format!(
+                    "TouPeriod '{}' schedule[{i}]: zero-width window (start == end == {})",
+                    self.name, tw.start_minute
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2196,5 +2236,55 @@ mod tests {
         let json = serde_json::to_string(&period).unwrap();
         let back: TouPeriod = serde_json::from_str(&json).unwrap();
         assert_eq!(back, period);
+    }
+
+    #[test]
+    fn tou_period_validate_accepts_valid() {
+        let period = TouPeriod {
+            name: "on-peak".to_string(),
+            schedule: vec![TimeWindow::new(DayFilter::Weekdays, 780, 1260, 0.25)],
+            season: SeasonFilter::Summer,
+        };
+        assert!(period.validate().is_ok());
+
+        let empty = TouPeriod {
+            name: "empty".to_string(),
+            schedule: vec![],
+            season: SeasonFilter::All,
+        };
+        assert!(empty.validate().is_ok());
+    }
+
+    #[test]
+    fn tou_period_validate_rejects_invalid_window() {
+        let bad_start = TouPeriod {
+            name: "bad".to_string(),
+            schedule: vec![TimeWindow {
+                day: DayFilter::Any,
+                start_minute: 1440,
+                end_minute: 1440,
+                value: 0.0,
+                noise: None,
+                min_value: None,
+                max_value: None,
+            }],
+            season: SeasonFilter::All,
+        };
+        assert!(bad_start.validate().is_err());
+
+        let zero_width = TouPeriod {
+            name: "zero".to_string(),
+            schedule: vec![TimeWindow {
+                day: DayFilter::Any,
+                start_minute: 300,
+                end_minute: 300,
+                value: 0.0,
+                noise: None,
+                min_value: None,
+                max_value: None,
+            }],
+            season: SeasonFilter::All,
+        };
+        assert!(zero_width.validate().is_err());
     }
 }

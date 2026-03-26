@@ -582,6 +582,68 @@ class TestEvLifecycle:
 # ---------------------------------------------------------------------------
 
 
+class TestEvControlSignals:
+    def test_ev_plug_in_disconnected_zero_power(self):
+        from ochre_next import ControlSignal, EV, EvConnectionState
+
+        dw = _init_dwelling(duration_s=600, time_res_s=60)
+        ev = EV("EV1", capacity_kwh=60.0, max_charging_kw=7.2, initial_soc=0.3)
+        dw.add_ev(ev)
+        dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
+        dw.step()
+        tel = dw.telemetry().equipment()
+        idx = tel["names"].index("EV1")
+        assert tel["power_kw"][idx] == 0.0
+
+    def test_ev_drive_deducts_soc(self):
+        from ochre_next import ControlSignal, EV, EvConnectionState
+
+        dw = _init_dwelling(duration_s=600, time_res_s=60)
+        ev = EV("EV1", capacity_kwh=75.0, initial_soc=0.5)
+        dw.add_ev(ev)
+        # Disconnect then drive
+        dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
+        dw.apply_control("EV1", ControlSignal.ev_drive(10.0))
+        dw.step()
+        tel = dw.telemetry().equipment()
+        idx = tel["names"].index("EV1")
+        soc = tel["soc"][idx]
+        # SOC should drop by ~10/75 ≈ 0.133
+        assert soc < 0.5, f"SOC should decrease after driving, got {soc}"
+        assert abs(soc - (0.5 - 10.0 / 75.0)) < 0.02
+
+    def test_ev_away_charge_no_residential_power(self):
+        from ochre_next import ControlSignal, EV, EvConnectionState
+
+        dw = _init_dwelling(duration_s=600, time_res_s=60)
+        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.3)
+        dw.add_ev(ev)
+        dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
+        dw.step()
+        dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.AwayPluggedIn))
+        dw.apply_control("EV1", ControlSignal.ev_away_charge(11.5))
+        dw.step()
+        tel = dw.telemetry().equipment()
+        idx = tel["names"].index("EV1")
+        # Residential power should be 0 (away charging)
+        assert tel["power_kw"][idx] == 0.0
+        # SOC should increase
+        assert tel["soc"][idx] > 0.3
+
+    def test_ev_home_plugged_in_charges_by_default(self):
+        """EV defaults to HomePluggedIn and charges to soc_max without any actor."""
+        from ochre_next import EV
+
+        dw = _init_dwelling(duration_s=600, time_res_s=60)
+        ev = EV("EV1", capacity_kwh=60.0, max_charging_kw=7.2, initial_soc=0.3)
+        dw.add_ev(ev)
+        for _ in range(5):
+            dw.step()
+        tel = dw.telemetry().equipment()
+        idx = tel["names"].index("EV1")
+        assert tel["soc"][idx] > 0.3, "EV should charge when plugged in at home"
+
+
 class TestEquipmentMutationRoundTrip:
     def test_add_battery_set_lut_save_load_remove(self):
         from ochre_next import Battery

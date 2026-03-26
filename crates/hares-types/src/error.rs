@@ -18,6 +18,8 @@ pub enum HaresError {
     Control(String),
     #[error("dwelling error: {0}")]
     Dwelling(String),
+    #[error("tariff error: {0}")]
+    Tariff(String),
     #[error("invariant violation in '{check_name}': value={value:.6e}, tolerance={tolerance:.6e}")]
     InvariantViolation {
         check_name: String,
@@ -57,6 +59,7 @@ mod tests {
             HaresError::Equipment("unknown id".to_string()),
             HaresError::Io("file not found".to_string()),
             HaresError::Control("unsupported signal".to_string()),
+            HaresError::Tariff("invalid rate".to_string()),
             HaresError::InvariantViolation {
                 check_name: "thermal_balance".to_string(),
                 value: 1.23,

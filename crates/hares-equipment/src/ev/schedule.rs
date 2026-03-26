@@ -1,3 +1,4 @@
+// TODO(DER-007): Move to EvDriverActor
 use std::path::Path;
 
 use hares_types::HaresError;
@@ -8,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::EquipmentConfig;
 
 use super::archetype::{DriverArchetype, default_distribution};
-use super::config::{KEY_SCHEDULE_CSV_PATH, KEY_SCHEDULE_CSV_REF, KEY_SCHEDULE_LEN};
+const KEY_SCHEDULE_CSV_PATH: &str = "schedule_csv_path";
+const KEY_SCHEDULE_CSV_REF: &str = "schedule_csv";
+const KEY_SCHEDULE_LEN: &str = "schedule_len";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub(super) struct EventDistributionRow {

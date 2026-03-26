@@ -991,6 +991,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hares-tariff"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hares-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hares-types"
 version = "0.1.0"
 dependencies = [

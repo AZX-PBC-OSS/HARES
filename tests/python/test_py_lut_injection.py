@@ -153,13 +153,14 @@ class TestBatteryLutInjection:
         with pytest.raises(Exception, match="not found"):
             dw.set_equipment_lut("NoSuch", LutType.ChargingCurve, _simple_charging_lut())
 
-    def test_set_lut_unsupported_type_raises(self):
-        """Setting OCV on an EV should raise (EV doesn't support OCV)."""
+    def test_set_ocv_on_ev_succeeds(self):
+        """EV supports OCV injection (chemistry-aware, same as Battery)."""
         ev = EV("TestEV", capacity_kwh=65.0)
         dw = _make_dwelling()
         dw.add_ev(ev)
-        with pytest.raises(Exception):
-            dw.set_equipment_lut("TestEV", LutType.Ocv, _lfp_ocv_table())
+        dw.set_equipment_lut("TestEV", LutType.Ocv, _lfp_ocv_table())
+        result = dw.step()
+        assert "time" in result
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,739 @@
+use hares_types::{BillingCycle, HaresError, SeasonFilter, SeasonalSplit, TouPeriod};
+use serde::{Deserialize, Serialize};
+
+/// Per-kWh energy rate for a TOU period and season.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EnergyRate {
+    pub period_name: String,
+    pub season: SeasonFilter,
+    pub rate_per_kwh: f64,
+}
+
+impl EnergyRate {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if !self.rate_per_kwh.is_finite() || self.rate_per_kwh < 0.0 {
+            return Err(HaresError::Tariff(format!(
+                "energy rate '{}' rate_per_kwh must be finite and >= 0, got {}",
+                self.period_name, self.rate_per_kwh
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Demand ratchet: bill at least `minimum_fraction` of the highest peak
+/// seen in the past `lookback_months`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RatchetConfig {
+    pub lookback_months: u8,
+    pub minimum_fraction: f64,
+}
+
+impl RatchetConfig {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if self.lookback_months == 0 {
+            return Err(HaresError::Tariff(
+                "lookback_months must be > 0".into(),
+            ));
+        }
+        if !self.minimum_fraction.is_finite()
+            || !(0.0..=1.0).contains(&self.minimum_fraction)
+        {
+            return Err(HaresError::Tariff(format!(
+                "minimum_fraction must be finite and in [0.0, 1.0], got {}",
+                self.minimum_fraction
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Per-kW demand charge for a TOU period and season.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DemandRate {
+    /// `None` = coincident peak (system-wide).
+    pub period_name: Option<String>,
+    pub season: SeasonFilter,
+    pub rate_per_kw: f64,
+    pub ratchet: Option<RatchetConfig>,
+}
+
+impl DemandRate {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if !self.rate_per_kw.is_finite() || self.rate_per_kw < 0.0 {
+            return Err(HaresError::Tariff(format!(
+                "rate_per_kw must be finite and >= 0, got {}",
+                self.rate_per_kw
+            )));
+        }
+        if let Some(r) = &self.ratchet {
+            r.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Inclining/declining block rate for a season.
+///
+/// `rates_per_kwh.len()` must equal `thresholds_kwh.len() + 1`:
+/// the first rate applies to usage below the first threshold,
+/// each subsequent rate applies between consecutive thresholds,
+/// and the last rate applies to all usage above the final threshold.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TieredBlock {
+    pub season: SeasonFilter,
+    /// Cumulative upper bounds per tier (kWh). Must be strictly ascending.
+    pub thresholds_kwh: Vec<f64>,
+    /// Rate for each tier. Length must be `thresholds_kwh.len() + 1`.
+    pub rates_per_kwh: Vec<f64>,
+}
+
+impl TieredBlock {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if self.rates_per_kwh.len() != self.thresholds_kwh.len() + 1 {
+            return Err(HaresError::Tariff(format!(
+                "rates_per_kwh.len() ({}) must be thresholds_kwh.len() + 1 ({})",
+                self.rates_per_kwh.len(),
+                self.thresholds_kwh.len() + 1
+            )));
+        }
+        for (i, t) in self.thresholds_kwh.iter().enumerate() {
+            if !t.is_finite() || *t < 0.0 {
+                return Err(HaresError::Tariff(format!(
+                    "thresholds_kwh[{i}] must be finite and >= 0, got {t}"
+                )));
+            }
+            if i > 0 && *t <= self.thresholds_kwh[i - 1] {
+                return Err(HaresError::Tariff(format!(
+                    "thresholds_kwh must be strictly ascending: [{}] = {} <= [{}] = {}",
+                    i - 1,
+                    self.thresholds_kwh[i - 1],
+                    i,
+                    t
+                )));
+            }
+        }
+        for (i, r) in self.rates_per_kwh.iter().enumerate() {
+            if !r.is_finite() || *r < 0.0 {
+                return Err(HaresError::Tariff(format!(
+                    "rates_per_kwh[{i}] must be finite and >= 0, got {r}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How grid exports are compensated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub enum ExportMode {
+    NetMetering,
+    NetBilling,
+    FlatRate(f64),
+    #[default]
+    None,
+}
+
+/// Export compensation configuration.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportRate {
+    pub mode: ExportMode,
+    pub tou_credits: Vec<EnergyRate>,
+}
+
+impl Default for ExportRate {
+    fn default() -> Self {
+        Self {
+            mode: ExportMode::None,
+            tou_credits: Vec::new(),
+        }
+    }
+}
+
+impl ExportRate {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if let ExportMode::FlatRate(r) = self.mode {
+            if !r.is_finite() || r < 0.0 {
+                return Err(HaresError::Tariff(format!(
+                    "FlatRate must be finite and >= 0, got {r}"
+                )));
+            }
+        }
+        for er in &self.tou_credits {
+            if !er.rate_per_kwh.is_finite() || er.rate_per_kwh < 0.0 {
+                return Err(HaresError::Tariff(format!(
+                    "export tou_credit '{}' rate_per_kwh must be finite and >= 0, got {}",
+                    er.period_name, er.rate_per_kwh
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Fixed monthly and daily charges.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct FixedCharges {
+    pub monthly_usd: f64,
+    pub daily_usd: f64,
+}
+
+impl FixedCharges {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if !self.monthly_usd.is_finite() || self.monthly_usd < 0.0 {
+            return Err(HaresError::Tariff(format!(
+                "monthly_usd must be finite and >= 0, got {}",
+                self.monthly_usd
+            )));
+        }
+        if !self.daily_usd.is_finite() || self.daily_usd < 0.0 {
+            return Err(HaresError::Tariff(format!(
+                "daily_usd must be finite and >= 0, got {}",
+                self.daily_usd
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Complete electric utility tariff.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ElectricTariff {
+    pub name: Option<String>,
+    pub tou_schedule: Vec<TouPeriod>,
+    pub energy_rates: Vec<EnergyRate>,
+    pub demand_rates: Vec<DemandRate>,
+    pub tiered_rates: Vec<TieredBlock>,
+    pub export_rate: ExportRate,
+    pub fixed_charges: FixedCharges,
+    /// Minimum monthly charge ($/month floor).
+    pub minimum_charge: Option<f64>,
+    pub billing_cycle: BillingCycle,
+    pub seasonal_split: Option<SeasonalSplit>,
+}
+
+impl ElectricTariff {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        for dr in &self.demand_rates {
+            dr.validate()?;
+        }
+        for tb in &self.tiered_rates {
+            tb.validate()?;
+        }
+        self.fixed_charges.validate()?;
+        self.export_rate.validate()?;
+        if let Some(mc) = self.minimum_charge {
+            if !mc.is_finite() || mc < 0.0 {
+                return Err(HaresError::Tariff(format!(
+                    "minimum_charge must be finite and >= 0, got {mc}"
+                )));
+            }
+        }
+        for er in &self.energy_rates {
+            er.validate()?;
+        }
+        if let BillingCycle::Custom(days) = self.billing_cycle {
+            if days == 0 {
+                return Err(HaresError::Tariff(
+                    "BillingCycle::Custom days must be > 0".into(),
+                ));
+            }
+        }
+        if let Some(ss) = &self.seasonal_split {
+            ss.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Gas tiered block rate for a season.
+///
+/// Same invariant as `TieredBlock`: `rates_per_therm.len() == thresholds_therms.len() + 1`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GasTieredBlock {
+    pub season: SeasonFilter,
+    pub thresholds_therms: Vec<f64>,
+    pub rates_per_therm: Vec<f64>,
+}
+
+impl GasTieredBlock {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        if self.rates_per_therm.len() != self.thresholds_therms.len() + 1 {
+            return Err(HaresError::Tariff(format!(
+                "rates_per_therm.len() ({}) must be thresholds_therms.len() + 1 ({})",
+                self.rates_per_therm.len(),
+                self.thresholds_therms.len() + 1
+            )));
+        }
+        for (i, t) in self.thresholds_therms.iter().enumerate() {
+            if !t.is_finite() || *t < 0.0 {
+                return Err(HaresError::Tariff(format!(
+                    "thresholds_therms[{i}] must be finite and >= 0, got {t}"
+                )));
+            }
+            if i > 0 && *t <= self.thresholds_therms[i - 1] {
+                return Err(HaresError::Tariff(format!(
+                    "thresholds_therms must be strictly ascending: [{}] = {} <= [{}] = {}",
+                    i - 1,
+                    self.thresholds_therms[i - 1],
+                    i,
+                    t
+                )));
+            }
+        }
+        for (i, r) in self.rates_per_therm.iter().enumerate() {
+            if !r.is_finite() || *r < 0.0 {
+                return Err(HaresError::Tariff(format!(
+                    "rates_per_therm[{i}] must be finite and >= 0, got {r}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Complete gas utility tariff.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct GasTariff {
+    pub name: Option<String>,
+    pub tiered_rates: Vec<GasTieredBlock>,
+    pub fixed_charges: FixedCharges,
+    pub billing_cycle: BillingCycle,
+    pub seasonal_split: Option<SeasonalSplit>,
+}
+
+impl GasTariff {
+    pub fn validate(&self) -> Result<(), HaresError> {
+        for tb in &self.tiered_rates {
+            tb.validate()?;
+        }
+        self.fixed_charges.validate()?;
+        if let BillingCycle::Custom(days) = self.billing_cycle {
+            if days == 0 {
+                return Err(HaresError::Tariff(
+                    "BillingCycle::Custom days must be > 0".into(),
+                ));
+            }
+        }
+        if let Some(ss) = &self.seasonal_split {
+            ss.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hares_types::{DayFilter, TimeWindow};
+
+    use super::*;
+
+    #[test]
+    fn electric_tariff_default_roundtrip() {
+        let tariff = ElectricTariff::default();
+        let json = serde_json::to_string(&tariff).unwrap();
+        let back: ElectricTariff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, tariff);
+        assert!(tariff.tou_schedule.is_empty());
+        assert!(tariff.energy_rates.is_empty());
+        assert!(tariff.demand_rates.is_empty());
+        assert!(tariff.tiered_rates.is_empty());
+        assert_eq!(tariff.fixed_charges, FixedCharges::default());
+        assert_eq!(tariff.billing_cycle, BillingCycle::Monthly);
+    }
+
+    #[test]
+    fn electric_tariff_full_roundtrip() {
+        let tariff = ElectricTariff {
+            name: Some("SCE TOU-D-4-9PM".into()),
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "on-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Weekdays, 960, 1260, 0.0)],
+                    season: SeasonFilter::Summer,
+                },
+                TouPeriod {
+                    name: "mid-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Weekdays, 480, 960, 0.0)],
+                    season: SeasonFilter::Summer,
+                },
+                TouPeriod {
+                    name: "off-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 480, 0.0)],
+                    season: SeasonFilter::All,
+                },
+            ],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "on-peak".into(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: 0.45,
+                },
+                EnergyRate {
+                    period_name: "mid-peak".into(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: 0.30,
+                },
+                EnergyRate {
+                    period_name: "off-peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.12,
+                },
+            ],
+            demand_rates: vec![DemandRate {
+                period_name: Some("on-peak".into()),
+                season: SeasonFilter::Summer,
+                rate_per_kw: 18.50,
+                ratchet: Some(RatchetConfig {
+                    lookback_months: 11,
+                    minimum_fraction: 0.85,
+                }),
+            }],
+            tiered_rates: vec![
+                TieredBlock {
+                    season: SeasonFilter::Summer,
+                    thresholds_kwh: vec![500.0, 1000.0],
+                    rates_per_kwh: vec![0.10, 0.15, 0.25],
+                },
+                TieredBlock {
+                    season: SeasonFilter::Winter,
+                    thresholds_kwh: vec![700.0],
+                    rates_per_kwh: vec![0.09, 0.14],
+                },
+            ],
+            export_rate: ExportRate {
+                mode: ExportMode::NetMetering,
+                tou_credits: vec![EnergyRate {
+                    period_name: "on-peak".into(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: 0.45,
+                }],
+            },
+            fixed_charges: FixedCharges {
+                monthly_usd: 12.50,
+                daily_usd: 0.0,
+            },
+            minimum_charge: Some(10.0),
+            billing_cycle: BillingCycle::Monthly,
+            seasonal_split: Some(SeasonalSplit::new(6, 9).unwrap()),
+        };
+
+        let json = serde_json::to_string(&tariff).unwrap();
+        let back: ElectricTariff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, tariff);
+        assert!(tariff.validate().is_ok());
+    }
+
+    #[test]
+    fn gas_tariff_roundtrip() {
+        let tariff = GasTariff {
+            name: Some("PG&E Gas Baseline".into()),
+            tiered_rates: vec![
+                GasTieredBlock {
+                    season: SeasonFilter::Winter,
+                    thresholds_therms: vec![25.0, 50.0],
+                    rates_per_therm: vec![1.05, 1.35, 1.85],
+                },
+                GasTieredBlock {
+                    season: SeasonFilter::Summer,
+                    thresholds_therms: vec![15.0],
+                    rates_per_therm: vec![0.95, 1.25],
+                },
+            ],
+            fixed_charges: FixedCharges {
+                monthly_usd: 10.00,
+                daily_usd: 0.0,
+            },
+            billing_cycle: BillingCycle::Monthly,
+            seasonal_split: Some(SeasonalSplit::new(6, 9).unwrap()),
+        };
+
+        let json = serde_json::to_string(&tariff).unwrap();
+        let back: GasTariff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, tariff);
+        assert!(tariff.validate().is_ok());
+    }
+
+    #[test]
+    fn export_mode_variants() {
+        let modes = vec![
+            ExportMode::NetMetering,
+            ExportMode::NetBilling,
+            ExportMode::FlatRate(0.08),
+            ExportMode::None,
+        ];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: ExportMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, mode);
+        }
+    }
+
+    #[test]
+    fn tiered_block_rate_count_invariant() {
+        let valid = TieredBlock {
+            season: SeasonFilter::All,
+            thresholds_kwh: vec![500.0, 1000.0],
+            rates_per_kwh: vec![0.10, 0.15, 0.25],
+        };
+        assert!(valid.validate().is_ok());
+
+        let too_few_rates = TieredBlock {
+            season: SeasonFilter::All,
+            thresholds_kwh: vec![500.0, 1000.0],
+            rates_per_kwh: vec![0.10, 0.15],
+        };
+        assert!(too_few_rates.validate().is_err());
+
+        let too_many_rates = TieredBlock {
+            season: SeasonFilter::All,
+            thresholds_kwh: vec![500.0],
+            rates_per_kwh: vec![0.10, 0.15, 0.25],
+        };
+        assert!(too_many_rates.validate().is_err());
+    }
+
+    #[test]
+    fn tiered_block_rejects_unsorted_thresholds() {
+        let unsorted = TieredBlock {
+            season: SeasonFilter::All,
+            thresholds_kwh: vec![1000.0, 500.0],
+            rates_per_kwh: vec![0.10, 0.15, 0.25],
+        };
+        assert!(unsorted.validate().is_err());
+    }
+
+    #[test]
+    fn tiered_block_no_thresholds_single_rate() {
+        let flat = TieredBlock {
+            season: SeasonFilter::All,
+            thresholds_kwh: vec![],
+            rates_per_kwh: vec![0.12],
+        };
+        assert!(flat.validate().is_ok());
+    }
+
+    #[test]
+    fn tiered_block_empty_rates_rejected() {
+        let empty = TieredBlock {
+            season: SeasonFilter::All,
+            thresholds_kwh: vec![],
+            rates_per_kwh: vec![],
+        };
+        assert!(empty.validate().is_err());
+    }
+
+    #[test]
+    fn gas_tiered_block_rate_count_invariant() {
+        let valid = GasTieredBlock {
+            season: SeasonFilter::Winter,
+            thresholds_therms: vec![25.0],
+            rates_per_therm: vec![1.05, 1.35],
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid = GasTieredBlock {
+            season: SeasonFilter::Winter,
+            thresholds_therms: vec![25.0],
+            rates_per_therm: vec![1.05],
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn demand_rate_validate_rejects_invalid() {
+        let bad = DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: -1.0,
+            ratchet: None,
+        };
+        assert!(bad.validate().is_err());
+
+        let bad_ratchet = DemandRate {
+            period_name: Some("peak".into()),
+            season: SeasonFilter::Summer,
+            rate_per_kw: 18.0,
+            ratchet: Some(RatchetConfig {
+                lookback_months: 0,
+                minimum_fraction: 0.85,
+            }),
+        };
+        assert!(bad_ratchet.validate().is_err());
+    }
+
+    #[test]
+    fn ratchet_config_validate_rejects_invalid_fraction() {
+        let bad = RatchetConfig {
+            lookback_months: 11,
+            minimum_fraction: 1.5,
+        };
+        assert!(bad.validate().is_err());
+
+        let nan = RatchetConfig {
+            lookback_months: 11,
+            minimum_fraction: f64::NAN,
+        };
+        assert!(nan.validate().is_err());
+    }
+
+    #[test]
+    fn fixed_charges_validate_rejects_negative() {
+        let bad = FixedCharges {
+            monthly_usd: -1.0,
+            daily_usd: 0.0,
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn electric_tariff_validate_rejects_invalid_minimum_charge() {
+        let tariff = ElectricTariff {
+            minimum_charge: Some(-5.0),
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
+    }
+
+    #[test]
+    fn electric_tariff_validate_rejects_nan_energy_rate() {
+        let tariff = ElectricTariff {
+            energy_rates: vec![EnergyRate {
+                period_name: "peak".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: f64::NAN,
+            }],
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
+    }
+
+    #[test]
+    fn export_mode_default_is_none() {
+        assert_eq!(ExportMode::default(), ExportMode::None);
+    }
+
+    #[test]
+    fn fixed_charges_default_is_zero() {
+        let fc = FixedCharges::default();
+        assert!(fc.monthly_usd == 0.0);
+        assert!(fc.daily_usd == 0.0);
+    }
+
+    #[test]
+    fn electric_tariff_validate_rejects_negative_energy_rate() {
+        let tariff = ElectricTariff {
+            energy_rates: vec![EnergyRate {
+                period_name: "peak".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: -0.05,
+            }],
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
+    }
+
+    #[test]
+    fn export_rate_validate_rejects_invalid_flat_rate() {
+        let er = ExportRate {
+            mode: ExportMode::FlatRate(-1.0),
+            tou_credits: vec![],
+        };
+        assert!(er.validate().is_err());
+
+        let nan = ExportRate {
+            mode: ExportMode::FlatRate(f64::NAN),
+            tou_credits: vec![],
+        };
+        assert!(nan.validate().is_err());
+    }
+
+    #[test]
+    fn export_rate_validate_rejects_nan_tou_credit() {
+        let er = ExportRate {
+            mode: ExportMode::NetMetering,
+            tou_credits: vec![EnergyRate {
+                period_name: "peak".into(),
+                season: SeasonFilter::Summer,
+                rate_per_kwh: f64::NAN,
+            }],
+        };
+        assert!(er.validate().is_err());
+    }
+
+    #[test]
+    fn export_rate_validate_accepts_valid() {
+        let er = ExportRate {
+            mode: ExportMode::FlatRate(0.08),
+            tou_credits: vec![EnergyRate {
+                period_name: "peak".into(),
+                season: SeasonFilter::Summer,
+                rate_per_kwh: 0.45,
+            }],
+        };
+        assert!(er.validate().is_ok());
+    }
+
+    #[test]
+    fn gas_tiered_block_rejects_unsorted_thresholds() {
+        let unsorted = GasTieredBlock {
+            season: SeasonFilter::All,
+            thresholds_therms: vec![50.0, 25.0],
+            rates_per_therm: vec![1.05, 1.35, 1.85],
+        };
+        assert!(unsorted.validate().is_err());
+    }
+
+    #[test]
+    fn billing_cycle_custom_zero_rejected() {
+        let tariff = ElectricTariff {
+            billing_cycle: BillingCycle::Custom(0),
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
+
+        let gas = GasTariff {
+            billing_cycle: BillingCycle::Custom(0),
+            ..Default::default()
+        };
+        assert!(gas.validate().is_err());
+    }
+
+    #[test]
+    fn billing_cycle_custom_valid_accepted() {
+        let tariff = ElectricTariff {
+            billing_cycle: BillingCycle::Custom(14),
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_ok());
+    }
+
+    #[test]
+    fn energy_rate_validate_standalone() {
+        let valid = EnergyRate {
+            period_name: "peak".into(),
+            season: SeasonFilter::Summer,
+            rate_per_kwh: 0.45,
+        };
+        assert!(valid.validate().is_ok());
+
+        let inf = EnergyRate {
+            period_name: "peak".into(),
+            season: SeasonFilter::All,
+            rate_per_kwh: f64::INFINITY,
+        };
+        assert!(inf.validate().is_err());
+    }
+
+    #[test]
+    fn electric_tariff_validate_checks_export_rate() {
+        let tariff = ElectricTariff {
+            export_rate: ExportRate {
+                mode: ExportMode::FlatRate(-1.0),
+                tou_credits: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
+    }
+}

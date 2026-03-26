@@ -8,6 +8,7 @@ members = [
     "crates/hares-io",
     "crates/hares-core",
     "crates/hares-fleet",
+    "crates/hares-tariff",
     "crates/hares-python",
 ]
 default-members = [
@@ -18,6 +19,7 @@ default-members = [
     "crates/hares-equipment",
     "crates/hares-io",
     "crates/hares-core",
+    "crates/hares-tariff",
     "crates/hares-fleet",
 ]
 resolver = "3"
@@ -37,6 +39,7 @@ hares-control = { path = "crates/hares-control" }
 hares-equipment = { path = "crates/hares-equipment" }
 hares-io = { path = "crates/hares-io" }
 hares-core = { path = "crates/hares-core" }
+hares-tariff = { path = "crates/hares-tariff" }
 hares-fleet = { path = "crates/hares-fleet" }
 
 # External dependencies
