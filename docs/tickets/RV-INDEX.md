@@ -50,10 +50,10 @@ Tickets partially advanced:
 
 | ID | Title | Kind | Crate(s) | Depends On |
 |----|-------|------|----------|------------|
-| [RV-009](RV-009.md) | Cooling coil psychrometrics tests (calculate_shr, AO, BPF) | test | hares-equipment | — |
-| [RV-010](RV-010.md) | Battery degradation tests (RainflowCounter, DegradationState) | test | hares-equipment | — |
-| [RV-011](RV-011.md) | HVAC staging + duct DSE tests (392 lines, zero tests) | test | hares-equipment | — |
-| [RV-012](RV-012.md) | Infiltration methods + multi-zone humidity coupling tests | test | hares-envelope | — |
+| [RV-009](RV-009.md) | Cooling coil psychrometrics tests (calculate_shr, AO, BPF) | test | hares-equipment | **Done** |
+| [RV-010](RV-010.md) | Battery degradation tests (RainflowCounter, DegradationState) | test | hares-equipment | **Done** |
+| [RV-011](RV-011.md) | HVAC staging + duct DSE tests (392 lines, zero tests) | test | hares-equipment | **Done** |
+| [RV-012](RV-012.md) | Infiltration methods + multi-zone humidity coupling tests | test | hares-envelope | **Done** |
 | [RV-013](RV-013.md) | EV driver full departure/drive/arrival/plug-in cycle test | test | hares-equipment | — |
 | [RV-014](RV-014.md) | Wire tank temp, SOC, thermal balance, moisture balance invariants | implement | hares-core, hares-envelope | HARES-071, RV-005 |
 

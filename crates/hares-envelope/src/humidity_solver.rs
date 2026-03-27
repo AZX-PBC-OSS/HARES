@@ -174,6 +174,7 @@ fn humidity_ratio_increment(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use chrono::{FixedOffset, TimeZone};
@@ -599,6 +600,73 @@ mod tests {
         assert!(
             (ratio - 15.0).abs() < 1e-10,
             "multiplier ratio must be 15.0: got {ratio}"
+        );
+    }
+
+    /// zone_volumes_m3 override replaces ZoneState::volume_m3 in the solver.
+    ///
+    /// A larger effective volume reduces the humidity-ratio swing for the same
+    /// latent gain. Assert: dW(override) / dW(zone) ≈ zone_volume / override_volume.
+    #[test]
+    fn humidity_zone_volume_override() {
+        let zone_id = ZoneId(1);
+        let zone_volume_m3 = 200.0_f64;
+        let override_volume_m3 = 600.0_f64; // 3× larger
+        let latent_w = 300.0_f64;
+        let dt = Duration::from_secs(60);
+
+        let env = env_with_zone(22.0, 0.008);
+
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: zone_id,
+                sensible_gain_w: 0.0,
+                latent_gain_w: latent_w,
+                ..ThermalAccumulator::new(zone_id)
+            }],
+            ..Default::default()
+        };
+
+        // Solver using zone's own volume (200 m³).
+        let mut solver_zone_vol = HumiditySolver::new(
+            HumiditySolverConfig {
+                moisture_buffering_multiplier: 1.0,
+                ..HumiditySolverConfig::default()
+            },
+            &env,
+        );
+        let w_before = solver_zone_vol.humidity_ratio(zone_id);
+        let _ = solver_zone_vol.resolve(&ports, &env, dt);
+        let dw_zone = solver_zone_vol.humidity_ratio(zone_id) - w_before;
+
+        // Solver using overridden volume (600 m³).
+        let mut overrides = HashMap::new();
+        overrides.insert(zone_id, override_volume_m3);
+        let mut solver_override = HumiditySolver::new(
+            HumiditySolverConfig {
+                zone_volumes_m3: overrides,
+                moisture_buffering_multiplier: 1.0,
+                ..HumiditySolverConfig::default()
+            },
+            &env,
+        );
+        let w_before_ov = solver_override.humidity_ratio(zone_id);
+        let _ = solver_override.resolve(&ports, &env, dt);
+        let dw_override = solver_override.humidity_ratio(zone_id) - w_before_ov;
+
+        // dW scales inversely with volume: dW(override) / dW(zone) = zone_vol / override_vol.
+        // Both solvers start from the same w_old, so density is identical.
+        let expected_ratio = zone_volume_m3 / override_volume_m3;
+        let actual_ratio = dw_override / dw_zone;
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 1e-8,
+            "volume override must reduce dW proportionally: \
+             expected ratio {expected_ratio:.6}, got {actual_ratio:.6}",
+        );
+        assert!(
+            dw_override < dw_zone,
+            "larger override volume must produce smaller humidity swing: \
+             dw_override={dw_override:.3e}, dw_zone={dw_zone:.3e}",
         );
     }
 

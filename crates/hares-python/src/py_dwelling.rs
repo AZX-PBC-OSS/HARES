@@ -1200,6 +1200,14 @@ impl PyDwelling {
         self.gas_tariff = Some(tariff);
     }
 
+    /// Emit the final partial billing period. Call after the last `step()`
+    /// when driving the simulation step-by-step. Idempotent.
+    pub fn finalize_billing(&self) -> PyResult<()> {
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling.finalize_billing();
+        Ok(())
+    }
+
     /// Returns accumulated billing period summaries.
     pub fn billing_summaries(&self) -> PyResult<Vec<crate::py_telemetry::PyBillingPeriodSummary>> {
         let dwelling = lock_dwelling(&self.dwelling)?;

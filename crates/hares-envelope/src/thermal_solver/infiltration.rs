@@ -243,7 +243,67 @@ pub(crate) fn apply_infiltration_and_ventilation(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use chrono::{FixedOffset, TimeZone};
     use hares_physics::air_properties::moist_air_density_kg_m3;
+    use hares_types::{
+        ElectricalSummary, EnvironmentState, GridState, PriceSignal, SurfaceIrradiance,
+        WeatherState, ZoneId, ZoneState,
+    };
+
+    use super::{InfiltrationCoupling, apply_infiltration_and_ventilation};
+    use crate::thermal_solver::config::{InfiltrationMethod, ThermalSolverConfig};
+
+    fn make_env(t_out_c: f64, wind_m_s: f64, zone_temp_c: f64, volume_m3: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.007,
+                relative_humidity: 0.45,
+                wet_bulb_c: zone_temp_c - 3.0,
+                volume_m3,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: t_out_c,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: wind_m_s,
+                wind_dir_deg: 180.0,
+                ground_temp_c: t_out_c,
+                sky_temp_c: t_out_c - 5.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![SurfaceIrradiance {
+                    surface_id: 1,
+                    direct_w_m2: 0.0,
+                    diffuse_w_m2: 0.0,
+                    reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
+                }],
+                outdoor_wet_bulb_c: 0.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
+                mains_temp_c: 15.0,
+                rainfall_m: 0.0,
+                ground_albedo: 0.2,
+            },
+            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid time"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: PriceSignal::default(),
+            electrical: ElectricalSummary::default(),
+        }
+    }
 
     #[test]
     fn density_is_dry_air_basis_kg_da_per_m3() {
@@ -253,6 +313,149 @@ mod tests {
         assert!(
             (rho - 1.18510).abs() < 0.001,
             "expected ~1.185 kg_da/m³, got {rho}",
+        );
+    }
+
+    /// ACH method: Q = ACH × V / 3600
+    /// For a 300 m³ zone at 0.5 ACH: Q = 0.5 × 300 / 3600 = 0.04167 m³/s
+    #[test]
+    fn infiltration_constant_ach() {
+        let volume_m3 = 300.0;
+        let ach = 0.5_f64;
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
+            ..ThermalSolverConfig::default()
+        };
+        let env = make_env(5.0, 3.0, 21.0, volume_m3);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        assert_eq!(couplings.len(), 1);
+        let coupling = &couplings[0];
+
+        let expected_flow_m3_s = ach * volume_m3 / 3600.0;
+        assert!(
+            (coupling.raw_inf_m3_s - expected_flow_m3_s).abs() < 1e-10,
+            "ACH flow: expected {expected_flow_m3_s:.6} m³/s, got {:.6}",
+            coupling.raw_inf_m3_s,
+        );
+        // Without forced or natural ventilation, combined flow equals raw infiltration.
+        assert!(
+            (coupling.combined_flow_m3_s - expected_flow_m3_s).abs() < 1e-10,
+            "combined flow must equal raw ACH flow when no ventilation",
+        );
+    }
+
+    /// AIM-2 with zero wind: only stack effect drives infiltration.
+    /// Q_stack = c_s × |ΔT|^n_i must be non-zero when T_zone ≠ T_out.
+    /// Q = sqrt(Q_stack² + 0²) = Q_stack — no quadrature cancellation.
+    #[test]
+    fn infiltration_zero_wind_nonzero_stack() {
+        // Typical single-storey residential coefficients from OCHRE defaults:
+        // c_s = 0.000290 [m³/s / K^0.65] (stack coefficient with n_stories=1 baked in)
+        // n_i = 0.65 (OCHRE/ResStock default pressure exponent)
+        let c_s = 0.000_290_f64;
+        let c_w = 0.000_150_f64; // non-zero but wind is zero, so this term vanishes
+        let n_i = 0.65_f64;
+        let t_zone = 21.0_f64;
+        let t_out = 0.0_f64;
+        let delta_t = (t_zone - t_out).abs(); // 21 K
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(
+                ZoneId(1),
+                InfiltrationMethod::AshraeWindStack {
+                    c_s,
+                    c_w,
+                    shielding_coeff: 0.5,
+                    n_i,
+                },
+            )],
+            ..ThermalSolverConfig::default()
+        };
+        // wind_speed = 0.0 so wind term is zero
+        let env = make_env(t_out, 0.0, t_zone, 300.0);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        assert_eq!(couplings.len(), 1);
+        let flow = couplings[0].raw_inf_m3_s;
+
+        // Stack-only expected: Q = c_s × |ΔT|^n_i
+        let expected = c_s * delta_t.powf(n_i);
+        assert!(
+            flow > 0.0,
+            "stack infiltration must be non-zero for 21 K temperature difference, got {flow}",
+        );
+        assert!(
+            (flow - expected).abs() < 1e-9,
+            "AIM-2 zero-wind flow: expected {expected:.8} m³/s, got {flow:.8} m³/s",
+        );
+    }
+
+    /// Energy decomposition: infiltration + forced_vent + natural_vent ≈ sensible_diagnostic.
+    ///
+    /// The three scaled components are computed from the combined sensible flow split back
+    /// through proportional scaling. Their sum must equal h_inf × (T_out - T_zone)
+    /// (the q_sensible_diagnostic_w field), confirming mass conservation through the
+    /// flow decomposition logic.
+    #[test]
+    fn infiltration_energy_decomposition_sums() {
+        // Setup: balanced ventilation with known flows so decomposition is deterministic.
+        // Forced flow = 0.02 m³/s (balanced ERV, 75% sensible recovery efficiency).
+        // Infiltration via ACH=1.0 on 300 m³ zone → 300/3600 = 0.0833 m³/s.
+        // With balanced ventilation: sensible_flow = nat_flow + forced × (1 - 0.75).
+        let volume_m3 = 300.0_f64;
+        let ach = 1.0_f64;
+        let forced_m3_s = 0.02_f64;
+        let sens_recovery = 0.75_f64;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
+            ventilation_flow_m3_s: forced_m3_s,
+            ventilation: crate::thermal_solver::config::VentilationConfig {
+                balanced: true,
+                sensible_recovery_efficiency: sens_recovery,
+                latent_recovery_efficiency: 0.0,
+                zone_flow_m3_s: HashMap::new(),
+            },
+            ..ThermalSolverConfig::default()
+        };
+
+        // Cold outdoor → large ΔT to produce a measurable sensible gain.
+        let env = make_env(-10.0, 3.0, 21.0, volume_m3);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        assert_eq!(couplings.len(), 1);
+        let c = &couplings[0];
+
+        // The three diagnostic components must sum to the overall sensible diagnostic.
+        // q_sensible_diagnostic = h_inf × (T_out - T_zone); components are scaled
+        // re-attributions of the same combined flow, so their sum must equal it.
+        let decomposition_sum = c.q_infiltration_w + c.q_forced_vent_w + c.q_natural_vent_w;
+        assert!(
+            (decomposition_sum - c.q_sensible_diagnostic_w).abs() < 0.01,
+            "energy decomposition sum {decomposition_sum:.4} W ≠ q_sensible_diagnostic \
+             {:.4} W (diff = {:.6} W)",
+            c.q_sensible_diagnostic_w,
+            (decomposition_sum - c.q_sensible_diagnostic_w).abs(),
+        );
+
+        // Sanity: sensible diagnostic must be negative (cold outdoor → heat loss).
+        assert!(
+            c.q_sensible_diagnostic_w < 0.0,
+            "cold outdoor must produce heat loss, got {:.2} W",
+            c.q_sensible_diagnostic_w,
         );
     }
 }

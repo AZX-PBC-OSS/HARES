@@ -20,9 +20,9 @@ pub(crate) struct RainflowCounter {
     pub(crate) reversals: Vec<f64>,
     /// Accumulated equivalent full cycle count (sum of cycle weights).
     cycle_count: f64,
-    /// DOD amplitudes of cycles accumulated within the current day.
-    /// Each entry is `range * weight` (weight = 0.5 for half-cycles, 1.0 for full).
-    daily_cycle_dods: Vec<f64>,
+    /// Cycles accumulated within the current day as `(range, count)` pairs.
+    /// Count is 0.5 for half-cycles, 1.0 for full cycles per ASTM E1049-85.
+    daily_cycle_dods: Vec<(f64, f64)>,
 }
 
 impl RainflowCounter {
@@ -81,14 +81,13 @@ impl RainflowCounter {
 
             if n == 3 {
                 // Y contains the starting point: count as half-cycle, discard first point.
-                let weight = 0.5;
-                self.cycle_count += range_y * weight;
-                self.daily_cycle_dods.push(range_y * weight);
+                self.cycle_count += 0.5;
+                self.daily_cycle_dods.push((range_y, 0.5));
                 self.reversals.remove(0);
             } else {
                 // Count Y as a full cycle, remove the peak and valley of Y.
-                self.cycle_count += range_y;
-                self.daily_cycle_dods.push(range_y);
+                self.cycle_count += 1.0;
+                self.daily_cycle_dods.push((range_y, 1.0));
                 // Remove points at n-3 and n-2 (the middle two of the 4-point window).
                 // SAFETY: reversals.len() >= 4 guaranteed by the `if n < 3 { break }` guard
                 // and the `n == 3` branch exclusion above this point.
@@ -104,10 +103,13 @@ impl RainflowCounter {
         self.cycle_count
     }
 
-    /// Sum of squared effective DOD values accumulated today (Σ DOD_i²).
+    /// Weighted sum of squared DOD values accumulated today: Σ(count_i × DOD_i²).
     /// Used by the Smith 2017 cycle-aging mechanism (b2 term).
     pub(crate) fn sum_squared_dod_daily(&self) -> f64 {
-        self.daily_cycle_dods.iter().map(|d| d * d).sum()
+        self.daily_cycle_dods
+            .iter()
+            .map(|&(range, count)| count * range * range)
+            .sum()
     }
 
     pub(crate) fn reset_daily(&mut self) {
@@ -357,6 +359,30 @@ mod tests {
         );
     }
 
+    /// ASTM E1049-85: sequence [1.0, 0.2, 0.6, 0.0] contains two reversals
+    /// producing two half-cycles. The first has DOD = |0.2 − 1.0| = 0.8 and
+    /// the second has DOD = |0.0 − 0.6| = 0.6. total_cycles() should return 1.0
+    /// (two half-cycles × 0.5 weight each).
+    #[test]
+    fn rainflow_partial_cycles() {
+        let mut rc = RainflowCounter::default();
+        for soc in [1.0_f64, 0.2, 0.6, 0.0] {
+            rc.push(soc);
+        }
+        // Each reversal produces one half-cycle (weight 0.5); two reversals → 1.0 total.
+        assert!(
+            rc.total_cycles() >= 1.0,
+            "Two-reversal sequence should yield total_cycles >= 1.0, got {}",
+            rc.total_cycles()
+        );
+        // sum_squared_dod must be positive: at least one half-cycle with DOD > 0.
+        assert!(
+            rc.sum_squared_dod_daily() > 0.0,
+            "sum_squared_dod_daily must be positive after partial cycles, got {}",
+            rc.sum_squared_dod_daily()
+        );
+    }
+
     /// ASTM E1049-85: monotonically decreasing SOC has no reversals, so no
     /// cycles can be extracted.
     #[test]
@@ -369,6 +395,39 @@ mod tests {
             rc.total_cycles(),
             0.0,
             "Monotonic discharge should produce zero cycles"
+        );
+        assert_eq!(
+            rc.sum_squared_dod_daily(),
+            0.0,
+            "No cycles means sum_squared_dod_daily must also be zero"
+        );
+    }
+
+    /// sum_squared_dod accumulates count × DOD² for each extracted cycle.
+    ///
+    /// Sequence [1.0, 0.2, 1.0]:
+    ///   - Push 1.0, 0.2: initialises reversal buffer (two-point ramp, no extraction)
+    ///   - Push 1.0: direction reverses; 3-point extraction extracts a half-cycle
+    ///     with range = |0.2 - 1.0| = 0.8 → stored as (DOD=0.8, count=0.5)
+    ///   sum_squared_dod = 0.5 × 0.8² = 0.32  (Smith 2017 b2 input term)
+    #[test]
+    fn rainflow_sum_squared_dod() {
+        let mut rc = RainflowCounter::default();
+        for soc in [1.0_f64, 0.2, 1.0] {
+            rc.push(soc);
+        }
+        // Exactly one half-cycle extracted.
+        assert!(
+            (rc.total_cycles() - 0.5).abs() < 1e-12,
+            "Sequence [1.0, 0.2, 1.0] should yield one half-cycle (total_cycles=0.5), got {}",
+            rc.total_cycles()
+        );
+        // sum_squared_dod = count × DOD² = 0.5 × 0.64 = 0.32
+        let expected = 0.5_f64 * 0.8_f64 * 0.8_f64;
+        assert!(
+            (rc.sum_squared_dod_daily() - expected).abs() < 1e-12,
+            "sum_squared_dod_daily should be 0.5×0.8²={expected:.4}, got {}",
+            rc.sum_squared_dod_daily()
         );
     }
 
@@ -574,6 +633,124 @@ mod tests {
             assert_eq!(ds.soc_max_today, 0.5, "soc_max_today should reset to current SOC");
             assert_eq!(ds.soc_min_today, 0.5, "soc_min_today should reset to current SOC");
         }
+    }
+
+    /// Smith 2017 §II-B: capacity_fade must increase (or remain flat) on every day.
+    /// Runs 10 days of pure calendar aging at 25°C and asserts strict monotonicity.
+    /// Also verifies that fade is non-zero after day 2, when the sqrt(t) integrator
+    /// has enough history to produce a positive dq_li1.
+    #[test]
+    fn degradation_calendar_aging() {
+        let u_neg = make_u_neg_table();
+        let dt_s = SECONDS_PER_DAY;
+        let mut ds = DegradationState::default();
+        let mut prev_fade = 0.0_f64;
+
+        for day in 0..10_u32 {
+            ds.accumulate(dt_s, T_REF, V_REF, 0.5);
+            ds.update_daily(&u_neg, T_REF, 0.0);
+            let fade = ds.capacity_fade_pct();
+            assert!(
+                fade >= prev_fade,
+                "capacity_fade must be monotonically non-decreasing: day {day} fade={fade:.8} < prev={prev_fade:.8}"
+            );
+            prev_fade = fade;
+            ds.reset_day_tracking(0.5);
+        }
+        // After 10 days the SEI layer should have grown measurably.
+        assert!(
+            prev_fade > 0.0,
+            "capacity_fade must be positive after 10 days of calendar aging, got {prev_fade}"
+        );
+    }
+
+    /// Smith 2017 Eq. 3: Arrhenius factor for mechanism 1 is positive, so
+    /// calendar fade at 45°C must exceed fade at 25°C over the same period.
+    /// This validates that the thermal acceleration is wired correctly end-to-end.
+    #[test]
+    fn degradation_temperature_dependence() {
+        let ds_25 = run_calendar_aging(30, T_REF, V_REF, 0.5);
+        let ds_45 = run_calendar_aging(30, 318.15, V_REF, 0.5);
+
+        assert!(
+            ds_45.capacity_fade_pct() > ds_25.capacity_fade_pct(),
+            "Calendar fade at 45°C ({:.6}) must exceed 25°C ({:.6}): \
+             higher temperature should accelerate SEI growth via Arrhenius",
+            ds_45.capacity_fade_pct(),
+            ds_25.capacity_fade_pct()
+        );
+        // The ratio must be strictly greater than 1; a sanity-check lower bound of 2×
+        // ensures the temperature sensitivity is not trivially small.
+        let ratio = ds_45.capacity_fade_pct() / ds_25.capacity_fade_pct();
+        assert!(
+            ratio > 2.0,
+            "45°C/25°C fade ratio should be substantially above 1.0 (got {ratio:.3}); \
+             Arrhenius + Tafel together should produce at least 2× acceleration"
+        );
+    }
+
+    /// Crossing a day boundary must reset per-day tracking (soc extremes, dod_max_today,
+    /// b1/b2/b3 accumulators) while preserving all lifetime state (q_li1, q_li2, q_li3,
+    /// capacity_fade, day_age).
+    #[test]
+    fn degradation_reset_day_tracking() {
+        let u_neg = make_u_neg_table();
+        let dt_s = SECONDS_PER_DAY;
+        let mut ds = DegradationState::default();
+
+        // Accumulate day 1 at SOC 0.8 so extremes are non-trivial.
+        ds.accumulate(dt_s, T_REF, V_REF, 0.8);
+        ds.update_daily(&u_neg, T_REF, 0.0);
+
+        // Capture lifetime state before crossing the day boundary.
+        let fade_after_day1 = ds.capacity_fade_pct();
+        let day_age_after_day1 = ds.day_age;
+
+        // Verify day_age incremented.
+        assert_eq!(day_age_after_day1, 1, "day_age should be 1 after first update_daily");
+
+        // Cross the boundary at SOC 0.5.
+        ds.reset_day_tracking(0.5);
+
+        // Daily tracking must be cleared.
+        assert_eq!(ds.dod_max_today, 0.0, "dod_max_today must reset to 0 at day boundary");
+        assert!(
+            (ds.soc_max_today - 0.5).abs() < 1e-12,
+            "soc_max_today must reset to current SOC 0.5, got {}",
+            ds.soc_max_today
+        );
+        assert!(
+            (ds.soc_min_today - 0.5).abs() < 1e-12,
+            "soc_min_today must reset to current SOC 0.5, got {}",
+            ds.soc_min_today
+        );
+        // Per-day accumulators are reset by update_daily itself (before reset_day_tracking).
+        assert!(
+            ds.b1_accum.abs() < 1e-15,
+            "b1_accum must be zero after update_daily, got {}",
+            ds.b1_accum
+        );
+
+        // Lifetime state must be preserved across the reset.
+        assert!(
+            (ds.capacity_fade_pct() - fade_after_day1).abs() < 1e-15,
+            "capacity_fade must be unchanged by reset_day_tracking: before={fade_after_day1:.10}, after={:.10}",
+            ds.capacity_fade_pct()
+        );
+        assert_eq!(
+            ds.day_age, day_age_after_day1,
+            "day_age must not change during reset_day_tracking"
+        );
+
+        // Day 2 aging must continue to accumulate — lifetime is preserved.
+        ds.accumulate(dt_s, T_REF, V_REF, 0.5);
+        ds.update_daily(&u_neg, T_REF, 0.0);
+        assert!(
+            ds.capacity_fade_pct() >= fade_after_day1,
+            "Fade after day 2 ({:.10}) must be >= day 1 ({fade_after_day1:.10})",
+            ds.capacity_fade_pct()
+        );
+        assert_eq!(ds.day_age, 2, "day_age should be 2 after second update_daily");
     }
 
     /// Smith 2017: Mechanism 2 has Ea_b2 = -42800 J/mol (negative activation energy).

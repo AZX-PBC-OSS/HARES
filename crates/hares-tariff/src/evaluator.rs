@@ -185,6 +185,22 @@ impl TariffEvaluator {
             .unwrap_or(0);
 
         let demand_window_minutes = tariff.demand_window_minutes;
+        // When the demand window is shorter than the simulation interval,
+        // it effectively becomes a 1-sample instantaneous peak. This is
+        // physically correct (the interval IS the averaging window). Only
+        // warn when the window is longer than the interval but not evenly
+        // divisible — that silently truncates the averaging window.
+        let window_seconds = demand_window_minutes as u64 * 60;
+        #[allow(clippy::manual_is_multiple_of)]
+        if window_seconds > interval_seconds as u64
+            && window_seconds % interval_seconds as u64 != 0
+        {
+            return Err(HaresError::Tariff(format!(
+                "demand_window_minutes ({demand_window_minutes}) must be evenly \
+                 divisible by the simulation interval ({interval_seconds}s) \
+                 when the window exceeds the interval",
+            )));
+        }
         let billing_state = BillingState::new(
             simulation_start,
             tariff.billing_cycle,
@@ -193,6 +209,11 @@ impl TariffEvaluator {
             max_lookback_months.into(),
             period_name_table.len(),
         );
+
+        debug_assert_eq!(price_array.len(), export_array.len());
+        debug_assert_eq!(price_array.len(), period_indices.len());
+        debug_assert_eq!(price_array.len(), demand_period_indices.len());
+        debug_assert_eq!(price_array.len(), months.len());
 
         Ok(Self {
             tariff,
@@ -213,6 +234,7 @@ impl TariffEvaluator {
 
     /// Clamped index: returns the last valid index when step_index exceeds bounds.
     fn clamped_index(&self) -> usize {
+        debug_assert!(!self.price_array.is_empty(), "price_array must be non-empty");
         self.step_index.min(self.price_array.len().saturating_sub(1))
     }
 
@@ -278,6 +300,12 @@ impl TariffEvaluator {
         if self.finished {
             return None;
         }
+        debug_assert!(
+            self.step_index < self.price_array.len(),
+            "step_index {} out of bounds (len {})",
+            self.step_index,
+            self.price_array.len()
+        );
         let import_price = self.current_price();
         let export_price = self.current_export_price();
         let period_idx = self.period_indices[self.step_index];

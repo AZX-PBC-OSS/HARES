@@ -2216,7 +2216,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// ASTM E1049-85: a 50% DOD round-trip (0.5→1.0→0.5→1.0) should yield
-    /// two half-cycles of range 0.5, totalling 0.5 EFC.
+    /// two half-cycles (weight 0.5 each), totalling 1.0 EFC regardless of DOD amplitude.
     #[test]
     fn rainflow_50_pct_dod_round_trip() {
         let mut rf = RainflowCounter::default();
@@ -2225,10 +2225,11 @@ mod tests {
         rf.push(0.5);
         rf.push(1.0);
 
-        // Two half-cycles extracted: each range=0.5 × count=0.5 = 0.25 EFC.
+        // ASTM E1049-85: two half-cycles extracted, each with weight 0.5 → total = 1.0 EFC.
+        // DOD amplitude does not affect the cycle count; it only affects sum_squared_dod_daily.
         assert!(
-            (rf.total_cycles() - 0.5).abs() < 1e-10,
-            "50% DOD round-trip should count as 0.5 EFC, got {}",
+            (rf.total_cycles() - 1.0).abs() < 1e-10,
+            "50% DOD round-trip should count as 1.0 EFC (two half-cycles), got {}",
             rf.total_cycles()
         );
     }
@@ -2701,7 +2702,7 @@ mod tests {
     /// Sequence: 0.0 → 0.8 → 0.6 → 1.0.
     /// After 3 points [0.0, 0.8, 0.6]: X=|0.6-0.8|=0.2, Y=|0.8-0.0|=0.8. X < Y → no extract.
     /// After 4 points [0.0, 0.8, 0.6, 1.0]: X=|1.0-0.6|=0.4, Y=|0.6-0.8|=0.2. X >= Y, n=4
-    ///   → full cycle of range 0.2 → count += 0.2. Remaining: [0.0, 1.0].
+    ///   → full cycle of range 0.2, weight 1.0 → count += 1.0. Remaining: [0.0, 1.0].
     #[test]
     fn rainflow_inner_cycle_extracted_as_full_cycle() {
         let mut rf = RainflowCounter::default();
@@ -2710,9 +2711,11 @@ mod tests {
         rf.push(0.6);
         rf.push(1.0);
 
+        // ASTM E1049-85: one full cycle (weight 1.0) extracted, DOD=0.2.
+        // total_cycles counts the weight, not the amplitude.
         assert!(
-            (rf.total_cycles() - 0.2).abs() < 1e-10,
-            "inner cycle should be extracted as full cycle (range=0.2): got {} EFC",
+            (rf.total_cycles() - 1.0).abs() < 1e-10,
+            "inner cycle should be extracted as full cycle (weight=1.0, range=0.2): got {} EFC",
             rf.total_cycles()
         );
         assert_eq!(
@@ -3115,19 +3118,18 @@ mod tests {
         let mut rf = RainflowCounter::default();
         assert_eq!(rf.sum_squared_dod_daily(), 0.0);
 
-        // Push a full 50% DOD cycle: 0.5 → 1.0 → 0.5 → 1.0
-        // First two half-cycles are extracted (range=0.5 each, weight=0.5 each → 0.25 each).
+        // Push a 50% DOD round-trip: 0.5 → 1.0 → 0.5 → 1.0
+        // Two half-cycles extracted: each (range=0.5, count=0.5).
         rf.push(0.5);
         rf.push(1.0);
         rf.push(0.5);
         rf.push(1.0);
 
         let sum_sq = rf.sum_squared_dod_daily();
-        // Two half-cycles each with effective DOD = 0.5 * 0.5 = 0.25.
-        // Σ(DOD_i)² = 0.25² + 0.25² = 0.0625 + 0.0625 = 0.125
+        // Σ(count_i × range_i²) = 0.5 × 0.5² + 0.5 × 0.5² = 0.125 + 0.125 = 0.25
         assert!(
-            (sum_sq - 0.125).abs() < 1e-10,
-            "sum_squared_dod should be 0.125 for two half-cycles of range 0.5: got {sum_sq}"
+            (sum_sq - 0.25).abs() < 1e-10,
+            "sum_squared_dod should be 0.25 for two half-cycles of range 0.5: got {sum_sq}"
         );
 
         // After reset_daily, sum should be zero again.

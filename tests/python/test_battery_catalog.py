@@ -76,11 +76,17 @@ class TestBatteryCatalogFactories:
         assert bat.capacity_kwh == 20.0
 
     def test_catalog_battery_charges_in_simulation(self):
-        """Tesla Powerwall 3 from catalog must charge when SOC target applied."""
+        """Tesla Powerwall 3 from catalog must charge when SOC target applied.
+
+        Uses July start to ensure cell temperature is above the 0°C charge
+        lockout (Denver January ambient is -19°C which blocks charging).
+        """
         from ochre_next import ControlSignal
         from conftest import make_dwelling
 
-        dw = make_dwelling(duration_s=300, time_res_s=60)
+        dw = make_dwelling(
+            duration_s=300, time_res_s=60, start_time="2019-07-01T12:00:00"
+        )
         dw.initialize()
         bat = Battery.tesla_pw3()
         dw.add_battery(bat)

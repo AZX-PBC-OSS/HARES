@@ -492,4 +492,56 @@ mod tests {
             "expected 7500 W, got {result}"
         );
     }
+
+    /// interpolated_eir with eir_by_stage=[0.3, 0.4], speed_index=0, speed_frac=0.5.
+    /// Expected: 0.3*(1-0.5) + 0.4*0.5 = 0.35.
+    #[test]
+    fn interpolated_eir_between_stages() {
+        let mut hvac = make_single_speed();
+        // COP ~3.3 at low speed, ~2.5 at high speed (realistic AC EIR values)
+        hvac.eir_by_stage = vec![0.30, 0.40];
+        let result = hvac.interpolated_eir(0, 0.5);
+        assert!(
+            (result - 0.35).abs() < 1e-9,
+            "expected EIR=0.35, got {result}"
+        );
+    }
+
+    /// interpolated_eir with speed_frac=0.0 returns stage 0 EIR unchanged.
+    #[test]
+    fn interpolated_eir_at_stage_boundary() {
+        let mut hvac = make_single_speed();
+        hvac.eir_by_stage = vec![0.30, 0.40];
+        let result = hvac.interpolated_eir(0, 0.0);
+        assert!(
+            (result - 0.30).abs() < 1e-9,
+            "expected EIR=0.30 at stage 0, got {result}"
+        );
+    }
+
+    /// capacity_fractions for a 2-speed heating config [5000, 10000 W].
+    /// Expected fractions: [0.5, 1.0] — normalized to the highest stage.
+    #[test]
+    fn capacity_fractions_two_speed() {
+        let mut hvac = make_single_speed();
+        hvac.heating_capacities_w = vec![5_000.0, 10_000.0];
+        let fracs = hvac.capacity_fractions();
+        assert_eq!(fracs.len(), 2, "two-speed must yield two fractions");
+        assert!(
+            (fracs[0] - 0.5).abs() < 1e-9,
+            "low-speed fraction: expected 0.5, got {}",
+            fracs[0]
+        );
+        assert!(
+            (fracs[1] - 1.0).abs() < 1e-9,
+            "high-speed fraction: expected 1.0, got {}",
+            fracs[1]
+        );
+        for (i, &f) in fracs.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&f),
+                "fraction[{i}]={f} must be in [0, 1]"
+            );
+        }
+    }
 }

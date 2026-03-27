@@ -17,14 +17,21 @@ WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 
-def make_dwelling(duration_s: int = 300, time_res_s: int = 60, seed: int = 0, output_verbosity: int = 0, **kw):
+def make_dwelling(
+    duration_s: int = 300,
+    time_res_s: int = 60,
+    seed: int = 0,
+    output_verbosity: int = 0,
+    start_time: str = "2019-01-01T00:00:00",
+    **kw,
+):
     from ochre_next import Dwelling
 
     return Dwelling.from_hpxml(
         HPXML,
         SCHEDULE,
         WEATHER,
-        start_time="2019-01-01T00:00:00",
+        start_time=start_time,
         duration_s=duration_s,
         time_res_s=time_res_s,
         defaults_path=str(HARES_DEFAULTS),

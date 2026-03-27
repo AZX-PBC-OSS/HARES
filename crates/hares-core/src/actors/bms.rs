@@ -144,10 +144,17 @@ impl BatteryManagementActor {
                 }
 
                 if surplus > 0.0 && soc < *max_soc {
+                    // When GridExportRule::Disabled, force solar-only charging
+                    // to prevent grid-to-battery import that would increase
+                    // net grid consumption.
+                    let force_solar_only = matches!(
+                        self.grid_export_rule,
+                        GridExportRule::Disabled
+                    );
                     self.emit(
                         ControlSignal::SelfConsumption {
                             enabled: true,
-                            solar_only_charging: *solar_only_charging,
+                            solar_only_charging: *solar_only_charging || force_solar_only,
                         },
                         out,
                     );
@@ -1767,6 +1774,95 @@ mod tests {
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_self_consumption_disabled_forces_solar_only_charging() {
+        // SelfConsumption + Disabled + surplus: battery should charge from PV only,
+        // not grid, even when solar_only_charging is false in the BmsMode config.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.9,
+                solar_only_charging: false, // user says allow grid charging
+            },
+            GridExportRule::Disabled, // but export rule says no grid interaction
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 4.0,
+                base_load_kw: 2.0, // surplus = 2 kW
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.3);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::SelfConsumption {
+                solar_only_charging,
+                ..
+            } => {
+                assert!(
+                    *solar_only_charging,
+                    "GridExportRule::Disabled should force solar_only_charging=true"
+                );
+            }
+            other => panic!("expected SelfConsumption signal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_self_consumption_unrestricted_respects_user_solar_only_false() {
+        // Unrestricted: user's solar_only_charging=false should be preserved.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.9,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 4.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.3);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::SelfConsumption {
+                solar_only_charging,
+                ..
+            } => {
+                assert!(
+                    !solar_only_charging,
+                    "Unrestricted should preserve user's solar_only_charging=false"
+                );
+            }
+            other => panic!("expected SelfConsumption signal, got {other:?}"),
         }
     }
 }

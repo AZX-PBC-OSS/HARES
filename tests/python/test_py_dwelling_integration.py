@@ -164,10 +164,16 @@ class TestControlInjection:
         )
 
     def test_soc_target_charges_battery(self):
-        """Applying SOCTarget to a half-charged battery must increase its SOC."""
+        """Applying SOCTarget to a half-charged battery must increase its SOC.
+
+        Uses a July start so the battery cell temperature is above the
+        0°C charge lockout threshold (Li-ion safety: no charging below 0°C).
+        """
         from ochre_next import Battery, ControlSignal
 
-        dw = _init_dwelling(duration_s=600, time_res_s=60)
+        dw = _init_dwelling(
+            duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
+        )
         bat = Battery("Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.3)
         dw.add_battery(bat)
         dw.apply_control("Bat", ControlSignal.soc_target(target=0.9))
@@ -176,7 +182,10 @@ class TestControlInjection:
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("Bat")
         soc = tel["soc"][idx]
-        assert soc > 0.3, f"Battery SOC should increase toward target 0.9, got {soc}"
+        assert soc > 0.3, (
+            f"Battery SOC should increase toward target 0.9, got {soc}. "
+            f"If stuck at 0.3, check cell_temp vs min_charge_temp_c lockout."
+        )
         power = tel["power_kw"][idx]
         assert power > 0, f"Battery should be drawing power to charge, got {power}"
 
