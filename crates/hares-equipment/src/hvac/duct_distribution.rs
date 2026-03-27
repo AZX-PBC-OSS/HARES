@@ -181,4 +181,114 @@ mod tests {
             hvac.zone_heat_fractions
         );
     }
+
+    /// When duct_zone_id == zone_id (conditioned zone IS the duct zone), the duct
+    /// loss entry must not be added as a separate row.  Adding it would double-count
+    /// heat into the conditioned zone.
+    #[test]
+    fn update_zone_heat_fractions_same_duct_zone() {
+        let mut hvac = make_hvac();
+        hvac.duct_dse = 0.85;
+        hvac.basement_heat_frac = 0.0;
+        // duct_zone_id == zone_id (ZoneId(1)) — conditioned zone is the duct zone.
+        hvac.duct_zone_id = Some(ZoneId(1));
+        hvac.update_zone_heat_fractions();
+
+        // Only the conditioned zone entry should appear; no duplicate duct entry.
+        assert_eq!(
+            hvac.zone_heat_fractions.len(),
+            1,
+            "duct_zone == indoor_zone must not produce a separate duct entry; \
+             got {:?}",
+            hvac.zone_heat_fractions
+        );
+        let (zone, frac) = hvac.zone_heat_fractions[0];
+        assert_eq!(zone, ZoneId(1));
+        // conditioned fraction = dse * (1 - basement_frac) = 0.85 * 1.0 = 0.85
+        assert!(
+            (frac - 0.85).abs() < 1e-9,
+            "conditioned fraction: expected 0.85, got {frac}"
+        );
+    }
+
+    /// write_zone_thermal_contributions with a positive sensible gain (heating).
+    /// DSE=1.0, single zone → conditioned zone must receive the full gain.
+    #[test]
+    fn write_zone_thermal_contributions_heating() {
+        use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
+
+        let mut hvac = make_hvac();
+        hvac.duct_dse = 1.0;
+        hvac.update_zone_heat_fractions();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let sensible_w = 8_000.0_f64;
+        let latent_w = 0.0_f64;
+        hvac.write_zone_thermal_contributions(
+            &mut ports,
+            sensible_w,
+            latent_w,
+            ThermalCategory::HvacHeating,
+        )
+        .expect("write must succeed for declared zone");
+
+        let acc = ports.thermal.iter().find(|a| a.zone == ZoneId(1)).unwrap();
+        assert!(
+            (acc.sensible_gain_w - sensible_w).abs() < 1e-9,
+            "zone 1 sensible gain: expected {sensible_w} W, got {}",
+            acc.sensible_gain_w
+        );
+        assert!(
+            acc.latent_gain_w.abs() < 1e-9,
+            "zone 1 latent gain must be zero, got {}",
+            acc.latent_gain_w
+        );
+    }
+
+    /// write_zone_thermal_contributions with a negative sensible gain (cooling).
+    /// The sign must pass through unchanged — cooling is a negative heat contribution.
+    #[test]
+    fn write_zone_thermal_contributions_cooling() {
+        use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
+
+        let mut hvac = make_hvac();
+        hvac.duct_dse = 1.0;
+        hvac.update_zone_heat_fractions();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let sensible_w = -9_000.0_f64; // negative = cooling load removed
+        let latent_w = -1_500.0_f64;
+        hvac.write_zone_thermal_contributions(
+            &mut ports,
+            sensible_w,
+            latent_w,
+            ThermalCategory::HvacCooling,
+        )
+        .expect("write must succeed for declared zone");
+
+        let acc = ports.thermal.iter().find(|a| a.zone == ZoneId(1)).unwrap();
+        assert!(
+            (acc.sensible_gain_w - sensible_w).abs() < 1e-9,
+            "cooling sensible must be negative: expected {sensible_w} W, got {}",
+            acc.sensible_gain_w
+        );
+        assert!(
+            acc.sensible_gain_w < 0.0,
+            "cooling sensible gain must be negative, got {}",
+            acc.sensible_gain_w
+        );
+        assert!(
+            (acc.latent_gain_w - latent_w).abs() < 1e-9,
+            "cooling latent: expected {latent_w} W, got {}",
+            acc.latent_gain_w
+        );
+    }
 }

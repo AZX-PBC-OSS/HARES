@@ -557,4 +557,156 @@ mod tests {
             );
         }
     }
+
+    fn make_two_speed_setpoint() -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::TwoSpeedSetpoint;
+        hvac.cooling_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.low_speed_capacity_fraction = 0.5;
+        // Set min_time_per_speed_s = 0 so tests are not time-locked.
+        hvac.min_time_per_speed_s = 0.0;
+        hvac.time_at_current_speed_s = 0.0;
+        hvac
+    }
+
+    fn make_two_speed_time() -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::TwoSpeedTime;
+        hvac.cooling_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.low_speed_capacity_fraction = 0.5;
+        hvac.min_time_per_speed_s = 300.0;
+        hvac.time_at_current_speed_s = 0.0;
+        hvac
+    }
+
+    /// TwoSpeedSetpoint: load ≤ low_speed_capacity_fraction → speed 0.
+    /// load=0.3, low_cap=0.5 → desired=0.  PLR = 0.3/0.5 = 0.6, speed_frac = 0.5.
+    #[test]
+    fn select_speed_two_speed_setpoint_low_load() {
+        let mut hvac = make_two_speed_setpoint();
+        let sel = hvac.select_speed(0.3);
+        assert_eq!(sel.speed_index, 0, "low load must select speed 0");
+        assert!(
+            (sel.part_load_ratio - 0.6).abs() < 1e-9,
+            "PLR must be load/low_cap = 0.3/0.5 = 0.6, got {}",
+            sel.part_load_ratio
+        );
+        assert!(
+            (sel.speed_frac - 0.5).abs() < 1e-9,
+            "speed_frac must equal low_speed_capacity_fraction=0.5, got {}",
+            sel.speed_frac
+        );
+    }
+
+    /// TwoSpeedSetpoint: load > low_speed_capacity_fraction → speed 1.
+    /// load=0.8, low_cap=0.5 → desired=1.  PLR = 0.8, speed_frac = 1.0.
+    #[test]
+    fn select_speed_two_speed_setpoint_high_load() {
+        let mut hvac = make_two_speed_setpoint();
+        let sel = hvac.select_speed(0.8);
+        assert_eq!(sel.speed_index, 1, "high load must select speed 1");
+        assert!(
+            (sel.part_load_ratio - 0.8).abs() < 1e-9,
+            "PLR must equal load_fraction=0.8, got {}",
+            sel.part_load_ratio
+        );
+        assert!(
+            (sel.speed_frac - 1.0).abs() < 1e-9,
+            "speed_frac must be 1.0 at high speed, got {}",
+            sel.speed_frac
+        );
+    }
+
+    /// TwoSpeedTime: fresh cycle (no prev_zone_temp) starts at speed 0.
+    /// After min_time_per_speed_s has elapsed and zone temp is moving wrong way
+    /// (cooling: zone temp rising), speed escalates to 1.
+    #[test]
+    fn select_speed_two_speed_time_direction_change() {
+        let mut hvac = make_two_speed_time();
+        // Fresh start: no previous temperature, must start at speed 0.
+        let sel0 = hvac.select_speed_with_zone_temp(0.8, Some(25.0), false);
+        assert_eq!(sel0.speed_index, 0, "fresh cycle must start at speed 0");
+
+        // Simulate time elapsing past the minimum guard.
+        hvac.time_at_current_speed_s = 300.0;
+        hvac.update_prev_zone_temp(Some(25.0));
+
+        // Next step: zone temp rose to 26.0°C during cooling — moving wrong way.
+        let sel1 = hvac.select_speed_with_zone_temp(0.8, Some(26.0), false);
+        assert_eq!(
+            sel1.speed_index, 1,
+            "rising zone temp during cooling after min_time must escalate to speed 1"
+        );
+    }
+
+    /// TwoSpeedTime: speed change is blocked when time_at_current_speed_s < min_time_per_speed_s.
+    /// Even with temperature moving in the wrong direction, the speed must not change.
+    #[test]
+    fn select_speed_two_speed_time_min_guard() {
+        let mut hvac = make_two_speed_time();
+        // Establish: running at speed 0, timer has not yet expired.
+        hvac.last_speed_index = 0;
+        hvac.time_at_current_speed_s = 100.0; // less than 300 s minimum
+        hvac.prev_zone_temp_c = Some(25.0);
+
+        // Zone temp is rising during cooling — would normally trigger escalation,
+        // but the min-time guard must block it.
+        let sel = hvac.select_speed_with_zone_temp(0.8, Some(26.0), false);
+        assert_eq!(
+            sel.speed_index, 0,
+            "speed must not change before min_time_per_speed_s expires: got {}",
+            sel.speed_index
+        );
+    }
+
+    /// apply_startup_capacity_degradation: cold start (duty_cycle > 0, timer=0) must
+    /// return capacity below steady-state.  Winkler (2011) c_d=0.25, dt=1 min → t_full=5.4 min,
+    /// first-step mult < 1.0.
+    #[test]
+    fn startup_capacity_degradation_cold_start() {
+        let mut hvac = make_single_speed();
+        hvac.duty_cycle = 1.0; // unit is on
+        hvac.startup.c_d = 0.25;
+        hvac.startup.time_since_start_min = 0.0;
+
+        let steady_w = 10_000.0;
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+
+        assert!(
+            actual_w < steady_w,
+            "cold-start capacity must be below steady-state {steady_w} W, got {actual_w} W"
+        );
+        assert!(
+            actual_w > 0.0,
+            "startup capacity must be positive, got {actual_w} W"
+        );
+        // Winkler formula at t=0.5 min (mid-step), t_full=5.4 min:
+        // mult = -1.025 * exp(-3.79936 * 0.5 / 5.4) + 1.025
+        let t_full = 20.0 * 0.25_f64 + 0.4;
+        let expected_mult =
+            (-1.025_f64 * (-3.799_36_f64 * 0.5 / t_full).exp() + 1.025).clamp(0.0, 1.0);
+        assert!(
+            (actual_w - steady_w * expected_mult).abs() < 1.0,
+            "cold-start capacity: expected {:.1} W, got {actual_w:.1} W",
+            steady_w * expected_mult
+        );
+    }
+
+    /// apply_startup_capacity_degradation: when c_d = 0.0 (variable-speed / no ramp),
+    /// the multiplier is always 1.0 and capacity equals steady-state on the first step.
+    #[test]
+    fn startup_capacity_degradation_warm_restart() {
+        let mut hvac = make_single_speed();
+        hvac.duty_cycle = 1.0;
+        hvac.startup.c_d = 0.0;
+        hvac.startup.time_since_start_min = 0.0;
+
+        let steady_w = 10_000.0;
+        let actual_w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+
+        assert!(
+            (actual_w - steady_w).abs() < 1e-9,
+            "c_d=0 must yield full capacity immediately: expected {steady_w} W, got {actual_w} W"
+        );
+    }
 }

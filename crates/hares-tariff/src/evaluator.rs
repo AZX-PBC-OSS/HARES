@@ -1325,7 +1325,7 @@ mod tests {
         // Accessors must not panic — they return the last valid value.
         assert_eq!(ev.current_price(), 0.12);
         assert_eq!(ev.current_export_price(), 0.0);
-        assert!(!ev.current_period_name().is_empty() || ev.current_period_name().is_empty());
+        assert_eq!(ev.current_period_name(), "flat");
         let _ = ev.tier_multiplier(0.0);
         assert!(ev.is_finished());
     }

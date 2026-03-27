@@ -1300,4 +1300,301 @@ mod tests {
             "energy not conserved: input sum {input_sum}, output sum {output_sum}"
         );
     }
+
+    /// Run a multi-step simulation, verifying node temperatures match analytically
+    /// derived reference values. Uses a 6-node, zero-UA (adiabatic) tank with
+    /// a fixed draw and element heating each step so physics is simple enough
+    /// to compute by hand.
+    ///
+    /// Step A (no draw, heat node 0 @ 4500 W for 60 s):
+    ///   ΔT_node0 = P·dt / (ρ·V_node·Cp)
+    ///
+    /// Step B (draw = node_volume, mains = 15°C, no heat):
+    ///   Top node fully displaced by node-1 content; bottom fills with mains.
+    ///
+    /// The test verifies that the scratch-buffer implementation produces the
+    /// same f64-exact results as the analytic calculation.
+    #[test]
+    fn tank_preallocated_produces_identical_temps() {
+        let mut tank = test_tank(6, 50.0);
+        let dt = Duration::from_secs(60);
+        let power_w = 4_500.0;
+        let mains_temp_c = 15.0;
+        let node_vol = tank.node_volumes_m3()[0];
+        let mcp = WATER_DENSITY_KG_PER_M3 * node_vol * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let delta_t = power_w * dt.as_secs_f64() / mcp;
+
+        // Step 1: heat-only (no draw)
+        let draw1 = tank
+            .step(20.0, 0.0, mains_temp_c, &[(0, power_w)], dt)
+            .expect("step 1");
+        assert_eq!(draw1.outlet_temp_c, 50.0, "pre-step top-node must be initial temp");
+
+        let expected_top_after_heat = 50.0 + delta_t;
+        assert!(
+            (tank.node_temps()[0] - expected_top_after_heat).abs() < 1e-10,
+            "node 0 after heating: expected {expected_top_after_heat:.6}, got {}",
+            tank.node_temps()[0]
+        );
+        for idx in 1..6 {
+            assert!(
+                (tank.node_temps()[idx] - 50.0).abs() < 1e-10,
+                "node {idx} must remain 50.0 after heat-only step, got {}",
+                tank.node_temps()[idx]
+            );
+        }
+
+        // Step 2: draw one node-volume of hot water; no element heat
+        let top_before_draw = tank.node_temps()[0];
+        let draw2 = tank
+            .step(20.0, node_vol, mains_temp_c, &[], dt)
+            .expect("step 2");
+
+        assert!(
+            (draw2.outlet_temp_c - top_before_draw).abs() < 1e-10,
+            "outlet temp must equal pre-step top-node, expected {top_before_draw:.6}, got {:.6}",
+            draw2.outlet_temp_c
+        );
+        // After drawing one full node-volume: node 0 takes content of old node 1 (50°C);
+        // bottom node gets mains water.
+        assert!(
+            (tank.node_temps()[0] - 50.0).abs() < 1e-10,
+            "node 0 after draw should be ~50.0°C (was node 1), got {}",
+            tank.node_temps()[0]
+        );
+        assert!(
+            (tank.node_temps()[5] - mains_temp_c).abs() < 1e-10,
+            "bottom node after one-node draw should equal mains {mains_temp_c}°C, got {}",
+            tank.node_temps()[5]
+        );
+    }
+
+    /// Verify conduction+standby: a 6-node tank with known UA and a 10°C top-to-bottom
+    /// temperature gradient produces the expected inter-node conduction and skin-loss
+    /// values without allocating new Vecs.
+    ///
+    /// Conductivity = 0 so only standby UA losses apply.  With UA = 5.0 W/K,
+    /// ambient = 20°C, and node 0 at 60°C, the expected skin loss from node 0
+    /// equals ua_per_node[0] × (60 − 20).
+    #[test]
+    fn tank_conduction_standby_identical() {
+        let mut tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 6,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 5.0,
+            conductivity_w_m_k: 0.0,
+            initial_temp_c: 50.0,
+            element_nodes: [Some(0), Some(5)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect("tank");
+
+        // Set a linear gradient: top (node 0) hottest.
+        for (i, t) in tank.node_temps_c.iter_mut().enumerate() {
+            *t = 60.0 - i as f64 * 2.0; // 60, 58, 56, 54, 52, 50
+        }
+
+        let ambient = 20.0;
+        let dt = Duration::from_secs(60);
+        let ua_node0 = tank.ua_per_node[0];
+        let vol_node0 = tank.node_volumes_m3()[0];
+        let mcp_node0 = WATER_DENSITY_KG_PER_M3 * vol_node0 * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let expected_loss_j = ua_node0 * (60.0 - ambient) * dt.as_secs_f64();
+        let expected_temp0 = 60.0 - expected_loss_j / mcp_node0;
+
+        tank.step(ambient, 0.0, 15.0, &[], dt).expect("standby step");
+
+        assert!(
+            (tank.node_temps()[0] - expected_temp0).abs() < 1e-9,
+            "node 0 standby temperature: expected {expected_temp0:.6}, got {:.6}",
+            tank.node_temps()[0]
+        );
+        // All nodes must cool toward ambient (none should heat up from conductivity=0).
+        for idx in 0..6 {
+            let initial_t = 60.0 - idx as f64 * 2.0;
+            assert!(
+                tank.node_temps()[idx] < initial_t,
+                "node {idx} must cool toward ambient after standby, initial={initial_t}, got {}",
+                tank.node_temps()[idx]
+            );
+        }
+        // Skin loss must be the sum of all per-node UA × ΔT contributions.
+        let expected_skin_loss: f64 = (0..6)
+            .map(|i| tank.ua_per_node[i] * ((60.0 - i as f64 * 2.0) - ambient))
+            .sum();
+        assert!(
+            (tank.skin_loss_w() - expected_skin_loss).abs() < 1e-6,
+            "skin_loss_w: expected {expected_skin_loss:.4}, got {:.4}",
+            tank.skin_loss_w()
+        );
+    }
+
+    /// Verify that a draw of exactly one node-volume produces correct outlet
+    /// temperature, correct energy accounting, and correct post-draw node
+    /// temperatures (each node shifts one position upward, bottom fills with mains).
+    #[test]
+    fn tank_draw_identical() {
+        let mut tank = test_tank(6, 50.0);
+        {
+            let temps = tank.node_temps_c.as_mut_slice();
+            temps.copy_from_slice(&[65.0, 62.0, 59.0, 56.0, 53.0, 50.0]);
+        }
+
+        let node_vol = tank.node_volumes_m3()[0];
+        let mains_temp_c = 12.0;
+        let dt = Duration::from_secs(60);
+
+        let draw = tank
+            .step(20.0, node_vol, mains_temp_c, &[], dt)
+            .expect("draw step");
+
+        // Outlet = pre-step top-node temperature.
+        assert!(
+            (draw.outlet_temp_c - 65.0).abs() < 1e-10,
+            "outlet_temp_c must equal pre-step top node 65.0, got {}",
+            draw.outlet_temp_c
+        );
+
+        // Energy removed equals ρ·V·Cp·T_outlet (pre-injection top-node segment).
+        let expected_energy_out = WATER_DENSITY_KG_PER_M3
+            * WATER_SPECIFIC_HEAT_J_PER_KG_K
+            * node_vol
+            * 65.0;
+        assert!(
+            (draw.energy_out_j - expected_energy_out).abs() < 1.0,
+            "energy_out_j: expected {expected_energy_out:.1}, got {:.1}",
+            draw.energy_out_j
+        );
+
+        // After a one-node draw each node shifts: node i takes content of node i+1.
+        // Bottom node receives mains water.
+        let expected_after = [62.0, 59.0, 56.0, 53.0, 50.0, mains_temp_c];
+        for (i, (&got, &exp)) in tank.node_temps().iter().zip(expected_after.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-9,
+                "node {i} after one-node draw: expected {exp}, got {got}"
+            );
+        }
+    }
+
+    /// Verify inversion mixing with a profile where the bottom is hotter than the top.
+    /// A 6-node tank initialised as [20, 20, 20, 60, 60, 60] (top cold, bottom hot)
+    /// must merge into a uniform [40, 40, 40, 40, 40, 40] profile and the temperature
+    /// ordering must be non-increasing (top ≥ bottom) after mixing.
+    #[test]
+    fn tank_mix_inversions_identical() {
+        let mut tank = test_tank(6, 0.0);
+        {
+            let t = tank.node_temps_c.as_mut_slice();
+            t.copy_from_slice(&[20.0, 20.0, 20.0, 60.0, 60.0, 60.0]);
+        }
+
+        let before_energy = total_energy_j(&tank);
+        let merges = tank.mix_inversions();
+
+        assert!(merges > 0, "bottom-hot profile must require at least one merge");
+
+        // All six nodes must converge to 40°C (volume-weighted average of 20 and 60 with equal volumes).
+        for (i, &t) in tank.node_temps().iter().enumerate() {
+            assert!(
+                (t - 40.0).abs() < 1e-9,
+                "node {i}: expected 40.0°C after full inversion mix, got {t}"
+            );
+        }
+
+        // Profile must be monotone non-increasing (top ≥ bottom).
+        for pair in tank.node_temps().windows(2) {
+            assert!(
+                pair[0] >= pair[1] - 1e-9,
+                "profile not monotone: {:.4} < {:.4}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // Energy must be conserved.
+        let after_energy = total_energy_j(&tank);
+        assert!(
+            (after_energy - before_energy).abs() <= 1.0,
+            "energy not conserved by mix_inversions: before={before_energy:.1}, after={after_energy:.1}"
+        );
+    }
+
+    /// Run 100 steps of alternating draw and recovery, verifying energy conservation
+    /// across the full multi-step sequence.
+    ///
+    /// Uses a zero-UA, zero-conductivity adiabatic tank so that the energy balance
+    /// closes exactly: `energy_after = energy_before − energy_out + energy_in + element_input`.
+    ///
+    /// Even steps: draw 5% of tank volume (mains 15°C), no element heat.
+    /// Odd steps: inject 4500 W into node 0, no draw.
+    ///
+    /// After every step the invariant must hold to within 1 J.  Final node
+    /// temperatures must be finite and the profile must be non-increasing
+    /// (inversion mixing is called inside every `step()` call).
+    #[test]
+    fn tank_multi_step_roundtrip() {
+        // Zero UA, zero conductivity: no losses, energy balance closes cleanly.
+        let mut tank = test_tank(6, 55.0);
+
+        let dt = Duration::from_secs(60);
+        let mains_temp_c = 15.0;
+        let total_vol = tank.total_volume_m3();
+        let draw_vol = total_vol * 0.05;
+        let element_power_w = 4_500.0;
+        let element_energy_j = element_power_w * dt.as_secs_f64();
+
+        let mut cumulative_energy_in = 0.0_f64;
+        let mut cumulative_energy_out = 0.0_f64;
+        let energy_initial = total_energy_j(&tank);
+
+        for step in 0..100u32 {
+            let before = total_energy_j(&tank);
+            let draw = if step % 2 == 0 {
+                tank.step(20.0, draw_vol, mains_temp_c, &[], dt)
+            } else {
+                tank.step(20.0, 0.0, mains_temp_c, &[(0, element_power_w)], dt)
+            }
+            .expect("step failed");
+            let after = total_energy_j(&tank);
+
+            let injected = if step % 2 == 1 { element_energy_j } else { 0.0 };
+            let expected_after = before - draw.energy_out_j + draw.energy_in_j + injected;
+            assert!(
+                (after - expected_after).abs() <= 1.0,
+                "step {step}: energy balance violated: expected {expected_after:.1}, got {after:.1}"
+            );
+
+            cumulative_energy_out += draw.energy_out_j;
+            cumulative_energy_in += draw.energy_in_j;
+        }
+
+        // All final temperatures must be finite.
+        for (i, &t) in tank.node_temps().iter().enumerate() {
+            assert!(t.is_finite(), "node {i} temperature is not finite after 100 steps");
+        }
+
+        // Final profile must be monotone non-increasing.
+        for pair in tank.node_temps().windows(2) {
+            assert!(
+                pair[0] >= pair[1] - 1e-9,
+                "final profile not monotone: {:.4} < {:.4}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // Gross energy flows must be positive (tank delivered and received heat).
+        assert!(cumulative_energy_out > 0.0, "cumulative energy_out must be positive");
+        assert!(cumulative_energy_in > 0.0, "cumulative energy_in must be positive");
+
+        // Sanity: final energy must be in a physically plausible range.
+        let energy_final = total_energy_j(&tank);
+        assert!(
+            energy_final > 0.0 && energy_final < energy_initial * 10.0,
+            "final energy {energy_final:.0} J outside plausible range"
+        );
+    }
 }

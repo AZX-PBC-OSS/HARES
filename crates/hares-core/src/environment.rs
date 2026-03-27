@@ -93,6 +93,8 @@ pub struct EnvironmentManager {
     solar_irradiance_buf: Vec<SurfaceIrradiance>,
     schedule_values_buf: Vec<f64>,
     mains_payload_buf: Vec<f64>,
+    schedule_payload_swap: Vec<f64>,
+    mains_payload_swap: Vec<f64>,
 }
 
 impl EnvironmentManager {
@@ -224,6 +226,8 @@ impl EnvironmentManager {
             solar_irradiance_buf: Vec::with_capacity(num_surfaces),
             schedule_values_buf: Vec::with_capacity(num_schedule_cols),
             mains_payload_buf: vec![0.0],
+            schedule_payload_swap: Vec::with_capacity(num_schedule_cols),
+            mains_payload_swap: Vec::with_capacity(1),
         })
     }
 
@@ -497,18 +501,42 @@ impl EnvironmentManager {
             frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
         });
 
-        // Step 6: custom_domains — reuse Vec capacity; maintain exactly two slots.
+        // Step 6: custom_domains — swap-based reuse to avoid per-step allocations.
         self.mains_payload_buf[0] = mains_temp_c;
-        state.custom_domains.clear();
+
+        // Recover previously-swapped Vecs from the existing DomainUpdates.
+        for du in state.custom_domains.drain(..) {
+            if du.domain_id == schedule_domain_id() {
+                if let Some(v) = du.custom_payload {
+                    self.schedule_payload_swap = v;
+                }
+            } else if du.domain_id == MAINS_WATER_DOMAIN_ID {
+                if let Some(v) = du.custom_payload {
+                    self.mains_payload_swap = v;
+                }
+            }
+        }
+
+        self.schedule_payload_swap.clear();
+        self.schedule_payload_swap
+            .extend_from_slice(&self.schedule_values_buf);
+
+        self.mains_payload_swap.clear();
+        self.mains_payload_swap
+            .extend_from_slice(&self.mains_payload_buf);
+
+        let sched_payload = std::mem::take(&mut self.schedule_payload_swap);
+        let mains_payload = std::mem::take(&mut self.mains_payload_swap);
+
         state.custom_domains.push(hares_types::DomainUpdate {
             domain_id: schedule_domain_id(),
             zone_temperatures_c: Vec::new(),
-            custom_payload: Some(self.schedule_values_buf.clone()),
+            custom_payload: Some(sched_payload),
         });
         state.custom_domains.push(hares_types::DomainUpdate {
             domain_id: MAINS_WATER_DOMAIN_ID,
             zone_temperatures_c: Vec::new(),
-            custom_payload: Some(self.mains_payload_buf.clone()),
+            custom_payload: Some(mains_payload),
         });
 
         // Step 7: weather scalar fields

@@ -399,6 +399,293 @@ mod tests {
         );
     }
 
+    /// ELA variant: nominal conditions (non-zero wind and stack effect).
+    /// Q = ela_cm2 * sqrt(stack_coeff * |ΔT| + wind_coeff * v²) * LPS_PER_CM2_TO_M3PS_PER_CM2
+    /// Verify the solver returns a positive, non-trivial flow for known ELA inputs.
+    #[test]
+    fn infiltration_ela_nominal() {
+        // ELA = 100 cm² = 0.01 m²; typical single-family home (LBNL/ASHRAE 136)
+        let ela_m2 = 0.01_f64;
+        let stack_coeff = 0.000_290_f64;
+        let wind_coeff = 0.000_150_f64;
+        let t_zone = 21.0_f64;
+        let t_out = 0.0_f64;
+        let wind_m_s = 3.0_f64;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(
+                ZoneId(1),
+                InfiltrationMethod::Ela {
+                    ela_m2,
+                    stack_coeff,
+                    wind_coeff,
+                },
+            )],
+            ..ThermalSolverConfig::default()
+        };
+        let env = make_env(t_out, wind_m_s, t_zone, 300.0);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        assert_eq!(couplings.len(), 1);
+        let flow = couplings[0].raw_inf_m3_s;
+        assert!(
+            flow > 0.0,
+            "ELA infiltration must be positive under stack+wind, got {flow}"
+        );
+
+        // Hand-calculate expected: ela_cm2 = 0.01 * 10_000 = 100 cm²
+        // driver = stack_coeff * |ΔT| + wind_coeff * v² = 0.000290*21 + 0.000150*9
+        // flow_lps_per_cm2 = sqrt(driver); flow_m3_s = ela_cm2 * flow_lps_per_cm2 / 1000
+        // (LPS_PER_CM2_TO_M3PS_PER_CM2 = 1/1000)
+        let ela_cm2 = ela_m2 * 10_000.0;
+        let driver = stack_coeff * (t_zone - t_out).abs() + wind_coeff * wind_m_s.powi(2);
+        let expected = ela_cm2 * driver.sqrt() / 1000.0;
+        assert!(
+            (flow - expected).abs() < 1e-9,
+            "ELA flow: expected {expected:.8} m³/s, got {flow:.8} m³/s"
+        );
+    }
+
+    /// ELA variant: zero wind — only stack effect drives infiltration.
+    /// Q = ela_cm2 * sqrt(stack_coeff * |ΔT|) / 1000
+    #[test]
+    fn infiltration_ela_zero_wind() {
+        let ela_m2 = 0.01_f64;
+        let stack_coeff = 0.000_290_f64;
+        let wind_coeff = 0.000_150_f64;
+        let t_zone = 21.0_f64;
+        let t_out = 0.0_f64;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(
+                ZoneId(1),
+                InfiltrationMethod::Ela {
+                    ela_m2,
+                    stack_coeff,
+                    wind_coeff,
+                },
+            )],
+            ..ThermalSolverConfig::default()
+        };
+        let env = make_env(t_out, 0.0, t_zone, 300.0);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        let flow = couplings[0].raw_inf_m3_s;
+        let ela_cm2 = ela_m2 * 10_000.0;
+        let expected = ela_cm2 * (stack_coeff * (t_zone - t_out).abs()).sqrt() / 1000.0;
+        assert!(
+            flow > 0.0,
+            "stack-only ELA infiltration must be positive, got {flow}"
+        );
+        assert!(
+            (flow - expected).abs() < 1e-9,
+            "ELA zero-wind: expected {expected:.8} m³/s, got {flow:.8} m³/s"
+        );
+    }
+
+    /// Duct leakage interaction with HVAC active: supply > return pressurises the house,
+    /// so adjusted infiltration must be higher than the ASHRAE 152 baseline.
+    #[test]
+    fn infiltration_duct_leakage_interaction_hvac_on() {
+        let volume_m3 = 300.0_f64;
+        let ach = 0.5_f64;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
+            supply_duct_leakage_m3_s: 0.02,
+            return_duct_leakage_m3_s: 0.01,
+            ..ThermalSolverConfig::default()
+        };
+        let env = make_env(5.0, 3.0, 21.0, volume_m3);
+
+        let mut latent_no_duct: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings_no_duct: Vec<InfiltrationCoupling> = Vec::new();
+        apply_infiltration_and_ventilation(
+            &ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
+                infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
+                ..ThermalSolverConfig::default()
+            },
+            &env,
+            false,
+            &mut latent_no_duct,
+            &mut couplings_no_duct,
+        );
+        let base_flow = couplings_no_duct[0].raw_inf_m3_s;
+
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+        apply_infiltration_and_ventilation(&config, &env, true, &mut latent, &mut couplings);
+        let adjusted_flow = couplings[0].raw_inf_m3_s;
+
+        // supply > return → pressurisation → infiltration increases above baseline
+        assert!(
+            adjusted_flow > base_flow,
+            "supply pressurisation must increase infiltration: \
+             base={base_flow:.6}, adjusted={adjusted_flow:.6}"
+        );
+    }
+
+    /// Duct leakage config present but hvac_active = false: no adjustment applied.
+    /// raw_inf_m3_s must equal base ACH flow.
+    #[test]
+    fn infiltration_duct_leakage_hvac_off() {
+        let volume_m3 = 300.0_f64;
+        let ach = 0.5_f64;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
+            supply_duct_leakage_m3_s: 0.02,
+            return_duct_leakage_m3_s: 0.01,
+            ..ThermalSolverConfig::default()
+        };
+        let env = make_env(5.0, 3.0, 21.0, volume_m3);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        let flow = couplings[0].raw_inf_m3_s;
+        let expected = ach * volume_m3 / 3600.0;
+        assert!(
+            (flow - expected).abs() < 1e-10,
+            "HVAC off: duct leakage must not affect infiltration; \
+             expected {expected:.6} m³/s, got {flow:.6} m³/s"
+        );
+    }
+
+    /// Natural ventilation open: zone is warm (26°C), outdoor is cool and dry (15°C, W=0.005).
+    /// All gating conditions satisfied → nat_flow_m3_s must be positive.
+    #[test]
+    fn infiltration_natural_ventilation_open() {
+        use crate::thermal_solver::config::NaturalVentilationConfig;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(
+                ZoneId(1),
+                InfiltrationMethod::Ach { ach: 0.0 },
+            )],
+            natural_ventilation: Some(NaturalVentilationConfig {
+                open_area_m2: 0.5,
+                stack_coeff: 0.000_290,
+                wind_coeff: 0.000_150,
+                t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
+                max_outdoor_humidity_ratio: NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+            }),
+            ..ThermalSolverConfig::default()
+        };
+        // zone=26°C > t_base=22.78°C > outdoor=15°C; w_out=0.005 < 0.0115
+        let mut env = make_env(15.0, 2.0, 26.0, 300.0);
+        env.weather.outdoor_humidity_ratio = 0.005;
+
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        let nat_flow = couplings[0].nat_flow_m3_s;
+        assert!(
+            nat_flow > 0.0,
+            "natural ventilation must be open when all conditions met, got {nat_flow}"
+        );
+    }
+
+    /// Natural ventilation closed: zone temp ≤ outdoor temp — stack effect cannot drive
+    /// outward exhaust, so nat_flow must be zero.
+    #[test]
+    fn infiltration_natural_ventilation_closed() {
+        use crate::thermal_solver::config::NaturalVentilationConfig;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(
+                ZoneId(1),
+                InfiltrationMethod::Ach { ach: 0.0 },
+            )],
+            natural_ventilation: Some(NaturalVentilationConfig {
+                open_area_m2: 0.5,
+                stack_coeff: 0.000_290,
+                wind_coeff: 0.000_150,
+                t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
+                max_outdoor_humidity_ratio: NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+            }),
+            ..ThermalSolverConfig::default()
+        };
+        // zone=18°C < outdoor=20°C → gating condition fails
+        let env = make_env(20.0, 2.0, 18.0, 300.0);
+
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        let nat_flow = couplings[0].nat_flow_m3_s;
+        assert!(
+            nat_flow.abs() < 1e-12,
+            "natural ventilation must be zero when zone ≤ outdoor, got {nat_flow}"
+        );
+    }
+
+    /// Latent output: outdoor humidity ratio > indoor → latent_out must be positive
+    /// (moisture flows into the zone).  The magnitude must match
+    /// m_dot_lat * H_FG * (w_out - w_zone).
+    #[test]
+    fn infiltration_latent_output() {
+        use hares_physics::air_properties::moist_air_density_kg_m3;
+        use super::super::H_FG_J_PER_KG;
+
+        let volume_m3 = 300.0_f64;
+        let ach = 0.5_f64;
+        let w_indoor = 0.005_f64;
+        let w_outdoor = 0.012_f64;
+        let t_zone = 21.0_f64;
+        let t_out = 10.0_f64;
+        let p_pa = 101_325.0_f64;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
+            ..ThermalSolverConfig::default()
+        };
+
+        let mut env = make_env(t_out, 0.0, t_zone, volume_m3);
+        env.weather.outdoor_humidity_ratio = w_outdoor;
+        env.zones[0].humidity_ratio = w_indoor;
+        env.weather.pressure_kpa = p_pa / 1000.0;
+
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        let q_latent = latent.get(&ZoneId(1)).copied().unwrap_or(0.0);
+        assert!(
+            q_latent > 0.0,
+            "outdoor humidity > indoor → positive latent gain, got {q_latent}"
+        );
+
+        // First-principles check: q_latent = rho * Q * H_FG * (w_out - w_in)
+        let rho = moist_air_density_kg_m3(p_pa, t_out, w_outdoor);
+        let q_flow = ach * volume_m3 / 3600.0;
+        let m_dot = rho * q_flow;
+        let expected = m_dot * H_FG_J_PER_KG * (w_outdoor - w_indoor);
+        assert!(
+            (q_latent - expected).abs() / expected < 0.01,
+            "latent output: expected ~{expected:.2} W, got {q_latent:.2} W"
+        );
+    }
+
     /// Energy decomposition: infiltration + forced_vent + natural_vent ≈ sensible_diagnostic.
     ///
     /// The three scaled components are computed from the combined sensible flow split back

@@ -736,8 +736,17 @@ impl Equipment for Ev {
         &self.ports
     }
 
-    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
-        self.init_from_config(config)
+    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let explicit_temp = config.get_f64(KEY_BATTERY_TEMP_C);
+        self.init_from_config(config)?;
+
+        // EV battery temperature starts at outdoor ambient — vehicles are
+        // parked outside or in unconditioned garages, not at a fixed 20 °C.
+        if explicit_temp.is_none() {
+            self.battery_temp_c = env.weather.outdoor_temp_c;
+        }
+
+        Ok(())
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {

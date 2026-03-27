@@ -24,21 +24,21 @@ classifiers = [
 [project.optional-dependencies]
 sam = ["NREL-PySAM>=7.1.0"]
 pybamm = ["pybamm>=26.3.0"]
-resstock = ["boto3>=1.42.76", "httpx>=0.28.1"]
+resstock = ["boto3>=1.42.78", "httpx>=0.28.1"]
 helics = ["helics>=3.6.1"]
 rl = ["gymnasium>=1.2.3"]
-notebook = ["marimo>=0.20.0", "plotly>=6.0.0"]
+notebook = ["marimo>=0.21.1", "plotly>=6.6.0"]
 dev = [
     "pytest>=9.0.2",
     "maturin>=1.12.6",
-    "ruff>=0.15.7",
+    "ruff>=0.15.8",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
     "maturin>=1.12.6",
-    "ruff>=0.15.7",
+    "ruff>=0.15.8",
     "psychrolib>=2.5.0",
     "numpy>=2.4.3",
     "pytest-xdist>=3.8.0",

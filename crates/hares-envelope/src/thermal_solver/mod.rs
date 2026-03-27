@@ -76,9 +76,7 @@ pub struct ThermalSolver {
     lwr_net_flux_buf: Vec<f64>,
     /// Pre-sorted zone temperature buffer for format_domain_update; indexed parallel to sorted zone_output_indices.
     zone_temps_buf: Vec<(ZoneId, f64)>,
-    /// Pre-allocated buffer for latent pairs in format_domain_update.
     latent_pairs_buf: Vec<(ZoneId, f64)>,
-    /// Pre-allocated buffer for custom_payload in format_domain_update.
     custom_payload_buf: Vec<f64>,
     /// Pre-allocated fallback buffer for InteriorSurface structs in non-ScriptF path.
     lwr_surfaces_buf: Vec<crate::longwave_radiation::InteriorSurface>,
@@ -477,14 +475,24 @@ impl ThermalSolver {
 
         self.latent_buf = latent_by_zone;
 
+        // Swap zone_temps into the DomainUpdate; the previous empty Vec flows back.
+        self.zone_temps_swap.clear();
+        self.zone_temps_swap.extend_from_slice(&self.zone_temps_buf);
+        let zone_temps = std::mem::take(&mut self.zone_temps_swap);
+
+        let payload = if self.custom_payload_buf.is_empty() {
+            None
+        } else {
+            self.custom_payload_swap.clear();
+            self.custom_payload_swap
+                .extend_from_slice(&self.custom_payload_buf);
+            Some(std::mem::take(&mut self.custom_payload_swap))
+        };
+
         DomainUpdate {
             domain_id: THERMAL,
-            zone_temperatures_c: self.zone_temps_buf.clone(),
-            custom_payload: if self.custom_payload_buf.is_empty() {
-                None
-            } else {
-                Some(self.custom_payload_buf.clone())
-            },
+            zone_temperatures_c: zone_temps,
+            custom_payload: payload,
         }
     }
 

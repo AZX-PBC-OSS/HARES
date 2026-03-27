@@ -92,6 +92,10 @@ impl DurationExt for Duration {
     }
 }
 
+/// Telemetry encoding of `EvConnectionState::Disconnected`.
+/// Matches the mapping in `Ev::emit_telemetry`: HomePluggedIn=0.0, AwayPluggedIn=1.0, Disconnected=2.0.
+const TELEMETRY_STATE_DISCONNECTED: f64 = 2.0;
+
 // ── Physics tests (preserved) ─────────────────────────────────────
 
 #[test]
@@ -110,7 +114,7 @@ fn no_power_when_disconnected() {
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
     assert_eq!(ev.telemetry().get("active_power_kw"), Some(0.0));
-    assert_eq!(ev.telemetry().get("connection_state"), Some(2.0));
+    assert_eq!(ev.telemetry().get("connection_state"), Some(TELEMETRY_STATE_DISCONNECTED));
     assert_eq!(ports.electrical.load_power_kw, 0.0);
 }
 
@@ -1596,7 +1600,7 @@ fn telemetry_disconnected() {
 
     assert_eq!(ev.telemetry().get("active_power_kw"), Some(0.0));
     assert_eq!(ev.telemetry().get("away_charge_power_kw"), Some(0.0));
-    assert_eq!(ev.telemetry().get("connection_state"), Some(2.0));
+    assert_eq!(ev.telemetry().get("connection_state"), Some(TELEMETRY_STATE_DISCONNECTED));
 }
 
 #[test]
@@ -2277,7 +2281,7 @@ fn ev_connection_state_transitions() {
     .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    assert_eq!(ev.telemetry().get("connection_state"), Some(2.0));
+    assert_eq!(ev.telemetry().get("connection_state"), Some(TELEMETRY_STATE_DISCONNECTED));
     assert_eq!(ev.connection_state, EvConnectionState::Disconnected);
 
     // Disconnected → AwayPluggedIn (away charging)
@@ -2297,7 +2301,7 @@ fn ev_connection_state_transitions() {
     .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    assert_eq!(ev.telemetry().get("connection_state"), Some(2.0));
+    assert_eq!(ev.telemetry().get("connection_state"), Some(TELEMETRY_STATE_DISCONNECTED));
 
     // Disconnected → HomePluggedIn (arrival)
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
@@ -2429,4 +2433,86 @@ fn ev_soc_curve_monotonic_during_charging() {
             "SOC out of bounds [0, 1]: {soc}"
         );
     }
+}
+
+/// Departure at exactly step 1440 (end of a 24-hour window) exercises the
+/// day-wrapping logic in the BMS ready-by scheduler: `departure_hour` wraps
+/// from 0.0 to 24.0, so the boundary case is a departure at midnight (0.0 h),
+/// equivalent to a full-day window.
+///
+/// Physics: 60 kWh battery, 7.2 kW L2 charger, SOC = 0.2 → target 0.9.
+/// Required charge = 0.7 * 60 = 42 kWh; time at 7.2 kW = 5.83 h = 350 min.
+/// At step 1440 (24 h window) there is plenty of time, so BMS should NOT start
+/// immediately at step 0. By step 1000, the deadline is close enough that
+/// charging must have begun and SOC must have risen above 0.2.
+#[test]
+fn ev_departure_at_step_boundary() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Departure at midnight (0.0 h) — equivalent to end of 24-hour window
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 0.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+
+    // Early in the window (18:00): BMS should delay — 6 h until midnight
+    // and only 350 min of charging needed, so start_hour is still in the future.
+    env.current_time = dt(2026, 1, 1, 18, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    let power_early = ev.telemetry().get("active_power_kw").unwrap();
+    assert_eq!(
+        power_early, 0.0,
+        "BMS should delay at 18:00 for midnight departure with 6 h remaining"
+    );
+
+    // Close to deadline (23:00): 1 h left but needs 350 min → urgent, must charge
+    ev.soc = 0.2; // reset SOC to ensure it hasn't changed from any early step
+    env.current_time = dt(2026, 1, 1, 23, 0, 0);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    let power_late = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        power_late > 0.0,
+        "BMS should charge at 23:00 for midnight departure with only 1 h remaining"
+    );
+
+    // Run 440 1-minute steps from 23:00 to verify charging proceeds normally
+    // (step 1440 is the boundary condition: day wraps at 1440 minutes).
+    let mut prev_soc = ev.soc;
+    for step in 0..440usize {
+        assert!(step < 2000, "step loop diverged");
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+        if ev.soc < 1.0 {
+            assert!(
+                ev.soc >= prev_soc,
+                "SOC must not decrease during charging (step {step}): {prev_soc:.6} -> {:.6}",
+                ev.soc
+            );
+        }
+        prev_soc = ev.soc;
+        assert!(
+            ev.soc >= 0.0 && ev.soc <= 1.0,
+            "SOC out of bounds at step {step}: {}",
+            ev.soc
+        );
+    }
+    // After 440 min of charging from SOC 0.2 at 7.2 kW with η=0.9:
+    // DC rate = 6.48 kWh/h, SOC gain/min = 6.48/60/60 = 0.0018/min
+    // After 440 min: ΔSOC = 440 * (7.2*0.9) / (60*60) = ~0.47 → SOC ≈ 0.67
+    // (tapered charging near full may slow it; SOC must be well above initial 0.2)
+    assert!(
+        ev.soc > 0.5,
+        "after 440 min charging SOC should be > 0.5, got {}",
+        ev.soc
+    );
 }

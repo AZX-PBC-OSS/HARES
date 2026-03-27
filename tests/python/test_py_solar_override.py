@@ -96,51 +96,61 @@ class TestSolarOverrideNumpy:
     def test_set_solar_override_preserves_timestep_order(self):
         from ochre_next import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-        )
-        dw.initialize()
+        def make_dwelling():
+            dw = Dwelling.from_hpxml(
+                HPXML, SCHEDULE, WEATHER,
+                start_time="2019-01-01T00:00:00",
+                duration_s=3600,
+                time_res_s=60,
+                defaults_path=str(HARES_DEFAULTS),
+                bldg_id=42,
+                master_seed=0,
+            )
+            dw.initialize()
+            return dw
 
+        dw = make_dwelling()
         surface_ids = dw.surface_ids()
-        n_surfaces = len(surface_ids)
         n_steps = 5
 
+        # High solar ramp: 0, 500, 1000, 1500, 2000 W/m² (midnight, so
+        # Perez baseline is zero — all solar comes from the override).
         data = {}
         for sid in surface_ids:
-            arr = np.arange(n_steps, dtype=np.float64) * 100.0
+            arr = np.arange(n_steps, dtype=np.float64) * 500.0
             data[int(sid)] = {
                 "direct": arr,
                 "diffuse": arr,
                 "reflected": arr,
                 "aoi": np.zeros(n_steps),
             }
-
         dw.set_solar_override(data)
 
-        # Step with increasing irradiance (0, 100, 200, 300, 400 W/m2).
-        # Solar gains should increase indoor temperature monotonically compared
-        # to the zero-irradiance baseline.
         results = []
-        for _ in range(5):
+        for _ in range(n_steps):
             results.append(dw.step())
 
-        temp_key = "Temperature - Indoor (C)"
-        temp_first = results[0][temp_key]
-        temp_last = results[-1][temp_key]
-        # With increasing solar irradiance across steps, later steps should
-        # accumulate more heat than earlier steps.  Allow equality since the
-        # thermal mass may dampen the first increments.
-        assert temp_last >= temp_first, (
-            f"Expected indoor temp to rise with increasing irradiance: "
-            f"step 0 = {temp_first:.4f} C, step 4 = {temp_last:.4f} C"
+        # Zero-solar baseline with identical initial conditions.
+        dw_base = make_dwelling()
+        zero_data = {}
+        for sid in surface_ids:
+            zero_data[int(sid)] = {
+                "direct": np.zeros(n_steps),
+                "diffuse": np.zeros(n_steps),
+                "reflected": np.zeros(n_steps),
+                "aoi": np.zeros(n_steps),
+            }
+        dw_base.set_solar_override(zero_data)
+        base_results = []
+        for _ in range(n_steps):
+            base_results.append(dw_base.step())
+
+        temp_key = "Temperature - Zone_1 (C)"
+        t_solar = results[-1][temp_key]
+        t_base = base_results[-1][temp_key]
+        assert t_solar > t_base, (
+            f"Solar override should produce warmer zone than zero-solar baseline: "
+            f"solar={t_solar:.4f} C, baseline={t_base:.4f} C"
         )
 
 
@@ -258,7 +268,7 @@ class TestSolarOverrideClear:
         # the Perez model resumes, so step_after_clear should be closer to the
         # no-override baseline than to the zero-override step for at least the
         # indoor temperature.
-        temp_key = "Temperature - Indoor (C)"
+        temp_key = "Temperature - Zone_1 (C)"
         t_without = step_without_override[temp_key]
         t_with = step_with_override[temp_key]
         t_after = step_after_clear[temp_key]
@@ -407,7 +417,7 @@ class TestSolarOverridePVProduction:
 
         # With 800 W/m2 irradiance vs zero, at least one measurable quantity
         # must differ: indoor temperature and/or HVAC power.
-        temp_key = "Temperature - Indoor (C)"
+        temp_key = "Temperature - Zone_1 (C)"
         temp_zero = result_zero[temp_key]
         temp_high = result_high[temp_key]
         power_zero = result_zero["net_electric_power_kw"]

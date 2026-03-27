@@ -670,6 +670,227 @@ mod tests {
         );
     }
 
+    fn env_with_two_zones(
+        vol_a: f64,
+        vol_b: f64,
+        w_a: f64,
+        w_b: f64,
+    ) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![
+                ZoneState {
+                    id: ZoneId(1),
+                    temperature_c: 22.0,
+                    humidity_ratio: w_a,
+                    relative_humidity: 0.50,
+                    wet_bulb_c: 19.0,
+                    volume_m3: vol_a,
+                },
+                ZoneState {
+                    id: ZoneId(2),
+                    temperature_c: 22.0,
+                    humidity_ratio: w_b,
+                    relative_humidity: 0.50,
+                    wet_bulb_c: 19.0,
+                    volume_m3: vol_b,
+                },
+            ],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 180.0,
+                ground_temp_c: 10.0,
+                sky_temp_c: 5.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![SurfaceIrradiance {
+                    surface_id: 1,
+                    direct_w_m2: 0.0,
+                    diffuse_w_m2: 0.0,
+                    reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
+                }],
+                outdoor_wet_bulb_c: 0.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
+                mains_temp_c: 15.0,
+                rainfall_m: 0.0,
+                ground_albedo: 0.2,
+            },
+            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid time"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// Two zones with different volumes but the same latent gain.
+    /// The larger zone must show a smaller humidity-ratio swing because the moisture
+    /// is diluted into more air mass.  dW ∝ 1 / (V × ρ), so dW_small / dW_large = V_large / V_small.
+    #[test]
+    fn humidity_two_zone_different_volumes() {
+        let w_init = 0.008_f64;
+        let vol_small = 100.0_f64;
+        let vol_large = 400.0_f64;
+        let latent_w = 200.0_f64;
+        let dt = Duration::from_secs(60);
+
+        let env = env_with_two_zones(vol_small, vol_large, w_init, w_init);
+
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver = HumiditySolver::new(config, &env);
+
+        let ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator {
+                    zone: ZoneId(1),
+                    sensible_gain_w: 0.0,
+                    latent_gain_w: latent_w,
+                    ..ThermalAccumulator::new(ZoneId(1))
+                },
+                ThermalAccumulator {
+                    zone: ZoneId(2),
+                    sensible_gain_w: 0.0,
+                    latent_gain_w: latent_w,
+                    ..ThermalAccumulator::new(ZoneId(2))
+                },
+            ],
+            ..Default::default()
+        };
+
+        let _ = solver.resolve(&ports, &env, dt);
+
+        let dw_small = solver.humidity_ratio(ZoneId(1)) - w_init;
+        let dw_large = solver.humidity_ratio(ZoneId(2)) - w_init;
+
+        assert!(
+            dw_small > dw_large,
+            "smaller volume must show larger humidity swing: \
+             dw_small={dw_small:.3e}, dw_large={dw_large:.3e}"
+        );
+
+        // dW scales inversely with volume: dW_small / dW_large = V_large / V_small
+        let expected_ratio = vol_large / vol_small;
+        let actual_ratio = dw_small / dw_large;
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 1e-6,
+            "dW ratio must equal V_large/V_small={expected_ratio:.1}: got {actual_ratio:.6}"
+        );
+    }
+
+    /// Zone not present in the initial humidity_ratios map falls back to
+    /// ZoneState::humidity_ratio.  Simulate this by constructing a solver with
+    /// one zone and then resolving with an environment that includes a second zone
+    /// that was absent at construction time.
+    #[test]
+    fn humidity_new_zone_fallback() {
+        let w_existing = 0.008_f64;
+        let w_new_zone = 0.010_f64;
+        let dt = Duration::from_secs(60);
+
+        // Construct solver with only zone 1.
+        let env_init = env_with_zone(22.0, w_existing);
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver = HumiditySolver::new(config, &env_init);
+
+        // Resolve with an environment that introduces zone 2 (not in humidity_ratios).
+        let env_two = env_with_two_zones(200.0, 200.0, w_existing, w_new_zone);
+
+        // Zero latent gain so humidity_ratio stays at its initial/fallback value.
+        let ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator::new(ZoneId(1)),
+                ThermalAccumulator::new(ZoneId(2)),
+            ],
+            ..Default::default()
+        };
+
+        let _ = solver.resolve(&ports, &env_two, dt);
+
+        // Zone 2 must have been initialised from ZoneState::humidity_ratio.
+        // With zero latent gain it should remain at or very near w_new_zone.
+        let w2 = solver.humidity_ratio(ZoneId(2));
+        assert!(
+            (w2 - w_new_zone).abs() < 1e-6,
+            "new zone must fall back to ZoneState::humidity_ratio={w_new_zone}, got {w2}"
+        );
+    }
+
+    /// Multi-zone with a garage zone held at outdoor humidity conditions.
+    /// After one timestep with zero latent gain the garage zone humidity ratio
+    /// must remain close to the outdoor value while the indoor zone evolves upward
+    /// due to its own latent gain.
+    #[test]
+    fn humidity_garage_boundary() {
+        let w_outdoor = 0.005_f64;
+        let w_indoor = 0.008_f64;
+        let dt = Duration::from_secs(60);
+
+        // Garage (zone 2) starts at outdoor humidity; indoor (zone 1) starts higher.
+        let env = env_with_two_zones(200.0, 150.0, w_indoor, w_outdoor);
+
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver = HumiditySolver::new(config, &env);
+
+        // Apply latent gain to indoor zone only; garage gets none.
+        let ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator {
+                    zone: ZoneId(1),
+                    sensible_gain_w: 0.0,
+                    latent_gain_w: 500.0,
+                    ..ThermalAccumulator::new(ZoneId(1))
+                },
+                ThermalAccumulator::new(ZoneId(2)),
+            ],
+            ..Default::default()
+        };
+
+        let _ = solver.resolve(&ports, &env, dt);
+
+        let w_garage_after = solver.humidity_ratio(ZoneId(2));
+        let w_indoor_after = solver.humidity_ratio(ZoneId(1));
+
+        // Garage with no gain stays at w_outdoor (no latent coupling between zones in this solver).
+        assert!(
+            (w_garage_after - w_outdoor).abs() < 1e-9,
+            "garage zone with no gain must stay at outdoor W={w_outdoor}, got {w_garage_after}"
+        );
+        // Indoor zone must have gained moisture.
+        assert!(
+            w_indoor_after > w_indoor,
+            "indoor zone must rise with latent gain: before={w_indoor}, after={w_indoor_after}"
+        );
+        // Indoor must remain further from outdoor than garage, confirming zone independence.
+        assert!(
+            (w_indoor_after - w_outdoor).abs() > (w_garage_after - w_outdoor).abs(),
+            "indoor must stay further from outdoor than garage: \
+             indoor_delta={:.4e}, garage_delta={:.4e}",
+            (w_indoor_after - w_outdoor).abs(),
+            (w_garage_after - w_outdoor).abs()
+        );
+    }
+
     /// Two zones with different latent gains evolve independently and proportionally.
     #[test]
     fn humidity_two_zone_independent_evolution() {

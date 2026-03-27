@@ -188,6 +188,86 @@ class TestBatteryTouBehavior:
             )
 
 
+# ── Thermal behavior ───────────────────────────────────────────────
+
+class TestThermalBehavior:
+
+    def test_zone_temp_stays_comfortable(self, sim_result):
+        """Conditioned zone must stay within a plausible comfort range for July."""
+        temps = []
+        for step in sim_result["steps"]:
+            r = step["result"]
+            t = r.get("Temperature - Zone_1 (C)")
+            if t is not None:
+                temps.append(t)
+
+        assert len(temps) > 0, "No zone temperature data"
+        t_min, t_max = min(temps), max(temps)
+        assert t_min > 15, f"Zone too cold for July: {t_min:.1f} °C"
+        assert t_max < 35, f"Zone too hot (HVAC failure): {t_max:.1f} °C"
+
+
+# ── HVAC active cooling ───────────────────────────────────────────
+
+class TestHvacActiveCooling:
+    """Separate test with a 21 °C setpoint override to force AC operation."""
+
+    def test_ac_runs_with_low_setpoint(self):
+        """With 21 °C cooling setpoint the AC must deliver cooling in July."""
+        from ochre_next import ControlSignal, Dwelling
+
+        dw = Dwelling.from_hpxml(
+            str(HPXML), str(SCHEDULE), str(WEATHER),
+            start_time="2019-07-01T12:00:00",
+            duration_s=2 * 86400,
+            time_res_s=TIME_RES_S,
+            defaults_path=str(DEFAULTS),
+            bldg_id=1,
+            master_seed=42,
+            output_verbosity=3,
+        )
+        dw.initialize()
+
+        cool_signal = ControlSignal.thermal_setpoint(cool_c=21.0)
+        n_steps = 2 * 86400 // TIME_RES_S
+        cool_kwh = 0.0
+        t_max = -999.0
+        for _ in range(n_steps):
+            dw.apply_control("Air Conditioner", cool_signal)
+            r = dw.step()
+            cool_kwh += r.get("hvac_cooling_w", 0) * TIME_RES_S / 3_600_000
+            z1 = r.get("Temperature - Zone_1 (C)", 0)
+            t_max = max(t_max, z1)
+
+        assert cool_kwh > 1.0, (
+            f"AC should deliver >1 kWh cooling with 21°C setpoint in July, "
+            f"got {cool_kwh:.2f} kWh"
+        )
+        assert t_max < 28, (
+            f"Zone should stay below 28°C with active AC, got {t_max:.1f}°C"
+        )
+
+    def test_attic_hotter_than_conditioned(self, sim_result):
+        """Unconditioned attic (Zone 2) should be hotter than conditioned zone
+        during afternoon hours in July."""
+        afternoon_deltas = []
+        for i, step in enumerate(sim_result["steps"]):
+            dt = SIM_START + timedelta(seconds=i * TIME_RES_S)
+            if 13 <= dt.hour <= 17:
+                r = step["result"]
+                z1 = r.get("Temperature - Zone_1 (C)")
+                z2 = r.get("Temperature - Zone_2 (C)")
+                if z1 is not None and z2 is not None:
+                    afternoon_deltas.append(z2 - z1)
+
+        assert len(afternoon_deltas) > 0, "No afternoon temp data"
+        avg_delta = sum(afternoon_deltas) / len(afternoon_deltas)
+        assert avg_delta > 2.0, (
+            f"Attic should be >2°C warmer than conditioned zone in July afternoon, "
+            f"avg delta={avg_delta:.1f}°C"
+        )
+
+
 # ── Billing ──────────────────────────────────────────────────────────
 
 class TestBillingSummary:

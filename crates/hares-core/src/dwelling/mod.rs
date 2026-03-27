@@ -2260,6 +2260,11 @@ impl Dwelling {
             // Split by conditioning status: conditioned zones get tighter bounds
             // (80 °C) while unconditioned zones (attics under solar load) get
             // wider bounds (120 °C).
+            debug_assert_eq!(
+                self.latest_env.zones.len(),
+                self.zone_is_conditioned.len(),
+                "zone_is_conditioned length must match latest_env.zones length"
+            );
             let mut conditioned_temps: Vec<f64> = Vec::new();
             let mut unconditioned_temps: Vec<f64> = Vec::new();
             for (zone, &is_cond) in self

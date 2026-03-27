@@ -45,13 +45,13 @@ fn parse_solar_override(
     if let Ok(list) = data.extract::<Bound<'_, PyList>>() {
         return parse_solar_override_from_list(py, &list);
     }
-    // Duck-type: Polars DataFrame has .values, .columns, and .height
-    if data.hasattr("values")? && data.hasattr("columns")? && data.hasattr("height")? {
+    // Duck-type: Polars DataFrame has .columns and .height (no .values since polars 1.x)
+    if data.hasattr("columns")? && data.hasattr("height")? {
         return parse_solar_override_from_dataframe(py, data);
     }
     // Duck-type: ndarray-like has .dtype and .shape attributes
     if data.hasattr("dtype")? && data.hasattr("shape")? {
-        return parse_solar_override_from_dict(py, data);
+        return parse_solar_override_from_ndarray(data);
     }
     // Duck-type: pandas DataFrame has .values and .columns but no .height
     if data.hasattr("values")? && data.hasattr("columns")? {
@@ -151,6 +151,69 @@ fn parse_solar_override_from_dataframe(
     Ok(result)
 }
 
+/// Extract a solar override from a 2D numpy array with shape `(n_rows, 5)`.
+///
+/// Each row encodes one (timestep, surface) tuple as
+/// `[surface_id, direct_w_m2, diffuse_w_m2, reflected_w_m2, angle_of_incidence_rad]`.
+/// Rows must be grouped by timestep (all surfaces for step 0 first, then step 1, etc.)
+/// and sorted by surface ID within each group.
+fn parse_solar_override_from_ndarray(
+    data: &Bound<'_, PyAny>,
+) -> PyResult<Vec<Vec<SurfaceIrradiance>>> {
+    let shape: Vec<usize> = data.getattr("shape")?.extract()?;
+    if shape.len() != 2 || shape[1] != 5 {
+        return Err(PyValueError::new_err(
+            "numpy solar override must have shape (n_rows, 5) with columns \
+             [surface_id, direct_w_m2, diffuse_w_m2, reflected_w_m2, angle_of_incidence_rad]",
+        ));
+    }
+    let n_rows = shape[0];
+    if n_rows == 0 {
+        return Err(PyValueError::new_err("numpy solar override array has no rows"));
+    }
+
+    let flat: Vec<f64> = data
+        .call_method0("flatten")?
+        .extract()?;
+
+    let n_surfaces_per_step = {
+        let first_id = flat[0] as u32;
+        let mut count = 1usize;
+        while count < n_rows {
+            if flat[count * 5] as u32 == first_id {
+                break;
+            }
+            count += 1;
+        }
+        count
+    };
+
+    if !n_rows.is_multiple_of(n_surfaces_per_step) {
+        return Err(PyValueError::new_err(
+            "numpy solar override row count is not evenly divisible by surfaces per timestep",
+        ));
+    }
+    let n_timesteps = n_rows / n_surfaces_per_step;
+    let mut result: Vec<Vec<SurfaceIrradiance>> = Vec::with_capacity(n_timesteps);
+
+    for t in 0..n_timesteps {
+        let mut surfaces = Vec::with_capacity(n_surfaces_per_step);
+        for s in 0..n_surfaces_per_step {
+            let base = (t * n_surfaces_per_step + s) * 5;
+            surfaces.push(SurfaceIrradiance {
+                surface_id: flat[base] as u32,
+                direct_w_m2: flat[base + 1],
+                diffuse_w_m2: flat[base + 2],
+                reflected_w_m2: flat[base + 3],
+                angle_of_incidence_rad: flat[base + 4],
+            });
+        }
+        result.push(surfaces);
+    }
+
+    Ok(result)
+}
+
 fn parse_solar_override_from_dict(
     _py: Python<'_>,
     data: &Bound<'_, PyAny>,
@@ -209,15 +272,12 @@ fn get_array_len(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
     if let Ok(list) = arr.extract::<Bound<'_, PyList>>() {
         return Ok(list.len());
     }
-    if let Ok(ndarray) = arr.getattr("__class__") {
-        let name: String = ndarray.getattr("__name__")?.extract()?;
-        if name == "ndarray" {
-            if let Ok(shape) = arr.getattr("shape") {
-                if let Ok(tuple) = shape.extract::<Bound<'_, pyo3::types::PyTuple>>() {
-                    if tuple.len() > 0 {
-                        if let Ok(Ok(dim)) = tuple.get_item(0).map(|v| v.extract::<usize>()) {
-                            return Ok(dim);
-                        }
+    if arr.hasattr("shape")? {
+        if let Ok(shape) = arr.getattr("shape") {
+            if let Ok(tuple) = shape.extract::<Bound<'_, pyo3::types::PyTuple>>() {
+                if tuple.len() > 0 {
+                    if let Ok(Ok(dim)) = tuple.get_item(0).map(|v| v.extract::<usize>()) {
+                        return Ok(dim);
                     }
                 }
             }

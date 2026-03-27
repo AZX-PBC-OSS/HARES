@@ -535,7 +535,6 @@ mod tests {
                     .lock()
                     .expect("lock thread id set")
                     .insert(id);
-                thread::sleep(std::time::Duration::from_micros(100));
             });
 
         let sequential = fleet.simulate(1);

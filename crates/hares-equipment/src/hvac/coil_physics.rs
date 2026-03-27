@@ -1195,4 +1195,62 @@ mod coil_psychrometric_tests {
             "SHR=1.0 BF must be in [{BYPASS_FACTOR_FLOOR}, 1.0], got {bf:.5}"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Test: coil_ao_factor with zero airflow.
+    //
+    // zero flow → mfr = 0 → coil_bypass_factor returns BYPASS_FACTOR_FLOOR.
+    // Ao = -ln(BYPASS_FACTOR_FLOOR) × 0 = 0.0.
+    // Must not panic and must return 0.0.
+    // ------------------------------------------------------------------
+    #[test]
+    fn coil_ao_factor_zero_flow() {
+        let result = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, 0.0, 0.70);
+        assert!(
+            result.is_ok(),
+            "coil_ao_factor with zero flow must not return Err, got {:?}",
+            result.err()
+        );
+        let ao = result.unwrap();
+        assert!(
+            ao.is_finite(),
+            "coil_ao_factor with zero flow must return a finite value, got {ao}"
+        );
+        // mfr = 0 so Ao = -ln(BF) × mfr = -ln(BF) × 0 = 0.
+        assert_eq!(
+            ao, 0.0,
+            "coil_ao_factor with zero flow must return 0.0, got {ao}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test: coil_bypass_factor with inputs that drive d_t = db_in_c - t_out
+    // toward zero.
+    //
+    // When d_t ≈ 0 the slope m_c = d_w / d_t is effectively infinite, which
+    // is the near-zero-denominator path.  Using SHR = 0.9999 (nearly sensible)
+    // at high capacity makes h_out very close to h_in, so t_out ≈ t_in and
+    // d_t is tiny.  The function must return BYPASS_FACTOR_FLOOR (not NaN,
+    // not a panic, not a value outside [BYPASS_FACTOR_FLOOR, 1.0]).
+    // ------------------------------------------------------------------
+    #[test]
+    fn coil_bypass_factor_negative_denominator() {
+        // Very high SHR makes d_w negligible; combined with tiny d_t this
+        // exercises the |d_t| < EPSILON guard.
+        let result = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.9999);
+        assert!(
+            result.is_ok(),
+            "coil_bypass_factor near-zero d_t must not return Err, got {:?}",
+            result.err()
+        );
+        let bf = result.unwrap();
+        assert!(
+            bf.is_finite() && !bf.is_nan(),
+            "bypass factor must be finite and not NaN, got {bf}"
+        );
+        assert!(
+            bf >= BYPASS_FACTOR_FLOOR && bf <= 1.0,
+            "bypass factor must be in [{BYPASS_FACTOR_FLOOR}, 1.0], got {bf:.6}"
+        );
+    }
 }

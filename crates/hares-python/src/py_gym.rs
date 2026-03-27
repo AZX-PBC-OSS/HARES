@@ -66,7 +66,7 @@ pub fn batch_step_py(
     // at the Python boundary with a clear error before entering Rayon.
     if actions.iter().any(|a| !a.is_empty()) {
         return Err(pyo3::exceptions::PyNotImplementedError::new_err(
-            "batch_step action mapping is not yet implemented. \
+            "batch_step action mapping is not yet implemented (see H-7). \
              Apply controls via dwelling.apply_control() before calling batch_step, \
              and pass empty action vectors.",
         ));

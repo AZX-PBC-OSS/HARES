@@ -39,7 +39,7 @@ currently active.
 | `zone_temperature_bounds` | T_conditioned ∈ [−50, 80] °C, finite               | —                                  | Yes    | Yes    |
 | `unconditioned_zone_temperature_bounds` | T_unconditioned ∈ [−50, 120] °C, finite | —                                  | Yes    | Yes    |
 | `tank_temperature_bounds` | T_tank ∈ [0, 100] °C, finite                       | —                                  | Yes    | Yes    |
-| `soc_bounds`              | SoC ∈ [0, 1], accumulated error < 0.001            | —                                  | No     | No     |
+| `soc_bounds`              | SoC ∈ [0, 1], accumulated error < 0.001            | —                                  | No     | Yes (warn-only) |
 
 **Thermal tolerance** uses gross flux (sum of absolute values of all gain terms)
 for the relative component, not net sum — a balanced system with large opposed
@@ -59,6 +59,7 @@ These fire every timestep after solver resolution but before port zeroing:
 | `electrical_net_finite`    | `electrical_solver.net_active_kw()` is finite                  |
 | `electrical_balance`       | Solver net matches port accumulation: \|solver + ports\| < 0.001 kW |
 | `humidity_payload_finite`  | Every value in humidity domain payload is finite               |
+| `soc_bounds`               | Battery/EV SoC ∈ [0, 1]; warns if out of range (non-fatal)    |
 
 ### Error Reporting
 
