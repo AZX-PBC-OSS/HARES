@@ -319,3 +319,292 @@ impl DegradationState {
         // soc extremes and dod_max are reset by the caller via reset_day_tracking().
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::deg_const::*;
+
+    fn make_u_neg_table() -> UNegTable {
+        UNegTable::default_li_nmc()
+    }
+
+    // -----------------------------------------------------------------------
+    // Rainflow counter tests (ASTM E1049-85 reference)
+    // -----------------------------------------------------------------------
+
+    /// ASTM E1049-85: sequence [0.5, 1.0, 0.0, 1.0] contains one complete
+    /// charge-discharge cycle. The counter should extract at least one cycle
+    /// with DOD = 1.0. Per ASTM, total_cycles() counts cycle weights
+    /// (0.5 per half-cycle, 1.0 per full cycle), independent of DOD amplitude.
+    #[test]
+    fn rainflow_single_full_cycle() {
+        let mut rc = RainflowCounter::default();
+        for soc in [0.5, 1.0, 0.0, 1.0] {
+            rc.push(soc);
+        }
+        // ASTM E1049-85: two half-cycles are extracted (0.5 + 0.5 = 1.0 total).
+        // If the code conflates DOD amplitude with cycle count, this will fail.
+        assert!(
+            rc.total_cycles() >= 1.0,
+            "ASTM E1049-85: [0.5,1.0,0.0,1.0] should yield total_cycles >= 1.0, got {}. \
+             Bug: cycle_count likely accumulates range*weight instead of weight alone.",
+            rc.total_cycles()
+        );
+        assert!(
+            rc.sum_squared_dod_daily() > 0.0,
+            "sum_squared_dod_daily should reflect extracted DOD"
+        );
+    }
+
+    /// ASTM E1049-85: monotonically decreasing SOC has no reversals, so no
+    /// cycles can be extracted.
+    #[test]
+    fn rainflow_monotonic_no_cycles() {
+        let mut rc = RainflowCounter::default();
+        for soc in [1.0, 0.8, 0.6, 0.4, 0.2, 0.0] {
+            rc.push(soc);
+        }
+        assert_eq!(
+            rc.total_cycles(),
+            0.0,
+            "Monotonic discharge should produce zero cycles"
+        );
+    }
+
+    /// ASTM E1049-85: [0.5, 1.0, 0.5] has one reversal producing a single
+    /// half-cycle with range (DOD) = 0.5 and weight = 0.5.
+    /// total_cycles() should return the cycle weight (0.5), NOT range*weight.
+    #[test]
+    fn rainflow_partial_cycles_half_weight() {
+        let mut rc = RainflowCounter::default();
+        for soc in [0.5, 1.0, 0.5] {
+            rc.push(soc);
+        }
+        // ASTM E1049-85: one half-cycle => total_cycles = 0.5
+        assert!(
+            (rc.total_cycles() - 0.5).abs() < 1e-10,
+            "ASTM E1049-85: [0.5,1.0,0.5] is one half-cycle, total_cycles should be 0.5, got {}. \
+             Bug: cycle_count accumulates range*weight ({}) instead of weight alone.",
+            rc.total_cycles(),
+            rc.total_cycles()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Degradation model tests (Smith et al. 2017, IEEE 7963578)
+    // -----------------------------------------------------------------------
+
+    /// Helper: run N days of pure calendar aging (no cycling) and return the
+    /// DegradationState. Each day consists of a single accumulate() call for
+    /// the full 86400 s timestep, then update_daily().
+    fn run_calendar_aging(days: u32, cell_temp_k: f64, v_oc: f64, soc: f64) -> DegradationState {
+        let u_neg = make_u_neg_table();
+        let mut ds = DegradationState::default();
+        let dt_s = SECONDS_PER_DAY;
+        for _ in 0..days {
+            ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
+            ds.update_daily(&u_neg, cell_temp_k, 0.0);
+            ds.reset_day_tracking(soc);
+        }
+        ds
+    }
+
+    /// Helper: run N days with a fixed sum_squared_dod per day.
+    fn run_cycling_aging(
+        days: u32,
+        cell_temp_k: f64,
+        v_oc: f64,
+        soc: f64,
+        sum_squared_dod_per_day: f64,
+    ) -> DegradationState {
+        let u_neg = make_u_neg_table();
+        let mut ds = DegradationState::default();
+        let dt_s = SECONDS_PER_DAY;
+        for _ in 0..days {
+            ds.accumulate(dt_s, cell_temp_k, v_oc, soc);
+            ds.update_daily(&u_neg, cell_temp_k, sum_squared_dod_per_day);
+            ds.reset_day_tracking(soc);
+        }
+        ds
+    }
+
+    /// Compute the Tafel factor for mechanism 1 at a given SOC and temperature,
+    /// using the NMC U_neg table. This is the physics reference calculation.
+    fn tafel_b1_factor(soc: f64, cell_temp_k: f64) -> f64 {
+        let u_neg = make_u_neg_table().potential_at_soc(soc);
+        (ALPHA_B1 * F_FARADAY / R_GAS * (u_neg / cell_temp_k - U_NEG_REF / T_REF)).exp()
+    }
+
+    /// At T = T_REF (25C), the Arrhenius factor exp(-Ea/R * (1/T - 1/T_REF)) = exp(0) = 1.0
+    /// for all three mechanisms. This is the fundamental identity of the Arrhenius equation.
+    #[test]
+    fn arrhenius_factor_at_reference_temperature_is_unity() {
+        let mut ds = DegradationState::default();
+        let dt_s = SECONDS_PER_DAY;
+        ds.accumulate(dt_s, T_REF, V_REF, 0.5);
+
+        // b1_accum = B1_REF * arr(T_REF) * dt_day = B1_REF * 1.0 * 1.0
+        let expected_b1 = B1_REF;
+        assert!(
+            (ds.b1_accum - expected_b1).abs() < 1e-12,
+            "b1_accum at T_REF should be B1_REF={expected_b1}, got {}",
+            ds.b1_accum
+        );
+
+        // b2_accum = arr(T_REF) * dt_day = 1.0 * 1.0
+        assert!(
+            (ds.b2_accum - 1.0).abs() < 1e-12,
+            "b2_accum at T_REF should be 1.0, got {}",
+            ds.b2_accum
+        );
+    }
+
+    /// Smith 2017 Eq. 3: at 45C the Arrhenius factor for mechanism 1 is
+    /// arr_b1 = exp(-35392/8.314 * (1/318.15 - 1/298.15)) = exp(0.898) ~ 2.454.
+    /// Combined with Tafel correction (which also depends on T), the overall
+    /// calendar fade ratio between 45C and 25C should be ~3.40.
+    ///
+    /// Derivation: ratio = (arr_45 * tafel_45) / (arr_25 * tafel_25)
+    ///   arr_25 = 1.0, tafel_25 = exp(-F/R * (u_neg/298.15 - 0.08/298.15)) ~ 0.1256
+    ///   arr_45 = 2.454, tafel_45 = exp(-F/R * (u_neg/318.15 - 0.08/298.15)) ~ 0.1740
+    ///   ratio = (2.454 * 0.1740) / (1.0 * 0.1256) ~ 3.40
+    #[test]
+    fn arrhenius_factor_at_45c_mechanism1() {
+        let ds_25 = run_calendar_aging(30, T_REF, V_REF, 0.5);
+        let ds_45 = run_calendar_aging(30, 318.15, V_REF, 0.5);
+
+        // Compute physics reference ratio from Arrhenius + Tafel
+        let arr_25 = 1.0_f64;
+        let arr_45 = (-(EA_B1 / R_GAS) * (1.0 / 318.15 - 1.0 / T_REF)).exp();
+        let tafel_25 = tafel_b1_factor(0.5, T_REF);
+        let tafel_45 = tafel_b1_factor(0.5, 318.15);
+        let expected_ratio = (arr_45 * tafel_45) / (arr_25 * tafel_25);
+
+        let ratio = ds_45.capacity_fade_pct() / ds_25.capacity_fade_pct();
+        assert!(
+            (ratio - expected_ratio).abs() < 0.1,
+            "45C/25C calendar fade ratio should be ~{expected_ratio:.2}, got {ratio:.4} \
+             (fade_25={:.6}, fade_45={:.6})",
+            ds_25.capacity_fade_pct(),
+            ds_45.capacity_fade_pct()
+        );
+    }
+
+    /// Smith 2017 Eq. 2-4: calendar aging at 25C for 30 days with SOC=0.5.
+    /// The SEI growth rate follows q_li1 ~ b1_eff * sqrt(t) where
+    /// b1_eff = B1_REF * arr(T_REF) * tafel(SOC=0.5) * dod_corr(dod=0).
+    ///
+    /// At T_REF: arr = 1.0
+    /// At SOC=0.5: U_neg ~ 0.1333V, tafel = exp(-F/R * (0.1333/298.15 - 0.08/298.15)) ~ 0.1256
+    /// At DOD=0: exp(gamma * 0^beta) = exp(0) = 1.0
+    /// b1_eff = 3.503e-3 * 0.1256 = 4.40e-4 per day^0.5
+    /// q_li1(30d) ~ 4.40e-4 * sqrt(30) ~ 2.41e-3 => 0.241%
+    #[test]
+    fn calendar_aging_30_days_25c() {
+        let ds = run_calendar_aging(30, T_REF, V_REF, 0.5);
+        let fade_pct = ds.capacity_fade_pct() * 100.0;
+
+        // Compute physics reference: B1_REF * tafel * sqrt(30)
+        let tafel = tafel_b1_factor(0.5, T_REF);
+        let b1_eff = B1_REF * tafel; // arr = 1.0 at T_REF, dod_corr = 1.0 at dod=0
+        let analytic_q_li1_pct = b1_eff * (30.0_f64).sqrt() * 100.0;
+
+        // The discrete integrator should match the analytic sqrt(t) curve within 0.05%
+        assert!(
+            (fade_pct - analytic_q_li1_pct).abs() < 0.05,
+            "Calendar fade after 30d at 25C should be ~{analytic_q_li1_pct:.3}%, got {fade_pct:.4}%. \
+             (B1_REF={B1_REF}, tafel={tafel:.4}, b1_eff={b1_eff:.4e})"
+        );
+    }
+
+    /// Smith 2017 Eq. 5: cycle aging with 1 full cycle/day (DOD=1.0) at 25C.
+    /// dq_li2 = B2_REF * b2_accum * sqrt(sum_sq_dod)
+    /// At T_REF: b2_accum = 1.0/day, sum_sq_dod = 1.0 (one cycle, DOD=1)
+    /// After N days: q_li2 ~ B2_REF * N * 1.0 = 1.541e-5 * N
+    /// After 1000 days: q_li2 ~ 0.01541 (1.541%)
+    #[test]
+    fn cycling_aging_single_cycle_per_day() {
+        let ds = run_cycling_aging(1000, T_REF, V_REF, 0.5, 1.0);
+        let ds_cal = run_calendar_aging(1000, T_REF, V_REF, 0.5);
+
+        let cycling_contribution = ds.capacity_fade_pct() - ds_cal.capacity_fade_pct();
+        let expected_cycling = B2_REF * 1000.0;
+        assert!(
+            (cycling_contribution - expected_cycling).abs() < 0.005,
+            "Cycling fade contribution after 1000d should be ~{:.5} ({:.3}%), got {:.5} ({:.3}%)",
+            expected_cycling,
+            expected_cycling * 100.0,
+            cycling_contribution,
+            cycling_contribution * 100.0,
+        );
+    }
+
+    /// Verify that reset_day_tracking preserves lifetime state (q_li1, q_li2,
+    /// q_li3, capacity_fade, day_age) while clearing daily tracking fields
+    /// (soc extremes, dod_max_today).
+    #[test]
+    fn degradation_reset_preserves_lifetime() {
+        let u_neg = make_u_neg_table();
+        let dt_s = SECONDS_PER_DAY;
+        let mut ds = DegradationState::default();
+
+        let mut prev_fade = 0.0_f64;
+        for day in 0..3 {
+            ds.accumulate(dt_s, T_REF, V_REF, 0.5);
+            ds.update_daily(&u_neg, T_REF, 0.0);
+
+            assert_eq!(ds.day_age, day + 1, "day_age should increment to {}", day + 1);
+
+            let fade = ds.capacity_fade_pct();
+            assert!(
+                fade >= prev_fade,
+                "Fade must be monotonically increasing: day {day} fade {fade} < prev {prev_fade}"
+            );
+            prev_fade = fade;
+
+            let fade_before = ds.capacity_fade_pct();
+            let q_li3_before = ds.q_li3;
+
+            ds.reset_day_tracking(0.5);
+
+            assert_eq!(ds.capacity_fade_pct(), fade_before, "capacity_fade must survive reset");
+            assert_eq!(ds.q_li3, q_li3_before, "q_li3 must survive reset");
+            assert_eq!(ds.dod_max_today, 0.0, "dod_max_today should reset to 0");
+            assert_eq!(ds.soc_max_today, 0.5, "soc_max_today should reset to current SOC");
+            assert_eq!(ds.soc_min_today, 0.5, "soc_min_today should reset to current SOC");
+        }
+    }
+
+    /// Smith 2017: Mechanism 2 has Ea_b2 = -42800 J/mol (negative activation energy).
+    /// Physically this models lithium plating, which is faster at lower temperatures.
+    /// At 0C vs 25C:
+    ///   arr_b2(0C) = exp(42800/8.314 * (1/273.15 - 1/298.15)) ~ exp(1.577) ~ 4.84
+    /// Cycling fade at 0C should exceed 25C by this factor.
+    #[test]
+    fn negative_activation_energy_mechanism2_faster_at_low_temp() {
+        let ds_25 = run_cycling_aging(100, T_REF, V_REF, 0.5, 1.0);
+        let ds_0c = run_cycling_aging(100, 273.15, V_REF, 0.5, 1.0);
+
+        let ds_25_cal = run_calendar_aging(100, T_REF, V_REF, 0.5);
+        let ds_0c_cal = run_calendar_aging(100, 273.15, V_REF, 0.5);
+
+        let cycling_25 = ds_25.capacity_fade_pct() - ds_25_cal.capacity_fade_pct();
+        let cycling_0c = ds_0c.capacity_fade_pct() - ds_0c_cal.capacity_fade_pct();
+
+        assert!(
+            cycling_0c > cycling_25,
+            "Cycling degradation at 0C ({cycling_0c:.6}) must exceed 25C ({cycling_25:.6}) \
+             due to negative activation energy (lithium plating)"
+        );
+
+        // Physics reference: ratio = arr_b2(0C) / arr_b2(25C)
+        let arr_0c = (-(EA_B2 / R_GAS) * (1.0 / 273.15 - 1.0 / T_REF)).exp();
+        let expected_ratio = arr_0c; // arr_b2(25C) = 1.0
+        let ratio = cycling_0c / cycling_25;
+        assert!(
+            (ratio - expected_ratio).abs() < 0.5,
+            "0C/25C cycling fade ratio should be ~{expected_ratio:.2}, got {ratio:.3}"
+        );
+    }
+}

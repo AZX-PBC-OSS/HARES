@@ -903,3 +903,179 @@ mod latent_degradation_tests {
         assert!(result <= 1.0, "SHR must not exceed 1.0, got {result:.4}");
     }
 }
+
+#[cfg(test)]
+mod coil_psychrometric_tests {
+    use super::*;
+
+    // AHRI 210/240 rated indoor conditions.
+    const T_DB: f64 = 26.67; // 80 °F
+    const W_IN: f64 = 0.011159; // from T_wb=19.44°C at 101325 Pa
+    const P_KPA: f64 = 101.325;
+    // 3-ton unit
+    const Q_KW: f64 = 10.5505;
+    const FLOW_M3S: f64 = 0.49554;
+
+    // ------------------------------------------------------------------
+    // Test 1: Bypass factor at AHRI rated conditions, SHR = 0.70.
+    // Reference: ASHRAE/OCHRE cross-validation.
+    // ------------------------------------------------------------------
+    #[test]
+    fn coil_bypass_factor_ahri_rated_shr_070() {
+        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+        assert!(
+            (bf - 0.16325).abs() < 0.005,
+            "BF at SHR=0.70: expected 0.16325 ± 0.005, got {bf:.5}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 2: Bypass factor at AHRI rated conditions, SHR = 0.74.
+    // Reference: ASHRAE/OCHRE cross-validation.
+    // ------------------------------------------------------------------
+    #[test]
+    fn coil_bypass_factor_ahri_rated_shr_074() {
+        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.74).unwrap();
+        assert!(
+            (bf - 0.0517).abs() < 0.005,
+            "BF at SHR=0.74: expected 0.0517 ± 0.005, got {bf:.5}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 3: Round-trip: compute Ao from SHR=0.70, feed to calculate_shr,
+    // recover SHR ≈ 0.70.
+    // Reference: ASHRAE psychrometric consistency.
+    // ------------------------------------------------------------------
+    #[test]
+    fn calculate_shr_round_trip_ahri_conditions() {
+        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, ao).unwrap();
+        assert!(
+            (result.shr - 0.70).abs() < 0.002,
+            "Round-trip SHR: expected 0.70 ± 0.002, got {:.5}",
+            result.shr
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 4: Ao factor at AHRI rated conditions, SHR = 0.70.
+    // Ao = -ln(BF) * mfr, where mfr ≈ 0.5796 kg/s.
+    // Reference: ASHRAE/OCHRE cross-validation.
+    // ------------------------------------------------------------------
+    #[test]
+    fn coil_ao_factor_ahri_rated() {
+        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+        assert!(
+            (ao - 1.05040).abs() < 0.01,
+            "Ao at SHR=0.70: expected 1.05040 ± 0.01 kg/s, got {ao:.5}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 5: Very low humidity (below SHR_MIN_HUMIDITY_RATIO) → SHR = 1.0.
+    // Physics: dry air has no latent load.
+    // ------------------------------------------------------------------
+    #[test]
+    fn calculate_shr_dry_coil_returns_one() {
+        let result = calculate_shr(T_DB, 1e-8, P_KPA, Q_KW, FLOW_M3S, 1.0).unwrap();
+        assert_eq!(
+            result.shr, 1.0,
+            "SHR must be exactly 1.0 for W < SHR_MIN_HUMIDITY_RATIO"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 6: Zero capacity → SHR = 1.0.
+    // Physics: no cooling means no latent removal.
+    // ------------------------------------------------------------------
+    #[test]
+    fn calculate_shr_zero_capacity_returns_one() {
+        let result = calculate_shr(T_DB, W_IN, P_KPA, 0.0, FLOW_M3S, 1.0).unwrap();
+        assert_eq!(
+            result.shr, 1.0,
+            "SHR must be exactly 1.0 when Q = 0"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 7: High humidity case that should clamp BF to floor (0.01).
+    // Reference: EnergyPlus issue #10738 (negative bypass factor).
+    // ------------------------------------------------------------------
+    #[test]
+    fn bypass_factor_floor_clamps_to_001() {
+        let bf = coil_bypass_factor(29.44, 0.014690, P_KPA, Q_KW, FLOW_M3S, 0.68).unwrap();
+        assert_eq!(
+            bf, BYPASS_FACTOR_FLOOR,
+            "High-humidity case must clamp to BYPASS_FACTOR_FLOOR (0.01), got {bf:.5}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 9: Normal AHRI conditions with valid Ao converges (Ok, not Err).
+    // ------------------------------------------------------------------
+    #[test]
+    fn calculate_shr_ahri_conditions_converges() {
+        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, ao);
+        assert!(
+            result.is_ok(),
+            "calculate_shr must converge at AHRI conditions, got {:?}",
+            result.err()
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 10: Zero airflow → mass flow = 0 → BF = BYPASS_FACTOR_FLOOR.
+    // Physics: no airflow means coil cannot operate.
+    // ------------------------------------------------------------------
+    #[test]
+    fn bypass_factor_zero_mass_flow_returns_floor() {
+        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, 0.0, 0.70).unwrap();
+        assert_eq!(
+            bf, BYPASS_FACTOR_FLOOR,
+            "Zero flow must return BYPASS_FACTOR_FLOOR (0.01), got {bf:.5}"
+        );
+    }
+
+    // Helper: call coil_bypass_factor and recover ADP via calculate_shr round-trip.
+    fn bypass_factor_with_adp(
+        db_in_c: f64,
+        w_in: f64,
+        p_kpa: f64,
+        q_kw: f64,
+        flow_m3_s: f64,
+        shr: f64,
+    ) -> (f64, f64) {
+        let bf = coil_bypass_factor(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, shr).unwrap();
+        let ao = coil_ao_factor(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, shr).unwrap();
+        let result = calculate_shr(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+        (bf, result.adp_temp_c)
+    }
+
+    // ------------------------------------------------------------------
+    // Test 1b: Verify ADP temperature at SHR = 0.70 via round-trip.
+    // Reference: ASHRAE/OCHRE cross-validation, T_ADP = 11.77°C.
+    // ------------------------------------------------------------------
+    #[test]
+    fn adp_temperature_ahri_rated_shr_070() {
+        let (_, t_adp) = bypass_factor_with_adp(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70);
+        assert!(
+            (t_adp - 11.77).abs() < 0.1,
+            "T_ADP at SHR=0.70: expected 11.77 ± 0.1°C, got {t_adp:.3}°C"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 2b: Verify ADP temperature at SHR = 0.74 via round-trip.
+    // Reference: ASHRAE/OCHRE cross-validation, T_ADP = 12.79°C.
+    // ------------------------------------------------------------------
+    #[test]
+    fn adp_temperature_ahri_rated_shr_074() {
+        let (_, t_adp) = bypass_factor_with_adp(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.74);
+        assert!(
+            (t_adp - 12.79).abs() < 0.1,
+            "T_ADP at SHR=0.74: expected 12.79 ± 0.1°C, got {t_adp:.3}°C"
+        );
+    }
+}

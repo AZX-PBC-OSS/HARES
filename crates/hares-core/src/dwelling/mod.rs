@@ -980,7 +980,17 @@ impl Dwelling {
         while self.clock.current_step() < self.clock.total_steps() {
             let _ = self.run_timestep(true)?;
         }
-        // Emit the final partial billing period (if any).
+        self.finalize_billing();
+        self.recorder
+            .flush()
+            .map_err(|err| HaresError::Io(format!("output flush failed: {err}")))?;
+        Ok(self.simulation_results.clone())
+    }
+
+    /// Emit the final partial billing period (if any). Call after the last
+    /// `step()` when driving the simulation step-by-step. Idempotent —
+    /// a second call has no effect.
+    pub fn finalize_billing(&mut self) {
         if let Some(ref mut evaluator) = self.tariff_evaluator {
             let tz = evaluator.simulation_start().timezone();
             let sim_end = self.clock.current_time().with_timezone(&tz);
@@ -988,10 +998,6 @@ impl Dwelling {
                 self.billing_summaries.push(summary);
             }
         }
-        self.recorder
-            .flush()
-            .map_err(|err| HaresError::Io(format!("output flush failed: {err}")))?;
-        Ok(self.simulation_results.clone())
     }
 
     /// Returns accumulated results gathered so far.

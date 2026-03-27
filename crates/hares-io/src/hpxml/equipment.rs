@@ -979,7 +979,7 @@ mod tests {
 
         let rac = specs
             .iter()
-            .find(|s| s.name == "Room Air Conditioner")
+            .find(|s| s.name == "Room AC")
             .expect("Room Air Conditioner spec must be present");
 
         // Room AC must NOT get duct DSE params (no ducts for window units).

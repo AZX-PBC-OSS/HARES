@@ -2136,21 +2136,7 @@ pub struct PyBmsScheduleWindow {
 }
 
 fn parse_day_filter(s: &str) -> PyResult<DayFilter> {
-    match s {
-        "any" => Ok(DayFilter::Any),
-        "weekdays" => Ok(DayFilter::Weekdays),
-        "weekends" => Ok(DayFilter::Weekends),
-        "monday" => Ok(DayFilter::Day(chrono::Weekday::Mon)),
-        "tuesday" => Ok(DayFilter::Day(chrono::Weekday::Tue)),
-        "wednesday" => Ok(DayFilter::Day(chrono::Weekday::Wed)),
-        "thursday" => Ok(DayFilter::Day(chrono::Weekday::Thu)),
-        "friday" => Ok(DayFilter::Day(chrono::Weekday::Fri)),
-        "saturday" => Ok(DayFilter::Day(chrono::Weekday::Sat)),
-        "sunday" => Ok(DayFilter::Day(chrono::Weekday::Sun)),
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "unknown day_filter: {s:?} (expected any, weekdays, weekends, or a day name)"
-        ))),
-    }
+    crate::utils::parse_day_filter(s)
 }
 
 fn day_filter_to_str(d: &DayFilter) -> &'static str {
@@ -2445,24 +2431,33 @@ impl PyBmsMode {
                 min_soc,
                 max_soc,
                 solar_only_charging,
-            } => format!(
-                "BmsMode.self_consumption(min_soc={min_soc}, max_soc={max_soc}, solar_only_charging={solar_only_charging})"
-            ),
+            } => {
+                let sc = if *solar_only_charging { "True" } else { "False" };
+                format!(
+                    "BmsMode.self_consumption(min_soc={min_soc}, max_soc={max_soc}, solar_only_charging={sc})"
+                )
+            }
             RustBmsMode::TimeOfUseOptimization {
                 reserve_soc,
                 charge_threshold_percentile,
                 discharge_threshold_percentile,
                 solar_only_charging,
-            } => format!(
-                "BmsMode.time_of_use_optimization(reserve_soc={reserve_soc}, charge_pct={charge_threshold_percentile}, discharge_pct={discharge_threshold_percentile}, solar_only={solar_only_charging})"
-            ),
+            } => {
+                let sc = if *solar_only_charging { "True" } else { "False" };
+                format!(
+                    "BmsMode.time_of_use_optimization(reserve_soc={reserve_soc}, charge_threshold_percentile={charge_threshold_percentile}, discharge_threshold_percentile={discharge_threshold_percentile}, solar_only_charging={sc})"
+                )
+            }
             RustBmsMode::BackupReserve {
                 target_soc,
                 charge_from_grid,
                 charge_rate_fraction,
-            } => format!(
-                "BmsMode.backup_reserve(target_soc={target_soc}, charge_from_grid={charge_from_grid}, charge_rate_fraction={charge_rate_fraction})"
-            ),
+            } => {
+                let cfg = if *charge_from_grid { "True" } else { "False" };
+                format!(
+                    "BmsMode.backup_reserve(target_soc={target_soc}, charge_from_grid={cfg}, charge_rate_fraction={charge_rate_fraction})"
+                )
+            }
             RustBmsMode::DemandResponse {
                 base_mode,
                 dr_discharge_rate,

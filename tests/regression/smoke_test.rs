@@ -27,6 +27,157 @@ mod tests {
         }
     }
 
+    /// Parse a CSV into column-name -> Vec<f64> map.
+    /// Non-numeric cells (headers, timestamps) are silently skipped per-cell.
+    fn parse_csv_columns(path: &PathBuf) -> BTreeMap<String, Vec<f64>> {
+        let contents = fs::read_to_string(path).expect("read CSV");
+        let mut lines = contents.lines();
+        let header = lines.next().expect("header line");
+        let columns: Vec<String> = header.split(',').map(|c| c.trim().to_string()).collect();
+        let mut data: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for col in &columns {
+            data.insert(col.clone(), Vec::new());
+        }
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split(',').collect();
+            for (i, field) in fields.iter().enumerate() {
+                if i < columns.len() {
+                    if let Ok(v) = field.trim().parse::<f64>() {
+                        data.get_mut(&columns[i]).unwrap().push(v);
+                    }
+                }
+            }
+        }
+        data
+    }
+
+    /// Physics-validated sanity checks on CSV output and metrics.
+    ///
+    /// These are wide-tolerance bounds designed to catch gross errors
+    /// (NaN, 10x energy, sign flips, runaway temps) — not parity tests.
+    fn assert_physics_bounds(
+        csv_path: &PathBuf,
+        total_energy_kwh: f64,
+        per_end_use: &BTreeMap<String, f64>,
+        duration_hours: f64,
+    ) {
+        let data = parse_csv_columns(csv_path);
+
+        // --- 1. Zone temperatures in physical bounds [-50, 80]°C ---
+        for (col, values) in &data {
+            if col.starts_with("Temperature -") && col.ends_with("(C)") {
+                for (i, &v) in values.iter().enumerate() {
+                    assert!(
+                        v > -50.0 && v < 80.0,
+                        "Zone temp {v:.1}°C outside physical bounds [-50, 80] in '{col}' at row {i}"
+                    );
+                }
+            }
+        }
+
+        // --- 2. No NaN values in any numeric column ---
+        for (col, values) in &data {
+            for (i, &v) in values.iter().enumerate() {
+                assert!(
+                    !v.is_nan(),
+                    "NaN detected in '{col}' at row {i}"
+                );
+            }
+        }
+
+        // --- 3. HVAC energy non-zero OR zone temps in comfort range ---
+        // In mild weather (spring/fall) HVAC may legitimately not run.
+        // Assert: either HVAC consumed energy, or zone temps stayed in [15, 30]°C
+        // (meaning the dwelling was comfortable without conditioning).
+        let hvac_keywords = ["Heater Electric Power", "Cooler Electric Power",
+                             "HVAC Heating", "HVAC Cooling", "Air Conditioner",
+                             "Furnace Electric Power", "Heat Pump"];
+        let hvac_total_kwh: f64 = data.iter()
+            .filter(|(col, _)| {
+                col.ends_with("(kW)") && hvac_keywords.iter().any(|kw| col.contains(kw))
+            })
+            .map(|(_, values)| {
+                let sum: f64 = values.iter().sum();
+                if values.is_empty() { 0.0 } else { sum * (duration_hours / values.len() as f64) }
+            })
+            .sum();
+        if hvac_total_kwh <= 0.0 {
+            // HVAC didn't run — verify zone temps are in comfort range
+            let zone_temps_ok = data.iter()
+                .filter(|(col, _)| col.starts_with("Temperature -") && col.ends_with("(C)") && col.contains("Indoor"))
+                .all(|(_, values)| values.iter().all(|&v| v > 15.0 && v < 30.0));
+            assert!(
+                zone_temps_ok,
+                "HVAC consumed zero energy AND zone temps are outside comfort range [15, 30]°C"
+            );
+        }
+
+        // --- 4. Electrical consumption in reasonable range [0, 50] kWh/h ---
+        assert!(
+            total_energy_kwh >= 0.0,
+            "Total electrical energy is negative: {total_energy_kwh:.4} kWh"
+        );
+        let max_reasonable_kwh = 50.0 * duration_hours;
+        assert!(
+            total_energy_kwh <= max_reasonable_kwh,
+            "Total electrical energy {total_energy_kwh:.4} kWh exceeds reasonable bound \
+             of {max_reasonable_kwh:.1} kWh for {duration_hours}h simulation"
+        );
+
+        // Also check per-end-use values are non-negative and finite
+        for (end_use, &kwh) in per_end_use {
+            assert!(
+                kwh.is_finite(),
+                "Non-finite energy for end-use '{end_use}': {kwh}"
+            );
+            assert!(
+                kwh >= 0.0,
+                "Negative energy for end-use '{end_use}': {kwh:.4} kWh"
+            );
+        }
+
+        // --- 5. Water heater energy is non-negative if present ---
+        // A water heater may not cycle in a short (1h) window, so we only
+        // assert non-negative (catching sign-flip bugs), not strictly positive.
+        let wh_kwh: f64 = data.iter()
+            .filter(|(col, _)| {
+                col.ends_with("(kW)") && (col.contains("Water Heater") || col.contains("water_heater"))
+            })
+            .map(|(_, values)| {
+                let sum: f64 = values.iter().sum();
+                if values.is_empty() { 0.0 } else { sum * (duration_hours / values.len() as f64) }
+            })
+            .sum();
+        let has_water_heater = data.keys().any(|col| {
+            col.ends_with("(kW)") && (col.contains("Water Heater") || col.contains("water_heater"))
+        });
+        if has_water_heater {
+            assert!(
+                wh_kwh >= 0.0,
+                "Water heater energy is negative ({wh_kwh:.6} kWh) — sign-flip bug"
+            );
+        }
+
+        // --- Verify total power column values are non-negative per-step ---
+        if let Some(total_power) = data.get("Total Electric Power (kW)") {
+            for (i, &v) in total_power.iter().enumerate() {
+                assert!(
+                    v >= 0.0,
+                    "Negative total electric power {v:.4} kW at row {i}"
+                );
+            }
+        }
+
+        eprintln!("  [physics bounds] all assertions passed");
+        eprintln!(
+            "    total_energy={total_energy_kwh:.4} kWh, hvac_energy={hvac_total_kwh:.4} kWh, \
+             water_heater={wh_kwh:.4} kWh (present={has_water_heater})"
+        );
+    }
+
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
     }
@@ -324,6 +475,13 @@ mod tests {
                     );
                 }
             }
+            // --- Physics-validated sanity checks ---
+            assert_physics_bounds(
+                &csv_path,
+                result.metrics.annual_energy_kwh.total,
+                &result.metrics.annual_energy_kwh.per_end_use,
+                1.0,
+            );
         } else {
             eprintln!(
                 "  [no output CSV at {} or {}]",
@@ -394,6 +552,14 @@ mod tests {
                     eprintln!("    {col:55} {kwh:10.4}");
                 }
             }
+
+            // --- Physics-validated sanity checks ---
+            assert_physics_bounds(
+                &output_path,
+                result.metrics.annual_energy_kwh.total,
+                &result.metrics.annual_energy_kwh.per_end_use,
+                1.0,
+            );
         }
     }
 }

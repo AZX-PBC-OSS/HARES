@@ -20,7 +20,7 @@ def test_bms_self_consumption() -> None:
     assert "self_consumption" in r
     assert "min_soc=0.1" in r
     assert "max_soc=0.95" in r
-    assert "solar_only_charging=True" in r or "solar_only_charging=true" in r
+    assert "solar_only_charging=True" in r
 
 
 def test_bms_self_consumption_defaults() -> None:
@@ -49,7 +49,7 @@ def test_bms_backup_reserve() -> None:
     r = repr(mode)
     assert "backup_reserve" in r
     assert "target_soc=0.8" in r
-    assert "charge_from_grid=True" in r or "charge_from_grid=true" in r
+    assert "charge_from_grid=True" in r
     assert "charge_rate_fraction=0.5" in r
 
 
@@ -184,3 +184,23 @@ def test_bms_mode_validation_rejects_bad_soc() -> None:
 def test_bms_scheduled_empty_rejects() -> None:
     with pytest.raises(ValueError, match="empty"):
         BmsMode.scheduled(windows=[])
+
+
+def test_assign_bms_to_battery_config() -> None:
+    mode = BmsMode.time_of_use_optimization(
+        reserve_soc=0.2,
+        charge_threshold_percentile=25.0,
+        discharge_threshold_percentile=75.0,
+        solar_only_charging=True,
+    )
+    r = repr(mode)
+    assert "time_of_use_optimization" in r
+    assert "reserve_soc=0.2" in r
+    assert "charge_threshold_percentile=25" in r
+    assert "discharge_threshold_percentile=75" in r
+    assert "solar_only_charging=True" in r
+
+    mode2 = BmsMode.self_consumption(min_soc=0.1, max_soc=0.95)
+    r2 = repr(mode2)
+    assert "self_consumption" in r2
+    assert mode != mode2

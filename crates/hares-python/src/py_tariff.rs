@@ -2,7 +2,7 @@ use hares_tariff::types::{
     DemandRate, ElectricTariff, EnergyRate, ExportMode, ExportRate, FixedCharges, GasTariff,
     GasTieredBlock, RatchetConfig, TieredBlock,
 };
-use hares_types::{BillingCycle, DayFilter, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod};
+use hares_types::{BillingCycle, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyType};
@@ -19,23 +19,7 @@ fn parse_season(s: &str) -> PyResult<SeasonFilter> {
     }
 }
 
-fn parse_day(s: &str) -> PyResult<DayFilter> {
-    match s.to_lowercase().as_str() {
-        "any" => Ok(DayFilter::Any),
-        "weekdays" => Ok(DayFilter::Weekdays),
-        "weekends" => Ok(DayFilter::Weekends),
-        "monday" => Ok(DayFilter::Day(chrono::Weekday::Mon)),
-        "tuesday" => Ok(DayFilter::Day(chrono::Weekday::Tue)),
-        "wednesday" => Ok(DayFilter::Day(chrono::Weekday::Wed)),
-        "thursday" => Ok(DayFilter::Day(chrono::Weekday::Thu)),
-        "friday" => Ok(DayFilter::Day(chrono::Weekday::Fri)),
-        "saturday" => Ok(DayFilter::Day(chrono::Weekday::Sat)),
-        "sunday" => Ok(DayFilter::Day(chrono::Weekday::Sun)),
-        _ => Err(PyValueError::new_err(format!(
-            "unknown day filter '{s}', expected 'any', 'weekdays', 'weekends', or a day name"
-        ))),
-    }
-}
+use crate::utils::parse_day_filter as parse_day;
 
 fn parse_window(d: &Bound<'_, PyDict>) -> PyResult<TimeWindow> {
     let day_str: String = d
@@ -315,6 +299,11 @@ impl PyTariffBuilder {
         season: &str,
         rate: f64,
     ) -> PyResult<Py<Self>> {
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "rate must be finite and >= 0, got {rate}"
+            )));
+        }
         let season = parse_season(season)?;
         slf.borrow_mut(py).energy_rates.push(EnergyRate {
             period_name,
@@ -334,6 +323,11 @@ impl PyTariffBuilder {
         ratchet_fraction: Option<f64>,
         lookback_months: Option<u8>,
     ) -> PyResult<Py<Self>> {
+        if !rate_per_kw.is_finite() || rate_per_kw < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "rate_per_kw must be finite and >= 0, got {rate_per_kw}"
+            )));
+        }
         let season = parse_season(season)?;
         let ratchet = match (ratchet_fraction, lookback_months) {
             (Some(frac), Some(months)) => Some(RatchetConfig {
@@ -382,12 +376,22 @@ impl PyTariffBuilder {
         py: Python<'_>,
         monthly_usd: f64,
         daily_usd: f64,
-    ) -> Py<Self> {
+    ) -> PyResult<Py<Self>> {
+        if !monthly_usd.is_finite() || monthly_usd < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "monthly_usd must be finite and >= 0, got {monthly_usd}"
+            )));
+        }
+        if !daily_usd.is_finite() || daily_usd < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "daily_usd must be finite and >= 0, got {daily_usd}"
+            )));
+        }
         slf.borrow_mut(py).fixed_charges = FixedCharges {
             monthly_usd,
             daily_usd,
         };
-        slf
+        Ok(slf)
     }
 
     #[pyo3(signature = (minutes=15))]
@@ -396,9 +400,9 @@ impl PyTariffBuilder {
         py: Python<'_>,
         minutes: u32,
     ) -> PyResult<Py<Self>> {
-        if minutes < 5 {
+        if !(5..=60).contains(&minutes) {
             return Err(PyValueError::new_err(format!(
-                "demand_window_minutes must be >= 5, got {minutes}"
+                "demand_window_minutes must be in [5, 60], got {minutes}"
             )));
         }
         slf.borrow_mut(py).demand_window_minutes = minutes;
@@ -448,17 +452,27 @@ impl PyTariffBuilder {
         Ok(slf)
     }
 
-    fn set_export_flat_rate(slf: Py<Self>, py: Python<'_>, rate: f64) -> Py<Self> {
+    fn set_export_flat_rate(slf: Py<Self>, py: Python<'_>, rate: f64) -> PyResult<Py<Self>> {
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "rate must be finite and >= 0, got {rate}"
+            )));
+        }
         slf.borrow_mut(py).export_rate = ExportRate {
             mode: ExportMode::FlatRate(rate),
             tou_credits: Vec::new(),
         };
-        slf
+        Ok(slf)
     }
 
-    fn set_minimum_charge(slf: Py<Self>, py: Python<'_>, amount: f64) -> Py<Self> {
+    fn set_minimum_charge(slf: Py<Self>, py: Python<'_>, amount: f64) -> PyResult<Py<Self>> {
+        if !amount.is_finite() || amount < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "amount must be finite and >= 0, got {amount}"
+            )));
+        }
         slf.borrow_mut(py).minimum_charge = Some(amount);
-        slf
+        Ok(slf)
     }
 
     /// Add a demand-specific TOU period (separate from energy TOU periods).
@@ -675,6 +689,31 @@ impl PyGasTariffBuilder {
             daily_usd,
         };
         slf
+    }
+
+    #[pyo3(signature = (cycle_days=None))]
+    fn set_billing_cycle(
+        slf: Py<Self>,
+        py: Python<'_>,
+        cycle_days: Option<u32>,
+    ) -> Py<Self> {
+        slf.borrow_mut(py).billing_cycle = match cycle_days {
+            None => BillingCycle::Monthly,
+            Some(days) => BillingCycle::Custom(days),
+        };
+        slf
+    }
+
+    fn set_seasonal_split(
+        slf: Py<Self>,
+        py: Python<'_>,
+        summer_start_month: u8,
+        summer_end_month: u8,
+    ) -> PyResult<Py<Self>> {
+        let split = SeasonalSplit::new(summer_start_month, summer_end_month)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        slf.borrow_mut(py).seasonal_split = Some(split);
+        Ok(slf)
     }
 
     fn build(&self) -> PyResult<PyGasTariff> {

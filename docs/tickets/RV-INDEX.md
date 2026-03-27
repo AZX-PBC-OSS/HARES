@@ -63,7 +63,7 @@ Tickets partially advanced:
 |----|-------|------|----------|------------|
 | [RV-015](RV-015.md) | RoomAC equipment type (~15% of ResStock) | implement | hares-equipment | — |
 | [RV-016](RV-016.md) | Parity gaps design (islanded, generic, EVI-Pro) | implement | (design doc) | — |
-| [RV-017](RV-017.md) | Test collision, weak assertions, magic numbers, timing deps | fix | multiple | — |
+| [RV-017](RV-017.md) | Test collision fixes (temp paths); remaining items tracked | fix | multiple | **Partial** |
 | [RV-018](RV-018.md) | Smoke test numeric assertions | test | tests | — |
 | [RV-019](RV-019.md) | Sentinels, panics, clippy, zero-div guard | fix | hares-core, hares-equipment | **Done** |
 | [RV-020](RV-020.md) | Config-driven summer months, duck typing, thresholds | fix | hares-tariff, hares-python, hares-core | — |

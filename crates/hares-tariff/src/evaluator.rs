@@ -213,7 +213,7 @@ impl TariffEvaluator {
 
     /// Clamped index: returns the last valid index when step_index exceeds bounds.
     fn clamped_index(&self) -> usize {
-        self.step_index.min(self.price_array.len() - 1)
+        self.step_index.min(self.price_array.len().saturating_sub(1))
     }
 
     pub fn current_price(&self) -> f64 {

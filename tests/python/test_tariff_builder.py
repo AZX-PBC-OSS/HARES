@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import make_dwelling
 from ochre_next import ElectricTariff, GasTariff, GasTariffBuilder, TariffBuilder
 
 
@@ -261,3 +262,47 @@ class TestGasTariffBuilder:
         r = repr(tariff)
         assert "Repr Gas" in r
         assert "tiered_rates=1" in r
+
+
+class TestFromUrdbJson:
+    def test_from_urdb_json(self) -> None:
+        tariff = ElectricTariff.from_urdb_json("tests/fixtures/urdb/flat_rate.json")
+        assert isinstance(tariff, ElectricTariff)
+        d = tariff.to_dict()
+        assert len(d["tou_schedule"]) >= 1
+        rates = d["energy_rates"]
+        assert len(rates) >= 1
+        assert any(r["rate_per_kwh"] > 0 for r in rates)
+
+
+class TestSetTariffOnDwelling:
+    def test_set_tariff_and_step(self) -> None:
+        tariff = _make_simple_tou_builder().build()
+        dw = make_dwelling(duration_s=300, time_res_s=60)
+        dw.initialize()
+        dw.set_electric_tariff(tariff)
+        dw.step()
+
+
+class TestCrossMidnightWindow:
+    def test_wrapping_window(self) -> None:
+        tariff = (
+            ElectricTariff.builder()
+            .set_name("Night TOU")
+            .add_tou_period(
+                "night",
+                [{"day": "any", "start_hour": 22, "end_hour": 6}],
+                "all",
+            )
+            .add_tou_period(
+                "day",
+                [{"day": "any", "start_hour": 6, "end_hour": 22}],
+                "all",
+            )
+            .add_energy_rate("night", "all", 0.05)
+            .add_energy_rate("day", "all", 0.20)
+            .build()
+        )
+        d = tariff.to_dict()
+        assert len(d["tou_schedule"]) == 2
+        assert tariff.name == "Night TOU"

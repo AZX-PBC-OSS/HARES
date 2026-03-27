@@ -567,4 +567,151 @@ mod tests {
             dw_unbuffered / 15.0
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Physics-grounded tests — validated against ASHRAE first principles.
+    // -----------------------------------------------------------------------
+
+    /// Direct test of humidity_ratio_increment with known inputs.
+    /// dW = (Q_latent * dt) / (h_fg * rho * V * multiplier)
+    ///    = (500 * 60) / (2501000 * 1.2 * 200 * 15) = 3.3320e-6 kg/kg
+    #[test]
+    fn humidity_increment_ashrae_first_principles() {
+        let dw = humidity_ratio_increment(500.0, 60.0, 2_501_000.0, 1.2, 200.0, 15.0);
+        let expected = (500.0 * 60.0) / (2_501_000.0 * 1.2 * 200.0 * 15.0);
+        assert!(
+            (dw - expected).abs() < 1e-12,
+            "dW mismatch: got {dw:.12e}, expected {expected:.12e}"
+        );
+        // Cross-check the numeric value from the ticket spec
+        assert!(
+            (dw - 3.332_0e-6).abs() < 1e-10,
+            "dW={dw:.12e} not near 3.3320e-6"
+        );
+    }
+
+    /// Moisture buffering multiplier scales linearly: dW(m=1) / dW(m=15) = 15.0.
+    #[test]
+    fn humidity_buffering_multiplier_scales_linearly() {
+        let dw_1 = humidity_ratio_increment(500.0, 60.0, 2_501_000.0, 1.2, 200.0, 1.0);
+        let dw_15 = humidity_ratio_increment(500.0, 60.0, 2_501_000.0, 1.2, 200.0, 15.0);
+        let ratio = dw_1 / dw_15;
+        assert!(
+            (ratio - 15.0).abs() < 1e-10,
+            "multiplier ratio must be 15.0: got {ratio}"
+        );
+    }
+
+    /// Two zones with different latent gains evolve independently and proportionally.
+    #[test]
+    fn humidity_two_zone_independent_evolution() {
+        let zone_a = ZoneId(1);
+        let zone_b = ZoneId(2);
+        let w_init = 0.008;
+
+        let env = EnvironmentState {
+            zones: vec![
+                ZoneState {
+                    id: zone_a,
+                    temperature_c: 22.0,
+                    humidity_ratio: w_init,
+                    relative_humidity: 0.50,
+                    wet_bulb_c: 19.0,
+                    volume_m3: 200.0,
+                },
+                ZoneState {
+                    id: zone_b,
+                    temperature_c: 22.0,
+                    humidity_ratio: w_init,
+                    relative_humidity: 0.50,
+                    wet_bulb_c: 19.0,
+                    volume_m3: 200.0,
+                },
+            ],
+            weather: WeatherState {
+                outdoor_temp_c: 10.0,
+                outdoor_humidity_ratio: 0.005,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 180.0,
+                ground_temp_c: 10.0,
+                sky_temp_c: 5.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![SurfaceIrradiance {
+                    surface_id: 1,
+                    direct_w_m2: 0.0,
+                    diffuse_w_m2: 0.0,
+                    reflected_w_m2: 0.0,
+                    angle_of_incidence_rad: 0.0,
+                }],
+                outdoor_wet_bulb_c: 0.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
+                mains_temp_c: 15.0,
+                rainfall_m: 0.0,
+                ground_albedo: 0.2,
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid time"),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        };
+
+        let config = HumiditySolverConfig {
+            moisture_buffering_multiplier: 1.0,
+            ..HumiditySolverConfig::default()
+        };
+        let mut solver = HumiditySolver::new(config, &env);
+
+        // Apply 100W to zone A, 300W to zone B via port slots
+        let ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator {
+                    zone: zone_a,
+                    sensible_gain_w: 0.0,
+                    latent_gain_w: 100.0,
+                    ..ThermalAccumulator::new(zone_a)
+                },
+                ThermalAccumulator {
+                    zone: zone_b,
+                    sensible_gain_w: 0.0,
+                    latent_gain_w: 300.0,
+                    ..ThermalAccumulator::new(zone_b)
+                },
+            ],
+            ..Default::default()
+        };
+
+        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+
+        let dw_a = solver.humidity_ratio(zone_a) - w_init;
+        let dw_b = solver.humidity_ratio(zone_b) - w_init;
+
+        // Both must be positive (latent gain adds moisture)
+        assert!(dw_a > 0.0, "zone A dW must be positive: {dw_a}");
+        assert!(dw_b > 0.0, "zone B dW must be positive: {dw_b}");
+
+        // Zone B receives 3x the latent gain, so its dW must be ~3x zone A's.
+        // Slight deviation possible due to density depending on humidity ratio,
+        // but within a single timestep with identical initial conditions the
+        // density is the same, so the ratio must be exact.
+        let ratio = dw_b / dw_a;
+        assert!(
+            (ratio - 3.0).abs() < 1e-8,
+            "zone B must evolve at 3x zone A's rate: ratio={ratio}"
+        );
+    }
 }

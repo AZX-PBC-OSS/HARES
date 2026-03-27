@@ -383,7 +383,8 @@ impl EnvironmentManager {
     /// Update environment state for the current clock step.
     #[must_use]
     pub fn update(&mut self, clock: &SimClock, zone_states: &[ZoneState]) -> EnvironmentState {
-        let step = usize::try_from(clock.current_step()).unwrap_or(usize::MAX);
+        let step = usize::try_from(clock.current_step())
+            .expect("step counter exceeds usize on this target");
         let weather_len = self.weather.len();
         let weather_idx = if weather_len == 0 {
             0

@@ -1397,6 +1397,130 @@ mod tests {
         assert_eq!(room.descriptor().stage, ExecutionStage::Thermal);
     }
 
+    #[test]
+    fn room_ac_duct_dse_is_one() {
+        let mut cfg = ac_config();
+        cfg.ochre_class = "Room AC".to_string();
+        let mut eq = RoomAC::new(cfg.clone());
+        let environment = env(27.0, 0.010, 19.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
+        assert!(
+            (eq.core.hvac.duct_dse - 1.0).abs() < f64::EPSILON,
+            "Room AC duct_dse must be 1.0, got {}",
+            eq.core.hvac.duct_dse
+        );
+        assert!(
+            eq.core.hvac.duct_zone_id.is_none(),
+            "Room AC must have no duct zone"
+        );
+    }
+
+    #[test]
+    fn room_ac_step_produces_cooling() {
+        let mut cfg = ac_config();
+        cfg.ochre_class = "Room AC".to_string();
+        cfg.raw_config
+            .insert("hysteresis_c".to_string(), 0.0.into());
+        let mut eq = RoomAC::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let environment = env(28.0, 0.012, 20.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let sens = eq.telemetry().get("sensible_cooling_w").unwrap_or(0.0);
+        let elec = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        assert!(sens > 0.0, "sensible_cooling_w must be positive (magnitude), got {sens}");
+        assert!(elec > 0.0, "electric_kw must be positive, got {elec}");
+        assert!(
+            ports.thermal[0].sensible_gain_w < 0.0,
+            "thermal port sensible gain must be negative (cooling), got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    #[test]
+    fn room_ac_no_duct_zone_entry() {
+        let mut cfg = ac_config();
+        cfg.ochre_class = "Room AC".to_string();
+        let mut eq = RoomAC::new(cfg.clone());
+        let environment = env(27.0, 0.010, 19.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
+
+        let fracs = &eq.core.hvac.zone_heat_fractions;
+        assert_eq!(
+            fracs.len(),
+            1,
+            "Room AC must have exactly one zone heat fraction entry, got {fracs:?}"
+        );
+        assert_eq!(fracs[0].0, ZoneId(1));
+        assert!(
+            (fracs[0].1 - 1.0).abs() < f64::EPSILON,
+            "Room AC zone heat fraction must be 1.0, got {}",
+            fracs[0].1
+        );
+    }
+
+    #[test]
+    fn room_ac_vs_central_different_dse() {
+        let mut central_cfg = ac_config();
+        central_cfg
+            .raw_config
+            .insert("hysteresis_c".to_string(), 0.0.into());
+        central_cfg
+            .raw_config
+            .insert("duct_dse".to_string(), 0.80.into());
+
+        let mut room_cfg = ac_config();
+        room_cfg.ochre_class = "Room AC".to_string();
+        room_cfg
+            .raw_config
+            .insert("hysteresis_c".to_string(), 0.0.into());
+
+        let environment = env(28.0, 0.012, 20.0, 35.0);
+
+        let mut central = AirConditioner::new(central_cfg.clone());
+        central.init(&central_cfg, &environment).unwrap();
+        let mut ports_central = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        central.update_control(&environment);
+        central
+            .step(&environment, Duration::from_secs(60), &mut ports_central)
+            .unwrap();
+
+        let mut room = RoomAC::new(room_cfg.clone());
+        room.init(&room_cfg, &environment).unwrap();
+        let mut ports_room = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        room.update_control(&environment);
+        room.step(&environment, Duration::from_secs(60), &mut ports_room)
+            .unwrap();
+
+        let central_cooling = -ports_central.thermal[0].sensible_gain_w;
+        let room_cooling = -ports_room.thermal[0].sensible_gain_w;
+        assert!(
+            central_cooling > 0.0,
+            "central AC must produce cooling, got {central_cooling}"
+        );
+        assert!(
+            room_cooling > 0.0,
+            "room AC must produce cooling, got {room_cooling}"
+        );
+        assert!(
+            room_cooling > central_cooling,
+            "Room AC (DSE=1.0) must deliver more cooling to zone ({room_cooling:.1} W) \
+             than central AC with DSE=0.80 ({central_cooling:.1} W)"
+        );
+    }
+
     /// Two-speed AC selects the high stage when load fraction exceeds
     /// `low_speed_capacity_fraction` (default 0.5), and the low stage otherwise.
     /// With `hysteresis_c=0` the thermostat activates at zone_temp > setpoint (24°C)

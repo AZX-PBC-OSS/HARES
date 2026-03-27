@@ -62,11 +62,11 @@ pub fn batch_step_py(
             dwellings.len(),
         )));
     }
-    // Action mapping is not yet implemented (H-7). Reject non-empty actions
+    // Action mapping is not yet implemented. Reject non-empty actions
     // at the Python boundary with a clear error before entering Rayon.
     if actions.iter().any(|a| !a.is_empty()) {
         return Err(pyo3::exceptions::PyNotImplementedError::new_err(
-            "batch_step action mapping is not yet implemented (H-7). \
+            "batch_step action mapping is not yet implemented. \
              Apply controls via dwelling.apply_control() before calling batch_step, \
              and pass empty action vectors.",
         ));

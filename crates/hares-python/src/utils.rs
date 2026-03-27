@@ -1,8 +1,28 @@
 //! Shared utilities for Python bindings.
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
+use hares_types::DayFilter;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+/// Case-insensitive day filter parser shared by tariff and enum modules.
+pub fn parse_day_filter(s: &str) -> PyResult<DayFilter> {
+    match s.to_lowercase().as_str() {
+        "any" => Ok(DayFilter::Any),
+        "weekdays" => Ok(DayFilter::Weekdays),
+        "weekends" => Ok(DayFilter::Weekends),
+        "monday" => Ok(DayFilter::Day(chrono::Weekday::Mon)),
+        "tuesday" => Ok(DayFilter::Day(chrono::Weekday::Tue)),
+        "wednesday" => Ok(DayFilter::Day(chrono::Weekday::Wed)),
+        "thursday" => Ok(DayFilter::Day(chrono::Weekday::Thu)),
+        "friday" => Ok(DayFilter::Day(chrono::Weekday::Fri)),
+        "saturday" => Ok(DayFilter::Day(chrono::Weekday::Sat)),
+        "sunday" => Ok(DayFilter::Day(chrono::Weekday::Sun)),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown day filter '{s}', expected 'any', 'weekdays', 'weekends', or a day name"
+        ))),
+    }
+}
 
 /// Parse a datetime string from Python to a FixedOffset DateTime.
 ///

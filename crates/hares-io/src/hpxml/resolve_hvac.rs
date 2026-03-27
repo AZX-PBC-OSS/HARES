@@ -355,7 +355,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
-        if name != "Room Air Conditioner" {
+        if name != "Room AC" {
             for (k, v) in &duct_params {
                 params.insert(k.clone(), v.clone());
             }
@@ -522,7 +522,7 @@ fn is_heating_equipment(name: &str) -> bool {
 fn is_cooling_equipment(name: &str) -> bool {
     matches!(
         name,
-        "ASHP Cooler" | "MSHP Cooler" | "Air Conditioner" | "Room Air Conditioner"
+        "ASHP Cooler" | "MSHP Cooler" | "Air Conditioner" | "Room AC"
     )
 }
 
@@ -583,7 +583,7 @@ fn canonical_hvac_heating_name(system_type: &str, fuel: FuelType) -> String {
 fn canonical_hvac_cooling_name(system_type: &str, _fuel: FuelType) -> String {
     match system_type.trim() {
         "central air conditioner" => "Air Conditioner".to_string(),
-        "room air conditioner" => "Room Air Conditioner".to_string(),
+        "room air conditioner" => "Room AC".to_string(),
         _ => "Generic Cooler".to_string(),
     }
 }

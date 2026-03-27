@@ -390,6 +390,7 @@ pub struct PyDwelling {
     registry: ActorRegistry,
     equipment_registry: EquipmentRegistry,
     zone_keys: Option<Vec<String>>,
+    gas_tariff: Option<crate::py_tariff::PyGasTariff>,
 }
 
 #[pymethods]
@@ -415,6 +416,7 @@ impl PyDwelling {
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
+            gas_tariff: None,
         })
     }
 
@@ -1191,6 +1193,11 @@ impl PyDwelling {
         dwelling
             .set_tariff(tariff.inner.clone(), tz)
             .map_err(to_py_err)
+    }
+
+    /// Attach a gas tariff to this dwelling for metadata/reporting.
+    pub fn set_gas_tariff(&mut self, tariff: crate::py_tariff::PyGasTariff) {
+        self.gas_tariff = Some(tariff);
     }
 
     /// Returns accumulated billing period summaries.

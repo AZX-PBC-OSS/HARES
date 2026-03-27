@@ -1744,3 +1744,315 @@ fn actor_seed_nightly_returns_ev_seed() {
         _ => panic!("expected Ev seed"),
     }
 }
+
+// ── RV-013: Physics-grounded EV driver lifecycle tests ────────────
+
+/// Physics reference: L2 7.2 kW charger, 90% efficiency, 60 kWh battery.
+/// DC energy per hour = 7.2 * 0.90 = 6.48 kWh/h
+/// SOC increase per hour = 6.48 / 60 = 0.108
+/// After 4 h from SOC 0.50: SOC = 0.50 + 4*0.108 = 0.932
+///
+/// Validates DC = AC * eta (not AC = DC * eta which would overstate by 11%).
+#[test]
+fn l2_charging_energy_accounting() {
+    let mut raw = base_raw();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    for _ in 0..240 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    }
+
+    let expected_soc = 0.932;
+    assert!(
+        (ev.soc - expected_soc).abs() < 0.005,
+        "After 4h L2 charging: expected SOC ~ {expected_soc}, got {}",
+        ev.soc
+    );
+}
+
+/// Same setup as above; charge until full.
+/// DC energy needed = 0.50 * 60 = 30.0 kWh
+/// Time = 30.0 / (7.2 * 0.90) = 4.630 h ~ 278 minutes
+#[test]
+fn charging_reaches_full_at_correct_time() {
+    let mut raw = base_raw();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let mut full_step = None;
+    for step in 1..=400 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+        if ev.soc >= 1.0 - 1e-9 && full_step.is_none() {
+            full_step = Some(step);
+        }
+    }
+
+    let step = full_step.expect("EV should reach full within 400 minutes");
+    assert!(
+        (step as i32 - 278).unsigned_abs() <= 2,
+        "Expected full at step ~278, got {step}"
+    );
+}
+
+/// OCHRE EV_FUEL_ECONOMY default = 0.325 kWh/mile.
+/// 30-mile trip: drive_kwh = 30 * 0.325 = 9.75 kWh
+/// SOC drop = 9.75 / 60 = 0.1625
+///
+/// Validates driving uses fuel economy directly, no charging efficiency applied.
+#[test]
+fn driving_soc_decrease_matches_fuel_economy() {
+    let mut raw = base_raw();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 1.0.into());
+    raw.insert(
+        KEY_FUEL_ECONOMY_KWH_PER_MI.to_string(),
+        0.325.into(),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+
+    let miles = 30.0;
+    let drive_kwh = miles * 0.325;
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
+        .unwrap();
+
+    let expected_drop = 0.1625;
+    let actual_drop = 1.0 - ev.soc;
+    assert!(
+        (actual_drop - expected_drop).abs() < 0.005,
+        "Expected SOC drop ~ {expected_drop}, got {actual_drop}"
+    );
+}
+
+/// Newton's law of cooling: T(t) = T_amb + (T0 - T_amb) * exp(-t/tau)
+/// tau = thermal_mass / UA = 20000 / 4.0 = 5000 s
+/// T0 = 25 C, T_amb = 10 C
+/// After 1 h (3600 s): T = 10 + 15*exp(-3600/5000) = 17.30 C
+/// After 2 h (7200 s): T = 10 + 15*exp(-7200/5000) = 13.55 C
+#[test]
+fn battery_thermal_exponential_decay() {
+    let mut raw = base_raw();
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 25.0.into());
+    raw.insert(KEY_THERMAL_MASS_J_PER_K.to_string(), 20_000.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 4.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.weather.outdoor_temp_c = 10.0;
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+
+    // Step 60 minutes (1 h)
+    for _ in 0..60 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    }
+    let tau = 5000.0_f64;
+    let expected_1h = 10.0 + 15.0 * (-3600.0 / tau).exp();
+    assert!(
+        (ev.battery_temp_c - expected_1h).abs() < 0.1,
+        "After 1h: expected {expected_1h:.2} C, got {:.2} C",
+        ev.battery_temp_c
+    );
+
+    // Step another 60 minutes (total 2 h)
+    for _ in 0..60 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    }
+    let expected_2h = 10.0 + 15.0 * (-7200.0 / tau).exp();
+    assert!(
+        (ev.battery_temp_c - expected_2h).abs() < 0.1,
+        "After 2h: expected {expected_2h:.2} C, got {:.2} C",
+        ev.battery_temp_c
+    );
+}
+
+/// SOC must clamp: never exceed 1.0 when overcharging, never go below 0.0.
+#[test]
+fn soc_clamps_at_boundaries() {
+    // Charge well past full from SOC 0.5 for 600 minutes
+    let mut raw = base_raw();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    for _ in 0..600 {
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+        assert!(
+            ev.soc <= 1.0,
+            "SOC must never exceed 1.0, got {}",
+            ev.soc
+        );
+    }
+    assert!(
+        (ev.soc - 1.0).abs() < 1e-9,
+        "SOC should be 1.0 after 600 min of charging from 0.5"
+    );
+
+    // Discharge from low SOC with a large drive
+    let mut raw2 = base_raw();
+    raw2.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw2.insert(KEY_INITIAL_SOC.to_string(), 0.05.into());
+    let config2 = ev_config(raw2);
+    let mut ev2 = Ev::new(config2.clone());
+    ev2.init(&config2, &env).unwrap();
+
+    ev2.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+
+    // Available = 0.05 * 60 = 3.0 kWh; try to drive 3.0 kWh exactly
+    ev2.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 3.0 })
+        .unwrap();
+    assert!(
+        ev2.soc >= 0.0,
+        "SOC must never go below 0.0, got {}",
+        ev2.soc
+    );
+    assert!(
+        ev2.soc.abs() < 1e-9,
+        "SOC should be ~0.0 after draining remaining energy"
+    );
+
+    // Attempting to overdraw should be rejected
+    let err = ev2
+        .apply_control_unchecked(&ControlSignal::EvDrive { kwh: 1.0 })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds available"),
+        "overdraw should be rejected: {err}"
+    );
+}
+
+/// Connection state transitions: HomePluggedIn -> AwayPluggedIn must be rejected
+/// (must go through Disconnected).
+#[test]
+fn connection_state_transitions_are_valid() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert_eq!(ev.connection_state, EvConnectionState::HomePluggedIn);
+
+    // HomePluggedIn -> Disconnected: valid
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    assert_eq!(ev.connection_state, EvConnectionState::Disconnected);
+
+    // Disconnected -> HomePluggedIn: valid
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::HomePluggedIn,
+    })
+    .unwrap();
+    assert_eq!(ev.connection_state, EvConnectionState::HomePluggedIn);
+
+    // HomePluggedIn -> AwayPluggedIn: REJECTED (must disconnect first)
+    let err = ev
+        .apply_control_unchecked(&ControlSignal::EvPlugIn {
+            state: EvConnectionState::AwayPluggedIn,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("disconnect first"),
+        "direct HomePluggedIn -> AwayPluggedIn should be rejected: {err}"
+    );
+
+    // Go through Disconnected to AwayPluggedIn
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::AwayPluggedIn,
+    })
+    .unwrap();
+    assert_eq!(ev.connection_state, EvConnectionState::AwayPluggedIn);
+
+    // AwayPluggedIn -> HomePluggedIn: REJECTED
+    let err = ev
+        .apply_control_unchecked(&ControlSignal::EvPlugIn {
+            state: EvConnectionState::HomePluggedIn,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("disconnect first"),
+        "direct AwayPluggedIn -> HomePluggedIn should be rejected: {err}"
+    );
+}
+
+/// At 7.2 kW AC with 90% efficiency:
+/// DC stored = 6.48 kW, waste heat = 0.72 kW = 720 W
+/// Verify temperature rise matches the waste heat injected into the thermal mass.
+#[test]
+fn charging_waste_heat_matches_efficiency_loss() {
+    let mut raw = base_raw();
+    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    raw.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
+    raw.insert(KEY_THERMAL_MASS_J_PER_K.to_string(), 20_000.0.into());
+    raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
+    raw.insert(KEY_HEATER_POWER_W.to_string(), 0.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    let temp_before = ev.battery_temp_c;
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::from_secs(3600), &mut ports).unwrap();
+
+    // Waste heat = AC_kW * (1 - eta) = 7.2 * 0.10 = 0.72 kW = 720 W
+    // Temperature rise = Q * dt / thermal_mass = 720 * 3600 / 20000 = 129.6 C
+    // That is the 1-hour integral with zero UA losses.
+    let waste_heat_w = 7.2 * (1.0 - 0.9) * 1000.0;
+    let expected_dt = waste_heat_w * 3600.0 / 20_000.0;
+    let actual_dt = ev.battery_temp_c - temp_before;
+
+    assert!(
+        (actual_dt - expected_dt).abs() < 0.5,
+        "Waste heat temperature rise: expected {expected_dt:.1} C, got {actual_dt:.1} C"
+    );
+}

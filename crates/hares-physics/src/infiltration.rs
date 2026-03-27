@@ -1376,4 +1376,81 @@ mod tests {
             "balanced leakage must not change infiltration by more than 1%: base={base}, result={result}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Physics-grounded tests — validated against ASHRAE HOF Ch.16 / ASHRAE 152
+    // / Walker-Wilson 1998 / EnergyPlus cross-validation.
+    // -----------------------------------------------------------------------
+
+    /// AIM-2 stack-dominated, normal shielding.
+    /// Q = sqrt((0.015 * 10^0.65)^2 + (0.0012 * (0.5*3)^1.3)^2)
+    #[test]
+    fn aim2_stack_dominated_normal_shielding() {
+        let q = ashrae_wind_stack(0.015, 0.0012, 10.0, 3.0, 0.5, 0.65);
+        approx_eq(q, 0.067_033_37, 1e-6);
+    }
+
+    /// AIM-2 cold winter, well-shielded (shelter=0.3, dT=20, wind=5).
+    #[test]
+    fn aim2_cold_winter_well_shielded() {
+        let q = ashrae_wind_stack(0.015, 0.0012, 20.0, 5.0, 0.3, 0.65);
+        approx_eq(q, 0.105_16, 1e-4);
+    }
+
+    /// AIM-2 wind-dominated, exposed site (shelter=0.9, dT=2, wind=8).
+    #[test]
+    fn aim2_wind_dominated_exposed() {
+        let q = ashrae_wind_stack(0.015, 0.0012, 2.0, 8.0, 0.9, 0.65);
+        approx_eq(q, 0.028_25, 1e-4);
+    }
+
+    /// Zero driving forces must yield exactly zero flow.
+    #[test]
+    fn aim2_zero_driving_forces() {
+        let q = ashrae_wind_stack(0.015, 0.0012, 0.0, 0.0, 0.5, 0.65);
+        assert_eq!(q, 0.0);
+    }
+
+    /// ACH simple method: 0.5 ACH * 400 m^3 / 3600 s = 0.05556 m^3/s.
+    #[test]
+    fn ach_simple_method() {
+        let q = ach_infiltration(0.5, 400.0);
+        approx_eq(q, 0.055_555_56, 1e-8);
+    }
+
+    /// ELA standard house per ASHRAE 62.2 coefficients.
+    #[test]
+    fn ela_standard_house() {
+        let q = ela_infiltration(0.009_29, 0.000_105_911, 0.000_142_748, 10.0, 3.0);
+        approx_eq(q, 0.004_50, 1e-4);
+    }
+
+    /// No duct leakage must return base infiltration unchanged (identity).
+    #[test]
+    fn duct_leakage_no_leakage_identity() {
+        let q = duct_leakage_infiltration_m3_s(0.050, 0.0, 0.0, 400.0);
+        assert_eq!(q, 0.050);
+    }
+
+    /// Pressurisation (supply > return) increases infiltration per ASHRAE 152 S9.3.
+    #[test]
+    fn duct_leakage_pressurisation_increases_infiltration() {
+        let q = duct_leakage_infiltration_m3_s(0.050, 0.010, 0.005, 400.0);
+        assert!(
+            q > 0.050,
+            "pressurisation must increase infiltration: got {q}"
+        );
+    }
+
+    /// Depressurisation (return > supply) yields less infiltration than pressurisation.
+    #[test]
+    fn duct_leakage_depressurisation_less_than_pressurisation() {
+        let q_press = duct_leakage_infiltration_m3_s(0.050, 0.010, 0.005, 400.0);
+        let q_depress = duct_leakage_infiltration_m3_s(0.050, 0.005, 0.010, 400.0);
+        assert!(
+            q_depress < q_press,
+            "depressurisation must produce less infiltration than pressurisation: \
+             depress={q_depress}, press={q_press}"
+        );
+    }
 }

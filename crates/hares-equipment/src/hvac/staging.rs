@@ -390,3 +390,106 @@ impl HvacEquipment {
         (sensible, latent)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use hares_types::ZoneId;
+
+    use super::super::hvac_core::{HvacEquipment, HvacEquipmentType};
+    use super::super::speed_control::SpeedControlMode;
+
+    fn make_single_speed() -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::SingleSpeed;
+        hvac.heating_capacities_w = vec![10_000.0];
+        hvac
+    }
+
+    fn make_multi_speed_4() -> HvacEquipment {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        hvac.cooling_capacities_w = vec![2_500.0, 5_000.0, 7_500.0, 10_000.0];
+        hvac
+    }
+
+    /// AHRI 210/240 S6.6.3: PLF = 1 - Cd*(1-PLR), default Cd = 0.25.
+    #[test]
+    fn plf_ahri_210_240_default_cd() {
+        let mut hvac = make_single_speed();
+        assert!((hvac.plf_cooling_degradation_coeff - 0.25).abs() < 1e-12);
+
+        let cases: &[(f64, f64)] = &[
+            (1.00, 1.000),
+            (0.75, 0.9375),
+            (0.50, 0.875),
+        ];
+        for &(plr, expected_plf) in cases {
+            let plf = hvac.part_load_factor_for_stage(plr, 0);
+            assert!(
+                (plf - expected_plf).abs() < 0.001,
+                "PLR={plr}: expected PLF={expected_plf}, got {plf}"
+            );
+        }
+    }
+
+    /// PLR = 0.0: raw PLF = 1 - 0.25*1 = 0.75.
+    /// Clamp is max(0.7, PLR) = max(0.7, 0.0) = 0.7.
+    /// Since 0.75 >= 0.7, PLF = 0.75.
+    #[test]
+    fn plf_zero_load_returns_floor() {
+        let mut hvac = make_single_speed();
+        let plf = hvac.part_load_factor_for_stage(0.0, 0);
+        assert!(
+            (plf - 0.75).abs() < 0.001,
+            "PLR=0: expected PLF=0.75, got {plf}"
+        );
+    }
+
+    /// SingleSpeed: any load fraction yields speed_index=0, PLR=load_fraction.
+    #[test]
+    fn single_speed_always_stage_zero() {
+        let mut hvac = make_single_speed();
+        for load in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let sel = hvac.select_speed(load);
+            assert_eq!(sel.speed_index, 0, "load={load}: speed_index must be 0");
+            assert!(
+                (sel.part_load_ratio - load).abs() < 1e-12,
+                "load={load}: PLR must equal load_fraction, got {}",
+                sel.part_load_ratio
+            );
+        }
+    }
+
+    /// 4-speed [0.25, 0.50, 0.75, 1.0] with load_fraction = 0.625.
+    /// Brackets between stage 1 (0.50) and stage 2 (0.75).
+    /// speed_index = 1, speed_frac = (0.625-0.50)/(0.75-0.50) = 0.50.
+    #[test]
+    fn multi_speed_interpolation_between_stages() {
+        let mut hvac = make_multi_speed_4();
+        let sel = hvac.select_speed(0.625);
+        assert_eq!(sel.speed_index, 1, "should bracket at stage 1");
+        assert!(
+            (sel.speed_frac - 0.5).abs() < 1e-9,
+            "expected speed_frac=0.5, got {}",
+            sel.speed_frac
+        );
+        assert!(
+            (sel.part_load_ratio - 1.0).abs() < 1e-9,
+            "inter-speed PLR must be 1.0, got {}",
+            sel.part_load_ratio
+        );
+    }
+
+    /// interpolated_capacity with capacities=[5000, 10000], speed_index=0, speed_frac=0.5.
+    /// Expected: 5000*(1-0.5) + 10000*0.5 = 7500.
+    #[test]
+    fn interpolated_capacity_linear() {
+        let hvac = make_single_speed();
+        let capacities = [5_000.0, 10_000.0];
+        let result = hvac.interpolated_capacity(&capacities, 0, 0.5);
+        assert!(
+            (result - 7_500.0).abs() < 1e-9,
+            "expected 7500 W, got {result}"
+        );
+    }
+}

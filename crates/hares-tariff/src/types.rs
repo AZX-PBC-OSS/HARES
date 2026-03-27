@@ -285,9 +285,9 @@ impl ElectricTariff {
         if let Some(ss) = &self.seasonal_split {
             ss.validate()?;
         }
-        if self.demand_window_minutes < 5 {
+        if self.demand_window_minutes < 5 || self.demand_window_minutes > 60 {
             return Err(HaresError::Tariff(format!(
-                "demand_window_minutes must be >= 5, got {}",
+                "demand_window_minutes must be in [5, 60], got {}",
                 self.demand_window_minutes
             )));
         }

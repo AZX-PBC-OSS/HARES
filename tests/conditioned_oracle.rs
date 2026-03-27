@@ -25,6 +25,14 @@ mod tests {
     use hares_physics::solar::GlazingCurve;
     use hares_types::{EndUse, ZoneId};
 
+    fn unique_temp_name(base: &str, ext: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        format!("{base}_{nanos}.{ext}")
+    }
+
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
     }
@@ -241,7 +249,7 @@ mod tests {
     fn run_conditioned_scenario(scenario: &str, use_ideal: bool) {
         let mode_name = if use_ideal { "ideal" } else { "dynamic" };
         let output_path =
-            std::env::temp_dir().join(format!("hares_conditioned_{mode_name}_{scenario}.csv"));
+            std::env::temp_dir().join(unique_temp_name(&format!("hares_conditioned_{mode_name}_{scenario}"), "csv"));
         let _ = fs::remove_file(&output_path);
 
         let config = beopt_conditioned_config(scenario, output_path.clone());

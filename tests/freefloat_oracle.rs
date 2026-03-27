@@ -13,6 +13,14 @@ mod tests {
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
     use hares_io::OutputFormat;
+
+    fn unique_temp_name(base: &str, ext: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        format!("{base}_{nanos}.{ext}")
+    }
     use hares_types::ZoneId;
     use std::collections::BTreeMap;
     use std::fs;
@@ -165,7 +173,7 @@ mod tests {
     }
 
     fn run_freefloat_scenario(scenario: &str) {
-        let output_path = std::env::temp_dir().join(format!("hares_freefloat_{scenario}.csv"));
+        let output_path = std::env::temp_dir().join(unique_temp_name(&format!("hares_freefloat_{scenario}"), "csv"));
         let _ = fs::remove_file(&output_path);
 
         let config = beopt_freefloat_config(scenario, output_path.clone());
@@ -1181,7 +1189,7 @@ mod tests {
     }
 
     fn run_freefloat_with_solar_override(scenario: &str) {
-        let output_path = std::env::temp_dir().join(format!("hares_ff_solar_{scenario}.csv"));
+        let output_path = std::env::temp_dir().join(unique_temp_name(&format!("hares_ff_solar_{scenario}"), "csv"));
         let _ = fs::remove_file(&output_path);
 
         let config = beopt_freefloat_config(scenario, output_path.clone());

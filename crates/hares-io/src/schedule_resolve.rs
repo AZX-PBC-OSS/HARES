@@ -423,7 +423,7 @@ const COOLING_EQUIPMENT: &[&str] = &[
     "ASHP Cooler",
     "MSHP Cooler",
     "Air Conditioner",
-    "Room Air Conditioner",
+    "Room AC",
 ];
 
 fn inject_setpoint_schedules(

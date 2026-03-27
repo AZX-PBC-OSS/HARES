@@ -80,6 +80,10 @@ class TestDwellingInterface:
             "surface_ids",
             "roof_planes",
             "pv_candidates",
+            "set_electric_tariff",
+            "set_gas_tariff",
+            "billing_summaries",
+            "tariff_telemetry",
         ]
         for method in expected:
             assert hasattr(ochre_next.Dwelling, method), (
