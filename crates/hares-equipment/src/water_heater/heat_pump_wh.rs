@@ -42,6 +42,7 @@ use super::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HpwhState {
     setpoint_c: f64,
+    target_setpoint_c: f64,
     deadband_c: f64,
     compressor_on: bool,
     backup_on: bool,
@@ -88,6 +89,8 @@ pub struct HeatPumpWH {
     /// Must sum to a positive value; weights are normalized before use.
     condenser_node_weights: Vec<f64>,
     setpoint_c: f64,
+    target_setpoint_c: f64,
+    setpoint_ramp_rate_c_per_s: Option<f64>,
     deadband_c: f64,
     duty_cycle: f64,
     /// Per-component duty cycle override for compressor (1.0 = full, 0.0 = off).
@@ -218,6 +221,8 @@ impl HeatPumpWH {
             condenser_node,
             condenser_node_weights: default_condenser_weights(n_nodes),
             setpoint_c: DEFAULT_SETPOINT_C,
+            target_setpoint_c: DEFAULT_SETPOINT_C,
+            setpoint_ramp_rate_c_per_s: None,
             deadband_c: DEFAULT_DEADBAND_C,
             duty_cycle: 1.0,
             hp_duty_cycle: 1.0,
@@ -396,6 +401,14 @@ impl Equipment for HeatPumpWH {
             ],
         )
         .unwrap_or(DEFAULT_SETPOINT_C);
+        self.setpoint_ramp_rate_c_per_s = first_f64(
+            config,
+            &["max_setpoint_ramp_rate_c_per_min", "setpoint_ramp_rate_c_per_min"],
+        )
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .map(|v| v / 60.0);
+        self.target_setpoint_c = self.setpoint_c;
+
         self.deadband_c = first_f64(config, &["deadband_c", "thermostat_deadband_c"])
             .unwrap_or(DEFAULT_DEADBAND_C)
             .max(0.0);
@@ -529,8 +542,15 @@ impl Equipment for HeatPumpWH {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
-        // Advance DR duration; auto-revert to Normal when expired.
         let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
+
+        // Ramp setpoint toward target.
+        if let Some(rate) = self.setpoint_ramp_rate_c_per_s {
+            self.setpoint_c =
+                super::ramp_limited_setpoint(self.setpoint_c, self.target_setpoint_c, rate, dt_s);
+        }
+
+        // Advance DR duration; auto-revert to Normal when expired.
         if let Some(remaining) = self.dr_duration_remaining_s {
             let next = remaining - dt_s;
             if next <= 0.0 {
@@ -835,6 +855,7 @@ impl Equipment for HeatPumpWH {
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&HpwhState {
             setpoint_c: self.setpoint_c,
+            target_setpoint_c: self.target_setpoint_c,
             deadband_c: self.deadband_c,
             compressor_on: self.compressor_on,
             backup_on: self.backup_on,
@@ -865,6 +886,7 @@ impl Equipment for HeatPumpWH {
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: HpwhState = load_postcard(state)?;
         self.setpoint_c = decoded.setpoint_c;
+        self.target_setpoint_c = decoded.target_setpoint_c;
         self.deadband_c = decoded.deadband_c;
         self.compressor_on = decoded.compressor_on;
         self.backup_on = decoded.backup_on;
@@ -921,7 +943,10 @@ impl Equipment for HeatPumpWH {
                             "invalid water-heater setpoint: {sp}"
                         )));
                     }
-                    self.setpoint_c = sp;
+                    self.target_setpoint_c = sp;
+                    if self.setpoint_ramp_rate_c_per_s.is_none() {
+                        self.setpoint_c = sp;
+                    }
                 }
                 if let Some(db) = deadband_c {
                     if !db.is_finite() || *db < 0.0 {

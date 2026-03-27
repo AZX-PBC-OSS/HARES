@@ -186,6 +186,20 @@ pub(super) fn weighted_average_tank_temp(node_temps: &[f64], node_volumes_m3: &[
         / total_volume
 }
 
+/// Rate-limit a setpoint change to model real thermostat motor slew.
+///
+/// Returns `target_c` clamped so that the absolute change from `current_c`
+/// does not exceed `max_rate_c_per_s * dt_s`.
+pub(super) fn ramp_limited_setpoint(
+    current_c: f64,
+    target_c: f64,
+    max_rate_c_per_s: f64,
+    dt_s: f64,
+) -> f64 {
+    let max_delta = max_rate_c_per_s * dt_s;
+    target_c.clamp(current_c - max_delta, current_c + max_delta)
+}
+
 /// Parse an `f64` config value as a `usize` node index.
 /// Returns `None` for non-finite, negative, or fractional values.
 pub(super) fn parse_usize(raw: Option<f64>) -> Option<usize> {

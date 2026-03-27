@@ -39,8 +39,31 @@ impl BatteryManagementActor {
         price_schedule: Option<Arc<[f64]>>,
         steps_per_day: usize,
     ) -> Self {
+        Self::with_name(
+            &format!("BatteryManagementActor:{battery_name}"),
+            battery_name,
+            bms_mode,
+            grid_export_rule,
+            max_charge_kw,
+            max_discharge_kw,
+            price_schedule,
+            steps_per_day,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_name(
+        name: &str,
+        battery_name: &str,
+        bms_mode: BmsMode,
+        grid_export_rule: GridExportRule,
+        max_charge_kw: f64,
+        max_discharge_kw: f64,
+        price_schedule: Option<Arc<[f64]>>,
+        steps_per_day: usize,
+    ) -> Self {
         Self {
-            name: format!("BatteryManagementActor:{battery_name}"),
+            name: name.to_string(),
             dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
             bms_mode,
             grid_export_rule,

@@ -261,8 +261,9 @@ impl ActorRegistry {
                     "manual" => BmsMode::Manual,
                     other => {
                         return Err(HaresError::Control(format!(
-                            "Unknown BMS mode: {other:?}. \
-                             Valid: self_consumption, tou, backup, manual"
+                            "Unknown BMS mode: {other:?}. Valid: \
+                             self_consumption, tou/time_of_use, \
+                             backup/backup_reserve, manual"
                         )));
                     }
                 };
@@ -280,8 +281,21 @@ impl ActorRegistry {
                 };
                 let max_charge_kw = config.get_f64("max_charge_kw").unwrap_or(5.0);
                 let max_discharge_kw = config.get_f64("max_discharge_kw").unwrap_or(5.0);
-                let steps_per_day = config.get_f64("steps_per_day").map(|v| v as usize).unwrap_or(96);
-                let actor = BatteryManagementActor::new(
+
+                // steps_per_day must match the simulation timestep: 86400 / time_res_s.
+                // The caller is expected to provide this; no sensible default exists.
+                let steps_per_day = config
+                    .get_f64("steps_per_day")
+                    .map(|v| v as usize)
+                    .ok_or_else(|| {
+                        HaresError::Control(
+                            "BatteryManagement requires 'steps_per_day' parameter \
+                             (= 86400 / time_res_s)"
+                                .into(),
+                        )
+                    })?;
+                let actor = BatteryManagementActor::with_name(
+                    &config.name,
                     &target,
                     bms_mode,
                     grid_export_rule,

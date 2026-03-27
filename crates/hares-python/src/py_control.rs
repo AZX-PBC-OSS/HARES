@@ -376,6 +376,9 @@ impl PyControlSignal {
                 departure_hour: dict_required(d, "departure_hour")?,
                 target_soc: dict_required(d, "target_soc")?,
             },
+            "EventDelay" => ControlSignal::EventDelay {
+                delay_s: dict_required(d, "delay_s")?,
+            },
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "unsupported control signal type `{kind}`"
@@ -589,6 +592,10 @@ impl PyControlSignal {
                 dict.set_item("type", "EvSetReadyBy")?;
                 dict.set_item("departure_hour", departure_hour)?;
                 dict.set_item("target_soc", target_soc)?;
+            }
+            ControlSignal::EventDelay { delay_s } => {
+                dict.set_item("type", "EventDelay")?;
+                dict.set_item("delay_s", delay_s)?;
             }
         }
         Ok(dict)

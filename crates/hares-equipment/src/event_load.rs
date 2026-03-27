@@ -3,6 +3,8 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use chrono::Datelike;
+
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
@@ -15,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::hvac::helpers::parse_fuel_type;
 use crate::schedule_helpers::{
-    ScheduleSourceState, capture_schedule_source_state, parse_u32, parse_usize, parse_zone_id,
-    restore_schedule_source_state,
+    ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
+    parse_usize, parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -71,6 +73,7 @@ struct EventBasedLoadState {
     rng_draws: u64,
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
+    delay_remaining_s: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,6 +88,7 @@ struct WetApplianceState {
     rng_draws: u64,
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
+    delay_remaining_s: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +112,7 @@ pub struct EventBasedLoad {
     cooldown_duration_s: f64,
     sensible_gain_fraction: f64,
     latent_gain_fraction: f64,
+    month_multipliers: Option<[f64; 12]>,
 
     phase: EventPhase,
     remaining_phase_s: f64,
@@ -115,6 +120,7 @@ pub struct EventBasedLoad {
     forced_mode: Option<ForcedMode>,
     /// Per-step absolute power override set by `PowerSetpoint`. Cleared after each step.
     power_setpoint_override: Option<f64>,
+    delay_remaining_s: f64,
 
     rng_seed: [u8; 32],
     rng_draws: u64,
@@ -135,12 +141,14 @@ pub struct WetAppliance {
     n_units: f64,
     sensible_gain_fraction: f64,
     latent_gain_fraction: f64,
+    month_multipliers: Option<[f64; 12]>,
 
     active: bool,
     phase_index: usize,
     elapsed_in_phase_s: f64,
     load_fraction: f64,
     forced_mode: Option<ForcedMode>,
+    delay_remaining_s: f64,
 
     hot_water_draw_rate_kg_s: f64,
 
@@ -163,7 +171,8 @@ impl EventBasedLoad {
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::LOAD_FRACTION
                 | ControlCapabilities::MODE_OVERRIDE
-                | ControlCapabilities::POWER_SETPOINT,
+                | ControlCapabilities::POWER_SETPOINT
+                | ControlCapabilities::EVENT_DELAY,
             telemetry_fields: event_load_telemetry_fields(),
         };
         let ports = ports_for_zone(descriptor.zone);
@@ -180,11 +189,13 @@ impl EventBasedLoad {
             cooldown_duration_s: 0.0,
             sensible_gain_fraction: 0.0,
             latent_gain_fraction: 0.0,
+            month_multipliers: None,
             phase: EventPhase::Idle,
             remaining_phase_s: 0.0,
             load_fraction: 1.0,
             forced_mode: None,
             power_setpoint_override: None,
+            delay_remaining_s: 0.0,
             rng_seed,
             rng_draws: 0,
             rng: ChaCha8Rng::from_seed(rng_seed),
@@ -193,6 +204,9 @@ impl EventBasedLoad {
 
     fn maybe_start_event(&mut self, window_open: bool, probability: f64) {
         if self.phase != EventPhase::Idle {
+            return;
+        }
+        if self.delay_remaining_s > 0.0 {
             return;
         }
         let should_start = match self.forced_mode {
@@ -273,7 +287,11 @@ impl EventBasedLoad {
         }
     }
 
-    fn update_outputs(&mut self, ports: &mut PortSlots) -> std::result::Result<(), HaresError> {
+    fn update_outputs(
+        &mut self,
+        ports: &mut PortSlots,
+        month_scale: f64,
+    ) -> std::result::Result<(), HaresError> {
         let active_now = self.phase == EventPhase::Active;
         // PowerSetpoint overrides the configured active_power_kw for this step.
         // The override is unconditional: it replaces the phase-based power regardless
@@ -281,7 +299,7 @@ impl EventBasedLoad {
         let active_power_kw = if let Some(override_kw) = self.power_setpoint_override.take() {
             override_kw
         } else if active_now {
-            self.active_power_kw * self.load_fraction.max(0.0)
+            self.active_power_kw * self.load_fraction.max(0.0) * month_scale
         } else {
             0.0
         };
@@ -361,6 +379,8 @@ impl Equipment for EventBasedLoad {
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
 
+        self.month_multipliers = parse_month_multipliers(config);
+
         self.fuel_type = match config.get_str("fuel_type") {
             None => FuelType::Electric,
             Some(raw) => parse_fuel_type(Some(raw))
@@ -373,6 +393,7 @@ impl Equipment for EventBasedLoad {
         self.load_fraction = 1.0;
         self.forced_mode = None;
         self.power_setpoint_override = None;
+        self.delay_remaining_s = 0.0;
         self.telemetry = default_event_load_telemetry();
 
         self.ports = ports_for_zone(self.descriptor.zone);
@@ -401,11 +422,19 @@ impl Equipment for EventBasedLoad {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         self.apply_overrides();
+        let dt_s = dt.as_secs_f64();
+        if self.delay_remaining_s > 0.0 {
+            self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
+        }
         let window_open = self.event_window_source.value_at(env)? > 0.0;
         let probability = self.event_probability_source.value_at(env)?;
         self.maybe_start_event(window_open, probability);
-        self.update_outputs(ports)?;
-        self.advance_phase_timer(dt.as_secs_f64());
+        let month_scale = self
+            .month_multipliers
+            .map(|m| m[env.current_time.month0() as usize])
+            .unwrap_or(1.0);
+        self.update_outputs(ports, month_scale)?;
+        self.advance_phase_timer(dt_s);
         Ok(())
     }
 
@@ -425,6 +454,7 @@ impl Equipment for EventBasedLoad {
             event_probability_source_state: capture_schedule_source_state(
                 &self.event_probability_source,
             ),
+            delay_remaining_s: self.delay_remaining_s,
         })
     }
 
@@ -434,6 +464,7 @@ impl Equipment for EventBasedLoad {
         self.remaining_phase_s = decoded.remaining_phase_s;
         self.load_fraction = decoded.load_fraction;
         self.forced_mode = decoded.forced_mode;
+        self.delay_remaining_s = decoded.delay_remaining_s;
         self.rng_seed = decoded.rng_seed;
         self.rng_draws = decoded.rng_draws;
 
@@ -448,34 +479,13 @@ impl Equipment for EventBasedLoad {
             &decoded.event_probability_source_state,
         )?;
 
-        // Rebuild ports from config-derived state (fuel_type set during init).
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.fuel_type != FuelType::Electric {
             self.ports.push(PortDeclaration::fuel());
         }
 
-        let active_power_kw = if self.phase == EventPhase::Active {
-            self.active_power_kw * self.load_fraction.max(0.0)
-        } else {
-            0.0
-        };
-        let is_fuel = self.fuel_type != FuelType::Electric;
-        let fuel_consumption_w = if is_fuel {
-            active_power_kw * 1_000.0
-        } else {
-            0.0
-        };
-        let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
-        let gain_source_w = active_power_kw * 1_000.0;
-        self.telemetry.set("active_power_kw", electric_power_kw);
-        self.telemetry.set(
-            "sensible_gain_w",
-            gain_source_w * self.sensible_gain_fraction,
-        );
-        self.telemetry
-            .set("latent_gain_w", gain_source_w * self.latent_gain_fraction);
-        self.telemetry.set("fuel_input_w", fuel_consumption_w);
-        self.telemetry.set("state", phase_ordinal(self.phase));
+        // Telemetry is populated on the next step() call, not reconstructed here.
+        // This avoids stale values when month_multipliers are configured.
         Ok(())
     }
 
@@ -502,6 +512,14 @@ impl Equipment for EventBasedLoad {
                 }
                 self.power_setpoint_override = Some(active_power_kw.max(0.0));
             }
+            ControlSignal::EventDelay { delay_s } => {
+                if self.phase == EventPhase::Active {
+                    return Err(HaresError::Control(
+                        "cannot delay an active event".to_string(),
+                    ));
+                }
+                self.delay_remaining_s += delay_s;
+            }
             _ => {
                 return Err(HaresError::Control(format!(
                     "EventBasedLoad does not handle control signal: {signal:?}"
@@ -525,7 +543,8 @@ impl WetAppliance {
             fuel: FuelType::Electric,
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::LOAD_FRACTION
-                | ControlCapabilities::MODE_OVERRIDE,
+                | ControlCapabilities::MODE_OVERRIDE
+                | ControlCapabilities::EVENT_DELAY,
             telemetry_fields: wet_appliance_telemetry_fields(),
         };
         let ports = ports_for_zone(descriptor.zone);
@@ -544,11 +563,13 @@ impl WetAppliance {
             n_units: 1.0,
             sensible_gain_fraction: 0.0,
             latent_gain_fraction: 0.0,
+            month_multipliers: None,
             active: false,
             phase_index: 0,
             elapsed_in_phase_s: 0.0,
             load_fraction: 1.0,
             forced_mode: None,
+            delay_remaining_s: 0.0,
             hot_water_draw_rate_kg_s: 0.0,
             rng_seed,
             rng_draws: 0,
@@ -558,6 +579,9 @@ impl WetAppliance {
 
     fn maybe_start_cycle(&mut self, window_open: bool, probability: f64) {
         if self.active {
+            return;
+        }
+        if self.delay_remaining_s > 0.0 {
             return;
         }
         let should_start = match self.forced_mode {
@@ -630,9 +654,16 @@ impl WetAppliance {
         }
     }
 
-    fn update_outputs(&mut self, ports: &mut PortSlots) -> std::result::Result<(), HaresError> {
+    fn update_outputs(
+        &mut self,
+        ports: &mut PortSlots,
+        month_scale: f64,
+    ) -> std::result::Result<(), HaresError> {
         let active_power_kw = if self.active {
-            self.phases[self.phase_index].power_kw * self.n_units * self.load_fraction.max(0.0)
+            self.phases[self.phase_index].power_kw
+                * self.n_units
+                * self.load_fraction.max(0.0)
+                * month_scale
         } else {
             0.0
         };
@@ -721,6 +752,8 @@ impl Equipment for WetAppliance {
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
 
+        self.month_multipliers = parse_month_multipliers(config);
+
         self.fuel_type = match config.get_str("fuel_type") {
             None => FuelType::Electric,
             Some(raw) => parse_fuel_type(Some(raw))
@@ -755,6 +788,7 @@ impl Equipment for WetAppliance {
         self.elapsed_in_phase_s = 0.0;
         self.load_fraction = 1.0;
         self.forced_mode = None;
+        self.delay_remaining_s = 0.0;
         self.telemetry = default_wet_appliance_telemetry();
 
         self.rng_seed = derive_rng_seed(config);
@@ -778,11 +812,19 @@ impl Equipment for WetAppliance {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         self.apply_overrides();
+        let dt_s = dt.as_secs_f64();
+        if self.delay_remaining_s > 0.0 {
+            self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
+        }
         let window_open = self.event_window_source.value_at(env)? > 0.0;
         let probability = self.event_probability_source.value_at(env)?;
         self.maybe_start_cycle(window_open, probability);
-        self.update_outputs(ports)?;
-        self.advance_cycle(dt.as_secs_f64());
+        let month_scale = self
+            .month_multipliers
+            .map(|m| m[env.current_time.month0() as usize])
+            .unwrap_or(1.0);
+        self.update_outputs(ports, month_scale)?;
+        self.advance_cycle(dt_s);
         Ok(())
     }
 
@@ -804,6 +846,7 @@ impl Equipment for WetAppliance {
             event_probability_source_state: capture_schedule_source_state(
                 &self.event_probability_source,
             ),
+            delay_remaining_s: self.delay_remaining_s,
         })
     }
 
@@ -821,9 +864,9 @@ impl Equipment for WetAppliance {
         self.elapsed_in_phase_s = decoded.elapsed_in_phase_s;
         self.load_fraction = decoded.load_fraction;
         self.forced_mode = decoded.forced_mode;
+        self.delay_remaining_s = decoded.delay_remaining_s;
         self.hot_water_draw_rate_kg_s = decoded.hot_water_draw_rate_kg_s;
 
-        // Regenerate ports to reflect restored DHW demand and fuel state.
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.hot_water_draw_rate_kg_s > 0.0 {
             self.ports.push(PortDeclaration::fluid(
@@ -849,31 +892,7 @@ impl Equipment for WetAppliance {
             &decoded.event_probability_source_state,
         )?;
 
-        let active_power_kw = if self.active {
-            self.phases[self.phase_index].power_kw * self.n_units * self.load_fraction.max(0.0)
-        } else {
-            0.0
-        };
-        let is_fuel = self.fuel_type != FuelType::Electric;
-        let fuel_consumption_w = if is_fuel {
-            active_power_kw * 1_000.0
-        } else {
-            0.0
-        };
-        let electric_power_kw = if is_fuel { 0.0 } else { active_power_kw };
-        let gain_source_w = active_power_kw * 1_000.0;
-        self.telemetry.set("active_power_kw", electric_power_kw);
-        self.telemetry.set(
-            "sensible_gain_w",
-            gain_source_w * self.sensible_gain_fraction,
-        );
-        self.telemetry
-            .set("latent_gain_w", gain_source_w * self.latent_gain_fraction);
-        self.telemetry.set("fuel_input_w", fuel_consumption_w);
-        self.telemetry.set(
-            "cycle_phase",
-            cycle_phase_ordinal(self.active, self.phase_index),
-        );
+        // Telemetry is populated on the next step() call, not reconstructed here.
         Ok(())
     }
 
@@ -889,6 +908,14 @@ impl Equipment for WetAppliance {
             }
             ControlSignal::ModeOverride { mode } => {
                 self.forced_mode = Some(mode_to_forced(*mode));
+            }
+            ControlSignal::EventDelay { delay_s } => {
+                if self.active {
+                    return Err(HaresError::Control(
+                        "cannot delay an active event".to_string(),
+                    ));
+                }
+                self.delay_remaining_s += delay_s;
             }
             _ => {
                 return Err(HaresError::Control(format!(
@@ -1846,6 +1873,7 @@ mod tests {
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
+            delay_remaining_s: 0.0,
         };
         let bytes = crate::save_postcard(&bad_state);
 
@@ -1949,6 +1977,7 @@ mod tests {
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
+            delay_remaining_s: 0.0,
         };
         let bytes = crate::save_postcard(&good_state);
 
@@ -2077,4 +2106,353 @@ mod tests {
             "active_power_kw must be zero for gas equipment"
         );
     }
+
+    // --- Month multiplier tests ---
+
+    fn event_config_with_month_multiplier(month: usize, multiplier: f64) -> EquipmentConfig {
+        let mut config = event_config("TestLoad", "EventBasedLoad");
+        config.raw_config.insert(
+            format!("month_multiplier_{month}"),
+            multiplier.into(),
+        );
+        config
+    }
+
+    #[test]
+    fn month_multiplier_zero_suppresses_event_output() {
+        // month 2 = March (0-indexed) -> env.current_time is March 18
+        let config = event_config_with_month_multiplier(2, 0.0);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        // Force Active phase via ModeOverride
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let power = eq.telemetry().get("active_power_kw").unwrap();
+        assert_eq!(power, 0.0, "month_multiplier=0 should zero power output");
+    }
+
+    #[test]
+    fn month_multiplier_scales_event_output() {
+        let config = event_config_with_month_multiplier(2, 0.5);
+        let mut eq = EventBasedLoad::new(config.clone());
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let power = eq.telemetry().get("active_power_kw").unwrap();
+        // active_power_kw=1.5 * load_fraction=1.0 * month_scale=0.5 = 0.75
+        assert!(
+            (power - 0.75).abs() < 1e-9,
+            "expected 0.75, got {power}"
+        );
+    }
+
+    #[test]
+    fn no_month_multiplier_uses_full_power() {
+        let config = event_config("TestLoad", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let power = eq.telemetry().get("active_power_kw").unwrap();
+        assert!(
+            (power - 1.5).abs() < 1e-9,
+            "expected 1.5, got {power}"
+        );
+    }
+
+    #[test]
+    fn wet_appliance_month_multiplier_zero_suppresses_output() {
+        let mut config = wet_config("Washer", "Clothes Washer", 1.0);
+        config.raw_config.insert("month_multiplier_2".to_string(), 0.0.into());
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        let mut env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        let power = eq.telemetry().get("active_power_kw").unwrap();
+        assert_eq!(power, 0.0, "month_multiplier=0 should zero wet appliance power");
+    }
+
+    // =======================================================================
+    // EventDelay control signal tests
+    // =======================================================================
+
+    /// A 120 s delay blocks the event start for the first step (delay decrements
+    /// from 120 -> 60, still positive) and allows it on the second step (delay
+    /// decrements 60 -> 0, then maybe_start_event fires).
+    #[test]
+    fn event_delay_blocks_event_start() {
+        let mut env = base_env();
+        let config = event_config("delay_test", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 120.0 })
+            .unwrap();
+
+        // Step 1: delay decrements 120 -> 60; still positive, no start.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(
+            slots.electrical.load_power_kw, 0.0,
+            "step 1: event must be blocked while delay is active"
+        );
+
+        // Step 2: delay decrements 60 -> 0; maybe_start_event fires.
+        env.current_time += ChronoDuration::minutes(1);
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            (slots.electrical.load_power_kw - 1.5).abs() < 1e-9,
+            "step 2: event must start once delay has expired, expected 1.5 kW, got {}",
+            slots.electrical.load_power_kw
+        );
+    }
+
+    /// Applying EventDelay while the equipment is in the Active phase must return
+    /// an error; the running event cannot be postponed retroactively.
+    #[test]
+    fn event_delay_error_when_active() {
+        let mut env = base_env();
+        // Use a long active_duration_s so the event persists across the step
+        // (active_duration_s=60 with dt=60 would transition to Cooldown by the
+        // time advance_phase_timer runs; 3600 s keeps it Active).
+        let mut config = event_config("delay_active_test", "EventBasedLoad");
+        config
+            .raw_config
+            .insert("active_duration_s".to_string(), 3600.0.into());
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        // Trigger an event by stepping with window=1, probability=1.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.load_power_kw > 0.0,
+            "equipment must be Active after first step with open window"
+        );
+
+        // Applying EventDelay while Active must fail.
+        let result =
+            eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 });
+        assert!(
+            result.is_err(),
+            "EventDelay on an active event must return Err"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("cannot delay"),
+            "error message should mention delay rejection, got: {msg}"
+        );
+    }
+
+    /// Two EventDelay applications accumulate: 60 s + 60 s = 120 s total, so the
+    /// event is still blocked on step 1 and starts on step 2.
+    #[test]
+    fn event_delay_accumulates() {
+        let mut env = base_env();
+        let config = event_config("delay_accum_test", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 })
+            .unwrap();
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 })
+            .unwrap();
+
+        // Step 1: combined 120 s delay decrements to 60 s; still blocked.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(
+            slots.electrical.load_power_kw, 0.0,
+            "step 1: accumulated delay must still block the event"
+        );
+
+        // Step 2: delay reaches 0; event starts.
+        env.current_time += ChronoDuration::minutes(1);
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            (slots.electrical.load_power_kw - 1.5).abs() < 1e-9,
+            "step 2: event must start after accumulated delay expires, expected 1.5 kW, got {}",
+            slots.electrical.load_power_kw
+        );
+    }
+
+    /// EventDelay { delay_s: 0.0 } adds nothing; the event starts on the very
+    /// first step as if no delay signal had been sent.
+    #[test]
+    fn event_delay_zero_is_noop() {
+        let mut env = base_env();
+        let config = event_config("delay_zero_test", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 0.0 })
+            .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            (slots.electrical.load_power_kw - 1.5).abs() < 1e-9,
+            "delay_s=0 must not block the event; expected 1.5 kW, got {}",
+            slots.electrical.load_power_kw
+        );
+    }
+
+    /// WetAppliance: a 120 s EventDelay blocks the cycle start on step 1 and
+    /// allows it on step 2, mirroring the EventBasedLoad behaviour.
+    #[test]
+    fn wet_appliance_event_delay_blocks_cycle_start() {
+        let mut env = base_env();
+        let config = wet_config("washer_delay", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 120.0 })
+            .unwrap();
+
+        // Step 1: delay 120 -> 60; still blocked.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert_eq!(
+            slots.electrical.load_power_kw, 0.0,
+            "step 1: WetAppliance cycle must be blocked while delay is active"
+        );
+
+        // Step 2: delay 60 -> 0; cycle starts at phase 0 (power=0.5 kW * 1 unit).
+        env.current_time += ChronoDuration::minutes(1);
+        slots.zero();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            (slots.electrical.load_power_kw - 0.5).abs() < 1e-9,
+            "step 2: WetAppliance cycle must start once delay expired, expected 0.5 kW, got {}",
+            slots.electrical.load_power_kw
+        );
+    }
+
+    /// WetAppliance: applying EventDelay while a cycle is active must return Err.
+    #[test]
+    fn wet_appliance_event_delay_error_when_active() {
+        let mut env = base_env();
+        let config = wet_config("washer_active_delay", "Clothes Washer", 1.0);
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+
+        // Start the cycle on the first step.
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.load_power_kw > 0.0,
+            "WetAppliance must be active after first step with open window"
+        );
+
+        // Applying EventDelay while active must fail.
+        let result =
+            eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 });
+        assert!(
+            result.is_err(),
+            "EventDelay on an active WetAppliance cycle must return Err"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("cannot delay"),
+            "error message should mention delay rejection, got: {msg}"
+        );
+    }
+
+    /// save_state captures delay_remaining_s; load_state restores it so the event
+    /// remains blocked for the same number of steps as it would have been without
+    /// the checkpoint round-trip.
+    #[test]
+    fn event_delay_checkpoint_round_trip() {
+        let mut env = base_env();
+        let config = event_config("delay_checkpoint", "EventBasedLoad");
+
+        // Instance A: apply 120 s delay, run one step, save state.
+        let mut eq_a = EventBasedLoad::new(config.clone());
+        eq_a.init(&config, &env).unwrap();
+        eq_a.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 120.0 })
+            .unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots_a = PortSlots::from_declarations(eq_a.ports());
+        eq_a.step(&env, Duration::from_secs(60), &mut slots_a)
+            .unwrap();
+        // After step 1 the delay is 60 s; event has not started.
+        assert_eq!(slots_a.electrical.load_power_kw, 0.0);
+
+        let checkpoint = eq_a.save_state();
+
+        // Instance B: fresh init, load the checkpoint.
+        let mut eq_b = EventBasedLoad::new(config.clone());
+        eq_b.init(&config, &env).unwrap();
+        eq_b.load_state(&checkpoint).unwrap();
+
+        // Step 2 on both A and B — delay expires, event must start on both.
+        env.current_time += ChronoDuration::minutes(1);
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        slots_a.zero();
+        let mut slots_b = PortSlots::from_declarations(eq_b.ports());
+        eq_a.step(&env, Duration::from_secs(60), &mut slots_a)
+            .unwrap();
+        eq_b.step(&env, Duration::from_secs(60), &mut slots_b)
+            .unwrap();
+
+        assert!(
+            (slots_b.electrical.load_power_kw - 1.5).abs() < 1e-9,
+            "after load_state, delay must still be active for one more step and then expire; \
+             expected 1.5 kW on step 2, got {}",
+            slots_b.electrical.load_power_kw
+        );
+        assert_eq!(
+            slots_a.electrical.load_power_kw, slots_b.electrical.load_power_kw,
+            "checkpoint round-trip must produce identical behaviour to the original instance"
+        );
+    }
+
 }

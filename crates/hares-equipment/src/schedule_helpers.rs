@@ -11,6 +11,9 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigValue;
+use crate::EquipmentConfig;
+
+pub(crate) const KEY_MONTH_MULTIPLIER_PREFIX: &str = "month_multiplier_";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ScheduleSourceState {
@@ -162,4 +165,19 @@ pub(crate) fn parse_usize(
         )));
     }
     Ok(Some(value as usize))
+}
+
+/// Parse per-month scale factors from config keys `month_multiplier_0` through
+/// `month_multiplier_11`. Returns `None` when no multiplier keys are present.
+pub(crate) fn parse_month_multipliers(config: &EquipmentConfig) -> Option<[f64; 12]> {
+    let mut found_any = false;
+    let mut multipliers = [1.0_f64; 12];
+    for (month, slot) in multipliers.iter_mut().enumerate() {
+        let key = format!("{KEY_MONTH_MULTIPLIER_PREFIX}{month}");
+        if let Some(val) = config.get_f64(&key) {
+            *slot = val.max(0.0);
+            found_any = true;
+        }
+    }
+    found_any.then_some(multipliers)
 }

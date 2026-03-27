@@ -18,10 +18,6 @@ def _imports():
     return datetime, mo, Path, pl, go, make_subplots, sys
 
 
-@app.cell
-def _title(mo):
-    mo.md("# HARES Simulation Explorer")
-
 
 @app.cell
 def _constants(Path):
@@ -50,43 +46,11 @@ def _building_source_selector(mo):
         value="BEopt Example (Denver CO)",
         label="Building source",
     )
-    building_source
     return (building_source,)
 
 
 @app.cell
-def _beopt_resolver(mo, building_source, DEFAULT_HPXML, DEFAULT_SCHEDULE, DEFAULT_WEATHER):
-    mo.stop(building_source.value != "beopt_default")
-
-    _missing = [
-        p.name for p in [DEFAULT_HPXML, DEFAULT_SCHEDULE, DEFAULT_WEATHER]
-        if not p.exists()
-    ]
-    if _missing:
-        mo.stop(
-            True,
-            mo.callout(
-                mo.md(f"Missing example files: {', '.join(_missing)}. Run `make data` from the repo root."),
-                kind="danger",
-            ),
-        )
-
-    bldg_hpxml = DEFAULT_HPXML
-    bldg_schedule = DEFAULT_SCHEDULE
-    bldg_weather = DEFAULT_WEATHER
-    bldg_label = "BEopt Example (Denver CO)"
-
-    mo.callout(
-        mo.md(f"Using: `{DEFAULT_HPXML.name}` / `{DEFAULT_WEATHER.name}`"),
-        kind="info",
-    )
-    return bldg_hpxml, bldg_schedule, bldg_weather, bldg_label
-
-
-@app.cell
-def _resstock_picker(mo, building_source):
-    mo.stop(building_source.value != "resstock")
-
+def _resstock_widgets(mo, building_source):
     rs_bldg_id = mo.ui.number(
         start=1,
         stop=550000,
@@ -99,31 +63,57 @@ def _resstock_picker(mo, building_source):
         value="2024.2",
         label="ResStock version",
     )
-    mo.hstack([rs_bldg_id, rs_version], gap="1rem")
+    if building_source.value == "resstock":
+        mo.hstack([rs_bldg_id, rs_version], gap="1rem")
     return rs_bldg_id, rs_version
 
 
 @app.cell
-def _resstock_fetch(mo, building_source, rs_bldg_id, rs_version):
-    mo.stop(building_source.value != "resstock")
-
-    from ochre_next.data.resstock import fetch_resstock_building
-
-    with mo.status.spinner(title="Fetching ResStock building from OEDI S3..."):
-        _bldg = fetch_resstock_building(
-            bldg_id=int(rs_bldg_id.value),
-            version=str(rs_version.value),
+def _building_resolver(
+    mo, building_source,
+    DEFAULT_HPXML, DEFAULT_SCHEDULE, DEFAULT_WEATHER,
+    rs_bldg_id, rs_version,
+):
+    if building_source.value == "beopt_default":
+        _missing = [
+            p.name for p in [DEFAULT_HPXML, DEFAULT_SCHEDULE, DEFAULT_WEATHER]
+            if not p.exists()
+        ]
+        if _missing:
+            mo.stop(
+                True,
+                mo.callout(
+                    mo.md(f"Missing example files: {', '.join(_missing)}. Run `make data` from the repo root."),
+                    kind="danger",
+                ),
+            )
+        bldg_hpxml = DEFAULT_HPXML
+        bldg_schedule = DEFAULT_SCHEDULE
+        bldg_weather = DEFAULT_WEATHER
+        bldg_label = "BEopt Example (Denver CO)"
+        mo.callout(
+            mo.md(f"Using: `{DEFAULT_HPXML.name}` / `{DEFAULT_WEATHER.name}`"),
+            kind="info",
         )
+    elif building_source.value == "resstock":
+        from ochre_next.data.resstock import fetch_resstock_building
 
-    bldg_hpxml = _bldg.hpxml_path
-    bldg_schedule = _bldg.schedule_path
-    bldg_weather = _bldg.weather_path
-    bldg_label = f"ResStock bldg{int(rs_bldg_id.value):07d} ({rs_version.value})"
+        with mo.status.spinner(title="Fetching ResStock building from OEDI S3..."):
+            _bldg = fetch_resstock_building(
+                bldg_id=int(rs_bldg_id.value),
+                version=str(rs_version.value),
+            )
+        bldg_hpxml = _bldg.hpxml_path
+        bldg_schedule = _bldg.schedule_path
+        bldg_weather = _bldg.weather_path
+        bldg_label = f"ResStock bldg{int(rs_bldg_id.value):07d} ({rs_version.value})"
+        mo.callout(
+            mo.md(f"Fetched building **{int(rs_bldg_id.value)}** (v{rs_version.value})"),
+            kind="success",
+        )
+    else:
+        mo.stop(True, mo.callout(mo.md("Select a building source."), kind="neutral"))
 
-    mo.callout(
-        mo.md(f"Fetched building **{int(rs_bldg_id.value)}** (v{rs_version.value})"),
-        kind="success",
-    )
     return bldg_hpxml, bldg_schedule, bldg_weather, bldg_label
 
 
@@ -328,21 +318,26 @@ def _controls_layout(
     elif ev_mode.value == "manual":
         ev_section.extend([ev_capacity, ev_charger_kw])
 
-    controls_panel = mo.vstack(
-        [
-            mo.md("### Simulation"),
-            mo.hstack([season, sim_days], gap="0.5rem"),
-            mo.hstack([time_res, seed], gap="0.5rem"),
-            *pv_section,
-            *bat_section,
-            *ev_section,
-            mo.md("### Options"),
-            ochre_compare,
-            run_btn,
-        ],
-        gap="0.5rem",
+    mo.sidebar(
+        mo.vstack(
+            [
+                mo.md("# HARES Simulation Explorer"),
+                mo.md("### Simulation"),
+                season,
+                sim_days,
+                time_res,
+                seed,
+                *pv_section,
+                *bat_section,
+                *ev_section,
+                mo.md("### Options"),
+                ochre_compare,
+                run_btn,
+            ],
+            gap="0.5rem",
+        ),
+        width="22rem",
     )
-    return (controls_panel,)
 
 
 # ---------------------------------------------------------------------------
@@ -361,10 +356,7 @@ def _run_simulation(
     HARES_DEFAULTS, VENDOR_OCHRE,
     pl, sys,
 ):
-    mo.stop(
-        not run_btn.value,
-        mo.callout(mo.md("Configure the simulation and click **Run simulation**."), kind="neutral"),
-    )
+    mo.stop(not run_btn.value)
 
     from ochre_next import (
         Dwelling,
@@ -499,6 +491,7 @@ def _run_simulation(
                         "grid_export_rule": bat_export_val,
                         "max_charge_kw": bat_charge_kw,
                         "max_discharge_kw": bat_discharge_kw,
+                        "steps_per_day": 86400.0 / time_res_s,
                     },
                 )
 
@@ -534,6 +527,27 @@ def _run_simulation(
                     sys.path.insert(0, vendor_ochre)
                 from ochre import Dwelling as OchreDwelling  # type: ignore[import-not-found]
 
+                _ochre_equip: dict[str, dict] = {}
+                if pv_info.get("enabled"):
+                    _pv_kw = pv_info["kw"]
+                    _pv_az_hpxml = pv_info.get("azimuth", 180)
+                    _ochre_az = (_pv_az_hpxml - 180) % 360
+                    if _ochre_az > 180:
+                        _ochre_az -= 360
+                    _ochre_equip["PV"] = {
+                        "capacity": _pv_kw,
+                        "tilt": pv_info.get("tilt", 26),
+                        "azimuth": _ochre_az,
+                        "inverter_capacity": _pv_kw / 1.2,
+                    }
+                if bat_info.get("enabled"):
+                    _ochre_equip["Battery"] = {
+                        "capacity_kwh": bat_info["kwh"],
+                        "capacity_kw": bat_info.get("max_kw", 5.0),
+                        "efficiency_type": "constant",
+                        "soc_init": 0.5,
+                    }
+
                 _start = _dt.datetime.strptime(start_date, "%Y-%m-%d")
                 _ochre_dw = OchreDwelling(
                     name="compare",
@@ -545,6 +559,7 @@ def _run_simulation(
                     weather_file=weather,
                     verbosity=6,
                     save_results=False,
+                    Equipment=_ochre_equip,
                 )
                 _pdf, _, _ = _ochre_dw.simulate()
                 ochre_df = pl.from_pandas(_pdf.reset_index())
@@ -607,8 +622,8 @@ def _visualizations(
 ):
     from ochre_next import parse_epw
 
-    _step_hours = sim_meta.get("time_res_s", 900) / 3600.0
-    _duration_days = sim_meta.get("duration_days", 14)
+    _step_hours = sim_meta["time_res_s"] / 3600.0
+    _duration_days = sim_meta["duration_days"]
     _time_col = "Time"
     _power_col = "Total Electric Power (kW)"
     _pv_col = "PV Electric Power (kW)"
@@ -897,18 +912,68 @@ def _visualizations(
         return fig
 
     def _summary():
+        import numpy as _np
+
         power = hares_df[_power_col].to_numpy()
-        total_kwh = float((hares_df[_power_col] * (_step_hours)).sum())
+        total_kwh = float((hares_df[_power_col] * _step_hours).sum())
         peak_kw = float(power.max())
         min_kw = float(power.min())
         avg_kw = float(power.mean())
 
         perf_rows = [
-            {"Metric": "Total net energy", "Value": f"{total_kwh:.1f} kWh"},
-            {"Metric": "Peak demand", "Value": f"{peak_kw:.2f} kW"},
-            {"Metric": "Min power (export peak)", "Value": f"{min_kw:.2f} kW"},
-            {"Metric": "Average power", "Value": f"{avg_kw:.2f} kW"},
+            {"Metric": "Total net energy", "HARES": f"{total_kwh:.1f} kWh"},
+            {"Metric": "Peak demand", "HARES": f"{peak_kw:.2f} kW"},
+            {"Metric": "Min power (export peak)", "HARES": f"{min_kw:.2f} kW"},
+            {"Metric": "Average power", "HARES": f"{avg_kw:.2f} kW"},
         ]
+
+        if ochre_df is not None and _power_col in ochre_df.columns:
+            _o_power = ochre_df[_power_col].to_numpy()
+            _o_total = float(ochre_df[_power_col].sum()) * _step_hours
+            _o_peak = float(_o_power.max())
+            _o_min = float(_o_power.min())
+            _o_avg = float(_o_power.mean())
+
+            _n = min(len(power), len(_o_power))
+            _diff = power[:_n] - _o_power[:_n]
+            _mae = float(_np.abs(_diff).mean())
+            _rmse = float(_np.sqrt((_diff ** 2).mean()))
+            _bias = float(_diff.mean())
+
+            perf_rows[0]["OCHRE"] = f"{_o_total:.1f} kWh"
+            perf_rows[1]["OCHRE"] = f"{_o_peak:.2f} kW"
+            perf_rows[2]["OCHRE"] = f"{_o_min:.2f} kW"
+            perf_rows[3]["OCHRE"] = f"{_o_avg:.2f} kW"
+
+            perf_rows.extend([
+                {"Metric": "MAE (HARES - OCHRE)", "HARES": f"{_mae:.3f} kW", "OCHRE": ""},
+                {"Metric": "RMSE", "HARES": f"{_rmse:.3f} kW", "OCHRE": ""},
+                {"Metric": "Mean bias", "HARES": f"{_bias:+.3f} kW", "OCHRE": ""},
+            ])
+
+            # Per-column comparison for shared output columns
+            _shared = [
+                c for c in hares_df.columns
+                if c in ochre_df.columns
+                and c != _time_col
+                and c.endswith("(kW)")
+            ]
+            if _shared:
+                col_rows = []
+                for c in _shared:
+                    _h = hares_df[c].to_numpy()
+                    _o = ochre_df[c].to_numpy()
+                    _cn = min(len(_h), len(_o))
+                    _cd = _h[:_cn] - _o[:_cn]
+                    col_rows.append({
+                        "Column": c.replace(" Electric Power (kW)", ""),
+                        "HARES mean": f"{_h.mean():.3f}",
+                        "OCHRE mean": f"{_o.mean():.3f}",
+                        "MAE": f"{_np.abs(_cd).mean():.3f}",
+                        "Bias": f"{_cd.mean():+.3f}",
+                    })
+                col_table = mo.ui.table(col_rows, label="Per-end-use comparison (kW)")
+
         perf_table = mo.ui.table(perf_rows, label="Performance metrics")
 
         # Build DER config table from structured metadata
@@ -965,16 +1030,10 @@ def _visualizations(
 
         der_table = mo.ui.table(der_rows, label="DER configuration")
 
-        elements: list[object] = [perf_table, der_table]
-        _any_der = pv.get("enabled") or bat.get("enabled") or ev.get("enabled")
-        if ochre_df is not None and _any_der:
-            elements.insert(
-                0,
-                mo.callout(
-                    mo.md("OCHRE comparison runs base-load only (no DERs). Power values will differ from HARES with DERs enabled."),
-                    kind="warn",
-                ),
-            )
+        elements: list[object] = [perf_table]
+        if ochre_df is not None and _power_col in ochre_df.columns and _shared:
+            elements.append(col_table)
+        elements.append(der_table)
         return mo.vstack(elements, gap="1rem")
 
     results_tabs = mo.ui.tabs(
@@ -991,13 +1050,8 @@ def _visualizations(
 
 
 @app.cell
-def _main_layout(mo, controls_panel, results_tabs):
-    mo.hstack(
-        [controls_panel, results_tabs],
-        widths=[1, 2],
-        gap="2rem",
-        align="start",
-    )
+def _show_results(results_tabs):
+    results_tabs
 
 
 if __name__ == "__main__":

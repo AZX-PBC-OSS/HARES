@@ -1108,6 +1108,16 @@ impl Equipment for Ev {
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     registry.register("EV", Box::new(|config| Box::new(Ev::new(config))));
+    registry.register(
+        "Scheduled EV",
+        Box::new(|config| {
+            Box::new(crate::scheduled_load::ScheduledLoad::new(
+                config,
+                hares_types::EndUse::EV,
+                "Scheduled EV",
+            ))
+        }),
+    );
 }
 
 #[cfg(test)]

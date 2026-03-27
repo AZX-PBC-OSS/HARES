@@ -46,6 +46,7 @@ const DEFAULT_ELEMENT_POWER_W: f64 = 4_500.0;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResistanceWhState {
     setpoint_c: f64,
+    target_setpoint_c: f64,
     deadband_c: f64,
     upper_element_on: bool,
     lower_element_on: bool,
@@ -90,6 +91,9 @@ pub struct ResistanceWH {
     mains_temp_c_source: Option<ScheduleSource>,
     // --- ZIP voltage model ---
     zip: WaterHeaterZip,
+    // --- Setpoint ramp rate ---
+    target_setpoint_c: f64,
+    setpoint_ramp_rate_c_per_s: Option<f64>,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
@@ -176,6 +180,8 @@ impl ResistanceWH {
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
             zip: WaterHeaterZip::default(),
+            target_setpoint_c: DEFAULT_SETPOINT_C,
+            setpoint_ramp_rate_c_per_s: None,
             dr_setpoint_offset_c: 0.0,
             dr_load_fraction: 1.0,
             dr_duration_remaining_s: None,
@@ -339,6 +345,15 @@ impl Equipment for ResistanceWH {
         self.mains_temp_c_source = mains_temp_schedule_source(config);
         self.zip = WaterHeaterZip::from_config(config)?;
 
+        // Setpoint ramp rate: config in C/min, stored internally in C/s.
+        self.setpoint_ramp_rate_c_per_s = first_f64(
+            config,
+            &["max_setpoint_ramp_rate_c_per_min", "setpoint_ramp_rate_c_per_min"],
+        )
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .map(|v| v / 60.0);
+        self.target_setpoint_c = self.setpoint_c;
+
         self.dr_setpoint_offset_c = 0.0;
         self.dr_load_fraction = 1.0;
         self.dr_duration_remaining_s = None;
@@ -350,8 +365,15 @@ impl Equipment for ResistanceWH {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
-        // Advance DR duration; auto-revert to Normal when expired.
         let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
+
+        // Ramp setpoint toward target.
+        if let Some(rate) = self.setpoint_ramp_rate_c_per_s {
+            self.setpoint_c =
+                super::ramp_limited_setpoint(self.setpoint_c, self.target_setpoint_c, rate, dt_s);
+        }
+
+        // Advance DR duration; auto-revert to Normal when expired.
         if let Some(remaining) = self.dr_duration_remaining_s {
             let next = remaining - dt_s;
             if next <= 0.0 {
@@ -520,6 +542,7 @@ impl Equipment for ResistanceWH {
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&ResistanceWhState {
             setpoint_c: self.setpoint_c,
+            target_setpoint_c: self.target_setpoint_c,
             deadband_c: self.deadband_c,
             upper_element_on: self.upper_element_on,
             lower_element_on: self.lower_element_on,
@@ -542,6 +565,7 @@ impl Equipment for ResistanceWH {
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
         let decoded: ResistanceWhState = load_postcard(state)?;
         self.setpoint_c = decoded.setpoint_c;
+        self.target_setpoint_c = decoded.target_setpoint_c;
         self.deadband_c = decoded.deadband_c;
         self.upper_element_on = decoded.upper_element_on;
         self.lower_element_on = decoded.lower_element_on;
@@ -588,7 +612,10 @@ impl Equipment for ResistanceWH {
                             "invalid water-heater setpoint: {sp}"
                         )));
                     }
-                    self.setpoint_c = sp;
+                    self.target_setpoint_c = sp;
+                    if self.setpoint_ramp_rate_c_per_s.is_none() {
+                        self.setpoint_c = sp;
+                    }
                 }
                 if let Some(db) = deadband_c {
                     if !db.is_finite() || *db < 0.0 {

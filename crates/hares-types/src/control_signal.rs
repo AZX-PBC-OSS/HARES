@@ -132,6 +132,11 @@ pub enum ControlSignal {
         departure_hour: f64,
         target_soc: f64,
     },
+    /// Defer the next event/cycle start by `delay_s` seconds. Cannot be applied
+    /// to an already-active event.
+    EventDelay {
+        delay_s: f64,
+    },
 }
 
 /// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
@@ -169,6 +174,7 @@ bitflags! {
         const EV_DRIVE = 1 << 20;
         const EV_AWAY_CHARGE = 1 << 21;
         const EV_SET_READY_BY = 1 << 22;
+        const EVENT_DELAY = 1 << 23;
     }
 }
 
@@ -208,6 +214,7 @@ impl ControlSignal {
             Self::EvDrive { .. } => ControlCapabilities::EV_DRIVE,
             Self::EvAwayCharge { .. } => ControlCapabilities::EV_AWAY_CHARGE,
             Self::EvSetReadyBy { .. } => ControlCapabilities::EV_SET_READY_BY,
+            Self::EventDelay { .. } => ControlCapabilities::EVENT_DELAY,
         }
     }
 }
@@ -307,6 +314,7 @@ mod tests {
                 departure_hour: 7.0,
                 target_soc: 0.8,
             },
+            ControlSignal::EventDelay { delay_s: 300.0 },
         ];
 
         for signal in signals {

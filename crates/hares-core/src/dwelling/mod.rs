@@ -118,6 +118,8 @@ struct EquipmentColumns {
     electric_power: Option<usize>,
     gas_power: Option<usize>,
     mode: Option<usize>,
+    reactive_power: Option<usize>,
+    power_factor: Option<usize>,
 }
 
 /// Build column index maps for each equipment piece using instance-qualified
@@ -150,6 +152,12 @@ fn build_equipment_column_map(
                     .get(&format!("{name} Gas Power (therms/hour)"))
                     .copied(),
                 mode: column_index.get(&format!("{name} Mode (-)")).copied(),
+                reactive_power: column_index
+                    .get(&format!("{name} Reactive Power (kVAR)"))
+                    .copied(),
+                power_factor: column_index
+                    .get(&format!("{name} Power Factor (-)"))
+                    .copied(),
             }
         })
         .collect()
@@ -2184,6 +2192,19 @@ impl Dwelling {
             }
             if let Some(idx) = cols.mode {
                 row[idx] = telem.get("mode").unwrap_or(0.0);
+            }
+            if let Some(idx) = cols.reactive_power {
+                let q = telem.get("reactive_power_kvar").unwrap_or(0.0);
+                row[idx] = q;
+                if let Some(pf_idx) = cols.power_factor {
+                    let p = telem
+                        .get("electric_kw")
+                        .or_else(|| telem.get("active_power_kw"))
+                        .or_else(|| telem.get("ac_power_kw"))
+                        .unwrap_or(0.0);
+                    let s = (p * p + q * q).sqrt();
+                    row[pf_idx] = if s > 1e-9 { (p / s).abs() } else { 1.0 };
+                }
             }
         }
 

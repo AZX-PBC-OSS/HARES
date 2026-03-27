@@ -15,8 +15,8 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 
 use crate::schedule_helpers::{
-    ScheduleSourceState, capture_schedule_source_state, parse_u32, parse_usize, parse_zone_id,
-    restore_schedule_source_state,
+    ScheduleSourceState, capture_schedule_source_state, parse_month_multipliers, parse_u32,
+    parse_usize, parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
@@ -53,9 +53,6 @@ const KEY_GAS_PROFILE_WEEKDAY: &str = "gas_profile_weekday";
 const KEY_GAS_PROFILE_WEEKEND: &str = "gas_profile_weekend";
 const KEY_GAS_PROFILE_MONTH: &str = "gas_profile_month";
 const KEY_GAS_CONSTANT: &str = "gas_constant";
-// Reserved for seasonal scaling of scheduled loads.
-#[allow(dead_code)]
-const KEY_MONTH_MULTIPLIER_PREFIX: &str = "month_multiplier_";
 const ZIP_SUM_TARGET: f64 = 1.0;
 const ZIP_SUM_TOLERANCE: f64 = 1e-9;
 
@@ -172,7 +169,10 @@ impl ScheduledLoad {
         // not the building envelope. "Garage" and "Basement" equipment auto-routes
         // to the respective zone when no explicit zone_id is provided.
         let name_lower = config.name.to_ascii_lowercase();
-        let zone = if name_lower.contains("exterior") || name_lower.contains("outdoor") {
+        let zone = if end_use == EndUse::EV {
+            // EV charging occurs outside the building envelope.
+            None
+        } else if name_lower.contains("exterior") || name_lower.contains("outdoor") {
             None
         } else if let Some(explicit) = parse_zone_id(&config.raw_config) {
             Some(explicit)
@@ -336,6 +336,7 @@ impl Equipment for ScheduledLoad {
             self.last_non_zero_power_kw = 0.0;
             self.last_non_zero_gas_w = 0.0;
             self.telemetry.set("electric_kw", 0.0);
+            self.telemetry.set("reactive_power_kvar", 0.0);
             self.telemetry.set("sensible_gain_w", 0.0);
             self.telemetry.set("latent_gain_w", 0.0);
             self.telemetry.set("fuel_input_w", 0.0);
@@ -347,6 +348,7 @@ impl Equipment for ScheduledLoad {
             self.last_non_zero_power_kw = 0.0;
             self.last_non_zero_gas_w = 0.0;
             self.telemetry.set("electric_kw", 0.0);
+            self.telemetry.set("reactive_power_kvar", 0.0);
             self.telemetry.set("sensible_gain_w", 0.0);
             self.telemetry.set("latent_gain_w", 0.0);
             self.telemetry.set("fuel_input_w", 0.0);
@@ -436,6 +438,7 @@ impl Equipment for ScheduledLoad {
         }
 
         self.telemetry.set("electric_kw", electric_power_kw);
+        self.telemetry.set("reactive_power_kvar", reactive_power_kvar);
         self.telemetry.set("sensible_gain_w", sensible_gain_w);
         self.telemetry.set("latent_gain_w", latent_gain_w);
         self.telemetry.set("fuel_input_w", gas_consumption_w);
@@ -674,8 +677,9 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(4);
+    let mut telemetry = Telemetry::with_capacity(5);
     telemetry.insert("electric_kw", 0.0);
+    telemetry.insert("reactive_power_kvar", 0.0);
     telemetry.insert("sensible_gain_w", 0.0);
     telemetry.insert("latent_gain_w", 0.0);
     telemetry.insert("fuel_input_w", 0.0);
@@ -688,6 +692,11 @@ fn scheduled_load_telemetry_fields() -> Vec<TelemetryField> {
             name: "electric_kw".to_string(),
             unit: "kW".to_string(),
             description: "ZIP-adjusted active electrical power draw".to_string(),
+        },
+        TelemetryField {
+            name: "reactive_power_kvar".to_string(),
+            unit: "kVAR".to_string(),
+            description: "ZIP-adjusted reactive electrical power".to_string(),
         },
         TelemetryField {
             name: "sensible_gain_w".to_string(),
@@ -983,20 +992,6 @@ fn is_schedule_source_zero(source: &ScheduleSource) -> bool {
     }
 }
 
-/// Parse per-month scale factors from config keys `month_multiplier_0` through
-/// `month_multiplier_11`. Returns `None` when no multiplier keys are present.
-fn parse_month_multipliers(config: &EquipmentConfig) -> Option<[f64; 12]> {
-    let mut found_any = false;
-    let mut multipliers = [1.0_f64; 12];
-    for (month, slot) in multipliers.iter_mut().enumerate() {
-        let key = format!("{KEY_MONTH_MULTIPLIER_PREFIX}{month}");
-        if let Some(val) = config.get_f64(&key) {
-            *slot = val.max(0.0);
-            found_any = true;
-        }
-    }
-    found_any.then_some(multipliers)
-}
 
 fn parse_bool(config: &EquipmentConfig, key: &str) -> crate::Result<Option<bool>> {
     if let Some(b) = config.get_bool(key) {
@@ -1033,10 +1028,11 @@ mod tests {
     use super::{
         GAS_THERMS_PER_HOUR_TO_W, KEY_CONVECTIVE_GAIN_FRACTION, KEY_GAS_CONSTANT,
         KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE, KEY_LATENT_GAIN_FRACTION,
-        KEY_MONTH_MULTIPLIER_PREFIX, KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL,
-        KEY_POWER_SCHEDULE_SOURCE, KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION,
-        KEY_ZIP_I, KEY_ZIP_P, KEY_ZIP_V0, KEY_ZIP_Z, ScheduledLoad, register_with_registry,
+        KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE,
+        KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, KEY_ZIP_I, KEY_ZIP_P,
+        KEY_ZIP_V0, KEY_ZIP_Z, ScheduledLoad, register_with_registry,
     };
+    use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn base_env() -> EnvironmentState {
@@ -1911,6 +1907,116 @@ mod tests {
         assert!(
             eq.descriptor().zone.is_none(),
             "Outdoor prefix takes precedence and suppresses garage auto-routing"
+        );
+    }
+
+    // --- Scheduled EV registration tests (Ticket 2) ---
+
+    #[test]
+    fn scheduled_ev_resolves_from_registry() {
+        let mut registry = EquipmentRegistry::new();
+        crate::ev::register_with_registry(&mut registry);
+        assert!(
+            registry.get("Scheduled EV").is_some(),
+            "Scheduled EV must be registered in the equipment registry"
+        );
+    }
+
+    #[test]
+    fn scheduled_ev_has_no_zone() {
+        let mut registry = EquipmentRegistry::new();
+        crate::ev::register_with_registry(&mut registry);
+        let config = config_with_schedule("Scheduled EV", "Scheduled EV", &[3.5]);
+        let factory = registry.get("Scheduled EV").expect("Scheduled EV registered");
+        let eq = factory(config);
+        assert!(
+            eq.descriptor().zone.is_none(),
+            "Scheduled EV must have zone=None (charging occurs outside building envelope)"
+        );
+    }
+
+    #[test]
+    fn scheduled_ev_has_ev_end_use() {
+        let mut registry = EquipmentRegistry::new();
+        crate::ev::register_with_registry(&mut registry);
+        let config = config_with_schedule("Scheduled EV", "Scheduled EV", &[3.5]);
+        let factory = registry.get("Scheduled EV").expect("Scheduled EV registered");
+        let eq = factory(config);
+        assert_eq!(
+            eq.descriptor().end_use,
+            hares_types::EndUse::EV,
+            "Scheduled EV must carry EndUse::EV"
+        );
+    }
+
+    // --- Reactive power telemetry tests (Ticket 5) ---
+
+    #[test]
+    fn zip_reactive_power_emitted_to_telemetry() {
+        // Iq=0.8 (pure current reactive term), pq=0.2, zq=0, pf=0.9 at nominal voltage v=1.0.
+        // reactive_base = zq*v² + iq*v + pq = 0.0 + 0.8*1.0 + 0.2 = 1.0
+        // reactive_kvar = real_kw * pf * reactive_base = 2.0 * 0.9 * 1.0 = 1.8
+        let mut config = config_with_schedule("s", "Lighting", &[2.0]);
+        config
+            .raw_config
+            .insert(super::KEY_ZIP_ZQ.to_string(), 0.0.into());
+        config
+            .raw_config
+            .insert(super::KEY_ZIP_IQ.to_string(), 0.8.into());
+        config
+            .raw_config
+            .insert(super::KEY_ZIP_PQ.to_string(), 0.2.into());
+        config
+            .raw_config
+            .insert(super::KEY_ZIP_PF.to_string(), 0.9.into());
+        config
+            .raw_config
+            .insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots::default();
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+
+        let expected_kvar = 2.0_f64 * 0.9 * (0.0 + 0.8 * 1.0 + 0.2);
+        let telemetry_kvar = eq
+            .telemetry()
+            .get("reactive_power_kvar")
+            .expect("reactive_power_kvar must be present in telemetry");
+        assert!(
+            (telemetry_kvar - expected_kvar).abs() < 1e-12,
+            "telemetry reactive_power_kvar={telemetry_kvar} expected={expected_kvar}"
+        );
+        // Confirm telemetry matches port accumulation.
+        assert!(
+            (telemetry_kvar - ports.electrical.reactive_power_kvar).abs() < 1e-12,
+            "telemetry must match port accumulation: telemetry={telemetry_kvar} port={}",
+            ports.electrical.reactive_power_kvar
+        );
+    }
+
+    #[test]
+    fn reactive_power_telemetry_zero_without_zip() {
+        // Default ScheduledLoad has pf=0.0, so reactive power is always zero.
+        let config = config_with_schedule("s", "Lighting", &[5.0]);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+
+        let telemetry_kvar = eq
+            .telemetry()
+            .get("reactive_power_kvar")
+            .expect("reactive_power_kvar must be present in telemetry even when zero");
+        assert_eq!(
+            telemetry_kvar, 0.0,
+            "reactive_power_kvar telemetry must be 0.0 when no ZIP coefficients configured"
         );
     }
 }
