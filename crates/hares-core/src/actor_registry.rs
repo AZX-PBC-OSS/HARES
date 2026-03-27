@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use hares_equipment::config::ConfigValue;
 use hares_types::HaresError;
 
+use hares_equipment::ev::catalog::archetype_by_id;
 use hares_types::{ChargingStrategy, PlugInPolicy, ScheduleSource};
 
 use crate::Actor;
@@ -37,7 +38,6 @@ use crate::actors::{
     AlwaysComply, DrCompliance, EquipmentBehavior, EvDriverActor, IdealThermostat, Occupant,
     Probabilistic,
 };
-use crate::actors::ev_driver::EventDistributionRow;
 
 pub type ActorFactory =
     Box<dyn Fn(ActorConfig) -> Result<Box<dyn Actor>, HaresError> + Send + Sync + 'static>;
@@ -139,36 +139,57 @@ impl ActorRegistry {
                 let seed = config.get_f64("seed").ok_or_else(|| {
                     HaresError::Control("EvDriver requires 'seed' parameter".into())
                 })? as u64;
-                let daily_miles_mean = config.get_f64("daily_drive_miles_mean").unwrap_or(30.0);
-                let event_day_ratio = config.get_f64("event_day_ratio").unwrap_or(0.8);
+
+                // If a preset is specified, load defaults from the archetype catalog
+                let preset = config
+                    .get_str("preset")
+                    .and_then(archetype_by_id);
+
+                let seed_bytes = {
+                    let mut b = [0u8; 32];
+                    b[..8].copy_from_slice(&seed.to_le_bytes());
+                    b
+                };
+
+                let strategy = preset
+                    .map(|p| p.strategy.clone())
+                    .unwrap_or(ChargingStrategy::Immediate { target_soc: 0.9 });
+                let policy = preset
+                    .map(|p| p.plug_in_policy.clone())
+                    .unwrap_or(PlugInPolicy::Always);
+                let event_day_ratio = config
+                    .get_f64("event_day_ratio")
+                    .or_else(|| preset.map(|p| p.event_day_ratio))
+                    .unwrap_or(0.8);
+                let miles_schedule = preset
+                    .map(|p| p.build_miles_schedule(seed_bytes))
+                    .unwrap_or_else(|| {
+                        let mean = config.get_f64("daily_drive_miles_mean").unwrap_or(30.0);
+                        ScheduleSource::Constant(mean)
+                    });
+                let departure_schedule = preset
+                    .map(|p| p.build_departure_schedule(seed_bytes))
+                    .unwrap_or(ScheduleSource::Constant(480.0));
+                let duration_schedule = preset
+                    .map(|p| p.build_duration_schedule(seed_bytes))
+                    .unwrap_or(ScheduleSource::Constant(600.0));
                 let fuel_economy = config.get_f64("fuel_economy_kwh_per_mi").unwrap_or(0.3);
                 let capacity_kwh = config.get_f64("capacity_kwh").unwrap_or(60.0);
                 let avg_speed = config.get_f64("average_speed_mph").unwrap_or(30.0);
-                let arrival_fuzz = config.get_f64("arrival_fuzz_minutes").unwrap_or(15.0);
-                let departure_fuzz = config.get_f64("departure_fuzz_minutes").unwrap_or(15.0);
 
-                let strategy = ChargingStrategy::Immediate { target_soc: 0.9 };
-                let policy = PlugInPolicy::Always;
-
-                let distributions = vec![EventDistributionRow {
-                    arrival_minute: 18 * 60,
-                    duration_minutes: 10 * 60,
-                    start_soc: 0.4,
-                    weight: 1.0,
-                }];
-
+                let max_charge_kw = config.get_f64("max_charge_kw").unwrap_or(7.2);
                 let actor = EvDriverActor::new(
                     &config.name,
                     &target,
                     strategy,
                     policy,
-                    ScheduleSource::Constant(daily_miles_mean),
+                    miles_schedule,
+                    departure_schedule,
+                    duration_schedule,
                     event_day_ratio,
-                    arrival_fuzz,
-                    departure_fuzz,
-                    distributions,
                     fuel_economy,
                     capacity_kwh,
+                    max_charge_kw,
                     avg_speed,
                     config.get_f64("range_anxiety_miles").unwrap_or(20.0),
                     config.get_f64("away_charge_fraction").unwrap_or(0.0),
@@ -246,6 +267,28 @@ mod tests {
         assert!(types.contains(&&"IdealThermostat".to_string()));
         assert!(types.contains(&&"Occupant".to_string()));
         assert!(types.contains(&&"DrCompliance".to_string()));
+        assert!(types.contains(&&"EvDriver".to_string()));
+    }
+
+    #[test]
+    fn actor_registry_create_ev_driver() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Driver1", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(42.0));
+        let actor = registry.create(config).expect("create ev driver");
+        assert_eq!(actor.name(), "Driver1");
+    }
+
+    #[test]
+    fn actor_registry_create_ev_driver_with_preset() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Driver2", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(42.0))
+            .with_param("preset", ConfigValue::Text("daily_commuter_l2".into()));
+        let actor = registry.create(config).expect("create ev driver with preset");
+        assert_eq!(actor.name(), "Driver2");
     }
 
     #[test]

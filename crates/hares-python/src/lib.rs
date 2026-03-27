@@ -13,6 +13,7 @@ mod py_fleet;
 mod py_gym;
 mod py_metrics;
 mod py_pv_sizing;
+mod py_tariff;
 mod py_telemetry;
 mod py_weather;
 mod utils;
@@ -22,11 +23,12 @@ use py_config::{PyDwellingConfig, PySimulationConfig};
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
 use py_enums::{
-    PyAggregationResolution, PyBatteryChemistry, PyBatteryProductId, PyChargingLevel,
-    PyChargingStrategy, PyControlCapabilities, PyDutyCycleComponent, PyEndUse,
-    PyEvArchetypeId, PyEvConnectionState, PyExecutionStage, PyFluidType, PyFuelType,
+    PyAggregationResolution, PyBatteryChemistry, PyBatteryProductId, PyBmsAction, PyBmsMode,
+    PyBmsScheduleWindow, PyChargingLevel, PyChargingStrategy, PyControlCapabilities,
+    PyDepartureConstraint, PyDutyCycleComponent, PyEndUse, PyEvArchetypeId,
+    PyEvConnectionState, PyExecutionStage, PyFluidType, PyFuelType, PyGridExportRule,
     PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion, PySimStatus,
-    PyVehicleId, PyVehicleType,
+    PyStormWatchTrigger, PyVehicleId, PyVehicleType,
 };
 use py_equipment::{
     PyBattery, PyEquipmentDescriptor, PyEv, PyPv, PyPvSoilingConfig, PyTelemetryField,
@@ -37,7 +39,8 @@ use py_metrics::{
     PyGridInteractionMetrics, PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics,
 };
 use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane};
-use py_telemetry::PyTelemetry;
+use py_tariff::{PyElectricTariff, PyGasTariff, PyGasTariffBuilder, PyTariffBuilder};
+use py_telemetry::{PyBillingPeriodSummary, PyTariffTelemetry, PyTelemetry};
 use py_weather::PyWeatherTimeSeries;
 
 #[pymodule]
@@ -82,6 +85,12 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVehicleId>()?;
     m.add_class::<PyEvArchetypeId>()?;
     m.add_class::<PyChargingStrategy>()?;
+    m.add_class::<PyBmsMode>()?;
+    m.add_class::<PyBmsAction>()?;
+    m.add_class::<PyBmsScheduleWindow>()?;
+    m.add_class::<PyGridExportRule>()?;
+    m.add_class::<PyStormWatchTrigger>()?;
+    m.add_class::<PyDepartureConstraint>()?;
     m.add_class::<PySimulationMetrics>()?;
     m.add_class::<PyAnnualEnergyKwh>()?;
     m.add_class::<PyPeakPowerKw>()?;
@@ -94,6 +103,12 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRoofPlane>()?;
     m.add_class::<PyPvCandidate>()?;
     m.add_class::<PyPvSizingResult>()?;
+    m.add_class::<PyElectricTariff>()?;
+    m.add_class::<PyTariffBuilder>()?;
+    m.add_class::<PyGasTariff>()?;
+    m.add_class::<PyGasTariffBuilder>()?;
+    m.add_class::<PyBillingPeriodSummary>()?;
+    m.add_class::<PyTariffTelemetry>()?;
 
     m.add("OperatingMode", m.getattr("Mode")?)?;
     m.add("Mode", m.getattr("Mode")?)?;

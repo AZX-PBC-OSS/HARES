@@ -1,11 +1,13 @@
 //! Built-in actor implementations for the dwelling orchestrator.
 
+mod bms;
 mod dr_compliance;
 pub mod ev_driver;
 mod ideal_thermostat;
 mod occupant;
 mod solver_feedback;
 
+pub use bms::BatteryManagementActor;
 pub use dr_compliance::{
     AlwaysComply, ComplianceModel, DrAction, DrCompliance, NeverComply, Probabilistic,
 };

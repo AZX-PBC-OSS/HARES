@@ -424,6 +424,12 @@ pub struct ArchetypePreset {
     pub weekend_miles_mean: Option<f64>,
     /// Weekend miles stddev for NoisyTimeWindows archetypes.
     pub weekend_miles_stddev: Option<f64>,
+    /// Departure time (minute of day): mean and stddev for Gaussian sampling.
+    pub departure_minute_mean: f64,
+    pub departure_minute_stddev: f64,
+    /// Trip duration (minutes): mean and stddev for Gaussian sampling.
+    pub duration_minutes_mean: f64,
+    pub duration_minutes_stddev: f64,
 }
 
 impl ArchetypePreset {
@@ -494,6 +500,40 @@ impl ArchetypePreset {
             }
         }
     }
+
+    /// Build a `ScheduleSource` for departure time (minute of day) with Gaussian noise.
+    pub fn build_departure_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
+        let mut dep_seed = seed;
+        dep_seed[0] ^= 0xDE;
+        ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean: self.departure_minute_mean,
+                std_dev: self.departure_minute_stddev,
+            },
+            seed: dep_seed,
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed(dep_seed),
+            clamp_min: Some(0.0),
+            clamp_max: Some(1439.0),
+        }
+    }
+
+    /// Build a `ScheduleSource` for trip duration (minutes) with Gaussian noise.
+    pub fn build_duration_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
+        let mut dur_seed = seed;
+        dur_seed[1] ^= 0xD0;
+        ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean: self.duration_minutes_mean,
+                std_dev: self.duration_minutes_stddev,
+            },
+            seed: dur_seed,
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed(dur_seed),
+            clamp_min: Some(30.0),
+            clamp_max: Some(1200.0),
+        }
+    }
 }
 
 pub fn archetype_by_id(id: &str) -> Option<&'static ArchetypePreset> {
@@ -522,6 +562,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 480.0,
+        departure_minute_stddev: 30.0,
+        duration_minutes_mean: 600.0,
+        duration_minutes_stddev: 60.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::DailyCommuterL1,
@@ -539,6 +583,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 480.0,
+        departure_minute_stddev: 30.0,
+        duration_minutes_mean: 600.0,
+        duration_minutes_stddev: 60.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::LongCommuterL2,
@@ -556,6 +604,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 420.0,
+        departure_minute_stddev: 30.0,
+        duration_minutes_mean: 660.0,
+        duration_minutes_stddev: 60.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::WfhOccasional,
@@ -576,6 +628,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: Some(6.0),
         weekend_miles_mean: Some(25.0),
         weekend_miles_stddev: Some(10.0),
+        departure_minute_mean: 600.0,
+        departure_minute_stddev: 60.0,
+        duration_minutes_mean: 180.0,
+        duration_minutes_stddev: 45.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::WfhL1Minimal,
@@ -593,6 +649,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 600.0,
+        departure_minute_stddev: 60.0,
+        duration_minutes_mean: 120.0,
+        duration_minutes_stddev: 30.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::HeavyUseSuv,
@@ -614,6 +674,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 480.0,
+        departure_minute_stddev: 30.0,
+        duration_minutes_mean: 600.0,
+        duration_minutes_stddev: 60.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::ShiftWorker,
@@ -634,6 +698,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 360.0,
+        departure_minute_stddev: 45.0,
+        duration_minutes_mean: 540.0,
+        duration_minutes_stddev: 60.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::WeekendWarrior,
@@ -654,6 +722,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: Some(5.0),
         weekend_miles_mean: Some(30.0),
         weekend_miles_stddev: Some(12.0),
+        departure_minute_mean: 540.0,
+        departure_minute_stddev: 60.0,
+        duration_minutes_mean: 480.0,
+        duration_minutes_stddev: 90.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::WorkplaceCharger,
@@ -671,6 +743,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 480.0,
+        departure_minute_stddev: 30.0,
+        duration_minutes_mean: 600.0,
+        duration_minutes_stddev: 60.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::RetireeL1,
@@ -688,6 +764,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 600.0,
+        departure_minute_stddev: 90.0,
+        duration_minutes_mean: 180.0,
+        duration_minutes_stddev: 60.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::PhevCommuter,
@@ -709,6 +789,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 480.0,
+        departure_minute_stddev: 30.0,
+        duration_minutes_mean: 600.0,
+        duration_minutes_stddev: 60.0,
     },
     ArchetypePreset {
         id: EvArchetypeId::TouOptimizerCa,
@@ -730,6 +814,10 @@ static ARCHETYPE_CATALOG: &[ArchetypePreset] = &[
         weekday_miles_stddev: None,
         weekend_miles_mean: None,
         weekend_miles_stddev: None,
+        departure_minute_mean: 480.0,
+        departure_minute_stddev: 30.0,
+        duration_minutes_mean: 600.0,
+        duration_minutes_stddev: 60.0,
     },
 ];
 

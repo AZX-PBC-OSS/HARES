@@ -49,6 +49,12 @@ from ._hares import (
     DRLevel,
     EquipmentDescriptor,
     TelemetryField,
+    BmsMode,
+    BmsAction,
+    BmsScheduleWindow,
+    GridExportRule,
+    StormWatchTrigger,
+    DepartureConstraint,
 )
 
 # Metrics types
@@ -60,6 +66,14 @@ from ._hares import GridInteractionMetrics
 from ._hares import EnvelopeComponentLoadsKwh
 from ._hares import EfficiencyMetrics
 from ._hares import GasEnergyMetrics
+
+# Tariff types
+from ._hares import ElectricTariff
+from ._hares import TariffBuilder
+from ._hares import GasTariff
+from ._hares import GasTariffBuilder
+from ._hares import BillingPeriodSummary
+from ._hares import TariffTelemetry
 
 # PV sizing types
 from ._hares import RoofPlane
@@ -127,6 +141,12 @@ __all__ = [
     "DRLevel",
     "EquipmentDescriptor",
     "TelemetryField",
+    "BmsMode",
+    "BmsAction",
+    "BmsScheduleWindow",
+    "GridExportRule",
+    "StormWatchTrigger",
+    "DepartureConstraint",
     # Metrics
     "SimulationMetrics",
     "AnnualEnergyKwh",
@@ -136,6 +156,13 @@ __all__ = [
     "EnvelopeComponentLoadsKwh",
     "EfficiencyMetrics",
     "GasEnergyMetrics",
+    # Tariffs
+    "ElectricTariff",
+    "TariffBuilder",
+    "GasTariff",
+    "GasTariffBuilder",
+    "BillingPeriodSummary",
+    "TariffTelemetry",
     # PV sizing
     "RoofPlane",
     "PvCandidate",

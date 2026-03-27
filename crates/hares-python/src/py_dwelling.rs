@@ -775,7 +775,7 @@ impl PyDwelling {
         archetype_id: PyEvArchetypeId,
         seed: u64,
     ) -> PyResult<()> {
-        use hares_core::actors::ev_driver::{EvDriverActor, EventDistributionRow};
+        use hares_core::actors::ev_driver::EvDriverActor;
         use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
 
         let rust_vid: VehicleId = vehicle_id.into();
@@ -788,7 +788,6 @@ impl PyDwelling {
             hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
         };
 
-        // Build EV equipment config
         let mut raw_config = std::collections::HashMap::new();
         raw_config.insert(
             "capacity_kwh".to_string(),
@@ -814,34 +813,25 @@ impl PyDwelling {
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
         dwelling.add_equipment(eq);
 
-        // Build EvDriverActor from preset + vehicle params
         let fuel_economy = spec.capacity_kwh / spec.range_miles;
         let seed_bytes = {
             let mut bytes = [0u8; 32];
             bytes[..8].copy_from_slice(&seed.to_le_bytes());
             bytes
         };
-        let daily_drive_miles = preset.build_miles_schedule(seed_bytes);
-
-        let distributions = vec![EventDistributionRow {
-            arrival_minute: 1080,
-            duration_minutes: 600,
-            start_soc: 0.4,
-            weight: 1.0,
-        }];
 
         let actor = EvDriverActor::new(
             &format!("{}_driver", spec.label),
             spec.label,
             preset.strategy.clone(),
             preset.plug_in_policy.clone(),
-            daily_drive_miles,
+            preset.build_miles_schedule(seed_bytes),
+            preset.build_departure_schedule(seed_bytes),
+            preset.build_duration_schedule(seed_bytes),
             preset.event_day_ratio,
-            preset.arrival_fuzz_minutes,
-            preset.departure_fuzz_minutes,
-            distributions,
             fuel_economy,
             spec.capacity_kwh,
+            max_power,
             30.0, // average_speed_mph
             20.0, // range_anxiety_miles
             0.0,  // away_charge_fraction
@@ -1173,6 +1163,55 @@ impl PyDwelling {
             max_kw,
         )
         .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
+    /// Attach an electric tariff to this dwelling for billing.
+    #[pyo3(signature = (tariff, timezone = None))]
+    pub fn set_electric_tariff(
+        &self,
+        tariff: &crate::py_tariff::PyElectricTariff,
+        timezone: Option<&str>,
+    ) -> PyResult<()> {
+        let tz_str = timezone
+            .map(|s| s.to_string())
+            .or_else(|| self.config.sim_config.civil_timezone.clone())
+            .unwrap_or_else(|| "UTC".to_string());
+        let tz: chrono_tz::Tz = tz_str
+            .parse()
+            .map_err(|_| PyValueError::new_err(format!("unknown timezone '{tz_str}'")))?;
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        dwelling
+            .set_tariff(tariff.inner.clone(), tz)
+            .map_err(to_py_err)
+    }
+
+    /// Returns accumulated billing period summaries.
+    pub fn billing_summaries(&self) -> PyResult<Vec<crate::py_telemetry::PyBillingPeriodSummary>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        Ok(dwelling
+            .billing_summaries()
+            .iter()
+            .map(crate::py_telemetry::PyBillingPeriodSummary::from_rust)
+            .collect())
+    }
+
+    /// Returns a snapshot of current tariff state, or None if no tariff is set.
+    pub fn tariff_telemetry(&self) -> PyResult<Option<crate::py_telemetry::PyTariffTelemetry>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        let evaluator = match dwelling.tariff_evaluator() {
+            Some(ev) => ev,
+            None => return Ok(None),
+        };
+        let billing = evaluator.billing_state();
+        Ok(Some(crate::py_telemetry::PyTariffTelemetry {
+            period_name: evaluator.current_period_name().to_string(),
+            current_rate_usd_per_kwh: evaluator.current_price(),
+            export_rate_usd_per_kwh: evaluator.current_export_price(),
+            cumulative_import_kwh: billing.cumulative_import_kwh(),
+            cumulative_export_kwh: billing.cumulative_export_kwh(),
+            peak_demand_kw: billing.peak_demand_kw(),
+            cumulative_energy_cost_usd: billing.cumulative_energy_cost_usd(),
+        }))
     }
 }
 

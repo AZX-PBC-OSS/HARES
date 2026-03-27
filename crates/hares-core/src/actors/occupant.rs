@@ -286,7 +286,7 @@ impl Occupant {
                     signal: ControlSignal::EvPlugIn {
                         state: EvConnectionState::HomePluggedIn,
                     },
-                    priority: PriorityTier::UserOverride,
+                    priority: PriorityTier::Schedule,
                 });
             } else if presence.is_away() && behavior.off_when_away {
                 out.push(DispatchRequest {
@@ -294,7 +294,7 @@ impl Occupant {
                     signal: ControlSignal::EvPlugIn {
                         state: EvConnectionState::Disconnected,
                     },
-                    priority: PriorityTier::UserOverride,
+                    priority: PriorityTier::Schedule,
                 });
             }
         }

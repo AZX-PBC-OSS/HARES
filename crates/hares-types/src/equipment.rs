@@ -583,6 +583,20 @@ pub struct BmsTimeWindow {
 }
 
 impl BmsTimeWindow {
+    /// Does this window contain the given day and minute-of-day?
+    /// Same semantics as `TimeWindow::contains()`: half-open `[start, end)`,
+    /// wraps across midnight when `start > end`.
+    pub fn contains(&self, weekday: chrono::Weekday, minute_of_day: u16) -> bool {
+        if !self.day.matches(weekday) {
+            return false;
+        }
+        if self.start_minute < self.end_minute {
+            minute_of_day >= self.start_minute && minute_of_day < self.end_minute
+        } else {
+            minute_of_day >= self.start_minute || minute_of_day < self.end_minute
+        }
+    }
+
     pub fn validate(&self) -> Result<(), crate::HaresError> {
         if self.start_minute >= 1440 {
             return Err(crate::HaresError::Equipment(format!(

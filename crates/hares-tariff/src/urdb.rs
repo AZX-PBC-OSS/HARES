@@ -427,9 +427,30 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     }
 
     // TOU demand
+    let mut demand_tou_schedule: Vec<TouPeriod> = Vec::new();
     if let Some(tou_demand) = extract_rate_tiers(&root, "demandratestructure")? {
         let demand_weekday = try_extract_schedule(&root, "demandweekdayschedule")?;
         let demand_weekend = try_extract_schedule(&root, "demandweekendschedule")?;
+
+        // Build demand TOU periods from the demand schedule matrices.
+        if let (Some(dwd), Some(dwe)) = (&demand_weekday, &demand_weekend) {
+            let demand_period_indices = unique_period_indices(dwd, dwe);
+            for &period_idx in &demand_period_indices {
+                let period_name = format!("demand_{period_idx}");
+                let months = months_for_period(dwd, dwe, period_idx);
+                let season = season_for_months(&months);
+                let weekday_ranges = hour_ranges_for_period(dwd, period_idx);
+                let weekend_ranges = hour_ranges_for_period(dwe, period_idx);
+                let windows = build_time_windows(&weekday_ranges, &weekend_ranges);
+                if !windows.is_empty() {
+                    demand_tou_schedule.push(TouPeriod {
+                        name: period_name,
+                        schedule: windows,
+                        season,
+                    });
+                }
+            }
+        }
 
         for (idx, tiers) in tou_demand.iter().enumerate() {
             let rate = tiers.first().map(tier_rate).unwrap_or(0.0);
@@ -479,6 +500,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
         tou_schedule,
         energy_rates,
         demand_rates,
+        demand_tou_schedule,
         tiered_rates,
         export_rate,
         fixed_charges,

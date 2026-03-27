@@ -83,6 +83,8 @@ pub mod testing {
         zone_temp_c: f64,
         outdoor_temp_c: f64,
         hour: u8,
+        date: Option<(i32, u32, u32)>,
+        weather: Option<hares_types::WeatherState>,
         price_signal: hares_types::PriceSignal,
         electrical: hares_types::ElectricalSummary,
     }
@@ -94,6 +96,8 @@ pub mod testing {
                 zone_temp_c: 21.0,
                 outdoor_temp_c: 10.0,
                 hour: 12,
+                date: None,
+                weather: None,
                 price_signal: Default::default(),
                 electrical: Default::default(),
             }
@@ -129,9 +133,43 @@ pub mod testing {
             self
         }
 
+        /// Sets the weather state (overrides outdoor_temp_c).
+        pub fn with_weather(mut self, ws: hares_types::WeatherState) -> Self {
+            self.weather = Some(ws);
+            self
+        }
+
+        /// Sets the date (year, month, day). Uses 2026-01-01 if not specified.
+        pub fn date(mut self, year: i32, month: u32, day: u32) -> Self {
+            self.date = Some((year, month, day));
+            self
+        }
+
         /// Builds the [`EnvironmentState`].
         pub fn build(self) -> EnvironmentState {
             use chrono::{Duration, FixedOffset, TimeZone};
+
+            let (year, month, day) = self.date.unwrap_or((2026, 1, 1));
+            let weather = self.weather.unwrap_or(hares_types::WeatherState {
+                outdoor_temp_c: self.outdoor_temp_c,
+                outdoor_humidity_ratio: 0.005,
+                outdoor_wet_bulb_c: 7.0,
+                outdoor_enthalpy_j_kg: 22_800.0,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
+                mains_temp_c: 15.0,
+                rainfall_m: 0.0,
+                ground_albedo: 0.2,
+            });
 
             EnvironmentState {
                 zones: vec![ZoneState {
@@ -142,26 +180,7 @@ pub mod testing {
                     wet_bulb_c: 14.0,
                     volume_m3: 200.0,
                 }],
-                weather: hares_types::WeatherState {
-                    outdoor_temp_c: self.outdoor_temp_c,
-                    outdoor_humidity_ratio: 0.005,
-                    outdoor_wet_bulb_c: 7.0,
-                    outdoor_enthalpy_j_kg: 22_800.0,
-                    wind_speed_m_s: 2.0,
-                    wind_dir_deg: 0.0,
-                    ground_temp_c: 12.0,
-                    sky_temp_c: 8.0,
-                    pressure_kpa: 101.325,
-                    solar_irradiance: vec![],
-                    ghi_w_m2: 0.0,
-                    dni_w_m2: 0.0,
-                    dhi_w_m2: 0.0,
-                    solar_altitude_deg: 0.0,
-                    solar_azimuth_deg: 180.0,
-                    mains_temp_c: 15.0,
-                    rainfall_m: 0.0,
-                    ground_albedo: 0.2,
-                },
+                weather,
                 grid: hares_types::GridState {
                     voltage_pu: 1.0,
                     frequency_hz: 60.0,
@@ -169,7 +188,7 @@ pub mod testing {
                 custom_domains: vec![],
                 current_time: FixedOffset::east_opt(0)
                     .expect("offset")
-                    .with_ymd_and_hms(2026, 1, 1, self.hour as u32, 0, 0)
+                    .with_ymd_and_hms(year, month, day, self.hour as u32, 0, 0)
                     .single()
                     .expect("valid timestamp"),
                 equipment_telemetry: std::collections::HashMap::new(),

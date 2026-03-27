@@ -11,12 +11,16 @@ use hares_io::ResStockVersion as IoResStockVersion;
 use hares_equipment::battery::catalog::BatteryProductId as RustBatteryProductId;
 use hares_equipment::ev::catalog::{EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId};
 use hares_types::{
-    BatteryChemistry as RustBatteryChemistry, ChargingLevel as RustChargingLevel,
+    BatteryChemistry as RustBatteryChemistry, BmsAction as RustBmsAction,
+    BmsMode as RustBmsMode, BmsScheduleWindow as RustBmsScheduleWindow,
+    BmsTimeWindow as RustBmsTimeWindow, ChargingLevel as RustChargingLevel,
     ChargingStrategy as RustChargingStrategy, ControlCapabilities as RustControlCapabilities,
+    DayFilter, DepartureConstraint as RustDepartureConstraint,
     DutyCycleComponent as RustDutyCycleComponent, EndUse as RustEndUse,
     EvConnectionState as RustEvConnectionState, ExecutionStage as RustExecutionStage,
     FluidType as RustFluidType, FuelType as RustFuelType,
-    InverterPriority as RustInverterPriority, PlugInPolicy as RustPlugInPolicy,
+    GridExportRule as RustGridExportRule, InverterPriority as RustInverterPriority,
+    PlugInPolicy as RustPlugInPolicy, StormWatchTrigger as RustStormWatchTrigger,
     VehicleType as RustVehicleType,
 };
 use pyo3::prelude::*;
@@ -1473,24 +1477,34 @@ impl PyChargingStrategy {
     }
 
     #[staticmethod]
-    fn pre_departure(target_soc: f64) -> PyResult<Self> {
+    #[pyo3(signature = (target_soc, departure_schedule = None))]
+    fn pre_departure(target_soc: f64, departure_schedule: Option<Vec<PyDepartureConstraint>>) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
         Ok(Self {
             inner: RustChargingStrategy::PreDeparture {
                 target_soc,
-                departure_schedule: Vec::new(),
+                departure_schedule: departure_schedule
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|d| d.inner)
+                    .collect(),
             },
         })
     }
 
     #[staticmethod]
-    fn tou_aware(target_soc: f64) -> PyResult<Self> {
+    #[pyo3(signature = (target_soc, departure_schedule = None, charge_buffer_hours = 2.0))]
+    fn tou_aware(target_soc: f64, departure_schedule: Option<Vec<PyDepartureConstraint>>, charge_buffer_hours: f64) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
         Ok(Self {
             inner: RustChargingStrategy::TouAware {
                 target_soc,
-                departure_schedule: Vec::new(),
-                charge_buffer_hours: 2.0,
+                departure_schedule: departure_schedule
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|d| d.inner)
+                    .collect(),
+                charge_buffer_hours,
             },
         })
     }
@@ -1535,7 +1549,8 @@ impl PyChargingStrategy {
     }
 
     #[staticmethod]
-    fn solar_surplus(min_charge_rate_kw: f64) -> PyResult<Self> {
+    #[pyo3(signature = (min_charge_rate_kw, departure_schedule = None))]
+    fn solar_surplus(min_charge_rate_kw: f64, departure_schedule: Option<Vec<PyDepartureConstraint>>) -> PyResult<Self> {
         if !min_charge_rate_kw.is_finite() || min_charge_rate_kw < 0.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "min_charge_rate_kw must be finite and >= 0, got {min_charge_rate_kw}"
@@ -1544,7 +1559,11 @@ impl PyChargingStrategy {
         Ok(Self {
             inner: RustChargingStrategy::SolarSurplus {
                 min_charge_rate_kw,
-                departure_schedule: Vec::new(),
+                departure_schedule: departure_schedule
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|d| d.inner)
+                    .collect(),
             },
         })
     }
@@ -1962,5 +1981,521 @@ impl From<PyEvArchetypeId> for RustEvArchetypeId {
             PyEvArchetypeId::PhevCommuter => Self::PhevCommuter,
             PyEvArchetypeId::TouOptimizerCa => Self::TouOptimizerCa,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GridExportRule
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "GridExportRule", eq, hash, frozen, from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PyGridExportRule {
+    SolarOnly,
+    Unrestricted,
+    Disabled,
+}
+
+#[pymethods]
+impl PyGridExportRule {
+    fn __repr__(&self) -> String {
+        format!("GridExportRule.{self:?}")
+    }
+}
+
+impl From<PyGridExportRule> for RustGridExportRule {
+    fn from(v: PyGridExportRule) -> Self {
+        match v {
+            PyGridExportRule::SolarOnly => Self::SolarOnly,
+            PyGridExportRule::Unrestricted => Self::Unrestricted,
+            PyGridExportRule::Disabled => Self::Disabled,
+        }
+    }
+}
+
+impl From<RustGridExportRule> for PyGridExportRule {
+    fn from(v: RustGridExportRule) -> Self {
+        match v {
+            RustGridExportRule::SolarOnly => Self::SolarOnly,
+            RustGridExportRule::Unrestricted => Self::Unrestricted,
+            RustGridExportRule::Disabled => Self::Disabled,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StormWatchTrigger
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "StormWatchTrigger", eq, hash, frozen, from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PyStormWatchTrigger {
+    ManualEnable,
+    WeatherSignal,
+}
+
+#[pymethods]
+impl PyStormWatchTrigger {
+    fn __repr__(&self) -> String {
+        format!("StormWatchTrigger.{self:?}")
+    }
+}
+
+impl From<PyStormWatchTrigger> for RustStormWatchTrigger {
+    fn from(v: PyStormWatchTrigger) -> Self {
+        match v {
+            PyStormWatchTrigger::ManualEnable => Self::ManualEnable,
+            PyStormWatchTrigger::WeatherSignal => Self::WeatherSignal,
+        }
+    }
+}
+
+impl From<RustStormWatchTrigger> for PyStormWatchTrigger {
+    fn from(v: RustStormWatchTrigger) -> Self {
+        match v {
+            RustStormWatchTrigger::ManualEnable => Self::ManualEnable,
+            RustStormWatchTrigger::WeatherSignal => Self::WeatherSignal,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BmsAction
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "BmsAction", from_py_object)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PyBmsAction {
+    pub inner: RustBmsAction,
+}
+
+#[pymethods]
+impl PyBmsAction {
+    #[staticmethod]
+    #[pyo3(signature = (rate_fraction = 1.0))]
+    fn charge(rate_fraction: f64) -> PyResult<Self> {
+        validate_soc("rate_fraction", rate_fraction)?;
+        Ok(Self {
+            inner: RustBmsAction::Charge { rate_fraction },
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (rate_fraction = 1.0))]
+    fn discharge(rate_fraction: f64) -> PyResult<Self> {
+        validate_soc("rate_fraction", rate_fraction)?;
+        Ok(Self {
+            inner: RustBmsAction::Discharge { rate_fraction },
+        })
+    }
+
+    #[staticmethod]
+    fn idle() -> Self {
+        Self {
+            inner: RustBmsAction::Idle,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target_soc = 0.5))]
+    fn hold(target_soc: f64) -> PyResult<Self> {
+        validate_soc("target_soc", target_soc)?;
+        Ok(Self {
+            inner: RustBmsAction::Hold { target_soc },
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.inner {
+            RustBmsAction::Charge { rate_fraction } => {
+                format!("BmsAction.charge(rate_fraction={rate_fraction})")
+            }
+            RustBmsAction::Discharge { rate_fraction } => {
+                format!("BmsAction.discharge(rate_fraction={rate_fraction})")
+            }
+            RustBmsAction::Idle => "BmsAction.idle()".to_string(),
+            RustBmsAction::Hold { target_soc } => {
+                format!("BmsAction.hold(target_soc={target_soc})")
+            }
+        }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BmsScheduleWindow
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "BmsScheduleWindow", from_py_object)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PyBmsScheduleWindow {
+    pub inner: RustBmsScheduleWindow,
+}
+
+fn parse_day_filter(s: &str) -> PyResult<DayFilter> {
+    match s {
+        "any" => Ok(DayFilter::Any),
+        "weekdays" => Ok(DayFilter::Weekdays),
+        "weekends" => Ok(DayFilter::Weekends),
+        "monday" => Ok(DayFilter::Day(chrono::Weekday::Mon)),
+        "tuesday" => Ok(DayFilter::Day(chrono::Weekday::Tue)),
+        "wednesday" => Ok(DayFilter::Day(chrono::Weekday::Wed)),
+        "thursday" => Ok(DayFilter::Day(chrono::Weekday::Thu)),
+        "friday" => Ok(DayFilter::Day(chrono::Weekday::Fri)),
+        "saturday" => Ok(DayFilter::Day(chrono::Weekday::Sat)),
+        "sunday" => Ok(DayFilter::Day(chrono::Weekday::Sun)),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unknown day_filter: {s:?} (expected any, weekdays, weekends, or a day name)"
+        ))),
+    }
+}
+
+fn day_filter_to_str(d: &DayFilter) -> &'static str {
+    match d {
+        DayFilter::Any => "any",
+        DayFilter::Weekdays => "weekdays",
+        DayFilter::Weekends => "weekends",
+        DayFilter::Day(chrono::Weekday::Mon) => "monday",
+        DayFilter::Day(chrono::Weekday::Tue) => "tuesday",
+        DayFilter::Day(chrono::Weekday::Wed) => "wednesday",
+        DayFilter::Day(chrono::Weekday::Thu) => "thursday",
+        DayFilter::Day(chrono::Weekday::Fri) => "friday",
+        DayFilter::Day(chrono::Weekday::Sat) => "saturday",
+        DayFilter::Day(chrono::Weekday::Sun) => "sunday",
+    }
+}
+
+#[pymethods]
+impl PyBmsScheduleWindow {
+    #[new]
+    #[pyo3(signature = (day, start_minute, end_minute, action))]
+    fn new(day: &str, start_minute: u16, end_minute: u16, action: PyBmsAction) -> PyResult<Self> {
+        let day_filter = parse_day_filter(day)?;
+        let tw = RustBmsTimeWindow {
+            day: day_filter,
+            start_minute,
+            end_minute,
+        };
+        tw.validate().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+        })?;
+        Ok(Self {
+            inner: RustBmsScheduleWindow {
+                time_window: tw,
+                action: action.inner,
+            },
+        })
+    }
+
+    #[getter]
+    fn day(&self) -> &'static str {
+        day_filter_to_str(&self.inner.time_window.day)
+    }
+
+    #[getter]
+    fn start_minute(&self) -> u16 {
+        self.inner.time_window.start_minute
+    }
+
+    #[getter]
+    fn end_minute(&self) -> u16 {
+        self.inner.time_window.end_minute
+    }
+
+    #[getter]
+    fn action(&self) -> PyBmsAction {
+        PyBmsAction {
+            inner: self.inner.action.clone(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        let day = day_filter_to_str(&self.inner.time_window.day);
+        let s = self.inner.time_window.start_minute;
+        let e = self.inner.time_window.end_minute;
+        let act = PyBmsAction {
+            inner: self.inner.action.clone(),
+        };
+        format!("BmsScheduleWindow(day={day:?}, start={s}, end={e}, action={})", act.__repr__())
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DepartureConstraint
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "DepartureConstraint", from_py_object)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PyDepartureConstraint {
+    pub inner: RustDepartureConstraint,
+}
+
+#[pymethods]
+impl PyDepartureConstraint {
+    #[new]
+    #[pyo3(signature = (day_filter = "weekdays", departure_minute = 480, target_soc = 0.8))]
+    fn new(day_filter: &str, departure_minute: u32, target_soc: f64) -> PyResult<Self> {
+        let day = parse_day_filter(day_filter)?;
+        validate_soc("target_soc", target_soc)?;
+        let dc = RustDepartureConstraint {
+            day_filter: day,
+            departure_minute,
+            target_soc,
+        };
+        dc.validate().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+        })?;
+        Ok(Self { inner: dc })
+    }
+
+    #[getter]
+    fn day_filter(&self) -> &'static str {
+        day_filter_to_str(&self.inner.day_filter)
+    }
+
+    #[getter]
+    fn departure_minute(&self) -> u32 {
+        self.inner.departure_minute
+    }
+
+    #[getter]
+    fn target_soc(&self) -> f64 {
+        self.inner.target_soc
+    }
+
+    fn __repr__(&self) -> String {
+        let day = day_filter_to_str(&self.inner.day_filter);
+        format!(
+            "DepartureConstraint(day_filter={day:?}, departure_minute={}, target_soc={})",
+            self.inner.departure_minute, self.inner.target_soc
+        )
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BmsMode
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "BmsMode", from_py_object)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PyBmsMode {
+    pub inner: RustBmsMode,
+}
+
+#[pymethods]
+impl PyBmsMode {
+    #[staticmethod]
+    #[pyo3(signature = (min_soc = 0.1, max_soc = 1.0, solar_only_charging = false))]
+    fn self_consumption(min_soc: f64, max_soc: f64, solar_only_charging: bool) -> PyResult<Self> {
+        validate_soc("min_soc", min_soc)?;
+        validate_soc("max_soc", max_soc)?;
+        if min_soc > max_soc {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "min_soc must be <= max_soc",
+            ));
+        }
+        Ok(Self {
+            inner: RustBmsMode::SelfConsumption {
+                min_soc,
+                max_soc,
+                solar_only_charging,
+            },
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (
+        reserve_soc = 0.2,
+        charge_threshold_percentile = 25.0,
+        discharge_threshold_percentile = 75.0,
+        solar_only_charging = false,
+    ))]
+    fn time_of_use_optimization(
+        reserve_soc: f64,
+        charge_threshold_percentile: f64,
+        discharge_threshold_percentile: f64,
+        solar_only_charging: bool,
+    ) -> PyResult<Self> {
+        validate_soc("reserve_soc", reserve_soc)?;
+        if !charge_threshold_percentile.is_finite()
+            || !(0.0..=100.0).contains(&charge_threshold_percentile)
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "charge_threshold_percentile must be in [0, 100], got {charge_threshold_percentile}"
+            )));
+        }
+        if !discharge_threshold_percentile.is_finite()
+            || !(0.0..=100.0).contains(&discharge_threshold_percentile)
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "discharge_threshold_percentile must be in [0, 100], got {discharge_threshold_percentile}"
+            )));
+        }
+        Ok(Self {
+            inner: RustBmsMode::TimeOfUseOptimization {
+                reserve_soc,
+                charge_threshold_percentile,
+                discharge_threshold_percentile,
+                solar_only_charging,
+            },
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target_soc = 0.8, charge_from_grid = true, charge_rate_fraction = 1.0))]
+    fn backup_reserve(
+        target_soc: f64,
+        charge_from_grid: bool,
+        charge_rate_fraction: f64,
+    ) -> PyResult<Self> {
+        validate_soc("target_soc", target_soc)?;
+        validate_soc("charge_rate_fraction", charge_rate_fraction)?;
+        Ok(Self {
+            inner: RustBmsMode::BackupReserve {
+                target_soc,
+                charge_from_grid,
+                charge_rate_fraction,
+            },
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (base_mode, dr_discharge_rate = 1.0, min_soc_during_dr = 0.1))]
+    fn demand_response(
+        base_mode: PyBmsMode,
+        dr_discharge_rate: f64,
+        min_soc_during_dr: f64,
+    ) -> PyResult<Self> {
+        validate_soc("dr_discharge_rate", dr_discharge_rate)?;
+        validate_soc("min_soc_during_dr", min_soc_during_dr)?;
+        Ok(Self {
+            inner: RustBmsMode::DemandResponse {
+                base_mode: Box::new(base_mode.inner),
+                dr_discharge_rate,
+                min_soc_during_dr,
+            },
+        })
+    }
+
+    #[staticmethod]
+    fn scheduled(windows: Vec<PyBmsScheduleWindow>) -> PyResult<Self> {
+        if windows.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "scheduled windows must not be empty",
+            ));
+        }
+        Ok(Self {
+            inner: RustBmsMode::Scheduled {
+                windows: windows.into_iter().map(|w| w.inner).collect(),
+            },
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target_soc = 1.0, trigger = "manual", base_mode = None))]
+    fn storm_watch(
+        target_soc: f64,
+        trigger: &str,
+        base_mode: Option<PyBmsMode>,
+    ) -> PyResult<Self> {
+        validate_soc("target_soc", target_soc)?;
+        let trigger = match trigger {
+            "manual" => RustStormWatchTrigger::ManualEnable,
+            "weather_signal" => RustStormWatchTrigger::WeatherSignal,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "trigger must be 'manual' or 'weather_signal', got {other:?}"
+                )));
+            }
+        };
+        let base = base_mode.unwrap_or(PyBmsMode {
+            inner: RustBmsMode::Manual,
+        });
+        Ok(Self {
+            inner: RustBmsMode::StormWatch {
+                target_soc,
+                trigger,
+                base_mode: Box::new(base.inner),
+            },
+        })
+    }
+
+    #[staticmethod]
+    fn manual() -> Self {
+        Self {
+            inner: RustBmsMode::Manual,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.inner {
+            RustBmsMode::SelfConsumption {
+                min_soc,
+                max_soc,
+                solar_only_charging,
+            } => format!(
+                "BmsMode.self_consumption(min_soc={min_soc}, max_soc={max_soc}, solar_only_charging={solar_only_charging})"
+            ),
+            RustBmsMode::TimeOfUseOptimization {
+                reserve_soc,
+                charge_threshold_percentile,
+                discharge_threshold_percentile,
+                solar_only_charging,
+            } => format!(
+                "BmsMode.time_of_use_optimization(reserve_soc={reserve_soc}, charge_pct={charge_threshold_percentile}, discharge_pct={discharge_threshold_percentile}, solar_only={solar_only_charging})"
+            ),
+            RustBmsMode::BackupReserve {
+                target_soc,
+                charge_from_grid,
+                charge_rate_fraction,
+            } => format!(
+                "BmsMode.backup_reserve(target_soc={target_soc}, charge_from_grid={charge_from_grid}, charge_rate_fraction={charge_rate_fraction})"
+            ),
+            RustBmsMode::DemandResponse {
+                base_mode,
+                dr_discharge_rate,
+                min_soc_during_dr,
+            } => {
+                let base_repr = PyBmsMode {
+                    inner: *base_mode.clone(),
+                }
+                .__repr__();
+                format!(
+                    "BmsMode.demand_response(base_mode={base_repr}, dr_discharge_rate={dr_discharge_rate}, min_soc_during_dr={min_soc_during_dr})"
+                )
+            }
+            RustBmsMode::Scheduled { windows } => {
+                format!("BmsMode.scheduled(windows=[{} window(s)])", windows.len())
+            }
+            RustBmsMode::StormWatch {
+                target_soc,
+                trigger,
+                base_mode,
+            } => {
+                let base_repr = PyBmsMode {
+                    inner: *base_mode.clone(),
+                }
+                .__repr__();
+                format!(
+                    "BmsMode.storm_watch(target_soc={target_soc}, trigger={trigger:?}, base_mode={base_repr})"
+                )
+            }
+            RustBmsMode::Manual => "BmsMode.manual()".to_string(),
+        }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
     }
 }

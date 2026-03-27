@@ -265,6 +265,18 @@ impl DistributionKind {
                 .map_err(|e| HaresError::Equipment(format!("invalid Bernoulli params: {e}"))),
         }
     }
+
+    /// Analytical mean of the distribution.
+    pub fn mean(&self) -> f64 {
+        match self {
+            Self::Gaussian { mean, .. } => *mean,
+            Self::Uniform { low, high } => (low + high) / 2.0,
+            Self::LogNormal { mu, sigma } => (*mu + sigma * sigma / 2.0).exp(),
+            Self::Exponential { lambda } => 1.0 / lambda,
+            Self::Poisson { lambda } => *lambda,
+            Self::Bernoulli { p } => *p,
+        }
+    }
 }
 
 /// Shared RNG state for stochastic schedule sources.
@@ -602,6 +614,75 @@ impl ScheduleSource {
 }
 
 impl ScheduleSource {
+    /// Statistical mean of this source, computed without mutation.
+    ///
+    /// Returns the exact mean for `Constant`, `Stochastic`, and `Shared`.
+    /// For time-varying sources (`DailyProfile`, `SolarAware`, `TimeWindows`),
+    /// returns a representative average. For `ColumnRef`, returns 0 (no data
+    /// available without environment state).
+    pub fn mean(&self) -> f64 {
+        match self {
+            Self::Constant(v) => *v,
+            Self::DailyProfile {
+                weekday,
+                weekend,
+                month_multipliers,
+                max_value,
+            } => {
+                // Weighted average: 5 weekday + 2 weekend hours, uniform month.
+                let wd_avg: f64 = weekday.iter().sum::<f64>() / 24.0;
+                let we_avg: f64 = weekend.iter().sum::<f64>() / 24.0;
+                let day_avg = (wd_avg * 5.0 + we_avg * 2.0) / 7.0;
+                let month_avg: f64 = month_multipliers.iter().sum::<f64>() / 12.0;
+                day_avg * month_avg * max_value
+            }
+            Self::ColumnRef { .. } => 0.0,
+            Self::SolarAware {
+                daytime_fraction,
+                evening_fraction,
+                overnight_fraction,
+                month_multipliers,
+                max_value,
+                ..
+            } => {
+                // Rough average across a day (12h day, 6h evening, 6h overnight).
+                let day_avg = (daytime_fraction * 12.0
+                    + evening_fraction * 6.0
+                    + overnight_fraction * 6.0)
+                    / 24.0;
+                let month_avg: f64 = month_multipliers.iter().sum::<f64>() / 12.0;
+                day_avg * month_avg * max_value
+            }
+            Self::Stochastic {
+                kind,
+                clamp_min,
+                clamp_max,
+                ..
+            } => {
+                let raw = kind.mean();
+                let lo = clamp_min.unwrap_or(f64::NEG_INFINITY);
+                let hi = clamp_max.unwrap_or(f64::INFINITY);
+                raw.clamp(lo, hi)
+            }
+            Self::Shared { data, .. } => {
+                if data.is_empty() {
+                    0.0
+                } else {
+                    data.iter().sum::<f64>() / data.len() as f64
+                }
+            }
+            Self::TimeWindows {
+                windows, default, ..
+            } => {
+                if windows.is_empty() {
+                    return default.unwrap_or(0.0);
+                }
+                let sum: f64 = windows.iter().map(|w| w.value).sum();
+                sum / windows.len() as f64
+            }
+        }
+    }
+
     /// Create a `TimeWindows` source with a seeded RNG for noisy windows.
     ///
     /// At least one window should have `noise` set; otherwise prefer the
@@ -2282,5 +2363,156 @@ mod tests {
             season: SeasonFilter::All,
         };
         assert!(zero_width.validate().is_err());
+    }
+
+    // ── ScheduleSource::mean() tests ────────────────────────────────
+
+    #[test]
+    fn mean_constant() {
+        assert_eq!(ScheduleSource::Constant(42.0).mean(), 42.0);
+        assert_eq!(ScheduleSource::Constant(0.0).mean(), 0.0);
+    }
+
+    #[test]
+    fn mean_daily_profile() {
+        let mut weekday = [0.0; 24];
+        weekday.fill(1.0); // all hours = 1.0
+        let weekend = [0.5; 24];
+        let month = [1.0; 12];
+        let source = ScheduleSource::DailyProfile {
+            weekday,
+            weekend,
+            month_multipliers: month,
+            max_value: 10.0,
+        };
+        // wd_avg = 1.0, we_avg = 0.5, day_avg = (5*1.0 + 2*0.5)/7 ≈ 0.857
+        // month_avg = 1.0, max = 10.0 → ~8.571
+        let expected = (5.0 * 1.0 + 2.0 * 0.5) / 7.0 * 10.0;
+        assert!((source.mean() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn mean_stochastic_gaussian() {
+        let source = ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean: 30.0,
+                std_dev: 5.0,
+            },
+            seed: [0; 32],
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed([0; 32]),
+            clamp_min: None,
+            clamp_max: None,
+        };
+        assert_eq!(source.mean(), 30.0);
+    }
+
+    #[test]
+    fn mean_stochastic_clamped() {
+        let source = ScheduleSource::Stochastic {
+            kind: DistributionKind::Gaussian {
+                mean: 100.0,
+                std_dev: 10.0,
+            },
+            seed: [0; 32],
+            draw_count: 0,
+            rng: ChaCha8Rng::from_seed([0; 32]),
+            clamp_min: None,
+            clamp_max: Some(50.0),
+        };
+        assert_eq!(source.mean(), 50.0);
+    }
+
+    #[test]
+    fn mean_shared() {
+        let data: Arc<[f64]> = Arc::from(vec![10.0, 20.0, 30.0]);
+        let source = ScheduleSource::Shared {
+            data,
+            cursor: 0,
+            boundary: BoundaryPolicy::Clamp,
+        };
+        assert!((source.mean() - 20.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn mean_shared_empty() {
+        let data: Arc<[f64]> = Arc::from(vec![]);
+        let source = ScheduleSource::Shared {
+            data,
+            cursor: 0,
+            boundary: BoundaryPolicy::Clamp,
+        };
+        assert_eq!(source.mean(), 0.0);
+    }
+
+    #[test]
+    fn mean_time_windows() {
+        let source = ScheduleSource::TimeWindows {
+            windows: vec![
+                TimeWindow::new(DayFilter::Weekdays, 0, 1440, 21.0),
+                TimeWindow::new(DayFilter::Weekends, 0, 1440, 24.0),
+            ],
+            default: None,
+            rng_state: None,
+        };
+        assert!((source.mean() - 22.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn mean_time_windows_empty_with_default() {
+        let source = ScheduleSource::TimeWindows {
+            windows: vec![],
+            default: Some(15.0),
+            rng_state: None,
+        };
+        assert_eq!(source.mean(), 15.0);
+    }
+
+    #[test]
+    fn mean_column_ref_returns_zero() {
+        let source = ScheduleSource::ColumnRef {
+            col_idx: 0,
+            boundary: BoundaryPolicy::Clamp,
+        };
+        assert_eq!(source.mean(), 0.0);
+    }
+
+    // ── DistributionKind::mean() tests ──────────────────────────────
+
+    #[test]
+    fn distribution_mean_uniform() {
+        let d = DistributionKind::Uniform {
+            low: 10.0,
+            high: 20.0,
+        };
+        assert_eq!(d.mean(), 15.0);
+    }
+
+    #[test]
+    fn distribution_mean_exponential() {
+        let d = DistributionKind::Exponential { lambda: 0.5 };
+        assert_eq!(d.mean(), 2.0);
+    }
+
+    #[test]
+    fn distribution_mean_bernoulli() {
+        let d = DistributionKind::Bernoulli { p: 0.3 };
+        assert!((d.mean() - 0.3).abs() < 1e-10);
+    }
+
+    #[test]
+    fn distribution_mean_poisson() {
+        let d = DistributionKind::Poisson { lambda: 4.5 };
+        assert_eq!(d.mean(), 4.5);
+    }
+
+    #[test]
+    fn distribution_mean_lognormal() {
+        let d = DistributionKind::LogNormal {
+            mu: 1.0,
+            sigma: 0.5,
+        };
+        // E[X] = exp(mu + sigma²/2) = exp(1.0 + 0.125) = exp(1.125)
+        assert!((d.mean() - 1.125_f64.exp()).abs() < 1e-10);
     }
 }

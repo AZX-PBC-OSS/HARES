@@ -119,6 +119,8 @@ impl OverrideState {
 /// assert_eq!(requests.len(), 1);
 /// ```
 pub struct IdealThermostat {
+    /// Actor name derived from the target equipment name.
+    name: String,
     /// Current override state.
     override_state: OverrideState,
     /// Pre-allocated dispatch target (avoids per-step Arc construction).
@@ -129,6 +131,7 @@ impl IdealThermostat {
     /// Creates a new IdealThermostat actor targeting the named equipment.
     pub fn new(target_name: &str) -> Self {
         Self {
+            name: format!("IdealThermostat({})", target_name),
             dispatch_target: DispatchTarget::ByName(target_name.into()),
             override_state: OverrideState::default(),
         }
@@ -204,7 +207,7 @@ impl IdealThermostat {
 
 impl Actor for IdealThermostat {
     fn name(&self) -> &str {
-        "IdealThermostat"
+        &self.name
     }
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
@@ -213,7 +216,7 @@ impl Actor for IdealThermostat {
         }
 
         tracing::debug!(
-            actor = "IdealThermostat",
+            actor = %self.name,
             target = self.target_name(),
             heating_c = ?self.override_state.heating_setpoint_c,
             cooling_c = ?self.override_state.cooling_setpoint_c,
@@ -298,7 +301,7 @@ mod tests {
     #[test]
     fn ideal_thermostat_name() {
         let thermostat = IdealThermostat::new("HVAC");
-        assert_eq!(thermostat.name(), "IdealThermostat");
+        assert_eq!(thermostat.name(), "IdealThermostat(HVAC)");
     }
 
     #[test]

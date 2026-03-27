@@ -66,6 +66,8 @@ pub struct ThermalSolver {
     interior_surf_temps_buf: Vec<f64>,
     /// Pre-allocated buffer for infiltration couplings returned by build_input_vector.
     infiltration_buf: Vec<InfiltrationCoupling>,
+    /// Pre-allocated scratch buffer for per-zone infiltration gains; swapped into component_gains.
+    infiltration_by_zone_buf: Vec<(ZoneId, f64)>,
     /// Pre-allocated buffer for solar distribution absorbed values.
     solar_absorbed_buf: Vec<f64>,
     /// Pre-allocated buffer for interior LWR per-zone results.
@@ -171,6 +173,7 @@ impl ThermalSolver {
             component_gains: EnvelopeComponentGains::default(),
             interior_surf_temps_buf: Vec::with_capacity(max_interior_surfaces),
             infiltration_buf: Vec::with_capacity(env.zones.len()),
+            infiltration_by_zone_buf: Vec::with_capacity(env.zones.len()),
             solar_absorbed_buf: Vec::new(),
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
@@ -377,12 +380,10 @@ impl ThermalSolver {
             .map(|a| a.sensible_for_category(ThermalCategory::DuctLoss))
             .unwrap_or(0.0);
 
-        let mut infiltration_by_zone_vec: Vec<(ZoneId, f64)> = self
-            .infiltration_buf
-            .iter()
-            .map(|c| (c.zone, c.q_infiltration_w))
-            .collect();
-        infiltration_by_zone_vec.sort_by_key(|(z, _)| *z);
+        self.infiltration_by_zone_buf.clear();
+        self.infiltration_by_zone_buf
+            .extend(self.infiltration_buf.iter().map(|c| (c.zone, c.q_infiltration_w)));
+        self.infiltration_by_zone_buf.sort_by_key(|(z, _)| *z);
 
         self.component_gains = EnvelopeComponentGains {
             window_solar_w,
@@ -398,8 +399,8 @@ impl ThermalSolver {
             internal_gain_w: internal_gain_cat_w,
             jacket_loss_w,
             duct_loss_w,
-            infiltration_by_zone: infiltration_by_zone_vec,
-            interior_lwr_by_zone: self.lwr_by_zone_buf.clone(),
+            infiltration_by_zone: Vec::new(),
+            interior_lwr_by_zone: Vec::new(),
             wall_heat_gain_w: 0.0,
             floor_heat_gain_w: 0.0,
             roof_heat_gain_w: 0.0,
@@ -440,6 +441,15 @@ impl ThermalSolver {
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             window_solar_diag: self.window_solar_diag_buf.clone(),
         };
+
+        std::mem::swap(
+            &mut self.infiltration_by_zone_buf,
+            &mut self.component_gains.infiltration_by_zone,
+        );
+        std::mem::swap(
+            &mut self.lwr_by_zone_buf,
+            &mut self.component_gains.interior_lwr_by_zone,
+        );
 
         (u, latent_by_zone)
     }

@@ -172,12 +172,7 @@ impl ExportRate {
             }
         }
         for er in &self.tou_credits {
-            if !er.rate_per_kwh.is_finite() || er.rate_per_kwh < 0.0 {
-                return Err(HaresError::Tariff(format!(
-                    "export tou_credit '{}' rate_per_kwh must be finite and >= 0, got {}",
-                    er.period_name, er.rate_per_kwh
-                )));
-            }
+            er.validate()?;
         }
         Ok(())
     }
@@ -213,6 +208,9 @@ impl FixedCharges {
 pub struct ElectricTariff {
     pub name: Option<String>,
     pub tou_schedule: Vec<TouPeriod>,
+    /// Demand-specific TOU schedule. When present, demand periods are resolved
+    /// independently of energy periods (URDB `demandweekdayschedule`).
+    pub demand_tou_schedule: Vec<TouPeriod>,
     pub energy_rates: Vec<EnergyRate>,
     pub demand_rates: Vec<DemandRate>,
     pub tiered_rates: Vec<TieredBlock>,
@@ -227,6 +225,9 @@ pub struct ElectricTariff {
 impl ElectricTariff {
     pub fn validate(&self) -> Result<(), HaresError> {
         for tp in &self.tou_schedule {
+            tp.validate()?;
+        }
+        for tp in &self.demand_tou_schedule {
             tp.validate()?;
         }
         for dr in &self.demand_rates {
@@ -264,6 +265,22 @@ impl ElectricTariff {
                     "energy rate references unknown TOU period '{}'",
                     er.period_name
                 )));
+            }
+        }
+        // Cross-check demand rate period names against demand (or energy) TOU schedule.
+        let demand_schedule = if self.demand_tou_schedule.is_empty() {
+            &self.tou_schedule
+        } else {
+            &self.demand_tou_schedule
+        };
+        let demand_tou_names: Vec<&str> = demand_schedule.iter().map(|p| p.name.as_str()).collect();
+        for dr in &self.demand_rates {
+            if let Some(name) = &dr.period_name {
+                if !demand_tou_names.contains(&name.as_str()) {
+                    return Err(HaresError::Tariff(format!(
+                        "demand rate references unknown TOU period '{name}'"
+                    )));
+                }
             }
         }
         Ok(())
@@ -415,6 +432,7 @@ mod tests {
             minimum_charge: Some(10.0),
             billing_cycle: BillingCycle::Monthly,
             seasonal_split: Some(SeasonalSplit::new(6, 9).unwrap()),
+            demand_tou_schedule: Vec::new(),
         };
 
         let json = serde_json::to_string(&tariff).unwrap();

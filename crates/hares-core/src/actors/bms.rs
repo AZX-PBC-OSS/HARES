@@ -1,0 +1,1284 @@
+//! Battery Management System actor — dispatches charge/discharge control
+//! signals based on the configured `BmsMode`, PV production, grid prices,
+//! and battery SOC.
+
+use std::sync::Arc;
+
+use chrono::{Datelike, Timelike};
+use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
+use hares_types::{
+    BmsAction, BmsMode, BmsScheduleWindow, ControlSignal, EnvironmentState, GridExportRule,
+    StormWatchTrigger,
+};
+
+use crate::Actor;
+
+pub struct BatteryManagementActor {
+    name: String,
+    dispatch_target: DispatchTarget,
+    bms_mode: BmsMode,
+    #[expect(dead_code)]
+    grid_export_rule: GridExportRule,
+    charge_price_threshold: f64,
+    discharge_price_threshold: f64,
+    daily_avg_price: f64,
+    current_day_ordinal0: u32,
+    max_charge_kw: f64,
+    max_discharge_kw: f64,
+    price_schedule: Option<Vec<f64>>,
+    steps_per_day: usize,
+    last_action: String,
+}
+
+impl BatteryManagementActor {
+    pub fn new(
+        battery_name: &str,
+        bms_mode: BmsMode,
+        grid_export_rule: GridExportRule,
+        max_charge_kw: f64,
+        max_discharge_kw: f64,
+        price_schedule: Option<Vec<f64>>,
+        steps_per_day: usize,
+    ) -> Self {
+        Self {
+            name: format!("BatteryManagementActor:{battery_name}"),
+            dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
+            bms_mode,
+            grid_export_rule,
+            charge_price_threshold: 0.0,
+            discharge_price_threshold: f64::INFINITY,
+            daily_avg_price: 0.0,
+            current_day_ordinal0: u32::MAX,
+            max_charge_kw,
+            max_discharge_kw,
+            price_schedule,
+            steps_per_day,
+            last_action: String::new(),
+        }
+    }
+
+    pub fn last_action(&self) -> &str {
+        &self.last_action
+    }
+
+    fn read_soc(&self, env: &EnvironmentState) -> Option<f64> {
+        let battery_name = match &self.dispatch_target {
+            DispatchTarget::ByName(n) => &**n,
+            _ => return None,
+        };
+        env.equipment_telemetry
+            .get(battery_name)
+            .and_then(|t| t.0.get("soc").copied())
+    }
+
+    fn emit(
+        &self,
+        signal: ControlSignal,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        out.push(DispatchRequest {
+            target: self.dispatch_target.clone(),
+            signal,
+            priority: PriorityTier::Schedule,
+        });
+    }
+
+    fn evaluate_mode(
+        &mut self,
+        mode: &BmsMode,
+        env: &EnvironmentState,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        match mode {
+            BmsMode::Manual => {
+                self.last_action = "idle".into();
+            }
+
+            BmsMode::SelfConsumption {
+                min_soc,
+                max_soc,
+                solar_only_charging,
+            } => {
+                let Some(soc) = self.read_soc(env) else {
+                    self.last_action = "idle:no_soc".into();
+                    return;
+                };
+                let pv = env.electrical.pv_generation_kw;
+                let load = env.electrical.base_load_kw;
+                let surplus = pv - load;
+
+                if *solar_only_charging && pv <= 0.0 {
+                    self.emit(ControlSignal::GridConnect { connected: false }, out);
+                    self.last_action = "grid_disconnect:solar_only".into();
+                    return;
+                }
+
+                if surplus > 0.0 && soc < *max_soc {
+                    self.emit(
+                        ControlSignal::SelfConsumption {
+                            enabled: true,
+                            solar_only_charging: *solar_only_charging,
+                        },
+                        out,
+                    );
+                    self.last_action = "self_consumption:charge".into();
+                } else if surplus < 0.0 && soc > *min_soc {
+                    self.emit(
+                        ControlSignal::SelfConsumption {
+                            enabled: true,
+                            solar_only_charging: false,
+                        },
+                        out,
+                    );
+                    self.last_action = "self_consumption:discharge".into();
+                } else {
+                    self.last_action = "idle:self_consumption".into();
+                }
+            }
+
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc,
+                charge_threshold_percentile,
+                discharge_threshold_percentile,
+                solar_only_charging,
+            } => {
+                let day_ordinal0 = env.current_time.ordinal0();
+                if day_ordinal0 != self.current_day_ordinal0 {
+                    self.recompute_tou_thresholds(
+                        env,
+                        *charge_threshold_percentile,
+                        *discharge_threshold_percentile,
+                    );
+                }
+
+                let Some(soc) = self.read_soc(env) else {
+                    self.last_action = "idle:no_soc".into();
+                    return;
+                };
+                let price = env
+                    .price_signal
+                    .electricity_price
+                    .unwrap_or(0.0);
+
+                if price <= self.charge_price_threshold && soc < (1.0 - reserve_soc) {
+                    if *solar_only_charging && env.electrical.pv_generation_kw <= 0.0 {
+                        self.emit(ControlSignal::GridConnect { connected: false }, out);
+                        self.last_action = "grid_disconnect:tou_solar_only".into();
+                        return;
+                    }
+                    self.emit(
+                        ControlSignal::PowerSetpoint {
+                            active_power_kw: self.max_charge_kw,
+                            reactive_power_kvar: None,
+                        },
+                        out,
+                    );
+                    self.last_action = "tou:charge".into();
+                } else if price >= self.discharge_price_threshold && soc > *reserve_soc {
+                    self.emit(
+                        ControlSignal::PowerSetpoint {
+                            active_power_kw: -self.max_discharge_kw,
+                            reactive_power_kvar: None,
+                        },
+                        out,
+                    );
+                    self.last_action = "tou:discharge".into();
+                } else {
+                    self.last_action = "idle:tou".into();
+                }
+            }
+
+            BmsMode::BackupReserve {
+                target_soc,
+                charge_from_grid,
+                charge_rate_fraction,
+            } => {
+                let Some(soc) = self.read_soc(env) else {
+                    self.last_action = "idle:no_soc".into();
+                    return;
+                };
+                if soc < *target_soc {
+                    if !charge_from_grid && env.electrical.pv_generation_kw <= 0.0 {
+                        self.emit(ControlSignal::GridConnect { connected: false }, out);
+                        self.last_action = "grid_disconnect:backup_no_pv".into();
+                        return;
+                    }
+                    self.emit(
+                        ControlSignal::SOCTarget {
+                            target_soc: *target_soc,
+                            min_soc: None,
+                            max_soc: Some(*target_soc),
+                        },
+                        out,
+                    );
+                    if *charge_rate_fraction < 1.0 {
+                        self.emit(
+                            ControlSignal::PowerLimit {
+                                max_power_kw: charge_rate_fraction * self.max_charge_kw,
+                                ramp_rate_kw_per_s: None,
+                            },
+                            out,
+                        );
+                    }
+                    self.last_action = "backup:charging".into();
+                } else {
+                    self.last_action = "idle:backup_at_target".into();
+                }
+            }
+
+            BmsMode::DemandResponse {
+                base_mode,
+                dr_discharge_rate,
+                min_soc_during_dr,
+            } => {
+                let price = env
+                    .price_signal
+                    .electricity_price
+                    .unwrap_or(0.0);
+                let dr_active = self.is_dr_active(env, price);
+
+                if dr_active {
+                    let Some(soc) = self.read_soc(env) else {
+                        self.last_action = "idle:no_soc".into();
+                        return;
+                    };
+                    if soc > *min_soc_during_dr {
+                        self.emit(
+                            ControlSignal::PowerSetpoint {
+                                active_power_kw: -(dr_discharge_rate * self.max_discharge_kw),
+                                reactive_power_kvar: None,
+                            },
+                            out,
+                        );
+                        self.last_action = "dr:discharging".into();
+                    } else {
+                        self.last_action = "dr:soc_too_low".into();
+                    }
+                } else {
+                    self.evaluate_mode(base_mode, env, out);
+                }
+            }
+
+            BmsMode::Scheduled { windows } => {
+                let weekday = env.current_time.weekday();
+                let minute_of_day =
+                    (env.current_time.hour() * 60 + env.current_time.minute()) as u16;
+
+                if let Some(window) = find_matching_window(windows, weekday, minute_of_day) {
+                    match &window.action {
+                        BmsAction::Charge { rate_fraction } => {
+                            self.emit(
+                                ControlSignal::PowerSetpoint {
+                                    active_power_kw: rate_fraction * self.max_charge_kw,
+                                    reactive_power_kvar: None,
+                                },
+                                out,
+                            );
+                            self.last_action = "scheduled:charge".into();
+                        }
+                        BmsAction::Discharge { rate_fraction } => {
+                            self.emit(
+                                ControlSignal::PowerSetpoint {
+                                    active_power_kw: -(rate_fraction * self.max_discharge_kw),
+                                    reactive_power_kvar: None,
+                                },
+                                out,
+                            );
+                            self.last_action = "scheduled:discharge".into();
+                        }
+                        BmsAction::Idle => {
+                            self.last_action = "scheduled:idle".into();
+                        }
+                        BmsAction::Hold { target_soc } => {
+                            self.emit(
+                                ControlSignal::SOCTarget {
+                                    target_soc: *target_soc,
+                                    min_soc: None,
+                                    max_soc: None,
+                                },
+                                out,
+                            );
+                            self.last_action = "scheduled:hold".into();
+                        }
+                    }
+                } else {
+                    self.last_action = "idle:no_window".into();
+                }
+            }
+
+            BmsMode::StormWatch {
+                target_soc,
+                trigger,
+                base_mode,
+            } => {
+                let active = match trigger {
+                    StormWatchTrigger::ManualEnable => true,
+                    // TODO: integrate weather signal from env.weather
+                    StormWatchTrigger::WeatherSignal => env.weather.wind_speed_m_s > 25.0,
+                };
+
+                if active {
+                    self.emit(
+                        ControlSignal::SOCTarget {
+                            target_soc: *target_soc,
+                            min_soc: None,
+                            max_soc: None,
+                        },
+                        out,
+                    );
+                    self.last_action = "storm_watch:active".into();
+                } else {
+                    self.evaluate_mode(base_mode, env, out);
+                }
+            }
+        }
+    }
+
+    fn ensure_daily_prices(&mut self, env: &EnvironmentState) {
+        let day_ordinal0 = env.current_time.ordinal0();
+        if day_ordinal0 == self.current_day_ordinal0 {
+            return;
+        }
+
+        let Some(prices) = &self.price_schedule else {
+            return;
+        };
+
+        let day_of_year = day_ordinal0 as usize;
+        let start = day_of_year * self.steps_per_day;
+        let end = (start + self.steps_per_day).min(prices.len());
+
+        if start >= prices.len() || start >= end {
+            return;
+        }
+
+        let today_prices = &prices[start..end];
+        let sum: f64 = today_prices.iter().sum();
+        self.daily_avg_price = sum / today_prices.len() as f64;
+        self.current_day_ordinal0 = day_ordinal0;
+    }
+
+    fn recompute_tou_thresholds(
+        &mut self,
+        env: &EnvironmentState,
+        charge_percentile: f64,
+        discharge_percentile: f64,
+    ) {
+        self.ensure_daily_prices(env);
+
+        let Some(prices) = &self.price_schedule else {
+            return;
+        };
+
+        let day_of_year = env.current_time.ordinal0() as usize;
+        let start = day_of_year * self.steps_per_day;
+        let end = (start + self.steps_per_day).min(prices.len());
+
+        if start >= prices.len() || start >= end {
+            return;
+        }
+
+        let today_prices = &prices[start..end];
+        self.charge_price_threshold = compute_percentile(today_prices, charge_percentile);
+        self.discharge_price_threshold = compute_percentile(today_prices, discharge_percentile);
+    }
+
+    fn is_dr_active(&mut self, env: &EnvironmentState, current_price: f64) -> bool {
+        let battery_name = match &self.dispatch_target {
+            DispatchTarget::ByName(n) => &**n,
+            _ => return false,
+        };
+        if let Some(telemetry) = env.equipment_telemetry.get(battery_name) {
+            if let Some(&flag) = telemetry.0.get("dr_active") {
+                return flag > 0.0;
+            }
+        }
+
+        self.ensure_daily_prices(env);
+
+        if self.price_schedule.is_none() {
+            return false;
+        }
+
+        if self.daily_avg_price <= 0.0 {
+            return false;
+        }
+
+        current_price > 2.0 * self.daily_avg_price
+    }
+}
+
+impl Actor for BatteryManagementActor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        let mode = std::mem::take(&mut self.bms_mode);
+        self.evaluate_mode(&mode, env, out);
+        self.bms_mode = mode;
+    }
+}
+
+fn find_matching_window(
+    windows: &[BmsScheduleWindow],
+    weekday: chrono::Weekday,
+    minute_of_day: u16,
+) -> Option<&BmsScheduleWindow> {
+    windows
+        .iter()
+        .find(|w| w.time_window.contains(weekday, minute_of_day))
+}
+
+fn compute_percentile(prices: &[f64], percentile: f64) -> f64 {
+    if prices.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = prices.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx =
+        ((percentile * (sorted.len() - 1) as f64).round() as usize).min(sorted.len() - 1);
+    sorted[idx]
+}
+
+#[cfg(test)]
+mod tests {
+    use hares_types::{
+        BmsScheduleWindow, BmsTimeWindow, DayFilter, ElectricalSummary, PriceSignal, Telemetry,
+        WeatherState,
+    };
+
+    use super::*;
+    use crate::actor::testing::TestEnvBuilder;
+
+    fn set_soc(env: &mut EnvironmentState, battery_name: &str, soc: f64) {
+        let mut t = Telemetry::default();
+        t.0.insert("soc".to_string(), soc);
+        env.equipment_telemetry
+            .insert(battery_name.to_string(), t);
+    }
+
+    #[test]
+    fn bms_manual_no_dispatch() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::Manual,
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let env = TestEnvBuilder::new().build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bms_self_consumption_pv_surplus_charges() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 5.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+        assert_eq!(out[0].priority, PriorityTier::Schedule);
+    }
+
+    #[test]
+    fn bms_self_consumption_deficit_discharges() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 1.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::SelfConsumption {
+                enabled,
+                solar_only_charging,
+            } => {
+                assert!(*enabled);
+                assert!(!solar_only_charging);
+            }
+            other => panic!("expected SelfConsumption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_self_consumption_solar_only_blocks_grid() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: true,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 0.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::GridConnect { connected: false }
+        ));
+    }
+
+    #[test]
+    fn bms_tou_low_price_charges() {
+        let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(3)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.05),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(*active_power_kw > 0.0);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_tou_high_price_discharges() {
+        let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.30),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.8);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(*active_power_kw < 0.0);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_tou_respects_reserve_soc() {
+        let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.30),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.15);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bms_backup_reserve_charges_to_target() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::BackupReserve {
+                target_soc: 0.8,
+                charge_from_grid: true,
+                charge_rate_fraction: 0.5,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new().build();
+        set_soc(&mut env, "bat1", 0.3);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 2);
+        match &out[0].signal {
+            ControlSignal::SOCTarget {
+                target_soc,
+                max_soc,
+                ..
+            } => {
+                assert!((target_soc - 0.8).abs() < 1e-9);
+                assert_eq!(*max_soc, Some(0.8));
+            }
+            other => panic!("expected SOCTarget, got {other:?}"),
+        }
+        match &out[1].signal {
+            ControlSignal::PowerLimit {
+                max_power_kw,
+                ramp_rate_kw_per_s,
+            } => {
+                assert!((*max_power_kw - 2.5).abs() < 1e-9);
+                assert_eq!(*ramp_rate_kw_per_s, None);
+            }
+            other => panic!("expected PowerLimit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_backup_reserve_idle_above_target() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::BackupReserve {
+                target_soc: 0.8,
+                charge_from_grid: true,
+                charge_rate_fraction: 0.5,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new().build();
+        set_soc(&mut env, "bat1", 0.9);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bms_demand_response_active() {
+        let prices: Vec<f64> = vec![0.10; 24];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::DemandResponse {
+                base_mode: Box::new(BmsMode::Manual),
+                dr_discharge_rate: 0.8,
+                min_soc_during_dr: 0.1,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.50),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.6);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!((*active_power_kw - (-0.8 * 5.0)).abs() < 1e-9);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_demand_response_via_telemetry_flag() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::DemandResponse {
+                base_mode: Box::new(BmsMode::Manual),
+                dr_discharge_rate: 0.8,
+                min_soc_during_dr: 0.1,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new().build();
+        let mut t = Telemetry::default();
+        t.0.insert("soc".to_string(), 0.6);
+        t.0.insert("dr_active".to_string(), 1.0);
+        env.equipment_telemetry
+            .insert("bat1".to_string(), t);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(*active_power_kw < 0.0);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_demand_response_delegates_to_base() {
+        let prices: Vec<f64> = vec![0.10; 24];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::DemandResponse {
+                base_mode: Box::new(BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                }),
+                dr_discharge_rate: 0.8,
+                min_soc_during_dr: 0.1,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.10),
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 5.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+    }
+
+    #[test]
+    fn bms_scheduled_charge_window() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::Scheduled {
+                windows: vec![BmsScheduleWindow {
+                    time_window: BmsTimeWindow {
+                        day: DayFilter::Any,
+                        start_minute: 0,
+                        end_minute: 1440,
+                    },
+                    action: BmsAction::Charge { rate_fraction: 0.5 },
+                }],
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let env = TestEnvBuilder::new().hour(6).build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!((*active_power_kw - 2.5).abs() < 1e-9);
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_scheduled_no_matching_window() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::Scheduled {
+                windows: vec![BmsScheduleWindow {
+                    time_window: BmsTimeWindow {
+                        day: DayFilter::Weekends,
+                        start_minute: 0,
+                        end_minute: 360,
+                    },
+                    action: BmsAction::Charge { rate_fraction: 1.0 },
+                }],
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        // 2026-01-05 is a Monday (weekday), so weekend window won't match
+        let env = TestEnvBuilder::new().date(2026, 1, 5).hour(3).build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bms_storm_watch_active_full_charge() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::StormWatch {
+                target_soc: 1.0,
+                trigger: StormWatchTrigger::ManualEnable,
+                base_mode: Box::new(BmsMode::Manual),
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let env = TestEnvBuilder::new().build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::SOCTarget { target_soc, .. } => {
+                assert!((*target_soc - 1.0).abs() < 1e-9);
+            }
+            other => panic!("expected SOCTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_storm_watch_weather_signal_high_wind_activates() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::StormWatch {
+                target_soc: 1.0,
+                trigger: StormWatchTrigger::WeatherSignal,
+                base_mode: Box::new(BmsMode::Manual),
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let env = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 30.0,
+                ..Default::default()
+            })
+            .build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].signal, ControlSignal::SOCTarget { .. }));
+    }
+
+    #[test]
+    fn bms_storm_watch_inactive_delegates() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::StormWatch {
+                target_soc: 1.0,
+                trigger: StormWatchTrigger::WeatherSignal,
+                base_mode: Box::new(BmsMode::SelfConsumption {
+                    min_soc: 0.1,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                }),
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 5.0,
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 5.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        ));
+    }
+
+    #[test]
+    fn bms_tou_threshold_recomputed_only_on_day_boundary() {
+        let prices: Vec<f64> = (0..48).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(3)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.05),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        let charge_threshold_after_first = actor.charge_price_threshold;
+        let discharge_threshold_after_first = actor.discharge_price_threshold;
+
+        // Second call same day: thresholds unchanged
+        out.clear();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            (actor.charge_price_threshold - charge_threshold_after_first).abs() < 1e-15,
+        );
+        assert!(
+            (actor.discharge_price_threshold - discharge_threshold_after_first).abs() < 1e-15,
+        );
+    }
+
+    #[test]
+    fn bms_tou_soc_at_reserve_does_not_discharge() {
+        let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.30),
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.2);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bms_self_consumption_soc_at_min_does_not_discharge() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 1.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.1);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bms_backup_reserve_soc_at_target_idles() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::BackupReserve {
+                target_soc: 0.8,
+                charge_from_grid: true,
+                charge_rate_fraction: 1.0,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new().build();
+        set_soc(&mut env, "bat1", 0.8);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bms_no_soc_telemetry_emits_nothing() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 5.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(out.is_empty());
+        assert_eq!(actor.last_action(), "idle:no_soc");
+    }
+
+    #[test]
+    fn bms_tou_solar_only_blocks_grid_charging() {
+        let prices: Vec<f64> = (0..24).map(|h| if h < 8 { 0.05 } else { 0.30 }).collect();
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.2,
+                charge_threshold_percentile: 0.25,
+                discharge_threshold_percentile: 0.75,
+                solar_only_charging: true,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(prices),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(3)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.05),
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 0.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].signal,
+            ControlSignal::GridConnect { connected: false }
+        ));
+    }
+
+    #[test]
+    fn compute_percentile_empty_returns_zero() {
+        assert_eq!(compute_percentile(&[], 0.5), 0.0);
+    }
+
+    #[test]
+    fn bms_last_action_tracks_decisions() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::Manual,
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let env = TestEnvBuilder::new().build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+        assert_eq!(actor.last_action(), "idle");
+    }
+}

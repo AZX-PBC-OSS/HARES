@@ -9,8 +9,10 @@ pub struct TariffEvaluator {
     tariff: ElectricTariff,
     price_array: Vec<f64>,
     export_array: Vec<f64>,
-    /// Index into a deduplicated period name table per step.
+    /// Index into a deduplicated period name table per step (energy TOU).
     period_indices: Vec<u16>,
+    /// Index into period name table per step for demand TOU periods.
+    demand_period_indices: Vec<u16>,
     /// Precomputed civil month (1-12) for each timestep.
     months: Vec<u8>,
     period_name_table: Vec<String>,
@@ -18,6 +20,7 @@ pub struct TariffEvaluator {
     simulation_start: DateTime<Tz>,
     step_index: usize,
     billing_state: BillingState,
+    finished: bool,
 }
 
 impl TariffEvaluator {
@@ -47,6 +50,7 @@ impl TariffEvaluator {
         let mut price_array = Vec::with_capacity(num_steps);
         let mut export_array = Vec::with_capacity(num_steps);
         let mut period_indices = Vec::with_capacity(num_steps);
+        let mut demand_period_indices = Vec::with_capacity(num_steps);
         let mut months = Vec::with_capacity(num_steps);
 
         // Intern period names to avoid per-step String allocations.
@@ -130,9 +134,32 @@ impl TariffEvaluator {
                 ExportMode::None => 0.0,
             };
 
+            // Resolve demand TOU period for this timestep.
+            let demand_idx = if tariff.demand_tou_schedule.is_empty() {
+                period_idx
+            } else {
+                let mut matched = None;
+                for period in &tariff.demand_tou_schedule {
+                    if !period.season.contains_month(month) {
+                        continue;
+                    }
+                    for tw in &period.schedule {
+                        if tw.contains(weekday, minute_of_day) {
+                            matched = Some(&period.name);
+                            break;
+                        }
+                    }
+                    if matched.is_some() {
+                        break;
+                    }
+                }
+                matched.map(|n| intern(n)).unwrap_or(0)
+            };
+
             price_array.push(import_price);
             export_array.push(export_price);
             period_indices.push(period_idx);
+            demand_period_indices.push(demand_idx);
             months.push(month);
         }
 
@@ -157,12 +184,14 @@ impl TariffEvaluator {
             price_array,
             export_array,
             period_indices,
+            demand_period_indices,
             months,
             period_name_table,
             interval_seconds,
             simulation_start,
             step_index: 0,
             billing_state,
+            finished: false,
         })
     }
 
@@ -219,11 +248,21 @@ impl TariffEvaluator {
         dt_seconds: f64,
         current_time: DateTime<Tz>,
     ) -> Option<BillingPeriodSummary> {
+        if self.finished {
+            return None;
+        }
         let import_price = self.current_price();
         let export_price = self.current_export_price();
         let period_idx = self.period_indices[self.step_index];
-        self.billing_state
-            .update(net_power_kw, dt_seconds, import_price, export_price, period_idx);
+        let demand_period_idx = self.demand_period_indices[self.step_index];
+        self.billing_state.update(
+            net_power_kw,
+            dt_seconds,
+            import_price,
+            export_price,
+            period_idx,
+            demand_period_idx,
+        );
 
         let result = if current_time >= self.billing_state.period_end {
             let month = self.billing_state.period_start.month() as u8;
@@ -257,7 +296,9 @@ impl TariffEvaluator {
             None
         };
 
-        self.advance();
+        if !self.advance() {
+            self.finished = true;
+        }
         result
     }
 
@@ -269,16 +310,15 @@ impl TariffEvaluator {
             .filter(|dr| dr.season.contains_month(month))
             .map(|dr| {
                 let peak = match &dr.period_name {
-                    // Coincident/flat demand: use global peak
                     None => global_peak,
-                    // TOU demand: use peak for that specific period
                     Some(name) => {
                         let idx = self
                             .period_name_table
                             .iter()
                             .position(|n| n == name)
                             .unwrap_or(0) as u16;
-                        self.billing_state.peak_for_period(idx)
+                        self.billing_state
+                            .effective_peak_for_period(idx, &dr.ratchet)
                     }
                 };
                 peak * dr.rate_per_kw
@@ -304,6 +344,37 @@ impl TariffEvaluator {
 
     pub fn simulation_start(&self) -> DateTime<Tz> {
         self.simulation_start
+    }
+
+    /// Emit the final partial billing period. Call after the last `step()`.
+    pub fn finalize(&mut self) -> Option<BillingPeriodSummary> {
+        let bs = &self.billing_state;
+        if bs.cumulative_import_kwh() == 0.0
+            && bs.cumulative_export_kwh() == 0.0
+            && bs.peak_demand_kw() == 0.0
+        {
+            return None;
+        }
+        let month = bs.period_start().month() as u8;
+        let demand_charge = self.compute_demand_charge(month);
+        let days_in_period = (bs.period_end() - bs.period_start()).num_days() as f64;
+        let fixed_charge = self.tariff.fixed_charges.monthly_usd
+            + self.tariff.fixed_charges.daily_usd * days_in_period;
+        let energy_charge = bs.cumulative_energy_cost_usd();
+        let export_credit = bs.cumulative_export_credit_usd();
+
+        Some(BillingPeriodSummary::new(
+            bs.period_start(),
+            bs.period_end(),
+            energy_charge,
+            demand_charge,
+            fixed_charge,
+            export_credit,
+            self.tariff.minimum_charge,
+            bs.peak_demand_kw(),
+            bs.cumulative_import_kwh(),
+            bs.cumulative_export_kwh(),
+        ))
     }
 }
 

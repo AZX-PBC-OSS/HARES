@@ -158,10 +158,10 @@ fn build_equipment_column_map(
 struct ZoneColumnCaches {
     /// (ZoneId, column_index) for temperature columns, sorted by ZoneId.
     temp_columns: Vec<(ZoneId, usize)>,
-    /// (ZoneId, column_index) for per-zone infiltration columns (non-indoor only).
-    infiltration_columns: Vec<(ZoneId, usize)>,
-    /// (ZoneId, column_index) for per-zone interior LWR columns.
-    lwr_columns: Vec<(ZoneId, usize)>,
+    /// ZoneId → column_index for per-zone infiltration columns (non-indoor only).
+    infiltration_columns: HashMap<ZoneId, usize>,
+    /// ZoneId → column_index for per-zone interior LWR columns.
+    lwr_columns: HashMap<ZoneId, usize>,
     /// Zone IDs in sorted order for StepResult construction.
     sorted_zone_ids: Vec<ZoneId>,
     /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones where
@@ -181,8 +181,8 @@ fn build_zone_column_caches(
     sorted_zone_ids.sort();
 
     let mut temp_columns = Vec::new();
-    let mut infiltration_columns = Vec::new();
-    let mut lwr_columns = Vec::new();
+    let mut infiltration_columns = HashMap::new();
+    let mut lwr_columns = HashMap::new();
     let mut zone_env_indices = Vec::with_capacity(sorted_zone_ids.len());
     let mut zone_temp_col_indices = Vec::with_capacity(sorted_zone_ids.len());
 
@@ -198,12 +198,12 @@ fn build_zone_column_caches(
         if zone_id != indoor_zone {
             let inf_key = format!("Infiltration Heat Gain - {label} (W)");
             if let Some(&idx) = column_index.get(&inf_key) {
-                infiltration_columns.push((zone_id, idx));
+                infiltration_columns.insert(zone_id, idx);
             }
         }
         let lwr_key = format!("Radiation Heat Gain - {label} (W)");
         if let Some(&idx) = column_index.get(&lwr_key) {
-            lwr_columns.push((zone_id, idx));
+            lwr_columns.insert(zone_id, idx);
         }
 
         // Pre-compute the index of this zone in the zones slice for O(1) hot-loop access.
@@ -545,12 +545,14 @@ pub struct Dwelling {
     output_value_count: usize,
     /// Pre-allocated scratch buffer for `record_step`, reused each timestep.
     record_scratch: Vec<f64>,
+    /// Pre-allocated buffer for RFC 3339 timestamp formatting, reused each step.
+    timestamp_buf: String,
     /// Pre-resolved zone temperature column indices, sorted by ZoneId.
     zone_temp_columns: Vec<(ZoneId, usize)>,
     /// Pre-resolved per-zone infiltration column indices (non-indoor zones only).
-    zone_infiltration_columns: Vec<(ZoneId, usize)>,
+    zone_infiltration_columns: HashMap<ZoneId, usize>,
     /// Pre-resolved per-zone interior LWR column indices.
-    zone_lwr_columns: Vec<(ZoneId, usize)>,
+    zone_lwr_columns: HashMap<ZoneId, usize>,
     /// Pre-sorted zone ID order for StepResult, computed once at init.
     sorted_zone_ids: Vec<ZoneId>,
     /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones.
@@ -928,6 +930,7 @@ impl Dwelling {
             output_column_index,
             output_value_count,
             record_scratch,
+            timestamp_buf: String::with_capacity(32),
             zone_temp_columns: zone_caches.temp_columns,
             zone_infiltration_columns: zone_caches.infiltration_columns,
             zone_lwr_columns: zone_caches.lwr_columns,
@@ -1295,6 +1298,12 @@ impl Dwelling {
         &self.billing_summaries
     }
 
+    /// Returns a reference to the tariff evaluator, if one is set.
+    #[must_use]
+    pub fn tariff_evaluator(&self) -> Option<&TariffEvaluator> {
+        self.tariff_evaluator.as_ref()
+    }
+
     /// Applies a grid voltage override through the environment manager.
     pub fn set_grid_voltage(&mut self, voltage_pu: f64) {
         self.environment.set_grid_override(GridState {
@@ -1631,15 +1640,21 @@ impl Dwelling {
             .collect_and_solve(&self.equipment, &self.thermal_solver);
 
         // Populate equipment telemetry snapshot for actors to read.
-        // Reuses existing HashMap capacity — only clones Telemetry internals
-        // (small hashmaps of ~10-20 f64 values per equipment).
-        self.latest_env.equipment_telemetry.clear();
+        // One-step lag by design: telemetry reflects equipment state after
+        // control dispatch (Step 1b) but before physics simulation (Step 3).
+        // This is the standard explicit-integration pattern — actors observe
+        // the previous step's physics output.
         if !self.actors.is_empty() {
             for eq in &self.equipment {
                 let desc = eq.descriptor();
-                self.latest_env
-                    .equipment_telemetry
-                    .insert(desc.name.clone(), eq.telemetry().clone());
+                let telemetry = eq.telemetry();
+                if let Some(existing) = self.latest_env.equipment_telemetry.get_mut(&desc.name) {
+                    existing.clone_from(&telemetry);
+                } else {
+                    self.latest_env
+                        .equipment_telemetry
+                        .insert(desc.name.clone(), telemetry.clone());
+                }
             }
         }
 
@@ -1821,8 +1836,16 @@ impl Dwelling {
         let thermal_update = self
             .thermal_solver
             .resolve(&self.ports, &self.latest_env, dt);
-        // Upsert thermal first so humidity/electrical solvers see updated thermal state.
-        self.latest_env.upsert_domain(thermal_update.clone());
+
+        // Apply zone temps and capture observer data while we still have the borrow.
+        apply_thermal_update_to_zones(&mut self.latest_env, &thermal_update);
+
+        // Upsert thermal domain so humidity/electrical solvers see updated state.
+        // Zone temperatures are already applied above; the upsert stores the full
+        // DomainUpdate in custom_domains for solvers that read it (humidity).
+        #[cfg(feature = "observe")]
+        let thermal_for_observer = thermal_update.clone();
+        self.latest_env.upsert_domain(thermal_update);
 
         let humidity_update = self
             .humidity_solver
@@ -1832,15 +1855,12 @@ impl Dwelling {
             .resolve(&self.ports, &self.latest_env, dt);
         let fluid_update = self.fluid_solver.resolve(&self.ports, &self.latest_env, dt);
 
-        // Apply zone updates and capture observer data before upserting the
-        // remaining domain updates, so we can pass ownership without cloning.
-        apply_thermal_update_to_zones(&mut self.latest_env, &thermal_update);
         apply_humidity_update_to_zones(&mut self.latest_env, &humidity_update);
 
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
             obs_phases.post_solvers = Some(observer_capture::capture_solvers(
-                &thermal_update,
+                &thermal_for_observer,
                 &humidity_update,
                 &electrical_update,
                 &fluid_update,
@@ -1879,7 +1899,7 @@ impl Dwelling {
                 .max(current_process_hwm_kb());
         }
 
-        self.check_invariants(&thermal_update, dt)?;
+        self.check_invariants(dt)?;
 
         for (i, entry) in self.zone_temp_scratch.iter_mut().enumerate() {
             let env_idx = self.zone_env_indices[i];
@@ -2072,30 +2092,24 @@ impl Dwelling {
             }
         }
 
-        // Per-zone infiltration columns (pre-resolved, non-indoor only).
         for &(zone, value) in &gains.infiltration_by_zone {
-            if let Some(&(_, idx)) = self
-                .zone_infiltration_columns
-                .iter()
-                .find(|(z, _)| *z == zone)
-            {
+            if let Some(&idx) = self.zone_infiltration_columns.get(&zone) {
                 row[idx] = value;
             }
         }
 
-        // Per-zone interior LWR columns (pre-resolved).
         for &(zone, value) in &gains.interior_lwr_by_zone {
-            if let Some(&(_, idx)) = self
-                .zone_lwr_columns
-                .iter()
-                .find(|(z, _)| *z == zone)
-            {
+            if let Some(&idx) = self.zone_lwr_columns.get(&zone) {
                 row[idx] = value;
             }
         }
 
+        self.timestamp_buf.clear();
+        use std::fmt::Write;
+        write!(&mut self.timestamp_buf, "{}", step.timestamp.format("%+"))
+            .expect("write to String is infallible");
         self.recorder
-            .push_row(&step.timestamp.to_rfc3339(), row)
+            .push_row(&self.timestamp_buf, row)
             .map_err(|err| HaresError::Io(format!("record push failed: {err}")))
     }
 
@@ -2104,12 +2118,11 @@ impl Dwelling {
     /// Active when `cfg(any(debug_assertions, feature = "check_invariants"))`.
     /// Returns `Err(HaresError::InvariantViolation { .. })` on the first violation;
     /// the engine then quarantines this dwelling rather than propagating a panic.
-    fn check_invariants(&self, thermal_update: &DomainUpdate, dt: StdDuration) -> Result<()> {
+    fn check_invariants(&self, dt: StdDuration) -> Result<()> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             let checker = InvariantChecker::new();
 
-            // Temporal sanity: dt must be positive and finite.
             let dt_s = dt.as_secs_f64();
             if !dt_s.is_finite() || dt_s <= 0.0 {
                 return Err(HaresError::InvariantViolation {
@@ -2119,11 +2132,12 @@ impl Dwelling {
                 });
             }
 
-            // Zone temperature bounds.
-            let zone_temps_c: Vec<f64> = thermal_update
-                .zone_temperatures_c
+            // Zone temperature bounds (read from already-updated zones).
+            let zone_temps_c: Vec<f64> = self
+                .latest_env
+                .zones
                 .iter()
-                .map(|&(_, t)| t)
+                .map(|z| z.temperature_c)
                 .collect();
             checker.check_temperatures(&zone_temps_c, &[])?;
 

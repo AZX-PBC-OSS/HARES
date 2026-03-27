@@ -47,7 +47,7 @@ pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f
         0.0
     } else {
         let span = temp_max - temp_min;
-        if span <= f64::EPSILON {
+        if span <= 1e-12 {
             0.0
         } else {
             (temp_c - temp_min) / span
@@ -185,6 +185,7 @@ pub fn load_postcard<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::linear_temp_derate;
     use std::borrow::Cow;
     use std::time::Duration;
 
@@ -503,5 +504,40 @@ mod tests {
     fn default_reset_u_neg_table_returns_err() {
         let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
         assert!(eq.reset_u_neg_table().is_err());
+    }
+
+    #[test]
+    fn linear_temp_derate_at_min_returns_zero() {
+        assert_eq!(linear_temp_derate(-20.0, -20.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn linear_temp_derate_below_min_returns_zero() {
+        assert_eq!(linear_temp_derate(-30.0, -20.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn linear_temp_derate_at_max_returns_one() {
+        assert_eq!(linear_temp_derate(10.0, -20.0, 10.0), 1.0);
+    }
+
+    #[test]
+    fn linear_temp_derate_above_max_returns_one() {
+        assert_eq!(linear_temp_derate(50.0, -20.0, 10.0), 1.0);
+    }
+
+    #[test]
+    fn linear_temp_derate_midpoint() {
+        assert!((linear_temp_derate(-5.0, -20.0, 10.0) - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn linear_temp_derate_quarter_point() {
+        assert!((linear_temp_derate(-12.5, -20.0, 10.0) - 0.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn linear_temp_derate_degenerate_span_returns_zero() {
+        assert_eq!(linear_temp_derate(5.0, 10.0, 10.0), 0.0);
     }
 }

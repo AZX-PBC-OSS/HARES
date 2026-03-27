@@ -92,14 +92,16 @@ impl Actor for SolverFeedbackActor {
 
     fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         for (idx, capacity_w) in self.pending.drain(..) {
-            debug_assert!(
-                idx < self.dispatch_targets.len(),
-                "dispatch_targets not synced with equipment (idx={}, len={})",
-                idx,
-                self.dispatch_targets.len()
-            );
+            let Some(target) = self.dispatch_targets.get(idx) else {
+                tracing::warn!(
+                    idx,
+                    len = self.dispatch_targets.len(),
+                    "dispatch_targets not synced with equipment"
+                );
+                continue;
+            };
             out.push(DispatchRequest {
-                target: self.dispatch_targets[idx].clone(),
+                target: target.clone(),
                 signal: ControlSignal::IdealCapacity { capacity_w },
                 priority: PriorityTier::Schedule,
             });
