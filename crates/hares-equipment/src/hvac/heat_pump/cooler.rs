@@ -34,12 +34,14 @@ impl HpCooler {
     fn build(config: EquipmentConfig, equipment_type: &'static str, is_mshp: bool) -> Self {
         let mut inner = AirConditioner::new(config.clone());
         if is_mshp {
-            inner.core.hvac.equipment_type =
-                crate::hvac::hvac_core::HvacEquipmentType::MiniSplitCool;
+            let mshp_type = crate::hvac::hvac_core::HvacEquipmentType::MiniSplitCool;
+            inner.core.hvac.equipment_type = mshp_type;
+            // Ductless mini-split: 312 CFM/ton (no duct back-pressure).
+            use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+            inner.core.hvac.airflow_m3_s_per_w =
+                mshp_type.default_airflow_cfm_per_ton() * CFM_TO_M3_S / W_PER_TON;
             // Apply MSHP crankcase defaults at construction so that step() uses
             // correct values (15 W / 0 °C) even if init() has not been called yet.
-            // init() re-applies these after re-reading config, so there is no
-            // double-override risk.
             inner.set_crankcase_defaults_if_unconfigured(
                 &config,
                 MSHP_CRANKCASE_HEATER_KW,

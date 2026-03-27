@@ -49,9 +49,9 @@ pub enum HvacEquipmentType {
     AshpHeatPumpOnly,
     AshpHeatPumpAux,
     MiniSplitHeat,
-    /// Central AC or ASHP cooling coil. Uses 312 CFM/ton airflow default.
+    /// Central AC or ASHP cooling coil. Uses 400 CFM/ton (RESNET HERS Addendum 82).
     AcCooler,
-    /// MSHP cooling coil. Uses 312 CFM/ton airflow default; Cd=0 (no cycling penalty).
+    /// MSHP cooling coil. Uses 312 CFM/ton (ductless, no duct static); Cd=0 (no cycling penalty).
     MiniSplitCool,
     Baseboard,
     Other,
@@ -59,12 +59,17 @@ pub enum HvacEquipmentType {
 
 /// Default airflow [CFM/ton] by equipment category.
 ///
-/// Source chain: ResStock `hvac.rb:2623` → OCHRE `HVAC.py:142`.
-/// OCHRE selects 350 for heaters (`is_heater=True`) and 312 for coolers.
-/// EnergyPlus valid range: 300–450 CFM/ton (0.00004027–0.00006041 m³/s/W).
-/// Ref: EnergyPlus I/O Reference, Coil:Cooling:DX:SingleSpeed.
+/// Central AC / ASHP cooling: 400 CFM/ton per RESNET HERS Addendum 82
+/// (also OpenStudio-HPXML `hvac.rb` `RatedCFMPerTon = 400.0`).
+/// MSHP (ductless): 312 CFM/ton — no duct back-pressure, compact coil geometry.
+/// Room/window AC: 320 CFM/ton — manufacturer data median across 5+ products
+/// (range 248–338, AHRI 310/380 test conditions, measured fan-driven airflow).
+/// Heating equipment: 350 CFM/ton per OCHRE/ResStock convention.
+/// EnergyPlus valid range: 300–450 CFM/ton (Coil:Cooling:DX:SingleSpeed I/O Ref).
 const AIRFLOW_HEATING_CFM_PER_TON: f64 = 350.0;
-const AIRFLOW_COOLING_CFM_PER_TON: f64 = 312.0;
+const AIRFLOW_CENTRAL_AC_CFM_PER_TON: f64 = 400.0;
+const AIRFLOW_MSHP_COOLING_CFM_PER_TON: f64 = 312.0;
+pub(crate) const AIRFLOW_ROOM_AC_CFM_PER_TON: f64 = 320.0;
 
 impl HvacEquipmentType {
     pub fn default_supply_air_temp_c(self, outdoor_temp_c: f64) -> f64 {
@@ -82,11 +87,13 @@ impl HvacEquipmentType {
 
     /// Default airflow rate [CFM/ton] for this equipment category.
     ///
-    /// Coolers (central AC, ASHP cooling coil, MSHP cooling coil) use 312;
-    /// all heating equipment uses 350. Ref: OCHRE `HVAC.py:142`.
+    /// Central AC / ASHP: 400 (RESNET HERS Addendum 82).
+    /// MSHP cooling: 312 (ductless, no duct static pressure).
+    /// Heating equipment: 350 (OCHRE/ResStock convention).
     pub fn default_airflow_cfm_per_ton(self) -> f64 {
         match self {
-            Self::AcCooler | Self::MiniSplitCool => AIRFLOW_COOLING_CFM_PER_TON,
+            Self::AcCooler => AIRFLOW_CENTRAL_AC_CFM_PER_TON,
+            Self::MiniSplitCool => AIRFLOW_MSHP_COOLING_CFM_PER_TON,
             Self::GasFurnace
             | Self::ElectricFurnace
             | Self::AshpHeatPumpOnly
@@ -1031,8 +1038,8 @@ mod tests {
             .raw_config
             .insert("AirflowDefectRatio".to_string(), 0.8.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
-        // 312 CFM/ton * 0.8 defect ratio = 249.6 CFM/ton
-        let expected = 249.6 * CFM_TO_M3_S / W_PER_TON;
+        // 400 CFM/ton * 0.8 defect ratio = 320 CFM/ton
+        let expected = 320.0 * CFM_TO_M3_S / W_PER_TON;
         assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
     }
 

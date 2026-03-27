@@ -358,8 +358,14 @@ impl CoolingCore {
             self.hvac.speed_control_mode = SpeedControlMode::SingleSpeed;
             self.hvac.duct_dse = 1.0;
             self.hvac.duct_zone_id = None;
+            // Window/room AC fans deliver less airflow than ducted central AC blowers.
+            // 320 CFM/ton from manufacturer data median (AHRI 310/380 conditions).
+            if config.get_f64("airflow_cfm_per_ton").is_none() {
+                use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+                self.hvac.airflow_m3_s_per_w =
+                    super::hvac_core::AIRFLOW_ROOM_AC_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
+            }
             // Room AC Cd = 0.22 (AHRI test data for window/through-wall units).
-            // Only apply when no explicit Cd key is present in config.
             let explicit_cd = config
                 .get_f64("startup_cd")
                 .or_else(|| config.get_f64("cooling_cd"))
@@ -1352,32 +1358,39 @@ mod tests {
         assert!(restored.telemetry().get("electric_kw").unwrap_or(0.0) > 0.0);
     }
 
+    /// Central AC uses 400 CFM/ton per RESNET HERS Addendum 82.
     #[test]
-    fn ac_uses_ac_cooler_equipment_type_with_312_cfm_per_ton_default() {
-        use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+    fn ac_uses_400_cfm_per_ton_default() {
+        use uom::si::f64::{Energy, VolumeRate};
+        use uom::si::energy::{btu_it, joule};
+        use uom::si::volume_rate::{cubic_foot_per_minute, cubic_meter_per_second};
+
+        let airflow_m3_s = VolumeRate::new::<cubic_foot_per_minute>(400.0)
+            .get::<cubic_meter_per_second>();
+        let w_per_ton = Energy::new::<btu_it>(12_000.0).get::<joule>() / 3600.0;
+        let expected = airflow_m3_s / w_per_ton;
+
         let cfg = ac_config();
         let eq = AirConditioner::new(cfg.clone());
         assert_eq!(
             eq.core.hvac.equipment_type,
             super::super::hvac_core::HvacEquipmentType::AcCooler,
-            "AirConditioner must use AcCooler equipment type"
         );
-        // Construction-time airflow default is 312 CFM/ton.
-        let expected = 312.0 * CFM_TO_M3_S / W_PER_TON;
+        // Tolerance 1e-9: uom ft³ constant (0.02831685) differs from NIST-exact
+        // (0.028316846592) by ~3 ppm; implementation uses the NIST constant.
         assert!(
-            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
-            "AcCooler default airflow must be 312 CFM/ton, got {} m3/s/W",
+            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
+            "Central AC default airflow must be 400 CFM/ton, got {} m3/s/W",
             eq.core.hvac.airflow_m3_s_per_w
         );
 
-        // init() preserves the 312 default when no explicit airflow configured.
-        let mut eq = AirConditioner::new(cfg.clone());
         let environment = env(27.0, 0.010, 19.0, 35.0);
+        let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment)
-            .expect("init must succeed with 312 CFM/ton default");
+            .expect("init must succeed");
         assert!(
-            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
-            "init() must preserve 312 CFM/ton default, got {} m3/s/W",
+            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
+            "init() must preserve 400 CFM/ton default, got {} m3/s/W",
             eq.core.hvac.airflow_m3_s_per_w
         );
     }
@@ -1520,36 +1533,31 @@ mod tests {
         );
     }
 
-    /// OCHRE uses 312 CFM/ton for all cooler types including window units.
+    /// Room AC uses 320 CFM/ton — manufacturer data median across window units
+    /// (range 248–338, AHRI 310/380 test conditions). Lower than central AC (400)
+    /// because window AC fans are compact cross-flow blowers with no duct back-pressure.
     #[test]
     fn room_ac_airflow_rate() {
         use uom::si::f64::{Energy, VolumeRate};
         use uom::si::energy::{btu_it, joule};
         use uom::si::volume_rate::{cubic_foot_per_minute, cubic_meter_per_second};
 
-        let airflow_m3_s = VolumeRate::new::<cubic_foot_per_minute>(312.0)
+        let airflow_m3_s = VolumeRate::new::<cubic_foot_per_minute>(320.0)
             .get::<cubic_meter_per_second>();
-        // 1 ton of refrigeration = 12 000 BTU(IT)/h
         let w_per_ton = Energy::new::<btu_it>(12_000.0).get::<joule>() / 3600.0;
         let expected = airflow_m3_s / w_per_ton;
 
         let mut cfg = ac_config();
         cfg.ochre_class = "Room AC".to_string();
 
-        let eq = RoomAC::new(cfg.clone());
-        assert!(
-            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
-            "RoomAC construction-time airflow must be 312 CFM/ton, got {} m3/s/W",
-            eq.core.hvac.airflow_m3_s_per_w
-        );
-
+        // Construction-time default is 400 (AcCooler); init() overrides to 320.
         let environment = env(27.0, 0.010, 19.0, 35.0);
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &environment)
-            .expect("init must succeed with 312 CFM/ton default");
+            .expect("init must succeed");
         assert!(
-            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
-            "init() must preserve 312 CFM/ton default for RoomAC, got {} m3/s/W",
+            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
+            "RoomAC airflow must be 320 CFM/ton after init(), got {} m3/s/W",
             eq.core.hvac.airflow_m3_s_per_w
         );
     }

@@ -253,6 +253,11 @@ impl StateSpaceModel {
     /// Constructs from continuous-time matrices using Crank-Nicolson discretization.
     ///
     /// Pre-computes M = I - dt/2·A_c (LU-factored), N = I + dt/2·A_c, B_eff = dt·B_c.
+    /// Constructs from continuous A_c, B_c using ZOH (matrix exponential) discretization.
+    ///
+    /// ZOH is unconditionally stable and matches OCHRE's approach. The step becomes:
+    /// `x[k+1] = A_d·x[k] + B_d·u[k]` with `M = I` (no implicit solve needed for the
+    /// base step). Semi-implicit infiltration coupling adds to M and N via the coupling API.
     pub fn from_continuous(
         a_c: &DMatrix<f64>,
         b_c: &DMatrix<f64>,
@@ -267,29 +272,18 @@ impl StateSpaceModel {
         let n = a_c.nrows();
         let (c, d) = build_output_matrices(n, b_c.ncols(), output_mapping)?;
 
+        let (a_d, b_d) = discretize_auto(a_c, b_c, dt)?;
+
         let eye = DMatrix::<f64>::identity(n, n);
-        let half_dt_a = a_c * (dt / 2.0);
-        let m = &eye - &half_dt_a;
-        let n_mat = &eye + &half_dt_a;
-        let b_eff = b_c * dt;
 
-        let m_mat = m.clone();
-        let m_lu = m.lu();
-        if m_lu.solve(&eye).is_none() {
-            return Err(StateSpaceError::ImplicitMatrixSingular);
-        }
-
-        // Stability check on equivalent A_d = M⁻¹·N
+        // Stability check on discrete A_d
         let max_discrete_eigenvalue_magnitude;
         if n <= 20 {
-            let a_d_equiv = m_lu
-                .solve(&n_mat)
-                .ok_or(StateSpaceError::ImplicitMatrixSingular)?;
-            let eigs = a_d_equiv.complex_eigenvalues();
+            let eigs = a_d.complex_eigenvalues();
             max_discrete_eigenvalue_magnitude =
                 Some(eigs.iter().map(|l| l.norm()).fold(0.0_f64, f64::max));
             let a_c_singular = is_singular(a_c);
-            if let Err(stability) = eigenvalue_check(a_c, &a_d_equiv) {
+            if let Err(stability) = eigenvalue_check(a_c, &a_d) {
                 let discrete_marginally_stable =
                     eigs.iter().all(|lambda| lambda.norm() <= 1.0 + 1e-10);
                 if !(a_c_singular && discrete_marginally_stable) {
@@ -312,13 +306,15 @@ impl StateSpaceModel {
             max_discrete_eigenvalue_magnitude = None;
         }
 
+        let m_lu = eye.clone().lu();
+
         Ok(Self {
             a_c: Some(a_c.clone()),
             b_c: Some(b_c.clone()),
-            m_mat,
+            m_mat: eye,
             m_lu,
-            n_mat: n_mat.into_owned(),
-            b_eff,
+            n_mat: a_d,
+            b_eff: b_d,
             c,
             d,
             max_discrete_eigenvalue_magnitude,
@@ -1431,9 +1427,9 @@ mod tests {
     }
 
     #[test]
-    fn cn_no_overshoot_where_explicit_overshoots() {
+    fn zoh_no_overshoot_where_explicit_overshoots() {
         // Massively stiff system: τ=0.1s with dt=60s (dt/τ=600)
-        // Explicit Euler would wildly overshoot; CN (A-stable) stays bounded.
+        // Explicit Euler would wildly overshoot; ZOH (exact) decays to zero.
         let a_c = DMatrix::from_row_slice(1, 1, &[-10.0]);
         let b_c = DMatrix::from_row_slice(1, 1, &[10.0]);
         let dt = 60.0;
@@ -1444,28 +1440,24 @@ mod tests {
             input_to_output: vec![],
         };
 
-        let cn_model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
-            .expect("CN model should build for stiff system");
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping)
+            .expect("ZOH model should build for stiff system");
 
         let x0 = DVector::from_row_slice(&[20.0]);
         let u = DVector::from_row_slice(&[0.0]);
-        let x_cn = cn_model.step(&x0, &u);
+        let x_next = model.step(&x0, &u);
 
-        // CN is A-stable: the discrete eigenvalue magnitude is always ≤ 1,
-        // so the state magnitude never exceeds the initial condition.
-        // (CN does allow sign oscillation for very stiff systems, unlike L-stable
-        // methods, but the amplitude is strictly bounded.)
+        // ZOH is exact: exp(-10*60) ≈ 0, so the state decays to near zero.
+        // No sign oscillation (unlike CN), no overshoot (unlike explicit Euler).
         assert!(
-            x_cn[0].abs() <= 20.0,
-            "CN magnitude should not exceed initial: |T|={}, expected ≤ 20",
-            x_cn[0].abs()
+            x_next[0].abs() <= 20.0,
+            "ZOH magnitude should not exceed initial: |T|={}, expected ≤ 20",
+            x_next[0].abs()
         );
-        // Bilinear transform maps eigenvalue -10 with dt=60 to (1-300)/(1+300) ≈ -0.993,
-        // so the first step must produce a negative value (sign oscillation for extreme stiffness).
         assert!(
-            x_cn[0] < 0.0,
-            "CN step must flip sign for extreme stiffness (dt/tau=600): got {}",
-            x_cn[0]
+            x_next[0].abs() < 0.01,
+            "ZOH should decay to near zero for extreme stiffness: got {}",
+            x_next[0]
         );
 
         // Explicit ZOH: for this extreme stiffness, discretize_zoh may succeed

@@ -331,7 +331,7 @@ pub(super) fn coil_bypass_factor(
     }
 
     // Outlet RH > 100% is physically infeasible but can occur at low airflow
-    // rates (e.g. 312 CFM/ton with SHR=0.75 at AHRI rated conditions).
+    // rates (e.g. 320 CFM/ton for room AC with SHR=0.75 at AHRI rated conditions).
     // OCHRE prints a warning but continues rather than aborting; we match
     // that error-recovery choice.
     // Ref: vendors/OCHRE/ochre/utils/equipment.py:839

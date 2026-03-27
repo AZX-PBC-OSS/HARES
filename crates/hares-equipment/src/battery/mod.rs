@@ -985,7 +985,7 @@ impl Equipment for Battery {
         // Default (Franklin-style): fires when charge is desired but cells are cold.
         // With heater_on_discharge (Tesla-style): also fires when discharge is
         // desired but blocked/derated by cold temps, e.g. grid outage at -25 C.
-        let wants_power = wants_charge || (wants_discharge && self.heater_on_discharge);
+        let _wants_power = wants_charge || (wants_discharge && self.heater_on_discharge);
         // Heater activates based on cell temperature alone — it protects cells
         // from freezing regardless of charge/discharge demand. Tesla PW3 Heat
         // Mode and similar systems run proactively to maintain cells above the

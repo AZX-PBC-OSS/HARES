@@ -84,6 +84,9 @@ impl ThermalSolver {
                 continue;
             };
             let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
+            // Backward Euler for infiltration coupling: add full d to M diagonal
+            // and cancel the N-side subtraction via forcing. This is unconditionally
+            // stable and matches EnergyPlus's fully-implicit infiltration treatment.
             let d = inf.h_inf_w_k * b_coeff;
             let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));
