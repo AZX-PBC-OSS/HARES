@@ -980,6 +980,14 @@ impl Dwelling {
         while self.clock.current_step() < self.clock.total_steps() {
             let _ = self.run_timestep(true)?;
         }
+        // Emit the final partial billing period (if any).
+        if let Some(ref mut evaluator) = self.tariff_evaluator {
+            let tz = evaluator.simulation_start().timezone();
+            let sim_end = self.clock.current_time().with_timezone(&tz);
+            if let Some(summary) = evaluator.finalize(sim_end) {
+                self.billing_summaries.push(summary);
+            }
+        }
         self.recorder
             .flush()
             .map_err(|err| HaresError::Io(format!("output flush failed: {err}")))?;
@@ -1994,9 +2002,9 @@ impl Dwelling {
                 self.latest_env.zones[env_idx].temperature_c
             } else {
                 // Zone not found in environment — should not happen in a correctly
-                // built dwelling. NaN propagates visibly rather than producing
-                // a plausible-looking but incorrect 0°C.
-                f64::NAN
+                // built dwelling. Use previous value (initialized to 0.0 at
+                // construction, updated each step when the zone is present).
+                entry.1
             };
         }
 

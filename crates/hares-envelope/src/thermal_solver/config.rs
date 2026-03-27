@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use hares_physics::solar::GlazingCurve;
 use hares_types::ZoneId;
 use thiserror::Error;
 
@@ -146,10 +147,11 @@ impl NaturalVentilationConfig {
 ///
 /// Used by the thermal solver to apply angle-of-incidence (IAM) corrections to
 /// window solar gains, following the EnergyPlus angular transmittance model.
-/// Construct the matching [`GlazingCurve`] via [`GlazingCurve::from_u_shgc`].
 ///
 /// Pre-computed `transmittance` and `radiation_frac` decompose SHGC into
 /// transmitted and absorbed fractions per EnergyPlus Steps 4–5.
+/// The `glazing_curve` is precomputed from `u_factor_w_m2_k` and `shgc` at
+/// construction time to avoid recomputing it every timestep.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowSolarProperties {
     /// Summer effective SHGC at normal incidence (SHGC × summer shading coefficient).
@@ -166,6 +168,8 @@ pub struct WindowSolarProperties {
     pub winter_transmittance: f64,
     /// Inward-flowing fraction of absorbed solar [dimensionless].
     pub radiation_frac: f64,
+    /// Precomputed EnergyPlus glazing curve from `u_factor_w_m2_k` and `shgc`.
+    pub glazing_curve: GlazingCurve,
 }
 
 /// One interior surface participating in intra-zone longwave radiation exchange.

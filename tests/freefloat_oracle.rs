@@ -31,22 +31,22 @@ mod tests {
     }
 
     fn beopt_freefloat_config(scenario: &str, output_path: PathBuf) -> DwellingConfig {
-        // All scenarios use Denver local time (UTC-7, MST year-round for TMY3).
-        // start_time is expressed in UTC so FixedOffset::east_opt(0) = UTC.
-        let utc = FixedOffset::east_opt(0).expect("UTC offset");
-        // Dwelling::from_preparsed preserves wall-clock components and applies
-        // the EPW timezone. Pass LOCAL time (Denver noon = 12:00), not UTC.
+        // Both HARES and OCHRE treat timestamps as local time internally —
+        // .hour() is used directly for schedule evaluation regardless of offset.
+        // We use Denver's real offset for clarity, but only the wall-clock
+        // digits (hour, minute) actually affect behavior.
+        let denver = FixedOffset::west_opt(7 * 3600).expect("Denver UTC-7 offset");
         let (start_time, duration) = match scenario {
             "beopt_spring_72h" => (
-                utc.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),
+                denver.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),
                 Duration::hours(72),
             ),
             "beopt_summer_48h" => (
-                utc.with_ymd_and_hms(2019, 7, 15, 12, 0, 0).unwrap(),
+                denver.with_ymd_and_hms(2019, 7, 15, 12, 0, 0).unwrap(),
                 Duration::hours(48),
             ),
             "beopt_winter_48h" => (
-                utc.with_ymd_and_hms(2019, 1, 15, 12, 0, 0).unwrap(),
+                denver.with_ymd_and_hms(2019, 1, 15, 12, 0, 0).unwrap(),
                 Duration::hours(48),
             ),
             other => panic!("unknown freefloat scenario: {other}"),

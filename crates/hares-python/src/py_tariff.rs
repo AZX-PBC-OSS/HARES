@@ -182,6 +182,9 @@ impl PyElectricTariff {
     pub fn from_json(_cls: &Bound<'_, PyType>, json_str: &str) -> PyResult<Self> {
         let tariff: ElectricTariff = serde_json::from_str(json_str)
             .map_err(|e| PyValueError::new_err(format!("JSON parse error: {e}")))?;
+        tariff
+            .validate()
+            .map_err(|e| PyValueError::new_err(format!("tariff validation failed: {e}")))?;
         Ok(Self { inner: tariff })
     }
 
@@ -192,6 +195,9 @@ impl PyElectricTariff {
             .map_err(|e| PyValueError::new_err(format!("serialization error: {e}")))?;
         let tariff: ElectricTariff = serde_json::from_str(&json_str)
             .map_err(|e| PyValueError::new_err(format!("deserialization error: {e}")))?;
+        tariff
+            .validate()
+            .map_err(|e| PyValueError::new_err(format!("tariff validation failed: {e}")))?;
         Ok(Self { inner: tariff })
     }
 
@@ -250,6 +256,7 @@ pub struct PyTariffBuilder {
     minimum_charge: Option<f64>,
     billing_cycle: BillingCycle,
     seasonal_split: Option<SeasonalSplit>,
+    demand_window_minutes: u32,
 }
 
 impl PyTariffBuilder {
@@ -266,6 +273,7 @@ impl PyTariffBuilder {
             minimum_charge: None,
             billing_cycle: BillingCycle::Monthly,
             seasonal_split: None,
+            demand_window_minutes: 15,
         }
     }
 }
@@ -380,6 +388,21 @@ impl PyTariffBuilder {
             daily_usd,
         };
         slf
+    }
+
+    #[pyo3(signature = (minutes=15))]
+    fn set_demand_window_minutes(
+        slf: Py<Self>,
+        py: Python<'_>,
+        minutes: u32,
+    ) -> PyResult<Py<Self>> {
+        if minutes < 5 {
+            return Err(PyValueError::new_err(format!(
+                "demand_window_minutes must be >= 5, got {minutes}"
+            )));
+        }
+        slf.borrow_mut(py).demand_window_minutes = minutes;
+        Ok(slf)
     }
 
     fn set_export_net_metering(slf: Py<Self>, py: Python<'_>) -> Py<Self> {
@@ -501,7 +524,7 @@ impl PyTariffBuilder {
             minimum_charge: self.minimum_charge,
             billing_cycle: self.billing_cycle,
             seasonal_split: self.seasonal_split,
-            demand_window_minutes: 15,
+            demand_window_minutes: self.demand_window_minutes,
         };
         tariff
             .validate()
@@ -539,6 +562,9 @@ impl PyGasTariff {
             .map_err(|e| PyValueError::new_err(format!("serialization error: {e}")))?;
         let tariff: GasTariff = serde_json::from_str(&json_str)
             .map_err(|e| PyValueError::new_err(format!("deserialization error: {e}")))?;
+        tariff
+            .validate()
+            .map_err(|e| PyValueError::new_err(format!("gas tariff validation failed: {e}")))?;
         Ok(Self { inner: tariff })
     }
 
@@ -546,6 +572,9 @@ impl PyGasTariff {
     pub fn from_json(_cls: &Bound<'_, PyType>, json_str: &str) -> PyResult<Self> {
         let tariff: GasTariff = serde_json::from_str(json_str)
             .map_err(|e| PyValueError::new_err(format!("JSON parse error: {e}")))?;
+        tariff
+            .validate()
+            .map_err(|e| PyValueError::new_err(format!("gas tariff validation failed: {e}")))?;
         Ok(Self { inner: tariff })
     }
 

@@ -18,16 +18,17 @@ def test_bms_self_consumption() -> None:
     mode = BmsMode.self_consumption(min_soc=0.1, max_soc=0.95, solar_only_charging=True)
     r = repr(mode)
     assert "self_consumption" in r
-    assert "0.1" in r
-    assert "0.95" in r
+    assert "min_soc=0.1" in r
+    assert "max_soc=0.95" in r
+    assert "solar_only_charging=True" in r or "solar_only_charging=true" in r
 
 
 def test_bms_self_consumption_defaults() -> None:
     mode = BmsMode.self_consumption()
     r = repr(mode)
     assert "self_consumption" in r
-    assert "0.1" in r
-    assert "1" in r
+    assert "min_soc=0.1" in r
+    assert "max_soc=1" in r or "max_soc=1.0" in r
 
 
 def test_bms_tou_optimization() -> None:
@@ -38,16 +39,18 @@ def test_bms_tou_optimization() -> None:
     )
     r = repr(mode)
     assert "time_of_use_optimization" in r
-    assert "25" in r
-    assert "75" in r
+    assert "reserve_soc=0.2" in r
+    assert "charge_threshold_percentile=25" in r
+    assert "discharge_threshold_percentile=75" in r
 
 
 def test_bms_backup_reserve() -> None:
     mode = BmsMode.backup_reserve(target_soc=0.8, charge_from_grid=True, charge_rate_fraction=0.5)
     r = repr(mode)
     assert "backup_reserve" in r
-    assert "0.8" in r
-    assert "0.5" in r
+    assert "target_soc=0.8" in r
+    assert "charge_from_grid=True" in r or "charge_from_grid=true" in r
+    assert "charge_rate_fraction=0.5" in r
 
 
 def test_bms_demand_response_nested() -> None:
@@ -56,6 +59,8 @@ def test_bms_demand_response_nested() -> None:
     r = repr(mode)
     assert "demand_response" in r
     assert "self_consumption" in r
+    assert "dr_discharge_rate=0.8" in r
+    assert "min_soc_during_dr=0.15" in r
 
 
 def test_bms_scheduled_with_windows() -> None:
@@ -79,6 +84,7 @@ def test_bms_storm_watch_nested() -> None:
     )
     r = repr(mode)
     assert "storm_watch" in r
+    assert "target_soc=1" in r
     assert "manual" in r
 
 

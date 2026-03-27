@@ -1,4 +1,4 @@
-use hares_physics::solar::{GlazingCurve, window_iam};
+use hares_physics::solar::window_iam;
 use hares_types::{EnvironmentState, ZoneId};
 use nalgebra::DVector;
 
@@ -20,7 +20,7 @@ impl ThermalSolver {
             }
 
             if let Some(win) = self.config.window_properties.get(&irr.surface_id) {
-                let curve = GlazingCurve::from_u_shgc(win.u_factor_w_m2_k, win.shgc);
+                let curve = win.glazing_curve;
                 let iam_beam = window_iam(irr.angle_of_incidence_rad, curve);
                 let iam_diffuse = curve.diffuse_iam();
 

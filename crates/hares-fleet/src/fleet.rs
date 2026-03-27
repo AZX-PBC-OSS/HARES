@@ -332,7 +332,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::thread;
-    use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_temp_path(suffix: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -535,7 +535,7 @@ mod tests {
                     .lock()
                     .expect("lock thread id set")
                     .insert(id);
-                thread::sleep(StdDuration::from_millis(5));
+                thread::yield_now();
             });
 
         let sequential = fleet.simulate(1);

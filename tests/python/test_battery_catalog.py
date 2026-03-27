@@ -74,3 +74,25 @@ class TestBatteryCatalogFactories:
         bat = Battery("Custom", 20.0)
         assert bat.name == "Custom"
         assert bat.capacity_kwh == 20.0
+
+    def test_catalog_battery_charges_in_simulation(self):
+        """Tesla Powerwall 3 from catalog must charge when SOC target applied."""
+        from ochre_next import ControlSignal
+        from conftest import make_dwelling
+
+        dw = make_dwelling(duration_s=300, time_res_s=60)
+        dw.initialize()
+        bat = Battery.tesla_pw3()
+        dw.add_battery(bat)
+        dw.apply_control("Tesla Powerwall 3", ControlSignal.soc_target(target=0.95))
+        initial_soc = None
+        for _ in range(5):
+            dw.step()
+            tel = dw.telemetry().equipment()
+            idx = tel["names"].index("Tesla Powerwall 3")
+            if initial_soc is None:
+                initial_soc = tel["soc"][idx]
+        final_soc = tel["soc"][idx]
+        assert final_soc > initial_soc, (
+            f"Catalog battery should charge: initial={initial_soc}, final={final_soc}"
+        )

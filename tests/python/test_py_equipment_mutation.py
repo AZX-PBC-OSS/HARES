@@ -185,6 +185,18 @@ class TestReplaceEquipment:
         result = dw.step()
         assert "time" in result
 
+        # After replacement, the battery should still appear in telemetry
+        tel = dw.telemetry().equipment()
+        assert "TestBat" in tel["names"], (
+            "Replaced battery should still appear in equipment telemetry"
+        )
+        # SOC should be a valid number (not NaN), confirming the new battery is active
+        idx = tel["names"].index("TestBat")
+        import math
+        assert not math.isnan(tel["soc"][idx]), (
+            "Replaced battery SOC should not be NaN"
+        )
+
 
 class TestUpdateEquipment:
     def test_update_battery_ocv_table(self):
@@ -210,9 +222,20 @@ class TestUpdateEquipment:
         ]
         dw.update_equipment("TestBat", ocv_table=ocv_data)
 
-        # Should still step fine
         result = dw.step()
         assert "time" in result
+
+        # Battery should be present in telemetry with valid SOC after LUT update
+        tel = dw.telemetry().equipment()
+        assert "TestBat" in tel["names"]
+        idx = tel["names"].index("TestBat")
+        import math
+        assert not math.isnan(tel["soc"][idx]), (
+            "Battery SOC should be valid after OCV table update"
+        )
+        assert not math.isnan(tel["power_kw"][idx]), (
+            "Battery power should be valid after OCV table update"
+        )
 
     def test_update_battery_uneg_table(self):
         from ochre_next import Battery
@@ -237,6 +260,18 @@ class TestUpdateEquipment:
         dw.update_equipment("TestBat", uneg_table=uneg_data)
         result = dw.step()
         assert "time" in result
+
+        # Battery should be present in telemetry with valid SOC after Uneg table update
+        tel = dw.telemetry().equipment()
+        assert "TestBat" in tel["names"]
+        idx = tel["names"].index("TestBat")
+        import math
+        assert not math.isnan(tel["soc"][idx]), (
+            "Battery SOC should be valid after Uneg table update"
+        )
+        assert not math.isnan(tel["power_kw"][idx]), (
+            "Battery power should be valid after Uneg table update"
+        )
 
     def test_update_nonexistent_raises(self):
         dw = _make_dwelling()
@@ -268,6 +303,18 @@ class TestSetEquipmentLut:
         result = dw.step()
         assert "time" in result
 
+        # Battery should report valid telemetry after LUT injection
+        tel = dw.telemetry().equipment()
+        assert "TestBat" in tel["names"]
+        idx = tel["names"].index("TestBat")
+        import math
+        assert not math.isnan(tel["soc"][idx]), (
+            "Battery SOC should be valid after set_equipment_lut"
+        )
+        assert not math.isnan(tel["power_kw"][idx]), (
+            "Battery power should be valid after set_equipment_lut"
+        )
+
     def test_clear_ocv_lut(self):
         from ochre_next import Battery, LutType
 
@@ -283,6 +330,19 @@ class TestSetEquipmentLut:
         dw.clear_equipment_lut("TestBat", LutType.ocv())
         result = dw.step()
         assert "time" in result
+
+        # After clearing the custom LUT, the battery should still function
+        # with valid telemetry (reverts to default OCV curve)
+        tel = dw.telemetry().equipment()
+        assert "TestBat" in tel["names"]
+        idx = tel["names"].index("TestBat")
+        import math
+        assert not math.isnan(tel["soc"][idx]), (
+            "Battery SOC should be valid after clearing OCV LUT"
+        )
+        assert not math.isnan(tel["power_kw"][idx]), (
+            "Battery power should be valid after clearing OCV LUT"
+        )
 
     def test_set_lut_nonexistent_raises(self):
         from ochre_next import LutType
@@ -400,6 +460,36 @@ class TestBatteryConfigParams:
         assert "initial_soc=0.5" in r
         assert "standby_power_w=5" in r
         assert "Nmc" in r
+
+    def test_min_soc_prevents_deep_discharge(self):
+        """Battery with min_soc=0.2 should never discharge below 0.2."""
+        from ochre_next import Battery, ControlSignal
+
+        dw = _make_dwelling()
+        bat = Battery("Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0,
+                      initial_soc=0.3, min_soc=0.2)
+        dw.add_battery(bat)
+        dw.apply_control("Bat", ControlSignal.power_setpoint(-5.0))
+        for _ in range(20):
+            dw.step()
+        tel = dw.telemetry().equipment()
+        idx = tel["names"].index("Bat")
+        soc = tel["soc"][idx]
+        assert soc >= 0.19, f"SOC {soc} dropped below min_soc=0.2"
+
+    def test_initial_soc_applied_in_telemetry(self):
+        """Battery with initial_soc=0.8 must report SOC=0.8 on first step."""
+        from ochre_next import Battery
+
+        dw = _make_dwelling()
+        bat = Battery("Bat", 10.0, initial_soc=0.8)
+        dw.add_battery(bat)
+        dw.step()
+        tel = dw.telemetry().equipment()
+        idx = tel["names"].index("Bat")
+        assert abs(tel["soc"][idx] - 0.8) < 0.05, (
+            f"Initial SOC should be ~0.8, got {tel['soc'][idx]}"
+        )
 
     def test_inverted_thermal_params_handled_gracefully(self):
         """Inverted min_charge_temp_c > full_power_temp_c must not silently corrupt state.

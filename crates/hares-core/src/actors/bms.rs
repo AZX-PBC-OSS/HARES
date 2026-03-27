@@ -153,9 +153,11 @@ impl BatteryManagementActor {
                     );
                     self.last_action = "self_consumption:charge".into();
                 } else if surplus < 0.0 && soc > *min_soc {
-                    // Enforce grid export rule on discharge path.
-                    // SelfConsumption signal lets equipment decide discharge freely,
-                    // so when export is restricted we emit a clamped PowerSetpoint instead.
+                    // The battery equipment's SelfConsumption handler already caps
+                    // discharge to net_load_kw, so Unrestricted is inherently safe.
+                    // For Disabled/SolarOnly we emit an explicit clamped PowerSetpoint
+                    // as defense-in-depth (the actor is the authoritative export policy
+                    // layer, not the equipment).
                     match self.grid_export_rule {
                         GridExportRule::Unrestricted => {
                             self.emit(
@@ -366,8 +368,8 @@ impl BatteryManagementActor {
             } => {
                 let active = match trigger {
                     StormWatchTrigger::ManualEnable => true,
-                    // TODO: integrate weather signal from env.weather
-                    StormWatchTrigger::WeatherSignal => env.weather.wind_speed_m_s > 25.0,
+                    StormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s } =>
+                        env.weather.wind_speed_m_s > *wind_speed_threshold_m_s,
                 };
 
                 if active {
@@ -1043,7 +1045,7 @@ mod tests {
             "bat1",
             BmsMode::StormWatch {
                 target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal,
+                trigger: StormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s: 25.0 },
                 base_mode: Box::new(BmsMode::Manual),
             },
             GridExportRule::Unrestricted,
@@ -1072,7 +1074,7 @@ mod tests {
             "bat1",
             BmsMode::StormWatch {
                 target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal,
+                trigger: StormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s: 25.0 },
                 base_mode: Box::new(BmsMode::SelfConsumption {
                     min_soc: 0.1,
                     max_soc: 0.95,
@@ -1546,8 +1548,8 @@ mod tests {
     #[test]
     fn bms_self_consumption_disabled_export_clamps_discharge() {
         // SelfConsumption + Disabled: deficit is 3 kW (load 5, PV 2).
-        // Battery should discharge at most 5 kW (home load), not export.
-        // Raw discharge = min(3, 5) = 3 kW. Clamped to min(3, 5) = 3 kW.
+        // Raw discharge = min(deficit=3, max_discharge=5) = 3 kW.
+        // Export clamp = min(3, load=5) = 3 kW. Deficit is the binding constraint.
         let mut actor = BatteryManagementActor::new(
             "bat1",
             BmsMode::SelfConsumption {
@@ -1670,5 +1672,101 @@ mod tests {
             "unrestricted self-consumption should emit SelfConsumption signal, got {:?}",
             out[0].signal
         );
+    }
+
+    #[test]
+    fn bms_self_consumption_solar_only_clamps_to_load_plus_pv() {
+        // SelfConsumption + SolarOnly: load=4, PV=1, max_discharge=5.
+        // Deficit = 3 kW. SolarOnly max = load + PV = 5.
+        // raw_discharge = min(3, 5) = 3. clamped = min(3, 5) = 3.
+        // Here the deficit is the binding constraint, not the export rule.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.9,
+                solar_only_charging: false,
+            },
+            GridExportRule::SolarOnly,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 1.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(
+                    (*active_power_kw + 3.0).abs() < 1e-10,
+                    "SolarOnly self-consumption discharge should be 3 kW (deficit), got {}",
+                    active_power_kw
+                );
+            }
+            other => panic!("expected PowerSetpoint for SolarOnly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_self_consumption_disabled_export_clamp_is_binding() {
+        // Test where the export clamp is the binding constraint, not the deficit.
+        // SelfConsumption + Disabled: load=1, PV=0, max_discharge=5.
+        // Deficit = 1 kW. raw_discharge = min(1, 5) = 1.
+        // Export clamp (Disabled) = min(1, load=1) = 1. Both align.
+        // Now set max_discharge=0.5 so hardware cap binds:
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.9,
+                solar_only_charging: false,
+            },
+            GridExportRule::Disabled,
+            5.0,
+            0.5, // max_discharge_kw is small
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 0.0,
+                base_load_kw: 3.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.8);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                // deficit=3, but max_discharge=0.5 → hardware cap binds.
+                assert!(
+                    (*active_power_kw + 0.5).abs() < 1e-10,
+                    "hardware cap (0.5 kW) should be binding, got {}",
+                    active_power_kw
+                );
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
     }
 }

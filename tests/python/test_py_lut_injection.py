@@ -10,7 +10,7 @@ import pytest
 
 from pathlib import Path
 
-from ochre_next import Battery, Dwelling, EV, LutType
+from ochre_next import Battery, ControlSignal, Dwelling, EV, LutType
 
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
@@ -275,3 +275,50 @@ class TestValidation:
         }
         with pytest.raises(Exception, match="length"):
             Battery("TestBat", 10.0, charging_curve_lut=lut)
+
+
+# ---------------------------------------------------------------------------
+# Behavioral LUT tests
+# ---------------------------------------------------------------------------
+
+
+class TestLutBehavior:
+    def test_ocv_table_affects_battery_voltage(self):
+        """Battery with custom OCV should behave differently from default."""
+        from conftest import make_dwelling
+
+        # Create two batteries: one default NMC, one with LFP OCV
+        dw = make_dwelling(duration_s=300, time_res_s=60)
+        dw.initialize()
+        bat_default = Battery("Default", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5)
+        bat_custom = Battery("Custom", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5)
+        dw.add_battery(bat_default)
+        dw.add_battery(bat_custom)
+
+        # Inject LFP OCV table on custom battery (much flatter plateau than default NMC)
+        lfp_ocv = {
+            "soc": [0.0, 0.2, 0.5, 0.8, 1.0],
+            "voltage": [2.5, 3.2, 3.27, 3.32, 3.6],
+        }
+        dw.set_equipment_lut("Custom", LutType.ocv(), lfp_ocv)
+
+        dw.apply_control("Default", ControlSignal.soc_target(target=0.9))
+        dw.apply_control("Custom", ControlSignal.soc_target(target=0.9))
+        for _ in range(5):
+            dw.step()
+
+        tel = dw.telemetry().equipment()
+        idx_d = tel["names"].index("Default")
+        idx_c = tel["names"].index("Custom")
+
+        soc_d = tel["soc"][idx_d]
+        soc_c = tel["soc"][idx_c]
+        # Both batteries should be charging (SOC above initial 0.5)
+        assert soc_d > 0.5, f"Default battery should be charging, SOC={soc_d}"
+        assert soc_c > 0.5, f"Custom battery should be charging, SOC={soc_c}"
+        # Different OCV curves produce different internal voltages, leading to
+        # measurably different SOC trajectories
+        assert abs(soc_d - soc_c) > 0.001, (
+            f"Custom OCV should produce different charging behavior: "
+            f"default SOC={soc_d:.4f}, custom SOC={soc_c:.4f}"
+        )

@@ -63,11 +63,12 @@ fn temp_checkpoint_path(path: &Path) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let tid = std::thread::current().id();
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("dwelling.chkpt");
-    let tmp_name = format!("{file_name}.{nonce}.tmp");
+    let tmp_name = format!("{file_name}.{nonce}.{tid:?}.tmp");
     path.with_file_name(tmp_name)
 }
 
@@ -75,6 +76,22 @@ fn temp_checkpoint_path(path: &Path) -> PathBuf {
 mod tests {
     use super::{CHECKPOINT_VERSION, DwellingCheckpoint};
     use hares_types::{EquipmentId, ZoneId};
+
+    fn unique_temp_name(base: &str, ext: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        let tid = std::thread::current().id();
+        format!("{base}_{nanos}_{tid:?}.{ext}")
+    }
+
+    struct TempFile(std::path::PathBuf);
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 
     #[test]
     fn save_then_load_round_trip() {
@@ -93,11 +110,12 @@ mod tests {
             lwr_t_prev_c: vec![15.0, 18.0],
         };
 
-        let path = std::env::temp_dir().join("hares_core_checkpoint_roundtrip.json");
+        let path = std::env::temp_dir()
+            .join(unique_temp_name("hares_core_checkpoint_roundtrip", "json"));
+        let _guard = TempFile(path.clone());
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded, cp);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -117,14 +135,15 @@ mod tests {
             lwr_t_prev_c: vec![],
         };
 
-        let path = std::env::temp_dir().join("hares_core_checkpoint_multizone.json");
+        let path = std::env::temp_dir()
+            .join(unique_temp_name("hares_core_checkpoint_multizone", "json"));
+        let _guard = TempFile(path.clone());
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded.humidity_states.len(), 3);
         assert_eq!(loaded.humidity_states[0], (ZoneId(1), 0.008));
         assert_eq!(loaded.humidity_states[1], (ZoneId(2), 0.012));
         assert_eq!(loaded.humidity_states[2], (ZoneId(3), 0.006));
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -144,7 +163,9 @@ mod tests {
             lwr_t_prev_c: vec![],
         };
 
-        let path = std::env::temp_dir().join("hares_core_checkpoint_version.json");
+        let path = std::env::temp_dir()
+            .join(unique_temp_name("hares_core_checkpoint_version", "json"));
+        let _guard = TempFile(path.clone());
         cp.save(&path).unwrap();
 
         // Tamper: write a v1 checkpoint
@@ -161,6 +182,5 @@ mod tests {
             err.to_string().contains("version mismatch"),
             "expected version mismatch error, got: {err}"
         );
-        let _ = std::fs::remove_file(path);
     }
 }

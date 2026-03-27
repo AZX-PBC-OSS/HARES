@@ -37,7 +37,9 @@ class TestMetrics:
         assert isinstance(metrics, SimulationMetrics)
 
         annual = metrics.annual_energy_kwh
-        assert annual.total >= 0
+        assert annual.total > 0, (
+            "January Denver ASHP case must have positive total energy"
+        )
         assert math.isfinite(annual.total)
         assert len(annual.per_end_use) > 0
         assert all(v >= 0 for v in annual.per_end_use.values())
@@ -45,6 +47,7 @@ class TestMetrics:
 
         peak = metrics.peak_power_kw
         assert peak.rolling_15min_kw >= peak.rolling_30min_kw >= peak.rolling_60min_kw
+        assert peak.rolling_15min_kw > 0, "Peak power must be positive for a heating case"
         assert len(peak.per_end_use) > 0
 
         grid = metrics.grid_interaction
@@ -52,7 +55,10 @@ class TestMetrics:
         assert math.isfinite(grid.peak_export_kw)
 
         eff = metrics.efficiency
-        assert eff.hvac_heating_cop is None or eff.hvac_heating_cop > 0
+        if eff.hvac_heating_cop is not None:
+            assert 1.0 <= eff.hvac_heating_cop <= 5.0, (
+                f"ASHP heating COP should be in [1.0, 5.0], got {eff.hvac_heating_cop}"
+            )
         assert eff.hvac_cooling_cop is None or eff.hvac_cooling_cop > 0
         assert eff.water_heater_cop is None or eff.water_heater_cop > 0
         assert (

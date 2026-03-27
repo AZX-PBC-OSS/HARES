@@ -77,7 +77,6 @@ pub struct BillingState {
     prior_period_peaks: Vec<VecDeque<f64>>,
     demand_window: DemandWindow,
     billing_cycle: BillingCycle,
-    ratchet_config: Option<RatchetConfig>,
     max_prior_periods: usize,
 }
 
@@ -121,7 +120,7 @@ impl BillingState {
         billing_cycle: BillingCycle,
         demand_window_minutes: u32,
         interval_seconds: u32,
-        ratchet_config: Option<RatchetConfig>,
+        max_lookback_months: u32,
         num_tou_periods: usize,
     ) -> Self {
         let capacity = if interval_seconds > 0 {
@@ -131,13 +130,16 @@ impl BillingState {
         };
         let capacity = capacity.max(1);
         let period_end = compute_period_end(period_start, billing_cycle);
-        let max_prior_periods = match (&ratchet_config, billing_cycle) {
-            (Some(rc), BillingCycle::Custom(days)) if days > 0 => {
-                let lookback_days = rc.lookback_months as usize * 31;
-                lookback_days.div_ceil(days as usize)
+        let max_prior_periods = if max_lookback_months == 0 {
+            0
+        } else {
+            match billing_cycle {
+                BillingCycle::Custom(days) if days > 0 => {
+                    let lookback_days = max_lookback_months as usize * 31;
+                    lookback_days.div_ceil(days as usize)
+                }
+                _ => max_lookback_months as usize,
             }
-            (Some(rc), _) => rc.lookback_months as usize,
-            (None, _) => 12,
         };
         Self {
             period_start,
@@ -154,7 +156,6 @@ impl BillingState {
                 .collect(),
             demand_window: DemandWindow::new(capacity),
             billing_cycle,
-            ratchet_config,
             max_prior_periods,
         }
     }
@@ -213,10 +214,6 @@ impl BillingState {
 
     pub fn cumulative_export_credit_usd(&self) -> f64 {
         self.cumulative_export_credit_usd
-    }
-
-    pub fn effective_peak_kw(&self) -> f64 {
-        apply_ratchet(self.peak_demand_kw, &self.prior_peaks_kw, &self.ratchet_config)
     }
 
     /// Coincident peak with a caller-supplied ratchet (used per demand rate).
@@ -368,7 +365,7 @@ mod tests {
             BillingCycle::Monthly,
             15,
             300,
-            None,
+            0,
             0,
         );
         // 15-min window with 5-min interval = 3 samples
@@ -386,7 +383,7 @@ mod tests {
             BillingCycle::Monthly,
             15,
             3600,
-            None,
+            0,
             0,
         );
         // Constant 1 kW for 1 hour (one step of 3600s)
@@ -403,7 +400,7 @@ mod tests {
             BillingCycle::Monthly,
             15,
             3600,
-            None,
+            0,
             0,
         );
         // Constant -2 kW for 1 hour
@@ -416,7 +413,7 @@ mod tests {
     #[test]
     fn billing_period_closes_at_month_end() {
         let start = make_dt(2025, 1, 1);
-        let state = BillingState::new(start, BillingCycle::Monthly, 15, 3600, None, 0);
+        let state = BillingState::new(start, BillingCycle::Monthly, 15, 3600, 0, 0);
         let expected_end = make_dt(2025, 2, 1);
         assert_eq!(state.period_end, expected_end);
     }
@@ -428,7 +425,7 @@ mod tests {
             BillingCycle::Monthly,
             15,
             3600,
-            None,
+            1, // need at least 1 month lookback to retain prior peak
             0,
         );
         state.update(5.0, 3600.0, 0.10, 0.0, 0, 0);
@@ -456,14 +453,14 @@ mod tests {
             BillingCycle::Monthly,
             15,
             3600,
-            Some(ratchet),
+            ratchet.lookback_months.into(),
             0,
         );
         // Simulate a high prior peak
         state.prior_peaks_kw.push_back(10.0);
         // Current peak is only 2 kW
         state.update(2.0, 3600.0, 0.0, 0.0, 0, 0);
-        let effective = state.effective_peak_kw();
+        let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         // 0.85 * 10.0 = 8.5 > 2.0, so ratchet applies
         assert!((effective - 8.5).abs() < 1e-10);
     }
@@ -479,16 +476,14 @@ mod tests {
             BillingCycle::Monthly,
             15,
             300,
-            Some(ratchet),
+            ratchet.lookback_months.into(),
             0,
         );
         state.prior_peaks_kw.push_back(5.0);
-        // Push enough samples to fill the window with 10 kW
-        // 15 min / 5 min = 3 samples
         for _ in 0..3 {
             state.update(10.0, 300.0, 0.0, 0.0, 0, 0);
         }
-        let effective = state.effective_peak_kw();
+        let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         // 0.85 * 5.0 = 4.25 < 10.0, so current peak wins
         assert!((effective - 10.0).abs() < 1e-10);
     }
@@ -500,7 +495,7 @@ mod tests {
             BillingCycle::Monthly,
             15,
             3600,
-            None,
+            12, // 12-month lookback
             0,
         );
         for month in 1..=13u32 {
@@ -528,7 +523,7 @@ mod tests {
             BillingCycle::Monthly,
             15,
             3600,
-            Some(ratchet),
+            ratchet.lookback_months.into(),
             0,
         );
         // Add 6 months of peaks: [5, 10, 15, 20, 25, 30]
@@ -538,7 +533,7 @@ mod tests {
         // Lookback 3 → considers [20.0, 25.0, 30.0], max = 30.0
         // Effective = max(2.0, 0.85 * 30.0) = 25.5
         state.update(2.0, 3600.0, 0.0, 0.0, 0, 0);
-        let effective = state.effective_peak_kw();
+        let effective = state.effective_peak_with_ratchet(&Some(ratchet));
         assert!((effective - 25.5).abs() < 1e-10);
     }
 
@@ -574,7 +569,7 @@ mod tests {
     #[test]
     fn billing_custom_cycle_period_end() {
         let start = make_dt(2025, 1, 1);
-        let state = BillingState::new(start, BillingCycle::Custom(14), 15, 3600, None, 0);
+        let state = BillingState::new(start, BillingCycle::Custom(14), 15, 3600, 0, 0);
         let expected_end = make_dt(2025, 1, 15);
         assert_eq!(state.period_end, expected_end);
     }
@@ -602,7 +597,7 @@ mod tests {
             BillingCycle::Monthly,
             15,
             3600,
-            Some(ratchet.clone()),
+            ratchet.lookback_months.into(),
             3,
         );
 
@@ -642,7 +637,7 @@ mod tests {
             BillingCycle::Custom(14),
             15,
             3600,
-            Some(ratchet),
+            ratchet.lookback_months.into(),
             0,
         );
 

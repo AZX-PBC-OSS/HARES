@@ -1,5 +1,18 @@
 //! Simulation clock and time-step management.
 //!
+//! ## Local Time Convention
+//!
+//! HARES treats all timestamps as **local time**. The `.hour()`,
+//! `.weekday()`, and `.month()` accessors on `start_time` are used
+//! directly by schedule evaluation, daily profiles, and actor logic.
+//! The timezone offset is carried through but **only the wall-clock
+//! digits matter** — `12:00 UTC+0` and `12:00 UTC-7` both read as
+//! hour 12. The offset is effectively ignored unless `civil_timezone`
+//! is set for DST-aware reinterpretation.
+//!
+//! Pass the intended local hour in `start_time`. If you mean noon
+//! Denver time, pass `12:00` — not `19:00 UTC`.
+//!
 //! `SimClock` iterates over timestep indices `0..total_steps()`.
 //! After iterator exhaustion (`current_step == total_steps()`), `current_time()`
 //! returns `start_time + total_steps() * time_res` (one step past the last
@@ -8,6 +21,9 @@
 use chrono::{DateTime, Duration, FixedOffset};
 
 /// Monotonic simulation clock over a fixed horizon.
+///
+/// Pass `start_time` with the intended local wall-clock time (see module docs).
+/// The `.hour()` component is used directly by schedule-based equipment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimClock {
     pub start_time: DateTime<FixedOffset>,

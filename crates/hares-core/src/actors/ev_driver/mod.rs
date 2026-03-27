@@ -298,7 +298,7 @@ impl EvDriverActor {
             todays_event: None,
             phase: DriverPhase::HomePluggedIn,
             estimated_soc: 1.0,
-            time_res_minutes: 0.0,
+            time_res_minutes: 1.0,
             expected_daily_miles,
             needs_away_charge: false,
         }

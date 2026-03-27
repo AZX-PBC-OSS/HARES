@@ -548,10 +548,10 @@ pub enum GridExportRule {
     Disabled,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum StormWatchTrigger {
     ManualEnable,
-    WeatherSignal,
+    WeatherSignal { wind_speed_threshold_m_s: f64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1280,7 +1280,7 @@ mod tests {
     fn bms_mode_storm_watch_nested_serde() {
         let mode = BmsMode::StormWatch {
             target_soc: 1.0,
-            trigger: StormWatchTrigger::WeatherSignal,
+            trigger: StormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s: 25.0 },
             base_mode: Box::new(BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.95,

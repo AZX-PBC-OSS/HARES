@@ -174,25 +174,23 @@ impl TariffEvaluator {
             months.push(month);
         }
 
-        // BillingState's global ratchet_config is used only by effective_peak_kw()
-        // for coincident demand. compute_demand_charge() now passes each rate's own
-        // ratchet via effective_peak_with_ratchet(), making this field unused in
-        // practice. Pass None to avoid the misleading find_map that previously took
-        // only the first rate's ratchet.
-        let ratchet_config: Option<crate::types::RatchetConfig> = None;
+        // Compute max lookback across all demand rates' ratchets so BillingState
+        // retains enough history for any per-rate ratchet to work.
+        let max_lookback_months = tariff
+            .demand_rates
+            .iter()
+            .filter_map(|dr| dr.ratchet.as_ref())
+            .map(|r| r.lookback_months)
+            .max()
+            .unwrap_or(0);
 
-        // Use tariff-configured demand window, defaulting to 15 minutes (FERC/NERC).
-        let demand_window_minutes: u32 = if tariff.demand_window_minutes > 0 {
-            tariff.demand_window_minutes
-        } else {
-            15
-        };
+        let demand_window_minutes = tariff.demand_window_minutes;
         let billing_state = BillingState::new(
             simulation_start,
             tariff.billing_cycle,
             demand_window_minutes,
             interval_seconds,
-            ratchet_config,
+            max_lookback_months.into(),
             period_name_table.len(),
         );
 
@@ -347,7 +345,8 @@ impl TariffEvaluator {
                             .period_name_table
                             .iter()
                             .position(|n| n == name)
-                            .unwrap_or(0) as u16;
+                            .expect("demand period name not in table — validate() should have caught this")
+                            as u16;
                         self.billing_state
                             .effective_peak_for_period(idx, &dr.ratchet)
                     }
@@ -383,7 +382,7 @@ impl TariffEvaluator {
     /// charges for partial periods. If the simulation ends mid-month, only
     /// the elapsed days are charged.
     ///
-    /// Returns `None` if already finalized (second call).
+    /// Returns `None` on second call (idempotent — `finalized` flag prevents double-billing).
     /// Returns `Some` even with zero metered load, as fixed charges may apply.
     pub fn finalize(&mut self, sim_end: DateTime<Tz>) -> Option<BillingPeriodSummary> {
         if self.finalized {

@@ -587,6 +587,10 @@ pub(crate) fn build_default_solvers(
                         transmittance: ws.transmittance_summer,
                         winter_transmittance: ws.transmittance_winter,
                         radiation_frac: ws.radiation_frac,
+                        glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(
+                            ws.u_factor_w_m2_k,
+                            ws.shgc_summer,
+                        ),
                     },
                 );
                 thermal_cfg

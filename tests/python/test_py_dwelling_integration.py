@@ -49,20 +49,38 @@ class TestConstructionRoundTrip:
 
 class TestFullSimulation:
     def test_simulate_returns_nonempty_dataframe(self):
-        dw = _init_dwelling()
+        duration_s = 300
+        time_res_s = 60
+        dw = _init_dwelling(duration_s=duration_s, time_res_s=time_res_s)
         df = dw.simulate()
         assert isinstance(df, pl.DataFrame)
-        assert df.height > 0
-        assert "Time" in df.columns or any("time" in c.lower() for c in df.columns)
+        expected_rows = duration_s // time_res_s
+        assert df.height == expected_rows, (
+            f"Expected {expected_rows} rows, got {df.height}"
+        )
+        assert "Total Electric Power (kW)" in df.columns
+        total_power = df["Total Electric Power (kW)"]
+        assert total_power.is_not_nan().all(), "Total electric power has NaN values"
+        assert total_power.sum() > 0, (
+            "January Denver heating case should have positive total electric power"
+        )
 
     def test_simulate_expected_columns(self):
         dw = _init_dwelling(output_verbosity=3)
         df = dw.simulate()
         cols = df.columns
         assert "Total Electric Power (kW)" in cols
-        # verbosity >= 2: zone temperature columns
+        first_power = df["Total Electric Power (kW)"].to_list()[0]
+        assert first_power is not None, "First power value should not be None"
+        # verbosity >= 2: zone temperature columns with realistic values
         temp_cols = [c for c in cols if c.startswith("Temperature -")]
         assert len(temp_cols) > 0
+        for tc in temp_cols:
+            col = df[tc].drop_nulls()
+            if col.len() > 0:
+                assert col.min() >= 10.0, f"{tc} has unrealistically low temp: {col.min()}"
+                assert col.max() <= 30.0, f"{tc} has unrealistically high temp: {col.max()}"
+                break
         # verbosity >= 3: equipment mode columns
         mode_cols = [c for c in cols if c.endswith("Mode (-)")]
         assert len(mode_cols) > 0
@@ -119,12 +137,48 @@ class TestControlInjection:
     def test_thermal_setpoint_applied(self):
         from ochre_next import ControlSignal
 
-        dw = _init_dwelling()
-        name = _find_thermal_equipment(dw)
-        signal = ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
-        dw.apply_control(name, signal)
-        result = dw.step()
-        assert "time" in result
+        # Run baseline (default setpoints) and capture final zone temperature
+        dw_base = _init_dwelling(duration_s=600, time_res_s=60)
+        name_base = _find_thermal_equipment(dw_base)
+        for _ in range(6):
+            baseline_result = dw_base.step()
+        temp_keys = [k for k in baseline_result if "Temperature" in k]
+        assert len(temp_keys) > 0
+        baseline_final_temp = baseline_result[temp_keys[0]]
+
+        # Run with a heating setpoint well above default and capture final temperature.
+        # January Denver: the zone starts around 20°C; setting heat_c=25 forces the
+        # furnace to run harder, which raises the zone temp vs the baseline.
+        dw_heat = _init_dwelling(duration_s=600, time_res_s=60)
+        name_heat = _find_thermal_equipment(dw_heat)
+        signal = ControlSignal.thermal_setpoint(heat_c=25.0, cool_c=30.0)
+        dw_heat.apply_control(name_heat, signal)
+        for _ in range(6):
+            heated_result = dw_heat.step()
+        heated_final_temp = heated_result[temp_keys[0]]
+
+        # Zone should be meaningfully warmer when heating setpoint is 25°C vs default
+        assert heated_final_temp > baseline_final_temp, (
+            f"Zone temp with heat_c=25 ({heated_final_temp:.2f}°C) should exceed "
+            f"baseline ({baseline_final_temp:.2f}°C) in January Denver"
+        )
+
+    def test_soc_target_charges_battery(self):
+        """Applying SOCTarget to a half-charged battery must increase its SOC."""
+        from ochre_next import Battery, ControlSignal
+
+        dw = _init_dwelling(duration_s=600, time_res_s=60)
+        bat = Battery("Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.3)
+        dw.add_battery(bat)
+        dw.apply_control("Bat", ControlSignal.soc_target(target=0.9))
+        for _ in range(5):
+            dw.step()
+        tel = dw.telemetry().equipment()
+        idx = tel["names"].index("Bat")
+        soc = tel["soc"][idx]
+        assert soc > 0.3, f"Battery SOC should increase toward target 0.9, got {soc}"
+        power = tel["power_kw"][idx]
+        assert power > 0, f"Battery should be drawing power to charge, got {power}"
 
     def test_control_reflected_in_telemetry(self):
         from ochre_next import ControlSignal
@@ -284,7 +338,15 @@ class TestMetrics:
         m = dw.metrics()
         assert m.annual_energy_kwh is not None
         assert isinstance(m.annual_energy_kwh.total, float)
+        assert m.annual_energy_kwh.total > 0, (
+            "January Denver simulation must have positive total energy"
+        )
+        hvac_keys = [k for k in m.annual_energy_kwh.per_end_use if "HVAC" in k or "Heating" in k or "Cooling" in k]
+        assert any(
+            m.annual_energy_kwh.per_end_use[k] > 0 for k in hvac_keys
+        ), f"HVAC end-use should have nonzero energy in January Denver; got {m.annual_energy_kwh.per_end_use}"
         assert m.peak_power_kw is not None
+        assert m.peak_power_kw.rolling_15min_kw > 0, "Peak power must be positive"
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +425,7 @@ class TestBatchStep:
         from ochre_next import batch_step
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        results = batch_step([dw], [[0.0]], ["total_power_kw"])
+        results = batch_step([dw], [[]], ["total_power_kw"])
         assert isinstance(results, list)
         assert len(results) == 1
         r = results[0]
@@ -390,7 +452,7 @@ class TestBatchStep:
                 for _ in range(5):
                     results = batch_step(
                         dw_list,
-                        [[0.0]] * len(dw_list),
+                        [[]] * len(dw_list),
                         ["total_power_kw"],
                     )
                     for r in results:
@@ -436,7 +498,7 @@ class TestBatchStep:
                 for _ in range(3):
                     results = batch_step(
                         dw_list,
-                        [[0.0]] * len(dw_list),
+                        [[]] * len(dw_list),
                         ["total_power_kw"],
                     )
                     assert len(results) == len(dw_list)
@@ -814,6 +876,19 @@ class TestDerSimulationExplorer:
         total = df["Total Electric Power (kW)"]
         assert total.min() < 0, "Should have export (negative) power from PV"
         assert total.max() > 0, "Should have import (positive) power"
+        assert total.is_not_nan().all(), "Net import must be finite (no NaN)"
+
+        # Battery SOC should have variance — it charged/discharged at least once
+        bat_soc_std = bat_soc.std()
+        assert bat_soc_std > 0, (
+            "Battery SOC should vary over 2-week simulation (charged/discharged)"
+        )
+
+        # PV total generation sum should be positive (producing power)
+        pv_sum = pv_col.sum()
+        assert pv_sum > 0, (
+            f"PV total generation should be positive (producing), got {pv_sum}"
+        )
 
         # Expected row count: 2 weeks × 96 steps/day = 1344
         expected_rows = 14 * 96

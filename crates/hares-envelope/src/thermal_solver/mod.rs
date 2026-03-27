@@ -74,6 +74,12 @@ pub struct ThermalSolver {
     lwr_by_zone_buf: Vec<(ZoneId, f64)>,
     /// Pre-allocated buffer for interior LWR net flux results per surface.
     lwr_net_flux_buf: Vec<f64>,
+    /// Pre-sorted zone temperature buffer for format_domain_update; indexed parallel to sorted zone_output_indices.
+    zone_temps_buf: Vec<(ZoneId, f64)>,
+    /// Pre-allocated buffer for latent pairs in format_domain_update.
+    latent_pairs_buf: Vec<(ZoneId, f64)>,
+    /// Pre-allocated buffer for custom_payload in format_domain_update.
+    custom_payload_buf: Vec<f64>,
     /// Pre-allocated fallback buffer for InteriorSurface structs in non-ScriptF path.
     lwr_surfaces_buf: Vec<crate::longwave_radiation::InteriorSurface>,
     /// Cached outdoor temperature [°C] from the most recent input vector.
@@ -150,6 +156,14 @@ impl ThermalSolver {
             .max()
             .unwrap_or(0);
 
+        let mut zone_temps_buf: Vec<(ZoneId, f64)> = wiring
+            .zone_output_indices
+            .keys()
+            .map(|zone| (*zone, indoor_temp_c))
+            .collect();
+        zone_temps_buf.sort_by_key(|(zone, _)| *zone);
+        let n_zones_for_latent = zone_temps_buf.len();
+
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         let n_ext_surfaces = config.exterior_surfaces.len();
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -178,6 +192,9 @@ impl ThermalSolver {
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
+            zone_temps_buf,
+            latent_pairs_buf: Vec::with_capacity(n_zones_for_latent),
+            custom_payload_buf: Vec::with_capacity(n_zones_for_latent * 2),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -338,30 +355,18 @@ impl ThermalSolver {
             &mut self.infiltration_buf,
         );
 
-        let infiltration_indoor_w = self
+        let indoor_inf = self
             .infiltration_buf
             .iter()
-            .find(|c| c.zone == indoor_zone)
-            .map(|c| c.q_infiltration_w)
-            .unwrap_or(0.0);
-        let ventilation_w = self
-            .infiltration_buf
-            .iter()
-            .find(|c| c.zone == indoor_zone)
-            .map(|c| c.q_forced_vent_w)
-            .unwrap_or(0.0);
-        let natural_ventilation_w = self
-            .infiltration_buf
-            .iter()
-            .find(|c| c.zone == indoor_zone)
-            .map(|c| c.q_natural_vent_w)
-            .unwrap_or(0.0);
-        let combined_airflow_sensible_w = self
-            .infiltration_buf
-            .iter()
-            .find(|c| c.zone == indoor_zone)
-            .map(|c| c.q_sensible_diagnostic_w)
-            .unwrap_or(0.0);
+            .find(|c| c.zone == indoor_zone);
+        let infiltration_indoor_w =
+            indoor_inf.map(|c| c.q_infiltration_w).unwrap_or(0.0);
+        let ventilation_w =
+            indoor_inf.map(|c| c.q_forced_vent_w).unwrap_or(0.0);
+        let natural_ventilation_w =
+            indoor_inf.map(|c| c.q_natural_vent_w).unwrap_or(0.0);
+        let combined_airflow_sensible_w =
+            indoor_inf.map(|c| c.q_sensible_diagnostic_w).unwrap_or(0.0);
 
         let indoor_acc = ports.thermal.iter().find(|t| t.zone == indoor_zone);
         let hvac_heating_w = indoor_acc
@@ -410,30 +415,10 @@ impl ThermalSolver {
             driving_ground_temp_c: env.weather.ground_temp_c,
             opaque_solar_w,
             exterior_lwr_w,
-            total_airflow_m3_s: self
-                .infiltration_buf
-                .iter()
-                .find(|c| c.zone == indoor_zone)
-                .map(|c| c.combined_flow_m3_s)
-                .unwrap_or(0.0),
-            raw_infiltration_m3_s: self
-                .infiltration_buf
-                .iter()
-                .find(|c| c.zone == indoor_zone)
-                .map(|c| c.raw_inf_m3_s)
-                .unwrap_or(0.0),
-            forced_vent_m3_s: self
-                .infiltration_buf
-                .iter()
-                .find(|c| c.zone == indoor_zone)
-                .map(|c| c.forced_flow_m3_s)
-                .unwrap_or(0.0),
-            natural_vent_m3_s: self
-                .infiltration_buf
-                .iter()
-                .find(|c| c.zone == indoor_zone)
-                .map(|c| c.nat_flow_m3_s)
-                .unwrap_or(0.0),
+            total_airflow_m3_s: indoor_inf.map(|c| c.combined_flow_m3_s).unwrap_or(0.0),
+            raw_infiltration_m3_s: indoor_inf.map(|c| c.raw_inf_m3_s).unwrap_or(0.0),
+            forced_vent_m3_s: indoor_inf.map(|c| c.forced_flow_m3_s).unwrap_or(0.0),
+            natural_vent_m3_s: indoor_inf.map(|c| c.nat_flow_m3_s).unwrap_or(0.0),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag: self.ext_surface_diag_buf.clone(),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -471,32 +456,34 @@ impl ThermalSolver {
         y_next: &DVector<f64>,
         latent_by_zone: HashMap<ZoneId, f64>,
     ) -> DomainUpdate {
-        let mut zone_temperatures_c: Vec<(ZoneId, f64)> = self
-            .wiring
-            .zone_output_indices
-            .iter()
-            .map(|(zone, output_idx)| (*zone, y_next[*output_idx]))
-            .collect();
-        zone_temperatures_c.sort_by_key(|(zone, _)| *zone);
+        // Update temperatures in pre-sorted zone_temps_buf (no allocation, no sort).
+        for (zone, temp) in &mut self.zone_temps_buf {
+            if let Some(&output_idx) = self.wiring.zone_output_indices.get(zone) {
+                *temp = y_next[output_idx];
+            }
+        }
 
-        let mut custom_payload = Vec::with_capacity(latent_by_zone.len() * 2);
-        let mut latent_pairs: Vec<(ZoneId, f64)> =
-            latent_by_zone.iter().map(|(&z, &v)| (z, v)).collect();
-        latent_pairs.sort_by_key(|(zone, _)| *zone);
-        for (zone, latent) in latent_pairs {
-            custom_payload.push(f64::from(zone.0));
-            custom_payload.push(latent);
+        // Reuse latent_pairs_buf and custom_payload_buf.
+        self.latent_pairs_buf.clear();
+        self.latent_pairs_buf
+            .extend(latent_by_zone.iter().map(|(&z, &v)| (z, v)));
+        self.latent_pairs_buf.sort_by_key(|(zone, _)| *zone);
+
+        self.custom_payload_buf.clear();
+        for &(zone, latent) in &self.latent_pairs_buf {
+            self.custom_payload_buf.push(f64::from(zone.0));
+            self.custom_payload_buf.push(latent);
         }
 
         self.latent_buf = latent_by_zone;
 
         DomainUpdate {
             domain_id: THERMAL,
-            zone_temperatures_c,
-            custom_payload: if custom_payload.is_empty() {
+            zone_temperatures_c: self.zone_temps_buf.clone(),
+            custom_payload: if self.custom_payload_buf.is_empty() {
                 None
             } else {
-                Some(custom_payload)
+                Some(self.custom_payload_buf.clone())
             },
         }
     }
@@ -2630,6 +2617,7 @@ mod tests {
             transmittance,
             winter_transmittance: transmittance,
             radiation_frac,
+            glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, 0.4),
         };
 
         // 500 W/m² direct irradiance, no diffuse or reflected.

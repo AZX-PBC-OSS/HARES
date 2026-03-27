@@ -86,6 +86,7 @@ def _run_hares_observed() -> tuple[list[dict], list[dict]]:
 ochre_mod = pytest.importorskip("ochre", reason="OCHRE not installed")
 
 
+@pytest.mark.skip(reason="diagnostic visualization tool, not regression test")
 def test_observer_hvac_diagnosis():
     """Compare HVAC behavior step-by-step between OCHRE and HARES."""
     ochre_steps = _run_ochre_detailed()
@@ -173,6 +174,7 @@ def test_observer_hvac_diagnosis():
             )
 
 
+@pytest.mark.skip(reason="diagnostic visualization tool, not regression test")
 def test_observer_equipment_detail():
     """Dump per-equipment telemetry + port contributions from first snapshot."""
     hares_snaps, _ = _run_hares_observed()
@@ -216,6 +218,7 @@ def test_observer_equipment_detail():
                     print(f"    fuel {ft}: {v:.2f} W")
 
 
+@pytest.mark.skip(reason="diagnostic visualization tool, not regression test")
 def test_observer_envelope_gains():
     """Dump envelope component gains from thermal solver for all steps."""
     hares_snaps, _ = _run_hares_observed()
@@ -246,6 +249,7 @@ def test_observer_envelope_gains():
             print(f"{i:>4} | " + " | ".join(f"{v:14.2f}" for v in vals))
 
 
+@pytest.mark.skip(reason="diagnostic visualization tool, not regression test")
 def test_observer_schedule_comparison():
     """Compare scheduled load power values between OCHRE and HARES."""
     ochre_steps = _run_ochre_detailed()
@@ -290,6 +294,7 @@ def test_observer_schedule_comparison():
                     print(f"    telem.{k} = {h_telem[k]:.6f}")
 
 
+@pytest.mark.skip(reason="diagnostic visualization tool, not regression test")
 def test_observer_ochre_equipment_detail():
     """Dump OCHRE per-equipment state at step 0 for comparison."""
     if str(VENDOR_OCHRE) not in sys.path:

@@ -109,9 +109,98 @@ fn months_for_period(weekday: &Schedule, weekend: &Schedule, period_idx: u64) ->
     months
 }
 
-fn season_for_months(months: &BTreeSet<u8>) -> SeasonFilter {
-    let has_summer = months.iter().any(|&m| (6..=9).contains(&m));
-    let has_winter = months.iter().any(|&m| !(6..=9).contains(&m));
+/// Derive summer months from schedule data by comparing each month's rate
+/// periods against December (the reference winter month). Months whose
+/// 24-hour period pattern differs from December are classified as summer.
+/// Returns `None` if all months have identical patterns (no seasonal split).
+///
+/// Works for both hemispheres: if more than 6 months differ from December,
+/// December is likely a summer month (southern hemisphere), so the set is
+/// inverted — the months matching December become summer.
+fn detect_summer_months(weekday: &Schedule, weekend: &Schedule) -> Option<BTreeSet<u8>> {
+    // December is index 11 (month 12, 0-indexed)
+    let dec_wd = weekday.get(11)?;
+    let dec_we = weekend.get(11)?;
+
+    let mut differ_from_dec = BTreeSet::new();
+    for m in 0..12u8 {
+        let wd = &weekday[m as usize];
+        let we = &weekend[m as usize];
+        if wd != dec_wd || we != dec_we {
+            differ_from_dec.insert(m + 1); // 1-indexed
+        }
+    }
+
+    if differ_from_dec.is_empty() {
+        return None;
+    }
+
+    // If more than 6 months differ from December, December is likely summer
+    // (southern hemisphere). Invert: months matching December are winter,
+    // so the complement (months that differ) would be winter — take the rest.
+    let summer = if differ_from_dec.len() > 6 {
+        let all: BTreeSet<u8> = (1..=12).collect();
+        all.difference(&differ_from_dec).copied().collect()
+    } else {
+        differ_from_dec
+    };
+
+    if summer.is_empty() { None } else { Some(summer) }
+}
+
+/// Build a `SeasonalSplit` from a set of summer months.
+///
+/// Finds a contiguous range (possibly wrapping around Dec-Jan) that covers all
+/// months in the set. If the set is non-contiguous (gaps that can't be explained
+/// by wrapping), logs a warning and falls back to the default June-September split.
+fn seasonal_split_from_months(summer_months: &BTreeSet<u8>) -> Option<SeasonalSplit> {
+    if summer_months.is_empty() {
+        return None;
+    }
+
+    let months: Vec<u8> = summer_months.iter().copied().collect();
+    let n = months.len();
+
+    // Single month: start == end
+    if n == 1 {
+        return SeasonalSplit::new(months[0], months[0]).ok();
+    }
+
+    // Try non-wrapping: check if months form a contiguous sequence
+    let min = months[0];
+    let max = months[n - 1];
+    let non_wrapping_contiguous = (max - min + 1) as usize == n;
+    if non_wrapping_contiguous {
+        return SeasonalSplit::new(min, max).ok();
+    }
+
+    // Try wrapping (e.g., {11, 12, 1, 2}): find a rotation where months are contiguous.
+    // Check if the gap is a single contiguous block of non-summer months.
+    let all: BTreeSet<u8> = (1..=12).collect();
+    let winter: Vec<u8> = all.difference(summer_months).copied().collect();
+    if !winter.is_empty() {
+        let w_min = winter[0];
+        let w_max = winter[winter.len() - 1];
+        let winter_contiguous = (w_max - w_min + 1) as usize == winter.len();
+        if winter_contiguous {
+            // Summer wraps: starts after winter ends, ends before winter starts
+            let start = if w_max < 12 { w_max + 1 } else { 1 };
+            let end = if w_min > 1 { w_min - 1 } else { 12 };
+            return SeasonalSplit::new(start, end).ok();
+        }
+    }
+
+    // Non-contiguous even with wrapping — fall back to default
+    tracing::warn!(
+        ?summer_months,
+        "URDB detected non-contiguous summer months; falling back to June-September"
+    );
+    SeasonalSplit::new(6, 9).ok()
+}
+
+fn season_for_months(months: &BTreeSet<u8>, summer_months: &BTreeSet<u8>) -> SeasonFilter {
+    let has_summer = months.iter().any(|m| summer_months.contains(m));
+    let has_winter = months.iter().any(|m| !summer_months.contains(m));
     match (has_summer, has_winter) {
         (true, false) => SeasonFilter::Summer,
         (false, true) => SeasonFilter::Winter,
@@ -307,6 +396,11 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
 
     let period_indices = unique_period_indices(&weekday_sched, &weekend_sched);
 
+    // Detect summer months from schedule data, defaulting to June-September.
+    let default_summer: BTreeSet<u8> = (6..=9).collect();
+    let summer_months = detect_summer_months(&weekday_sched, &weekend_sched)
+        .unwrap_or_else(|| default_summer.clone());
+
     // Build TOU periods and energy rates
     let mut tou_schedule = Vec::new();
     let mut energy_rates = Vec::new();
@@ -320,7 +414,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     for &period_idx in &period_indices {
         let period_name = format!("period_{period_idx}");
         let months = months_for_period(&weekday_sched, &weekend_sched, period_idx);
-        let season = season_for_months(&months);
+        let season = season_for_months(&months, &summer_months);
         period_seasons.insert(period_idx, season);
 
         let weekday_ranges = hour_ranges_for_period(&weekday_sched, period_idx);
@@ -438,7 +532,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
             for &period_idx in &demand_period_indices {
                 let period_name = format!("demand_{period_idx}");
                 let months = months_for_period(dwd, dwe, period_idx);
-                let season = season_for_months(&months);
+                let season = season_for_months(&months, &summer_months);
                 let weekday_ranges = hour_ranges_for_period(dwd, period_idx);
                 let weekend_ranges = hour_ranges_for_period(dwe, period_idx);
                 let windows = build_time_windows(&weekday_ranges, &weekend_ranges);
@@ -458,7 +552,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
                 let period_name = format!("demand_{idx}");
                 let season = if let (Some(wd), Some(we)) = (&demand_weekday, &demand_weekend) {
                     let months = months_for_period(wd, we, idx as u64);
-                    season_for_months(&months)
+                    season_for_months(&months, &summer_months)
                 } else {
                     SeasonFilter::All
                 };
@@ -490,7 +584,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
         .values()
         .any(|s| matches!(s, SeasonFilter::Summer | SeasonFilter::Winter));
     let seasonal_split = if has_seasonal {
-        SeasonalSplit::new(6, 9).ok()
+        seasonal_split_from_months(&summer_months)
     } else {
         None
     };

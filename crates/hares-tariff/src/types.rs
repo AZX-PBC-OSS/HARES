@@ -204,7 +204,7 @@ impl FixedCharges {
 }
 
 /// Complete electric utility tariff.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ElectricTariff {
     pub name: Option<String>,
     pub tou_schedule: Vec<TouPeriod>,
@@ -228,6 +228,25 @@ pub struct ElectricTariff {
 
 fn default_demand_window_minutes() -> u32 {
     15
+}
+
+impl Default for ElectricTariff {
+    fn default() -> Self {
+        Self {
+            name: None,
+            tou_schedule: Vec::new(),
+            demand_tou_schedule: Vec::new(),
+            energy_rates: Vec::new(),
+            demand_rates: Vec::new(),
+            tiered_rates: Vec::new(),
+            export_rate: ExportRate::default(),
+            fixed_charges: FixedCharges::default(),
+            minimum_charge: None,
+            billing_cycle: BillingCycle::default(),
+            seasonal_split: None,
+            demand_window_minutes: 15,
+        }
+    }
 }
 
 impl ElectricTariff {
@@ -266,9 +285,9 @@ impl ElectricTariff {
         if let Some(ss) = &self.seasonal_split {
             ss.validate()?;
         }
-        if self.demand_window_minutes != 0 && self.demand_window_minutes < 5 {
+        if self.demand_window_minutes < 5 {
             return Err(HaresError::Tariff(format!(
-                "demand_window_minutes must be >= 5 or 0 (default 15), got {}",
+                "demand_window_minutes must be >= 5, got {}",
                 self.demand_window_minutes
             )));
         }

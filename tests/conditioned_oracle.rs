@@ -38,21 +38,22 @@ mod tests {
     }
 
     fn beopt_conditioned_config(scenario: &str, output_path: PathBuf) -> DwellingConfig {
-        // All scenarios use Denver local time. HARES takes naive_local() from start_time
-        // and re-applies the EPW timezone offset (MST = UTC-7). The offset on start_time
-        // is ignored; only the wall-clock components matter.
-        let utc = FixedOffset::east_opt(0).expect("UTC offset");
+        // Both HARES and OCHRE treat timestamps as local time internally —
+        // .hour() is used directly for schedule evaluation regardless of offset.
+        // We use Denver's real offset for clarity, but only the wall-clock
+        // digits (hour, minute) actually affect behavior.
+        let denver = FixedOffset::west_opt(7 * 3600).expect("Denver UTC-7 offset");
         let (start_time, duration) = match scenario {
             "beopt_spring_72h" => (
-                utc.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),
+                denver.with_ymd_and_hms(2019, 5, 5, 12, 0, 0).unwrap(),
                 Duration::hours(72),
             ),
             "beopt_summer_48h" => (
-                utc.with_ymd_and_hms(2019, 7, 15, 12, 0, 0).unwrap(),
+                denver.with_ymd_and_hms(2019, 7, 15, 12, 0, 0).unwrap(),
                 Duration::hours(48),
             ),
             "beopt_winter_48h" => (
-                utc.with_ymd_and_hms(2019, 1, 15, 12, 0, 0).unwrap(),
+                denver.with_ymd_and_hms(2019, 1, 15, 12, 0, 0).unwrap(),
                 Duration::hours(48),
             ),
             other => panic!("unknown conditioned scenario: {other}"),

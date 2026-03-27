@@ -2045,7 +2045,7 @@ impl From<PyStormWatchTrigger> for RustStormWatchTrigger {
     fn from(v: PyStormWatchTrigger) -> Self {
         match v {
             PyStormWatchTrigger::ManualEnable => Self::ManualEnable,
-            PyStormWatchTrigger::WeatherSignal => Self::WeatherSignal,
+            PyStormWatchTrigger::WeatherSignal => Self::WeatherSignal { wind_speed_threshold_m_s: 25.0 },
         }
     }
 }
@@ -2054,7 +2054,7 @@ impl From<RustStormWatchTrigger> for PyStormWatchTrigger {
     fn from(v: RustStormWatchTrigger) -> Self {
         match v {
             RustStormWatchTrigger::ManualEnable => Self::ManualEnable,
-            RustStormWatchTrigger::WeatherSignal => Self::WeatherSignal,
+            RustStormWatchTrigger::WeatherSignal { .. } => Self::WeatherSignal,
         }
     }
 }
@@ -2403,16 +2403,17 @@ impl PyBmsMode {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target_soc = 1.0, trigger = "manual", base_mode = None))]
+    #[pyo3(signature = (target_soc = 1.0, trigger = "manual", base_mode = None, wind_speed_threshold_m_s = 25.0))]
     fn storm_watch(
         target_soc: f64,
         trigger: &str,
         base_mode: Option<PyBmsMode>,
+        wind_speed_threshold_m_s: f64,
     ) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
         let trigger = match trigger {
             "manual" => RustStormWatchTrigger::ManualEnable,
-            "weather_signal" => RustStormWatchTrigger::WeatherSignal,
+            "weather_signal" => RustStormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s },
             other => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "trigger must be 'manual' or 'weather_signal', got {other:?}"

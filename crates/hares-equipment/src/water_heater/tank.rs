@@ -88,6 +88,14 @@ pub struct StratifiedTank {
     last_skin_loss_w: f64,
     /// Pre-computed telemetry key strings: `["tank_node_0_c", "tank_node_1_c", ...]`.
     telemetry_keys: Vec<String>,
+    // Scratch buffers reused each step to avoid per-step heap allocations.
+    scratch_old_temps: Vec<f64>,
+    scratch_delta_energy: Vec<f64>,
+    scratch_new_temps: Vec<f64>,
+    scratch_pre_injection_temps: Vec<f64>,
+    scratch_inversion_temps: Vec<f64>,
+    scratch_inversion_volumes: Vec<f64>,
+    scratch_inversion_counts: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +182,13 @@ impl StratifiedTank {
             telemetry_keys: (0..config.n_nodes)
                 .map(|i| format!("tank_node_{i}_c"))
                 .collect(),
+            scratch_old_temps: vec![0.0; config.n_nodes],
+            scratch_delta_energy: vec![0.0; config.n_nodes],
+            scratch_new_temps: vec![0.0; config.n_nodes],
+            scratch_pre_injection_temps: vec![0.0; config.n_nodes],
+            scratch_inversion_temps: Vec::with_capacity(config.n_nodes),
+            scratch_inversion_volumes: Vec::with_capacity(config.n_nodes),
+            scratch_inversion_counts: Vec::with_capacity(config.n_nodes),
         })
     }
 
@@ -280,9 +295,9 @@ impl StratifiedTank {
         // Snapshot post-conduction/pre-injection temps for energy accounting.
         // energy_out_j must reflect the water actually in the tank before element
         // heat is added, not the heated water.
-        let pre_injection_temps = self.node_temps_c.clone();
+        self.scratch_pre_injection_temps.copy_from_slice(&self.node_temps_c);
         self.apply_heat_injections(heat_injections, dt)?;
-        let mut draw = self.apply_draw(draw_volume_m3, mains_temp_c, &pre_injection_temps)?;
+        let mut draw = self.apply_draw(draw_volume_m3, mains_temp_c)?;
         draw.outlet_temp_c = pre_step_outlet_temp_c;
         self.mix_inversions();
         draw.unmet_load_w = 0.0;
@@ -348,9 +363,9 @@ impl StratifiedTank {
         let clamped_draw = total_draw_m3.min(self.total_volume_m3);
 
         self.apply_conduction_and_standby(ambient_temp_c, dt)?;
-        let pre_injection_temps = self.node_temps_c.clone();
+        self.scratch_pre_injection_temps.copy_from_slice(&self.node_temps_c);
         self.apply_heat_injections(heat_injections, dt)?;
-        let mut draw = self.apply_draw(clamped_draw, mains_temp_c, &pre_injection_temps)?;
+        let mut draw = self.apply_draw(clamped_draw, mains_temp_c)?;
         // Override outlet with pre-heating snapshot.
         draw.outlet_temp_c = outlet_est_c;
         self.mix_inversions();
@@ -409,42 +424,45 @@ impl StratifiedTank {
     }
 
     pub fn mix_inversions(&mut self) -> usize {
-        let mut layer_temps = Vec::<f64>::with_capacity(self.n_nodes());
-        let mut layer_volumes = Vec::<f64>::with_capacity(self.n_nodes());
-        let mut layer_counts = Vec::<usize>::with_capacity(self.n_nodes());
+        self.scratch_inversion_temps.clear();
+        self.scratch_inversion_volumes.clear();
+        self.scratch_inversion_counts.clear();
         let mut total_merges = 0usize;
 
         for (&temp_c, &volume_m3) in self.node_temps_c.iter().zip(self.node_volumes_m3.iter()) {
-            layer_temps.push(temp_c);
-            layer_volumes.push(volume_m3);
-            layer_counts.push(1);
+            self.scratch_inversion_temps.push(temp_c);
+            self.scratch_inversion_volumes.push(volume_m3);
+            self.scratch_inversion_counts.push(1);
 
-            while layer_temps.len() >= 2 {
-                let lower = layer_temps.len() - 1;
+            while self.scratch_inversion_temps.len() >= 2 {
+                let lower = self.scratch_inversion_temps.len() - 1;
                 let upper = lower - 1;
-                if layer_temps[upper] >= layer_temps[lower] {
+                if self.scratch_inversion_temps[upper] >= self.scratch_inversion_temps[lower] {
                     break;
                 }
 
-                let merged_volume = layer_volumes[upper] + layer_volumes[lower];
-                let merged_temp = (layer_temps[upper] * layer_volumes[upper]
-                    + layer_temps[lower] * layer_volumes[lower])
+                let merged_volume =
+                    self.scratch_inversion_volumes[upper] + self.scratch_inversion_volumes[lower];
+                let merged_temp = (self.scratch_inversion_temps[upper]
+                    * self.scratch_inversion_volumes[upper]
+                    + self.scratch_inversion_temps[lower]
+                        * self.scratch_inversion_volumes[lower])
                     / merged_volume;
 
-                layer_temps[upper] = merged_temp;
-                layer_volumes[upper] = merged_volume;
-                layer_counts[upper] += layer_counts[lower];
+                self.scratch_inversion_temps[upper] = merged_temp;
+                self.scratch_inversion_volumes[upper] = merged_volume;
+                self.scratch_inversion_counts[upper] += self.scratch_inversion_counts[lower];
 
-                layer_temps.pop();
-                layer_volumes.pop();
-                layer_counts.pop();
+                self.scratch_inversion_temps.pop();
+                self.scratch_inversion_volumes.pop();
+                self.scratch_inversion_counts.pop();
                 total_merges += 1;
             }
         }
 
         let mut output_idx = 0usize;
-        for (layer_idx, &layer_temp_c) in layer_temps.iter().enumerate() {
-            let count = layer_counts[layer_idx];
+        for (layer_idx, &layer_temp_c) in self.scratch_inversion_temps.iter().enumerate() {
+            let count = self.scratch_inversion_counts[layer_idx];
             for _ in 0..count {
                 self.node_temps_c[output_idx] = layer_temp_c;
                 output_idx += 1;
@@ -500,22 +518,23 @@ impl StratifiedTank {
             return Ok(());
         }
 
-        let old_temps_c = self.node_temps_c.clone();
-        let mut delta_energy_j = vec![0.0_f64; self.n_nodes()];
+        self.scratch_old_temps.copy_from_slice(&self.node_temps_c);
+        self.scratch_delta_energy.fill(0.0);
 
         let conduction_w_per_k =
             self.conductivity_w_m_k * self.cross_section_area_m2 / self.node_height_m;
         for idx in 0..(self.n_nodes() - 1) {
-            let heat_flow_w = conduction_w_per_k * (old_temps_c[idx + 1] - old_temps_c[idx]);
+            let heat_flow_w =
+                conduction_w_per_k * (self.scratch_old_temps[idx + 1] - self.scratch_old_temps[idx]);
             let transfer_j = heat_flow_w * seconds;
-            delta_energy_j[idx] += transfer_j;
-            delta_energy_j[idx + 1] -= transfer_j;
+            self.scratch_delta_energy[idx] += transfer_j;
+            self.scratch_delta_energy[idx + 1] -= transfer_j;
         }
 
         let mut total_skin_loss_w = 0.0_f64;
         for idx in 0..self.n_nodes() {
-            let loss_w = self.ua_per_node[idx] * (old_temps_c[idx] - ambient_temp_c);
-            delta_energy_j[idx] -= loss_w * seconds;
+            let loss_w = self.ua_per_node[idx] * (self.scratch_old_temps[idx] - ambient_temp_c);
+            self.scratch_delta_energy[idx] -= loss_w * seconds;
             total_skin_loss_w += loss_w;
         }
         self.last_skin_loss_w = total_skin_loss_w;
@@ -524,21 +543,20 @@ impl StratifiedTank {
             let thermal_mass_j_per_k = WATER_DENSITY_KG_PER_M3
                 * self.node_volumes_m3[idx]
                 * WATER_SPECIFIC_HEAT_J_PER_KG_K;
-            *node_temp_c += delta_energy_j[idx] / thermal_mass_j_per_k;
+            *node_temp_c += self.scratch_delta_energy[idx] / thermal_mass_j_per_k;
         }
 
         Ok(())
     }
 
     /// Apply a draw to the tank, displacing water downward with mains water entering
-    /// from the bottom. `energy_temps_c` provides the temperature profile used for
-    /// computing `energy_out_j` — typically the pre-injection snapshot so that
-    /// element heat does not inflate the reported energy removed by the draw.
+    /// from the bottom. Uses `scratch_pre_injection_temps` for energy accounting —
+    /// typically the pre-injection snapshot so that element heat does not inflate
+    /// the reported energy removed by the draw.
     fn apply_draw(
         &mut self,
         draw_volume_m3: f64,
         mains_temp_c: f64,
-        energy_temps_c: &[f64],
     ) -> Result<DrawResult> {
         let outlet_temp_c = self.node_temps_c[0];
         if draw_volume_m3 == 0.0 {
@@ -550,15 +568,13 @@ impl StratifiedTank {
             });
         }
 
-        let old_temps_c = self.node_temps_c.clone();
+        self.scratch_old_temps.copy_from_slice(&self.node_temps_c);
         let top_segment_edges_m3 = [0.0, draw_volume_m3];
-        // Use pre-injection temperatures for energy accounting so element heat
-        // does not inflate the reported energy removed by the draw.
         let energy_out_j = WATER_DENSITY_KG_PER_M3
             * WATER_SPECIFIC_HEAT_J_PER_KG_K
             * segment_average_temp(
                 &self.node_edges_m3,
-                energy_temps_c,
+                &self.scratch_pre_injection_temps,
                 top_segment_edges_m3[0],
                 top_segment_edges_m3[1],
             )
@@ -569,18 +585,19 @@ impl StratifiedTank {
             * draw_volume_m3;
 
         let mains_start_m3 = self.total_volume_m3 - draw_volume_m3;
-        let mut new_temps_c = vec![0.0_f64; self.n_nodes()];
-        for (idx, new_temp_c) in new_temps_c.iter_mut().enumerate().take(self.n_nodes()) {
+        self.scratch_new_temps.fill(0.0);
+        let n = self.n_nodes();
+        for idx in 0..n {
             let target_start = self.node_edges_m3[idx];
             let target_end = self.node_edges_m3[idx + 1];
             let mut energy_volume_temp = 0.0_f64;
 
-            for (src_idx, src_temp_c) in old_temps_c.iter().enumerate().take(self.n_nodes()) {
+            for src_idx in 0..n {
                 let shifted_start = self.node_edges_m3[src_idx] - draw_volume_m3;
                 let shifted_end = self.node_edges_m3[src_idx + 1] - draw_volume_m3;
                 let overlap = overlap_length(target_start, target_end, shifted_start, shifted_end);
                 if overlap > 0.0 {
-                    energy_volume_temp += overlap * src_temp_c;
+                    energy_volume_temp += overlap * self.scratch_old_temps[src_idx];
                 }
             }
 
@@ -595,10 +612,10 @@ impl StratifiedTank {
             }
 
             let node_volume = self.node_volumes_m3[idx];
-            *new_temp_c = energy_volume_temp / node_volume;
+            self.scratch_new_temps[idx] = energy_volume_temp / node_volume;
         }
 
-        self.node_temps_c = new_temps_c;
+        self.node_temps_c.copy_from_slice(&self.scratch_new_temps);
         Ok(DrawResult {
             outlet_temp_c,
             energy_out_j,

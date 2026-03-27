@@ -11,72 +11,12 @@ use crate::py_dwelling::{PyDwelling, lock_dwelling_string};
 
 /// One batched RL step result.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct StepResult {
-    pub obs: Vec<f64>,
-    pub reward: f64,
-    pub terminated: bool,
-    pub truncated: bool,
-    pub info: HashMap<String, f64>,
-}
-
-/// Parallel batch stepping entry point used by vectorized gym environments.
-///
-/// # Panics
-///
-/// Panics if `actions` is non-empty — action mapping is not yet implemented (H-7).
-/// Pass an empty slice to step without actions.
-#[allow(dead_code)]
-pub fn batch_step(dwellings: &mut [PyDwelling], actions: &[Vec<f64>]) -> Vec<StepResult> {
-    assert!(
-        actions.is_empty(),
-        "batch_step action mapping is not yet implemented (H-7). \
-         Pass an empty slice to step without actions."
-    );
-    dwellings
-        .par_iter_mut()
-        .map(|dwelling| {
-
-            let mut info = HashMap::new();
-            match dwelling.step_core() {
-                Ok(step) => {
-                    let obs = dwelling.observation().unwrap_or_default();
-                    let reward = -step.net_electric_power_kw;
-                    info.insert(
-                        "net_electric_power_kw".to_string(),
-                        step.net_electric_power_kw,
-                    );
-                    StepResult {
-                        obs,
-                        reward,
-                        terminated: false,
-                        truncated: false,
-                        info,
-                    }
-                }
-                Err(_e) => {
-                    info.insert("error".to_string(), 1.0);
-                    StepResult {
-                        obs: Vec::new(),
-                        reward: 0.0,
-                        terminated: true,
-                        truncated: false,
-                        info,
-                    }
-                }
-            }
-        })
-        .collect()
-}
-
-/// GIL-releasing wrapper for batch stepping.
-#[allow(dead_code)]
-pub fn batch_step_with_py(
-    py: Python<'_>,
-    dwellings: &mut [PyDwelling],
-    actions: &[Vec<f64>],
-) -> Vec<StepResult> {
-    py.detach(|| batch_step(dwellings, actions))
+struct StepResult {
+    obs: Vec<f64>,
+    reward: f64,
+    terminated: bool,
+    truncated: bool,
+    info: HashMap<String, f64>,
 }
 
 fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Vec<f64>, String> {

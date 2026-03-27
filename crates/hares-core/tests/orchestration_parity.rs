@@ -461,19 +461,14 @@ master_seed = 0
 
     // OCHRE-correct behavior: occupancy gain reduces heating demand → A < B.
     //
-    // STALE-TEMP STATUS: HVAC currently reads zone temperature from the previous
-    // timestep's latest_env and does not see the same-timestep occupancy gains
-    // accumulated in ports. Until this is fixed (update latest_env zone temperatures
-    // after apply_occupancy_gains() and before HVAC step), both dwellings produce
-    // identical heating energy (kwh_a == kwh_b).
-    // The assertion uses <= to document that A must not exceed B even now.
-    // When the defect is fixed, change this to strict < and remove this comment.
+    // STALE-TEMP DEFECT (open): HVAC reads zone temperature from the previous
+    // timestep and does not see same-timestep occupancy gains. Until fixed,
+    // both dwellings produce identical heating energy (kwh_a == kwh_b).
+    // Change <= to < once the stale-temp defect is resolved.
     assert!(
         kwh_a <= kwh_b,
-        "EXPECTED (stale-temp regression): occupancy gain (A, {kwh_a:.4} kWh) should \
-         reduce heating demand vs no-occupancy (B, {kwh_b:.4} kWh) over {STEPS} steps. \
-         If this assertion fails, HVAC is seeing current-step gains (defect resolved). \
-         Update this test to assert kwh_a < kwh_b once the stale-temp defect is fixed."
+        "occupancy gain (A, {kwh_a:.4} kWh) must not exceed \
+         no-occupancy (B, {kwh_b:.4} kWh) over {STEPS} steps"
     );
 }
 

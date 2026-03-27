@@ -251,10 +251,11 @@ fn apply_soc_target_limits_charging() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
+    let max_soc = 0.3;
     ev.apply_control(&ControlSignal::SOCTarget {
-        target_soc: 0.3,
+        target_soc: max_soc,
         min_soc: None,
-        max_soc: Some(0.3),
+        max_soc: Some(max_soc),
     })
     .unwrap();
 
@@ -263,7 +264,14 @@ fn apply_soc_target_limits_charging() {
         ev.step(&env, Duration::minutes(5), &mut ports).unwrap();
     }
 
-    assert!(ev.soc <= 0.301);
+    const SOC_FLOAT_TOL: f64 = 1e-3;
+    assert!(
+        ev.soc <= max_soc + SOC_FLOAT_TOL,
+        "SOC {} should not exceed max_soc {} (+ tol {})",
+        ev.soc,
+        max_soc,
+        SOC_FLOAT_TOL,
+    );
 }
 
 #[test]

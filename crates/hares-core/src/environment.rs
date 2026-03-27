@@ -89,6 +89,11 @@ pub struct EnvironmentManager {
     /// surface, the covered fraction reduces incident solar irradiance on that
     /// envelope surface (shading effect).
     pv_roof_coverage: std::collections::HashMap<u32, f64>,
+    // Pre-allocated buffers reused each step to avoid per-step allocations.
+    solar_irradiance_buf: Vec<SurfaceIrradiance>,
+    schedule_values_buf: Vec<f64>,
+    mains_payload_buf: Vec<f64>,
+    equipment_telemetry_buf: std::collections::HashMap<String, hares_types::Telemetry>,
 }
 
 impl EnvironmentManager {
@@ -195,6 +200,9 @@ impl EnvironmentManager {
         let start_hour = start_time.hour() as usize;
         let zones = initial_zones(building, initial_outdoor_temp_c, start_hour);
 
+        let num_surfaces = surfaces.len();
+        let num_schedule_cols = schedule.columns.len();
+
         Ok(Self {
             weather,
             schedule,
@@ -207,9 +215,6 @@ impl EnvironmentManager {
             mains_t_annual_avg_c,
             mains_dt_annual_range_c,
             mains_hemisphere,
-            // Kusuda-Achenbach parameters: use same annual stats as mains water model.
-            // T_mean ≈ annual average outdoor temperature.
-            // T_amplitude ≈ half of annual range (same derivation as mains model).
             ground_t_mean_c: mains_t_annual_avg_c,
             ground_t_amplitude_c: mains_dt_annual_range_c / 2.0,
             ground_phase_day,
@@ -217,6 +222,10 @@ impl EnvironmentManager {
             civil_tz,
             solar_override: None,
             pv_roof_coverage: std::collections::HashMap::new(),
+            solar_irradiance_buf: Vec::with_capacity(num_surfaces),
+            schedule_values_buf: Vec::with_capacity(num_schedule_cols),
+            mains_payload_buf: vec![0.0],
+            equipment_telemetry_buf: std::collections::HashMap::new(),
         })
     }
 
@@ -263,6 +272,7 @@ impl EnvironmentManager {
             .any(|s| s.surface_id == geom.surface_id)
         {
             self.surfaces.push(geom);
+            self.solar_irradiance_buf.reserve(1);
         }
     }
 
@@ -396,7 +406,7 @@ impl EnvironmentManager {
             wet_bulb_from_humidity_ratio(outdoor_temp_c, outdoor_humidity_ratio, pressure_pa);
         let outdoor_enthalpy_j_kg = moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
 
-        // Step 2: per-surface solar irradiance
+        // Step 2: per-surface solar irradiance (reuse self.solar_irradiance_buf)
         // solar_position() converts to UTC internally — it needs true UTC for
         // solar geometry. We pass the local-time clock value.
         let now = clock.current_time();
@@ -413,15 +423,14 @@ impl EnvironmentManager {
             self.mains_hemisphere,
         );
         let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
-        let solar_irradiance = if let Some(ref overrides) = self.solar_override {
-            // Use pre-computed POA from external source (pvlib, PySAM, etc.)
+
+        self.solar_irradiance_buf.clear();
+        if let Some(ref overrides) = self.solar_override {
             let idx = step % overrides.len();
-            overrides[idx].clone()
+            self.solar_irradiance_buf.extend_from_slice(&overrides[idx]);
         } else {
-            // Compute POA from GHI/DNI/DHI using Perez tilted irradiance model.
-            self.surfaces
-                .iter()
-                .map(|surface| {
+            self.solar_irradiance_buf.extend(
+                self.surfaces.iter().map(|surface| {
                     perez_tilted_irradiance(
                         surface.surface_id,
                         ghi,
@@ -434,39 +443,31 @@ impl EnvironmentManager {
                         day_of_year,
                         ground_albedo,
                     )
-                })
-                .collect()
-        };
+                }),
+            );
+        }
 
-        // Apply PV roof shading: reduce irradiance on covered roof surfaces.
-        let solar_irradiance = if self.pv_roof_coverage.is_empty() {
-            solar_irradiance
-        } else {
-            solar_irradiance
-                .into_iter()
-                .map(|mut irr| {
-                    if let Some(&coverage) = self.pv_roof_coverage.get(&irr.surface_id) {
-                        let exposed = 1.0 - coverage;
-                        irr.direct_w_m2 *= exposed;
-                        irr.diffuse_w_m2 *= exposed;
-                        irr.reflected_w_m2 *= exposed;
-                    }
-                    irr
-                })
-                .collect()
-        };
+        // Apply PV roof shading in-place: reduce irradiance on covered roof surfaces.
+        if !self.pv_roof_coverage.is_empty() {
+            for irr in &mut self.solar_irradiance_buf {
+                if let Some(&coverage) = self.pv_roof_coverage.get(&irr.surface_id) {
+                    let exposed = 1.0 - coverage;
+                    irr.direct_w_m2 *= exposed;
+                    irr.diffuse_w_m2 *= exposed;
+                    irr.reflected_w_m2 *= exposed;
+                }
+            }
+        }
 
-        // Step 3: schedule values
-        let schedule_values = self
-            .schedule
-            .columns
-            .iter()
-            .map(|col| col[schedule_idx])
-            .collect::<Vec<_>>();
+        // Step 3: schedule values (reuse self.schedule_values_buf)
+        self.schedule_values_buf.clear();
+        self.schedule_values_buf
+            .extend(self.schedule.columns.iter().map(|col| col[schedule_idx]));
 
-        // Step 4: zone-state feedback
+        // Step 4: zone-state feedback (reuse capacity)
         if !zone_states.is_empty() {
-            self.zones = zone_states.to_vec();
+            self.zones.clear();
+            self.zones.extend_from_slice(zone_states);
         }
 
         // Step 5: grid defaults / overrides
@@ -474,6 +475,24 @@ impl EnvironmentManager {
             voltage_pu: DEFAULT_GRID_VOLTAGE_PU,
             frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
         });
+
+        // Step 6: build custom_domains, reusing buffer capacity across steps.
+        self.mains_payload_buf[0] = mains_temp_c;
+        let custom_domains = vec![
+            hares_types::DomainUpdate {
+                domain_id: schedule_domain_id(),
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(self.schedule_values_buf.clone()),
+            },
+            hares_types::DomainUpdate {
+                domain_id: MAINS_WATER_DOMAIN_ID,
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(self.mains_payload_buf.clone()),
+            },
+        ];
+
+        // Reuse equipment telemetry map capacity.
+        self.equipment_telemetry_buf.clear();
 
         EnvironmentState {
             zones: self.zones.clone(),
@@ -487,7 +506,7 @@ impl EnvironmentManager {
                 ground_temp_c: self.weather.get(WeatherField::GroundTempC, weather_idx),
                 sky_temp_c: self.weather.get(WeatherField::SkyTempC, weather_idx),
                 pressure_kpa,
-                solar_irradiance,
+                solar_irradiance: self.solar_irradiance_buf.clone(),
                 ghi_w_m2: ghi,
                 dni_w_m2: dni,
                 dhi_w_m2: dhi,
@@ -498,19 +517,8 @@ impl EnvironmentManager {
                 ground_albedo,
             },
             grid,
-            custom_domains: vec![
-                hares_types::DomainUpdate {
-                    domain_id: schedule_domain_id(),
-                    zone_temperatures_c: Vec::new(),
-                    custom_payload: Some(schedule_values),
-                },
-                hares_types::DomainUpdate {
-                    domain_id: MAINS_WATER_DOMAIN_ID,
-                    zone_temperatures_c: Vec::new(),
-                    custom_payload: Some(vec![mains_temp_c]),
-                },
-            ],
-            equipment_telemetry: std::collections::HashMap::new(),
+            custom_domains,
+            equipment_telemetry: self.equipment_telemetry_buf.clone(),
             current_time: clock.current_time(),
             time_res: clock.time_res,
             price_signal: Default::default(),

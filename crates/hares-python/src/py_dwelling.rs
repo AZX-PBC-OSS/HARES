@@ -45,15 +45,13 @@ fn parse_solar_override(
     if let Ok(list) = data.extract::<Bound<'_, PyList>>() {
         return parse_solar_override_from_list(py, &list);
     }
-    if data.getattr("__class__").is_ok() {
-        let class_name = data.getattr("__class__")?.getattr("__name__")?;
-        let class_name_str: String = class_name.extract()?;
-        if class_name_str == "DataFrame" {
-            return parse_solar_override_from_dataframe(py, data);
-        }
-        if class_name_str == "NDArray" || class_name_str == "ndarray" {
-            return parse_solar_override_from_dict(py, data);
-        }
+    // Duck-type: DataFrame-like has .values and .columns attributes
+    if data.hasattr("values")? && data.hasattr("columns")? {
+        return parse_solar_override_from_dataframe(py, data);
+    }
+    // Duck-type: ndarray-like has .dtype and .shape attributes
+    if data.hasattr("dtype")? && data.hasattr("shape")? {
+        return parse_solar_override_from_dict(py, data);
     }
     if let Ok(dict) = data.extract::<Bound<'_, PyDict>>() {
         return parse_solar_override_from_dict(py, dict.as_any());

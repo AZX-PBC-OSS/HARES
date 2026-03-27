@@ -38,6 +38,7 @@ def test_fleet_from_resstock_accepts_2024_2(tmp_path: Path) -> None:
     )
 
     assert isinstance(fleet, py_fleet)
+    assert len(fleet) >= 1, f"Fleet should have at least 1 building, got {len(fleet)}"
 
 
 def test_fleet_from_resstock_rejects_invalid_version(tmp_path: Path) -> None:
