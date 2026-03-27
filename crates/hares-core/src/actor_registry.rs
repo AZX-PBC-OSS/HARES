@@ -172,6 +172,7 @@ impl ActorRegistry {
                     avg_speed,
                     config.get_f64("range_anxiety_miles").unwrap_or(20.0),
                     config.get_f64("away_charge_fraction").unwrap_or(0.0),
+                    config.get_f64("away_charge_power_kw").unwrap_or(6.6),
                     seed,
                 );
                 Ok(Box::new(actor))

@@ -37,6 +37,24 @@ pub use water_heater::DHW_DEMAND_LOOP;
 /// Equipment-layer result type.
 pub type Result<T> = std::result::Result<T, HaresError>;
 
+/// Piecewise-linear temperature derate: returns 0.0 at or below `temp_min`,
+/// 1.0 at or above `temp_max`, and linearly interpolates between.
+#[inline]
+pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f64 {
+    if temp_c >= temp_max {
+        1.0
+    } else if temp_c <= temp_min {
+        0.0
+    } else {
+        let span = temp_max - temp_min;
+        if span <= f64::EPSILON {
+            0.0
+        } else {
+            (temp_c - temp_min) / span
+        }
+    }
+}
+
 /// Common interface implemented by all equipment models.
 pub trait Equipment: Send + Sync {
     fn descriptor(&self) -> &EquipmentDescriptor;
@@ -319,12 +337,15 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
                 .single()
                 .expect("valid"),
             time_res: chrono::Duration::seconds(60),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 

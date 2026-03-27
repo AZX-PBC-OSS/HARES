@@ -57,8 +57,11 @@ fn sample_env() -> EnvironmentState {
             frequency_hz: 60.0,
         },
         custom_domains: vec![],
+        equipment_telemetry: std::collections::HashMap::new(),
         current_time: dt(2026, 1, 1, 0, 0, 0),
         time_res: ChronoDuration::minutes(1),
+    price_signal: Default::default(),
+    electrical: Default::default(),
     }
 }
 
@@ -1646,4 +1649,43 @@ fn ev_control_capabilities_include_new_signals() {
     assert!(caps.contains(ControlCapabilities::EV_DRIVE));
     assert!(caps.contains(ControlCapabilities::EV_AWAY_CHARGE));
     assert!(caps.contains(ControlCapabilities::EV_SET_READY_BY));
+}
+
+#[test]
+fn ev_charging_strategy_v2g_from_config() {
+    let mut raw = base_raw();
+    let json = serde_json::to_string(&hares_types::ChargingStrategy::V2G {
+        min_soc: 0.3,
+        max_export_kw: 7.2,
+        price_threshold: 0.25,
+    })
+    .unwrap();
+    raw.insert(
+        KEY_CHARGING_STRATEGY.to_string(),
+        crate::config::ConfigValue::Text(json),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert_eq!(
+        ev.charging_strategy(),
+        &hares_types::ChargingStrategy::V2G {
+            min_soc: 0.3,
+            max_export_kw: 7.2,
+            price_threshold: 0.25,
+        }
+    );
+}
+
+#[test]
+fn ev_charging_strategy_backward_compat() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    assert_eq!(
+        ev.charging_strategy(),
+        &hares_types::ChargingStrategy::Immediate { target_soc: 1.0 }
+    );
 }

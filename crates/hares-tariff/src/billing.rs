@@ -11,6 +11,7 @@ struct DemandWindow {
     head: usize,
     count: usize,
     running_sum: f64,
+    push_count: u64,
 }
 
 impl DemandWindow {
@@ -20,6 +21,7 @@ impl DemandWindow {
             head: 0,
             count: 0,
             running_sum: 0.0,
+            push_count: 0,
         }
     }
 
@@ -34,6 +36,10 @@ impl DemandWindow {
         self.head = (self.head + 1) % cap;
         if self.count < cap {
             self.count += 1;
+        }
+        self.push_count += 1;
+        if self.push_count.is_multiple_of(1000) {
+            self.running_sum = self.samples.iter().sum();
         }
     }
 
@@ -50,6 +56,9 @@ impl DemandWindow {
         self.head = 0;
         self.count = 0;
         self.running_sum = 0.0;
+        // Resetting push_count is intentional: there's no accumulated drift to
+        // correct after a full reset, so the periodic recomputation guard restarts.
+        self.push_count = 0;
     }
 }
 
@@ -61,6 +70,8 @@ pub struct BillingState {
     pub(crate) cumulative_energy_cost_usd: f64,
     pub(crate) cumulative_export_credit_usd: f64,
     pub(crate) peak_demand_kw: f64,
+    /// Per-period peak demand (indexed by period name table index from evaluator).
+    pub(crate) period_peak_demand_kw: Vec<f64>,
     pub(crate) prior_peaks_kw: VecDeque<f64>,
     demand_window: DemandWindow,
     billing_cycle: BillingCycle,
@@ -68,18 +79,15 @@ pub struct BillingState {
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 30,
-    }
+    use chrono::NaiveDate;
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let next = NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap();
+    let this = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+    (next - this).num_days() as u32
 }
 
 fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> {
@@ -95,7 +103,7 @@ fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> 
             start
                 .timezone()
                 .with_ymd_and_hms(year, month, day, 0, 0, 0)
-                .single()
+                .earliest()
                 .expect("computed billing period date must be valid after day clamp")
         }
         BillingCycle::Custom(days) => start + Duration::days(days as i64),
@@ -109,6 +117,7 @@ impl BillingState {
         demand_window_minutes: u32,
         interval_seconds: u32,
         ratchet_config: Option<RatchetConfig>,
+        num_tou_periods: usize,
     ) -> Self {
         let capacity = if interval_seconds > 0 {
             (demand_window_minutes as usize * 60) / interval_seconds as usize
@@ -125,6 +134,7 @@ impl BillingState {
             cumulative_energy_cost_usd: 0.0,
             cumulative_export_credit_usd: 0.0,
             peak_demand_kw: 0.0,
+            period_peak_demand_kw: vec![0.0; num_tou_periods],
             prior_peaks_kw: VecDeque::with_capacity(12),
             demand_window: DemandWindow::new(capacity),
             billing_cycle,
@@ -138,6 +148,7 @@ impl BillingState {
         dt_seconds: f64,
         import_price: f64,
         export_price: f64,
+        period_idx: u16,
     ) {
         let import_kwh = net_power_kw.max(0.0) * dt_seconds / 3600.0;
         let export_kwh = (-net_power_kw).max(0.0) * dt_seconds / 3600.0;
@@ -146,7 +157,11 @@ impl BillingState {
         self.cumulative_energy_cost_usd += import_kwh * import_price;
         self.cumulative_export_credit_usd += export_kwh * export_price;
         self.demand_window.push(net_power_kw.max(0.0));
-        self.peak_demand_kw = self.peak_demand_kw.max(self.demand_window.average());
+        let avg = self.demand_window.average();
+        self.peak_demand_kw = self.peak_demand_kw.max(avg);
+        if let Some(slot) = self.period_peak_demand_kw.get_mut(period_idx as usize) {
+            *slot = slot.max(avg);
+        }
     }
 
     pub fn period_start(&self) -> DateTime<Tz> {
@@ -173,6 +188,13 @@ impl BillingState {
         apply_ratchet(self.peak_demand_kw, &self.prior_peaks_kw, &self.ratchet_config)
     }
 
+    pub fn peak_for_period(&self, period_idx: u16) -> f64 {
+        self.period_peak_demand_kw
+            .get(period_idx as usize)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     pub fn reset(&mut self, new_period_start: DateTime<Tz>) {
         self.prior_peaks_kw.push_back(self.peak_demand_kw);
         if self.prior_peaks_kw.len() > 12 {
@@ -185,6 +207,7 @@ impl BillingState {
         self.cumulative_energy_cost_usd = 0.0;
         self.cumulative_export_credit_usd = 0.0;
         self.peak_demand_kw = 0.0;
+        self.period_peak_demand_kw.fill(0.0);
         self.demand_window.reset();
     }
 }
@@ -200,6 +223,40 @@ pub struct BillingPeriodSummary {
     pub peak_demand_kw: f64,
     pub total_import_kwh: f64,
     pub total_export_kwh: f64,
+}
+
+impl BillingPeriodSummary {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        period_start: DateTime<Tz>,
+        period_end: DateTime<Tz>,
+        energy_charge_usd: f64,
+        demand_charge_usd: f64,
+        fixed_charge_usd: f64,
+        export_credit_usd: f64,
+        minimum_charge: Option<f64>,
+        peak_demand_kw: f64,
+        total_import_kwh: f64,
+        total_export_kwh: f64,
+    ) -> Self {
+        let raw = energy_charge_usd + demand_charge_usd + fixed_charge_usd - export_credit_usd;
+        let net_bill_usd = match minimum_charge {
+            Some(min) if raw < min => min,
+            _ => raw,
+        };
+        Self {
+            period_start,
+            period_end,
+            energy_charge_usd,
+            demand_charge_usd,
+            fixed_charge_usd,
+            export_credit_usd,
+            net_bill_usd,
+            peak_demand_kw,
+            total_import_kwh,
+            total_export_kwh,
+        }
+    }
 }
 
 fn apply_ratchet(
@@ -252,11 +309,12 @@ mod tests {
             15,
             300,
             None,
+            0,
         );
         // 15-min window with 5-min interval = 3 samples
         // Push sequence: 2, 4, 6 -> avg 4.0, then 8, 10, 12 -> avg 10.0
         for &kw in &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0] {
-            state.update(kw, 300.0, 0.0, 0.0);
+            state.update(kw, 300.0, 0.0, 0.0, 0);
         }
         assert!((state.peak_demand_kw - 10.0).abs() < 1e-10);
     }
@@ -269,9 +327,10 @@ mod tests {
             15,
             3600,
             None,
+            0,
         );
         // Constant 1 kW for 1 hour (one step of 3600s)
-        state.update(1.0, 3600.0, 0.10, 0.0);
+        state.update(1.0, 3600.0, 0.10, 0.0, 0);
         assert!((state.cumulative_import_kwh - 1.0).abs() < 1e-10);
         assert!((state.cumulative_export_kwh).abs() < 1e-10);
         assert!((state.cumulative_energy_cost_usd - 0.10).abs() < 1e-10);
@@ -285,9 +344,10 @@ mod tests {
             15,
             3600,
             None,
+            0,
         );
         // Constant -2 kW for 1 hour
-        state.update(-2.0, 3600.0, 0.10, 0.05);
+        state.update(-2.0, 3600.0, 0.10, 0.05, 0);
         assert!((state.cumulative_import_kwh).abs() < 1e-10);
         assert!((state.cumulative_export_kwh - 2.0).abs() < 1e-10);
         assert!((state.cumulative_export_credit_usd - 0.10).abs() < 1e-10);
@@ -296,7 +356,7 @@ mod tests {
     #[test]
     fn billing_period_closes_at_month_end() {
         let start = make_dt(2025, 1, 1);
-        let state = BillingState::new(start, BillingCycle::Monthly, 15, 3600, None);
+        let state = BillingState::new(start, BillingCycle::Monthly, 15, 3600, None, 0);
         let expected_end = make_dt(2025, 2, 1);
         assert_eq!(state.period_end, expected_end);
     }
@@ -309,8 +369,9 @@ mod tests {
             15,
             3600,
             None,
+            0,
         );
-        state.update(5.0, 3600.0, 0.10, 0.0);
+        state.update(5.0, 3600.0, 0.10, 0.0, 0);
         assert!(state.cumulative_import_kwh > 0.0);
         assert!(state.peak_demand_kw > 0.0);
 
@@ -336,11 +397,12 @@ mod tests {
             15,
             3600,
             Some(ratchet),
+            0,
         );
         // Simulate a high prior peak
         state.prior_peaks_kw.push_back(10.0);
         // Current peak is only 2 kW
-        state.update(2.0, 3600.0, 0.0, 0.0);
+        state.update(2.0, 3600.0, 0.0, 0.0, 0);
         let effective = state.effective_peak_kw();
         // 0.85 * 10.0 = 8.5 > 2.0, so ratchet applies
         assert!((effective - 8.5).abs() < 1e-10);
@@ -358,12 +420,13 @@ mod tests {
             15,
             300,
             Some(ratchet),
+            0,
         );
         state.prior_peaks_kw.push_back(5.0);
         // Push enough samples to fill the window with 10 kW
         // 15 min / 5 min = 3 samples
         for _ in 0..3 {
-            state.update(10.0, 300.0, 0.0, 0.0);
+            state.update(10.0, 300.0, 0.0, 0.0, 0);
         }
         let effective = state.effective_peak_kw();
         // 0.85 * 5.0 = 4.25 < 10.0, so current peak wins
@@ -378,6 +441,7 @@ mod tests {
             15,
             3600,
             None,
+            0,
         );
         for month in 1..=13u32 {
             state.peak_demand_kw = month as f64;
@@ -405,6 +469,7 @@ mod tests {
             15,
             3600,
             Some(ratchet),
+            0,
         );
         // Add 6 months of peaks: [5, 10, 15, 20, 25, 30]
         for peak in [5.0, 10.0, 15.0, 20.0, 25.0, 30.0] {
@@ -412,7 +477,7 @@ mod tests {
         }
         // Lookback 3 → considers [20.0, 25.0, 30.0], max = 30.0
         // Effective = max(2.0, 0.85 * 30.0) = 25.5
-        state.update(2.0, 3600.0, 0.0, 0.0);
+        state.update(2.0, 3600.0, 0.0, 0.0, 0);
         let effective = state.effective_peak_kw();
         assert!((effective - 25.5).abs() < 1e-10);
     }
@@ -447,19 +512,37 @@ mod tests {
     }
 
     #[test]
+    fn billing_custom_cycle_period_end() {
+        let start = make_dt(2025, 1, 1);
+        let state = BillingState::new(start, BillingCycle::Custom(14), 15, 3600, None, 0);
+        let expected_end = make_dt(2025, 1, 15);
+        assert_eq!(state.period_end, expected_end);
+    }
+
+    #[test]
+    fn compute_period_end_feb29_to_mar() {
+        let start = New_York
+            .with_ymd_and_hms(2024, 2, 29, 0, 0, 0)
+            .unwrap();
+        let end = compute_period_end(start, BillingCycle::Monthly);
+        assert_eq!(end.month(), 3);
+        assert_eq!(end.day(), 29);
+    }
+
+    #[test]
     fn billing_period_summary_net_bill() {
-        let summary = BillingPeriodSummary {
-            period_start: make_dt(2025, 1, 1),
-            period_end: make_dt(2025, 2, 1),
-            energy_charge_usd: 50.0,
-            demand_charge_usd: 25.0,
-            fixed_charge_usd: 12.50,
-            export_credit_usd: 5.0,
-            net_bill_usd: 50.0 + 25.0 + 12.50 - 5.0,
-            peak_demand_kw: 8.0,
-            total_import_kwh: 500.0,
-            total_export_kwh: 100.0,
-        };
+        let summary = BillingPeriodSummary::new(
+            make_dt(2025, 1, 1),
+            make_dt(2025, 2, 1),
+            50.0,
+            25.0,
+            12.50,
+            5.0,
+            None,
+            8.0,
+            500.0,
+            100.0,
+        );
         let expected_net = summary.energy_charge_usd + summary.demand_charge_usd
             + summary.fixed_charge_usd - summary.export_credit_usd;
         assert!((summary.net_bill_usd - expected_net).abs() < 1e-10);

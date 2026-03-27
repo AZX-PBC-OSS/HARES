@@ -71,6 +71,45 @@ impl DemandRate {
     }
 }
 
+fn validate_tiered(
+    thresholds: &[f64],
+    rates: &[f64],
+    threshold_name: &str,
+    rate_name: &str,
+) -> Result<(), HaresError> {
+    if rates.len() != thresholds.len() + 1 {
+        return Err(HaresError::Tariff(format!(
+            "{rate_name}.len() ({}) must be {threshold_name}.len() + 1 ({})",
+            rates.len(),
+            thresholds.len() + 1
+        )));
+    }
+    for (i, t) in thresholds.iter().enumerate() {
+        if !t.is_finite() || *t < 0.0 {
+            return Err(HaresError::Tariff(format!(
+                "{threshold_name}[{i}] must be finite and >= 0, got {t}"
+            )));
+        }
+        if i > 0 && *t <= thresholds[i - 1] {
+            return Err(HaresError::Tariff(format!(
+                "{threshold_name} must be strictly ascending: [{}] = {} <= [{}] = {}",
+                i - 1,
+                thresholds[i - 1],
+                i,
+                t
+            )));
+        }
+    }
+    for (i, r) in rates.iter().enumerate() {
+        if !r.is_finite() || *r < 0.0 {
+            return Err(HaresError::Tariff(format!(
+                "{rate_name}[{i}] must be finite and >= 0, got {r}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Inclining/declining block rate for a season.
 ///
 /// `rates_per_kwh.len()` must equal `thresholds_kwh.len() + 1`:
@@ -88,37 +127,12 @@ pub struct TieredBlock {
 
 impl TieredBlock {
     pub fn validate(&self) -> Result<(), HaresError> {
-        if self.rates_per_kwh.len() != self.thresholds_kwh.len() + 1 {
-            return Err(HaresError::Tariff(format!(
-                "rates_per_kwh.len() ({}) must be thresholds_kwh.len() + 1 ({})",
-                self.rates_per_kwh.len(),
-                self.thresholds_kwh.len() + 1
-            )));
-        }
-        for (i, t) in self.thresholds_kwh.iter().enumerate() {
-            if !t.is_finite() || *t < 0.0 {
-                return Err(HaresError::Tariff(format!(
-                    "thresholds_kwh[{i}] must be finite and >= 0, got {t}"
-                )));
-            }
-            if i > 0 && *t <= self.thresholds_kwh[i - 1] {
-                return Err(HaresError::Tariff(format!(
-                    "thresholds_kwh must be strictly ascending: [{}] = {} <= [{}] = {}",
-                    i - 1,
-                    self.thresholds_kwh[i - 1],
-                    i,
-                    t
-                )));
-            }
-        }
-        for (i, r) in self.rates_per_kwh.iter().enumerate() {
-            if !r.is_finite() || *r < 0.0 {
-                return Err(HaresError::Tariff(format!(
-                    "rates_per_kwh[{i}] must be finite and >= 0, got {r}"
-                )));
-            }
-        }
-        Ok(())
+        validate_tiered(
+            &self.thresholds_kwh,
+            &self.rates_per_kwh,
+            "thresholds_kwh",
+            "rates_per_kwh",
+        )
     }
 }
 
@@ -243,6 +257,15 @@ impl ElectricTariff {
         if let Some(ss) = &self.seasonal_split {
             ss.validate()?;
         }
+        let tou_names: Vec<&str> = self.tou_schedule.iter().map(|p| p.name.as_str()).collect();
+        for er in &self.energy_rates {
+            if !er.period_name.is_empty() && !tou_names.contains(&er.period_name.as_str()) {
+                return Err(HaresError::Tariff(format!(
+                    "energy rate references unknown TOU period '{}'",
+                    er.period_name
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -259,37 +282,12 @@ pub struct GasTieredBlock {
 
 impl GasTieredBlock {
     pub fn validate(&self) -> Result<(), HaresError> {
-        if self.rates_per_therm.len() != self.thresholds_therms.len() + 1 {
-            return Err(HaresError::Tariff(format!(
-                "rates_per_therm.len() ({}) must be thresholds_therms.len() + 1 ({})",
-                self.rates_per_therm.len(),
-                self.thresholds_therms.len() + 1
-            )));
-        }
-        for (i, t) in self.thresholds_therms.iter().enumerate() {
-            if !t.is_finite() || *t < 0.0 {
-                return Err(HaresError::Tariff(format!(
-                    "thresholds_therms[{i}] must be finite and >= 0, got {t}"
-                )));
-            }
-            if i > 0 && *t <= self.thresholds_therms[i - 1] {
-                return Err(HaresError::Tariff(format!(
-                    "thresholds_therms must be strictly ascending: [{}] = {} <= [{}] = {}",
-                    i - 1,
-                    self.thresholds_therms[i - 1],
-                    i,
-                    t
-                )));
-            }
-        }
-        for (i, r) in self.rates_per_therm.iter().enumerate() {
-            if !r.is_finite() || *r < 0.0 {
-                return Err(HaresError::Tariff(format!(
-                    "rates_per_therm[{i}] must be finite and >= 0, got {r}"
-                )));
-            }
-        }
-        Ok(())
+        validate_tiered(
+            &self.thresholds_therms,
+            &self.rates_per_therm,
+            "thresholds_therms",
+            "rates_per_therm",
+        )
     }
 }
 
@@ -733,6 +731,58 @@ mod tests {
             rate_per_kwh: f64::INFINITY,
         };
         assert!(inf.validate().is_err());
+    }
+
+    #[test]
+    fn demand_rate_validate_rejects_nan() {
+        let bad = DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: f64::NAN,
+            ratchet: None,
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn demand_rate_validate_rejects_infinity() {
+        let bad = DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: f64::INFINITY,
+            ratchet: None,
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn fixed_charges_validate_rejects_nan() {
+        let bad = FixedCharges {
+            monthly_usd: f64::NAN,
+            daily_usd: 0.0,
+        };
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn electric_tariff_validate_checks_tou_schedule() {
+        let tariff = ElectricTariff {
+            tou_schedule: vec![TouPeriod {
+                name: "bad".into(),
+                schedule: vec![TimeWindow {
+                    day: DayFilter::Any,
+                    start_minute: 500,
+                    end_minute: 500,
+                    value: 0.0,
+                    noise: None,
+                    min_value: None,
+                    max_value: None,
+                }],
+                season: SeasonFilter::All,
+            }],
+            ..Default::default()
+        };
+        assert!(tariff.validate().is_err());
     }
 
     #[test]

@@ -83,6 +83,8 @@ pub mod testing {
         zone_temp_c: f64,
         outdoor_temp_c: f64,
         hour: u8,
+        price_signal: hares_types::PriceSignal,
+        electrical: hares_types::ElectricalSummary,
     }
 
     impl TestEnvBuilder {
@@ -92,6 +94,8 @@ pub mod testing {
                 zone_temp_c: 21.0,
                 outdoor_temp_c: 10.0,
                 hour: 12,
+                price_signal: Default::default(),
+                electrical: Default::default(),
             }
         }
 
@@ -110,6 +114,18 @@ pub mod testing {
         /// Sets the hour of day (0-23).
         pub fn hour(mut self, hour: u8) -> Self {
             self.hour = hour;
+            self
+        }
+
+        /// Sets the price signal.
+        pub fn with_price_signal(mut self, ps: hares_types::PriceSignal) -> Self {
+            self.price_signal = ps;
+            self
+        }
+
+        /// Sets the electrical summary.
+        pub fn with_electrical(mut self, es: hares_types::ElectricalSummary) -> Self {
+            self.electrical = es;
             self
         }
 
@@ -156,7 +172,10 @@ pub mod testing {
                     .with_ymd_and_hms(2026, 1, 1, self.hour as u32, 0, 0)
                     .single()
                     .expect("valid timestamp"),
+                equipment_telemetry: std::collections::HashMap::new(),
                 time_res: Duration::minutes(1),
+                price_signal: self.price_signal,
+                electrical: self.electrical,
             }
         }
     }

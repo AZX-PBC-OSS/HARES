@@ -415,12 +415,15 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains,
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid timestamp"),
             time_res: ChronoDuration::seconds(60),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 
@@ -639,12 +642,15 @@ mod dhw_integration_tests {
                 zone_temperatures_c: Vec::new(),
                 custom_payload: Some(vec![1.0, 1.0]),
             }],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid UTC timestamp"),
             time_res: ChronoDuration::minutes(1),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 

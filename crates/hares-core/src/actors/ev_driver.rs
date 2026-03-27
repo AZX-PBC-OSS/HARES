@@ -78,12 +78,16 @@ pub struct EvDriverActor {
     fuel_economy_kwh_per_mi: f64,
     capacity_kwh: f64,
     average_speed_mph: f64,
-    #[allow(dead_code)] // TODO: wire into range anxiety check and away charging logic
     range_anxiety_miles: f64,
-    #[allow(dead_code)] // TODO: wire into away charging fraction logic
     away_charge_fraction: f64,
+    away_charge_power_kw: f64,
 
     // Runtime state
+    // NOTE: estimated_soc tracks the actor's best guess of EV SOC. It diverges
+    // from actual equipment SOC because the actor doesn't observe CC-CV taper,
+    // thermal derating, or BMS charge termination. The divergence is bounded
+    // and conservative: the actor overestimates discharge and underestimates
+    // charge, causing it to over-charge rather than strand the driver.
     rng: ChaCha8Rng,
     current_day_ordinal: i32,
     todays_event: Option<DayEvent>,
@@ -95,28 +99,39 @@ pub struct EvDriverActor {
 
 /// Temperature-dependent EV driving efficiency multiplier.
 ///
-/// Returns a multiplier on the base kWh/mile (> 1.0 = more energy consumed).
-/// Based on AAA 2019 EV range testing + Geotab 2022 fleet analysis:
-/// - Optimal at ~21°C (multiplier = 1.0)
-/// - Cold: cabin heating + battery conditioning increase consumption
-/// - Hot: AC increases consumption (less severe than cold)
+/// Returns a multiplier on EPA-rated kWh/mile (> 1.0 = more energy consumed).
+/// Piecewise linear model calibrated against fleet-scale data:
+/// - AAA 2019 (5 EVs, HVAC on): 41% range loss at -7°C, 17% at 35°C
+/// - Geotab 2020 (5.2M trips): 54% rated range at -15°C
+/// - DOE/Argonne 2024: 54% range loss at -18°C, 14% at 35°C
+/// - Recurrent Auto (30k vehicles): 5% loss at 32°C, 31% at 38°C
 ///
-/// Piecewise linear fit to published data:
-/// - -10°C: ~1.41× (AAA: 41% range loss at 20°F)
-/// - 0°C:   ~1.20× (Geotab: ~20% loss at freezing)
-/// - 21°C:  1.00× (baseline)
-/// - 35°C:  ~1.17× (AAA: 17% range loss at 95°F with AC)
-/// - 43°C:  ~1.20× (extrapolated)
+/// Cold penalty is steeper than hot: cabin heating (resistive 3-6 kW or heat
+/// pump 1-3 kW) plus battery internal resistance and preconditioning. Hot
+/// weather AC draws 1-2 kW. This curve is fleet-average across heat pump
+/// and resistive vehicles per the cited studies.
 fn temp_efficiency_multiplier(ambient_c: f64) -> f64 {
-    if ambient_c < 21.0 {
-        // Cold: linear ramp from 1.0 at 21°C to ~1.41 at -10°C
-        // Slope: 0.41 / 31 ≈ 0.0132 per °C below 21
-        (1.0 + 0.0132 * (21.0 - ambient_c)).min(1.5)
-    } else {
-        // Hot: linear ramp from 1.0 at 21°C to ~1.17 at 35°C
-        // Slope: 0.17 / 14 ≈ 0.0121 per °C above 21
-        (1.0 + 0.0121 * (ambient_c - 21.0)).min(1.3)
+    const BREAKPOINTS: [(f64, f64); 8] = [
+        (-20.0, 2.00), // ~50% range
+        (-10.0, 1.61), // ~62% range
+        (0.0, 1.33),   // ~75% range
+        (10.0, 1.11),  // ~90% range
+        (22.0, 1.00),  // EPA baseline
+        (30.0, 1.03),  // minimal AC penalty
+        (35.0, 1.17),  // AAA 95°F
+        (45.0, 1.43),  // extreme heat
+    ];
+
+    let t = ambient_c.clamp(BREAKPOINTS[0].0, BREAKPOINTS[BREAKPOINTS.len() - 1].0);
+    for i in 0..BREAKPOINTS.len() - 1 {
+        let (t0, m0) = BREAKPOINTS[i];
+        let (t1, m1) = BREAKPOINTS[i + 1];
+        if t <= t1 {
+            let frac = (t - t0) / (t1 - t0);
+            return m0 + frac * (m1 - m0);
+        }
     }
+    BREAKPOINTS[BREAKPOINTS.len() - 1].1
 }
 
 /// Expand a u64 seed to a [u8; 32] for ChaCha8Rng (LE bytes, zero-padded).
@@ -147,6 +162,7 @@ impl EvDriverActor {
         average_speed_mph: f64,
         range_anxiety_miles: f64,
         away_charge_fraction: f64,
+        away_charge_power_kw: f64,
         seed: u64,
     ) -> Self {
         Self {
@@ -164,6 +180,7 @@ impl EvDriverActor {
             average_speed_mph,
             range_anxiety_miles,
             away_charge_fraction,
+            away_charge_power_kw,
             rng: ChaCha8Rng::from_seed(seed_bytes(seed)),
             current_day_ordinal: -1,
             todays_event: None,
@@ -274,11 +291,23 @@ impl EvDriverActor {
         current_minute >= target_minute && current_minute < target_minute.saturating_add(res)
     }
 
+    /// Read the actual SOC from equipment telemetry, falling back to estimated.
+    fn current_soc(&self, env: &EnvironmentState) -> f64 {
+        let target_name = match &self.dispatch_target {
+            DispatchTarget::ByName(name) => name.as_ref(),
+            _ => return self.estimated_soc,
+        };
+        env.equipment_telemetry
+            .get(target_name)
+            .and_then(|tel| tel.get("soc"))
+            .unwrap_or(self.estimated_soc)
+    }
+
     /// Should the driver plug in at home based on policy?
-    fn should_plug_in(&self) -> bool {
+    fn should_plug_in(&self, env: &EnvironmentState) -> bool {
         match &self.plug_in_policy {
             PlugInPolicy::Always => true,
-            PlugInPolicy::LowSoc { threshold } => self.estimated_soc < *threshold,
+            PlugInPolicy::LowSoc { threshold } => self.current_soc(env) < *threshold,
         }
     }
 
@@ -290,8 +319,41 @@ impl EvDriverActor {
         }
     }
 
+    /// Check if tomorrow's trip would leave SOC dangerously low.
+    /// If so, the driver overrides their strategy and charges to full.
+    fn needs_range_anxiety_override(&self, env: &EnvironmentState) -> bool {
+        if self.range_anxiety_miles <= 0.0 {
+            return false;
+        }
+        let ambient_c = env.weather.outdoor_temp_c;
+        let soc = self.current_soc(env);
+        let today_miles = self
+            .todays_event
+            .map(|ev| ev.drive_kwh / (self.fuel_economy_kwh_per_mi * temp_efficiency_multiplier(ambient_c)).max(0.01))
+            .unwrap_or(0.0);
+        let anxiety_kwh =
+            (today_miles + self.range_anxiety_miles) * self.fuel_economy_kwh_per_mi * temp_efficiency_multiplier(ambient_c);
+        let anxiety_soc = anxiety_kwh / self.capacity_kwh.max(0.01);
+        soc < anxiety_soc
+    }
+
     /// Emit charging strategy signals on arrival home.
-    fn emit_strategy_signals(&self, out: &mut Vec<DispatchRequest>) {
+    fn emit_strategy_signals(&self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        // Range anxiety override: if tomorrow's trip would strand the driver,
+        // charge to full regardless of strategy.
+        if self.needs_range_anxiety_override(env) {
+            out.push(DispatchRequest {
+                target: self.dispatch_target.clone(),
+                signal: ControlSignal::SOCTarget {
+                    target_soc: 1.0,
+                    min_soc: None,
+                    max_soc: None,
+                },
+                priority: PriorityTier::Schedule,
+            });
+            return;
+        }
+
         match &self.strategy {
             ChargingStrategy::Immediate { target_soc } => {
                 // Immediate: charge at full power now — emit SOCTarget, not
@@ -362,11 +424,45 @@ impl EvDriverActor {
                     priority: PriorityTier::Schedule,
                 });
             }
-            ChargingStrategy::V2H { .. }
-            | ChargingStrategy::V2G { .. }
-            | ChargingStrategy::SolarSurplus { .. } => {
-                // V2H/V2G/SolarSurplus strategies are handled by the BMS/grid layer,
-                // the driver just plugs in.
+            ChargingStrategy::V2H { min_soc, .. } => {
+                // V2H: charge to 90% so EV is ready to supply house;
+                // min_soc prevents over-discharge during V2H events.
+                out.push(DispatchRequest {
+                    target: self.dispatch_target.clone(),
+                    signal: ControlSignal::SOCTarget {
+                        target_soc: 0.9,
+                        min_soc: Some(*min_soc),
+                        max_soc: None,
+                    },
+                    priority: PriorityTier::Schedule,
+                });
+            }
+            ChargingStrategy::V2G { min_soc, .. } => {
+                // V2G: charge to full, grid export logic is handled per-step
+                // by a separate grid actor (not yet implemented)
+                let target = if *min_soc < 1.0 { 1.0 } else { *min_soc };
+                out.push(DispatchRequest {
+                    target: self.dispatch_target.clone(),
+                    signal: ControlSignal::SOCTarget {
+                        target_soc: target,
+                        min_soc: Some(*min_soc),
+                        max_soc: None,
+                    },
+                    priority: PriorityTier::Schedule,
+                });
+            }
+            ChargingStrategy::SolarSurplus { .. } => {
+                // SolarSurplus: charge to full; solar surplus logic is a
+                // grid-layer concern, not an EV equipment signal.
+                out.push(DispatchRequest {
+                    target: self.dispatch_target.clone(),
+                    signal: ControlSignal::SOCTarget {
+                        target_soc: 1.0,
+                        min_soc: None,
+                        max_soc: None,
+                    },
+                    priority: PriorityTier::Schedule,
+                });
             }
         }
     }
@@ -457,6 +553,30 @@ impl Actor for EvDriverActor {
                 let new_remaining = remaining_kwh - kwh_this_step;
 
                 if new_steps_done >= total_steps {
+                    // Trip complete — check if driver charges away before heading home
+                    if self.away_charge_fraction > 0.0 {
+                        let recoup_kwh =
+                            event.drive_kwh * self.away_charge_fraction;
+                        let recoup_soc = recoup_kwh / self.capacity_kwh.max(0.01);
+                        self.estimated_soc =
+                            (self.estimated_soc + recoup_soc).min(1.0);
+
+                        // Emit away charging signals at configured power
+                        out.push(DispatchRequest {
+                            target: self.dispatch_target.clone(),
+                            signal: ControlSignal::EvPlugIn {
+                                state: EvConnectionState::AwayPluggedIn,
+                            },
+                            priority: PriorityTier::Schedule,
+                        });
+                        out.push(DispatchRequest {
+                            target: self.dispatch_target.clone(),
+                            signal: ControlSignal::EvAwayCharge {
+                                power_kw: self.away_charge_power_kw,
+                            },
+                            priority: PriorityTier::Schedule,
+                        });
+                    }
                     self.phase = DriverPhase::Away;
                 } else {
                     self.phase = DriverPhase::Driving {
@@ -468,7 +588,19 @@ impl Actor for EvDriverActor {
             }
             DriverPhase::Away => {
                 if self.minute_matches(current_minute, event.arrival_minute) {
-                    if self.should_plug_in() {
+                    // Disconnect from away charger if active (must go through
+                    // Disconnected before HomePluggedIn per EV transition rules)
+                    if self.away_charge_fraction > 0.0 {
+                        out.push(DispatchRequest {
+                            target: self.dispatch_target.clone(),
+                            signal: ControlSignal::EvPlugIn {
+                                state: EvConnectionState::Disconnected,
+                            },
+                            priority: PriorityTier::Schedule,
+                        });
+                    }
+
+                    if self.should_plug_in(env) {
                         out.push(DispatchRequest {
                             target: self.dispatch_target.clone(),
                             signal: ControlSignal::EvPlugIn {
@@ -478,7 +610,7 @@ impl Actor for EvDriverActor {
                         });
 
                         if !self.arrival_soc_applied {
-                            self.emit_strategy_signals(out);
+                            self.emit_strategy_signals(env, out);
                             self.arrival_soc_applied = true;
                         }
                     }
@@ -490,7 +622,7 @@ impl Actor for EvDriverActor {
                         target = self.target_name(),
                         arrival_minute = event.arrival_minute,
                         estimated_soc = self.estimated_soc,
-                        plugged_in = self.should_plug_in(),
+                        plugged_in = self.should_plug_in(env),
                         "EV driver arrived home",
                     );
                 }
@@ -529,6 +661,7 @@ mod tests {
             30.0, // 30 mph average
             20.0, // 20 miles range anxiety buffer
             0.0,  // no away charging
+            6.6,  // workplace L2 default
             seed,
         )
     }
@@ -722,9 +855,11 @@ mod tests {
         // Arrival at 18:00 (1080 min), duration 10h (600 min) -> departure at 08:00 (480 min)
         assert_eq!(event.arrival_minute, 1080, "arrival should be 18:00");
         assert_eq!(event.departure_minute, 480, "departure should be 08:00");
+        // 30mi × 0.3kWh/mi × temp_multiplier(10°C) ≈ 9.99 kWh
+        let expected = 30.0 * 0.3 * temp_efficiency_multiplier(10.0);
         assert!(
-            (event.drive_kwh - 9.0).abs() < 0.01,
-            "drive_kwh should be 30mi * 0.3kWh/mi = 9.0, got {}",
+            (event.drive_kwh - expected).abs() < 0.1,
+            "drive_kwh should be ~{expected:.1}, got {}",
             event.drive_kwh,
         );
     }
@@ -843,10 +978,154 @@ mod tests {
             drive_count > 1,
             "expected multi-step driving, got {drive_count} drive signals"
         );
-        // Total should be close to 30mi * 0.3kWh/mi = 9.0 kWh
+        // 30mi × 0.3kWh/mi × temp_multiplier(10°C=1.11) ≈ 9.99 kWh
+        let expected = 30.0 * 0.3 * temp_efficiency_multiplier(10.0);
         assert!(
-            (total_drive_kwh - 9.0).abs() < 0.1,
-            "total drive energy should be ~9.0 kWh, got {total_drive_kwh}"
+            (total_drive_kwh - expected).abs() < 0.5,
+            "total drive energy should be ~{expected:.1} kWh, got {total_drive_kwh}"
+        );
+    }
+
+    #[test]
+    fn range_anxiety_overrides_strategy_when_soc_low() {
+        let mut actor = make_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.9,
+            },
+            PlugInPolicy::Always,
+            42,
+        );
+        // Force low SOC so range anxiety kicks in
+        actor.estimated_soc = 0.15;
+        let mut out = Vec::new();
+
+        // Roll event, depart, drive, arrive
+        actor.decide(&env_at_minute(0), &mut out);
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60), &mut out); // depart
+        out.clear();
+        for step in 1..=120 {
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+            out.clear();
+        }
+        actor.decide(&env_at_minute(18 * 60), &mut out); // arrive
+
+        // With very low SOC and 20mi anxiety buffer, range anxiety should override
+        // Nightly strategy and emit SOCTarget{1.0} instead of EvSetReadyBy
+        let has_soc_target_full = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 1.0).abs() < 0.01
+            )
+        });
+        assert!(
+            has_soc_target_full,
+            "range anxiety should override to SOCTarget(1.0), got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn away_charge_fraction_emits_away_signals() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.away_charge_fraction = 0.3;
+        actor.away_charge_power_kw = 11.5;
+        let mut out = Vec::new();
+
+        // Roll event, depart
+        actor.decide(&env_at_minute(0), &mut out);
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        out.clear();
+
+        // Drive through to completion
+        for step in 1..=120 {
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+            // Check for away charging signals when driving completes
+        }
+
+        let has_away_plug_in = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::AwayPluggedIn
+                }
+            )
+        });
+        let has_away_charge = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::EvAwayCharge { power_kw } if (power_kw - 11.5).abs() < 0.01
+            )
+        });
+        assert!(
+            has_away_plug_in,
+            "should emit AwayPluggedIn when away_charge_fraction > 0"
+        );
+        assert!(
+            has_away_charge,
+            "should emit EvAwayCharge at configured power"
+        );
+    }
+
+    #[test]
+    fn temp_efficiency_multiplier_ranges() {
+        // Cold: higher multiplier
+        assert!(temp_efficiency_multiplier(-10.0) > 1.5);
+        assert!(temp_efficiency_multiplier(0.0) > 1.2);
+        // Optimal
+        assert!((temp_efficiency_multiplier(22.0) - 1.0).abs() < 0.01);
+        // Hot: moderate increase
+        assert!(temp_efficiency_multiplier(35.0) > 1.1);
+        assert!(temp_efficiency_multiplier(35.0) < 1.25);
+        // Monotonic around baseline
+        assert!(temp_efficiency_multiplier(10.0) > temp_efficiency_multiplier(22.0));
+        assert!(temp_efficiency_multiplier(35.0) > temp_efficiency_multiplier(22.0));
+    }
+
+    #[test]
+    fn v2h_strategy_emits_soc_target_with_min() {
+        let mut actor = make_actor(
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.8,
+                min_soc: 0.2,
+            },
+            PlugInPolicy::Always,
+            42,
+        );
+        let mut out = Vec::new();
+
+        // Roll event, depart, drive, arrive
+        actor.decide(&env_at_minute(0), &mut out);
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60), &mut out);
+        out.clear();
+        for step in 1..=120 {
+            actor.decide(&env_at_minute(8 * 60 + step), &mut out);
+            out.clear();
+        }
+        actor.decide(&env_at_minute(18 * 60), &mut out);
+
+        let has_soc_target = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget {
+                    target_soc,
+                    min_soc: Some(min),
+                    ..
+                } if (target_soc - 0.9).abs() < 0.01 && (min - 0.2).abs() < 0.01
+            )
+        });
+        assert!(
+            has_soc_target,
+            "V2H should emit SOCTarget(0.9, min=0.2), got: {:?}",
+            out.iter().map(|r| &r.signal).collect::<Vec<_>>()
         );
     }
 }

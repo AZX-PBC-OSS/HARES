@@ -20,6 +20,37 @@ pub const DEFAULT_GROUND_ALBEDO: f64 = 0.2;
 
 use crate::DomainUpdate;
 
+/// Price-like external signals consumed by higher-level controllers.
+///
+/// This is intentionally separate from `ControlSignal`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct PriceSignal {
+    pub electricity_price: Option<f64>,
+    pub export_price: Option<f64>,
+    /// Grid carbon intensity in `kg CO₂e/kWh`.
+    pub ghg_intensity: Option<f64>,
+}
+
+/// Electrical power summary from the prior timestep's solver.
+///
+/// Provides read-only observation of the building's electrical state
+/// so actors can make informed decisions (e.g., BMS self-consumption
+/// needs to know PV generation vs home load).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ElectricalSummary {
+    /// Total PV generation [kW], positive = producing.
+    pub pv_generation_kw: f64,
+    /// Total non-dispatchable load [kW], positive = consuming.
+    /// Excludes battery and EV (those are dispatchable).
+    pub base_load_kw: f64,
+    /// Net grid power [kW], positive = importing, negative = exporting.
+    pub net_grid_kw: f64,
+    /// Total battery power [kW], positive = charging, negative = discharging.
+    pub battery_power_kw: f64,
+    /// Total EV power [kW], positive = charging.
+    pub ev_power_kw: f64,
+}
+
 /// Stable zone identifier.
 #[derive(
     Hash, Eq, PartialEq, Copy, Clone, Debug, Default, Ord, PartialOrd, Serialize, Deserialize,
@@ -150,6 +181,12 @@ pub struct EnvironmentState {
     pub weather: WeatherState,
     pub grid: GridState,
     pub custom_domains: Vec<DomainUpdate>,
+    /// Equipment telemetry snapshots from the previous timestep, keyed by
+    /// equipment name. Populated by the dwelling before calling actors.
+    /// Actors can read equipment state (SOC, power, connection_state, etc.)
+    /// to make informed decisions.
+    #[serde(default, skip_serializing)]
+    pub equipment_telemetry: std::collections::HashMap<String, crate::Telemetry>,
     pub current_time: DateTime<FixedOffset>,
     /// Simulation timestep.
     ///
@@ -162,6 +199,10 @@ pub struct EnvironmentState {
         deserialize_with = "deserialize_duration_millis"
     )]
     pub time_res: Duration,
+    #[serde(default)]
+    pub price_signal: PriceSignal,
+    #[serde(default)]
+    pub electrical: ElectricalSummary,
 }
 
 impl EnvironmentState {
@@ -173,6 +214,22 @@ impl EnvironmentState {
     #[inline]
     pub fn time_step_secs(&self) -> f64 {
         self.time_res.num_milliseconds() as f64 / 1000.0
+    }
+
+    /// Replace the domain update for `update.domain_id` in-place, or append if
+    /// no entry for that domain exists yet. Avoids the O(n) `retain` + `push`
+    /// pattern that would reallocate on every timestep.
+    #[inline]
+    pub fn upsert_domain(&mut self, update: DomainUpdate) {
+        if let Some(slot) = self
+            .custom_domains
+            .iter_mut()
+            .find(|u| u.domain_id == update.domain_id)
+        {
+            *slot = update;
+        } else {
+            self.custom_domains.push(update);
+        }
     }
 }
 
@@ -247,17 +304,165 @@ mod tests {
                 zone_temperatures_c: vec![(ZoneId(1), 21.0)],
                 custom_payload: Some(vec![1.0, 2.0, 3.0]),
             }],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("offset")
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
                 .single()
                 .expect("valid timestamp"),
             time_res: Duration::minutes(5),
+            price_signal: PriceSignal::default(),
+            electrical: ElectricalSummary::default(),
         };
 
         let json = serde_json::to_string(&state).expect("serialize environment state");
         let decoded: EnvironmentState =
             serde_json::from_str(&json).expect("deserialize environment state");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn environment_state_with_price_signal_roundtrip() {
+        let state = EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState::default(),
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .expect("offset")
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            time_res: Duration::minutes(5),
+            price_signal: PriceSignal {
+                electricity_price: Some(0.25),
+                export_price: Some(0.08),
+                ghg_intensity: Some(0.4),
+            },
+            electrical: ElectricalSummary {
+                pv_generation_kw: 3.5,
+                base_load_kw: 1.2,
+                net_grid_kw: -2.3,
+                battery_power_kw: 0.0,
+                ev_power_kw: 0.0,
+            },
+        };
+
+        let json = serde_json::to_string(&state).expect("serialize");
+        let decoded: EnvironmentState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.price_signal.electricity_price, Some(0.25));
+        assert_eq!(decoded.electrical.pv_generation_kw, 3.5);
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn environment_state_default_electrical_summary() {
+        let summary = ElectricalSummary::default();
+        assert_eq!(summary.pv_generation_kw, 0.0);
+        assert_eq!(summary.base_load_kw, 0.0);
+        assert_eq!(summary.net_grid_kw, 0.0);
+        assert_eq!(summary.battery_power_kw, 0.0);
+        assert_eq!(summary.ev_power_kw, 0.0);
+    }
+
+    #[test]
+    fn environment_state_backward_compat() {
+        // JSON without price_signal or electrical fields should deserialize
+        // with defaults thanks to #[serde(default)].
+        let json = r#"{
+            "zones": [],
+            "weather": {
+                "outdoor_temp_c": 5.0,
+                "outdoor_humidity_ratio": 0.004,
+                "outdoor_wet_bulb_c": 3.5,
+                "outdoor_enthalpy_j_kg": 15000.0,
+                "wind_speed_m_s": 3.2,
+                "wind_dir_deg": 180.0,
+                "ground_temp_c": 10.5,
+                "sky_temp_c": -2.0,
+                "pressure_kpa": 101.3,
+                "solar_irradiance": []
+            },
+            "grid": { "voltage_pu": 1.0, "frequency_hz": 60.0 },
+            "custom_domains": [],
+            "current_time": "2026-03-18T12:00:00+00:00",
+            "time_res": 300000
+        }"#;
+
+        let decoded: EnvironmentState = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(decoded.price_signal, PriceSignal::default());
+        assert_eq!(decoded.electrical, ElectricalSummary::default());
+    }
+
+    #[test]
+    fn upsert_domain_inserts_when_empty() {
+        let mut state = crate::test_utils::default_env();
+        state.custom_domains.clear();
+        let update = DomainUpdate {
+            domain_id: crate::DomainId(99),
+            zone_temperatures_c: vec![(ZoneId(1), 22.0)],
+            custom_payload: None,
+        };
+        state.upsert_domain(update.clone());
+        assert_eq!(state.custom_domains.len(), 1);
+        assert_eq!(state.custom_domains[0], update);
+    }
+
+    #[test]
+    fn upsert_domain_replaces_existing() {
+        let mut state = crate::test_utils::default_env();
+        state.custom_domains.clear();
+        let v1 = DomainUpdate {
+            domain_id: crate::DomainId(5),
+            zone_temperatures_c: vec![(ZoneId(1), 20.0)],
+            custom_payload: Some(vec![1.0]),
+        };
+        let v2 = DomainUpdate {
+            domain_id: crate::DomainId(5),
+            zone_temperatures_c: vec![(ZoneId(1), 25.0)],
+            custom_payload: Some(vec![2.0, 3.0]),
+        };
+        state.upsert_domain(v1);
+        state.upsert_domain(v2.clone());
+        assert_eq!(state.custom_domains.len(), 1);
+        assert_eq!(state.custom_domains[0], v2);
+    }
+
+    #[test]
+    fn upsert_domain_preserves_other_domains() {
+        let mut state = crate::test_utils::default_env();
+        state.custom_domains.clear();
+        let a = DomainUpdate {
+            domain_id: crate::DomainId(1),
+            zone_temperatures_c: vec![],
+            custom_payload: None,
+        };
+        let b = DomainUpdate {
+            domain_id: crate::DomainId(2),
+            zone_temperatures_c: vec![],
+            custom_payload: None,
+        };
+        let b_updated = DomainUpdate {
+            domain_id: crate::DomainId(2),
+            zone_temperatures_c: vec![(ZoneId(1), 30.0)],
+            custom_payload: Some(vec![99.0]),
+        };
+        state.upsert_domain(a.clone());
+        state.upsert_domain(b);
+        state.upsert_domain(b_updated.clone());
+        assert_eq!(state.custom_domains.len(), 2);
+        assert_eq!(state.custom_domains[0], a);
+        assert_eq!(state.custom_domains[1], b_updated);
     }
 }

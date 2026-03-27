@@ -1,5 +1,7 @@
 //! Python bindings for equipment configuration.
 
+use hares_equipment::battery::catalog::{BatteryProductId, BatterySpec};
+use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId, VehicleSpec};
 use hares_equipment::ndinterp::RegularGridInterpolator;
 use hares_equipment::{OcvTable, UNegTable};
 use hares_types::{
@@ -9,7 +11,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::py_enums::{PyBatteryChemistry, PyEvConnectionState};
+use crate::py_enums::{
+    PyBatteryChemistry, PyBatteryProductId, PyEvArchetypeId, PyEvConnectionState, PyVehicleId,
+};
 
 /// Extract a `RegularGridInterpolator` from a Python dict with numpy arrays or an NPZ path.
 ///
@@ -144,6 +148,41 @@ pub struct PyBattery {
     pub u_neg_table: Option<UNegTable>,
 }
 
+impl PyBattery {
+    fn from_spec(spec: &BatterySpec) -> Self {
+        let eta = spec.round_trip_efficiency.sqrt();
+        Self {
+            name: spec.label.to_string(),
+            capacity_kwh: spec.capacity_kwh,
+            max_charge_kw: Some(spec.max_charge_kw),
+            max_discharge_kw: Some(spec.max_discharge_kw),
+            chemistry: Some(PyBatteryChemistry::from(spec.chemistry)),
+            initial_soc: None,
+            min_soc: Some(spec.min_soc),
+            max_soc: Some(spec.max_soc),
+            inverter_efficiency: None,
+            charge_efficiency: Some(eta),
+            discharge_efficiency: Some(eta),
+            self_discharge_pct_per_day: Some(spec.self_discharge_pct_per_day),
+            standby_power_w: Some(spec.standby_power_w),
+            import_limit_w: None,
+            export_limit_w: None,
+            n_series: None,
+            n_parallel: None,
+            cell_resistance_ohm: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_charge_temp_c: None,
+            full_power_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            charging_curve_lut: None,
+            ocv_table: None,
+            u_neg_table: None,
+        }
+    }
+}
+
 #[pymethods]
 impl PyBattery {
     #[new]
@@ -248,6 +287,70 @@ impl PyBattery {
             ocv_table: ocv,
             u_neg_table: u_neg,
         })
+    }
+
+    #[staticmethod]
+    fn from_product(product_id: PyBatteryProductId) -> Self {
+        let rust_id: BatteryProductId = product_id.into();
+        Self::from_spec(rust_id.spec())
+    }
+
+    #[staticmethod]
+    fn by_product_id(id: &str) -> PyResult<Self> {
+        let spec = hares_equipment::battery::catalog::by_id(id).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown battery product: {id}"))
+        })?;
+        Ok(Self::from_spec(spec))
+    }
+
+    #[staticmethod]
+    fn product_catalog() -> Vec<PyBatteryProductId> {
+        BatteryProductId::ALL.iter().copied().map(PyBatteryProductId::from).collect()
+    }
+
+    #[staticmethod]
+    fn tesla_pw3() -> Self {
+        Self::from_spec(BatteryProductId::TeslaPw3.spec())
+    }
+    #[staticmethod]
+    fn tesla_pw2() -> Self {
+        Self::from_spec(BatteryProductId::TeslaPw2.spec())
+    }
+    #[staticmethod]
+    fn tesla_pw3_x2() -> Self {
+        Self::from_spec(BatteryProductId::TeslaPw3X2.spec())
+    }
+    #[staticmethod]
+    fn enphase_iq5p() -> Self {
+        Self::from_spec(BatteryProductId::EnphaseIq5p.spec())
+    }
+    #[staticmethod]
+    fn enphase_iq5p_x2() -> Self {
+        Self::from_spec(BatteryProductId::EnphaseIq5pX2.spec())
+    }
+    #[staticmethod]
+    fn enphase_iq10c() -> Self {
+        Self::from_spec(BatteryProductId::EnphaseIq10c.spec())
+    }
+    #[staticmethod]
+    fn franklin_apower() -> Self {
+        Self::from_spec(BatteryProductId::FranklinApower.spec())
+    }
+    #[staticmethod]
+    fn franklin_apower2() -> Self {
+        Self::from_spec(BatteryProductId::FranklinApower2.spec())
+    }
+    #[staticmethod]
+    fn franklin_apower2_x2() -> Self {
+        Self::from_spec(BatteryProductId::FranklinApower2X2.spec())
+    }
+    #[staticmethod]
+    fn solaredge_home() -> Self {
+        Self::from_spec(BatteryProductId::SolaredgeHome.spec())
+    }
+    #[staticmethod]
+    fn lg_resu10h() -> Self {
+        Self::from_spec(BatteryProductId::LgResu10h.spec())
     }
 
     fn __repr__(&self) -> String {
@@ -466,6 +569,103 @@ impl PyEv {
         })
     }
 
+    #[staticmethod]
+    fn from_vehicle(vehicle_id: PyVehicleId) -> Self {
+        let rust_id: VehicleId = vehicle_id.into();
+        Self::from_spec(rust_id.spec())
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (vehicle_id, archetype_id, seed=0))]
+    fn from_vehicle_with_archetype(
+        vehicle_id: PyVehicleId,
+        archetype_id: PyEvArchetypeId,
+        #[allow(unused_variables)] seed: u64,
+    ) -> Self {
+        let rust_vid: VehicleId = vehicle_id.into();
+        let rust_aid: EvArchetypeId = archetype_id.into();
+        let spec = rust_vid.spec();
+        let preset = rust_aid.preset();
+        let max_power = match preset.charging_level {
+            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(1.8),
+            hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
+        };
+        Self {
+            name: spec.label.to_string(),
+            capacity_kwh: Some(spec.capacity_kwh),
+            max_charging_kw: Some(max_power),
+            initial_soc: None,
+            initial_connection_state: None,
+            charging_curve_lut: None,
+        }
+    }
+
+    #[staticmethod]
+    fn by_vehicle_id(id: &str) -> PyResult<Self> {
+        let spec = hares_equipment::ev::catalog::by_id(id).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown vehicle: {id}"))
+        })?;
+        Ok(Self::from_spec(spec))
+    }
+
+    #[staticmethod]
+    fn vehicle_catalog() -> Vec<PyVehicleId> {
+        VehicleId::ALL.iter().copied().map(PyVehicleId::from).collect()
+    }
+
+    #[staticmethod]
+    fn tesla_model_y_lr() -> Self {
+        Self::from_spec(VehicleId::TeslaModelYLr.spec())
+    }
+    #[staticmethod]
+    fn tesla_model_y_sr() -> Self {
+        Self::from_spec(VehicleId::TeslaModelYSr.spec())
+    }
+    #[staticmethod]
+    fn tesla_model_3_lr() -> Self {
+        Self::from_spec(VehicleId::TeslaModel3Lr.spec())
+    }
+    #[staticmethod]
+    fn chevy_bolt_ev() -> Self {
+        Self::from_spec(VehicleId::ChevyBoltEv.spec())
+    }
+    #[staticmethod]
+    fn chevy_bolt_euv() -> Self {
+        Self::from_spec(VehicleId::ChevyBoltEuv.spec())
+    }
+    #[staticmethod]
+    fn ford_mache_sr() -> Self {
+        Self::from_spec(VehicleId::FordMacheSr.spec())
+    }
+    #[staticmethod]
+    fn ford_mache_er() -> Self {
+        Self::from_spec(VehicleId::FordMacheEr.spec())
+    }
+    #[staticmethod]
+    fn ford_lightning_er() -> Self {
+        Self::from_spec(VehicleId::FordLightningEr.spec())
+    }
+    #[staticmethod]
+    fn hyundai_ioniq5_lr() -> Self {
+        Self::from_spec(VehicleId::HyundaiIoniq5Lr.spec())
+    }
+    #[staticmethod]
+    fn nissan_leaf30() -> Self {
+        Self::from_spec(VehicleId::NissanLeaf30.spec())
+    }
+    #[staticmethod]
+    fn jeep_4xe() -> Self {
+        Self::from_spec(VehicleId::Jeep4xe.spec())
+    }
+    #[staticmethod]
+    fn toyota_rav4_prime() -> Self {
+        Self::from_spec(VehicleId::ToyotaRav4Prime.spec())
+    }
+    #[staticmethod]
+    fn chevy_volt_gen1() -> Self {
+        Self::from_spec(VehicleId::ChevyVoltGen1.spec())
+    }
+
     fn __repr__(&self) -> String {
         let lut_info = if self.charging_curve_lut.is_some() {
             ", lut=loaded"
@@ -476,6 +676,19 @@ impl PyEv {
             "EV(name={:?}, capacity_kwh={:?}, max_charging_kw={:?}{lut_info})",
             self.name, self.capacity_kwh, self.max_charging_kw
         )
+    }
+}
+
+impl PyEv {
+    fn from_spec(spec: &VehicleSpec) -> Self {
+        Self {
+            name: spec.label.to_string(),
+            capacity_kwh: Some(spec.capacity_kwh),
+            max_charging_kw: Some(spec.max_l2_power_kw),
+            initial_soc: None,
+            initial_connection_state: None,
+            charging_curve_lut: None,
+        }
     }
 }
 

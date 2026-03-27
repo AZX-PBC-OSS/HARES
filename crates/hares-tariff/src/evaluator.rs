@@ -11,10 +11,11 @@ pub struct TariffEvaluator {
     export_array: Vec<f64>,
     /// Index into a deduplicated period name table per step.
     period_indices: Vec<u16>,
+    /// Precomputed civil month (1-12) for each timestep.
+    months: Vec<u8>,
     period_name_table: Vec<String>,
     interval_seconds: u32,
     simulation_start: DateTime<Tz>,
-    timezone: Tz,
     step_index: usize,
     billing_state: BillingState,
 }
@@ -46,6 +47,7 @@ impl TariffEvaluator {
         let mut price_array = Vec::with_capacity(num_steps);
         let mut export_array = Vec::with_capacity(num_steps);
         let mut period_indices = Vec::with_capacity(num_steps);
+        let mut months = Vec::with_capacity(num_steps);
 
         // Intern period names to avoid per-step String allocations.
         let mut period_name_table: Vec<String> = Vec::new();
@@ -54,6 +56,13 @@ impl TariffEvaluator {
         for period in &tariff.tou_schedule {
             if !period_name_table.contains(&period.name) {
                 period_name_table.push(period.name.clone());
+            }
+        }
+        for dr in &tariff.demand_rates {
+            if let Some(name) = &dr.period_name {
+                if !period_name_table.contains(name) {
+                    period_name_table.push(name.clone());
+                }
             }
         }
 
@@ -124,6 +133,7 @@ impl TariffEvaluator {
             price_array.push(import_price);
             export_array.push(export_price);
             period_indices.push(period_idx);
+            months.push(month);
         }
 
         let ratchet_config = tariff
@@ -139,6 +149,7 @@ impl TariffEvaluator {
             demand_window_minutes,
             interval_seconds,
             ratchet_config,
+            period_name_table.len(),
         );
 
         Ok(Self {
@@ -146,10 +157,10 @@ impl TariffEvaluator {
             price_array,
             export_array,
             period_indices,
+            months,
             period_name_table,
             interval_seconds,
             simulation_start,
-            timezone,
             step_index: 0,
             billing_state,
         })
@@ -179,10 +190,7 @@ impl TariffEvaluator {
     }
 
     pub fn tier_multiplier(&self, cumulative_kwh: f64) -> f64 {
-        let ts = self.simulation_start
-            + Duration::seconds(self.step_index as i64 * self.interval_seconds as i64);
-        let civil = ts.with_timezone(&self.timezone);
-        let month = civil.month() as u8;
+        let month = self.months[self.step_index];
 
         for block in &self.tariff.tiered_rates {
             if !block.season.contains_month(month) {
@@ -213,15 +221,14 @@ impl TariffEvaluator {
     ) -> Option<BillingPeriodSummary> {
         let import_price = self.current_price();
         let export_price = self.current_export_price();
+        let period_idx = self.period_indices[self.step_index];
         self.billing_state
-            .update(net_power_kw, dt_seconds, import_price, export_price);
+            .update(net_power_kw, dt_seconds, import_price, export_price, period_idx);
 
         let result = if current_time >= self.billing_state.period_end {
-            let civil = self.billing_state.period_start.with_timezone(&self.timezone);
-            let month = civil.month() as u8;
+            let month = self.billing_state.period_start.month() as u8;
 
-            let effective_peak = self.billing_state.effective_peak_kw();
-            let demand_charge = self.compute_demand_charge(effective_peak, month);
+            let demand_charge = self.compute_demand_charge(month);
 
             let days_in_period = (self.billing_state.period_end - self.billing_state.period_start)
                 .num_days() as f64;
@@ -230,20 +237,19 @@ impl TariffEvaluator {
 
             let energy_charge = self.billing_state.cumulative_energy_cost_usd;
             let export_credit = self.billing_state.cumulative_export_credit_usd;
-            let net_bill = energy_charge + demand_charge + fixed_charge - export_credit;
 
-            let summary = BillingPeriodSummary {
-                period_start: self.billing_state.period_start,
-                period_end: self.billing_state.period_end,
-                energy_charge_usd: energy_charge,
-                demand_charge_usd: demand_charge,
-                fixed_charge_usd: fixed_charge,
-                export_credit_usd: export_credit,
-                net_bill_usd: net_bill,
-                peak_demand_kw: self.billing_state.peak_demand_kw,
-                total_import_kwh: self.billing_state.cumulative_import_kwh,
-                total_export_kwh: self.billing_state.cumulative_export_kwh,
-            };
+            let summary = BillingPeriodSummary::new(
+                self.billing_state.period_start,
+                self.billing_state.period_end,
+                energy_charge,
+                demand_charge,
+                fixed_charge,
+                export_credit,
+                self.tariff.minimum_charge,
+                self.billing_state.peak_demand_kw,
+                self.billing_state.cumulative_import_kwh,
+                self.billing_state.cumulative_export_kwh,
+            );
 
             self.billing_state.reset(self.billing_state.period_end);
             Some(summary)
@@ -255,12 +261,28 @@ impl TariffEvaluator {
         result
     }
 
-    fn compute_demand_charge(&self, effective_peak_kw: f64, month: u8) -> f64 {
+    fn compute_demand_charge(&self, month: u8) -> f64 {
+        let global_peak = self.billing_state.effective_peak_kw();
         self.tariff
             .demand_rates
             .iter()
             .filter(|dr| dr.season.contains_month(month))
-            .map(|dr| effective_peak_kw * dr.rate_per_kw)
+            .map(|dr| {
+                let peak = match &dr.period_name {
+                    // Coincident/flat demand: use global peak
+                    None => global_peak,
+                    // TOU demand: use peak for that specific period
+                    Some(name) => {
+                        let idx = self
+                            .period_name_table
+                            .iter()
+                            .position(|n| n == name)
+                            .unwrap_or(0) as u16;
+                        self.billing_state.peak_for_period(idx)
+                    }
+                };
+                peak * dr.rate_per_kw
+            })
             .sum()
     }
 
@@ -274,6 +296,14 @@ impl TariffEvaluator {
 
     pub fn total_steps(&self) -> usize {
         self.price_array.len()
+    }
+
+    pub fn interval_seconds(&self) -> u32 {
+        self.interval_seconds
+    }
+
+    pub fn simulation_start(&self) -> DateTime<Tz> {
+        self.simulation_start
     }
 }
 
@@ -578,6 +608,364 @@ mod tests {
         let start = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
         let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         assert_eq!(ev.current_export_price(), 0.0);
+    }
+
+    /// Flat tariff covering all hours/seasons at a known rate, for step() tests.
+    fn flat_tariff(rate: f64) -> ElectricTariff {
+        ElectricTariff {
+            name: Some("flat-step".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: rate,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Run step() for every timestep, passing end-of-step time as current_time.
+    /// The billing period closes when current_time >= period_end, so we pass
+    /// the timestamp at the END of each interval.
+    fn run_all_steps(
+        ev: &mut TariffEvaluator,
+        power_fn: impl Fn(usize) -> f64,
+    ) -> Vec<BillingPeriodSummary> {
+        let total = ev.total_steps();
+        let interval = ev.interval_seconds;
+        let start = ev.simulation_start;
+        let mut summaries = Vec::new();
+        for i in 0..total {
+            let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            if let Some(s) = ev.step(power_fn(i), interval as f64, step_end) {
+                summaries.push(s);
+            }
+        }
+        summaries
+    }
+
+    #[test]
+    fn evaluator_step_accumulates_energy() {
+        let start = make_start(2025, 1, 1);
+        let end = start + Duration::hours(24);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
+
+        run_all_steps(&mut ev, |_| 2.0);
+        assert!(
+            (ev.billing_state().cumulative_import_kwh() - 48.0).abs() < 1e-10,
+            "expected 48.0 kWh, got {}",
+            ev.billing_state().cumulative_import_kwh()
+        );
+    }
+
+    #[test]
+    fn evaluator_step_billing_period_closes() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 3, 1);
+        let interval = 3600u32;
+        let monthly_fixed = 15.0;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: monthly_fixed,
+            daily_usd: 0.0,
+        };
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |_| 2.0);
+
+        assert_eq!(summaries.len(), 2, "expected exactly 2 billing period closes");
+
+        let s0 = &summaries[0];
+        assert!(s0.energy_charge_usd > 0.0);
+        assert!(s0.total_import_kwh > 0.0);
+        assert!(
+            (s0.fixed_charge_usd - monthly_fixed).abs() < 1e-10,
+            "expected fixed_charge_usd={monthly_fixed}, got {}",
+            s0.fixed_charge_usd
+        );
+    }
+
+    #[test]
+    fn evaluator_step_demand_charge_in_summary() {
+        use crate::types::DemandRate;
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+        let demand_rate_per_kw = 10.0;
+        let mut tariff = flat_tariff(0.12);
+        tariff.demand_rates = vec![DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: demand_rate_per_kw,
+            ratchet: None,
+        }];
+        let mut ev = make_evaluator(tariff, start, end, interval);
+        let half = ev.total_steps() / 2;
+
+        let summaries = run_all_steps(&mut ev, |i| if i < half { 5.0 } else { 1.0 });
+
+        let summary = summaries.into_iter().next().expect("billing period should close");
+        assert!(
+            summary.demand_charge_usd > 0.0,
+            "demand_charge_usd should be > 0"
+        );
+        assert!(
+            summary.peak_demand_kw >= 4.9,
+            "peak_demand_kw should be near 5.0, got {}",
+            summary.peak_demand_kw
+        );
+    }
+
+    #[test]
+    fn evaluator_tou_demand_charge_uses_period_peak() {
+        use crate::types::DemandRate;
+
+        // Two TOU periods: on-peak (weekdays 16:00-21:00) and off-peak (all other).
+        // Load 10 kW during on-peak, 2 kW during off-peak.
+        // Demand rate with period_name "on-peak" should use the on-peak period peak (~10 kW),
+        // not the global peak (which is also ~10 kW here). We verify by adding a second
+        // demand rate for "off-peak" and checking it uses only the off-peak peak (~2 kW).
+        let start = make_start(2025, 1, 1); // Wednesday
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+
+        let tariff = ElectricTariff {
+            name: Some("tou-demand".into()),
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "on-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Weekdays, 960, 1260, 0.0)],
+                    season: SeasonFilter::All,
+                },
+                TouPeriod {
+                    name: "off-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+            ],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "on-peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.30,
+                },
+                EnergyRate {
+                    period_name: "off-peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.10,
+                },
+            ],
+            demand_rates: vec![
+                DemandRate {
+                    period_name: Some("on-peak".into()),
+                    season: SeasonFilter::All,
+                    rate_per_kw: 10.0,
+                    ratchet: None,
+                },
+                DemandRate {
+                    period_name: Some("off-peak".into()),
+                    season: SeasonFilter::All,
+                    rate_per_kw: 5.0,
+                    ratchet: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |i| {
+            // Compute the civil hour for this step to decide load.
+            let step_start = start + Duration::seconds(i as i64 * interval as i64);
+            let civil = step_start.with_timezone(&New_York);
+            let minute_of_day = civil.hour() as u16 * 60 + civil.minute() as u16;
+            let is_weekday = matches!(
+                civil.weekday(),
+                chrono::Weekday::Mon
+                    | chrono::Weekday::Tue
+                    | chrono::Weekday::Wed
+                    | chrono::Weekday::Thu
+                    | chrono::Weekday::Fri
+            );
+            if is_weekday && (960..1260).contains(&minute_of_day) {
+                10.0 // on-peak: 10 kW
+            } else {
+                2.0 // off-peak: 2 kW
+            }
+        });
+
+        let s = summaries.into_iter().next().expect("billing period should close");
+
+        // On-peak demand charge: ~10 kW * $10/kW = ~$100
+        // Off-peak demand charge: ~2 kW * $5/kW = ~$10
+        // Total demand charge: ~$110
+        // If bug existed (using global peak for both), it would be 10*10 + 10*5 = $150
+        let on_peak_contribution = 10.0 * 10.0;
+        let off_peak_contribution = 2.0 * 5.0;
+        let expected_demand = on_peak_contribution + off_peak_contribution;
+
+        assert!(
+            (s.demand_charge_usd - expected_demand).abs() < 1.0,
+            "TOU demand charge should be ~{expected_demand}, got {}. \
+             If using global peak for both periods, would be {}",
+            s.demand_charge_usd,
+            10.0 * 10.0 + 10.0 * 5.0,
+        );
+    }
+
+    #[test]
+    fn evaluator_step_export_credit_in_summary() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.30);
+        tariff.export_rate = ExportRate {
+            mode: ExportMode::NetMetering,
+            tou_credits: vec![],
+        };
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |_| -3.0);
+
+        let summary = summaries.into_iter().next().expect("billing period should close");
+        assert!(
+            summary.export_credit_usd > 0.0,
+            "export_credit_usd should be > 0"
+        );
+        assert!(
+            summary.total_export_kwh > 0.0,
+            "total_export_kwh should be > 0"
+        );
+    }
+
+    #[test]
+    fn evaluator_step_net_bill_arithmetic() {
+        use crate::types::DemandRate;
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.15);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 12.0,
+            daily_usd: 0.0,
+        };
+        tariff.demand_rates = vec![DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: 8.0,
+            ratchet: None,
+        }];
+        tariff.export_rate = ExportRate {
+            mode: ExportMode::NetMetering,
+            tou_credits: vec![],
+        };
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |i| if i % 2 == 0 { 3.0 } else { -1.0 });
+
+        let s = summaries.into_iter().next().expect("billing period should close");
+        let expected = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd
+            - s.export_credit_usd;
+        assert!(
+            (s.net_bill_usd - expected).abs() < 1e-10,
+            "net_bill_usd={} != energy({}) + demand({}) + fixed({}) - export({})",
+            s.net_bill_usd,
+            s.energy_charge_usd,
+            s.demand_charge_usd,
+            s.fixed_charge_usd,
+            s.export_credit_usd
+        );
+    }
+
+    #[test]
+    fn evaluator_new_rejects_zero_interval() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let result = TariffEvaluator::new(flat_tariff(0.12), start, end, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evaluator_new_rejects_end_before_start() {
+        let start = make_start(2025, 6, 1);
+        let end = make_start(2025, 1, 1);
+        let result = TariffEvaluator::new(flat_tariff(0.12), start, end, 3600);
+        assert!(result.is_err());
+
+        // Also test equal start and end.
+        let result_eq = TariffEvaluator::new(flat_tariff(0.12), start, start, 3600);
+        assert!(result_eq.is_err());
+    }
+
+    #[test]
+    fn evaluator_tier_multiplier_no_tiers_returns_price() {
+        let start = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
+        let tariff = flat_tariff(0.12);
+        let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        assert!(
+            (ev.tier_multiplier(0.0) - 0.12).abs() < 1e-10,
+            "with no tiers, tier_multiplier should return current_price (0.12), got {}",
+            ev.tier_multiplier(0.0)
+        );
+        assert!(
+            (ev.tier_multiplier(999.0) - 0.12).abs() < 1e-10,
+            "with no tiers, tier_multiplier should return current_price regardless of kwh"
+        );
+    }
+
+    #[test]
+    fn evaluator_minimum_charge_enforced() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.12);
+        tariff.minimum_charge = Some(50.0);
+
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Very low usage: 0.1 kW for the whole month → ~74.4 kWh → ~$8.93 energy
+        // With no demand/fixed/export, raw bill < $50 minimum
+        let summaries = run_all_steps(&mut ev, |_| 0.1);
+
+        let s = summaries.into_iter().next().expect("billing period should close");
+        let raw = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd
+            - s.export_credit_usd;
+        assert!(raw < 50.0, "raw bill should be below minimum, got {raw}");
+        assert!(
+            (s.net_bill_usd - 50.0).abs() < 1e-10,
+            "net_bill_usd should be clamped to minimum_charge $50, got {}",
+            s.net_bill_usd,
+        );
+    }
+
+    #[test]
+    fn evaluator_minimum_charge_not_applied_when_bill_exceeds() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.12);
+        tariff.minimum_charge = Some(10.0);
+
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // 5 kW for the whole month → ~3720 kWh → ~$446 energy, well above $10 min
+        let summaries = run_all_steps(&mut ev, |_| 5.0);
+
+        let s = summaries.into_iter().next().expect("billing period should close");
+        let raw = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd
+            - s.export_credit_usd;
+        assert!(
+            (s.net_bill_usd - raw).abs() < 1e-10,
+            "net_bill_usd should equal raw bill when above minimum, got {} vs {raw}",
+            s.net_bill_usd,
+        );
     }
 
     #[test]

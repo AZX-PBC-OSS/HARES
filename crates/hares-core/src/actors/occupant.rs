@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_types::{ControlSignal, EndUse, EnvironmentState, OperatingMode};
+use hares_types::{ControlSignal, EndUse, EnvironmentState, EvConnectionState, OperatingMode};
 
 use crate::Actor;
 
@@ -283,16 +283,16 @@ impl Occupant {
             if presence.is_present() && behavior.on_when_home {
                 out.push(DispatchRequest {
                     target: target.clone(),
-                    signal: ControlSignal::ModeOverride {
-                        mode: OperatingMode::Standby,
+                    signal: ControlSignal::EvPlugIn {
+                        state: EvConnectionState::HomePluggedIn,
                     },
                     priority: PriorityTier::UserOverride,
                 });
             } else if presence.is_away() && behavior.off_when_away {
                 out.push(DispatchRequest {
                     target: target.clone(),
-                    signal: ControlSignal::ModeOverride {
-                        mode: OperatingMode::Off,
+                    signal: ControlSignal::EvPlugIn {
+                        state: EvConnectionState::Disconnected,
                     },
                     priority: PriorityTier::UserOverride,
                 });
@@ -384,7 +384,7 @@ impl Actor for Occupant {
 #[cfg(test)]
 mod tests {
     use hares_control::{DispatchTarget, PriorityTier};
-    use hares_types::{ControlSignal, EndUse, OperatingMode};
+    use hares_types::{ControlSignal, EndUse, EvConnectionState, OperatingMode};
 
     use super::{EquipmentBehavior, Occupant, Presence};
     use crate::Actor;
@@ -571,14 +571,14 @@ mod tests {
         let has_unplug = requests.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::ModeOverride {
-                    mode: OperatingMode::Off
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::Disconnected,
                 }
             )
         });
         assert!(
             has_unplug,
-            "expected unplug (Off) signal when transitioning to Away"
+            "expected EvPlugIn(Disconnected) signal when transitioning to Away"
         );
 
         // Step 1: Home (plug in)
@@ -589,14 +589,14 @@ mod tests {
         let has_plug = requests.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::ModeOverride {
-                    mode: OperatingMode::Standby
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn,
                 }
             )
         });
         assert!(
             has_plug,
-            "expected plug (Standby) signal when transitioning to Home"
+            "expected EvPlugIn(HomePluggedIn) signal when transitioning to Home"
         );
     }
 

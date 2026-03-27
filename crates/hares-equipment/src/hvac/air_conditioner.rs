@@ -1111,12 +1111,15 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 
@@ -1565,17 +1568,21 @@ mod dr_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 
     fn hot_env_at_time(zone_temp_c: f64, second: i64) -> EnvironmentState {
         EnvironmentState {
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -1937,12 +1944,15 @@ mod crankcase_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 
@@ -1994,12 +2004,15 @@ mod crankcase_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 

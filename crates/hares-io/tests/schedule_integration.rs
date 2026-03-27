@@ -113,12 +113,15 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
             zone_temperatures_c: Vec::new(),
             custom_payload: Some(payload),
         }],
+        equipment_telemetry: std::collections::HashMap::new(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
             .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
             .single()
             .expect("valid timestamp"),
         time_res: ChronoDuration::minutes(1),
+    price_signal: Default::default(),
+    electrical: Default::default(),
     }
 }
 

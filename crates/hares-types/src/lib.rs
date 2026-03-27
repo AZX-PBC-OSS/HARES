@@ -80,12 +80,15 @@ pub mod test_utils {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid timestamp"),
             time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 }

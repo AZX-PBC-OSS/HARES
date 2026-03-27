@@ -14,7 +14,9 @@ use std::time::Duration as StdDuration;
 use std::time::Instant;
 
 use chrono::{DateTime, Duration, FixedOffset};
+use chrono_tz::Tz;
 use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal};
+use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
@@ -32,8 +34,9 @@ use hares_physics::constants::{
 };
 use hares_physics::pv_sizing::RoofInfo;
 use hares_types::{
-    ControlSignal, DomainSolver, DomainUpdate, EndUse, EnvironmentState, ExecutionStage, GridState,
-    HaresError, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID, THERMAL, ThermalCategory, ZoneId,
+    ControlSignal, DomainSolver, DomainUpdate, ElectricalSummary, EndUse, EnvironmentState,
+    ExecutionStage, GridState, HaresError, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID,
+    ThermalCategory, ZoneId,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -149,6 +152,76 @@ fn build_equipment_column_map(
             }
         })
         .collect()
+}
+
+/// Pre-resolved zone column indices for record_step, avoiding per-step format!() allocations.
+struct ZoneColumnCaches {
+    /// (ZoneId, column_index) for temperature columns, sorted by ZoneId.
+    temp_columns: Vec<(ZoneId, usize)>,
+    /// (ZoneId, column_index) for per-zone infiltration columns (non-indoor only).
+    infiltration_columns: Vec<(ZoneId, usize)>,
+    /// (ZoneId, column_index) for per-zone interior LWR columns.
+    lwr_columns: Vec<(ZoneId, usize)>,
+    /// Zone IDs in sorted order for StepResult construction.
+    sorted_zone_ids: Vec<ZoneId>,
+    /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones where
+    /// that zone lives. Enables O(1) temperature lookup in the hot loop.
+    zone_env_indices: Vec<usize>,
+    /// For each entry in sorted_zone_ids, the output column index for zone temperature,
+    /// or None if no temperature column exists for that zone.
+    zone_temp_col_indices: Vec<Option<usize>>,
+}
+
+fn build_zone_column_caches(
+    zones: &[hares_types::ZoneState],
+    indoor_zone: ZoneId,
+    column_index: &HashMap<String, usize>,
+) -> ZoneColumnCaches {
+    let mut sorted_zone_ids: Vec<ZoneId> = zones.iter().map(|z| z.id).collect();
+    sorted_zone_ids.sort();
+
+    let mut temp_columns = Vec::new();
+    let mut infiltration_columns = Vec::new();
+    let mut lwr_columns = Vec::new();
+    let mut zone_env_indices = Vec::with_capacity(sorted_zone_ids.len());
+    let mut zone_temp_col_indices = Vec::with_capacity(sorted_zone_ids.len());
+
+    for &zone_id in &sorted_zone_ids {
+        let label = zone_display_name(zone_id, indoor_zone);
+        let temp_key = format!("Temperature - {label} (C)");
+        let temp_col = column_index.get(&temp_key).copied();
+        if let Some(idx) = temp_col {
+            temp_columns.push((zone_id, idx));
+        }
+        zone_temp_col_indices.push(temp_col);
+
+        if zone_id != indoor_zone {
+            let inf_key = format!("Infiltration Heat Gain - {label} (W)");
+            if let Some(&idx) = column_index.get(&inf_key) {
+                infiltration_columns.push((zone_id, idx));
+            }
+        }
+        let lwr_key = format!("Radiation Heat Gain - {label} (W)");
+        if let Some(&idx) = column_index.get(&lwr_key) {
+            lwr_columns.push((zone_id, idx));
+        }
+
+        // Pre-compute the index of this zone in the zones slice for O(1) hot-loop access.
+        let env_idx = zones
+            .iter()
+            .position(|z| z.id == zone_id)
+            .unwrap_or(usize::MAX);
+        zone_env_indices.push(env_idx);
+    }
+
+    ZoneColumnCaches {
+        temp_columns,
+        infiltration_columns,
+        lwr_columns,
+        sorted_zone_ids,
+        zone_env_indices,
+        zone_temp_col_indices,
+    }
 }
 
 /// Single-step observable output.
@@ -457,6 +530,9 @@ pub struct Dwelling {
 
     control_dispatcher: ControlDispatcher,
     price_signal: PriceSignal,
+    tariff_evaluator: Option<TariffEvaluator>,
+    billing_summaries: Vec<BillingPeriodSummary>,
+    prior_electrical_summary: ElectricalSummary,
     latest_env: EnvironmentState,
     simulation_results: SimulationResults,
     custom_domain_solvers: Vec<Box<dyn DomainSolver>>,
@@ -467,6 +543,24 @@ pub struct Dwelling {
     equipment_column_map: Vec<EquipmentColumns>,
     /// Number of numeric columns expected by the recorder (schema fields minus timestamp).
     output_value_count: usize,
+    /// Pre-allocated scratch buffer for `record_step`, reused each timestep.
+    record_scratch: Vec<f64>,
+    /// Pre-resolved zone temperature column indices, sorted by ZoneId.
+    zone_temp_columns: Vec<(ZoneId, usize)>,
+    /// Pre-resolved per-zone infiltration column indices (non-indoor zones only).
+    zone_infiltration_columns: Vec<(ZoneId, usize)>,
+    /// Pre-resolved per-zone interior LWR column indices.
+    zone_lwr_columns: Vec<(ZoneId, usize)>,
+    /// Pre-sorted zone ID order for StepResult, computed once at init.
+    sorted_zone_ids: Vec<ZoneId>,
+    /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones.
+    /// Enables O(1) temperature extraction in the hot loop.
+    zone_env_indices: Vec<usize>,
+    /// For each entry in sorted_zone_ids, the output column index for zone temperature,
+    /// or None if no temperature column exists for that zone.
+    zone_temp_col_indices: Vec<Option<usize>>,
+    /// Pre-allocated buffer for zone temperatures in StepResult, reused each step.
+    zone_temp_scratch: Vec<(ZoneId, f64)>,
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
@@ -794,6 +888,12 @@ impl Dwelling {
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
 
         let equipment_column_map = build_equipment_column_map(&equipment, &output_column_index);
+        let zone_caches = build_zone_column_caches(
+            &initial_env.zones,
+            solvers.thermal.config().indoor_zone_id,
+            &output_column_index,
+        );
+        let record_scratch = vec![0.0; output_value_count];
         let equipment_execution_order = compute_equipment_execution_order(&equipment);
         let mut solver_feedback_actor = SolverFeedbackActor::new();
         solver_feedback_actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
@@ -817,6 +917,9 @@ impl Dwelling {
             facility_type,
             control_dispatcher: ControlDispatcher::default(),
             price_signal: PriceSignal::default(),
+            tariff_evaluator: None,
+            billing_summaries: Vec::new(),
+            prior_electrical_summary: ElectricalSummary::default(),
             latest_env: initial_env,
             simulation_results: SimulationResults::default(),
             custom_domain_solvers: Vec::new(),
@@ -824,6 +927,14 @@ impl Dwelling {
             equipment_column_map,
             output_column_index,
             output_value_count,
+            record_scratch,
+            zone_temp_columns: zone_caches.temp_columns,
+            zone_infiltration_columns: zone_caches.infiltration_columns,
+            zone_lwr_columns: zone_caches.lwr_columns,
+            zone_temp_scratch: zone_caches.sorted_zone_ids.iter().map(|&z| (z, 0.0)).collect(),
+            sorted_zone_ids: zone_caches.sorted_zone_ids,
+            zone_env_indices: zone_caches.zone_env_indices,
+            zone_temp_col_indices: zone_caches.zone_temp_col_indices,
             occupancy_column_idx,
             zone_capacitances_j_k: solvers.zone_capacitances_j_k,
             actors: Vec::new(),
@@ -1119,6 +1230,20 @@ impl Dwelling {
             self.output_column_index = build_output_column_index(&schema);
             self.equipment_column_map =
                 build_equipment_column_map(&self.equipment, &self.output_column_index);
+            let zone_caches = build_zone_column_caches(
+                &self.latest_env.zones,
+                self.thermal_solver.config().indoor_zone_id,
+                &self.output_column_index,
+            );
+            self.zone_temp_columns = zone_caches.temp_columns;
+            self.zone_infiltration_columns = zone_caches.infiltration_columns;
+            self.zone_lwr_columns = zone_caches.lwr_columns;
+            self.zone_temp_scratch = zone_caches.sorted_zone_ids.iter().map(|&z| (z, 0.0)).collect();
+            self.sorted_zone_ids = zone_caches.sorted_zone_ids;
+            self.zone_env_indices = zone_caches.zone_env_indices;
+            self.zone_temp_col_indices = zone_caches.zone_temp_col_indices;
+            self.record_scratch.clear();
+            self.record_scratch.resize(self.output_value_count, 0.0);
 
             if let Ok(recorder) = StreamingRecorder::new(
                 schema,
@@ -1147,6 +1272,27 @@ impl Dwelling {
     #[must_use]
     pub fn price_signal(&self) -> &PriceSignal {
         &self.price_signal
+    }
+
+    /// Configures a tariff evaluator from an electric tariff definition.
+    ///
+    /// The evaluator precomputes prices for the entire simulation horizon so
+    /// that `run_timestep` can populate `EnvironmentState.price_signal` before
+    /// actors run. Billing accumulation happens post-solver each step.
+    pub fn set_tariff(&mut self, tariff: ElectricTariff, tz: Tz) -> Result<()> {
+        let start = self.clock.start_time.with_timezone(&tz);
+        let end_fixed = self.clock.start_time + self.clock.duration;
+        let end = end_fixed.with_timezone(&tz);
+        let interval_secs = self.clock.time_res.num_seconds() as u32;
+        let evaluator = TariffEvaluator::new(tariff, start, end, interval_secs)?;
+        self.tariff_evaluator = Some(evaluator);
+        Ok(())
+    }
+
+    /// Returns accumulated billing period summaries.
+    #[must_use]
+    pub fn billing_summaries(&self) -> &[BillingPeriodSummary] {
+        &self.billing_summaries
     }
 
     /// Applies a grid voltage override through the environment manager.
@@ -1449,6 +1595,20 @@ impl Dwelling {
         let env = self.environment.update(&self.clock, &self.latest_env.zones);
         self.latest_env = env;
 
+        // Populate price signal from tariff evaluator (deterministic function of clock).
+        if let Some(ref evaluator) = self.tariff_evaluator {
+            self.latest_env.price_signal = PriceSignal {
+                electricity_price: Some(evaluator.current_price()),
+                export_price: Some(evaluator.current_export_price()),
+                ghg_intensity: self.latest_env.price_signal.ghg_intensity,
+            };
+        } else {
+            self.latest_env.price_signal = self.price_signal.clone();
+        }
+
+        // Populate electrical summary from prior step's solver results.
+        self.latest_env.electrical = self.prior_electrical_summary.clone();
+
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
             obs_phases.post_environment =
@@ -1469,6 +1629,19 @@ impl Dwelling {
         // Step 1c: solver feedback actor collects ideal targets and solves for capacities.
         self.solver_feedback_actor
             .collect_and_solve(&self.equipment, &self.thermal_solver);
+
+        // Populate equipment telemetry snapshot for actors to read.
+        // Reuses existing HashMap capacity — only clones Telemetry internals
+        // (small hashmaps of ~10-20 f64 values per equipment).
+        self.latest_env.equipment_telemetry.clear();
+        if !self.actors.is_empty() {
+            for eq in &self.equipment {
+                let desc = eq.descriptor();
+                self.latest_env
+                    .equipment_telemetry
+                    .insert(desc.name.clone(), eq.telemetry().clone());
+            }
+        }
 
         // Step 1d: actors decide and queue control signals (registration order, last write wins).
         // Solver feedback actor decides first (Schedule priority, can be overridden by user actors).
@@ -1648,10 +1821,8 @@ impl Dwelling {
         let thermal_update = self
             .thermal_solver
             .resolve(&self.ports, &self.latest_env, dt);
-        self.latest_env
-            .custom_domains
-            .retain(|u| u.domain_id != THERMAL);
-        self.latest_env.custom_domains.push(thermal_update.clone());
+        // Upsert thermal first so humidity/electrical solvers see updated thermal state.
+        self.latest_env.upsert_domain(thermal_update.clone());
 
         let humidity_update = self
             .humidity_solver
@@ -1661,52 +1832,30 @@ impl Dwelling {
             .resolve(&self.ports, &self.latest_env, dt);
         let fluid_update = self.fluid_solver.resolve(&self.ports, &self.latest_env, dt);
 
-        #[cfg(feature = "observe")]
-        let obs_fluid_update = if self.observer_buf.is_some() {
-            Some(fluid_update.clone())
-        } else {
-            None
-        };
-
-        self.latest_env
-            .custom_domains
-            .retain(|u| u.domain_id != humidity_update.domain_id);
-        self.latest_env.custom_domains.push(humidity_update.clone());
-        self.latest_env
-            .custom_domains
-            .retain(|u| u.domain_id != electrical_update.domain_id);
-        self.latest_env
-            .custom_domains
-            .push(electrical_update.clone());
-        self.latest_env
-            .custom_domains
-            .retain(|u| u.domain_id != fluid_update.domain_id);
-        self.latest_env.custom_domains.push(fluid_update);
-
-        for solver in &mut self.custom_domain_solvers {
-            let update = solver.resolve(&self.ports, &self.latest_env, dt);
-            self.latest_env
-                .custom_domains
-                .retain(|u| u.domain_id != update.domain_id);
-            self.latest_env.custom_domains.push(update);
-        }
-
-        // internal_gain_w is computed directly in the thermal solver from
-        // ThermalCategory subtotals — no post-hoc subtraction needed.
+        // Apply zone updates and capture observer data before upserting the
+        // remaining domain updates, so we can pass ownership without cloning.
+        apply_thermal_update_to_zones(&mut self.latest_env, &thermal_update);
+        apply_humidity_update_to_zones(&mut self.latest_env, &humidity_update);
 
         #[cfg(feature = "observe")]
-        if let Some(fluid) = obs_fluid_update {
+        if self.observer_buf.is_some() {
             obs_phases.post_solvers = Some(observer_capture::capture_solvers(
                 &thermal_update,
                 &humidity_update,
                 &electrical_update,
-                &fluid,
+                &fluid_update,
                 &self.thermal_solver,
             ));
         }
 
-        apply_thermal_update_to_zones(&mut self.latest_env, &thermal_update);
-        apply_humidity_update_to_zones(&mut self.latest_env, &humidity_update);
+        self.latest_env.upsert_domain(humidity_update);
+        self.latest_env.upsert_domain(electrical_update);
+        self.latest_env.upsert_domain(fluid_update);
+
+        for solver in &mut self.custom_domain_solvers {
+            let update = solver.resolve(&self.ports, &self.latest_env, dt);
+            self.latest_env.upsert_domain(update);
+        }
 
         #[cfg(feature = "observe")]
         if let Some(buf) = &mut self.observer_buf {
@@ -1732,13 +1881,14 @@ impl Dwelling {
 
         self.check_invariants(&thermal_update, dt)?;
 
-        let mut zone_temperatures_c: Vec<(ZoneId, f64)> = self
-            .latest_env
-            .zones
-            .iter()
-            .map(|z| (z.id, z.temperature_c))
-            .collect();
-        zone_temperatures_c.sort_by_key(|(z, _)| *z);
+        for (i, entry) in self.zone_temp_scratch.iter_mut().enumerate() {
+            let env_idx = self.zone_env_indices[i];
+            entry.1 = if env_idx < self.latest_env.zones.len() {
+                self.latest_env.zones[env_idx].temperature_c
+            } else {
+                0.0
+            };
+        }
 
         // HVAC thermal delivery: use component_gains which includes both equipment
         // port contributions and ideal HVAC loads from the thermal solver.
@@ -1749,7 +1899,7 @@ impl Dwelling {
         let step_result = StepResult {
             timestamp: self.latest_env.current_time,
             net_electric_power_kw: self.electrical_solver.net_active_kw(),
-            zone_temperatures_c,
+            zone_temperatures_c: self.zone_temp_scratch.clone(),
             hvac_heating_w,
             hvac_cooling_w,
         };
@@ -1793,6 +1943,41 @@ impl Dwelling {
             }
         }
 
+        // Post-solver: accumulate billing state from metered power.
+        if let Some(ref mut evaluator) = self.tariff_evaluator {
+            let net_kw = self.electrical_solver.net_active_kw();
+            let dt_secs = self.latest_env.time_step_secs();
+            let tz = evaluator.simulation_start().timezone();
+            let current_tz = self.latest_env.current_time.with_timezone(&tz);
+            if let Some(summary) = evaluator.step(net_kw, dt_secs, current_tz) {
+                self.billing_summaries.push(summary);
+            }
+        }
+
+        // Capture electrical summary for next step's EnvironmentState.
+        let mut battery_kw = 0.0;
+        let mut ev_kw = 0.0;
+        let mut pv_kw = 0.0;
+        for eq in &self.equipment {
+            let end_use = &eq.descriptor().end_use;
+            let telem = eq.telemetry();
+            if *end_use == EndUse::BATTERY {
+                battery_kw += telem.get("active_power_kw").unwrap_or(0.0);
+            } else if *end_use == EndUse::EV {
+                ev_kw += telem.get("active_power_kw").unwrap_or(0.0);
+            } else if *end_use == EndUse::PV {
+                pv_kw += telem.get("active_power_kw").unwrap_or(0.0);
+            }
+        }
+        let net_grid = self.electrical_solver.net_active_kw();
+        self.prior_electrical_summary = ElectricalSummary {
+            pv_generation_kw: -pv_kw,
+            base_load_kw: self.ports.electrical.load_power_kw - battery_kw.max(0.0) - ev_kw,
+            net_grid_kw: net_grid,
+            battery_power_kw: battery_kw,
+            ev_power_kw: ev_kw,
+        };
+
         // ORDERING: ports.zero() must come AFTER check_invariants() (called above)
         // because the electrical balance check reads self.ports.electrical.net_active_kw().
         self.ports.zero();
@@ -1802,7 +1987,8 @@ impl Dwelling {
     }
 
     fn record_step(&mut self, step: &StepResult) -> Result<()> {
-        let mut row = vec![0.0; self.output_value_count];
+        self.record_scratch.fill(0.0);
+        let row = &mut self.record_scratch;
 
         if let Some(&idx) = self.output_column_index.get("Total Electric Power (kW)") {
             row[idx] = step.net_electric_power_kw;
@@ -1836,20 +2022,17 @@ impl Dwelling {
             }
         }
 
-        // Zone temperature columns.
-        let indoor_zone = self.thermal_solver.config().indoor_zone_id;
-        for (zone_id, temp_c) in &step.zone_temperatures_c {
-            let zone_label = zone_display_name(*zone_id, indoor_zone);
-            let col_key = format!("Temperature - {zone_label} (C)");
-            if let Some(&idx) = self.output_column_index.get(&col_key) {
-                row[idx] = *temp_c;
+        // Zone temperature columns — direct index lookup, no allocations.
+        for (i, &(_, temp_c)) in self.zone_temp_scratch.iter().enumerate() {
+            if let Some(idx) = self.zone_temp_col_indices[i] {
+                row[idx] = temp_c;
             }
         }
         // Fallback for old-style column name
         if let Some(&idx) = self.output_column_index.get("Indoor Temperature (C)")
-            && let Some((_, temp_c)) = step.zone_temperatures_c.first()
+            && let Some(&(_, temp_c)) = self.zone_temp_scratch.first()
         {
-            row[idx] = *temp_c;
+            row[idx] = temp_c;
         }
 
         // Outdoor temperature (verbosity >= 2).
@@ -1889,33 +2072,30 @@ impl Dwelling {
             }
         }
 
-        // Per-zone infiltration columns (e.g., attic zone).
+        // Per-zone infiltration columns (pre-resolved, non-indoor only).
         for &(zone, value) in &gains.infiltration_by_zone {
-            if zone == indoor_zone {
-                continue; // already written as "Infiltration Heat Gain - Indoor (W)"
-            }
-            let col_name = format!(
-                "Infiltration Heat Gain - {} (W)",
-                zone_display_name(zone, indoor_zone)
-            );
-            if let Some(&idx) = self.output_column_index.get(col_name.as_str()) {
+            if let Some(&(_, idx)) = self
+                .zone_infiltration_columns
+                .iter()
+                .find(|(z, _)| *z == zone)
+            {
                 row[idx] = value;
             }
         }
 
-        // Per-zone interior LWR columns.
+        // Per-zone interior LWR columns (pre-resolved).
         for &(zone, value) in &gains.interior_lwr_by_zone {
-            let col_name = format!(
-                "Radiation Heat Gain - {} (W)",
-                zone_display_name(zone, indoor_zone)
-            );
-            if let Some(&idx) = self.output_column_index.get(col_name.as_str()) {
+            if let Some(&(_, idx)) = self
+                .zone_lwr_columns
+                .iter()
+                .find(|(z, _)| *z == zone)
+            {
                 row[idx] = value;
             }
         }
 
         self.recorder
-            .push_row(&step.timestamp.to_rfc3339(), &row)
+            .push_row(&step.timestamp.to_rfc3339(), row)
             .map_err(|err| HaresError::Io(format!("record push failed: {err}")))
     }
 

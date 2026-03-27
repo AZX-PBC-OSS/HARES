@@ -22,6 +22,7 @@ use crate::py_actor::PyActor;
 use crate::py_config::PySimulationConfig;
 use crate::py_control::PyControlSignal;
 use crate::py_enums::PyLutType;
+use crate::py_enums::{PyEvArchetypeId, PyVehicleId};
 use crate::py_equipment::{
     PyBattery, PyEquipmentDescriptor, PyEv, PyPv, extract_charging_lut, extract_ocv_table,
     extract_u_neg_table,
@@ -765,6 +766,90 @@ impl PyDwelling {
         }
 
         dwelling.add_equipment(eq);
+        Ok(())
+    }
+
+    pub fn add_ev_with_driver(
+        &mut self,
+        vehicle_id: PyVehicleId,
+        archetype_id: PyEvArchetypeId,
+        seed: u64,
+    ) -> PyResult<()> {
+        use hares_core::actors::ev_driver::{EvDriverActor, EventDistributionRow};
+        use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
+
+        let rust_vid: VehicleId = vehicle_id.into();
+        let rust_aid: EvArchetypeId = archetype_id.into();
+        let spec = rust_vid.spec();
+        let preset = rust_aid.preset();
+
+        let max_power = match preset.charging_level {
+            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(1.8),
+            hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
+        };
+
+        // Build EV equipment config
+        let mut raw_config = std::collections::HashMap::new();
+        raw_config.insert(
+            "capacity_kwh".to_string(),
+            hares_equipment::config::ConfigValue::Float(spec.capacity_kwh),
+        );
+        raw_config.insert(
+            "max_charging_power_kw".to_string(),
+            hares_equipment::config::ConfigValue::Float(max_power),
+        );
+
+        let config = hares_equipment::EquipmentConfig {
+            name: spec.label.to_string(),
+            ochre_class: "EV".to_string(),
+            raw_config,
+        };
+
+        let mut eq = self
+            .equipment_registry
+            .create("EV", config.clone())
+            .map_err(to_py_err)?;
+
+        let mut dwelling = lock_dwelling(&self.dwelling)?;
+        eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
+        dwelling.add_equipment(eq);
+
+        // Build EvDriverActor from preset + vehicle params
+        let fuel_economy = spec.capacity_kwh / spec.range_miles;
+        let seed_bytes = {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&seed.to_le_bytes());
+            bytes
+        };
+        let daily_drive_miles = preset.build_miles_schedule(seed_bytes);
+
+        let distributions = vec![EventDistributionRow {
+            arrival_minute: 1080,
+            duration_minutes: 600,
+            start_soc: 0.4,
+            weight: 1.0,
+        }];
+
+        let actor = EvDriverActor::new(
+            &format!("{}_driver", spec.label),
+            spec.label,
+            preset.strategy.clone(),
+            preset.plug_in_policy.clone(),
+            daily_drive_miles,
+            preset.event_day_ratio,
+            preset.arrival_fuzz_minutes,
+            preset.departure_fuzz_minutes,
+            distributions,
+            fuel_economy,
+            spec.capacity_kwh,
+            30.0, // average_speed_mph
+            20.0, // range_anxiety_miles
+            0.0,  // away_charge_fraction
+            0.0,  // away_charge_power_kw
+            seed,
+        );
+
+        dwelling.add_actor(Box::new(actor));
         Ok(())
     }
 

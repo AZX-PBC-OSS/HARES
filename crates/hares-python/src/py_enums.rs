@@ -8,6 +8,8 @@ use std::hash::{Hash, Hasher};
 use hares_core::engine::SimStatus as CoreSimStatus;
 use hares_fleet::fleet::SimStatus as FleetSimStatus;
 use hares_io::ResStockVersion as IoResStockVersion;
+use hares_equipment::battery::catalog::BatteryProductId as RustBatteryProductId;
+use hares_equipment::ev::catalog::{EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId};
 use hares_types::{
     BatteryChemistry as RustBatteryChemistry, ChargingLevel as RustChargingLevel,
     ChargingStrategy as RustChargingStrategy, ControlCapabilities as RustControlCapabilities,
@@ -1585,5 +1587,380 @@ impl PyChargingStrategy {
 
     fn __eq__(&self, other: &Self) -> bool {
         self.inner == other.inner
+    }
+}
+
+#[pyclass(name = "BatteryProductId", eq, hash, frozen, from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PyBatteryProductId {
+    TeslaPw3,
+    TeslaPw2,
+    TeslaPw3X2,
+    EnphaseIq5p,
+    EnphaseIq5pX2,
+    EnphaseIq10c,
+    FranklinApower,
+    FranklinApower2,
+    FranklinApower2X2,
+    SolaredgeHome,
+    LgResu10h,
+}
+
+#[pymethods]
+impl PyBatteryProductId {
+    #[staticmethod]
+    fn tesla_pw3() -> Self {
+        Self::TeslaPw3
+    }
+    #[staticmethod]
+    fn tesla_pw2() -> Self {
+        Self::TeslaPw2
+    }
+    #[staticmethod]
+    fn tesla_pw3_x2() -> Self {
+        Self::TeslaPw3X2
+    }
+    #[staticmethod]
+    fn enphase_iq5p() -> Self {
+        Self::EnphaseIq5p
+    }
+    #[staticmethod]
+    fn enphase_iq5p_x2() -> Self {
+        Self::EnphaseIq5pX2
+    }
+    #[staticmethod]
+    fn enphase_iq10c() -> Self {
+        Self::EnphaseIq10c
+    }
+    #[staticmethod]
+    fn franklin_apower() -> Self {
+        Self::FranklinApower
+    }
+    #[staticmethod]
+    fn franklin_apower2() -> Self {
+        Self::FranklinApower2
+    }
+    #[staticmethod]
+    fn franklin_apower2_x2() -> Self {
+        Self::FranklinApower2X2
+    }
+    #[staticmethod]
+    fn solaredge_home() -> Self {
+        Self::SolaredgeHome
+    }
+    #[staticmethod]
+    fn lg_resu10h() -> Self {
+        Self::LgResu10h
+    }
+
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        name.parse::<RustBatteryProductId>()
+            .map(PyBatteryProductId::from)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("BatteryProductId.{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        RustBatteryProductId::from(*self).to_string()
+    }
+}
+
+impl From<RustBatteryProductId> for PyBatteryProductId {
+    fn from(id: RustBatteryProductId) -> Self {
+        match id {
+            RustBatteryProductId::TeslaPw3 => Self::TeslaPw3,
+            RustBatteryProductId::TeslaPw2 => Self::TeslaPw2,
+            RustBatteryProductId::TeslaPw3X2 => Self::TeslaPw3X2,
+            RustBatteryProductId::EnphaseIq5p => Self::EnphaseIq5p,
+            RustBatteryProductId::EnphaseIq5pX2 => Self::EnphaseIq5pX2,
+            RustBatteryProductId::EnphaseIq10c => Self::EnphaseIq10c,
+            RustBatteryProductId::FranklinApower => Self::FranklinApower,
+            RustBatteryProductId::FranklinApower2 => Self::FranklinApower2,
+            RustBatteryProductId::FranklinApower2X2 => Self::FranklinApower2X2,
+            RustBatteryProductId::SolaredgeHome => Self::SolaredgeHome,
+            RustBatteryProductId::LgResu10h => Self::LgResu10h,
+        }
+    }
+}
+
+impl From<PyBatteryProductId> for RustBatteryProductId {
+    fn from(id: PyBatteryProductId) -> Self {
+        match id {
+            PyBatteryProductId::TeslaPw3 => Self::TeslaPw3,
+            PyBatteryProductId::TeslaPw2 => Self::TeslaPw2,
+            PyBatteryProductId::TeslaPw3X2 => Self::TeslaPw3X2,
+            PyBatteryProductId::EnphaseIq5p => Self::EnphaseIq5p,
+            PyBatteryProductId::EnphaseIq5pX2 => Self::EnphaseIq5pX2,
+            PyBatteryProductId::EnphaseIq10c => Self::EnphaseIq10c,
+            PyBatteryProductId::FranklinApower => Self::FranklinApower,
+            PyBatteryProductId::FranklinApower2 => Self::FranklinApower2,
+            PyBatteryProductId::FranklinApower2X2 => Self::FranklinApower2X2,
+            PyBatteryProductId::SolaredgeHome => Self::SolaredgeHome,
+            PyBatteryProductId::LgResu10h => Self::LgResu10h,
+        }
+    }
+}
+
+#[pyclass(name = "VehicleId", eq, hash, frozen, from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PyVehicleId {
+    TeslaModelYLr,
+    TeslaModelYSr,
+    TeslaModel3Lr,
+    ChevyBoltEv,
+    ChevyBoltEuv,
+    FordMacheSr,
+    FordMacheEr,
+    FordLightningEr,
+    HyundaiIoniq5Lr,
+    NissanLeaf30,
+    Jeep4xe,
+    ToyotaRav4Prime,
+    ChevyVoltGen1,
+}
+
+#[pymethods]
+impl PyVehicleId {
+    #[staticmethod]
+    fn tesla_model_y_lr() -> Self {
+        Self::TeslaModelYLr
+    }
+    #[staticmethod]
+    fn tesla_model_y_sr() -> Self {
+        Self::TeslaModelYSr
+    }
+    #[staticmethod]
+    fn tesla_model_3_lr() -> Self {
+        Self::TeslaModel3Lr
+    }
+    #[staticmethod]
+    fn chevy_bolt_ev() -> Self {
+        Self::ChevyBoltEv
+    }
+    #[staticmethod]
+    fn chevy_bolt_euv() -> Self {
+        Self::ChevyBoltEuv
+    }
+    #[staticmethod]
+    fn ford_mache_sr() -> Self {
+        Self::FordMacheSr
+    }
+    #[staticmethod]
+    fn ford_mache_er() -> Self {
+        Self::FordMacheEr
+    }
+    #[staticmethod]
+    fn ford_lightning_er() -> Self {
+        Self::FordLightningEr
+    }
+    #[staticmethod]
+    fn hyundai_ioniq5_lr() -> Self {
+        Self::HyundaiIoniq5Lr
+    }
+    #[staticmethod]
+    fn nissan_leaf30() -> Self {
+        Self::NissanLeaf30
+    }
+    #[staticmethod]
+    fn jeep_4xe() -> Self {
+        Self::Jeep4xe
+    }
+    #[staticmethod]
+    fn toyota_rav4_prime() -> Self {
+        Self::ToyotaRav4Prime
+    }
+    #[staticmethod]
+    fn chevy_volt_gen1() -> Self {
+        Self::ChevyVoltGen1
+    }
+
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        name.parse::<RustVehicleId>()
+            .map(PyVehicleId::from)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("VehicleId.{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        RustVehicleId::from(*self).to_string()
+    }
+}
+
+impl From<RustVehicleId> for PyVehicleId {
+    fn from(id: RustVehicleId) -> Self {
+        match id {
+            RustVehicleId::TeslaModelYLr => Self::TeslaModelYLr,
+            RustVehicleId::TeslaModelYSr => Self::TeslaModelYSr,
+            RustVehicleId::TeslaModel3Lr => Self::TeslaModel3Lr,
+            RustVehicleId::ChevyBoltEv => Self::ChevyBoltEv,
+            RustVehicleId::ChevyBoltEuv => Self::ChevyBoltEuv,
+            RustVehicleId::FordMacheSr => Self::FordMacheSr,
+            RustVehicleId::FordMacheEr => Self::FordMacheEr,
+            RustVehicleId::FordLightningEr => Self::FordLightningEr,
+            RustVehicleId::HyundaiIoniq5Lr => Self::HyundaiIoniq5Lr,
+            RustVehicleId::NissanLeaf30 => Self::NissanLeaf30,
+            RustVehicleId::Jeep4xe => Self::Jeep4xe,
+            RustVehicleId::ToyotaRav4Prime => Self::ToyotaRav4Prime,
+            RustVehicleId::ChevyVoltGen1 => Self::ChevyVoltGen1,
+        }
+    }
+}
+
+impl From<PyVehicleId> for RustVehicleId {
+    fn from(id: PyVehicleId) -> Self {
+        match id {
+            PyVehicleId::TeslaModelYLr => Self::TeslaModelYLr,
+            PyVehicleId::TeslaModelYSr => Self::TeslaModelYSr,
+            PyVehicleId::TeslaModel3Lr => Self::TeslaModel3Lr,
+            PyVehicleId::ChevyBoltEv => Self::ChevyBoltEv,
+            PyVehicleId::ChevyBoltEuv => Self::ChevyBoltEuv,
+            PyVehicleId::FordMacheSr => Self::FordMacheSr,
+            PyVehicleId::FordMacheEr => Self::FordMacheEr,
+            PyVehicleId::FordLightningEr => Self::FordLightningEr,
+            PyVehicleId::HyundaiIoniq5Lr => Self::HyundaiIoniq5Lr,
+            PyVehicleId::NissanLeaf30 => Self::NissanLeaf30,
+            PyVehicleId::Jeep4xe => Self::Jeep4xe,
+            PyVehicleId::ToyotaRav4Prime => Self::ToyotaRav4Prime,
+            PyVehicleId::ChevyVoltGen1 => Self::ChevyVoltGen1,
+        }
+    }
+}
+
+#[pyclass(name = "EvArchetypeId", eq, hash, frozen, from_py_object)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PyEvArchetypeId {
+    DailyCommuterL2,
+    DailyCommuterL1,
+    LongCommuterL2,
+    WfhOccasional,
+    WfhL1Minimal,
+    HeavyUseSuv,
+    ShiftWorker,
+    WeekendWarrior,
+    WorkplaceCharger,
+    RetireeL1,
+    PhevCommuter,
+    TouOptimizerCa,
+}
+
+#[pymethods]
+impl PyEvArchetypeId {
+    #[staticmethod]
+    fn daily_commuter_l2() -> Self {
+        Self::DailyCommuterL2
+    }
+    #[staticmethod]
+    fn daily_commuter_l1() -> Self {
+        Self::DailyCommuterL1
+    }
+    #[staticmethod]
+    fn long_commuter_l2() -> Self {
+        Self::LongCommuterL2
+    }
+    #[staticmethod]
+    fn wfh_occasional() -> Self {
+        Self::WfhOccasional
+    }
+    #[staticmethod]
+    fn wfh_l1_minimal() -> Self {
+        Self::WfhL1Minimal
+    }
+    #[staticmethod]
+    fn heavy_use_suv() -> Self {
+        Self::HeavyUseSuv
+    }
+    #[staticmethod]
+    fn shift_worker() -> Self {
+        Self::ShiftWorker
+    }
+    #[staticmethod]
+    fn weekend_warrior() -> Self {
+        Self::WeekendWarrior
+    }
+    #[staticmethod]
+    fn workplace_charger() -> Self {
+        Self::WorkplaceCharger
+    }
+    #[staticmethod]
+    fn retiree_l1() -> Self {
+        Self::RetireeL1
+    }
+    #[staticmethod]
+    fn phev_commuter() -> Self {
+        Self::PhevCommuter
+    }
+    #[staticmethod]
+    fn tou_optimizer_ca() -> Self {
+        Self::TouOptimizerCa
+    }
+
+    #[staticmethod]
+    fn from_str(name: &str) -> PyResult<Self> {
+        name.parse::<RustEvArchetypeId>()
+            .map(PyEvArchetypeId::from)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+    }
+
+    #[staticmethod]
+    fn archetype_catalog() -> Vec<PyEvArchetypeId> {
+        RustEvArchetypeId::ALL
+            .iter()
+            .copied()
+            .map(PyEvArchetypeId::from)
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("EvArchetypeId.{:?}", self)
+    }
+
+    fn __str__(&self) -> String {
+        RustEvArchetypeId::from(*self).to_string()
+    }
+}
+
+impl From<RustEvArchetypeId> for PyEvArchetypeId {
+    fn from(id: RustEvArchetypeId) -> Self {
+        match id {
+            RustEvArchetypeId::DailyCommuterL2 => Self::DailyCommuterL2,
+            RustEvArchetypeId::DailyCommuterL1 => Self::DailyCommuterL1,
+            RustEvArchetypeId::LongCommuterL2 => Self::LongCommuterL2,
+            RustEvArchetypeId::WfhOccasional => Self::WfhOccasional,
+            RustEvArchetypeId::WfhL1Minimal => Self::WfhL1Minimal,
+            RustEvArchetypeId::HeavyUseSuv => Self::HeavyUseSuv,
+            RustEvArchetypeId::ShiftWorker => Self::ShiftWorker,
+            RustEvArchetypeId::WeekendWarrior => Self::WeekendWarrior,
+            RustEvArchetypeId::WorkplaceCharger => Self::WorkplaceCharger,
+            RustEvArchetypeId::RetireeL1 => Self::RetireeL1,
+            RustEvArchetypeId::PhevCommuter => Self::PhevCommuter,
+            RustEvArchetypeId::TouOptimizerCa => Self::TouOptimizerCa,
+        }
+    }
+}
+
+impl From<PyEvArchetypeId> for RustEvArchetypeId {
+    fn from(id: PyEvArchetypeId) -> Self {
+        match id {
+            PyEvArchetypeId::DailyCommuterL2 => Self::DailyCommuterL2,
+            PyEvArchetypeId::DailyCommuterL1 => Self::DailyCommuterL1,
+            PyEvArchetypeId::LongCommuterL2 => Self::LongCommuterL2,
+            PyEvArchetypeId::WfhOccasional => Self::WfhOccasional,
+            PyEvArchetypeId::WfhL1Minimal => Self::WfhL1Minimal,
+            PyEvArchetypeId::HeavyUseSuv => Self::HeavyUseSuv,
+            PyEvArchetypeId::ShiftWorker => Self::ShiftWorker,
+            PyEvArchetypeId::WeekendWarrior => Self::WeekendWarrior,
+            PyEvArchetypeId::WorkplaceCharger => Self::WorkplaceCharger,
+            PyEvArchetypeId::RetireeL1 => Self::RetireeL1,
+            PyEvArchetypeId::PhevCommuter => Self::PhevCommuter,
+            PyEvArchetypeId::TouOptimizerCa => Self::TouOptimizerCa,
+        }
     }
 }

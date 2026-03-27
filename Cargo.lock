@@ -873,6 +873,7 @@ dependencies = [
  "hares-fleet",
  "hares-io",
  "hares-physics",
+ "hares-tariff",
  "hares-types",
  "nalgebra",
  "parquet",

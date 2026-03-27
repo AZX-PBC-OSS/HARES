@@ -510,8 +510,11 @@ impl EnvironmentManager {
                     custom_payload: Some(vec![mains_temp_c]),
                 },
             ],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: clock.current_time(),
             time_res: clock.time_res,
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 }

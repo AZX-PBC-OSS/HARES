@@ -5,14 +5,15 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Timelike};
 use hares_types::{
-    BatteryChemistry, ChargingLevel, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage, FuelType, HaresError,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal, EndUse,
+    EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage,
+    FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
+pub mod catalog;
 mod checkpoint;
 mod charging_curve;
 mod config;
@@ -103,6 +104,8 @@ pub struct Ev {
 
     v2l_active: bool,
     v2l_power_kw: f64,
+
+    charging_strategy: ChargingStrategy,
 
     power_limit_kw: Option<f64>,
     power_setpoint_kw: Option<f64>,
@@ -205,6 +208,7 @@ impl Ev {
             custom_u_neg: false,
             v2l_active: false,
             v2l_power_kw: 0.0,
+            charging_strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
             power_limit_kw: config.get_f64(KEY_POWER_LIMIT_KW),
             power_setpoint_kw: None,
             soc_target: None,
@@ -216,6 +220,10 @@ impl Ev {
             u_neg_table: UNegTable::for_chemistry(chemistry),
             last_daily_update_day: 0,
         }
+    }
+
+    pub fn charging_strategy(&self) -> &ChargingStrategy {
+        &self.charging_strategy
     }
 
     fn init_from_config(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
@@ -382,6 +390,12 @@ impl Ev {
             .get_f64(KEY_BATTERY_TEMP_C)
             .unwrap_or(self.battery_temp_c);
         self.active_power_kw = 0.0;
+
+        if let Some(strat_str) = config.get_str(KEY_CHARGING_STRATEGY) {
+            self.charging_strategy = serde_json::from_str(strat_str).map_err(|e| {
+                HaresError::Equipment(format!("invalid charging_strategy: {e}"))
+            })?;
+        }
 
         self.power_setpoint_kw = None;
         self.soc_target = None;
@@ -569,18 +583,7 @@ impl Ev {
     }
 
     fn charge_derate_factor(&self) -> f64 {
-        if self.battery_temp_c <= self.min_charge_temp_c {
-            0.0
-        } else if self.battery_temp_c >= self.full_power_temp_c {
-            1.0
-        } else {
-            let span = self.full_power_temp_c - self.min_charge_temp_c;
-            if span <= f64::EPSILON {
-                1.0
-            } else {
-                (self.battery_temp_c - self.min_charge_temp_c) / span
-            }
-        }
+        crate::linear_temp_derate(self.battery_temp_c, self.min_charge_temp_c, self.full_power_temp_c)
     }
 
     fn l1_power_kw(&self) -> f64 {

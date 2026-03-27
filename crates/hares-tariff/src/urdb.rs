@@ -646,6 +646,97 @@ mod tests {
         assert!(tariff.is_ok());
     }
 
+    fn minimal_schedule_row() -> &'static str {
+        "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]"
+    }
+
+    fn minimal_valid_json(overrides: &str) -> String {
+        let row = minimal_schedule_row();
+        let sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        if overrides.is_empty() {
+            format!(
+                r#"{{"energyweekdayschedule":{sched},"energyweekendschedule":{sched},"energyratestructure":[[{{"rate":0.10}}]]}}"#,
+            )
+        } else {
+            format!(
+                r#"{{"energyweekdayschedule":{sched},"energyweekendschedule":{sched},"energyratestructure":[[{{"rate":0.10}}]],{overrides}}}"#,
+            )
+        }
+    }
+
+    #[test]
+    fn urdb_schedule_wrong_month_count() {
+        let row = minimal_schedule_row();
+        // 11 months instead of 12
+        let bad_sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let good_sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let json = format!(
+            r#"{{"energyweekdayschedule":{bad_sched},"energyweekendschedule":{good_sched},"energyratestructure":[[{{"rate":0.10}}]]}}"#,
+        );
+        let err = parse(&json).unwrap_err();
+        assert!(err.message.contains("12"), "should mention 12 months: {}", err.message);
+    }
+
+    #[test]
+    fn urdb_schedule_wrong_hour_count() {
+        let row = minimal_schedule_row();
+        let bad_row = "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]"; // 23 hours
+        // Month 0 has 23 hours
+        let bad_sched = format!("[{bad_row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let good_sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let json = format!(
+            r#"{{"energyweekdayschedule":{bad_sched},"energyweekendschedule":{good_sched},"energyratestructure":[[{{"rate":0.10}}]]}}"#,
+        );
+        let err = parse(&json).unwrap_err();
+        assert!(err.message.contains("24"), "should mention 24 hours: {}", err.message);
+    }
+
+    #[test]
+    fn urdb_schedule_non_integer_value() {
+        let row = minimal_schedule_row();
+        let bad_row = "[0.5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
+        let bad_sched = format!("[{bad_row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let good_sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let json = format!(
+            r#"{{"energyweekdayschedule":{bad_sched},"energyweekendschedule":{good_sched},"energyratestructure":[[{{"rate":0.10}}]]}}"#,
+        );
+        let err = parse(&json).unwrap_err();
+        assert!(err.message.contains("not an integer"), "should mention non-integer: {}", err.message);
+    }
+
+    #[test]
+    fn urdb_tier_missing_rate_defaults_zero() {
+        let row = minimal_schedule_row();
+        let sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let json = format!(
+            r#"{{"energyweekdayschedule":{sched},"energyweekendschedule":{sched},"energyratestructure":[[{{"adj":0.0}}]]}}"#,
+        );
+        let tariff = parse(&json).unwrap();
+        assert!((tariff.energy_rates[0].rate_per_kwh).abs() < 1e-10);
+    }
+
+    #[test]
+    fn urdb_fixed_charge_daily_units() {
+        let json = minimal_valid_json(r#""fixedchargefirstmeter":1.50,"fixedchargeunits":"$/day""#);
+        let tariff = parse(&json).unwrap();
+        assert!((tariff.fixed_charges.daily_usd - 1.50).abs() < 1e-10);
+        assert!((tariff.fixed_charges.monthly_usd).abs() < 1e-10);
+    }
+
+    #[test]
+    fn urdb_export_mode_unknown_dgrules() {
+        let json = minimal_valid_json(r#""dgrules":"Unknown Mode""#);
+        let tariff = parse(&json).unwrap();
+        assert_eq!(tariff.export_rate.mode, ExportMode::None);
+    }
+
+    #[test]
+    fn urdb_export_mode_net_billing() {
+        let json = minimal_valid_json(r#""dgrules":"Net Billing Instantaneous""#);
+        let tariff = parse(&json).unwrap();
+        assert_eq!(tariff.export_rate.mode, ExportMode::NetBilling);
+    }
+
     #[test]
     fn urdb_rate_values_match_source() {
         let tariff = parse(PGE_TOU_C_JSON).unwrap();

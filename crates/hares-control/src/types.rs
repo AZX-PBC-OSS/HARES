@@ -1,17 +1,6 @@
 //! Common types for the control subsystem.
 
-use serde::{Deserialize, Serialize};
-
-/// Price-like external signals consumed by higher-level controllers.
-///
-/// This is intentionally separate from `ControlSignal`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
-pub struct PriceSignal {
-    pub electricity_price: Option<f64>,
-    pub export_price: Option<f64>,
-    /// Grid carbon intensity in `kg CO₂e/kWh`.
-    pub ghg_intensity: Option<f64>,
-}
+pub use hares_types::PriceSignal;
 
 #[cfg(test)]
 mod tests {

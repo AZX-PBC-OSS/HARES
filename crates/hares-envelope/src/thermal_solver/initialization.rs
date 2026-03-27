@@ -188,12 +188,15 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
                 .single()
                 .expect("valid time"),
             time_res: chrono::Duration::seconds(60),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 

@@ -4,6 +4,7 @@
 //! ohmic loss efficiency, self-consumption control, rainflow cycle counting,
 //! and degradation tracking (stubbed in v1).
 
+pub mod catalog;
 pub(crate) mod degradation;
 pub mod ocv;
 
@@ -11,10 +12,10 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    BatteryChemistry, ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
-    ZoneId,
+    BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, DRLevel, EndUse,
+    EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule,
+    HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,17 +32,17 @@ pub use hares_types::BatteryLutType;
 // ---------------------------------------------------------------------------
 
 use crate::config::{KEY_EQUIPMENT_ID, KEY_ZONE_ID};
-const KEY_CAPACITY_KWH: &str = "capacity_kwh";
-const KEY_MAX_CHARGE_KW: &str = "max_charge_kw";
-const KEY_MAX_DISCHARGE_KW: &str = "max_discharge_kw";
+pub(crate) const KEY_CAPACITY_KWH: &str = "capacity_kwh";
+pub(crate) const KEY_MAX_CHARGE_KW: &str = "max_charge_kw";
+pub(crate) const KEY_MAX_DISCHARGE_KW: &str = "max_discharge_kw";
 const KEY_N_SERIES: &str = "n_series";
 const KEY_N_PARALLEL: &str = "n_parallel";
 const KEY_CELL_RESISTANCE_OHM: &str = "cell_resistance_ohm";
-const KEY_SELF_DISCHARGE_PCT_PER_DAY: &str = "self_discharge_pct_per_day";
-const KEY_STANDBY_POWER_W: &str = "standby_power_w";
+pub(crate) const KEY_SELF_DISCHARGE_PCT_PER_DAY: &str = "self_discharge_pct_per_day";
+pub(crate) const KEY_STANDBY_POWER_W: &str = "standby_power_w";
 const KEY_INITIAL_SOC: &str = "initial_soc";
-const KEY_MIN_SOC: &str = "min_soc";
-const KEY_MAX_SOC: &str = "max_soc";
+pub(crate) const KEY_MIN_SOC: &str = "min_soc";
+pub(crate) const KEY_MAX_SOC: &str = "max_soc";
 const KEY_HEATER_POWER_W: &str = "heater_power_w";
 const KEY_HEATER_THRESHOLD_C: &str = "heater_threshold_c";
 const KEY_HEATER_ON_DISCHARGE: &str = "heater_on_discharge";
@@ -53,9 +54,9 @@ const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
 /// Symmetric round-trip inverter efficiency: splits as sqrt(rte) per direction.
 const KEY_INVERTER_EFFICIENCY: &str = "inverter_efficiency";
 /// Explicit charge-direction efficiency (AC→DC). Overrides sqrt split when set.
-const KEY_CHARGE_EFFICIENCY: &str = "charge_efficiency";
+pub(crate) const KEY_CHARGE_EFFICIENCY: &str = "charge_efficiency";
 /// Explicit discharge-direction efficiency (DC→AC). Overrides sqrt split when set.
-const KEY_DISCHARGE_EFFICIENCY: &str = "discharge_efficiency";
+pub(crate) const KEY_DISCHARGE_EFFICIENCY: &str = "discharge_efficiency";
 /// Per-cell capacity (Ah). When provided with KEY_V_CELL, n_series/n_parallel
 /// are derived from capacity_kwh: n_series = V_pack/V_cell, n_parallel = Ah_pack/Ah_cell,
 /// where V_pack ≈ cell_ocv_nom * n_series and Ah_pack = capacity_kwh * 1000 / V_pack.
@@ -68,7 +69,9 @@ const KEY_IMPORT_LIMIT_W: &str = "import_limit_w";
 /// Maximum grid export power while battery is discharging (W). None = unlimited.
 /// OCHRE: `export_limit` parameter on Generator (Battery inherits it).
 const KEY_EXPORT_LIMIT_W: &str = "export_limit_w";
-const KEY_CHEMISTRY: &str = "chemistry";
+pub(crate) const KEY_CHEMISTRY: &str = "chemistry";
+const KEY_BMS_MODE: &str = "bms_mode";
+const KEY_GRID_EXPORT_RULE: &str = "grid_export_rule";
 
 // ---------------------------------------------------------------------------
 // Physical defaults (Li-NMC, Tesla Powerwall-class)
@@ -325,6 +328,9 @@ pub struct Battery {
 
     custom_ocv: bool,
     custom_u_neg: bool,
+
+    bms_mode: BmsMode,
+    grid_export_rule: GridExportRule,
 }
 
 impl Battery {
@@ -409,7 +415,17 @@ impl Battery {
             last_daily_update_day: 0,
             custom_ocv: false,
             custom_u_neg: false,
+            bms_mode: BmsMode::Manual,
+            grid_export_rule: GridExportRule::Unrestricted,
         }
+    }
+
+    pub fn bms_mode(&self) -> &BmsMode {
+        &self.bms_mode
+    }
+
+    pub fn grid_export_rule(&self) -> GridExportRule {
+        self.grid_export_rule
     }
 
     /// Compute pack-level voltage, current, and ohmic losses for a target AC power.
@@ -589,17 +605,7 @@ impl Battery {
     /// Full power above `full_power_temp_c`, linearly derates to zero at
     /// `min_discharge_temp_c`. Returns 0.0 below min discharge temp.
     fn discharge_derate_factor(&self) -> f64 {
-        if self.cell_temp_c >= self.full_power_temp_c {
-            1.0
-        } else if self.cell_temp_c <= self.min_discharge_temp_c {
-            0.0
-        } else {
-            let span = self.full_power_temp_c - self.min_discharge_temp_c;
-            if span <= 0.0 {
-                return 0.0;
-            }
-            (self.cell_temp_c - self.min_discharge_temp_c) / span
-        }
+        crate::linear_temp_derate(self.cell_temp_c, self.min_discharge_temp_c, self.full_power_temp_c)
     }
 
     /// Whether charging is allowed at current cell temperature.
@@ -795,6 +801,17 @@ impl Equipment for Battery {
                     "battery export_limit_w must be non-negative".to_string(),
                 ));
             }
+        }
+
+        if let Some(mode_str) = config.get_str(KEY_BMS_MODE) {
+            self.bms_mode = serde_json::from_str(mode_str).map_err(|e| {
+                HaresError::Equipment(format!("invalid bms_mode: {e}"))
+            })?;
+        }
+        if let Some(rule_str) = config.get_str(KEY_GRID_EXPORT_RULE) {
+            self.grid_export_rule = serde_json::from_str(rule_str).map_err(|e| {
+                HaresError::Equipment(format!("invalid grid_export_rule: {e}"))
+            })?;
         }
 
         let initial_soc = config
@@ -1394,12 +1411,15 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
                 .single()
                 .expect("valid UTC timestamp"),
             time_res: ChronoDuration::minutes(5),
+        price_signal: Default::default(),
+        electrical: Default::default(),
         }
     }
 
@@ -3657,5 +3677,49 @@ mod tests {
             clamped < -4.0,
             "discharge should not be limited by charging LUT, got {clamped}"
         );
+    }
+
+    #[test]
+    fn battery_default_bms_mode_is_manual() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        let env = warm_env();
+        bat.init(&config, &env).unwrap();
+        assert_eq!(bat.bms_mode(), &BmsMode::Manual);
+    }
+
+    #[test]
+    fn battery_bms_mode_from_config_json() {
+        let mut config = battery_config(&[]);
+        let json = serde_json::to_string(&BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 1.0,
+            solar_only_charging: false,
+        })
+        .unwrap();
+        config
+            .raw_config
+            .insert(KEY_BMS_MODE.to_string(), ConfigValue::Text(json));
+
+        let mut bat = Battery::new(config.clone());
+        let env = warm_env();
+        bat.init(&config, &env).unwrap();
+        assert_eq!(
+            bat.bms_mode(),
+            &BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 1.0,
+                solar_only_charging: false,
+            }
+        );
+    }
+
+    #[test]
+    fn battery_grid_export_rule_default() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        let env = warm_env();
+        bat.init(&config, &env).unwrap();
+        assert_eq!(bat.grid_export_rule(), GridExportRule::Unrestricted);
     }
 }
