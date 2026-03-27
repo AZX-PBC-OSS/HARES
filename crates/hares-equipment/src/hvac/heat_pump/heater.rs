@@ -863,7 +863,12 @@ impl HeatPumpHeaterCore {
         }
         self.prev_zone_temp_c = zone.temperature_c;
 
-        if mode != ThermostatMode::Heating {
+        // Ideal capacity mode (coarse timesteps >= 5 min): bypass the thermostat
+        // FSM and compute load fraction directly from zone temp vs setpoint. This
+        // prevents on/off cycling spikes at coarse resolution.
+        let ideal = self.hvac.use_ideal_capacity(env);
+
+        if !ideal && mode != ThermostatMode::Heating {
             return Ok(HeaterControl {
                 hp_on: false,
                 er_on: false,
@@ -876,6 +881,15 @@ impl HeatPumpHeaterCore {
 
         let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
         let load_ratio = load_ratio_raw.clamp(0.0, 1.0);
+
+        if ideal && load_ratio <= 0.0 {
+            return Ok(HeaterControl {
+                hp_on: false,
+                er_on: false,
+                speed_index: 0,
+                duty_cycle: 0.0,
+            });
+        }
         let speed = self.hvac.select_speed(load_ratio);
 
         let hp_available = env.weather.outdoor_temp_c >= self.hp_lockout_temp_c;

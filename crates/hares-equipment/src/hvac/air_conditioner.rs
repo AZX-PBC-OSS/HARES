@@ -516,41 +516,68 @@ impl CoolingCore {
             return OperatingMode::Off;
         }
 
-        let mode = self
-            .hvac
-            .update_mode(env)
-            .unwrap_or(ThermostatMode::Deadband);
-        if mode == ThermostatMode::Cooling {
-            // Apply DR setpoint offset: positive offset raises cooling setpoint → less demand.
-            let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
-            let zone_temp = lookup_zone(env, self.hvac.zone_id)
-                .map(|z| z.temperature_c)
-                .unwrap_or(setpoint);
+        // Apply DR setpoint offset: positive offset raises cooling setpoint → less demand.
+        let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
+        let zone_temp = lookup_zone(env, self.hvac.zone_id)
+            .map(|z| z.temperature_c)
+            .unwrap_or(setpoint);
+
+        if self.hvac.use_ideal_capacity(env) {
+            // Ideal capacity mode (coarse timesteps >= 5 min or variable-speed):
+            // bypass the thermostat FSM and compute the exact capacity fraction
+            // needed to hold zone temperature at the setpoint, matching OCHRE's
+            // ideal_capacity solver. This produces time-averaged power rather
+            // than on/off cycling spikes.
             let deadband = self
                 .hvac
                 .thermostat
                 .hysteresis_c
                 .max(MIN_LOAD_FRACTION_DEADBAND_C);
             let load_fraction = ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0);
-            let selection = self.hvac.select_speed(load_fraction);
-            self.hvac.duty_cycle = match self.hvac.speed_control_mode {
-                SpeedControlMode::VariableSpeedIdeal => {
-                    if selection.speed_frac > 0.0 {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                _ => selection.part_load_ratio,
-            };
-            self.operating_mode = if self.hvac.duty_cycle > 0.0 {
-                OperatingMode::Cooling
+            if load_fraction > 0.0 {
+                let selection = self.hvac.select_speed(load_fraction);
+                self.hvac.duty_cycle = selection.part_load_ratio;
+                self.operating_mode = OperatingMode::Cooling;
+                // Keep thermostat in Cooling so it doesn't fight ideal capacity.
+                self.hvac.mode = ThermostatMode::Cooling;
             } else {
-                OperatingMode::Off
-            };
+                self.hvac.duty_cycle = 0.0;
+                self.operating_mode = OperatingMode::Off;
+                self.hvac.mode = ThermostatMode::Deadband;
+            }
         } else {
-            self.hvac.duty_cycle = 0.0;
-            self.operating_mode = OperatingMode::Off;
+            // Fine timestep (< 5 min): use thermostat FSM for realistic cycling.
+            let mode = self
+                .hvac
+                .update_mode(env)
+                .unwrap_or(ThermostatMode::Deadband);
+            if mode == ThermostatMode::Cooling {
+                let deadband = self
+                    .hvac
+                    .thermostat
+                    .hysteresis_c
+                    .max(MIN_LOAD_FRACTION_DEADBAND_C);
+                let load_fraction = ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0);
+                let selection = self.hvac.select_speed(load_fraction);
+                self.hvac.duty_cycle = match self.hvac.speed_control_mode {
+                    SpeedControlMode::VariableSpeedIdeal => {
+                        if selection.speed_frac > 0.0 {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    _ => selection.part_load_ratio,
+                };
+                self.operating_mode = if self.hvac.duty_cycle > 0.0 {
+                    OperatingMode::Cooling
+                } else {
+                    OperatingMode::Off
+                };
+            } else {
+                self.hvac.duty_cycle = 0.0;
+                self.operating_mode = OperatingMode::Off;
+            }
         }
         self.operating_mode
     }

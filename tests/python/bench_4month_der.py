@@ -29,8 +29,8 @@ HPXML = str(EXAMPLES / "BEopt_example.xml")
 SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
 WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-START_LOCAL = dt.datetime(2019, 1, 1, 0, 0)
-START_HARES = "2019-01-01T00:00:00"
+START_LOCAL = dt.datetime(2019, 5, 1, 7, 0)
+START_HARES = "2019-05-01T07:00:00"
 
 DURATION_DAYS = 120
 DURATION_H = DURATION_DAYS * 24
@@ -151,7 +151,7 @@ def _run_hares() -> tuple[dict[str, float], float, float]:
     dwelling.add_actor_by_name(
         "BatteryManagement",
         "Battery_bms",
-        {"target": "Battery", "mode": "Self-Consumption", "grid_export_rule": "allow"},
+        {"target": "Battery", "mode": "self_consumption", "grid_export_rule": "unrestricted", "steps_per_day": 86400 // (TIME_RES_MIN * 60)},
     )
     init_elapsed = time.perf_counter() - t0
 

@@ -951,29 +951,6 @@ def _visualizations(
                 {"Metric": "Mean bias", "HARES": f"{_bias:+.3f} kW", "OCHRE": ""},
             ])
 
-            # Per-column comparison for shared output columns
-            _shared = [
-                c for c in hares_df.columns
-                if c in ochre_df.columns
-                and c != _time_col
-                and c.endswith("(kW)")
-            ]
-            if _shared:
-                col_rows = []
-                for c in _shared:
-                    _h = hares_df[c].to_numpy()
-                    _o = ochre_df[c].to_numpy()
-                    _cn = min(len(_h), len(_o))
-                    _cd = _h[:_cn] - _o[:_cn]
-                    col_rows.append({
-                        "Column": c.replace(" Electric Power (kW)", ""),
-                        "HARES mean": f"{_h.mean():.3f}",
-                        "OCHRE mean": f"{_o.mean():.3f}",
-                        "MAE": f"{_np.abs(_cd).mean():.3f}",
-                        "Bias": f"{_cd.mean():+.3f}",
-                    })
-                col_table = mo.ui.table(col_rows, label="Per-end-use comparison (kW)")
-
         perf_table = mo.ui.table(perf_rows, label="Performance metrics")
 
         # Build DER config table from structured metadata
@@ -1031,8 +1008,28 @@ def _visualizations(
         der_table = mo.ui.table(der_rows, label="DER configuration")
 
         elements: list[object] = [perf_table]
-        if ochre_df is not None and _power_col in ochre_df.columns and _shared:
-            elements.append(col_table)
+        if ochre_df is not None and _power_col in ochre_df.columns:
+            _shared = [
+                c for c in hares_df.columns
+                if c in ochre_df.columns
+                and c != _time_col
+                and c.endswith("(kW)")
+            ]
+            if _shared:
+                col_rows = []
+                for c in _shared:
+                    _h = hares_df[c].to_numpy()
+                    _o = ochre_df[c].to_numpy()
+                    _cn = min(len(_h), len(_o))
+                    _cd = _h[:_cn] - _o[:_cn]
+                    col_rows.append({
+                        "Column": c.replace(" Electric Power (kW)", ""),
+                        "HARES mean": f"{_h.mean():.3f}",
+                        "OCHRE mean": f"{_o.mean():.3f}",
+                        "MAE": f"{_np.abs(_cd).mean():.3f}",
+                        "Bias": f"{_cd.mean():+.3f}",
+                    })
+                elements.append(mo.ui.table(col_rows, label="Per-end-use comparison (kW)"))
         elements.append(der_table)
         return mo.vstack(elements, gap="1rem")
 
