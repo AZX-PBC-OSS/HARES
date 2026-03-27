@@ -564,10 +564,10 @@ pub struct Dwelling {
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
-    /// Per-zone thermal capacitances [J/K] for lightweight gain-preview between
-    /// non-thermal and thermal equipment passes.
-    #[expect(dead_code, reason = "reserved for gain-preview pass")]
+    #[expect(dead_code, reason = "reserved for thermal balance invariant (see RV-014)")]
     zone_capacitances_j_k: Vec<(ZoneId, f64)>,
+    #[cfg(any(debug_assertions, feature = "check_invariants"))]
+    prev_humidity_ratios: Vec<(ZoneId, f64)>,
     /// Actor decision-makers that emit control signals each timestep.
     /// Actors execute in registration order. Signals are dispatched by PriorityTier.
     actors: Vec<Box<dyn Actor>>,
@@ -906,6 +906,14 @@ impl Dwelling {
         let mut solver_feedback_actor = SolverFeedbackActor::new();
         solver_feedback_actor.set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
 
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        let init_humidity_ratios: Vec<(ZoneId, f64)> = solvers
+            .humidity
+            .humidity_ratios
+            .iter()
+            .map(|(&z, &w)| (z, w))
+            .collect();
+
         let mut dwelling = Self {
             bldg_id: config.bldg_id,
             equipment,
@@ -946,6 +954,8 @@ impl Dwelling {
             zone_temp_col_indices: zone_caches.zone_temp_col_indices,
             occupancy_column_idx,
             zone_capacitances_j_k: solvers.zone_capacitances_j_k,
+            #[cfg(any(debug_assertions, feature = "check_invariants"))]
+            prev_humidity_ratios: init_humidity_ratios,
             actors: Vec::new(),
             auto_registered_actor_names: HashSet::new(),
             actor_dispatch_buf: Vec::with_capacity(16),
@@ -1966,6 +1976,17 @@ impl Dwelling {
         let thermal_for_observer = thermal_update.clone();
         self.latest_env.upsert_domain(thermal_update);
 
+        #[cfg(any(debug_assertions, feature = "check_invariants"))]
+        {
+            self.prev_humidity_ratios.clear();
+            self.prev_humidity_ratios.extend(
+                self.humidity_solver
+                    .humidity_ratios
+                    .iter()
+                    .map(|(&z, &w)| (z, w)),
+            );
+        }
+
         let humidity_update = self
             .humidity_solver
             .resolve(&self.ports, &self.latest_env, dt);
@@ -2330,7 +2351,16 @@ impl Dwelling {
             let bus_power = self.ports.electrical.net_active_kw();
             checker.check_electrical(net_kw, &[-bus_power])?;
 
-            // Moisture payload: every humidity value must be finite.
+            // Thermal balance: deferred — the multi-node RC state-space model
+            // distributes thermal energy across zone-air and wall-mass nodes.
+            // A zone-air-only balance (C_zone × ΔT / dt vs. component gains)
+            // has a ~6 kW residual because wall-mass energy changes aren't
+            // captured. A proper system-level energy audit requires exposing
+            // per-node capacitances and previous-step state vectors from
+            // ThermalSolver, which exceeds the ~20-line API surface limit.
+            // See follow-up ticket for ThermalSolver::balance_inputs() API.
+
+            // Moisture balance: mass conservation across the humidity solver.
             if let Some(update) = self
                 .latest_env
                 .custom_domains
@@ -2347,6 +2377,70 @@ impl Dwelling {
                         });
                     }
                 }
+            }
+            let p_pa = self.latest_env.weather.pressure_pa();
+            let moisture_mult = self.humidity_solver.config.moisture_buffering_multiplier;
+            let mut infiltration_latent_by_zone: Vec<(ZoneId, f64)> = Vec::new();
+            if let Some(thermal_update) = self
+                .latest_env
+                .custom_domains
+                .iter()
+                .find(|u| u.domain_id == hares_types::THERMAL)
+                && let Some(payload) = &thermal_update.custom_payload
+            {
+                for pair in payload.chunks_exact(2) {
+                    let zone_raw = pair[0];
+                    let latent = pair[1];
+                    if zone_raw.is_finite() && zone_raw >= 0.0 {
+                        infiltration_latent_by_zone
+                            .push((ZoneId(zone_raw as u16), latent));
+                    }
+                }
+            }
+            for zone in &self.latest_env.zones {
+                let w_new = self.humidity_solver.humidity_ratio(zone.id);
+                let w_old = self
+                    .prev_humidity_ratios
+                    .iter()
+                    .find(|(z, _)| *z == zone.id)
+                    .map(|(_, w)| *w)
+                    .unwrap_or(w_new);
+                let d_w = w_new - w_old;
+                if d_w.abs() < f64::EPSILON {
+                    continue;
+                }
+                // Skip if the humidity solver clamped w_new (at 0 or w_sat).
+                // Clamping breaks mass conservation by design.
+                if w_new <= 0.0 {
+                    continue;
+                }
+                let w_sat = hares_physics::psychrometrics::humidity_ratio_from_tdp(
+                    zone.temperature_c,
+                    p_pa,
+                );
+                if (w_new - w_sat).abs() < f64::EPSILON {
+                    continue;
+                }
+                let rho_air = hares_physics::air_properties::moist_air_density_kg_m3(
+                    p_pa,
+                    zone.temperature_c,
+                    w_old,
+                );
+                let delta_m = d_w * rho_air * zone.volume_m3 * moisture_mult;
+                let latent_from_ports: f64 = self
+                    .ports
+                    .thermal
+                    .iter()
+                    .filter(|e| e.zone == zone.id)
+                    .map(|e| e.latent_gain_w)
+                    .sum();
+                let latent_from_infiltration: f64 = infiltration_latent_by_zone
+                    .iter()
+                    .filter(|(z, _)| *z == zone.id)
+                    .map(|(_, l)| *l)
+                    .sum();
+                let total_latent = latent_from_ports + latent_from_infiltration;
+                checker.check_moisture(delta_m, &[(total_latent, dt_s)])?;
             }
         }
 

@@ -31,12 +31,14 @@ use hares_equipment::config::ConfigValue;
 use hares_types::HaresError;
 
 use hares_equipment::ev::catalog::archetype_by_id;
-use hares_types::{ChargingStrategy, PlugInPolicy, ScheduleSource};
+use hares_types::{
+    BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource,
+};
 
 use crate::Actor;
 use crate::actors::{
-    AlwaysComply, DrCompliance, EquipmentBehavior, EvDriverActor, IdealThermostat, Occupant,
-    Probabilistic,
+    AlwaysComply, BatteryManagementActor, DrCompliance, EquipmentBehavior, EvDriverActor,
+    IdealThermostat, Occupant, Probabilistic,
 };
 
 pub type ActorFactory =
@@ -213,6 +215,81 @@ impl ActorRegistry {
                 } else if config.get_bool("always_comply").unwrap_or(false) {
                     actor = actor.with_compliance_model(AlwaysComply);
                 }
+                Ok(Box::new(actor))
+            }),
+        );
+
+        registry.register(
+            "BatteryManagement",
+            Box::new(|config: ActorConfig| {
+                let target = config
+                    .get_str("target")
+                    .ok_or_else(|| {
+                        HaresError::Control(
+                            "BatteryManagement requires 'target' parameter".into(),
+                        )
+                    })?
+                    .to_string();
+                let mode_str = config.get_str("mode").unwrap_or("self_consumption");
+                let bms_mode = match mode_str {
+                    "self_consumption" => BmsMode::SelfConsumption {
+                        min_soc: config.get_f64("min_soc").unwrap_or(0.1),
+                        max_soc: config.get_f64("max_soc").unwrap_or(1.0),
+                        solar_only_charging: config
+                            .get_bool("solar_only_charging")
+                            .unwrap_or(false),
+                    },
+                    "tou" | "time_of_use" => BmsMode::TimeOfUseOptimization {
+                        reserve_soc: config.get_f64("reserve_soc").unwrap_or(0.2),
+                        charge_threshold_percentile: config
+                            .get_f64("charge_threshold_percentile")
+                            .unwrap_or(0.25),
+                        discharge_threshold_percentile: config
+                            .get_f64("discharge_threshold_percentile")
+                            .unwrap_or(0.75),
+                        solar_only_charging: config
+                            .get_bool("solar_only_charging")
+                            .unwrap_or(false),
+                    },
+                    "backup" | "backup_reserve" => BmsMode::BackupReserve {
+                        target_soc: config.get_f64("target_soc").unwrap_or(0.8),
+                        charge_from_grid: config.get_bool("charge_from_grid").unwrap_or(true),
+                        charge_rate_fraction: config
+                            .get_f64("charge_rate_fraction")
+                            .unwrap_or(1.0),
+                    },
+                    "manual" => BmsMode::Manual,
+                    other => {
+                        return Err(HaresError::Control(format!(
+                            "Unknown BMS mode: {other:?}. \
+                             Valid: self_consumption, tou, backup, manual"
+                        )));
+                    }
+                };
+                let export_str = config.get_str("grid_export_rule").unwrap_or("unrestricted");
+                let grid_export_rule = match export_str {
+                    "unrestricted" => GridExportRule::Unrestricted,
+                    "solar_only" => GridExportRule::SolarOnly,
+                    "disabled" => GridExportRule::Disabled,
+                    other => {
+                        return Err(HaresError::Control(format!(
+                            "Unknown grid export rule: {other:?}. \
+                             Valid: unrestricted, solar_only, disabled"
+                        )));
+                    }
+                };
+                let max_charge_kw = config.get_f64("max_charge_kw").unwrap_or(5.0);
+                let max_discharge_kw = config.get_f64("max_discharge_kw").unwrap_or(5.0);
+                let steps_per_day = config.get_f64("steps_per_day").map(|v| v as usize).unwrap_or(96);
+                let actor = BatteryManagementActor::new(
+                    &target,
+                    bms_mode,
+                    grid_export_rule,
+                    max_charge_kw,
+                    max_discharge_kw,
+                    None,
+                    steps_per_day,
+                );
                 Ok(Box::new(actor))
             }),
         );
