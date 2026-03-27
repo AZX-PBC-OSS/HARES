@@ -1,5 +1,7 @@
 //! PriceOptimizer — TOU-aware charging with day-boundary cached thresholds.
 
+use std::sync::Arc;
+
 use chrono::Datelike;
 
 use super::preference::{ChargingPreference, DecisionContext, PreferenceVote};
@@ -7,7 +9,7 @@ use super::preference::{ChargingPreference, DecisionContext, PreferenceVote};
 pub struct PriceOptimizer {
     charge_percentile: f64,
     discharge_percentile: f64,
-    price_schedule: Option<Vec<f64>>,
+    price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
     charge_threshold: f64,
     discharge_threshold: f64,
@@ -18,7 +20,7 @@ impl PriceOptimizer {
     pub fn new(
         charge_percentile: f64,
         discharge_percentile: f64,
-        price_schedule: Option<Vec<f64>>,
+        price_schedule: Option<Arc<[f64]>>,
         steps_per_day: usize,
     ) -> Self {
         Self {
@@ -140,7 +142,7 @@ mod tests {
     fn charges_at_low_price() {
         // 24 steps/day, prices for day 0
         let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();
-        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices), 24);
+        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices.into()), 24);
 
         let env = TestEnvBuilder::new()
             .with_price_signal(PriceSignal {
@@ -159,7 +161,7 @@ mod tests {
     #[test]
     fn discharges_at_high_price() {
         let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();
-        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices), 24);
+        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices.into()), 24);
 
         let env = TestEnvBuilder::new()
             .with_price_signal(PriceSignal {
@@ -178,7 +180,7 @@ mod tests {
     #[test]
     fn neutral_at_mid_price() {
         let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();
-        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices), 24);
+        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices.into()), 24);
 
         let env = TestEnvBuilder::new()
             .with_price_signal(PriceSignal {
@@ -205,7 +207,7 @@ mod tests {
             *p = 0.50;
         }
 
-        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices), 24);
+        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices.into()), 24);
 
         // Day 0
         let env = TestEnvBuilder::new()
@@ -221,6 +223,40 @@ mod tests {
 
         // Verify the day was cached
         assert_eq!(pref.current_day, 0);
+
+        // Day 1: prices are all 0.50, so thresholds should change.
+        let env_day1 = TestEnvBuilder::new()
+            .date(2026, 1, 2) // day ordinal = 1
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.50),
+                ..Default::default()
+            })
+            .build();
+        let ctx_day1 = make_ctx_with_price(&env_day1);
+        let vote_day1 = pref.score(&ctx_day1);
+        assert_eq!(pref.current_day, 1, "day should advance to 1");
+        // All day-1 prices are 0.50, so charge_threshold = 0.50.
+        // price 0.50 <= 0.50 → charge
+        assert_eq!(vote_day1.label, "price:charge");
+    }
+
+    #[test]
+    fn compute_percentile_empty_returns_zero() {
+        assert!((compute_percentile(&[], 0.5) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compute_percentile_single_element() {
+        assert!((compute_percentile(&[0.42], 0.5) - 0.42).abs() < 1e-9);
+        assert!((compute_percentile(&[0.42], 0.0) - 0.42).abs() < 1e-9);
+        assert!((compute_percentile(&[0.42], 1.0) - 0.42).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compute_percentile_at_zero_and_one() {
+        let prices = [0.10, 0.20, 0.30, 0.40, 0.50];
+        assert!((compute_percentile(&prices, 0.0) - 0.10).abs() < 1e-9);
+        assert!((compute_percentile(&prices, 1.0) - 0.50).abs() < 1e-9);
     }
 
     #[test]

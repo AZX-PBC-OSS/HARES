@@ -37,6 +37,7 @@ pub(crate) const KEY_READY_SOC: &str = "ready_soc";
 pub(crate) const KEY_FUEL_ECONOMY_KWH_PER_MI: &str = "fuel_economy_kwh_per_mi";
 pub(crate) const KEY_CHEMISTRY: &str = "chemistry";
 pub(super) const KEY_CHARGING_STRATEGY: &str = "charging_strategy";
+pub(super) const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
 
 pub(super) const DEFAULT_FUEL_ECONOMY_KWH_PER_MI: f64 = 0.325;
 pub(super) const L1_CHARGING_POWER_KW: f64 = 1.4;

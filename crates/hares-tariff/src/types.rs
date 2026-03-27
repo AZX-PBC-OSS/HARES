@@ -803,6 +803,24 @@ mod tests {
         assert!(tariff.validate().is_err());
     }
 
+    // M1: DemandRate referencing an unknown period name fails validation.
+    #[test]
+    fn electric_tariff_validate_rejects_unknown_demand_period() {
+        let tariff = ElectricTariff {
+            demand_rates: vec![DemandRate {
+                period_name: Some("nonexistent".into()),
+                season: SeasonFilter::All,
+                rate_per_kw: 10.0,
+                ratchet: None,
+            }],
+            ..Default::default()
+        };
+        assert!(
+            tariff.validate().is_err(),
+            "validate() should reject a DemandRate referencing an unknown period name"
+        );
+    }
+
     #[test]
     fn electric_tariff_validate_checks_export_rate() {
         let tariff = ElectricTariff {

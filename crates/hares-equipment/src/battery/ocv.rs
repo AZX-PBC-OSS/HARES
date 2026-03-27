@@ -347,6 +347,25 @@ mod tests {
     }
 
     #[test]
+    fn voltage_at_soc_endpoints_exact() {
+        let table = OcvTable::default_li_nmc();
+        assert!((table.voltage_at_soc(0.0) - table.voltage_v[0]).abs() < 1e-10);
+        assert!((table.voltage_at_soc(1.0) - *table.voltage_v.last().unwrap()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn voltage_at_soc_clamps_negative() {
+        let table = OcvTable::default_li_nmc();
+        assert_eq!(table.voltage_at_soc(-1.0), table.voltage_at_soc(0.0));
+    }
+
+    #[test]
+    fn voltage_at_soc_clamps_above_one() {
+        let table = OcvTable::default_li_nmc();
+        assert_eq!(table.voltage_at_soc(2.0), table.voltage_at_soc(1.0));
+    }
+
+    #[test]
     fn u_neg_for_chemistry_lfp_uses_graphite() {
         let lfp = UNegTable::for_chemistry(BatteryChemistry::Lfp);
         let nmc = UNegTable::default_li_nmc();

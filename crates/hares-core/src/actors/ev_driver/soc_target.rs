@@ -71,10 +71,11 @@ mod tests {
     #[test]
     fn score_zero_when_above_target() {
         let env = TestEnvBuilder::new().build();
-        let mut pref = SocTarget { target_soc: 0.8 };
+        let mut pref = SocTarget { target_soc: 0.9 };
 
         let ctx = make_ctx(&env, 0.95);
         let vote = pref.score(&ctx);
         assert!(vote.score.abs() < 1e-9);
+        assert_eq!(vote.target_soc, Some(0.9));
     }
 }

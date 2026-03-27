@@ -76,6 +76,7 @@ mod tests {
         match pref.constraint(&ctx) {
             Constraint::Override(vote) => {
                 assert_eq!(vote.label, "v2g:soc_floor");
+                assert!(vote.power_kw.is_none());
             }
             Constraint::Inactive => panic!("expected Override"),
         }
@@ -119,6 +120,28 @@ mod tests {
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2g:idle");
+        assert!(vote.power_kw.is_none());
+    }
+
+    #[test]
+    fn idles_when_price_exactly_at_threshold() {
+        let env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.20), // exactly at threshold
+                ..Default::default()
+            })
+            .build();
+        let mut pref = V2GExport {
+            min_soc: 0.3,
+            max_export_kw: 5.0,
+            price_threshold: 0.20,
+        };
+        let ctx = make_ctx(&env, 0.7);
+        let vote = pref.score(&ctx);
+
+        // price > threshold is strict, so exactly-at should idle
+        assert_eq!(vote.label, "v2g:idle");
+        assert!(vote.power_kw.is_none());
     }
 
     #[test]

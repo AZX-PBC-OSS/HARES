@@ -50,6 +50,16 @@ fn parse_window(d: &Bound<'_, PyDict>) -> PyResult<TimeWindow> {
             .get_item("end_hour")?
             .ok_or_else(|| PyValueError::new_err("window has 'start_hour' but missing 'end_hour'"))?
             .extract()?;
+        if start_h < 0.0 || start_h > 24.0 {
+            return Err(PyValueError::new_err(format!(
+                "start_hour {start_h} out of range (must be 0..=24)"
+            )));
+        }
+        if end_h < 0.0 || end_h > 24.0 {
+            return Err(PyValueError::new_err(format!(
+                "end_hour {end_h} out of range (must be 0..=24; use 24 for midnight end)"
+            )));
+        }
         ((start_h * 60.0) as u16, (end_h * 60.0) as u16)
     } else {
         let sm: u16 = d
@@ -72,7 +82,7 @@ fn parse_window(d: &Bound<'_, PyDict>) -> PyResult<TimeWindow> {
     }
     if end_minute > 1440 || end_minute == 0 {
         return Err(PyValueError::new_err(format!(
-            "end_minute {end_minute} out of range (must be 1..=1440)"
+            "end_minute {end_minute} out of range (must be 1..=1440; use end_hour=24 or end_minute=1440 for midnight)"
         )));
     }
     if start_minute == end_minute {
@@ -231,6 +241,7 @@ impl PyElectricTariff {
 pub struct PyTariffBuilder {
     name: Option<String>,
     tou_periods: Vec<TouPeriod>,
+    demand_tou_periods: Vec<TouPeriod>,
     energy_rates: Vec<EnergyRate>,
     demand_rates: Vec<DemandRate>,
     tiered_rates: Vec<TieredBlock>,
@@ -246,6 +257,7 @@ impl PyTariffBuilder {
         Self {
             name: None,
             tou_periods: Vec::new(),
+            demand_tou_periods: Vec::new(),
             energy_rates: Vec::new(),
             demand_rates: Vec::new(),
             tiered_rates: Vec::new(),
@@ -426,11 +438,61 @@ impl PyTariffBuilder {
         slf
     }
 
+    /// Add a demand-specific TOU period (separate from energy TOU periods).
+    /// If no demand TOU periods are added, demand charges use energy TOU periods.
+    fn add_demand_tou_period(
+        slf: Py<Self>,
+        py: Python<'_>,
+        name: String,
+        windows: &Bound<'_, PyList>,
+        season: String,
+    ) -> PyResult<Py<Self>> {
+        let season_filter = parse_season(&season)?;
+        let mut schedule = Vec::new();
+        for item in windows.iter() {
+            let d: &Bound<'_, PyDict> = item.downcast()?;
+            schedule.push(parse_window(d)?);
+        }
+        slf.borrow_mut(py).demand_tou_periods.push(TouPeriod {
+            name,
+            schedule,
+            season: season_filter,
+        });
+        Ok(slf)
+    }
+
+    /// Set billing cycle: "monthly" (default) or a custom number of days.
+    #[pyo3(signature = (cycle_days=None))]
+    fn set_billing_cycle(
+        slf: Py<Self>,
+        py: Python<'_>,
+        cycle_days: Option<u32>,
+    ) -> Py<Self> {
+        slf.borrow_mut(py).billing_cycle = match cycle_days {
+            None => BillingCycle::Monthly,
+            Some(days) => BillingCycle::Custom(days),
+        };
+        slf
+    }
+
+    /// Set custom summer/winter boundary months (1-indexed, inclusive).
+    fn set_seasonal_split(
+        slf: Py<Self>,
+        py: Python<'_>,
+        summer_start_month: u8,
+        summer_end_month: u8,
+    ) -> PyResult<Py<Self>> {
+        let split = SeasonalSplit::new(summer_start_month, summer_end_month)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        slf.borrow_mut(py).seasonal_split = Some(split);
+        Ok(slf)
+    }
+
     fn build(&self) -> PyResult<PyElectricTariff> {
         let tariff = ElectricTariff {
             name: self.name.clone(),
             tou_schedule: self.tou_periods.clone(),
-            demand_tou_schedule: Vec::new(),
+            demand_tou_schedule: self.demand_tou_periods.clone(),
             energy_rates: self.energy_rates.clone(),
             demand_rates: self.demand_rates.clone(),
             tiered_rates: self.tiered_rates.clone(),
@@ -476,6 +538,13 @@ impl PyGasTariff {
             .map_err(|e| PyValueError::new_err(format!("serialization error: {e}")))?;
         let tariff: GasTariff = serde_json::from_str(&json_str)
             .map_err(|e| PyValueError::new_err(format!("deserialization error: {e}")))?;
+        Ok(Self { inner: tariff })
+    }
+
+    #[classmethod]
+    pub fn from_json(_cls: &Bound<'_, PyType>, json_str: &str) -> PyResult<Self> {
+        let tariff: GasTariff = serde_json::from_str(json_str)
+            .map_err(|e| PyValueError::new_err(format!("JSON parse error: {e}")))?;
         Ok(Self { inner: tariff })
     }
 

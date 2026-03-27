@@ -74,7 +74,7 @@ fn build_preferences(
     capacity_kwh: f64,
     max_charge_kw: f64,
     efficiency: f64,
-    price_schedule: Option<Vec<f64>>,
+    price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
 ) -> Vec<Box<dyn ChargingPreference>> {
     match strategy {
@@ -310,7 +310,7 @@ impl EvDriverActor {
     }
 
     /// Set the price schedule for TOU-aware strategies, rebuilding the composer.
-    pub fn with_price_schedule(mut self, schedule: Vec<f64>, steps_per_day: usize) -> Self {
+    pub fn with_price_schedule(mut self, schedule: Arc<[f64]>, steps_per_day: usize) -> Self {
         let target = self.target_name().to_owned();
         let prefs = build_preferences(
             &self.strategy,
@@ -906,6 +906,13 @@ mod tests {
                 out_b.len(),
                 "signal count mismatch at minute {minute}"
             );
+            for (a, b) in out_a.iter().zip(out_b.iter()) {
+                assert_eq!(
+                    format!("{:?}", a.signal),
+                    format!("{:?}", b.signal),
+                    "signal content mismatch at minute {minute}"
+                );
+            }
         }
 
         // Internal state should match
@@ -1058,11 +1065,20 @@ mod tests {
         actor.decide(&env_at_minute(8 * 60), &mut out);
         out.clear();
 
-        // Drive through to completion
+        // Drive through to completion, then step once more in Away phase
+        // to trigger the deferred away-charge signals.
         for step in 1..=120 {
+            out.clear();
             actor.decide(&env_at_minute(8 * 60 + step), &mut out);
-            // Check for away charging signals when driving completes
+            if matches!(actor.phase, DriverPhase::Away) && actor.needs_away_charge {
+                // Transition to Away happened; next step emits deferred signals.
+                break;
+            }
         }
+
+        // One more step in Away phase — deferred signals are emitted here.
+        out.clear();
+        actor.decide(&env_at_minute(8 * 60 + 121), &mut out);
 
         let has_away_plug_in = out.iter().any(|r| {
             matches!(
@@ -1089,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn v2h_strategy_emits_soc_target() {
+    fn v2h_strategy_charges_when_no_deficit() {
         let mut actor = make_actor(
             ChargingStrategy::V2H {
                 discharge_threshold_soc: 0.8,
@@ -1140,10 +1156,21 @@ mod tests {
             PlugInPolicy::Always,
             42,
         );
-        actor.phase = DriverPhase::Away;
+        // Roll an event so todays_event is Some (arrival at 18:00 = 1080)
         let mut out = Vec::new();
+        actor.decide(&env_at_minute(0), &mut out);
+        out.clear();
+
+        // Force Away phase with no pending away-charge signals
+        actor.phase = DriverPhase::Away;
+        actor.needs_away_charge = false;
+
+        // Pick a minute that is NOT near arrival (1080). 15:00 = 900.
         actor.decide(&env_at_minute(15 * 60), &mut out);
-        assert!(out.is_empty(), "Away phase should emit nothing outside arrival");
+        assert!(
+            out.is_empty(),
+            "Away phase should emit nothing when not at arrival minute, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1240,7 +1267,7 @@ mod tests {
             },
             0.4,
         );
-        actor = actor.with_price_schedule(prices, 24);
+        actor = actor.with_price_schedule(prices.into(), 24);
         actor.estimated_soc = 0.4;
         actor.phase = DriverPhase::HomePluggedIn;
 
@@ -1274,7 +1301,7 @@ mod tests {
             },
             0.4,
         );
-        actor = actor.with_price_schedule(prices, 24);
+        actor = actor.with_price_schedule(prices.into(), 24);
         actor.estimated_soc = 0.4;
         actor.phase = DriverPhase::HomePluggedIn;
 
@@ -1417,13 +1444,19 @@ mod tests {
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
 
-        let has_discharge = out.iter().any(|r| {
-            matches!(
-                r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < 0.0
-            )
+        let discharge_power = out.iter().find_map(|r| {
+            if let ControlSignal::PowerSetpoint { active_power_kw, .. } = &r.signal {
+                if *active_power_kw < 0.0 { Some(*active_power_kw) } else { None }
+            } else {
+                None
+            }
         });
-        assert!(has_discharge, "V2H should discharge during deficit, got: {out:?}");
+        assert!(discharge_power.is_some(), "V2H should discharge during deficit, got: {out:?}");
+        let power = discharge_power.unwrap();
+        assert!(
+            (power + 3.0).abs() < 0.1,
+            "V2H deficit = 4.0-1.0 = 3.0 kW, expected power ~ -3.0, got {power}"
+        );
     }
 
     #[test]
@@ -1462,13 +1495,19 @@ mod tests {
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
 
-        let has_discharge = out.iter().any(|r| {
-            matches!(
-                r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < 0.0
-            )
+        let discharge_power = out.iter().find_map(|r| {
+            if let ControlSignal::PowerSetpoint { active_power_kw, .. } = &r.signal {
+                if *active_power_kw < 0.0 { Some(*active_power_kw) } else { None }
+            } else {
+                None
+            }
         });
-        assert!(has_discharge, "V2G should discharge above price threshold, got: {out:?}");
+        assert!(discharge_power.is_some(), "V2G should discharge above price threshold, got: {out:?}");
+        let power = discharge_power.unwrap();
+        assert!(
+            (power + 5.0).abs() < 0.1,
+            "V2G max_export_kw=5.0, expected power ~ -5.0, got {power}"
+        );
     }
 
     #[test]
@@ -1591,5 +1630,568 @@ mod tests {
             42,
         );
         assert_eq!(actor.expected_daily_miles, 30.0);
+    }
+
+    // H2: Range anxiety fires on a non-driving day when SOC is critically low.
+    //
+    // On a non-driving day todays_event is None, so decide() exits before reaching
+    // evaluate_charging(). We test needs_range_anxiety_override() directly (accessible
+    // from within the same module's test block) to confirm the predicate is true when
+    // SOC is below the anxiety threshold regardless of whether a trip is scheduled.
+    #[test]
+    fn range_anxiety_triggers_on_non_driving_day_with_low_soc() {
+        // Actor: 30 mi/day expected, 20 mi buffer, 0.3 kWh/mi, 60 kWh battery.
+        // anxiety_kwh = (30 + 20) * 0.3 * temp_mult(10°C)
+        // anxiety_soc = anxiety_kwh / 60.0
+        // At temp 10°C, temp_mult ≈ 1.11, anxiety_kwh ≈ 16.65, anxiety_soc ≈ 0.278
+        // SOC 0.15 < 0.278 → should trigger.
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+
+        actor.estimated_soc = 0.15;
+        actor.todays_event = None;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let env = env_at_minute(0);
+        assert!(
+            actor.needs_range_anxiety_override(&env),
+            "needs_range_anxiety_override should be true when SOC=0.15 is below anxiety threshold \
+             (expected_daily_miles={}, range_anxiety_miles={}, fuel_economy={}, capacity={})",
+            actor.expected_daily_miles,
+            actor.range_anxiety_miles,
+            actor.fuel_economy_kwh_per_mi,
+            actor.capacity_kwh,
+        );
+    }
+
+    // ======= Compound preference interaction tests =======
+
+    #[test]
+    fn ev_tou_with_departure_deadline_overrides_price() {
+        use hares_types::{DayFilter, DepartureConstraint};
+
+        // TouAware with a departure deadline in 1 hour, SOC at 0.3, target 0.9.
+        // Even though the price is expensive, departure urgency should override.
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.02).collect();
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![DepartureConstraint {
+                    day_filter: DayFilter::Any,
+                    departure_minute: 7 * 60, // 07:00
+                    target_soc: 0.9,
+                }],
+                charge_buffer_hours: 2.0,
+            },
+            0.3,
+        );
+        actor = actor.with_price_schedule(prices.into(), 24);
+        actor.estimated_soc = 0.3;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        // At 06:00, only 1 hour until departure. Need 0.6 * 60kWh / (7.2 * 0.9) = 5.6h.
+        // 1h << 5.6h * 1.2 = urgent override fires.
+        let mut env = env_at_minute(6 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(0.40), // expensive
+            ..Default::default()
+        };
+        let out = plugged_in_step_with_env(&mut actor, &env);
+
+        let has_positive_power = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+            ) || matches!(
+                r.signal,
+                ControlSignal::EvSetReadyBy { .. }
+            ) || matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if target_soc >= 0.9
+            )
+        });
+        assert!(
+            has_positive_power,
+            "departure deadline should override price optimizer and force charging, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn ev_solar_surplus_defers_then_deadline_forces() {
+        use hares_types::{DayFilter, DepartureConstraint};
+
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::SolarSurplus {
+                min_charge_rate_kw: 1.4,
+                departure_schedule: vec![DepartureConstraint {
+                    day_filter: DayFilter::Any,
+                    departure_minute: 7 * 60,
+                    target_soc: 1.0,
+                }],
+            },
+            0.3,
+        );
+
+        // Step 1: no PV surplus, 8 hours until departure (23:00 -> 07:00 = 8h).
+        // SOC 0.3, need 0.7 * 60 / (7.2 * 0.9) = 6.48h, 8h > 6.48 * 1.2 = not urgent.
+        // Solar has nothing -> should idle.
+        let mut env1 = env_at_minute(23 * 60);
+        env1.electrical = ElectricalSummary {
+            pv_generation_kw: 0.0,
+            base_load_kw: 1.0,
+            ..Default::default()
+        };
+        let out1 = plugged_in_step_with_env(&mut actor, &env1);
+        // No PowerSetpoint should fire — solar has no surplus.
+        // EvSetReadyBy may still be emitted (departure planning), which is fine —
+        // it tells the BMS when to be ready, not to charge now.
+        let has_active_charging1 = out1.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.01
+            )
+        });
+        assert!(
+            !has_active_charging1,
+            "solar surplus with no PV should not emit active PowerSetpoint, got: {out1:?}"
+        );
+
+        // Step 2: same conditions but only 30 min until departure (06:30).
+        // Need 6.48h but only 0.5h -> departure override fires.
+        let env2 = env_at_minute(6 * 60 + 30);
+        let out2 = plugged_in_step_with_env(&mut actor, &env2);
+        let has_charging2 = out2.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+            ) || matches!(r.signal, ControlSignal::EvSetReadyBy { .. })
+        });
+        assert!(
+            has_charging2,
+            "departure deadline should force max-rate charging, got: {out2:?}"
+        );
+    }
+
+    #[test]
+    fn ev_v2h_then_charges_when_cheap() {
+        // V2H: evening with high load, low PV, SOC above threshold -> should discharge.
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.5,
+                min_soc: 0.2,
+            },
+            0.7,
+        );
+
+        // Evening: high load deficit
+        let mut env_evening = env_at_minute(19 * 60);
+        env_evening.electrical = ElectricalSummary {
+            pv_generation_kw: 0.5,
+            base_load_kw: 4.0,
+            ..Default::default()
+        };
+        let out_evening = plugged_in_step_with_env(&mut actor, &env_evening);
+        let has_discharge = out_evening.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < 0.0
+            )
+        });
+        assert!(
+            has_discharge,
+            "V2H should discharge during evening deficit, got: {out_evening:?}"
+        );
+
+        // Morning: no load deficit, SOC now at 0.4 (below discharge threshold 0.5).
+        // V2H idles on discharge; SocTarget(0.9) should emit SOCTarget.
+        actor.estimated_soc = 0.4;
+        let mut env_morning = env_at_minute(6 * 60);
+        env_morning.electrical = ElectricalSummary {
+            pv_generation_kw: 3.0,
+            base_load_kw: 1.0,
+            ..Default::default()
+        };
+        let out_morning = plugged_in_step_with_env(&mut actor, &env_morning);
+        let has_charge = out_morning.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 0.01
+            )
+        });
+        assert!(
+            has_charge,
+            "V2H should charge via SocTarget when SOC is low and no deficit, got: {out_morning:?}"
+        );
+    }
+
+    #[test]
+    fn ev_v2g_respects_min_soc_floor() {
+        // V2G: high price but SOC exactly at min_soc. Floor constraint should prevent discharge.
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_kw: 5.0,
+                price_threshold: 0.20,
+            },
+            0.3, // exactly at min_soc
+        );
+
+        let mut env = env_at_minute(19 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(0.50), // well above threshold
+            ..Default::default()
+        };
+        let out = plugged_in_step_with_env(&mut actor, &env);
+
+        let has_discharge = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < -0.01
+            )
+        });
+        assert!(
+            !has_discharge,
+            "V2G should not discharge at min_soc floor, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn ev_tou_prefers_cheap_over_expensive() {
+        // Two steps through the full actor: one at cheap price, one at expensive.
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.02).collect();
+        // 25th percentile ~ prices[6] = 0.12, 75th percentile ~ prices[18] = 0.36
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![],
+                charge_buffer_hours: 2.0,
+            },
+            0.5,
+        );
+        actor = actor.with_price_schedule(prices.into(), 24);
+        actor.estimated_soc = 0.5;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        // Cheap price step
+        let mut env_cheap = env_at_minute(2 * 60);
+        env_cheap.price_signal = PriceSignal {
+            electricity_price: Some(0.02),
+            ..Default::default()
+        };
+        let out_cheap = plugged_in_step_with_env(&mut actor, &env_cheap);
+        let has_charge = out_cheap.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+            ) || matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if target_soc > 0.0
+            )
+        });
+        assert!(has_charge, "TOU should charge at cheap price, got: {out_cheap:?}");
+
+        // Expensive price step: PriceOptimizer scores a discharge (negative
+        // PowerSetpoint) because price 0.44 > discharge_threshold (~0.34).
+        // The behavioral difference: cheap price → positive charge PowerSetpoint,
+        // expensive price → negative discharge PowerSetpoint (no positive charge).
+        let mut env_expensive = env_at_minute(20 * 60);
+        env_expensive.price_signal = PriceSignal {
+            electricity_price: Some(0.44),
+            ..Default::default()
+        };
+        let out_expensive = plugged_in_step_with_env(&mut actor, &env_expensive);
+        let has_positive_charge = out_expensive.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.01
+            ) || matches!(
+                r.signal,
+                ControlSignal::SOCTarget { .. }
+            )
+        });
+        assert!(
+            !has_positive_charge,
+            "TOU should not charge at expensive price (should discharge instead), got: {out_expensive:?}"
+        );
+        let has_discharge = out_expensive.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < -0.01
+            )
+        });
+        assert!(
+            has_discharge,
+            "TOU should discharge at expensive price, got: {out_expensive:?}"
+        );
+    }
+
+    // ======= Realistic scenario tests =======
+
+    #[test]
+    fn ev_nightly_full_cycle() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Nightly {
+                off_peak_start_hour: 22.0,
+                off_peak_end_hour: 6.0,
+                target_soc: 0.95,
+            },
+            0.5,
+        );
+
+        // Evening 18:00-21:59: outside off-peak window, should idle
+        for hour in 18..22 {
+            let out = plugged_in_step(&mut actor, hour * 60);
+            let has_charging = out.iter().any(|r| {
+                matches!(
+                    r.signal,
+                    ControlSignal::SOCTarget { .. }
+                        | ControlSignal::PowerSetpoint { .. }
+                        | ControlSignal::EvSetReadyBy { .. }
+                )
+            });
+            assert!(
+                !has_charging,
+                "nightly should idle at hour {hour} (before off-peak), got: {:?}",
+                out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+            );
+        }
+
+        // Overnight 22:00-05:59: off-peak, should charge
+        for hour in [22, 23, 0, 1, 2, 3, 4, 5] {
+            let out = plugged_in_step(&mut actor, hour * 60);
+            let has_charging = out.iter().any(|r| {
+                matches!(
+                    r.signal,
+                    ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.95).abs() < 0.01
+                )
+            });
+            assert!(
+                has_charging,
+                "nightly should charge at hour {hour} (off-peak), got: {:?}",
+                out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+            );
+        }
+
+        // Morning 06:00-07:59: outside off-peak again, should idle
+        for hour in 6..8 {
+            let out = plugged_in_step(&mut actor, hour * 60);
+            let has_charging = out.iter().any(|r| {
+                matches!(
+                    r.signal,
+                    ControlSignal::SOCTarget { .. }
+                        | ControlSignal::PowerSetpoint { .. }
+                        | ControlSignal::EvSetReadyBy { .. }
+                )
+            });
+            assert!(
+                !has_charging,
+                "nightly should idle at hour {hour} (after off-peak), got: {:?}",
+                out.iter().map(|r| &r.signal).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn ev_immediate_charges_every_step() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            0.3,
+        );
+
+        for step in 0..5 {
+            let minute = 19 * 60 + step;
+            let out = plugged_in_step(&mut actor, minute);
+            let has_soc_target = out.iter().any(|r| {
+                matches!(
+                    r.signal,
+                    ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 0.01
+                )
+            });
+            assert!(
+                has_soc_target,
+                "Immediate should charge at every step (step {step}), got: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ev_solar_surplus_tracks_pv_curve() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::SolarSurplus {
+                min_charge_rate_kw: 1.4,
+                departure_schedule: vec![],
+            },
+            0.3,
+        );
+
+        // 0 kW PV -> idle
+        let mut env0 = env_at_minute(12 * 60);
+        env0.electrical = ElectricalSummary {
+            pv_generation_kw: 0.0,
+            base_load_kw: 1.5,
+            ..Default::default()
+        };
+        let out0 = plugged_in_step_with_env(&mut actor, &env0);
+        assert!(
+            out0.is_empty() || !out0.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() > 0.01
+            )),
+            "should idle with 0 kW PV, got: {out0:?}"
+        );
+
+        // 1.0 kW PV, 1.5 kW load -> surplus -0.5 kW (below min 1.4), idle
+        let mut env1 = env_at_minute(12 * 60 + 1);
+        env1.electrical = ElectricalSummary {
+            pv_generation_kw: 1.0,
+            base_load_kw: 1.5,
+            ..Default::default()
+        };
+        let out1 = plugged_in_step_with_env(&mut actor, &env1);
+        assert!(
+            out1.is_empty() || !out1.iter().any(|r| matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() > 0.01
+            )),
+            "should idle with insufficient surplus (1.0-1.5=-0.5), got: {out1:?}"
+        );
+
+        // 3.0 kW PV, 1.5 kW load -> surplus 1.5 kW (above min 1.4), charge at 1.5 kW
+        let mut env2 = env_at_minute(12 * 60 + 2);
+        env2.electrical = ElectricalSummary {
+            pv_generation_kw: 3.0,
+            base_load_kw: 1.5,
+            ..Default::default()
+        };
+        let out2 = plugged_in_step_with_env(&mut actor, &env2);
+        let power2 = out2.iter().find_map(|r| {
+            if let ControlSignal::PowerSetpoint { active_power_kw, .. } = &r.signal {
+                Some(*active_power_kw)
+            } else {
+                None
+            }
+        });
+        assert!(
+            power2.is_some() && (power2.unwrap() - 1.5).abs() < 0.1,
+            "should charge at ~1.5 kW surplus, got: {out2:?}"
+        );
+
+        // 5.0 kW PV, 1.5 kW load -> surplus 3.5 kW, charge at 3.5 kW
+        let mut env3 = env_at_minute(12 * 60 + 3);
+        env3.electrical = ElectricalSummary {
+            pv_generation_kw: 5.0,
+            base_load_kw: 1.5,
+            ..Default::default()
+        };
+        let out3 = plugged_in_step_with_env(&mut actor, &env3);
+        let power3 = out3.iter().find_map(|r| {
+            if let ControlSignal::PowerSetpoint { active_power_kw, .. } = &r.signal {
+                Some(*active_power_kw)
+            } else {
+                None
+            }
+        });
+        assert!(
+            power3.is_some() && (power3.unwrap() - 3.5).abs() < 0.1,
+            "should charge at ~3.5 kW surplus, got: {out3:?}"
+        );
+    }
+
+    // ======= Edge case tests =======
+
+    #[test]
+    fn ev_missing_price_signal_tou_falls_back() {
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.02).collect();
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![],
+                charge_buffer_hours: 2.0,
+            },
+            0.4,
+        );
+        actor = actor.with_price_schedule(prices.into(), 24);
+        actor.estimated_soc = 0.4;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        // No price signal (None) -- should not panic
+        let mut env = env_at_minute(12 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: None,
+            ..Default::default()
+        };
+        let out = plugged_in_step_with_env(&mut actor, &env);
+        // PriceOptimizer uses unwrap_or(0.0) for None, so price=0.0 <= charge_threshold.
+        // With SOC=0.4 and target=0.9, SocTarget fallback should still emit.
+        let has_signal = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { .. }
+                    | ControlSignal::PowerSetpoint { .. }
+            )
+        });
+        assert!(
+            has_signal,
+            "TOU with missing price should still emit via fallback, got {} signals: {out:?}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn ev_missing_electrical_summary_solar_idles() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::SolarSurplus {
+                min_charge_rate_kw: 1.0,
+                departure_schedule: vec![],
+            },
+            0.4,
+        );
+
+        // Default ElectricalSummary has all zeros
+        let env = env_at_minute(12 * 60);
+        let out = plugged_in_step_with_env(&mut actor, &env);
+
+        let has_power = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() > 0.01
+            )
+        });
+        assert!(
+            !has_power,
+            "SolarSurplus should idle with zero PV/load, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn ev_soc_at_target_still_emits_soc_target() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            0.9, // already at target
+        );
+
+        let out = plugged_in_step(&mut actor, 19 * 60);
+
+        // SocTarget score = (0.9 - 0.9).max(0.0) = 0.0, so score is 0.
+        // emit_vote with target_soc=0.9 but score=0 still emits SOCTarget.
+        // The key is that the equipment BMS handles the fact that SOC == target.
+        // At the actor level, a zero-gap SOCTarget is still valid to emit.
+        // However, per the resolve logic a score of 0 still wins if it's the
+        // only vote, and target_soc is set. So it emits SOCTarget(0.9).
+        // This verifies the actor doesn't panic or misbehave at target.
+        let has_soc_target = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 0.01
+            )
+        });
+        // At target SOC, score is 0 but SOCTarget is still emitted (equipment handles no-op).
+        assert!(
+            has_soc_target,
+            "Immediate at target SOC should still emit SOCTarget (equipment handles no-op), got: {out:?}"
+        );
     }
 }

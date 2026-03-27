@@ -55,6 +55,8 @@ def test_billing_summary_fields():
 
     assert isinstance(s.period_start, datetime.datetime)
     assert isinstance(s.period_end, datetime.datetime)
+    assert s.period_start.tzinfo is not None, "period_start must be timezone-aware"
+    assert s.period_end.tzinfo is not None, "period_end must be timezone-aware"
     assert s.period_end > s.period_start
     assert s.total_import_kwh >= 0.0
     assert s.total_export_kwh >= 0.0
@@ -173,3 +175,44 @@ def test_tariff_telemetry_rate_matches_tariff():
     # At midnight, should be offpeak with rate 0.10
     assert t.period_name == "offpeak"
     assert abs(t.current_rate_usd_per_kwh - 0.10) < 1e-6
+
+
+def test_billing_energy_charge_matches_rate_times_kwh():
+    """Energy charge must approximately equal total_import_kwh × rate."""
+    tariff = (
+        ElectricTariff.builder()
+        .set_name("Flat")
+        .add_tou_period("all", [{"day": "any", "start_hour": 0, "end_hour": 24}], "all")
+        .add_energy_rate("all", "all", 0.15)
+        .set_fixed_charges(0.0, 0.0)
+        .build()
+    )
+    dw = make_dwelling(duration_s=35 * 86400, time_res_s=900)
+    dw.initialize()
+    dw.set_electric_tariff(tariff)
+    dw.simulate()
+    summaries = dw.billing_summaries()
+    assert len(summaries) >= 1
+    for s in summaries:
+        if s.total_import_kwh > 0:
+            expected = s.total_import_kwh * 0.15
+            assert abs(s.energy_charge_usd - expected) / expected < 0.10, (
+                f"energy_charge {s.energy_charge_usd:.2f} != import "
+                f"{s.total_import_kwh:.1f} × 0.15 = {expected:.2f}"
+            )
+
+
+def test_tariff_cumulative_cost_increases():
+    """Cumulative energy cost must increase as house consumes power."""
+    tariff = _build_tou_tariff()
+    dw = make_dwelling(duration_s=3600, time_res_s=60)
+    dw.initialize()
+    dw.set_electric_tariff(tariff)
+    costs = []
+    for _ in range(10):
+        dw.step()
+        t = dw.tariff_telemetry()
+        if t is not None:
+            costs.append(t.cumulative_energy_cost_usd)
+    assert len(costs) >= 5
+    assert costs[-1] > costs[0], "Cumulative cost must increase with consumption"

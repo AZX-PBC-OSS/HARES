@@ -125,5 +125,6 @@ mod tests {
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "solar:insufficient");
+        assert!(vote.power_kw.is_none());
     }
 }

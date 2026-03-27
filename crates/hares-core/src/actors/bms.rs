@@ -25,7 +25,7 @@ pub struct BatteryManagementActor {
     current_day_ordinal0: u32,
     max_charge_kw: f64,
     max_discharge_kw: f64,
-    price_schedule: Option<Vec<f64>>,
+    price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
     last_action: String,
 }
@@ -37,7 +37,7 @@ impl BatteryManagementActor {
         grid_export_rule: GridExportRule,
         max_charge_kw: f64,
         max_discharge_kw: f64,
-        price_schedule: Option<Vec<f64>>,
+        price_schedule: Option<Arc<[f64]>>,
         steps_per_day: usize,
     ) -> Self {
         Self {
@@ -59,6 +59,10 @@ impl BatteryManagementActor {
 
     pub fn last_action(&self) -> &str {
         &self.last_action
+    }
+
+    pub fn bms_mode(&self) -> &BmsMode {
+        &self.bms_mode
     }
 
     fn read_soc(&self, env: &EnvironmentState) -> Option<f64> {
@@ -598,7 +602,7 @@ mod tests {
             GridExportRule::Unrestricted,
             5.0,
             5.0,
-            Some(prices),
+            Some(prices.into()),
             24,
         );
 
@@ -639,7 +643,7 @@ mod tests {
             GridExportRule::Unrestricted,
             5.0,
             5.0,
-            Some(prices),
+            Some(prices.into()),
             24,
         );
 
@@ -680,7 +684,7 @@ mod tests {
             GridExportRule::Unrestricted,
             5.0,
             5.0,
-            Some(prices),
+            Some(prices.into()),
             24,
         );
 
@@ -783,7 +787,7 @@ mod tests {
             GridExportRule::Unrestricted,
             5.0,
             5.0,
-            Some(prices),
+            Some(prices.into()),
             24,
         );
 
@@ -863,7 +867,7 @@ mod tests {
             GridExportRule::Unrestricted,
             5.0,
             5.0,
-            Some(prices),
+            Some(prices.into()),
             24,
         );
 
@@ -1070,7 +1074,7 @@ mod tests {
             GridExportRule::Unrestricted,
             5.0,
             5.0,
-            Some(prices),
+            Some(prices.into()),
             24,
         );
 
@@ -1115,7 +1119,7 @@ mod tests {
             GridExportRule::Unrestricted,
             5.0,
             5.0,
-            Some(prices),
+            Some(prices.into()),
             24,
         );
 
@@ -1233,7 +1237,7 @@ mod tests {
             GridExportRule::Unrestricted,
             5.0,
             5.0,
-            Some(prices),
+            Some(prices.into()),
             24,
         );
 

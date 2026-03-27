@@ -504,8 +504,9 @@ impl PyDwelling {
 
     pub fn apply_control(&self, name: String, signal: &PyControlSignal) -> PyResult<()> {
         let mut dwelling = lock_dwelling(&self.dwelling)?;
-        dwelling.apply_control(&name, signal.signal.clone());
-        Ok(())
+        dwelling
+            .apply_control_validated(&name, signal.signal.clone())
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     /// Adds a Python actor to the dwelling's decision-making loop.

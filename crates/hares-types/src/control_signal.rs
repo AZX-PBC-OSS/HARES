@@ -173,6 +173,14 @@ bitflags! {
 }
 
 impl ControlSignal {
+    /// Returns `true` for signals whose only effect is updating connection or
+    /// mode state (idempotent assignments). These can be applied eagerly before
+    /// queuing so that subsequent signals in the same timestep see the updated
+    /// state when validated.
+    pub fn is_immediate_state_update(&self) -> bool {
+        matches!(self, Self::EvPlugIn { .. })
+    }
+
     pub fn required_capability(&self) -> ControlCapabilities {
         match self {
             Self::ThermalSetpoint { .. } => ControlCapabilities::THERMAL_SETPOINT,

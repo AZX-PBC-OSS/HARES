@@ -20,10 +20,30 @@ pub mod water_heater;
 use std::time::Duration;
 
 use hares_types::{
-    ControlSignal, EnvironmentState, EquipmentDescriptor, HaresError, OperatingMode,
-    PortDeclaration, PortSlots, ensure_signal_supported,
+    BmsMode, ChargingStrategy, ControlSignal, EnvironmentState, EquipmentDescriptor,
+    GridExportRule, HaresError, OperatingMode, PlugInPolicy, PortDeclaration, PortSlots,
+    ensure_signal_supported,
 };
 use serde::{Serialize, de::DeserializeOwned};
+
+/// Configuration seed for auto-registering an actor for this equipment.
+/// Equipment that wants a built-in actor overrides `actor_seed()`.
+#[derive(Clone, Debug)]
+pub enum ActorSeed {
+    Battery {
+        bms_mode: BmsMode,
+        grid_export_rule: GridExportRule,
+        max_charge_kw: f64,
+        max_discharge_kw: f64,
+    },
+    Ev {
+        strategy: ChargingStrategy,
+        plug_in_policy: PlugInPolicy,
+        capacity_kwh: f64,
+        max_charge_kw: f64,
+        fuel_economy_kwh_per_mi: f64,
+    },
+}
 
 pub use battery::{BatteryLutType, OcvTable, UNegTable};
 pub use config::EquipmentConfig;
@@ -84,9 +104,24 @@ pub trait Equipment: Send + Sync {
         self.apply_control_unchecked(signal)
     }
 
+    /// Read-only pre-flight check: validates capability flags and any
+    /// equipment-specific state preconditions without applying side effects.
+    ///
+    /// The default checks only capability flags. Equipment with state-dependent
+    /// preconditions (e.g. EV connection state) must override this method.
+    fn validate_signal(&self, signal: &ControlSignal) -> Result<()> {
+        ensure_signal_supported(self.descriptor().control_capabilities, signal)
+    }
+
     /// Returns the zone and ideal heating/cooling capacity (watts) this
     /// equipment wants the thermal solver to back-calculate.
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        None
+    }
+
+    /// Returns an actor seed if this equipment wants a built-in actor
+    /// auto-registered during dwelling initialization.
+    fn actor_seed(&self) -> Option<ActorSeed> {
         None
     }
 

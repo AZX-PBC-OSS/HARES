@@ -62,6 +62,11 @@ impl TariffEvaluator {
                 period_name_table.push(period.name.clone());
             }
         }
+        for period in &tariff.demand_tou_schedule {
+            if !period_name_table.contains(&period.name) {
+                period_name_table.push(period.name.clone());
+            }
+        }
         for dr in &tariff.demand_rates {
             if let Some(name) = &dr.period_name {
                 if !period_name_table.contains(name) {
@@ -347,6 +352,7 @@ impl TariffEvaluator {
     }
 
     /// Emit the final partial billing period. Call after the last `step()`.
+    /// Returns `None` if already finalized or if no charges accumulated.
     pub fn finalize(&mut self) -> Option<BillingPeriodSummary> {
         let bs = &self.billing_state;
         if bs.cumulative_import_kwh() == 0.0
@@ -362,18 +368,26 @@ impl TariffEvaluator {
             + self.tariff.fixed_charges.daily_usd * days_in_period;
         let energy_charge = bs.cumulative_energy_cost_usd();
         let export_credit = bs.cumulative_export_credit_usd();
+        let peak = bs.peak_demand_kw();
+        let import = bs.cumulative_import_kwh();
+        let export = bs.cumulative_export_kwh();
+        let start = bs.period_start();
+        let end = bs.period_end();
+
+        // Reset billing state so a second call returns None.
+        self.billing_state.reset(end);
 
         Some(BillingPeriodSummary::new(
-            bs.period_start(),
-            bs.period_end(),
+            start,
+            end,
             energy_charge,
             demand_charge,
             fixed_charge,
             export_credit,
             self.tariff.minimum_charge,
-            bs.peak_demand_kw(),
-            bs.cumulative_import_kwh(),
-            bs.cumulative_export_kwh(),
+            peak,
+            import,
+            export,
         ))
     }
 }
@@ -1066,5 +1080,110 @@ mod tests {
         let start = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
         let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         assert_eq!(ev.current_export_price(), 0.08);
+    }
+
+    // C1: URDB tariff with demand_tou_schedule produces nonzero TOU demand charges.
+    #[test]
+    fn evaluator_demand_tou_schedule_produces_nonzero_demand_charge() {
+        use crate::types::DemandRate;
+
+        // Monday January 6, 2025 — a weekday.
+        let start = make_start(2025, 1, 6);
+        let end = make_start(2025, 2, 6);
+        let interval = 3600u32;
+
+        let tariff = ElectricTariff {
+            name: Some("urdb-demand-tou".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "peak".into(),
+                // Weekdays 16:00–21:00 (minutes 960–1260).
+                schedule: vec![TimeWindow::new(DayFilter::Weekdays, 960, 1260, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            demand_tou_schedule: vec![TouPeriod {
+                name: "demand_0".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Weekdays, 960, 1260, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "peak".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.30,
+            }],
+            demand_rates: vec![DemandRate {
+                period_name: Some("demand_0".into()),
+                season: SeasonFilter::All,
+                rate_per_kw: 10.0,
+                ratchet: None,
+            }],
+            ..Default::default()
+        };
+
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |i| {
+            let step_ts = start + Duration::seconds(i as i64 * interval as i64);
+            let civil = step_ts.with_timezone(&New_York);
+            let minute_of_day = civil.hour() as u16 * 60 + civil.minute() as u16;
+            let is_weekday = matches!(
+                civil.weekday(),
+                chrono::Weekday::Mon
+                    | chrono::Weekday::Tue
+                    | chrono::Weekday::Wed
+                    | chrono::Weekday::Thu
+                    | chrono::Weekday::Fri
+            );
+            if is_weekday && (960..1260).contains(&minute_of_day) {
+                10.0
+            } else {
+                1.0
+            }
+        });
+
+        let s = summaries.into_iter().next().expect("billing period should close");
+        assert!(
+            s.demand_charge_usd > 0.0,
+            "demand_charge_usd should be > 0 when load is present during demand TOU window, got {}",
+            s.demand_charge_usd
+        );
+    }
+
+    // M2: finalize() returns Some on first call and None on second call.
+    #[test]
+    fn evaluator_finalize_double_call_returns_none() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
+
+        // Accumulate some load so finalize() has something to return.
+        let step_end = start + Duration::seconds(interval as i64);
+        ev.step(5.0, interval as f64, step_end);
+
+        let first = ev.finalize();
+        assert!(first.is_some(), "first finalize() should return Some");
+
+        let second = ev.finalize();
+        assert!(second.is_none(), "second finalize() should return None after billing state was reset");
+    }
+
+    // L1: step() after simulation end returns None.
+    #[test]
+    fn evaluator_step_after_end_returns_none() {
+        // One step simulation: start → start + 1h, interval = 1h → 1 step total.
+        let start = make_start(2025, 1, 1);
+        let end = start + Duration::hours(1);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
+
+        assert_eq!(ev.total_steps(), 1);
+
+        // The single valid step.
+        let step_end = start + Duration::seconds(interval as i64);
+        let _ = ev.step(1.0, interval as f64, step_end);
+
+        // Any subsequent call must return None — the evaluator is finished.
+        let result = ev.step(1.0, interval as f64, step_end + Duration::hours(1));
+        assert!(result.is_none(), "step() after simulation end should return None");
     }
 }

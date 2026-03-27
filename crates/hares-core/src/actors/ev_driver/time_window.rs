@@ -23,6 +23,7 @@ impl TimeWindowPref {
         }
     }
 
+    #[allow(dead_code)] // TARIFF-011: used when constructing from config
     pub fn from_time_window(window: TimeWindow) -> Self {
         Self { window }
     }
@@ -81,7 +82,13 @@ mod tests {
         // Window 22:00 - 06:00 (1320-360), current 12:00 (720)
         let mut pref = TimeWindowPref::from_hours(22.0, 6.0);
         let ctx = make_ctx(&env, 720);
-        assert!(matches!(pref.constraint(&ctx), Constraint::Override(_)));
+        match pref.constraint(&ctx) {
+            Constraint::Override(vote) => {
+                assert_eq!(vote.label, "time_window:outside");
+                assert!(vote.power_kw.is_none());
+            }
+            Constraint::Inactive => panic!("expected Override outside window"),
+        }
     }
 
     #[test]
@@ -117,7 +124,13 @@ mod tests {
         // Window 08:00 - 18:00, current 20:00 (1200)
         let mut pref = TimeWindowPref::from_hours(8.0, 18.0);
         let ctx = make_ctx(&env, 1200);
-        assert!(matches!(pref.constraint(&ctx), Constraint::Override(_)));
+        match pref.constraint(&ctx) {
+            Constraint::Override(vote) => {
+                assert_eq!(vote.label, "time_window:outside");
+                assert!(vote.power_kw.is_none());
+            }
+            Constraint::Inactive => panic!("expected Override outside window"),
+        }
     }
 
     #[test]
@@ -133,6 +146,11 @@ mod tests {
         let weekend_tw = TimeWindow::new(DayFilter::Day(Weekday::Sat), 480, 1080, 0.0);
         let mut weekend_pref = TimeWindowPref::from_time_window(weekend_tw);
         // Thursday is not Saturday — should override idle
-        assert!(matches!(weekend_pref.constraint(&ctx), Constraint::Override(_)));
+        match weekend_pref.constraint(&ctx) {
+            Constraint::Override(vote) => {
+                assert_eq!(vote.label, "time_window:outside");
+            }
+            Constraint::Inactive => panic!("expected Override for wrong day"),
+        }
     }
 }

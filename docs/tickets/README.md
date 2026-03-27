@@ -147,6 +147,55 @@ Bug-fix tickets from the HARES vs OCHRE parity audit. Each identifies a specific
 
 ---
 
+## Review Tickets (RV-*)
+
+Tickets from the comprehensive codebase review covering correctness bugs, hot-loop performance, missing physics tests, unwired invariant checks, OCHRE parity gaps, test quality, and code quality. Full index: [RV-INDEX.md](RV-INDEX.md).
+
+### Wave 1 — Correctness (fix first)
+
+| ID | Title | Kind | Crate(s) |
+|----|-------|------|----------|
+| [RV-001a](RV-001.md) | TariffEvaluator: bounds-check accessors | fix | hares-tariff |
+| [RV-001b](RV-001b.md) | TariffEvaluator: fix ratchet drop | fix | hares-tariff |
+| [RV-001c](RV-001c.md) | TariffEvaluator: fix partial-period overbilling | fix | hares-tariff |
+| [RV-001d](RV-001d.md) | TariffEvaluator: configurable demand window | fix | hares-tariff |
+| [RV-002](RV-002.md) | batch_step RL: raise NotImplementedError | fix | hares-python |
+| [RV-003](RV-003.md) | GridExportRule: wire into BMS | fix | hares-core |
+| ~~[RV-004](RV-004.md)~~ | ~~DutyCycle control signal~~ (already implemented) | — | — |
+
+### Wave 2 — Hot-Loop Performance
+
+| ID | Title | Kind | Crate(s) |
+|----|-------|------|----------|
+| [RV-005](RV-005.md) | Dwelling hot-path alloc elimination (env + step loop) | refactor | hares-core |
+| [RV-006](RV-006.md) | StratifiedTank scratch buffer preallocation | refactor | hares-equipment |
+| [RV-007](RV-007.md) | ThermalSolver prealloc/dedup lookups | refactor | hares-envelope |
+| [RV-007b](RV-007b.md) | ThermalSolver GlazingCurve precompute | refactor | hares-envelope |
+
+### Wave 3 — Missing Tests + Invariants
+
+| ID | Title | Kind | Crate(s) |
+|----|-------|------|----------|
+| [RV-009](RV-009.md) | Cooling coil psychrometrics tests | test | hares-equipment |
+| [RV-010](RV-010.md) | Battery degradation model tests | test | hares-equipment |
+| [RV-011](RV-011.md) | HVAC staging + duct DSE tests | test | hares-equipment |
+| [RV-012](RV-012.md) | Infiltration + multi-zone humidity tests | test | hares-envelope |
+| [RV-013](RV-013.md) | EV driver full lifecycle test | test | hares-equipment |
+| [RV-014](RV-014.md) | Wire all invariant checks | implement | hares-core |
+
+### Wave 4 — Parity, Test Quality, Code Quality
+
+| ID | Title | Kind | Crate(s) |
+|----|-------|------|----------|
+| [RV-015](RV-015.md) | RoomAC equipment type | implement | hares-equipment |
+| [RV-016](RV-016.md) | Parity gaps design (islanded, generic, EVI-Pro) | implement | (design) |
+| [RV-017](RV-017.md) | Test collision + assertion quality fixes | fix | multiple |
+| [RV-018](RV-018.md) | Smoke test numeric assertions | test | tests |
+| [RV-019](RV-019.md) | Sentinels, panics, clippy, zero-div guard | fix | hares-core |
+| [RV-020](RV-020.md) | Config-driven summer months, duck typing, thresholds | fix | hares-tariff, hares-python |
+
+---
+
 ## Phase Assignments
 
 > **Roadmap vs. ticket phasing note:** `docs/architecture/09-roadmap.md` places HPXML/EPW/Schedule parsers and PyO3 bindings in Phase 1 (logical grouping by capability). The ticket backlog defers parsers to Phase 3 (`hares-io`) and PyO3 bindings to Phase 5 (`hares-python`) because these cannot compile without the types from Phase 1 and the equipment/core layers from Phases 2-3 respectively. Both views are valid; the ticket dependency graph is the authoritative schedule. Implementers should use the dependency graph, not the roadmap phases, when sequencing work.

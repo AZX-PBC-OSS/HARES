@@ -29,6 +29,7 @@ impl ChargingComposer {
         }
     }
 
+    #[allow(dead_code)] // TARIFF-011: used for preference telemetry
     pub fn last_action(&self) -> &str {
         &self.last_action
     }

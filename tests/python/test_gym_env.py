@@ -30,8 +30,8 @@ _DWELLING_CONFIG = {
     "time_res_s": 60,
 }
 
-# HVAC Heating is present in the base HPXML; heat_c resolves to ThermalSetpoint.
-_ACTION_CONFIG: dict[str, list[str]] = {"HVAC Heating": ["heat_c"]}
+# Gas Furnace is present in the base HPXML; heat_c resolves to ThermalSetpoint.
+_ACTION_CONFIG: dict[str, list[str]] = {"Gas Furnace": ["heat_c"]}
 _OBS_FIELDS = ["total_power_kw", "outdoor_temp_c"]
 
 

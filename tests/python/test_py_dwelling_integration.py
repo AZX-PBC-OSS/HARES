@@ -643,6 +643,28 @@ class TestEvControlSignals:
         idx = tel["names"].index("EV1")
         assert tel["soc"][idx] > 0.3, "EV should charge when plugged in at home"
 
+    def test_ev_drive_while_home_plugged_in_raises(self):
+        """EvDrive must be rejected when not Disconnected."""
+        from ochre_next import ControlSignal, EV, EvConnectionState
+
+        dw = _init_dwelling(duration_s=300, time_res_s=60)
+        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.5,
+                initial_connection_state=EvConnectionState.HomePluggedIn)
+        dw.add_ev(ev)
+        with pytest.raises((ValueError, RuntimeError)):
+            dw.apply_control("EV1", ControlSignal.ev_drive(5.0))
+
+    def test_ev_away_charge_while_home_raises(self):
+        """EvAwayCharge must be rejected when not AwayPluggedIn."""
+        from ochre_next import ControlSignal, EV, EvConnectionState
+
+        dw = _init_dwelling(duration_s=300, time_res_s=60)
+        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.3,
+                initial_connection_state=EvConnectionState.HomePluggedIn)
+        dw.add_ev(ev)
+        with pytest.raises((ValueError, RuntimeError)):
+            dw.apply_control("EV1", ControlSignal.ev_away_charge(7.2))
+
 
 class TestEquipmentMutationRoundTrip:
     def test_add_battery_set_lut_save_load_remove(self):

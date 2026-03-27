@@ -236,6 +236,9 @@ class TestGasTariffBuilder:
         assert isinstance(b, GasTariffBuilder)
         b = b.set_tiered_rates("all", [], [1.00])
         assert isinstance(b, GasTariffBuilder)
+        # Verify build succeeds with flat rate (empty thresholds)
+        tariff = b.build()
+        assert tariff.name == "Test Gas"
 
     def test_gas_roundtrip(self) -> None:
         original = (

@@ -1101,6 +1101,18 @@ impl Equipment for Battery {
         &self.telemetry
     }
 
+    fn actor_seed(&self) -> Option<crate::ActorSeed> {
+        if matches!(self.bms_mode, BmsMode::Manual) {
+            return None;
+        }
+        Some(crate::ActorSeed::Battery {
+            bms_mode: self.bms_mode.clone(),
+            grid_export_rule: self.grid_export_rule,
+            max_charge_kw: self.max_charge_kw,
+            max_discharge_kw: self.max_discharge_kw,
+        })
+    }
+
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&BatteryCheckpoint {
             soc: self.soc,
@@ -3721,5 +3733,46 @@ mod tests {
         let env = warm_env();
         bat.init(&config, &env).unwrap();
         assert_eq!(bat.grid_export_rule(), GridExportRule::Unrestricted);
+    }
+
+    #[test]
+    fn actor_seed_manual_returns_none() {
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &warm_env()).unwrap();
+        assert!(bat.actor_seed().is_none());
+    }
+
+    #[test]
+    fn actor_seed_self_consumption_returns_battery_seed() {
+        let mut config = battery_config(&[]);
+        let json = serde_json::to_string(&BmsMode::SelfConsumption {
+            min_soc: 0.15,
+            max_soc: 0.95,
+            solar_only_charging: false,
+        })
+        .unwrap();
+        config
+            .raw_config
+            .insert(KEY_BMS_MODE.to_string(), ConfigValue::Text(json));
+
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &warm_env()).unwrap();
+
+        let seed = bat.actor_seed();
+        assert!(seed.is_some());
+        match seed.unwrap() {
+            crate::ActorSeed::Battery {
+                bms_mode,
+                max_charge_kw,
+                max_discharge_kw,
+                ..
+            } => {
+                assert!(matches!(bms_mode, BmsMode::SelfConsumption { .. }));
+                assert!((max_charge_kw - 5.0).abs() < 1e-6);
+                assert!((max_discharge_kw - 5.0).abs() < 1e-6);
+            }
+            _ => panic!("expected Battery seed"),
+        }
     }
 }

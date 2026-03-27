@@ -584,6 +584,78 @@ mod tests {
         assert_eq!(end.day(), 29);
     }
 
+    // H1: Per-period ratchet with populated prior_period_peaks applies correctly.
+    #[test]
+    fn billing_per_period_ratchet_applied() {
+        let ratchet = RatchetConfig {
+            lookback_months: 3,
+            minimum_fraction: 0.85,
+        };
+        // 3 TOU periods; we exercise period index 1.
+        let mut state = BillingState::new(
+            make_dt(2025, 1, 1),
+            BillingCycle::Monthly,
+            15,
+            3600,
+            Some(ratchet.clone()),
+            3,
+        );
+
+        // Push three billing periods of history for period 1 via reset().
+        // Period 1 peaks: 10.0, 15.0, 20.0 → max of last 3 = 20.0.
+        for peak in [10.0_f64, 15.0, 20.0] {
+            state.period_peak_demand_kw[1] = peak;
+            let next = state.period_end;
+            state.reset(next);
+        }
+
+        // Current period: push a single 5 kW reading (instant window, 1-sample average = 5.0).
+        state.update(5.0, 3600.0, 0.0, 0.0, 1, 1);
+        assert!((state.period_peak_demand_kw[1] - 5.0).abs() < 1e-10);
+
+        // effective_peak_for_period(1) = max(5.0, 0.85 * 20.0) = max(5.0, 17.0) = 17.0
+        let effective = state.effective_peak_for_period(1, &Some(ratchet));
+        assert!(
+            (effective - 17.0).abs() < 1e-10,
+            "expected 17.0 (ratchet floor), got {effective}"
+        );
+    }
+
+    // M4: BillingState with Custom(14) and lookback_months=11 caps prior_peaks_kw correctly.
+    #[test]
+    fn billing_custom_cycle_ratchet_max_prior_periods() {
+        let ratchet = RatchetConfig {
+            lookback_months: 11,
+            minimum_fraction: 0.85,
+        };
+        // Custom(14)-day cycle with 11-month lookback.
+        // max_prior_periods = ceil(11 * 31 / 14) = ceil(341 / 14) = ceil(24.36) = 25.
+        let expected_cap: usize = (11usize * 31).div_ceil(14);
+
+        let mut state = BillingState::new(
+            make_dt(2025, 1, 1),
+            BillingCycle::Custom(14),
+            15,
+            3600,
+            Some(ratchet),
+            0,
+        );
+
+        // Simulate 30 billing periods; prior_peaks_kw must not exceed the cap.
+        for _ in 0..30 {
+            state.peak_demand_kw = 5.0;
+            let next = state.period_end;
+            state.reset(next);
+        }
+
+        assert_eq!(
+            state.prior_peaks_kw.len(),
+            expected_cap,
+            "prior_peaks_kw should be capped at {expected_cap}, got {}",
+            state.prior_peaks_kw.len()
+        );
+    }
+
     #[test]
     fn billing_period_summary_net_bill() {
         let summary = BillingPeriodSummary::new(

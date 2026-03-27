@@ -7,7 +7,8 @@ use chrono::{DateTime, FixedOffset, Timelike};
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal, EndUse,
     EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage,
-    FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    FuelType, HaresError, OperatingMode, PlugInPolicy, PortContribution, PortDeclaration,
+    PortSlots, Telemetry,
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
@@ -106,6 +107,7 @@ pub struct Ev {
     v2l_power_kw: f64,
 
     charging_strategy: ChargingStrategy,
+    plug_in_policy: PlugInPolicy,
 
     power_limit_kw: Option<f64>,
     power_setpoint_kw: Option<f64>,
@@ -209,6 +211,10 @@ impl Ev {
             v2l_active: false,
             v2l_power_kw: 0.0,
             charging_strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
+            plug_in_policy: config
+                .get_str(KEY_PLUG_IN_POLICY)
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(PlugInPolicy::Always),
             power_limit_kw: config.get_f64(KEY_POWER_LIMIT_KW),
             power_setpoint_kw: None,
             soc_target: None,
@@ -394,6 +400,12 @@ impl Ev {
         if let Some(strat_str) = config.get_str(KEY_CHARGING_STRATEGY) {
             self.charging_strategy = serde_json::from_str(strat_str).map_err(|e| {
                 HaresError::Equipment(format!("invalid charging_strategy: {e}"))
+            })?;
+        }
+
+        if let Some(policy_str) = config.get_str(KEY_PLUG_IN_POLICY) {
+            self.plug_in_policy = serde_json::from_str(policy_str).map_err(|e| {
+                HaresError::Equipment(format!("invalid plug_in_policy: {e}"))
             })?;
         }
 
@@ -812,6 +824,19 @@ impl Equipment for Ev {
         &self.telemetry
     }
 
+    fn actor_seed(&self) -> Option<crate::ActorSeed> {
+        if matches!(self.charging_strategy, ChargingStrategy::Immediate { .. }) {
+            return None;
+        }
+        Some(crate::ActorSeed::Ev {
+            strategy: self.charging_strategy.clone(),
+            plug_in_policy: self.plug_in_policy.clone(),
+            capacity_kwh: self.battery_capacity_kwh,
+            max_charge_kw: self.rated_power_kw,
+            fuel_economy_kwh_per_mi: self.fuel_economy_kwh_per_mi,
+        })
+    }
+
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&EvCheckpoint {
             soc: self.soc,
@@ -870,6 +895,29 @@ impl Equipment for Ev {
         self.v2l_power_kw = 0.0;
 
         self.write_telemetry();
+        Ok(())
+    }
+
+    fn validate_signal(&self, signal: &hares_types::ControlSignal) -> crate::Result<()> {
+        use hares_types::ensure_signal_supported;
+        ensure_signal_supported(self.descriptor().control_capabilities, signal)?;
+        match signal {
+            hares_types::ControlSignal::EvDrive { .. } => {
+                if self.connection_state != hares_types::EvConnectionState::Disconnected {
+                    return Err(hares_types::HaresError::Control(
+                        "EvDrive rejected: EV must be Disconnected to drive".to_string(),
+                    ));
+                }
+            }
+            hares_types::ControlSignal::EvAwayCharge { .. } => {
+                if self.connection_state != hares_types::EvConnectionState::AwayPluggedIn {
+                    return Err(hares_types::HaresError::Control(
+                        "EvAwayCharge rejected: EV must be AwayPluggedIn".to_string(),
+                    ));
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 

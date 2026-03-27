@@ -10,8 +10,6 @@ use super::preference::{
 pub struct DepartureDeadline {
     pub schedule: Vec<DepartureConstraint>,
     pub target_soc: f64,
-    pub capacity_kwh: f64,
-    pub max_charge_kw: f64,
     pub efficiency: f64,
 }
 
@@ -180,7 +178,41 @@ mod tests {
         let ctx_near = make_ctx(&env, 0.5, 360); // 6 AM, 60 min until departure
         let vote_near = pref.score(&ctx_near);
 
-        assert!(vote_near.score >= vote_far.score);
+        assert!(
+            vote_near.score > vote_far.score,
+            "near urgency ({}) should be strictly greater than far urgency ({})",
+            vote_near.score,
+            vote_far.score,
+        );
+    }
+
+    #[test]
+    fn departure_midnight_wrap() {
+        let env = TestEnvBuilder::new().hour(23).build();
+        let mut pref = DepartureDeadline {
+            schedule: vec![DepartureConstraint {
+                day_filter: DayFilter::Any,
+                departure_minute: 120, // 02:00
+                target_soc: 0.9,
+            }],
+            target_soc: 0.9,
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            efficiency: 0.9,
+        };
+
+        // current_minute=1400 (23:20), departure_minute=120 (02:00)
+        // Should see ~160 min remaining (wrapping through midnight), not negative.
+        let ctx = make_ctx(&env, 0.5, 1400);
+        let minutes = pref.minutes_until_departure(&ctx, 120);
+        assert!(
+            (minutes - 160.0).abs() < 1.0,
+            "midnight wrap should give ~160 min remaining, got {minutes}"
+        );
+
+        // Verify score doesn't return idle (there is time pressure)
+        let vote = pref.score(&ctx);
+        assert!(vote.score > 0.0, "should have positive urgency across midnight wrap");
     }
 
     #[test]

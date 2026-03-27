@@ -1689,3 +1689,50 @@ fn ev_charging_strategy_backward_compat() {
         &hares_types::ChargingStrategy::Immediate { target_soc: 1.0 }
     );
 }
+
+#[test]
+fn actor_seed_immediate_returns_none() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+    assert!(ev.actor_seed().is_none());
+}
+
+#[test]
+fn actor_seed_nightly_returns_ev_seed() {
+    let mut raw = base_raw();
+    let json = serde_json::to_string(&hares_types::ChargingStrategy::Nightly {
+        off_peak_start_hour: 23.0,
+        off_peak_end_hour: 6.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    raw.insert(
+        KEY_CHARGING_STRATEGY.to_string(),
+        crate::config::ConfigValue::Text(json),
+    );
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).unwrap();
+
+    let seed = ev.actor_seed();
+    assert!(seed.is_some());
+    match seed.unwrap() {
+        crate::ActorSeed::Ev {
+            strategy,
+            plug_in_policy,
+            capacity_kwh,
+            max_charge_kw,
+            ..
+        } => {
+            assert!(matches!(
+                strategy,
+                hares_types::ChargingStrategy::Nightly { .. }
+            ));
+            assert_eq!(plug_in_policy, hares_types::PlugInPolicy::Always);
+            assert!((capacity_kwh - 60.0).abs() < 1e-6);
+            assert!((max_charge_kw - 7.2).abs() < 1e-6);
+        }
+        _ => panic!("expected Ev seed"),
+    }
+}

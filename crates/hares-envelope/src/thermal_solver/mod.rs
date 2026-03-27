@@ -450,6 +450,16 @@ impl ThermalSolver {
             &mut self.lwr_by_zone_buf,
             &mut self.component_gains.interior_lwr_by_zone,
         );
+        // After swap, the buf fields hold the empty Vecs from the freshly
+        // constructed struct. Reserve capacity so the next step avoids realloc.
+        let n_inf = self.component_gains.infiltration_by_zone.len();
+        let n_lwr = self.component_gains.interior_lwr_by_zone.len();
+        if self.infiltration_by_zone_buf.capacity() < n_inf {
+            self.infiltration_by_zone_buf.reserve(n_inf);
+        }
+        if self.lwr_by_zone_buf.capacity() < n_lwr {
+            self.lwr_by_zone_buf.reserve(n_lwr);
+        }
 
         (u, latent_by_zone)
     }

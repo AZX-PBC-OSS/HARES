@@ -89,6 +89,21 @@ mod tests {
     }
 
     #[test]
+    fn score_at_threshold_returns_idle() {
+        let env = TestEnvBuilder::new().build();
+        let ctx = make_ctx(&env, 0.8);
+        let mut pref = SocGate {
+            threshold: 0.8,
+            target_soc: 1.0,
+        };
+
+        let vote = pref.score(&ctx);
+        assert_eq!(vote.label, "soc_gate:idle");
+        assert!(vote.score.abs() < 1e-9);
+        assert!(vote.power_kw.is_none());
+    }
+
+    #[test]
     fn scores_when_below_threshold() {
         let env = TestEnvBuilder::new().build();
         let ctx = make_ctx(&env, 0.3);

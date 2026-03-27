@@ -137,6 +137,11 @@ impl IdealThermostat {
         }
     }
 
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
     /// Sets the override state.
     pub fn with_override(mut self, state: OverrideState) -> Self {
         self.override_state = state;

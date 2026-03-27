@@ -79,6 +79,7 @@ mod tests {
         match pref.constraint(&ctx) {
             Constraint::Override(vote) => {
                 assert_eq!(vote.label, "v2h:soc_floor");
+                assert!(vote.power_kw.is_none());
             }
             Constraint::Inactive => panic!("expected Override"),
         }
@@ -124,6 +125,7 @@ mod tests {
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:idle");
+        assert!(vote.power_kw.is_none());
     }
 
     #[test]
@@ -144,6 +146,29 @@ mod tests {
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:idle");
+        assert!(vote.power_kw.is_none());
+    }
+
+    #[test]
+    fn idles_when_soc_exactly_at_threshold() {
+        let env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 1.0,
+                base_load_kw: 4.0,
+                ..Default::default()
+            })
+            .build();
+        let mut pref = V2HDischarge {
+            threshold_soc: 0.5,
+            min_soc: 0.2,
+            max_discharge_kw: 5.0,
+        };
+        // SOC exactly at threshold — strict > means it should idle
+        let ctx = make_ctx(&env, 0.5);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(vote.label, "v2h:idle");
+        assert!(vote.power_kw.is_none());
     }
 
     #[test]

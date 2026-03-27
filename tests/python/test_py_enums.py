@@ -340,6 +340,10 @@ class TestBatteryChemistry:
         ]:
             assert BatteryChemistry.from_str(str(chem)) == chem
 
+    def test_from_str_invalid_raises(self):
+        with pytest.raises(ValueError):
+            BatteryChemistry.from_str("lithium_polymer")
+
 
 class TestChargingLevel:
     def test_variants_accessible(self):

@@ -358,4 +358,26 @@ mod tests {
         assert!((discharge_eff - eta).abs() < 1e-10);
         assert_eq!(cfg.get_str("chemistry").unwrap(), "lfp");
     }
+
+    #[test]
+    fn to_config_splits_rte_correctly_for_all_products() {
+        for spec in CATALOG {
+            let cfg = spec.to_config();
+            let expected_eta = spec.round_trip_efficiency.sqrt();
+            let charge = cfg.get_f64("charge_efficiency").unwrap();
+            let discharge = cfg.get_f64("discharge_efficiency").unwrap();
+            assert!(
+                (charge - expected_eta).abs() < 1e-10,
+                "{}: charge_eff {charge} != sqrt({}) = {expected_eta}",
+                spec.label,
+                spec.round_trip_efficiency
+            );
+            assert!(
+                (discharge - expected_eta).abs() < 1e-10,
+                "{}: discharge_eff {discharge} != sqrt({}) = {expected_eta}",
+                spec.label,
+                spec.round_trip_efficiency
+            );
+        }
+    }
 }

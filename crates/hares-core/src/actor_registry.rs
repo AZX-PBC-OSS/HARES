@@ -98,7 +98,8 @@ impl ActorRegistry {
             "IdealThermostat",
             Box::new(|config: ActorConfig| {
                 let target = config.get_str("target").unwrap_or("HVAC");
-                let mut actor = IdealThermostat::new(target);
+                let mut actor = IdealThermostat::new(target)
+                    .with_name(&config.name);
                 if let (Some(heat), Some(cool)) =
                     (config.get_f64("heating_c"), config.get_f64("cooling_c"))
                 {
@@ -299,7 +300,7 @@ mod tests {
             .with_param("heating_c", ConfigValue::Float(20.0));
 
         let actor = registry.create(config).expect("create actor");
-        assert_eq!(actor.name(), "IdealThermostat");
+        assert_eq!(actor.name(), "Thermostat");
     }
 
     #[test]

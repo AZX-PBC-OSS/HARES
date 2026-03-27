@@ -6,7 +6,7 @@ mod synthetic;
 
 pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -21,7 +21,8 @@ use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
 use hares_equipment::{
-    BatteryLutType, Equipment, EquipmentRegistry, OcvTable, RegularGridInterpolator, UNegTable,
+    ActorSeed, BatteryLutType, Equipment, EquipmentRegistry, OcvTable, RegularGridInterpolator,
+    UNegTable,
 };
 use hares_io::{
     Building, DefaultsStore, ScheduleTimeSeries, SimulationConfig, StreamingRecorder,
@@ -34,15 +35,15 @@ use hares_physics::constants::{
 };
 use hares_physics::pv_sizing::RoofInfo;
 use hares_types::{
-    ControlSignal, DomainSolver, DomainUpdate, ElectricalSummary, EndUse, EnvironmentState,
-    ExecutionStage, GridState, HaresError, PortDeclaration, PortSlots, SCHEDULE_DOMAIN_ID,
-    ThermalCategory, ZoneId,
+    BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary, EndUse,
+    EnvironmentState, ExecutionStage, GridState, HaresError, PortDeclaration, PortSlots,
+    ScheduleSource, SCHEDULE_DOMAIN_ID, ThermalCategory, ZoneId,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::{Map, Value};
 
-use crate::actors::SolverFeedbackActor;
+use crate::actors::{BatteryManagementActor, EvDriverActor, SolverFeedbackActor};
 use crate::checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
 use crate::invariants::InvariantChecker;
 use crate::telemetry::DwellingTelemetry;
@@ -573,6 +574,9 @@ pub struct Dwelling {
     /// Actor decision-makers that emit control signals each timestep.
     /// Actors execute in registration order. Signals are dispatched by PriorityTier.
     actors: Vec<Box<dyn Actor>>,
+    /// Names of actors that were auto-registered from equipment seeds.
+    /// Used to evict stale built-in actors when set_tariff() triggers rebuild.
+    auto_registered_actor_names: HashSet<String>,
     /// Pre-allocated buffer for actor dispatch requests, reused each step.
     actor_dispatch_buf: Vec<DispatchRequest>,
     /// Solver feedback actor: bridges thermal solver to IdealHvac equipment.
@@ -941,6 +945,7 @@ impl Dwelling {
             occupancy_column_idx,
             zone_capacitances_j_k: solvers.zone_capacitances_j_k,
             actors: Vec::new(),
+            auto_registered_actor_names: HashSet::new(),
             actor_dispatch_buf: Vec::with_capacity(16),
             solver_feedback_actor,
             equipment_execution_order,
@@ -957,6 +962,8 @@ impl Dwelling {
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             envelope_diagnostics: solvers.envelope_diagnostics,
         };
+
+        dwelling.auto_register_actors();
 
         if let Some(init_dur) = config.initialization_duration {
             dwelling.run_warmup(init_dur)?;
@@ -1002,6 +1009,42 @@ impl Dwelling {
         });
     }
 
+    /// Validates a control signal against the named equipment's current state
+    /// and queues it on success.
+    ///
+    /// Signals that only update connection/mode state (e.g. `EvPlugIn`) are
+    /// applied eagerly so that subsequent validated signals in the same
+    /// timestep see the updated state. They remain queued so that the
+    /// dispatcher's telemetry capture still fires at step time; re-applying an
+    /// idempotent state-assignment is safe.
+    ///
+    /// Returns `Err` if the equipment is not found or the signal is rejected
+    /// by the equipment's current state (e.g. EvDrive while plugged in).
+    pub fn apply_control_validated(&mut self, name: &str, signal: ControlSignal) -> Result<()> {
+        let is_immediate = signal.is_immediate_state_update();
+        if is_immediate {
+            let eq = self
+                .equipment
+                .iter_mut()
+                .find(|e| e.descriptor().name == name)
+                .ok_or_else(|| HaresError::Equipment(format!("equipment '{name}' not found")))?;
+            eq.apply_control(&signal)?;
+        } else {
+            let eq = self
+                .equipment
+                .iter()
+                .find(|e| e.descriptor().name == name)
+                .ok_or_else(|| HaresError::Equipment(format!("equipment '{name}' not found")))?;
+            eq.validate_signal(&signal)?;
+        }
+        self.control_dispatcher.queue(DispatchRequest {
+            target: DispatchTarget::ByName(Arc::from(name)),
+            signal,
+            priority: Default::default(),
+        });
+        Ok(())
+    }
+
     /// Queues a control signal by end-use category.
     pub fn queue_end_use_control(&mut self, end_use: EndUse, signal: ControlSignal) {
         self.control_dispatcher.queue(DispatchRequest {
@@ -1044,6 +1087,53 @@ impl Dwelling {
     #[must_use]
     pub fn actor_count(&self) -> usize {
         self.actors.len()
+    }
+
+    /// Auto-register built-in BMS and EV actors based on equipment configuration.
+    ///
+    /// Called after equipment init and optionally after `set_tariff()`.
+    /// Built-in actors are prepended before any existing (user) actors.
+    /// Idempotent: skips registration if an actor with the same name already exists.
+    pub fn auto_register_actors(&mut self) {
+        let interval_secs = self.clock.time_res.num_seconds() as u32;
+        assert!(
+            interval_secs > 0,
+            "time resolution must be positive; got 0 seconds"
+        );
+        let steps_per_day = 86_400 / interval_secs as usize;
+
+        let price_schedule: Option<Arc<[f64]>> = self
+            .tariff_evaluator
+            .as_ref()
+            .and_then(|te| te.price_slice(0, te.total_steps()).map(Arc::from));
+
+        let has_tariff = self.tariff_evaluator.is_some();
+
+        // Evict previously auto-registered actors so they can be rebuilt
+        // with updated tariff/price data.
+        if !self.auto_registered_actor_names.is_empty() {
+            self.actors
+                .retain(|a| !self.auto_registered_actor_names.contains(a.name()));
+            self.auto_registered_actor_names.clear();
+        }
+
+        let built_in_actors = build_actors_from_seeds(
+            &self.equipment,
+            &self.actors,
+            has_tariff,
+            price_schedule,
+            steps_per_day,
+        );
+
+        if !built_in_actors.is_empty() {
+            for a in &built_in_actors {
+                self.auto_registered_actor_names
+                    .insert(a.name().to_string());
+            }
+            let user_actors = std::mem::take(&mut self.actors);
+            self.actors = built_in_actors;
+            self.actors.extend(user_actors);
+        }
     }
 }
 
@@ -1289,6 +1379,7 @@ impl Dwelling {
         let interval_secs = self.clock.time_res.num_seconds() as u32;
         let evaluator = TariffEvaluator::new(tariff, start, end, interval_secs)?;
         self.tariff_evaluator = Some(evaluator);
+        self.auto_register_actors();
         Ok(())
     }
 
@@ -1649,7 +1740,7 @@ impl Dwelling {
                 let desc = eq.descriptor();
                 let telemetry = eq.telemetry();
                 if let Some(existing) = self.latest_env.equipment_telemetry.get_mut(&desc.name) {
-                    existing.clone_from(&telemetry);
+                    existing.clone_from(telemetry);
                 } else {
                     self.latest_env
                         .equipment_telemetry
@@ -1925,6 +2016,9 @@ impl Dwelling {
         };
 
         // Step 5: record outputs.
+        // Note: step_result.clone() is unavoidable here — we need both a
+        // stored copy (for simulation_results) and a returned copy (for
+        // the caller). The zone_temperatures_c Vec is the only heap alloc.
         if record_output {
             #[cfg(feature = "profiling")]
             let io_started = Instant::now();
@@ -2190,6 +2284,148 @@ fn zone_display_name(zone: ZoneId, indoor_zone: ZoneId) -> String {
             n => format!("Zone_{n}"),
         }
     }
+}
+
+/// Build actor instances from equipment seeds.
+///
+/// Pure function for testability — takes equipment, existing actors,
+/// tariff availability, price schedule, and returns new built-in actors.
+fn build_actors_from_seeds(
+    equipment: &[Box<dyn Equipment>],
+    existing_actors: &[Box<dyn Actor>],
+    has_tariff: bool,
+    price_schedule: Option<Arc<[f64]>>,
+    steps_per_day: usize,
+) -> Vec<Box<dyn Actor>> {
+    let seeds: Vec<(String, ActorSeed)> = equipment
+        .iter()
+        .filter_map(|eq| {
+            eq.actor_seed()
+                .map(|seed| (eq.descriptor().name.clone(), seed))
+        })
+        .collect();
+
+    let existing_names: HashSet<String> = existing_actors
+        .iter()
+        .map(|a| a.name().to_string())
+        .collect();
+
+    let mut built_in_actors: Vec<Box<dyn Actor>> = Vec::new();
+
+    for (name, seed) in seeds {
+        match seed {
+            ActorSeed::Battery {
+                mut bms_mode,
+                grid_export_rule,
+                max_charge_kw,
+                max_discharge_kw,
+            } => {
+                let actor_name = format!("BatteryManagementActor:{name}");
+                if existing_names.contains(&actor_name) {
+                    continue;
+                }
+
+                if !has_tariff
+                    && matches!(bms_mode, BmsMode::TimeOfUseOptimization { .. })
+                {
+                    tracing::warn!(
+                        equipment = %name,
+                        "TimeOfUseOptimization requires tariff; falling back to SelfConsumption"
+                    );
+                    if let BmsMode::TimeOfUseOptimization {
+                        reserve_soc,
+                        solar_only_charging,
+                        ..
+                    } = &bms_mode
+                    {
+                        bms_mode = BmsMode::SelfConsumption {
+                            min_soc: *reserve_soc,
+                            max_soc: 1.0,
+                            solar_only_charging: *solar_only_charging,
+                        };
+                    }
+                }
+
+                let actor = BatteryManagementActor::new(
+                    &name,
+                    bms_mode,
+                    grid_export_rule,
+                    max_charge_kw,
+                    max_discharge_kw,
+                    price_schedule.clone(),
+                    steps_per_day,
+                );
+                built_in_actors.push(Box::new(actor));
+            }
+            ActorSeed::Ev {
+                mut strategy,
+                plug_in_policy,
+                capacity_kwh,
+                max_charge_kw,
+                fuel_economy_kwh_per_mi,
+            } => {
+                let actor_name = format!("EvDriver:{name}");
+                if existing_names.contains(&actor_name) {
+                    continue;
+                }
+
+                if !has_tariff
+                    && matches!(
+                        strategy,
+                        ChargingStrategy::TouAware { .. } | ChargingStrategy::V2G { .. }
+                    )
+                {
+                    tracing::warn!(
+                        equipment = %name,
+                        strategy = ?strategy,
+                        "tariff-dependent ChargingStrategy requires tariff; falling back to Immediate"
+                    );
+                    if let ChargingStrategy::TouAware { target_soc, .. } = &strategy {
+                        strategy = ChargingStrategy::Immediate {
+                            target_soc: *target_soc,
+                        };
+                    } else {
+                        // V2G without tariff: charge to full is the safe default.
+                        // V2G's min_soc is a discharge floor, not a charge target;
+                        // without price signals the actor cannot decide when to
+                        // export, so charging to 100% avoids stranding the driver.
+                        strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
+                    }
+                }
+
+                let seed_val = name
+                    .as_bytes()
+                    .iter()
+                    .fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                let mut actor = EvDriverActor::new(
+                    &format!("EvDriver:{name}"),
+                    &name,
+                    strategy,
+                    plug_in_policy,
+                    ScheduleSource::Constant(30.0),
+                    ScheduleSource::Constant(480.0),
+                    ScheduleSource::Constant(600.0),
+                    0.8,
+                    fuel_economy_kwh_per_mi,
+                    capacity_kwh,
+                    max_charge_kw,
+                    30.0,
+                    20.0,
+                    0.0,
+                    6.6,
+                    seed_val,
+                );
+
+                if let Some(ref prices) = price_schedule {
+                    actor = actor.with_price_schedule(Arc::clone(prices), steps_per_day);
+                }
+
+                built_in_actors.push(Box::new(actor));
+            }
+        }
+    }
+
+    built_in_actors
 }
 
 #[cfg(test)]
@@ -3204,4 +3440,349 @@ mod tests {
             "second equipment should still receive signal despite first rejecting"
         );
     }
+
+    // ---------------------------------------------------------------
+    // SeedableTestEquipment — TestEquipment + optional ActorSeed
+    // ---------------------------------------------------------------
+
+    struct SeedableTestEquipment {
+        inner: TestEquipment,
+        seed: Option<ActorSeed>,
+    }
+
+    impl SeedableTestEquipment {
+        fn new(name: &str, seed: Option<ActorSeed>) -> Self {
+            Self {
+                inner: TestEquipment::new(name, ControlCapabilities::POWER_SETPOINT),
+                seed,
+            }
+        }
+    }
+
+    impl Equipment for SeedableTestEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            self.inner.descriptor()
+        }
+        fn ports(&self) -> &[PortDeclaration] {
+            self.inner.ports()
+        }
+        fn init(
+            &mut self,
+            config: &EquipmentConfig,
+            env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.inner.init(config, env)
+        }
+        fn update_control(&mut self, env: &hares_types::EnvironmentState) -> OperatingMode {
+            self.inner.update_control(env)
+        }
+        fn step(
+            &mut self,
+            env: &hares_types::EnvironmentState,
+            dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.inner.step(env, dt, ports)
+        }
+        fn telemetry(&self) -> &Telemetry {
+            self.inner.telemetry()
+        }
+        fn save_state(&self) -> Vec<u8> {
+            self.inner.save_state()
+        }
+        fn load_state(
+            &mut self,
+            state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.inner.load_state(state)
+        }
+        fn apply_control_unchecked(
+            &mut self,
+            signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.inner.apply_control_unchecked(signal)
+        }
+        fn actor_seed(&self) -> Option<ActorSeed> {
+            self.seed.clone()
+        }
+    }
+
+    // Minimal actor for testing ordering and idempotency.
+    struct StubActor {
+        name: String,
+    }
+    impl crate::Actor for StubActor {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn decide(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _out: &mut Vec<hares_control::DispatchRequest>,
+        ) {
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // auto_register tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn auto_register_bms_actor() {
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "Battery1",
+            Some(ActorSeed::Battery {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.15,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                },
+                grid_export_rule: hares_types::GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+            }),
+        ));
+
+        let actors = build_actors_from_seeds(&[eq], &[], true, Some(Arc::from(vec![0.10; 24])), 24);
+        assert_eq!(actors.len(), 1);
+        assert_eq!(actors[0].name(), "BatteryManagementActor:Battery1");
+    }
+
+    #[test]
+    fn auto_register_ev_actor() {
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "EV1",
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::Nightly {
+                    off_peak_start_hour: 23.0,
+                    off_peak_end_hour: 6.0,
+                    target_soc: 0.9,
+                },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.6,
+                fuel_economy_kwh_per_mi: 0.3,
+            }),
+        ));
+
+        let actors = build_actors_from_seeds(&[eq], &[], true, Some(Arc::from(vec![0.10; 24])), 24);
+        assert_eq!(actors.len(), 1);
+        assert_eq!(actors[0].name(), "EvDriver:EV1");
+    }
+
+    #[test]
+    fn manual_mode_no_bms_actor() {
+        // Equipment with no ActorSeed (simulates BmsMode::Manual)
+        let eq: Box<dyn Equipment> =
+            Box::new(SeedableTestEquipment::new("Battery1", None));
+
+        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        assert!(actors.is_empty());
+    }
+
+    #[test]
+    fn immediate_no_ev_actor() {
+        // Equipment with no ActorSeed (simulates ChargingStrategy::Immediate)
+        let eq: Box<dyn Equipment> =
+            Box::new(SeedableTestEquipment::new("EV1", None));
+
+        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        assert!(actors.is_empty());
+    }
+
+    #[test]
+    fn tou_without_tariff_warns_and_falls_back() {
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "Battery1",
+            Some(ActorSeed::Battery {
+                bms_mode: BmsMode::TimeOfUseOptimization {
+                    reserve_soc: 0.2,
+                    charge_threshold_percentile: 0.25,
+                    discharge_threshold_percentile: 0.75,
+                    solar_only_charging: false,
+                },
+                grid_export_rule: hares_types::GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+            }),
+        ));
+
+        // No tariff: has_tariff=false, price_schedule=None
+        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        // Should still register an actor (with fallback to SelfConsumption)
+        assert_eq!(actors.len(), 1);
+        assert_eq!(actors[0].name(), "BatteryManagementActor:Battery1");
+    }
+
+    #[test]
+    fn tou_aware_ev_without_tariff_warns() {
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "EV1",
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::TouAware {
+                    target_soc: 0.9,
+                    departure_schedule: vec![],
+                    charge_buffer_hours: 2.0,
+                },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.6,
+                fuel_economy_kwh_per_mi: 0.3,
+            }),
+        ));
+
+        // No tariff: falls back to Immediate
+        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        assert_eq!(actors.len(), 1);
+        assert_eq!(actors[0].name(), "EvDriver:EV1");
+    }
+
+    #[test]
+    fn actor_order_before_user_actors() {
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "Battery1",
+            Some(ActorSeed::Battery {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.15,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                },
+                grid_export_rule: hares_types::GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+            }),
+        ));
+
+        let user_actor: Box<dyn crate::Actor> = Box::new(StubActor {
+            name: "UserActor".to_string(),
+        });
+        let existing: Vec<Box<dyn crate::Actor>> = vec![user_actor];
+
+        let built_in = build_actors_from_seeds(&[eq], &existing, false, None, 24);
+        assert_eq!(built_in.len(), 1);
+        assert_eq!(built_in[0].name(), "BatteryManagementActor:Battery1");
+        // Caller (auto_register_actors) prepends built_in before existing.
+        // Verify existing user actor is not among built_in.
+        assert!(built_in.iter().all(|a| a.name() != "UserActor"));
+    }
+
+    #[test]
+    fn auto_register_idempotent() {
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "Battery1",
+            Some(ActorSeed::Battery {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.15,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                },
+                grid_export_rule: hares_types::GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+            }),
+        ));
+
+        // Simulate existing actor with same name
+        let existing_actor: Box<dyn crate::Actor> = Box::new(StubActor {
+            name: "BatteryManagementActor:Battery1".to_string(),
+        });
+        let existing: Vec<Box<dyn crate::Actor>> = vec![existing_actor];
+
+        let built_in = build_actors_from_seeds(&[eq], &existing, false, None, 24);
+        assert!(built_in.is_empty(), "duplicate actor should not be registered");
+    }
+
+    #[test]
+    fn auto_register_multiple_batteries() {
+        let eq1: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "Battery1",
+            Some(ActorSeed::Battery {
+                bms_mode: BmsMode::SelfConsumption {
+                    min_soc: 0.15,
+                    max_soc: 0.95,
+                    solar_only_charging: false,
+                },
+                grid_export_rule: hares_types::GridExportRule::Unrestricted,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+            }),
+        ));
+        let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "Battery2",
+            Some(ActorSeed::Battery {
+                bms_mode: BmsMode::BackupReserve {
+                    target_soc: 1.0,
+                    charge_from_grid: true,
+                    charge_rate_fraction: 0.5,
+                },
+                grid_export_rule: hares_types::GridExportRule::Disabled,
+                max_charge_kw: 3.0,
+                max_discharge_kw: 3.0,
+            }),
+        ));
+
+        let actors = build_actors_from_seeds(&[eq1, eq2], &[], false, None, 24);
+        assert_eq!(actors.len(), 2);
+        assert_eq!(actors[0].name(), "BatteryManagementActor:Battery1");
+        assert_eq!(actors[1].name(), "BatteryManagementActor:Battery2");
+    }
+
+    #[test]
+    fn auto_register_multiple_evs() {
+        let eq1: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "EV1",
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::Nightly {
+                    off_peak_start_hour: 23.0,
+                    off_peak_end_hour: 6.0,
+                    target_soc: 0.9,
+                },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.6,
+                fuel_economy_kwh_per_mi: 0.3,
+            }),
+        ));
+        let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "EV2",
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::LowSoc {
+                    threshold: 0.3,
+                    target_soc: 0.8,
+                },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 75.0,
+                max_charge_kw: 11.5,
+                fuel_economy_kwh_per_mi: 0.28,
+            }),
+        ));
+
+        let actors = build_actors_from_seeds(&[eq1, eq2], &[], false, None, 24);
+        assert_eq!(actors.len(), 2);
+        assert_eq!(actors[0].name(), "EvDriver:EV1");
+        assert_eq!(actors[1].name(), "EvDriver:EV2");
+    }
+
+    #[test]
+    fn v2g_without_tariff_falls_back_to_immediate() {
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
+            "EV1",
+            Some(ActorSeed::Ev {
+                strategy: ChargingStrategy::V2G {
+                    min_soc: 0.3,
+                    max_export_kw: 5.0,
+                    price_threshold: 0.15,
+                },
+                plug_in_policy: hares_types::PlugInPolicy::Always,
+                capacity_kwh: 60.0,
+                max_charge_kw: 7.6,
+                fuel_economy_kwh_per_mi: 0.3,
+            }),
+        ));
+
+        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        assert_eq!(actors.len(), 1);
+        assert_eq!(actors[0].name(), "EvDriver:EV1");
+    }
+
 }
