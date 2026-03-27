@@ -299,7 +299,21 @@ impl DegradationState {
             0.0
         };
 
-        // Mechanism 2: cycle aging
+        // ── Mechanism 2: cycle aging — Smith et al. 2017, IEEE 7963578 Eq.13 ──
+        //
+        // dq_li2 = b2_ref × Σ_t[arr(T_t) × dt_t] × √Σ_i[count_i × DOD_i²]
+        //
+        // Deviation from OCHRE (vendors/OCHRE/ochre/Equipment/Battery.py:418):
+        //   OCHRE: b2 = b2_ref × √Σ_i[(arr_i × count_i)²] / deg_time
+        //     • Computes Arrhenius per-cycle using each cycle's avg temperature
+        //     • Omits DOD amplitude entirely — a 10% DOD cycle and a 100% DOD
+        //       cycle contribute identical fade, violating Miner's rule.
+        //   HARES: accumulates Arrhenius every timestep (finer time resolution),
+        //     then weights cycle damage by Σ(count × DOD²) per Miner's linear
+        //     damage rule (fatigue damage ∝ stress amplitude squared).
+        //
+        // The DOD² weighting matches Smith 2017 Eq.13 and is standard in
+        // electrochemical cycle-life models (Schmalstieg 2014, Xu 2018).
         let dq_li2 = B2_REF * self.b2_accum * sum_squared_dod.sqrt();
 
         // Mechanism 3: BOL transient (exponential relaxation toward b3_accum)

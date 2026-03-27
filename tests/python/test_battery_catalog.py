@@ -102,3 +102,133 @@ class TestBatteryCatalogFactories:
         assert final_soc > initial_soc, (
             f"Catalog battery should charge: initial={initial_soc}, final={final_soc}"
         )
+
+
+class TestBatteryThermalBehavior:
+    """Verify battery thermal management in cold weather."""
+
+    def test_heater_draws_power_in_cold_weather(self):
+        """Tesla PW3 (300W heater) should draw heater power at -19°C.
+
+        In January Denver the battery cell temp drifts toward -19°C ambient.
+        The heater should activate when cell temp drops below heater_threshold_c
+        (5°C) and draw standby + heater power even when not charging.
+        """
+        from conftest import make_dwelling
+
+        dw = make_dwelling(
+            duration_s=3600, time_res_s=60, start_time="2019-01-01T00:00:00"
+        )
+        dw.initialize()
+        bat = Battery.tesla_pw3()  # 300W heater, threshold=5°C
+        dw.add_battery(bat)
+
+        # Run long enough for cell temp to drop below heater threshold
+        max_power = 0.0
+        for _ in range(60):
+            dw.step()
+            tel = dw.telemetry().equipment()
+            idx = tel["names"].index("Tesla Powerwall 3")
+            power = tel["power_kw"][idx]
+            max_power = max(max_power, power)
+
+        # Heater (300W = 0.3 kW) + standby (10W = 0.01 kW) should be visible
+        assert max_power > 0.1, (
+            f"Battery heater should draw measurable power in -19°C weather, "
+            f"max observed was {max_power:.4f} kW"
+        )
+
+    def test_passive_battery_no_heater_power_in_cold(self):
+        """Enphase IQ 5P (no heater) should only draw standby in cold weather."""
+        from conftest import make_dwelling
+
+        dw = make_dwelling(
+            duration_s=3600, time_res_s=60, start_time="2019-01-01T00:00:00"
+        )
+        dw.initialize()
+        bat = Battery.enphase_iq5p()  # 0W heater, passive only
+        dw.add_battery(bat)
+
+        max_power = 0.0
+        for _ in range(60):
+            dw.step()
+            tel = dw.telemetry().equipment()
+            idx = tel["names"].index("Enphase IQ 5P")
+            power = tel["power_kw"][idx]
+            max_power = max(max_power, power)
+
+        # No heater — only standby (15W = 0.015 kW)
+        assert max_power < 0.05, (
+            f"Passive battery should only draw standby (~15W), "
+            f"got max {max_power:.4f} kW"
+        )
+
+    def test_heated_battery_eventually_charges_in_cold(self):
+        """Tesla PW3 with heater should warm up enough to charge in cold weather.
+
+        After the heater warms cells above min_charge_temp_c (0°C), applying
+        a SOC target should result in charging. This may take many minutes
+        depending on heater power vs thermal mass.
+        """
+        from ochre_next import ControlSignal
+        from conftest import make_dwelling
+
+        dw = make_dwelling(
+            duration_s=7200, time_res_s=60, start_time="2019-01-01T00:00:00"
+        )
+        dw.initialize()
+        bat = Battery.tesla_pw3()  # 300W heater
+        dw.add_battery(bat)
+        dw.apply_control("Tesla Powerwall 3", ControlSignal.soc_target(target=0.9))
+
+        charged = False
+        for _ in range(120):  # 2 hours
+            dw.step()
+            tel = dw.telemetry().equipment()
+            idx = tel["names"].index("Tesla Powerwall 3")
+            soc = tel["soc"][idx]
+            if soc > 0.52:  # default initial is ~0.5
+                charged = True
+                break
+
+        # With a 300W heater the battery should warm above 0°C within 2 hours
+        # and begin charging. If this fails, the heater power or thermal model
+        # may be misconfigured.
+        assert charged, (
+            f"Battery with 300W heater should warm up and charge within 2h at -19°C. "
+            f"Final SOC={soc:.4f}"
+        )
+
+    def test_cold_blocks_charging_without_heater(self):
+        """Enphase IQ 5P charges in cold because min_charge_temp_c=-20°C.
+
+        LFP batteries like Enphase can charge at low temperatures (with derating).
+        The IQ 5P has min_charge_temp_c=-20°C, so it should charge even in
+        Denver January (-19°C) — just at a derated rate.
+        """
+        from ochre_next import ControlSignal
+        from conftest import make_dwelling
+
+        dw = make_dwelling(
+            duration_s=3600, time_res_s=60, start_time="2019-01-01T00:00:00"
+        )
+        dw.initialize()
+        bat = Battery.enphase_iq5p()  # min_charge_temp=-20°C
+        dw.add_battery(bat)
+        dw.apply_control("Enphase IQ 5P", ControlSignal.soc_target(target=0.9))
+
+        initial_soc = None
+        final_soc = None
+        for _ in range(60):
+            dw.step()
+            tel = dw.telemetry().equipment()
+            idx = tel["names"].index("Enphase IQ 5P")
+            soc = tel["soc"][idx]
+            if initial_soc is None:
+                initial_soc = soc
+            final_soc = soc
+
+        assert final_soc > initial_soc, (
+            f"Enphase IQ 5P (min_charge_temp=-20°C) should charge at -19°C "
+            f"(with derating). Initial={initial_soc:.4f}, final={final_soc:.4f}"
+        )

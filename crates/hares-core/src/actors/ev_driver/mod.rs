@@ -2433,4 +2433,159 @@ mod tests {
             actor.last_action()
         );
     }
+
+    // ======= RV-013: Full 24-hour lifecycle test =======
+
+    /// Step the actor through all 1440 minutes of a day, recording the signals
+    /// emitted at each phase transition and the SOC evolution.
+    ///
+    /// Actor config: 30 mi/day, 0.3 kWh/mi, 60 kWh battery, depart 08:00 (480),
+    /// arrive 18:00 (1080), average speed 30 mph.  event_day_ratio = 1.0.
+    ///
+    /// Physics assertions:
+    /// - Departure minute emits `EvPlugIn { Disconnected }`.
+    /// - At least one `EvDrive` signal is emitted between departure and arrival.
+    /// - Total `EvDrive` kWh matches expected drive energy within 5 %.
+    /// - Actor's `estimated_soc` decreases monotonically across driving steps
+    ///   and ends lower than the pre-departure value.
+    /// - Arrival minute emits `EvPlugIn { HomePluggedIn }`.
+    /// - Post-arrival HomePluggedIn step emits a charging signal (`SOCTarget`).
+    /// - `estimated_soc` after arrival is below the pre-departure SOC (energy
+    ///   was consumed; the actor has not yet been told charging completed).
+    #[test]
+    fn full_24h_lifecycle_soc_and_connection_transitions() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+
+        // ---- bookkeeping across the full day --------------------------------
+        let mut departure_signals: Vec<ControlSignal> = Vec::new();
+        let mut arrival_signals: Vec<ControlSignal> = Vec::new();
+        let mut post_arrival_signals: Vec<ControlSignal> = Vec::new();
+        let mut total_drive_kwh = 0.0_f64;
+        let mut drive_signal_count = 0_usize;
+
+        // SOC samples: (minute, estimated_soc)
+        let mut soc_at_pre_departure = 1.0_f64;
+        let mut soc_samples_driving: Vec<f64> = Vec::new();
+        let mut soc_at_post_arrival = f64::NAN;
+
+        let mut out = Vec::new();
+        let mut saw_departure = false;
+        let mut saw_arrival = false;
+        let mut saw_post_arrival = false;
+
+        // ---- simulate 1440 steps (minutes 0..1439) --------------------------
+        for minute in 0_u16..1440 {
+            let env = env_at_minute(minute);
+            out.clear();
+            actor.decide(&env, &mut out);
+
+            if minute == 479 {
+                // Snapshot SOC immediately before departure step runs.
+                soc_at_pre_departure = actor.estimated_soc;
+            }
+
+            if minute == 480 && !saw_departure {
+                saw_departure = true;
+                departure_signals = out.iter().map(|r| r.signal.clone()).collect();
+            }
+
+            // Collect driving energy and SOC samples between departure and arrival.
+            if minute > 480 && minute < 1080 {
+                for req in &out {
+                    if let ControlSignal::EvDrive { kwh } = req.signal {
+                        total_drive_kwh += kwh;
+                        drive_signal_count += 1;
+                        soc_samples_driving.push(actor.estimated_soc);
+                    }
+                }
+            }
+
+            if minute == 1080 && !saw_arrival {
+                saw_arrival = true;
+                arrival_signals = out.iter().map(|r| r.signal.clone()).collect();
+            }
+
+            if minute == 1081 && !saw_post_arrival {
+                saw_post_arrival = true;
+                post_arrival_signals = out.iter().map(|r| r.signal.clone()).collect();
+                soc_at_post_arrival = actor.estimated_soc;
+            }
+        }
+
+        // ---- 1. Departure emits Disconnected --------------------------------
+        let has_disconnect = departure_signals.iter().any(|s| {
+            matches!(s, ControlSignal::EvPlugIn { state: EvConnectionState::Disconnected })
+        });
+        assert!(
+            has_disconnect,
+            "minute 480 (departure) must emit EvPlugIn{{Disconnected}}, got: {departure_signals:?}"
+        );
+
+        // ---- 2. EvDrive signals were emitted during the trip ----------------
+        assert!(
+            drive_signal_count > 1,
+            "expected multi-step EvDrive signals between departure and arrival, got {drive_signal_count}"
+        );
+
+        // ---- 3. Total drive energy matches physics within 5% ----------------
+        // 30 mi × 0.3 kWh/mi × temp_multiplier(10 °C outdoor)
+        let expected_kwh = 30.0 * 0.3 * temp_efficiency_multiplier(10.0);
+        let pct_err = ((total_drive_kwh - expected_kwh) / expected_kwh).abs();
+        assert!(
+            pct_err < 0.05,
+            "total EvDrive kWh ({total_drive_kwh:.3}) should be within 5% of expected ({expected_kwh:.3})"
+        );
+
+        // ---- 4. estimated_soc decreased monotonically across driving steps --
+        // Each driving step spreads energy evenly; the actor deducts from
+        // estimated_soc after each step, so the sequence must be non-increasing.
+        assert!(
+            !soc_samples_driving.is_empty(),
+            "expected SOC samples from driving steps"
+        );
+        for i in 1..soc_samples_driving.len() {
+            assert!(
+                soc_samples_driving[i] <= soc_samples_driving[i - 1] + 1e-9,
+                "estimated_soc must be non-increasing across driving steps: \
+                 sample[{i}]={} > sample[{}]={}",
+                soc_samples_driving[i],
+                i - 1,
+                soc_samples_driving[i - 1],
+            );
+        }
+
+        // ---- 5. Post-arrival SOC is below pre-departure SOC -----------------
+        // Drive consumed energy; the actor hasn't been told charging completed.
+        assert!(
+            soc_at_post_arrival < soc_at_pre_departure - 1e-6,
+            "estimated_soc after arrival ({soc_at_post_arrival:.4}) must be below \
+             pre-departure SOC ({soc_at_pre_departure:.4})"
+        );
+
+        // ---- 6. Arrival emits HomePluggedIn ---------------------------------
+        let has_home_plugin = arrival_signals.iter().any(|s| {
+            matches!(s, ControlSignal::EvPlugIn { state: EvConnectionState::HomePluggedIn })
+        });
+        assert!(
+            has_home_plugin,
+            "minute 1080 (arrival) must emit EvPlugIn{{HomePluggedIn}}, got: {arrival_signals:?}"
+        );
+
+        // ---- 7. Post-arrival step emits a charging signal -------------------
+        let has_charging_signal = post_arrival_signals.iter().any(|s| {
+            matches!(
+                s,
+                ControlSignal::SOCTarget { target_soc, .. } if (*target_soc - 0.9).abs() < 0.01
+            )
+        });
+        assert!(
+            has_charging_signal,
+            "minute 1081 (post-arrival HomePluggedIn) must emit SOCTarget(0.9), \
+             got: {post_arrival_signals:?}"
+        );
+    }
 }

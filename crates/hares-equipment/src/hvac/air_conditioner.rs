@@ -1520,16 +1520,22 @@ mod tests {
         );
     }
 
+    /// OCHRE uses 312 CFM/ton for all cooler types including window units.
     #[test]
     fn room_ac_airflow_rate() {
-        use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+        use uom::si::f64::{Energy, VolumeRate};
+        use uom::si::energy::{btu_it, joule};
+        use uom::si::volume_rate::{cubic_foot_per_minute, cubic_meter_per_second};
+
+        let airflow_m3_s = VolumeRate::new::<cubic_foot_per_minute>(312.0)
+            .get::<cubic_meter_per_second>();
+        // 1 ton of refrigeration = 12 000 BTU(IT)/h
+        let w_per_ton = Energy::new::<btu_it>(12_000.0).get::<joule>() / 3600.0;
+        let expected = airflow_m3_s / w_per_ton;
+
         let mut cfg = ac_config();
         cfg.ochre_class = "Room AC".to_string();
-        let environment = env(27.0, 0.010, 19.0, 35.0);
 
-        let expected = 312.0 * CFM_TO_M3_S / W_PER_TON;
-
-        // Construction-time default must be 312 CFM/ton.
         let eq = RoomAC::new(cfg.clone());
         assert!(
             (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
@@ -1537,7 +1543,7 @@ mod tests {
             eq.core.hvac.airflow_m3_s_per_w
         );
 
-        // init() must preserve the 312 CFM/ton default when no explicit airflow is configured.
+        let environment = env(27.0, 0.010, 19.0, 35.0);
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &environment)
             .expect("init must succeed with 312 CFM/ton default");

@@ -110,9 +110,15 @@ class TestEvFullDayCycle:
 
         soc_values: list[float] = []
         for _ in dw.timesteps():
-            soc = dw.get_equipment_telemetry("Tesla Model Y LR", "soc")
-            if soc is not None:
-                soc_values.append(soc)
+            dw.step()
+            telem = dw.telemetry()
+            eq = telem.equipment()
+            names: list[str] = eq["names"]
+            socs: list[float] = eq["soc"]
+            for i, name in enumerate(names):
+                if "Tesla Model Y" in name and i < len(socs):
+                    soc_values.append(socs[i])
+                    break
 
         assert len(soc_values) > 0, "no SOC telemetry recorded"
         assert all(0.0 <= s <= 1.0 for s in soc_values), (
@@ -120,4 +126,8 @@ class TestEvFullDayCycle:
         )
         assert soc_values[0] != soc_values[-1], (
             f"SOC did not change over simulation: {soc_values[0]:.4f} -> {soc_values[-1]:.4f}"
+        )
+        min_soc = min(soc_values)
+        assert min_soc < soc_values[0], (
+            f"SOC never decreased (no driving discharge): min={min_soc:.4f}, initial={soc_values[0]:.4f}"
         )

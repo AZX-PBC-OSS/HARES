@@ -139,26 +139,39 @@ impl InvariantChecker {
 
     /// Validates that zone and tank temperatures are within physically plausible bounds.
     ///
-    /// - Zone temperatures: `[-50.0, 80.0]` °C
-    /// - Tank temperatures: `[0.0, 100.0]` °C
+    /// - Conditioned zone temperatures: `[-50, 80]` °C
+    /// - Unconditioned zone temperatures: `[-50, 120]` °C (attics under solar load
+    ///   routinely exceed 80 °C in hot climates)
+    /// - Tank temperatures: `[0, 100]` °C
     ///
     /// Returns the first violation found, or `Ok(())`.
     pub fn check_temperatures(
         &self,
-        zone_temps_c: &[f64],
+        conditioned_zone_temps_c: &[f64],
+        unconditioned_zone_temps_c: &[f64],
         tank_temps_c: &[f64],
     ) -> Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             const ZONE_MIN_C: f64 = -50.0;
-            const ZONE_MAX_C: f64 = 80.0;
+            const CONDITIONED_MAX_C: f64 = 80.0;
+            const UNCONDITIONED_MAX_C: f64 = 120.0;
             const TANK_MIN_C: f64 = 0.0;
             const TANK_MAX_C: f64 = 100.0;
 
-            for &t in zone_temps_c {
-                if !t.is_finite() || !(ZONE_MIN_C..=ZONE_MAX_C).contains(&t) {
+            for &t in conditioned_zone_temps_c {
+                if !t.is_finite() || !(ZONE_MIN_C..=CONDITIONED_MAX_C).contains(&t) {
                     return Err(HaresError::InvariantViolation {
                         check_name: "zone_temperature_bounds".to_string(),
+                        value: t,
+                        tolerance: 0.0,
+                    });
+                }
+            }
+            for &t in unconditioned_zone_temps_c {
+                if !t.is_finite() || !(ZONE_MIN_C..=UNCONDITIONED_MAX_C).contains(&t) {
+                    return Err(HaresError::InvariantViolation {
+                        check_name: "unconditioned_zone_temperature_bounds".to_string(),
                         value: t,
                         tolerance: 0.0,
                     });
@@ -273,14 +286,21 @@ mod tests {
     // ── temperature bounds ────────────────────────────────────────────────────
 
     #[test]
-    fn zone_temperature_within_bounds_passes() {
-        let result = checker().check_temperatures(&[20.0, -10.0, 79.9], &[]);
+    fn conditioned_zone_temperature_within_bounds_passes() {
+        let result = checker().check_temperatures(&[20.0, -10.0], &[], &[]);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn zone_temperature_below_minimum_fails() {
-        let result = checker().check_temperatures(&[-51.0], &[]);
+    fn unconditioned_zone_temperature_within_bounds_passes() {
+        // 95°C is valid for an attic under solar load.
+        let result = checker().check_temperatures(&[], &[95.0, 119.0], &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn conditioned_zone_temperature_below_minimum_fails() {
+        let result = checker().check_temperatures(&[-51.0], &[], &[]);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
@@ -290,26 +310,39 @@ mod tests {
     }
 
     #[test]
-    fn zone_temperature_above_maximum_fails() {
-        let result = checker().check_temperatures(&[80.1], &[]);
+    fn conditioned_zone_temperature_above_maximum_fails() {
+        // 80.1°C should fail for a conditioned zone.
+        let result = checker().check_temperatures(&[80.1], &[], &[]);
         assert!(result.is_err());
     }
 
     #[test]
+    fn unconditioned_zone_temperature_above_maximum_fails() {
+        // 120.1°C should fail even for an unconditioned zone.
+        let result = checker().check_temperatures(&[], &[120.1], &[]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            HaresError::InvariantViolation { check_name, .. } if check_name == "unconditioned_zone_temperature_bounds"
+        ));
+    }
+
+    #[test]
     fn zone_temperature_nan_fails() {
-        let result = checker().check_temperatures(&[f64::NAN], &[]);
+        let result = checker().check_temperatures(&[f64::NAN], &[], &[]);
         assert!(result.is_err());
     }
 
     #[test]
     fn tank_temperature_within_bounds_passes() {
-        let result = checker().check_temperatures(&[], &[50.0, 99.9]);
+        let result = checker().check_temperatures(&[], &[], &[50.0, 99.9]);
         assert!(result.is_ok());
     }
 
     #[test]
     fn tank_temperature_above_maximum_fails() {
-        let result = checker().check_temperatures(&[], &[100.1]);
+        let result = checker().check_temperatures(&[], &[], &[100.1]);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
@@ -320,7 +353,7 @@ mod tests {
 
     #[test]
     fn tank_temperature_below_minimum_fails() {
-        let result = checker().check_temperatures(&[], &[-0.1]);
+        let result = checker().check_temperatures(&[], &[], &[-0.1]);
         assert!(result.is_err());
     }
 

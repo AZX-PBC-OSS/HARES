@@ -31,12 +31,24 @@ pub const MOLECULAR_WEIGHT_RATIO_WATER_AIR: f64 = 0.621_945;
 pub const HUMIDITY_DENSITY_CORRECTION: f64 = 1.607_768_7;
 
 /// Latent heat of vaporisation at 0°C [kJ/kg].
-/// ASHRAE 2017 HOF Ch. 1, Table 2 at 0°C.
+///
+/// ASHRAE 2017 HOF Ch.1, Table 2 at 0°C. Used in psychrometric enthalpy
+/// (Eq.30) where h = cp_da×T + W×(h_fg + cp_v×T). The 0°C reference is
+/// standard for moist-air enthalpy calculations across the full operating
+/// range (−20 to 60°C).
+///
+/// OCHRE also uses 2501 kJ/kg (via psychrolib) for enthalpy. No deviation.
 pub const LATENT_HEAT_VAPORISATION_0C_KJ_KG: f64 = 2_501.0;
 
 /// Latent heat of vaporisation at ~20°C [J/kg].
-/// Commonly used round value for zone-temperature moisture balance.
-/// ASHRAE 2017 HOF Ch. 1, Table 2 (interpolated at ~20°C).
+///
+/// ASHRAE 2017 HOF Ch.1, Table 2 (interpolated at 20°C: 2454 kJ/kg, rounded
+/// to 2450 for the conventional zone-balance approximation). Used in moisture
+/// balance calculations where indoor conditions cluster near 20°C, giving a
+/// more accurate latent load estimate than the 0°C reference value.
+///
+/// Deviation from OCHRE: OCHRE uses 2454 kJ/kg (psychrolib constant at 20°C)
+/// in some paths. The ~0.2% difference is within measurement uncertainty.
 pub const LATENT_HEAT_VAPORISATION_J_KG: f64 = 2_450_000.0;
 
 /// Latent heat of sublimation at 0°C [kJ/kg].

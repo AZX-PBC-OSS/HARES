@@ -2082,9 +2082,11 @@ fn ev_full_day_lifecycle() {
         ev.soc
     );
 
-    // Phase 1 (steps 0..278): HomePluggedIn, charging from SOC 0.50
+    // Phase 1: charge from SOC 0.50 to full.
+    // Minutes to full = (1.0 - 0.5) * 60 kWh / (7.2 kW * 0.9 η) * 60 min/h ≈ 278 min
+    let charge_steps = 278;
     let mut prev_soc = ev.soc;
-    for step in 0..278 {
+    for step in 0..charge_steps {
         let mut ports = PortSlots::default();
         ev.step(&env, dt, &mut ports).unwrap();
         if ev.soc < 1.0 {
@@ -2197,8 +2199,6 @@ fn ev_energy_accounting_closed() {
 
     let dt = Duration::minutes(1);
     let dt_hours = 1.0 / 60.0;
-    let capacity = 60.0;
-    let efficiency = 0.9;
     let soc_start = ev.soc;
     let mut total_grid_kwh = 0.0;
 
@@ -2212,9 +2212,9 @@ fn ev_energy_accounting_closed() {
     }
 
     let soc_change = ev.soc - soc_start;
-    let expected_grid_kwh = soc_change * capacity / efficiency;
+    let expected_grid_kwh = soc_change * ev.battery_capacity_kwh / ev.charging_efficiency;
     let error_kwh = (total_grid_kwh - expected_grid_kwh).abs();
-    let tolerance_kwh = 0.02 * capacity;
+    let tolerance_kwh = 0.02 * ev.battery_capacity_kwh;
 
     assert!(
         error_kwh < tolerance_kwh,
@@ -2234,20 +2234,21 @@ fn ev_soc_decreases_during_driving() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
+    let drive_kwh = 15.0;
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 15.0 })
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
         .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
 
-    let expected_soc = 0.8 - 15.0 / 60.0;
+    let expected_soc = 0.8 - drive_kwh / ev.battery_capacity_kwh;
     assert!(
         (ev.soc - expected_soc).abs() < 0.01,
-        "SOC after 15 kWh drive should be ~{expected_soc:.4}, got {}",
+        "SOC after {drive_kwh} kWh drive should be ~{expected_soc:.4}, got {}",
         ev.soc
     );
     assert!(
@@ -2264,44 +2265,53 @@ fn ev_connection_state_transitions() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    // Default state is HomePluggedIn → telemetry code 0.0
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    assert_eq!(
-        ev.telemetry().get("connection_state"),
-        Some(0.0),
-        "HomePluggedIn should report connection_state == 0.0"
-    );
+    assert_eq!(ev.telemetry().get("connection_state"), Some(0.0));
+    assert_eq!(ev.connection_state, EvConnectionState::HomePluggedIn);
 
-    // Transition to Disconnected → telemetry code 2.0
+    // HomePluggedIn → Disconnected (departure)
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    assert_eq!(
-        ev.telemetry().get("connection_state"),
-        Some(2.0),
-        "Disconnected should report connection_state == 2.0"
-    );
+    assert_eq!(ev.telemetry().get("connection_state"), Some(2.0));
+    assert_eq!(ev.connection_state, EvConnectionState::Disconnected);
 
-    // Transition back to HomePluggedIn → telemetry code 0.0
+    // Disconnected → AwayPluggedIn (away charging)
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::AwayPluggedIn,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    assert_eq!(ev.telemetry().get("connection_state"), Some(1.0));
+    assert_eq!(ev.connection_state, EvConnectionState::AwayPluggedIn);
+
+    // AwayPluggedIn → Disconnected (leaving away charger)
+    ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
+        state: EvConnectionState::Disconnected,
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    assert_eq!(ev.telemetry().get("connection_state"), Some(2.0));
+
+    // Disconnected → HomePluggedIn (arrival)
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::HomePluggedIn,
     })
     .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    assert_eq!(
-        ev.telemetry().get("connection_state"),
-        Some(0.0),
-        "HomePluggedIn after reconnect should report connection_state == 0.0"
-    );
+    assert_eq!(ev.telemetry().get("connection_state"), Some(0.0));
+    assert_eq!(ev.connection_state, EvConnectionState::HomePluggedIn);
 }
 
 #[test]
-fn ev_departure_at_step_boundary() {
+fn ev_drive_after_full_day_charging() {
     let mut raw = base_raw();
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.9.into());
     let config = ev_config(raw);
@@ -2315,7 +2325,12 @@ fn ev_departure_at_step_boundary() {
         ev.step(&env, dt, &mut ports).unwrap();
     }
 
-    let soc_before = ev.soc;
+    assert!(
+        (ev.soc - 1.0).abs() < 1e-9,
+        "EV should be fully charged after 24h, got SOC {}",
+        ev.soc
+    );
+
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
@@ -2326,9 +2341,10 @@ fn ev_departure_at_step_boundary() {
     let mut ports = PortSlots::default();
     ev.step(&env, dt, &mut ports).unwrap();
 
+    let expected_soc = 1.0 - 10.0 / ev.battery_capacity_kwh;
     assert!(
-        ev.soc < soc_before,
-        "SOC must decrease after driving at day boundary: was {soc_before}, now {}",
+        (ev.soc - expected_soc).abs() < 0.01,
+        "SOC after drive should be ~{expected_soc:.4}, got {}",
         ev.soc
     );
 }
@@ -2350,14 +2366,16 @@ fn ev_insufficient_charge_before_departure() {
         ev.step(&env, dt, &mut ports).unwrap();
     }
 
-    // Drive all available energy: soc * capacity rounded down slightly to stay within bounds.
-    let available_kwh = ev.soc * ev.battery_capacity_kwh;
+    // Drive nearly all available energy; subtract epsilon to avoid f64
+    // boundary where implementation's `kwh > available` guard could
+    // reject the call due to rounding.
+    let drive_kwh = ev.soc * ev.battery_capacity_kwh - 1e-9;
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
     ev.apply_control_unchecked(&ControlSignal::EvDrive {
-        kwh: available_kwh,
+        kwh: drive_kwh,
     })
     .unwrap();
 

@@ -111,9 +111,9 @@ def test_grid_export_rule_enum() -> None:
 
 
 def test_storm_watch_trigger_enum() -> None:
-    assert StormWatchTrigger.ManualEnable != StormWatchTrigger.WeatherSignal
-    assert "ManualEnable" in repr(StormWatchTrigger.ManualEnable)
-    assert "WeatherSignal" in repr(StormWatchTrigger.WeatherSignal)
+    assert StormWatchTrigger.manual_enable() != StormWatchTrigger.weather_signal()
+    assert "manual" in repr(StormWatchTrigger.manual_enable()).lower()
+    assert "weather" in repr(StormWatchTrigger.weather_signal()).lower()
 
 
 def test_bms_action_variants() -> None:

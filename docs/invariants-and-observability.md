@@ -36,8 +36,9 @@ currently active.
 | `thermal_balance`         | \|Σ Q_gain − ΔE_storage − Q_loss\| < tol           | max(1.0 W, 1e-6 × gross_flux)     | Yes    | No     |
 | `electrical_balance`      | \|P_grid + Σ P_equipment\| < tol                    | 0.001 kW                          | Yes    | Yes    |
 | `moisture_balance`        | \|Δm_water − Σ(Q_latent·dt / h_fg)\| < tol         | 1e-6 kg                           | Yes    | No     |
-| `zone_temperature_bounds` | T_zone ∈ [−50, 80] °C, finite                      | —                                  | Yes    | Yes    |
-| `tank_temperature_bounds` | T_tank ∈ [0, 100] °C, finite                       | —                                  | Yes    | No     |
+| `zone_temperature_bounds` | T_conditioned ∈ [−50, 80] °C, finite               | —                                  | Yes    | Yes    |
+| `unconditioned_zone_temperature_bounds` | T_unconditioned ∈ [−50, 120] °C, finite | —                                  | Yes    | Yes    |
+| `tank_temperature_bounds` | T_tank ∈ [0, 100] °C, finite                       | —                                  | Yes    | Yes    |
 | `soc_bounds`              | SoC ∈ [0, 1], accumulated error < 0.001            | —                                  | No     | No     |
 
 **Thermal tolerance** uses gross flux (sum of absolute values of all gain terms)
@@ -54,7 +55,7 @@ These fire every timestep after solver resolution but before port zeroing:
 | Check                      | What it validates                                              |
 |----------------------------|----------------------------------------------------------------|
 | `timestep_dt`              | dt > 0 and finite                                              |
-| `zone_temperature_bounds`  | All zone temps from thermal_update within [−50, 80] °C        |
+| `zone_temperature_bounds`  | Conditioned zone temps within [−50, 80] °C; unconditioned within [−50, 120] °C |
 | `electrical_net_finite`    | `electrical_solver.net_active_kw()` is finite                  |
 | `electrical_balance`       | Solver net matches port accumulation: \|solver + ports\| < 0.001 kW |
 | `humidity_payload_finite`  | Every value in humidity domain payload is finite               |

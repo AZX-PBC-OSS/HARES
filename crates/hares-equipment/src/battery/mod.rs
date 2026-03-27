@@ -986,9 +986,12 @@ impl Equipment for Battery {
         // With heater_on_discharge (Tesla-style): also fires when discharge is
         // desired but blocked/derated by cold temps, e.g. grid outage at -25 C.
         let wants_power = wants_charge || (wants_discharge && self.heater_on_discharge);
+        // Heater activates based on cell temperature alone — it protects cells
+        // from freezing regardless of charge/discharge demand. Tesla PW3 Heat
+        // Mode and similar systems run proactively to maintain cells above the
+        // min_charge_temp threshold.
         let heater_w = if self.heater_power_w > 0.0
             && self.cell_temp_c <= self.heater_threshold_c
-            && wants_power
         {
             self.heater_active = true;
             self.heater_power_w
@@ -2030,7 +2033,10 @@ mod tests {
     }
 
     #[test]
-    fn heater_does_not_activate_on_discharge_by_default() {
+    fn heater_activates_even_during_idle_when_cold() {
+        // Heater protects cells from freezing regardless of charge/discharge state.
+        // At -25°C with a 500W heater and threshold=5°C, the heater must run
+        // even if no charge or discharge is requested.
         let config = battery_config(&[
             (KEY_INITIAL_SOC, 0.5),
             (KEY_HEATER_POWER_W, 500.0),
@@ -2042,19 +2048,19 @@ mod tests {
         bat.init(&config, &env).unwrap();
         bat.cell_temp_c = -25.0;
 
-        bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
-        })
-        .unwrap();
-
+        // No control signal — battery is idle
         let mut ports = default_ports();
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
 
         assert!(
-            !bat.heater_active,
-            "heater should NOT activate on discharge by default (heater_on_discharge=false)"
+            bat.heater_active,
+            "heater must activate at -25°C to protect cells, even when idle"
+        );
+        let heater_kw = bat.telemetry().get("heater_power_w").unwrap() / 1000.0;
+        assert!(
+            heater_kw > 0.4,
+            "heater should draw ~500W, got {heater_kw:.3} kW"
         );
     }
 
@@ -2813,6 +2819,9 @@ mod tests {
 
     /// ASTM E1049-85 known sequence test.
     /// Sequence: -2, 1, -3, 5, -1, 3, -4, 4, -2 (scaled to SOC [0..1] range).
+    /// The Python `rainflow` library extracts 4.0 total cycles (with end-of-series
+    /// flush). HARES's incremental (no-flush) design extracts 2.5 during the push
+    /// loop, leaving 1.5 cycles in the reversal buffer for later extraction.
     #[test]
     fn rainflow_astm_known_sequence() {
         let values: Vec<f64> = [-2.0, 1.0, -3.0, 5.0, -1.0, 3.0, -4.0, 4.0, -2.0]
@@ -2826,8 +2835,8 @@ mod tests {
         }
 
         assert!(
-            rf.total_cycles() > 0.0,
-            "ASTM known sequence should produce cycles: got {}",
+            (rf.total_cycles() - 2.5).abs() < 1e-10,
+            "ASTM reference sequence (incremental, no flush): expected 2.5 cycles, got {}",
             rf.total_cycles()
         );
     }

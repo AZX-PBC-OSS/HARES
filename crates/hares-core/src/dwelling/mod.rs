@@ -584,6 +584,9 @@ pub struct Dwelling {
     equipment_execution_order: Vec<usize>,
     /// Numerical invariant checker, allocated once and reused each step.
     invariant_checker: InvariantChecker,
+    /// Per-zone conditioning status, aligned with `latest_env.zones` order.
+    /// `true` = conditioned (HVAC-served), `false` = unconditioned (attic, garage, etc.).
+    zone_is_conditioned: Vec<bool>,
     /// Output config retained for schema rebuilds when equipment changes.
     output_verbosity: u8,
     output_chunk_size: usize,
@@ -949,6 +952,15 @@ impl Dwelling {
             solver_feedback_actor,
             equipment_execution_order,
             invariant_checker: InvariantChecker::new(),
+            zone_is_conditioned: if building.zones.is_empty() {
+                vec![true]
+            } else {
+                building
+                    .zones
+                    .iter()
+                    .map(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
+                    .collect()
+            },
             output_verbosity: config.sim_config.output_verbosity,
             output_chunk_size: config.sim_config.output_chunk_size,
             output_format: config.sim_config.output_format,
@@ -2245,13 +2257,59 @@ impl Dwelling {
             }
 
             // Zone temperature bounds (read from already-updated zones).
-            let zone_temps_c: Vec<f64> = self
+            // Split by conditioning status: conditioned zones get tighter bounds
+            // (80 °C) while unconditioned zones (attics under solar load) get
+            // wider bounds (120 °C).
+            let mut conditioned_temps: Vec<f64> = Vec::new();
+            let mut unconditioned_temps: Vec<f64> = Vec::new();
+            for (zone, &is_cond) in self
                 .latest_env
                 .zones
                 .iter()
-                .map(|z| z.temperature_c)
-                .collect();
-            checker.check_temperatures(&zone_temps_c, &[])?;
+                .zip(self.zone_is_conditioned.iter())
+            {
+                if is_cond {
+                    conditioned_temps.push(zone.temperature_c);
+                } else {
+                    unconditioned_temps.push(zone.temperature_c);
+                }
+            }
+
+            // Tank node temperatures from all water heater equipment.
+            let mut tank_temps_c: Vec<f64> = Vec::new();
+            for eq in &self.equipment {
+                if eq.descriptor().end_use != EndUse::WATER_HEATING {
+                    continue;
+                }
+                let telem = eq.telemetry();
+                let mut i = 0usize;
+                loop {
+                    let key = format!("tank_node_{i}_c");
+                    match telem.get(&key) {
+                        Some(t) => {
+                            tank_temps_c.push(t);
+                            i += 1;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            checker.check_temperatures(
+                &conditioned_temps,
+                &unconditioned_temps,
+                &tank_temps_c,
+            )?;
+
+            // SOC bounds for storage equipment.
+            for eq in &self.equipment {
+                let end_use = &eq.descriptor().end_use;
+                if *end_use != EndUse::BATTERY && *end_use != EndUse::EV {
+                    continue;
+                }
+                if let Some(soc) = eq.telemetry().get("soc") {
+                    checker.check_soc(soc, 0.0)?;
+                }
+            }
 
             // Electrical finiteness.
             let net_kw = self.electrical_solver.net_active_kw();
