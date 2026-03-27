@@ -620,6 +620,7 @@ mod tests {
     /// TwoSpeedTime: fresh cycle (no prev_zone_temp) starts at speed 0.
     /// After min_time_per_speed_s has elapsed and zone temp is moving wrong way
     /// (cooling: zone temp rising), speed escalates to 1.
+    /// At speed 1 with load_fraction=0.8: PLR=0.8, speed_frac=1.0.
     #[test]
     fn select_speed_two_speed_time_direction_change() {
         let mut hvac = make_two_speed_time();
@@ -627,8 +628,8 @@ mod tests {
         let sel0 = hvac.select_speed_with_zone_temp(0.8, Some(25.0), false);
         assert_eq!(sel0.speed_index, 0, "fresh cycle must start at speed 0");
 
-        // Simulate time elapsing past the minimum guard.
-        hvac.time_at_current_speed_s = 300.0;
+        // Advance timer past the minimum guard and record current zone temp.
+        hvac.advance_speed_timer(300.0);
         hvac.update_prev_zone_temp(Some(25.0));
 
         // Next step: zone temp rose to 26.0°C during cooling — moving wrong way.
@@ -636,6 +637,16 @@ mod tests {
         assert_eq!(
             sel1.speed_index, 1,
             "rising zone temp during cooling after min_time must escalate to speed 1"
+        );
+        assert!(
+            (sel1.part_load_ratio - 0.8).abs() < 1e-9,
+            "speed 1 PLR must equal load_fraction=0.8, got {}",
+            sel1.part_load_ratio
+        );
+        assert!(
+            (sel1.speed_frac - 1.0).abs() < 1e-9,
+            "speed 1 speed_frac must be 1.0, got {}",
+            sel1.speed_frac
         );
     }
 
@@ -695,7 +706,7 @@ mod tests {
     /// apply_startup_capacity_degradation: when c_d = 0.0 (variable-speed / no ramp),
     /// the multiplier is always 1.0 and capacity equals steady-state on the first step.
     #[test]
-    fn startup_capacity_degradation_warm_restart() {
+    fn startup_capacity_degradation_c_d_zero_no_ramp() {
         let mut hvac = make_single_speed();
         hvac.duty_cycle = 1.0;
         hvac.startup.c_d = 0.0;
@@ -707,6 +718,45 @@ mod tests {
         assert!(
             (actual_w - steady_w).abs() < 1e-9,
             "c_d=0 must yield full capacity immediately: expected {steady_w} W, got {actual_w} W"
+        );
+    }
+
+    /// apply_startup_capacity_degradation warm-restart scenario:
+    /// with c_d=0.25, once time_since_start_min >= t_full the multiplier is 1.0.
+    /// After an off cycle, the first on-step must start below 1.0 again.
+    #[test]
+    fn startup_capacity_degradation_warm_restart_real() {
+        let steady_w = 10_000.0;
+        let c_d = 0.25_f64;
+        let t_full = 20.0 * c_d + 0.4; // 5.4 min
+
+        // Run enough on-steps to pass t_full.
+        let mut hvac = make_single_speed();
+        hvac.duty_cycle = 1.0;
+        hvac.startup.c_d = c_d;
+        hvac.startup.time_since_start_min = 0.0;
+
+        // Advance beyond t_full with 1-min steps.
+        let mut mult_at_full = 0.0_f64;
+        for _ in 0..=((t_full as usize) + 1) {
+            let w = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+            mult_at_full = w / steady_w;
+        }
+        assert!(
+            (mult_at_full - 1.0).abs() < 1e-9,
+            "past t_full the multiplier must be 1.0, got {mult_at_full}"
+        );
+
+        // Off cycle resets the timer.
+        hvac.duty_cycle = 0.0;
+        let _ = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+
+        // First on-step after off must ramp again (mult < 1.0).
+        hvac.duty_cycle = 1.0;
+        let w_restart = hvac.apply_startup_capacity_degradation(steady_w, 1.0);
+        assert!(
+            w_restart < steady_w,
+            "first on-step after off cycle must be below steady-state: got {w_restart} W"
         );
     }
 }

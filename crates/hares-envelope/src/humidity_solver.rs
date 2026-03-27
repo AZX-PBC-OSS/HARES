@@ -833,17 +833,17 @@ mod tests {
         );
     }
 
-    /// Multi-zone with a garage zone held at outdoor humidity conditions.
-    /// After one timestep with zero latent gain the garage zone humidity ratio
-    /// must remain close to the outdoor value while the indoor zone evolves upward
-    /// due to its own latent gain.
+    /// Zones are independent: latent gain applied to zone 1 must not transfer to zone 2.
+    ///
+    /// Zone 2 (garage) carries zero latent gain; its humidity ratio must remain exactly
+    /// at its initial value because the solver has no inter-zone moisture coupling.
     #[test]
-    fn humidity_garage_boundary() {
+    fn humidity_zones_are_independent() {
         let w_outdoor = 0.005_f64;
         let w_indoor = 0.008_f64;
         let dt = Duration::from_secs(60);
 
-        // Garage (zone 2) starts at outdoor humidity; indoor (zone 1) starts higher.
+        // Zone 2 starts at outdoor humidity; zone 1 starts higher.
         let env = env_with_two_zones(200.0, 150.0, w_indoor, w_outdoor);
 
         let config = HumiditySolverConfig {
@@ -852,7 +852,7 @@ mod tests {
         };
         let mut solver = HumiditySolver::new(config, &env);
 
-        // Apply latent gain to indoor zone only; garage gets none.
+        // Apply latent gain to zone 1 only; zone 2 gets none.
         let ports = PortSlots {
             thermal: vec![
                 ThermalAccumulator {
@@ -868,26 +868,18 @@ mod tests {
 
         let _ = solver.resolve(&ports, &env, dt);
 
-        let w_garage_after = solver.humidity_ratio(ZoneId(2));
+        let w_zone2_after = solver.humidity_ratio(ZoneId(2));
         let w_indoor_after = solver.humidity_ratio(ZoneId(1));
 
-        // Garage with no gain stays at w_outdoor (no latent coupling between zones in this solver).
+        // Zone 2 with no gain must remain at its initial value (no inter-zone transfer).
         assert!(
-            (w_garage_after - w_outdoor).abs() < 1e-9,
-            "garage zone with no gain must stay at outdoor W={w_outdoor}, got {w_garage_after}"
+            (w_zone2_after - w_outdoor).abs() < 1e-9,
+            "zone 2 with no gain must not change: expected {w_outdoor}, got {w_zone2_after}"
         );
-        // Indoor zone must have gained moisture.
+        // Zone 1 must have gained moisture from its latent input.
         assert!(
             w_indoor_after > w_indoor,
-            "indoor zone must rise with latent gain: before={w_indoor}, after={w_indoor_after}"
-        );
-        // Indoor must remain further from outdoor than garage, confirming zone independence.
-        assert!(
-            (w_indoor_after - w_outdoor).abs() > (w_garage_after - w_outdoor).abs(),
-            "indoor must stay further from outdoor than garage: \
-             indoor_delta={:.4e}, garage_delta={:.4e}",
-            (w_indoor_after - w_outdoor).abs(),
-            (w_garage_after - w_outdoor).abs()
+            "zone 1 must rise with latent gain: before={w_indoor}, after={w_indoor_after}"
         );
     }
 

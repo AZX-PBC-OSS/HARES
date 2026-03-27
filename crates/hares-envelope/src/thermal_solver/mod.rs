@@ -475,24 +475,16 @@ impl ThermalSolver {
 
         self.latent_buf = latent_by_zone;
 
-        // Swap zone_temps into the DomainUpdate; the previous empty Vec flows back.
-        self.zone_temps_swap.clear();
-        self.zone_temps_swap.extend_from_slice(&self.zone_temps_buf);
-        let zone_temps = std::mem::take(&mut self.zone_temps_swap);
-
-        let payload = if self.custom_payload_buf.is_empty() {
+        let custom_payload = if self.custom_payload_buf.is_empty() {
             None
         } else {
-            self.custom_payload_swap.clear();
-            self.custom_payload_swap
-                .extend_from_slice(&self.custom_payload_buf);
-            Some(std::mem::take(&mut self.custom_payload_swap))
+            Some(self.custom_payload_buf.clone())
         };
 
         DomainUpdate {
             domain_id: THERMAL,
-            zone_temperatures_c: zone_temps,
-            custom_payload: payload,
+            zone_temperatures_c: self.zone_temps_buf.clone(),
+            custom_payload,
         }
     }
 

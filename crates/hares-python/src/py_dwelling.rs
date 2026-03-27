@@ -49,8 +49,8 @@ fn parse_solar_override(
     if data.hasattr("columns")? && data.hasattr("height")? {
         return parse_solar_override_from_dataframe(py, data);
     }
-    // Duck-type: ndarray-like has .dtype and .shape attributes
-    if data.hasattr("dtype")? && data.hasattr("shape")? {
+    // Duck-type: ndarray-like has .dtype and .shape but NOT .columns
+    if data.hasattr("dtype")? && data.hasattr("shape")? && !data.hasattr("columns")? {
         return parse_solar_override_from_ndarray(data);
     }
     // Duck-type: pandas DataFrame has .values and .columns but no .height
@@ -173,7 +173,9 @@ fn parse_solar_override_from_ndarray(
     }
 
     let flat: Vec<f64> = data
+        .call_method1("astype", ("float64",))?
         .call_method0("flatten")?
+        .call_method0("tolist")?
         .extract()?;
 
     let n_surfaces_per_step = {
@@ -194,6 +196,19 @@ fn parse_solar_override_from_ndarray(
         ));
     }
     let n_timesteps = n_rows / n_surfaces_per_step;
+
+    for t in 1..n_timesteps {
+        for s in 0..n_surfaces_per_step {
+            let expected_id = flat[s * 5] as u32;
+            let actual_id = flat[(t * n_surfaces_per_step + s) * 5] as u32;
+            if actual_id != expected_id {
+                return Err(PyValueError::new_err(format!(
+                    "surface ID mismatch at timestep {t}, surface {s}: expected {expected_id}, got {actual_id}. \
+                     Rows must be grouped by timestep with identical surface ID ordering in each group.",
+                )));
+            }
+        }
+    }
     let mut result: Vec<Vec<SurfaceIrradiance>> = Vec::with_capacity(n_timesteps);
 
     for t in 0..n_timesteps {
@@ -289,12 +304,6 @@ fn get_array_len(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
 fn extract_array_element(arr: &Bound<'_, PyAny>, index: usize) -> PyResult<f64> {
     if let Ok(list) = arr.extract::<Bound<'_, PyList>>() {
         return list.get_item(index)?.extract::<f64>();
-    }
-    if let Ok(ndarray) = arr.getattr("__class__") {
-        let name: String = ndarray.getattr("__name__")?.extract()?;
-        if name == "ndarray" {
-            return arr.get_item(index)?.extract::<f64>();
-        }
     }
     arr.get_item(index)?.extract::<f64>()
 }

@@ -185,10 +185,15 @@ mod tests {
     /// When duct_zone_id == zone_id (conditioned zone IS the duct zone), the duct
     /// loss entry must not be added as a separate row.  Adding it would double-count
     /// heat into the conditioned zone.
+    ///
+    /// The single fraction equals `dse` (not 1.0): the duct loss energy (1 − dse) is
+    /// silently discarded rather than routed to a separate zone, so gross capacity is
+    /// only partially delivered to the conditioned space.
     #[test]
     fn update_zone_heat_fractions_same_duct_zone() {
         let mut hvac = make_hvac();
-        hvac.duct_dse = 0.85;
+        let dse = 0.85_f64;
+        hvac.duct_dse = dse;
         hvac.basement_heat_frac = 0.0;
         // duct_zone_id == zone_id (ZoneId(1)) — conditioned zone is the duct zone.
         hvac.duct_zone_id = Some(ZoneId(1));
@@ -204,10 +209,16 @@ mod tests {
         );
         let (zone, frac) = hvac.zone_heat_fractions[0];
         assert_eq!(zone, ZoneId(1));
-        // conditioned fraction = dse * (1 - basement_frac) = 0.85 * 1.0 = 0.85
+        // conditioned fraction = dse * (1 - basement_frac) = 0.85 * 1.0 = 0.85.
+        // Fractions sum to dse, not 1.0: duct loss (1 − dse) is unrouted.
         assert!(
-            (frac - 0.85).abs() < 1e-9,
-            "conditioned fraction: expected 0.85, got {frac}"
+            (frac - dse).abs() < 1e-9,
+            "conditioned fraction must equal dse={dse}, got {frac}"
+        );
+        let total: f64 = hvac.zone_heat_fractions.iter().map(|&(_, f)| f).sum();
+        assert!(
+            (total - dse).abs() < 1e-9,
+            "fractions must sum to dse={dse} when duct_zone == indoor_zone, got {total}"
         );
     }
 

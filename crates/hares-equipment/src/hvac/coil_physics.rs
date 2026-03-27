@@ -1221,6 +1221,17 @@ mod coil_psychrometric_tests {
             ao, 0.0,
             "coil_ao_factor with zero flow must return 0.0, got {ao}"
         );
+        // Ao=0.0 drives BF=exp(0/mfr)=1.0 (no contact with coil), so calculate_shr
+        // must return SHR=1.0 (no dehumidification) or return Err — but must not panic.
+        let shr_result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, 0.0, ao);
+        match shr_result {
+            Ok(result) => assert_eq!(
+                result.shr, 1.0,
+                "calculate_shr with Ao=0 and zero flow must return SHR=1.0, got {:.6}",
+                result.shr
+            ),
+            Err(_) => {} // non-convergence is also an acceptable outcome for Ao=0
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1234,9 +1245,12 @@ mod coil_psychrometric_tests {
     // not a panic, not a value outside [BYPASS_FACTOR_FLOOR, 1.0]).
     // ------------------------------------------------------------------
     #[test]
-    fn coil_bypass_factor_negative_denominator() {
-        // Very high SHR makes d_w negligible; combined with tiny d_t this
-        // exercises the |d_t| < EPSILON guard.
+    fn coil_bypass_factor_near_zero_denominator() {
+        // SHR=0.9999 drives d_w ≈ 0 and m_c ≈ 0, which exercises the ADP slope
+        // guard paths.  The result must not panic, must not return Err, and
+        // must return BYPASS_FACTOR_FLOOR because the ADP converges to the dew
+        // point, making db_in_c − t_adp < 0 for this high-SHR, high-capacity
+        // combination — triggering the `db_in_c - t_adp <= 0.0` guard at line 383.
         let result = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.9999);
         assert!(
             result.is_ok(),
@@ -1244,13 +1258,9 @@ mod coil_psychrometric_tests {
             result.err()
         );
         let bf = result.unwrap();
-        assert!(
-            bf.is_finite() && !bf.is_nan(),
-            "bypass factor must be finite and not NaN, got {bf}"
-        );
-        assert!(
-            bf >= BYPASS_FACTOR_FLOOR && bf <= 1.0,
-            "bypass factor must be in [{BYPASS_FACTOR_FLOOR}, 1.0], got {bf:.6}"
+        assert_eq!(
+            bf, BYPASS_FACTOR_FLOOR,
+            "near-zero-denominator guard must return exactly BYPASS_FACTOR_FLOOR, got {bf:.6}"
         );
     }
 }

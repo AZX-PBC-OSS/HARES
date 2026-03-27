@@ -1315,7 +1315,7 @@ mod tests {
     /// The test verifies that the scratch-buffer implementation produces the
     /// same f64-exact results as the analytic calculation.
     #[test]
-    fn tank_preallocated_produces_identical_temps() {
+    fn tank_step_heat_then_draw_analytic() {
         let mut tank = test_tank(6, 50.0);
         let dt = Duration::from_secs(60);
         let power_w = 4_500.0;
@@ -1377,7 +1377,7 @@ mod tests {
     /// ambient = 20°C, and node 0 at 60°C, the expected skin loss from node 0
     /// equals ua_per_node[0] × (60 − 20).
     #[test]
-    fn tank_conduction_standby_identical() {
+    fn tank_standby_ua_loss_analytic() {
         let mut tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes: 6,
             height_m: 1.2,
@@ -1463,8 +1463,8 @@ mod tests {
             * node_vol
             * 65.0;
         assert!(
-            (draw.energy_out_j - expected_energy_out).abs() < 1.0,
-            "energy_out_j: expected {expected_energy_out:.1}, got {:.1}",
+            (draw.energy_out_j - expected_energy_out).abs() < 1e-6,
+            "energy_out_j: expected {expected_energy_out:.6}, got {:.6}",
             draw.energy_out_j
         );
 
@@ -1571,9 +1571,17 @@ mod tests {
             cumulative_energy_in += draw.energy_in_j;
         }
 
-        // All final temperatures must be finite.
+        // All final temperatures must be within physical bounds.
+        // 100 steps: 50 heating steps × 4500 W × 60 s = 13_500_000 J max injection.
+        // Adiabatic tank means no losses, so upper bound is initial energy + all injected heat.
+        let max_possible_delta =
+            50.0 * element_power_w * dt.as_secs_f64() / (WATER_DENSITY_KG_PER_M3 * tank.total_volume_m3() * WATER_SPECIFIC_HEAT_J_PER_KG_K);
         for (i, &t) in tank.node_temps().iter().enumerate() {
-            assert!(t.is_finite(), "node {i} temperature is not finite after 100 steps");
+            assert!(
+                t >= mains_temp_c && t <= 55.0 + max_possible_delta,
+                "node {i} temperature {t:.4} outside physical bounds [{mains_temp_c}, {:.4}]",
+                55.0 + max_possible_delta
+            );
         }
 
         // Final profile must be monotone non-increasing.
@@ -1586,15 +1594,190 @@ mod tests {
             );
         }
 
-        // Gross energy flows must be positive (tank delivered and received heat).
-        assert!(cumulative_energy_out > 0.0, "cumulative energy_out must be positive");
-        assert!(cumulative_energy_in > 0.0, "cumulative energy_in must be positive");
-
-        // Sanity: final energy must be in a physically plausible range.
-        let energy_final = total_energy_j(&tank);
+        // 50 draw steps each remove heated tank water: cumulative_energy_out must be positive.
+        // (Each draw step has draw_vol > 0 and node temperatures > 0°C throughout.)
         assert!(
-            energy_final > 0.0 && energy_final < energy_initial * 10.0,
-            "final energy {energy_final:.0} J outside plausible range"
+            cumulative_energy_out > 0.0,
+            "cumulative energy_out must be positive, got {cumulative_energy_out:.0}"
+        );
+        // 50 draw steps each inject mains water: cumulative_energy_in is exactly ρ·V_draw·Cp·T_mains·50.
+        let expected_energy_in = WATER_DENSITY_KG_PER_M3
+            * WATER_SPECIFIC_HEAT_J_PER_KG_K
+            * draw_vol
+            * mains_temp_c
+            * 50.0;
+        assert!(
+            (cumulative_energy_in - expected_energy_in).abs() <= 1.0,
+            "cumulative energy_in {cumulative_energy_in:.0} must equal analytic {expected_energy_in:.0} ± 1 J"
+        );
+
+        // Sanity: final energy must be bounded: [0, initial + all injected heat].
+        let energy_final = total_energy_j(&tank);
+        let max_energy = energy_initial
+            + 50.0 * element_power_w * dt.as_secs_f64()
+            + 1.0;
+        assert!(
+            energy_final > 0.0 && energy_final <= max_energy,
+            "final energy {energy_final:.0} J outside plausible range [0, {max_energy:.0}]"
+        );
+    }
+
+    /// Draw 1.5 × node_volume through a 6-node tank.  This exercises the
+    /// fractional-node overlap path in `apply_draw` where the draw volume
+    /// straddles a node boundary.
+    ///
+    /// `apply_draw` shifts all content down by `draw_volume`.  New node i receives
+    /// content from source nodes whose shifted range overlaps the target range.
+    /// With equal node volumes V and draw = 1.5V, the shift map for node 0 is:
+    ///   - Old node 1 shifted to [-0.5V, 0.5V]: overlap [0, 0.5V] with node 0 → 0.5V of T1=60°C
+    ///   - Old node 2 shifted to [0.5V, 1.5V]:  overlap [0.5V, V] with node 0 → 0.5V of T2=58°C
+    ///   T_new_node0 = (0.5V×60 + 0.5V×58) / V = 59°C
+    #[test]
+    fn tank_fractional_draw_node_overlap() {
+        let mut tank = test_tank(6, 60.0);
+        {
+            let temps = tank.node_temps_c.as_mut_slice();
+            temps.copy_from_slice(&[70.0, 60.0, 58.0, 56.0, 54.0, 52.0]);
+        }
+
+        let node_vol = tank.node_volumes_m3()[0];
+        let draw_vol = 1.5 * node_vol;
+        let mains_temp_c = 10.0;
+
+        tank.step(20.0, draw_vol, mains_temp_c, &[], Duration::from_secs(60))
+            .expect("fractional draw step");
+
+        // New node 0 = (0.5V × 60°C + 0.5V × 58°C) / V = 59°C.
+        let expected_top = (0.5 * 60.0 + 0.5 * 58.0) / 1.0;
+        assert!(
+            (tank.node_temps()[0] - expected_top).abs() < 1e-9,
+            "node 0 after 1.5-node draw: expected {expected_top:.6}°C, got {}",
+            tank.node_temps()[0]
+        );
+    }
+
+    /// With nonzero conductivity and a two-node linear gradient, the inter-node
+    /// conduction heat transfer per second equals:
+    ///   Q_cond = k × A / Δx × (T_bottom − T_top)
+    /// where Δx = node_height_m = height_m / n_nodes.
+    ///
+    /// After one step of dt seconds, node 0 (top, hot) must cool by
+    ///   ΔT0 = −Q_cond × dt / (ρ·V_node·Cp)
+    /// and node 1 (bottom, cold) must warm by the same magnitude.
+    #[test]
+    fn tank_inter_node_conduction_gradient() {
+        let conductivity = 0.6_f64;
+        let mut tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 2,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 0.0,
+            conductivity_w_m_k: conductivity,
+            initial_temp_c: 50.0,
+            element_nodes: [Some(0), Some(1)],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: Some(0.0),
+        })
+        .expect("tank");
+
+        // Two-node tank: node 0 = hot top, node 1 = cold bottom.
+        let t_top = 70.0_f64;
+        let t_bot = 30.0_f64;
+        tank.node_temps_c[0] = t_top;
+        tank.node_temps_c[1] = t_bot;
+
+        let dt = Duration::from_secs(60);
+        let node_height_m = 1.2 / 2.0;
+        let cross_section_m2 = std::f64::consts::PI * (0.5_f64 / 2.0).powi(2);
+        let cond_w_per_k = conductivity * cross_section_m2 / node_height_m;
+        // Heat flows from bottom (hot side of gradient) to top? No — node 0 is top/hot,
+        // node 1 is bottom/cold.  In apply_conduction_and_standby the loop is:
+        //   heat_flow_w = cond × (old_temps[idx+1] − old_temps[idx])
+        // i.e. idx=0 → heat_flow_w = cond × (T_bot − T_top) < 0 (heat leaves node 0).
+        let heat_flow_j = cond_w_per_k * (t_bot - t_top) * dt.as_secs_f64();
+
+        // ua_w_per_k=0 and ua_end_cap_w_per_k=Some(0.0) so no skin losses.
+        // Two-node tank uses volumes [V/3, 2V/3].
+        let total_vol = std::f64::consts::PI * (0.5_f64 / 2.0).powi(2) * 1.2;
+        let vol0 = total_vol / 3.0;
+        let vol1 = 2.0 * total_vol / 3.0;
+        let mcp0 = WATER_DENSITY_KG_PER_M3 * vol0 * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let mcp1 = WATER_DENSITY_KG_PER_M3 * vol1 * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+
+        let expected_t0 = t_top + heat_flow_j / mcp0;
+        let expected_t1 = t_bot - heat_flow_j / mcp1;
+
+        tank.step(20.0, 0.0, 15.0, &[], dt).expect("conduction step");
+
+        assert!(
+            (tank.node_temps()[0] - expected_t0).abs() < 1e-9,
+            "node 0 after conduction: expected {expected_t0:.6}, got {:.6}",
+            tank.node_temps()[0]
+        );
+        assert!(
+            (tank.node_temps()[1] - expected_t1).abs() < 1e-9,
+            "node 1 after conduction: expected {expected_t1:.6}, got {:.6}",
+            tank.node_temps()[1]
+        );
+        // Hot node must cool, cold node must warm.
+        assert!(
+            tank.node_temps()[0] < t_top,
+            "top node must cool toward equilibrium, got {}",
+            tank.node_temps()[0]
+        );
+        assert!(
+            tank.node_temps()[1] > t_bot,
+            "bottom node must warm toward equilibrium, got {}",
+            tank.node_temps()[1]
+        );
+    }
+
+    /// After a large draw that injects cold mains water at the bottom, the
+    /// resulting temperature profile is inverted (bottom colder than nodes above).
+    /// `mix_inversions` must resolve this so that the profile is monotone
+    /// non-increasing (top ≥ bottom) and energy is conserved.
+    #[test]
+    fn tank_draw_triggers_inversion_mixing() {
+        let mut tank = test_tank(4, 60.0);
+        {
+            let temps = tank.node_temps_c.as_mut_slice();
+            // Uniform 60°C before the draw.
+            temps.copy_from_slice(&[60.0, 60.0, 60.0, 60.0]);
+        }
+
+        let total_vol = tank.total_volume_m3();
+        // Draw 75% of tank volume; mains = 10°C, so bottom node fills with cold water.
+        let draw_vol = total_vol * 0.75;
+        let mains_temp_c = 10.0;
+        let before_energy = total_energy_j(&tank);
+
+        tank.step(20.0, draw_vol, mains_temp_c, &[], Duration::from_secs(60))
+            .expect("large draw step");
+
+        // Profile must be monotone non-increasing after mix_inversions runs inside step().
+        for pair in tank.node_temps().windows(2) {
+            assert!(
+                pair[0] >= pair[1] - 1e-9,
+                "profile must be non-increasing after draw+mix: {:.4} < {:.4}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // Energy in the tank after the draw must reflect the cold mains injection.
+        // All temperatures must be between mains and original tank temp.
+        for (i, &t) in tank.node_temps().iter().enumerate() {
+            assert!(
+                t >= mains_temp_c - 1e-9 && t <= 60.0 + 1e-9,
+                "node {i} temperature {t:.4} outside [{mains_temp_c}, 60.0] after draw"
+            );
+        }
+
+        // Energy balance: after = before - energy_out + energy_in.
+        let after_energy = total_energy_j(&tank);
+        assert!(
+            after_energy < before_energy,
+            "tank must lose net energy after drawing hot water and replacing with mains ({mains_temp_c}°C < 60°C): before={before_energy:.0}, after={after_energy:.0}"
         );
     }
 }

@@ -766,29 +766,37 @@ mod tests {
         assert_eq!(ds.day_age, 2, "day_age should be 2 after second update_daily");
     }
 
-    /// ASTM E1049-85 §5.4.4 reference sequence validates the rainflow counter
-    /// against the standard's 9-point example.
+    /// Regression test for the HARES 3-point residue rainflow algorithm on a
+    /// 9-point SOC sequence derived from load amplitudes.
     ///
-    /// Original load amplitudes: −2, 1, −3, 5, −1, 3, −4, 4, −2.
-    /// Mapped to SOC ∈ [0, 1] via soc_i = (amp_i − (−4)) / 9:
-    ///   −4 → 0.000, −3 → 0.111, −2 → 0.222, −1 → 0.333, 1 → 0.556, 3 → 0.778,
-    ///    4 → 0.889, 5 → 1.000
-    /// Sequence (9 points):  0.222, 0.556, 0.111, 1.000, 0.333, 0.778, 0.000, 0.889, 0.222
+    /// This test validates the HARES implementation's specific output, NOT ASTM
+    /// E1049-85 standard compliance.  The 3-point algorithm processes reversals
+    /// left-to-right and extracts cycles differently from the full ASTM residue
+    /// procedure.
     ///
-    /// ASTM E1049-85 §5.4.4 Table 2 identifies the following cycles:
-    ///   Full cycles (range, count=1.0): [0.556−0.111=0.445], [1.0−0.333=0.667], [0.889−0.0=0.889]
-    ///   Half-cycles (range, count=0.5): [0.556−0.222=0.334], [0.222−0.222=0.0] (residue)
+    /// Sequence (9 SOC values): 0.222, 0.556, 0.111, 1.000, 0.333, 0.778, 0.000, 0.889, 0.222
     ///
-    /// The HARES 3-point residue method processes reversals left-to-right, extracting
-    /// cycles as they become eligible.  The sequence contains 5 total reversal pairs
-    /// that yield 2.5 cycle-weight before the residue is flushed.  This matches the
-    /// in-flight count before the algorithm terminates (half-cycles in the residue
-    /// are not flushed until reset_daily).
+    /// Tracing the algorithm step by step:
+    ///   After push(0.111): reversals=[0.222,0.556,0.111] → half-cycle extracted,
+    ///     range=0.556−0.222=0.334, count=0.5. reversals=[0.556,0.111]
+    ///   After push(1.000): reversals=[0.556,0.111,1.000] → half-cycle extracted,
+    ///     range=0.556−0.111=0.445, count=0.5. reversals=[0.111,1.000]
+    ///   After push(0.333): reversals=[0.111,1.000,0.333] → range_x=0.667 < range_y=0.889, no extraction
+    ///   After push(0.778): reversals=[0.111,1.000,0.333,0.778] → range_x=0.445 < range_y=0.667, no extraction
+    ///   After push(0.000): reversals=[0.111,1.000,0.333,0.778,0.000] → full cycle extracted,
+    ///     range=0.778−0.333=0.445, count=1.0. reversals=[0.111,1.000,0.000]
+    ///     Then: reversals=[0.111,1.000,0.000] → half-cycle extracted,
+    ///     range=1.000−0.111=0.889, count=0.5. reversals=[1.000,0.000]
+    ///   After push(0.889): no extraction (range_x < range_y)
+    ///   After push(0.222): no extraction (range_x < range_y)
     ///
-    /// Exact expected values are derived by tracing the algorithm; see the
-    /// `extract_cycles` implementation for the 3-point method specification.
+    /// Extracted cycles: (0.334,0.5), (0.445,0.5), (0.445,1.0), (0.889,0.5)
+    /// total_cycles = 0.5+0.5+1.0+0.5 = 2.5
+    ///
+    /// Exact sum_squared_dod is computed from the same f64 literals to match
+    /// floating-point arithmetic exactly.
     #[test]
-    fn rainflow_astm_reference_cycles() {
+    fn rainflow_3point_residue_regression() {
         let soc_sequence: &[f64] = &[
             0.222, 0.556, 0.111, 1.000, 0.333, 0.778, 0.000, 0.889, 0.222,
         ];
@@ -798,30 +806,24 @@ mod tests {
             rc.push(soc);
         }
 
-        // The 3-point method extracts 5 half-cycles (2.5 total weight) from this
-        // 9-point sequence before the residue.  Asserting the exact value guards
-        // against both over-counting (> 2.5) and under-counting (< 2.5) regressions.
+        // The 3-point method extracts 4 events totalling 2.5 cycle-weight.
         assert!(
             (rc.total_cycles() - 2.5).abs() < 1e-10,
-            "ASTM E1049-85 §5.4.4 sequence: expected total_cycles = 2.5, got {}",
+            "3-point residue sequence: expected total_cycles = 2.5, got {}",
             rc.total_cycles()
         );
 
-        // Every extracted cycle has a positive range so the weighted damage term
-        // must be strictly positive.
+        // Compute the exact expected sum_squared_dod from the same f64 literals,
+        // so floating-point rounding is identical to the algorithm.
+        let r1 = 0.556_f64 - 0.222_f64; // first half-cycle range
+        let r2 = 0.556_f64 - 0.111_f64; // second half-cycle range
+        let r3 = 0.778_f64 - 0.333_f64; // full cycle range
+        let r4 = 1.000_f64 - 0.111_f64; // half-cycle from residue collapse
+        let expected_sum_sq_dod = 0.5 * r1 * r1 + 0.5 * r2 * r2 + 1.0 * r3 * r3 + 0.5 * r4 * r4;
         assert!(
-            rc.sum_squared_dod_daily() > 0.0,
-            "ASTM §5.4.4 sequence must produce positive sum_squared_dod_daily, got {}",
+            (rc.sum_squared_dod_daily() - expected_sum_sq_dod).abs() < 1e-12,
+            "sum_squared_dod_daily: expected {expected_sum_sq_dod:.10}, got {:.10}",
             rc.sum_squared_dod_daily()
-        );
-
-        // The sequence spans nearly the full SOC range (0.0 to 1.0).  Average
-        // squared DOD across all extracted cycles must reflect meaningful amplitudes:
-        // sum_squared_dod / total_cycles ≥ 0.1.
-        let avg_sq_dod = rc.sum_squared_dod_daily() / rc.total_cycles();
-        assert!(
-            avg_sq_dod >= 0.1,
-            "avg squared DOD should be >= 0.1 for wide-range ASTM sequence, got {avg_sq_dod:.4}"
         );
     }
 
@@ -884,6 +886,26 @@ mod tests {
                 "day {day}: daily fade increment must be positive when cycling, got {inc:.10}"
             );
         }
+
+        // Quantitative check for day-1 fade against Smith 2017 Eq. 2 + Eq. 13.
+        //
+        // At day=1 (day_age==1, q_li1 still zero after day-0 skip):
+        //   b1_accum = B1_REF (arr=1 at T_REF, dt_day=1)
+        //   tafel = exp(ALPHA_B1 * F/R * (u_neg/T_REF − U_NEG_REF/T_REF))
+        //   dod_max_today = 0 → dod_corr = exp(GAMMA_B1 * 0^BETA_B1) = exp(0) = 1.0
+        //   b1_eff = B1_REF * tafel * 1.0
+        //   dq_li1 = b1_eff / sqrt(day_age=1) = b1_eff
+        //   dq_li2 = B2_REF * b2_accum(=1) * sqrt(sum_sq_dod=1) = B2_REF
+        //   dq_li3 = max(b3_accum − 0, 0) / TAU_B3 = 0  (B3_REF < 0)
+        //   day-1 increment = dq_li1 + dq_li2
+        let tafel_day1 = tafel_b1_factor(0.5, T_REF);
+        let b1_eff_day1 = B1_REF * tafel_day1; // dod_corr=1, arr=1, dt_day=1
+        let expected_day1_increment = b1_eff_day1 + B2_REF;
+        assert!(
+            (daily_fade[1] - expected_day1_increment).abs() < 1e-10,
+            "day-1 fade increment: expected {expected_day1_increment:.10} (Smith 2017 Eq.2+13), got {:.10}",
+            daily_fade[1]
+        );
     }
 
     /// Smith 2017: Mechanism 2 has Ea_b2 = -42800 J/mol (negative activation energy).

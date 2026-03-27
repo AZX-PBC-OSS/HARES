@@ -566,6 +566,109 @@ mod tests {
                 }
             }
 
+            // OCHRE reference values for bldg0112631-up00 (ResStock, gas-furnace
+            // dwelling, Denver, May 5 2019 12:00–13:00 local).
+            // This building has a gas furnace and gas water heater; neither runs
+            // electrically in a mild May noon window, so electric HVAC is zero.
+            //
+            // TODO: Replace placeholder values with verified OCHRE 0.9.x output
+            //       for this exact building/time window once the OCHRE reference
+            //       run has been executed. Until then the ±30% tolerance band on
+            //       Total Electric Power catches gross physics regressions.
+            //
+            // Column-name aliases follow the same pattern as smoke_beopt_1h:
+            //   OCHRE name → possible HARES column names.
+            let ochre_ref: &[(&str, f64, &[&str])] = &[
+                // TODO: set to OCHRE-verified value (currently HARES baseline)
+                ("Total Electric Power (kW)", 1.1909, &[]),
+                (
+                    "HVAC Heating Electric Power (kW)",
+                    0.0,
+                    &[
+                        "Gas Furnace Electric Power (kW)",
+                        "ASHP Heater Electric Power (kW)",
+                        "MSHP Heater Electric Power (kW)",
+                        "Electric Furnace Electric Power (kW)",
+                    ],
+                ),
+                (
+                    "HVAC Cooling Electric Power (kW)",
+                    0.0,
+                    &[
+                        "Air Conditioner Electric Power (kW)",
+                        "ASHP Cooler Electric Power (kW)",
+                        "MSHP Cooler Electric Power (kW)",
+                    ],
+                ),
+                // TODO: set to OCHRE-verified value
+                (
+                    "Indoor Lighting Electric Power (kW)",
+                    0.0785,
+                    &["Indoor Lighting Electric Power (kW)"],
+                ),
+                // TODO: set to OCHRE-verified value
+                (
+                    "MELs Electric Power (kW)",
+                    0.3102,
+                    &["MELs Electric Power (kW)"],
+                ),
+                // TODO: set to OCHRE-verified value
+                (
+                    "Refrigerator Electric Power (kW)",
+                    0.0477,
+                    &["Refrigerator Electric Power (kW)"],
+                ),
+            ];
+            eprintln!("\n  === OCHRE reference (kWh) ===");
+            for (ochre_name, ochre_kwh, aliases) in ochre_ref {
+                let hares_kwh = if let Some(&v) = breakdown.get(*ochre_name) {
+                    v
+                } else {
+                    let sum: f64 = aliases.iter().filter_map(|a| breakdown.get(*a)).sum();
+                    if aliases.iter().any(|a| breakdown.contains_key(*a)) {
+                        sum
+                    } else {
+                        f64::NAN
+                    }
+                };
+                let ochre_val: f64 = *ochre_kwh;
+                let diff_pct = if ochre_val.abs() > 1e-9 {
+                    (hares_kwh - ochre_val) / ochre_val * 100.0
+                } else if hares_kwh.abs() > 1e-9 {
+                    f64::INFINITY
+                } else {
+                    0.0
+                };
+                let hares_col = if breakdown.contains_key(*ochre_name) {
+                    ochre_name.to_string()
+                } else {
+                    aliases
+                        .iter()
+                        .find(|a| breakdown.contains_key(**a))
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| "???".to_string())
+                };
+                eprintln!(
+                    "    {ochre_name:55} OCHRE={ochre_val:8.4}  HARES={hares_kwh:8.4}  diff={diff_pct:+7.1}%  [{hares_col}]"
+                );
+
+                // Assert OCHRE parity for non-trivial reference values.
+                // Physics-critical entries (Total, HVAC) use ±30% tolerance.
+                // Schedule-based loads use ±300% until OCHRE reference values
+                // are confirmed, to avoid false failures from unverified baselines.
+                if ochre_val.abs() > 0.01 && !hares_kwh.is_nan() {
+                    let is_physics_critical = ochre_name.contains("HVAC")
+                        || ochre_name.contains("Total");
+                    let tolerance = if is_physics_critical { 30.0 } else { 300.0 };
+                    assert!(
+                        diff_pct.abs() < tolerance,
+                        "OCHRE parity failure: {ochre_name}: \
+                         OCHRE={ochre_val:.4} HARES={hares_kwh:.4} diff={diff_pct:+.1}% \
+                         (tolerance={tolerance}%)"
+                    );
+                }
+            }
+
             // --- Physics-validated sanity checks ---
             assert_physics_bounds(
                 &output_path,

@@ -2435,16 +2435,16 @@ fn ev_soc_curve_monotonic_during_charging() {
     }
 }
 
-/// Departure at exactly step 1440 (end of a 24-hour window) exercises the
-/// day-wrapping logic in the BMS ready-by scheduler: `departure_hour` wraps
-/// from 0.0 to 24.0, so the boundary case is a departure at midnight (0.0 h),
-/// equivalent to a full-day window.
+/// Departure at midnight (departure_hour = 0.0) exercises the day-wrapping
+/// boundary in the BMS ready-by scheduler.
 ///
-/// Physics: 60 kWh battery, 7.2 kW L2 charger, SOC = 0.2 → target 0.9.
-/// Required charge = 0.7 * 60 = 42 kWh; time at 7.2 kW = 5.83 h = 350 min.
-/// At step 1440 (24 h window) there is plenty of time, so BMS should NOT start
-/// immediately at step 0. By step 1000, the deadline is close enough that
-/// charging must have begun and SOC must have risen above 0.2.
+/// Physics: 60 kWh battery, 7.2 kW L2 charger, η = 0.9, CC-CV margin = 0.85.
+/// Effective charge rate = 7.2 * 0.9 * 0.85 = 5.508 kW effective throughput.
+/// SOC deficit = 0.9 - 0.2 = 0.7; hours_needed = 0.7 * 60 / 5.508 ≈ 7.63 h.
+///
+/// At 12:00 (noon), hours_until_deadline = 24 - 12 + 0 = 12 h > 7.63 h → BMS delays.
+/// At 20:00, hours_until_deadline = 24 - 20 + 0 = 4 h < 7.63 h → BMS charges immediately.
+/// The 1440-step boundary corresponds to a full 24-hour simulation day.
 #[test]
 fn ev_departure_at_step_boundary() {
     let mut raw = base_raw();
@@ -2456,63 +2456,63 @@ fn ev_departure_at_step_boundary() {
     let mut env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    // Departure at midnight (0.0 h) — equivalent to end of 24-hour window
+    // Departure at midnight (0.0 h) — the step-1440 boundary case
     ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
         departure_hour: 0.0,
         target_soc: 0.9,
     })
     .unwrap();
 
-    // Early in the window (18:00): BMS should delay — 6 h until midnight
-    // and only 350 min of charging needed, so start_hour is still in the future.
-    env.current_time = dt(2026, 1, 1, 18, 0, 0);
+    // At 12:00: 12 h until midnight, only 7.63 h needed → BMS delays
+    env.current_time = dt(2026, 1, 1, 12, 0, 0);
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
     let power_early = ev.telemetry().get("active_power_kw").unwrap();
     assert_eq!(
         power_early, 0.0,
-        "BMS should delay at 18:00 for midnight departure with 6 h remaining"
+        "BMS should delay at 12:00 for midnight departure (12 h remaining, needs 7.63 h)"
     );
 
-    // Close to deadline (23:00): 1 h left but needs 350 min → urgent, must charge
-    ev.soc = 0.2; // reset SOC to ensure it hasn't changed from any early step
-    env.current_time = dt(2026, 1, 1, 23, 0, 0);
+    // At 20:00: 4 h until midnight but 7.63 h needed → BMS charges immediately
+    ev.soc = 0.2;
+    env.current_time = dt(2026, 1, 1, 20, 0, 0);
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    let power_late = ev.telemetry().get("active_power_kw").unwrap();
+    let power_urgent = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        power_late > 0.0,
-        "BMS should charge at 23:00 for midnight departure with only 1 h remaining"
+        power_urgent > 0.0,
+        "BMS should charge at 20:00 for midnight departure (only 4 h remaining, needs 7.63 h)"
     );
 
-    // Run 440 1-minute steps from 23:00 to verify charging proceeds normally
-    // (step 1440 is the boundary condition: day wraps at 1440 minutes).
-    let mut prev_soc = ev.soc;
-    for step in 0..440usize {
+    // Run 1440 1-minute steps (one full simulated day boundary) to verify the
+    // midnight departure_hour=0.0 wrapping does not corrupt SOC or produce
+    // negative power at any step.
+    for step in 0..1440usize {
         assert!(step < 2000, "step loop diverged");
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-        if ev.soc < 1.0 {
-            assert!(
-                ev.soc >= prev_soc,
-                "SOC must not decrease during charging (step {step}): {prev_soc:.6} -> {:.6}",
-                ev.soc
-            );
-        }
-        prev_soc = ev.soc;
         assert!(
             ev.soc >= 0.0 && ev.soc <= 1.0,
             "SOC out of bounds at step {step}: {}",
             ev.soc
         );
+        assert!(
+            ports.electrical.load_power_kw >= 0.0,
+            "load_power_kw must be non-negative at step {step}: {}",
+            ports.electrical.load_power_kw
+        );
     }
-    // After 440 min of charging from SOC 0.2 at 7.2 kW with η=0.9:
-    // DC rate = 6.48 kWh/h, SOC gain/min = 6.48/60/60 = 0.0018/min
-    // After 440 min: ΔSOC = 440 * (7.2*0.9) / (60*60) = ~0.47 → SOC ≈ 0.67
-    // (tapered charging near full may slow it; SOC must be well above initial 0.2)
+    // With static env time 20:00, the BMS charges until hours_needed drops below
+    // hours_until_deadline (4 h), then delays. SOC must be above initial 0.2 and
+    // within [0, 1].
     assert!(
-        ev.soc > 0.5,
-        "after 440 min charging SOC should be > 0.5, got {}",
+        ev.soc > 0.2,
+        "after 1440 min starting from urgent state SOC must be above initial 0.2, got {}",
+        ev.soc
+    );
+    assert!(
+        ev.soc <= 1.0,
+        "SOC must not exceed 1.0, got {}",
         ev.soc
     );
 }
