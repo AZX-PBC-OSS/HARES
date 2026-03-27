@@ -167,7 +167,7 @@ struct ZoneColumnCaches {
     sorted_zone_ids: Vec<ZoneId>,
     /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones where
     /// that zone lives. Enables O(1) temperature lookup in the hot loop.
-    zone_env_indices: Vec<usize>,
+    zone_env_indices: Vec<Option<usize>>,
     /// For each entry in sorted_zone_ids, the output column index for zone temperature,
     /// or None if no temperature column exists for that zone.
     zone_temp_col_indices: Vec<Option<usize>>,
@@ -208,10 +208,7 @@ fn build_zone_column_caches(
         }
 
         // Pre-compute the index of this zone in the zones slice for O(1) hot-loop access.
-        let env_idx = zones
-            .iter()
-            .position(|z| z.id == zone_id)
-            .unwrap_or(usize::MAX);
+        let env_idx = zones.iter().position(|z| z.id == zone_id);
         zone_env_indices.push(env_idx);
     }
 
@@ -558,7 +555,7 @@ pub struct Dwelling {
     sorted_zone_ids: Vec<ZoneId>,
     /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones.
     /// Enables O(1) temperature extraction in the hot loop.
-    zone_env_indices: Vec<usize>,
+    zone_env_indices: Vec<Option<usize>>,
     /// For each entry in sorted_zone_ids, the output column index for zone temperature,
     /// or None if no temperature column exists for that zone.
     zone_temp_col_indices: Vec<Option<usize>>,
@@ -1993,11 +1990,13 @@ impl Dwelling {
         self.check_invariants(dt)?;
 
         for (i, entry) in self.zone_temp_scratch.iter_mut().enumerate() {
-            let env_idx = self.zone_env_indices[i];
-            entry.1 = if env_idx < self.latest_env.zones.len() {
+            entry.1 = if let Some(env_idx) = self.zone_env_indices[i] {
                 self.latest_env.zones[env_idx].temperature_c
             } else {
-                0.0
+                // Zone not found in environment — should not happen in a correctly
+                // built dwelling. NaN propagates visibly rather than producing
+                // a plausible-looking but incorrect 0°C.
+                f64::NAN
             };
         }
 

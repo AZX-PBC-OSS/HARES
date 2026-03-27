@@ -11,6 +11,10 @@ pub struct DepartureDeadline {
     pub schedule: Vec<DepartureConstraint>,
     pub target_soc: f64,
     pub efficiency: f64,
+    /// When time_to_departure < buffer_hours AND soc < target, force max-rate
+    /// charging regardless of price. Fires earlier than the physical-urgency
+    /// override (which only fires when there isn't enough time to charge).
+    pub buffer_hours: f64,
 }
 
 impl DepartureDeadline {
@@ -23,13 +27,20 @@ impl DepartureDeadline {
     }
 
     /// Hours needed to charge from current SOC to target at max rate.
-    fn needed_charge_hours(&self, current_soc: f64) -> f64 {
-        let soc_gap = (self.target_soc - current_soc).max(0.0);
-        let energy_kwh = soc_gap * self.capacity_kwh;
-        if self.max_charge_kw <= 0.0 || self.efficiency <= 0.0 {
+    /// Rounds up to the nearest timestep to avoid underestimating charge time.
+    fn needed_charge_hours(&self, ctx: &DecisionContext) -> f64 {
+        let soc_gap = (self.target_soc - ctx.current_soc).max(0.0);
+        let energy_kwh = soc_gap * ctx.capacity_kwh;
+        if ctx.max_charge_kw <= 0.0 || self.efficiency <= 0.0 {
             return f64::INFINITY;
         }
-        energy_kwh / (self.max_charge_kw * self.efficiency)
+        let raw_hours = energy_kwh / (ctx.max_charge_kw * self.efficiency);
+        let step_hours = ctx.time_res_minutes / 60.0;
+        if step_hours > 0.0 {
+            (raw_hours / step_hours).ceil() * step_hours
+        } else {
+            raw_hours
+        }
     }
 
     /// Minutes remaining until departure.
@@ -39,24 +50,52 @@ impl DepartureDeadline {
         let diff = dm - cm;
         if diff > 0 { diff as f64 } else { (diff + 1440) as f64 }
     }
+
+    /// Resolve departure minute: prefer the actor-provided next_departure_minute
+    /// (which accounts for today's rolled event), fall back to schedule scan.
+    fn resolve_departure(&self, ctx: &DecisionContext) -> Option<(u32, f64)> {
+        if let Some(dep_min) = ctx.next_departure_minute {
+            let dc = self.find_today(ctx)?;
+            return Some((dep_min as u32, dc.target_soc));
+        }
+        let dc = self.find_today(ctx)?;
+        Some((dc.departure_minute, dc.target_soc))
+    }
 }
 
 impl ChargingPreference for DepartureDeadline {
     fn constraint(&mut self, ctx: &DecisionContext) -> Constraint {
-        let Some(dc) = self.find_today(ctx) else {
+        let Some((departure_minute, dep_target_soc)) = self.resolve_departure(ctx) else {
             return Constraint::Inactive;
         };
 
-        let minutes_left = self.minutes_until_departure(ctx, dc.departure_minute);
+        let minutes_left = self.minutes_until_departure(ctx, departure_minute);
         let hours_left = minutes_left / 60.0;
-        let needed = self.needed_charge_hours(ctx.current_soc);
+        let needed = self.needed_charge_hours(ctx);
+
+        // Buffer window: if within buffer_hours of departure and still need
+        // charge, force max-rate charging regardless of price optimality.
+        if self.buffer_hours > 0.0
+            && hours_left <= self.buffer_hours
+            && ctx.current_soc < dep_target_soc
+        {
+            return Constraint::Override(PreferenceVote {
+                target_soc: Some(dep_target_soc),
+                power_kw: Some(ctx.max_charge_kw),
+                departure_hour: Some(departure_minute as f64 / 60.0),
+                min_soc: None,
+                max_soc: None,
+                score: 10.0,
+                label: "departure:buffer",
+            });
+        }
 
         // Safety margin: 20% buffer
         if hours_left < needed * 1.2 {
             Constraint::Override(PreferenceVote {
-                target_soc: Some(dc.target_soc),
-                power_kw: Some(self.max_charge_kw),
-                departure_hour: Some(dc.departure_minute as f64 / 60.0),
+                target_soc: Some(dep_target_soc),
+                power_kw: Some(ctx.max_charge_kw),
+                departure_hour: Some(departure_minute as f64 / 60.0),
                 min_soc: None,
                 max_soc: None,
                 score: 10.0,
@@ -68,12 +107,12 @@ impl ChargingPreference for DepartureDeadline {
     }
 
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
-        let Some(dc) = self.find_today(ctx) else {
+        let Some((departure_minute, dep_target_soc)) = self.resolve_departure(ctx) else {
             return PreferenceVote::idle("departure:no_schedule");
         };
 
-        let minutes_left = self.minutes_until_departure(ctx, dc.departure_minute);
-        let needed = self.needed_charge_hours(ctx.current_soc);
+        let minutes_left = self.minutes_until_departure(ctx, departure_minute);
+        let needed = self.needed_charge_hours(ctx);
         let total_available = minutes_left / 60.0;
 
         let urgency = if total_available > 0.0 {
@@ -83,9 +122,9 @@ impl ChargingPreference for DepartureDeadline {
         };
 
         PreferenceVote {
-            target_soc: Some(dc.target_soc),
+            target_soc: Some(dep_target_soc),
             power_kw: None,
-            departure_hour: Some(dc.departure_minute as f64 / 60.0),
+            departure_hour: Some(departure_minute as f64 / 60.0),
             min_soc: None,
             max_soc: None,
             score: urgency,
@@ -112,9 +151,8 @@ mod tests {
                 target_soc: 0.9,
             }],
             target_soc: 0.9,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
             efficiency: 0.9,
+            buffer_hours: 0.0,
         }
     }
 
@@ -196,9 +234,8 @@ mod tests {
                 target_soc: 0.9,
             }],
             target_soc: 0.9,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
             efficiency: 0.9,
+            buffer_hours: 0.0,
         };
 
         // current_minute=1400 (23:20), departure_minute=120 (02:00)
@@ -221,14 +258,178 @@ mod tests {
         let mut pref = DepartureDeadline {
             schedule: vec![], // empty schedule
             target_soc: 0.9,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
             efficiency: 0.9,
+            buffer_hours: 0.0,
         };
 
         let ctx = make_ctx(&env, 0.5, 360);
         assert!(matches!(pref.constraint(&ctx), Constraint::Inactive));
         let vote = pref.score(&ctx);
         assert_eq!(vote.label, "departure:no_schedule");
+    }
+
+    // Finding 1: buffer_hours changes charging behavior
+    #[test]
+    fn departure_buffer_changes_charging_behavior() {
+        let env = TestEnvBuilder::new().hour(4).build(); // 04:00
+
+        // Departure at 07:00, SOC 0.5 needing charge to 0.9.
+        // needed = 0.4 * 60 / (7.2 * 0.9) ≈ 3.7h, 3h available.
+        // buffer=0: only urgency check: 3h < 3.7 * 1.2 = 4.44h → Override(urgent)
+        // But let's pick a scenario where urgency does NOT fire but buffer does:
+        // SOC 0.8, target 0.9, needed = 0.1 * 60 / (7.2*0.9) ≈ 0.93h
+        // 3h > 0.93 * 1.2 = 1.11h → urgency Inactive.
+        // buffer=0: Inactive. buffer=4: 3h <= 4h AND 0.8 < 0.9 → Override(buffer).
+
+        let mut no_buffer = DepartureDeadline {
+            schedule: vec![DepartureConstraint {
+                day_filter: DayFilter::Any,
+                departure_minute: 420,
+                target_soc: 0.9,
+            }],
+            target_soc: 0.9,
+            efficiency: 0.9,
+            buffer_hours: 0.0,
+        };
+        let mut with_buffer = DepartureDeadline {
+            schedule: vec![DepartureConstraint {
+                day_filter: DayFilter::Any,
+                departure_minute: 420,
+                target_soc: 0.9,
+            }],
+            target_soc: 0.9,
+            efficiency: 0.9,
+            buffer_hours: 4.0,
+        };
+
+        // current_minute=240 (04:00), departure=420 (07:00), 180 min = 3h
+        let ctx = make_ctx(&env, 0.8, 240);
+
+        let result_no_buffer = no_buffer.constraint(&ctx);
+        let result_with_buffer = with_buffer.constraint(&ctx);
+
+        assert!(
+            matches!(result_no_buffer, Constraint::Inactive),
+            "buffer=0 should be Inactive (no urgency, no buffer)"
+        );
+        match result_with_buffer {
+            Constraint::Override(vote) => {
+                assert_eq!(vote.label, "departure:buffer");
+            }
+            Constraint::Inactive => panic!("buffer=4 should Override within buffer window"),
+        }
+    }
+
+    // Finding 2: capacity_kwh sensitivity
+    #[test]
+    fn capacity_kwh_changes_urgency_threshold() {
+        let env = TestEnvBuilder::new().hour(5).build();
+
+        // SOC gap 0.5, max_charge_kw=7.2, time_to_departure=2h (120 min)
+        // Small battery (10 kWh): needed = 0.5 * 10 / (7.2 * 0.9) ≈ 0.77h
+        //   2h > 0.77 * 1.2 = 0.93h → Inactive
+        // Large battery (100 kWh): needed = 0.5 * 100 / (7.2 * 0.9) ≈ 7.72h
+        //   2h < 7.72 * 1.2 = 9.26h → Override
+
+        let mut pref = DepartureDeadline {
+            schedule: vec![DepartureConstraint {
+                day_filter: DayFilter::Any,
+                departure_minute: 420, // 07:00
+                target_soc: 0.9,
+            }],
+            target_soc: 0.9,
+            efficiency: 0.9,
+            buffer_hours: 0.0,
+        };
+
+        // current_minute=300 (05:00), departure=420, 120 min = 2h
+        let ctx_small = DecisionContext {
+            current_soc: 0.4,
+            capacity_kwh: 10.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 5.0,
+            env: &env,
+            current_minute: 300,
+            next_departure_minute: Some(420),
+            time_res_minutes: 1.0,
+        };
+
+        let ctx_large = DecisionContext {
+            current_soc: 0.4,
+            capacity_kwh: 100.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 5.0,
+            env: &env,
+            current_minute: 300,
+            next_departure_minute: Some(420),
+            time_res_minutes: 1.0,
+        };
+
+        let result_small = pref.constraint(&ctx_small);
+        let result_large = pref.constraint(&ctx_large);
+
+        assert!(
+            matches!(result_small, Constraint::Inactive),
+            "small battery (10 kWh) should have enough time: Inactive"
+        );
+        assert!(
+            matches!(result_large, Constraint::Override(_)),
+            "large battery (100 kWh) should be urgent: Override"
+        );
+    }
+
+    // Finding 3: next_departure_minute overrides schedule
+    #[test]
+    fn next_departure_minute_overrides_schedule_minute() {
+        let env = TestEnvBuilder::new().hour(5).build();
+
+        let mut pref = DepartureDeadline {
+            schedule: vec![DepartureConstraint {
+                day_filter: DayFilter::Any,
+                departure_minute: 480, // 08:00 schedule
+                target_soc: 0.9,
+            }],
+            target_soc: 0.9,
+            efficiency: 0.9,
+            buffer_hours: 0.0,
+        };
+
+        // Context B: next_departure_minute=None, falls back to schedule 480 (08:00)
+        // 180 min to departure (3h), needed = 0.1*60/(7.2*0.9)=0.93h, 3h>1.11h → Inactive
+        let ctx_b = DecisionContext {
+            current_soc: 0.8,
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 5.0,
+            env: &env,
+            current_minute: 300,
+            next_departure_minute: None,
+            time_res_minutes: 1.0,
+        };
+
+        // Context A with same SOC=0.8: next_departure=360, 60 min left, needed=0.93h
+        // 1h < 0.93 * 1.2 = 1.11h → Override
+        let ctx_a_high_soc = DecisionContext {
+            current_soc: 0.8,
+            capacity_kwh: 60.0,
+            max_charge_kw: 7.2,
+            max_discharge_kw: 5.0,
+            env: &env,
+            current_minute: 300,
+            next_departure_minute: Some(360),
+            time_res_minutes: 1.0,
+        };
+
+        let result_a = pref.constraint(&ctx_a_high_soc);
+        let result_b = pref.constraint(&ctx_b);
+
+        assert!(
+            matches!(result_a, Constraint::Override(_)),
+            "next_departure_minute=360 (1h away) should trigger urgency Override"
+        );
+        assert!(
+            matches!(result_b, Constraint::Inactive),
+            "fallback to schedule minute=480 (3h away) should be Inactive"
+        );
     }
 }

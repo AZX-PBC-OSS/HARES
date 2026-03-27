@@ -219,6 +219,11 @@ impl BillingState {
         apply_ratchet(self.peak_demand_kw, &self.prior_peaks_kw, &self.ratchet_config)
     }
 
+    /// Coincident peak with a caller-supplied ratchet (used per demand rate).
+    pub fn effective_peak_with_ratchet(&self, ratchet: &Option<RatchetConfig>) -> f64 {
+        apply_ratchet(self.peak_demand_kw, &self.prior_peaks_kw, ratchet)
+    }
+
     pub fn peak_for_period(&self, period_idx: u16) -> f64 {
         self.period_peak_demand_kw
             .get(period_idx as usize)

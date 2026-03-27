@@ -71,7 +71,6 @@ enum DriverPhase {
 /// Build the preference stack for a given charging strategy.
 fn build_preferences(
     strategy: &ChargingStrategy,
-    capacity_kwh: f64,
     max_charge_kw: f64,
     efficiency: f64,
     price_schedule: Option<Arc<[f64]>>,
@@ -121,9 +120,8 @@ fn build_preferences(
                 Box::new(DepartureDeadline {
                     schedule: departure_schedule.clone(),
                     target_soc: *target_soc,
-                    capacity_kwh,
-                    max_charge_kw,
                     efficiency,
+                    buffer_hours: 0.0,
                 }),
                 Box::new(SocTarget {
                     target_soc: *target_soc,
@@ -133,7 +131,7 @@ fn build_preferences(
         ChargingStrategy::TouAware {
             target_soc,
             departure_schedule,
-            ..
+            charge_buffer_hours,
         } => {
             vec![
                 Box::new(PriceOptimizer::new(
@@ -145,9 +143,8 @@ fn build_preferences(
                 Box::new(DepartureDeadline {
                     schedule: departure_schedule.clone(),
                     target_soc: *target_soc,
-                    capacity_kwh,
-                    max_charge_kw,
                     efficiency,
+                    buffer_hours: *charge_buffer_hours,
                 }),
                 Box::new(SocTarget {
                     target_soc: *target_soc,
@@ -165,9 +162,8 @@ fn build_preferences(
                 Box::new(DepartureDeadline {
                     schedule: departure_schedule.clone(),
                     target_soc: 1.0,
-                    capacity_kwh,
-                    max_charge_kw,
                     efficiency,
+                    buffer_hours: 0.0,
                 }),
             ]
         }
@@ -273,7 +269,6 @@ impl EvDriverActor {
     ) -> Self {
         let prefs = build_preferences(
             &strategy,
-            capacity_kwh,
             max_charge_kw,
             0.9, // charging efficiency for energy calc
             None,
@@ -314,7 +309,6 @@ impl EvDriverActor {
         let target = self.target_name().to_owned();
         let prefs = build_preferences(
             &self.strategy,
-            self.capacity_kwh,
             self.max_charge_kw,
             0.9,
             Some(schedule),
@@ -322,6 +316,11 @@ impl EvDriverActor {
         );
         self.composer = ChargingComposer::new(prefs, &target);
         self
+    }
+
+    /// Returns the last charging action taken by the composer (for telemetry).
+    pub fn last_action(&self) -> &str {
+        self.composer.last_action()
     }
 
     /// Returns the target equipment name.
@@ -451,6 +450,12 @@ impl EvDriverActor {
             time_res_minutes: self.time_res_minutes,
         };
         self.composer.evaluate(&ctx, out);
+
+        tracing::trace!(
+            actor = %self.name,
+            last_action = self.composer.last_action(),
+            "ev charging decision",
+        );
     }
 }
 
@@ -460,7 +465,9 @@ impl Actor for EvDriverActor {
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
-        self.time_res_minutes = env.time_res.num_seconds() as f64 / 60.0;
+        let res_seconds = env.time_res.num_seconds();
+        debug_assert!(res_seconds >= 1, "time_res must be >= 1 second");
+        self.time_res_minutes = (res_seconds.max(1) as f64) / 60.0;
         self.maybe_roll_daily_event(env);
 
         let event = match self.todays_event {
@@ -2192,6 +2199,238 @@ mod tests {
         assert!(
             has_soc_target,
             "Immediate at target SOC should still emit SOCTarget (equipment handles no-op), got: {out:?}"
+        );
+    }
+
+    // ======= Test gap audit findings =======
+
+    // Finding 5: build_preferences never directly asserted
+    #[test]
+    fn build_preferences_tou_aware_installs_three_preferences() {
+        let prefs = build_preferences(
+            &ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![],
+                charge_buffer_hours: 2.0,
+            },
+            7.2,
+            0.9,
+            None,
+            24,
+        );
+        assert_eq!(prefs.len(), 3, "TouAware should install 3 preferences (PriceOptimizer + DepartureDeadline + SocTarget)");
+    }
+
+    #[test]
+    fn build_preferences_immediate_installs_one() {
+        let prefs = build_preferences(
+            &ChargingStrategy::Immediate { target_soc: 0.9 },
+            7.2,
+            0.9,
+            None,
+            24,
+        );
+        assert_eq!(prefs.len(), 1, "Immediate should install 1 preference (SocTarget)");
+    }
+
+    #[test]
+    fn build_preferences_solar_surplus_installs_two() {
+        let prefs = build_preferences(
+            &ChargingStrategy::SolarSurplus {
+                min_charge_rate_kw: 1.0,
+                departure_schedule: vec![],
+            },
+            7.2,
+            0.9,
+            None,
+            24,
+        );
+        assert_eq!(prefs.len(), 2, "SolarSurplus should install 2 preferences (SolarTracking + DepartureDeadline)");
+    }
+
+    // Finding 6: evaluate_charging path not proven
+    #[test]
+    fn evaluate_charging_updates_last_action() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            0.5,
+        );
+
+        let out = plugged_in_step(&mut actor, 19 * 60);
+        assert!(
+            !out.is_empty(),
+            "plugged-in actor with SOC<target should emit signal"
+        );
+        let action1 = actor.last_action().to_owned();
+        assert!(
+            action1.starts_with("resolved:") || action1.starts_with("override:"),
+            "last_action should start with resolved: or override:, got: {action1}"
+        );
+
+        // Step again at different SOC
+        actor.estimated_soc = 0.95;
+        let _out2 = plugged_in_step(&mut actor, 19 * 60 + 1);
+        let action2 = actor.last_action().to_owned();
+        assert!(
+            !action2.is_empty(),
+            "last_action should be set after second step"
+        );
+    }
+
+    // Finding 7: Departure override label not pinned
+    #[test]
+    fn ev_tou_with_departure_deadline_override_label_pinned() {
+        use hares_types::{DayFilter, DepartureConstraint};
+
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.02).collect();
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![DepartureConstraint {
+                    day_filter: DayFilter::Any,
+                    departure_minute: 7 * 60,
+                    target_soc: 0.9,
+                }],
+                charge_buffer_hours: 2.0,
+            },
+            0.3,
+        );
+        actor = actor.with_price_schedule(prices.into(), 24);
+        actor.estimated_soc = 0.3;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        let mut env = env_at_minute(6 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(0.40),
+            ..Default::default()
+        };
+        let _out = plugged_in_step_with_env(&mut actor, &env);
+
+        assert!(
+            actor.last_action().contains("override") || actor.last_action().contains("departure"),
+            "expected departure override path, got: {}",
+            actor.last_action()
+        );
+    }
+
+    // Finding 8: SocTarget score-driven priority
+    #[test]
+    fn tou_neutral_price_soc_target_drives_charging() {
+        // Neutral price (between charge and discharge thresholds), no departure
+        // pressure. Only SocTarget provides a non-zero score. SOC level drives
+        // whether a charging signal is emitted.
+        // Spread prices 0..0.23 → charge_threshold(25th)≈0.06, discharge_threshold(75th)≈0.17
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();
+
+        // Low SOC: gap = 0.9 - 0.4 = 0.5 → SocTarget scores 0.5 → emits SOCTarget(0.9)
+        let mut actor_low = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![],
+                charge_buffer_hours: 0.0,
+            },
+            0.4,
+        );
+        actor_low = actor_low.with_price_schedule(prices.clone().into(), 24);
+        actor_low.estimated_soc = 0.4;
+        actor_low.phase = DriverPhase::HomePluggedIn;
+
+        // High SOC: gap = 0.9 - 0.95 = 0.0 → SocTarget scores 0 → idle-ish
+        let mut actor_high = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![],
+                charge_buffer_hours: 0.0,
+            },
+            0.95,
+        );
+        actor_high = actor_high.with_price_schedule(prices.into(), 24);
+        actor_high.estimated_soc = 0.95;
+        actor_high.phase = DriverPhase::HomePluggedIn;
+
+        // Price 0.10: between 0.06 (charge threshold) and 0.17 (discharge threshold) → neutral
+        let mut env = env_at_minute(12 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(0.10),
+            ..Default::default()
+        };
+
+        let out_low = plugged_in_step_with_env(&mut actor_low, &env);
+        let _out_high = plugged_in_step_with_env(&mut actor_high, &env);
+
+        // Low SOC: SocTarget(0.5 score) wins → SOCTarget(0.9)
+        let has_soc_target = out_low.iter().any(|r| {
+            matches!(r.signal, ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 0.01)
+        });
+        assert!(
+            has_soc_target,
+            "low SOC (0.4) with neutral price should emit SOCTarget(0.9), got: {out_low:?}"
+        );
+
+        // High SOC: all scores are 0, so the resolved label is soc_target with
+        // target_soc=0.9 and score=0. Equipment handles the no-op.
+        // The key: low SOC produces a meaningful charging signal (score > 0).
+        let action_low = actor_low.last_action();
+        assert!(
+            action_low.contains("soc_target"),
+            "at neutral price, SocTarget should drive the resolved action, got: {action_low}"
+        );
+    }
+
+    // Finding 1 (integration): TouAware buffer_hours forces charge
+    #[test]
+    fn ev_tou_aware_buffer_hours_forces_charge() {
+        use hares_types::{DayFilter, DepartureConstraint};
+
+        // Expensive price, departure 5h away. Without buffer, price optimizer
+        // would push toward discharge/neutral. With buffer=6, departure:buffer fires.
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.03).collect();
+
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::TouAware {
+                target_soc: 0.9,
+                departure_schedule: vec![DepartureConstraint {
+                    day_filter: DayFilter::Any,
+                    departure_minute: 7 * 60, // 07:00
+                    target_soc: 0.9,
+                }],
+                charge_buffer_hours: 6.0,
+            },
+            0.5,
+        );
+        actor = actor.with_price_schedule(prices.into(), 24);
+        actor.estimated_soc = 0.5;
+        actor.phase = DriverPhase::HomePluggedIn;
+
+        // At 02:00, 5 hours until departure. buffer_hours=6 > 5h → buffer fires.
+        // SOC=0.5 < target=0.9 → Override(departure:buffer)
+        let mut env = env_at_minute(2 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(0.50), // expensive
+            ..Default::default()
+        };
+        let out = plugged_in_step_with_env(&mut actor, &env);
+
+        let has_positive_charge = out.iter().any(|r| {
+            matches!(
+                r.signal,
+                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+            ) || matches!(
+                r.signal,
+                ControlSignal::EvSetReadyBy { .. }
+            ) || matches!(
+                r.signal,
+                ControlSignal::SOCTarget { target_soc, .. } if target_soc >= 0.9
+            )
+        });
+        assert!(
+            has_positive_charge,
+            "buffer_hours=6 should force charging despite expensive price, got: {out:?}"
+        );
+        assert!(
+            actor.last_action().contains("departure") && actor.last_action().contains("buffer"),
+            "last_action should indicate departure buffer override, got: {}",
+            actor.last_action()
         );
     }
 }

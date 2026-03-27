@@ -220,6 +220,14 @@ pub struct ElectricTariff {
     pub minimum_charge: Option<f64>,
     pub billing_cycle: BillingCycle,
     pub seasonal_split: Option<SeasonalSplit>,
+    /// Demand averaging window in minutes. Defaults to 15 (standard US FERC/NERC).
+    /// Some utilities use 30 (LADWP commercial) or 5.
+    #[serde(default = "default_demand_window_minutes")]
+    pub demand_window_minutes: u32,
+}
+
+fn default_demand_window_minutes() -> u32 {
+    15
 }
 
 impl ElectricTariff {
@@ -257,6 +265,12 @@ impl ElectricTariff {
         }
         if let Some(ss) = &self.seasonal_split {
             ss.validate()?;
+        }
+        if self.demand_window_minutes != 0 && self.demand_window_minutes < 5 {
+            return Err(HaresError::Tariff(format!(
+                "demand_window_minutes must be >= 5 or 0 (default 15), got {}",
+                self.demand_window_minutes
+            )));
         }
         let tou_names: Vec<&str> = self.tou_schedule.iter().map(|p| p.name.as_str()).collect();
         for er in &self.energy_rates {
@@ -433,6 +447,7 @@ mod tests {
             billing_cycle: BillingCycle::Monthly,
             seasonal_split: Some(SeasonalSplit::new(6, 9).unwrap()),
             demand_tou_schedule: Vec::new(),
+            demand_window_minutes: 15,
         };
 
         let json = serde_json::to_string(&tariff).unwrap();

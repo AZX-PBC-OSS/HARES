@@ -29,7 +29,6 @@ impl ChargingComposer {
         }
     }
 
-    #[allow(dead_code)] // TARIFF-011: used for preference telemetry
     pub fn last_action(&self) -> &str {
         &self.last_action
     }
@@ -51,6 +50,8 @@ impl ChargingComposer {
             if let Constraint::Override(vote) = pref.constraint(ctx) {
                 self.last_action.clear();
                 self.last_action.push_str("override:");
+                self.last_action.push_str(pref.name());
+                self.last_action.push(':');
                 self.last_action.push_str(vote.label);
                 self.emit_vote(&vote, out);
                 return;
@@ -60,7 +61,9 @@ impl ChargingComposer {
         // Collect scored votes
         self.scratch.clear();
         for pref in &mut self.preferences {
-            self.scratch.push(pref.score(ctx));
+            let vote = pref.score(ctx);
+            tracing::trace!(preference = pref.name(), score = vote.score, label = vote.label, "preference scored");
+            self.scratch.push(vote);
         }
 
         if self.scratch.is_empty() {

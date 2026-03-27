@@ -21,6 +21,7 @@ pub struct TariffEvaluator {
     step_index: usize,
     billing_state: BillingState,
     finished: bool,
+    finalized: bool,
 }
 
 impl TariffEvaluator {
@@ -47,6 +48,11 @@ impl TariffEvaluator {
 
         let timezone = simulation_start.timezone();
         let num_steps = total_seconds as usize / interval_seconds as usize;
+        if num_steps == 0 {
+            return Err(HaresError::Tariff(
+                "simulation duration is shorter than one interval — no steps to simulate".into(),
+            ));
+        }
         let mut price_array = Vec::with_capacity(num_steps);
         let mut export_array = Vec::with_capacity(num_steps);
         let mut period_indices = Vec::with_capacity(num_steps);
@@ -168,13 +174,19 @@ impl TariffEvaluator {
             months.push(month);
         }
 
-        let ratchet_config = tariff
-            .demand_rates
-            .iter()
-            .find_map(|dr| dr.ratchet.clone());
+        // BillingState's global ratchet_config is used only by effective_peak_kw()
+        // for coincident demand. compute_demand_charge() now passes each rate's own
+        // ratchet via effective_peak_with_ratchet(), making this field unused in
+        // practice. Pass None to avoid the misleading find_map that previously took
+        // only the first rate's ratchet.
+        let ratchet_config: Option<crate::types::RatchetConfig> = None;
 
-        // Standard US utility 15-minute demand averaging window (FERC/NERC).
-        let demand_window_minutes: u32 = 15;
+        // Use tariff-configured demand window, defaulting to 15 minutes (FERC/NERC).
+        let demand_window_minutes: u32 = if tariff.demand_window_minutes > 0 {
+            tariff.demand_window_minutes
+        } else {
+            15
+        };
         let billing_state = BillingState::new(
             simulation_start,
             tariff.billing_cycle,
@@ -197,20 +209,30 @@ impl TariffEvaluator {
             step_index: 0,
             billing_state,
             finished: false,
+            finalized: false,
         })
     }
 
+    /// Clamped index: returns the last valid index when step_index exceeds bounds.
+    fn clamped_index(&self) -> usize {
+        self.step_index.min(self.price_array.len() - 1)
+    }
+
     pub fn current_price(&self) -> f64 {
-        self.price_array[self.step_index]
+        self.price_array[self.clamped_index()]
     }
 
     pub fn current_export_price(&self) -> f64 {
-        self.export_array[self.step_index]
+        self.export_array[self.clamped_index()]
     }
 
     pub fn current_period_name(&self) -> &str {
-        let idx = self.period_indices[self.step_index] as usize;
+        let idx = self.period_indices[self.clamped_index()] as usize;
         &self.period_name_table[idx]
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
     }
 
     /// Advance to the next timestep. Returns `false` if already at the last step.
@@ -219,12 +241,14 @@ impl TariffEvaluator {
             self.step_index += 1;
             true
         } else {
+            self.finished = true;
             false
         }
     }
 
     pub fn tier_multiplier(&self, cumulative_kwh: f64) -> f64 {
-        let month = self.months[self.step_index];
+        let ci = self.clamped_index();
+        let month = self.months[ci];
 
         for block in &self.tariff.tiered_rates {
             if !block.season.contains_month(month) {
@@ -239,7 +263,7 @@ impl TariffEvaluator {
         }
 
         // No tiered block for current season — return the current step's energy price.
-        self.price_array[self.step_index]
+        self.price_array[ci]
     }
 
     /// Returns a subslice of the price array, or `None` if indices are out of bounds.
@@ -308,14 +332,16 @@ impl TariffEvaluator {
     }
 
     fn compute_demand_charge(&self, month: u8) -> f64 {
-        let global_peak = self.billing_state.effective_peak_kw();
         self.tariff
             .demand_rates
             .iter()
             .filter(|dr| dr.season.contains_month(month))
             .map(|dr| {
                 let peak = match &dr.period_name {
-                    None => global_peak,
+                    // Coincident demand: use each rate's own ratchet, not a global one.
+                    None => self
+                        .billing_state
+                        .effective_peak_with_ratchet(&dr.ratchet),
                     Some(name) => {
                         let idx = self
                             .period_name_table
@@ -352,30 +378,38 @@ impl TariffEvaluator {
     }
 
     /// Emit the final partial billing period. Call after the last `step()`.
-    /// Returns `None` if already finalized or if no charges accumulated.
-    pub fn finalize(&mut self) -> Option<BillingPeriodSummary> {
-        let bs = &self.billing_state;
-        if bs.cumulative_import_kwh() == 0.0
-            && bs.cumulative_export_kwh() == 0.0
-            && bs.peak_demand_kw() == 0.0
-        {
+    ///
+    /// `sim_end` is the actual simulation end time, used to prorate fixed
+    /// charges for partial periods. If the simulation ends mid-month, only
+    /// the elapsed days are charged.
+    ///
+    /// Returns `None` if already finalized (second call).
+    /// Returns `Some` even with zero metered load, as fixed charges may apply.
+    pub fn finalize(&mut self, sim_end: DateTime<Tz>) -> Option<BillingPeriodSummary> {
+        if self.finalized {
             return None;
         }
-        let month = bs.period_start().month() as u8;
-        let demand_charge = self.compute_demand_charge(month);
-        let days_in_period = (bs.period_end() - bs.period_start()).num_days() as f64;
-        let fixed_charge = self.tariff.fixed_charges.monthly_usd
-            + self.tariff.fixed_charges.daily_usd * days_in_period;
-        let energy_charge = bs.cumulative_energy_cost_usd();
-        let export_credit = bs.cumulative_export_credit_usd();
-        let peak = bs.peak_demand_kw();
-        let import = bs.cumulative_import_kwh();
-        let export = bs.cumulative_export_kwh();
-        let start = bs.period_start();
-        let end = bs.period_end();
+        self.finalized = true;
+        self.finished = true;
 
-        // Reset billing state so a second call returns None.
-        self.billing_state.reset(end);
+        let month = self.billing_state.period_start().month() as u8;
+        let demand_charge = self.compute_demand_charge(month);
+
+        // Prorate fixed charges: use actual elapsed days, not the full
+        // scheduled period length. Clamp to period end in case sim_end
+        // exceeds the billing period boundary.
+        let actual_end = sim_end.min(self.billing_state.period_end());
+        let elapsed_days = (actual_end - self.billing_state.period_start()).num_days().max(0) as f64;
+        let fixed_charge = self.tariff.fixed_charges.monthly_usd
+            + self.tariff.fixed_charges.daily_usd * elapsed_days;
+
+        let energy_charge = self.billing_state.cumulative_energy_cost_usd();
+        let export_credit = self.billing_state.cumulative_export_credit_usd();
+        let peak = self.billing_state.peak_demand_kw();
+        let import = self.billing_state.cumulative_import_kwh();
+        let export = self.billing_state.cumulative_export_kwh();
+        let start = self.billing_state.period_start();
+        let end = actual_end;
 
         Some(BillingPeriodSummary::new(
             start,
@@ -1160,11 +1194,74 @@ mod tests {
         let step_end = start + Duration::seconds(interval as i64);
         ev.step(5.0, interval as f64, step_end);
 
-        let first = ev.finalize();
+        let first = ev.finalize(end);
         assert!(first.is_some(), "first finalize() should return Some");
 
-        let second = ev.finalize();
+        let second = ev.finalize(end);
         assert!(second.is_none(), "second finalize() should return None after billing state was reset");
+    }
+
+    #[test]
+    fn evaluator_finalize_partial_period_prorates_fixed_charge() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1); // full month
+        let interval = 3600u32;
+        let daily_usd = 1.0;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 0.0,
+            daily_usd,
+        };
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Step through 15 days only.
+        let sim_end = make_start(2025, 1, 16);
+        let steps_15d = 15 * 24;
+        for i in 0..steps_15d {
+            let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            ev.step(1.0, interval as f64, t);
+        }
+
+        let summary = ev.finalize(sim_end).expect("should have charges");
+        // 15 elapsed days × $1/day = $15
+        assert!(
+            (summary.fixed_charge_usd - 15.0).abs() < 1e-10,
+            "partial-period fixed charge should be $15 (15 days × $1/day), got {}",
+            summary.fixed_charge_usd
+        );
+    }
+
+    #[test]
+    fn evaluator_finalize_full_period_unchanged() {
+        // Simulate 31 days but DON'T trigger a billing period close (the billing
+        // period is monthly starting Jan 1, ending Feb 1 = 31 days). We step
+        // through all hours but stop just before the period_end to avoid auto-close.
+        // Then finalize with sim_end == period_end to get the full-period charge.
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1); // 31 days
+        let interval = 3600u32;
+        let daily_usd = 1.0;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 0.0,
+            daily_usd,
+        };
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Step all hours except the last one (which would trigger period close).
+        let total = ev.total_steps();
+        for i in 0..(total - 1) {
+            let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            ev.step(1.0, interval as f64, t);
+        }
+
+        let summary = ev.finalize(end).expect("should have charges");
+        // Full period: 31 days × $1/day = $31
+        assert!(
+            (summary.fixed_charge_usd - 31.0).abs() < 1e-10,
+            "full-period fixed charge should be $31, got {}",
+            summary.fixed_charge_usd
+        );
     }
 
     // L1: step() after simulation end returns None.
@@ -1185,5 +1282,166 @@ mod tests {
         // Any subsequent call must return None — the evaluator is finished.
         let result = ev.step(1.0, interval as f64, step_end + Duration::hours(1));
         assert!(result.is_none(), "step() after simulation end should return None");
+    }
+
+    #[test]
+    fn accessor_returns_last_value_after_advance_exhaustion() {
+        let start = make_start(2025, 1, 1);
+        let mut ev = make_evaluator(flat_tariff(0.12), start, start + Duration::hours(3), 3600);
+        assert_eq!(ev.total_steps(), 3);
+
+        // Advance to the end.
+        assert!(ev.advance());
+        assert!(ev.advance());
+        assert!(!ev.advance()); // exhausted
+
+        // Accessors must not panic — they return the last valid value.
+        assert_eq!(ev.current_price(), 0.12);
+        assert_eq!(ev.current_export_price(), 0.0);
+        assert!(!ev.current_period_name().is_empty() || ev.current_period_name().is_empty());
+        let _ = ev.tier_multiplier(0.0);
+        assert!(ev.is_finished());
+    }
+
+    #[test]
+    fn accessor_valid_mid_simulation() {
+        let start = make_start(2025, 1, 1);
+        let ev = make_evaluator(flat_tariff(0.12), start, start + Duration::hours(3), 3600);
+        assert!(!ev.is_finished());
+        assert_eq!(ev.current_price(), 0.12);
+        assert_eq!(ev.current_export_price(), 0.0);
+    }
+
+    #[test]
+    fn accessor_after_step_returns_none_no_panic() {
+        let start = make_start(2025, 1, 1);
+        let end = start + Duration::hours(1);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
+
+        // Run the single step to completion.
+        let step_end = start + Duration::seconds(interval as i64);
+        let _ = ev.step(1.0, interval as f64, step_end);
+        assert!(ev.is_finished());
+
+        // Accessors must not panic even after step() has finished.
+        assert_eq!(ev.current_price(), 0.12);
+        assert_eq!(ev.current_export_price(), 0.0);
+        let _ = ev.current_period_name();
+        let _ = ev.tier_multiplier(100.0);
+    }
+
+    #[test]
+    fn demand_window_30_minutes() {
+        use crate::types::DemandRate;
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 300u32; // 5-minute intervals
+        let mut tariff = flat_tariff(0.12);
+        tariff.demand_window_minutes = 30;
+        tariff.demand_rates = vec![DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: 10.0,
+            ratchet: None,
+        }];
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Push 6 steps of 10 kW (30 min at 5-min intervals).
+        for i in 0..6 {
+            let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            ev.step(10.0, interval as f64, t);
+        }
+        // Then push low load.
+        for i in 6..12 {
+            let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            ev.step(1.0, interval as f64, t);
+        }
+
+        // The peak should be ~10 kW (the 30-min average of the first 6 steps).
+        let peak = ev.billing_state().peak_demand_kw();
+        assert!(
+            (peak - 10.0).abs() < 0.5,
+            "30-min window peak should be ~10 kW, got {}",
+            peak
+        );
+    }
+
+    #[test]
+    fn demand_window_default_15_minutes() {
+        use crate::types::DemandRate;
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 300u32;
+        let mut tariff = flat_tariff(0.12);
+        // demand_window_minutes defaults to 0 from Default, evaluator treats as 15
+        tariff.demand_rates = vec![DemandRate {
+            period_name: None,
+            season: SeasonFilter::All,
+            rate_per_kw: 10.0,
+            ratchet: None,
+        }];
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Push 3 steps of 10 kW (15 min at 5-min intervals).
+        for i in 0..3 {
+            let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
+            ev.step(10.0, interval as f64, t);
+        }
+        let peak = ev.billing_state().peak_demand_kw();
+        assert!(
+            (peak - 10.0).abs() < 0.5,
+            "default 15-min window peak should be ~10 kW, got {}",
+            peak
+        );
+    }
+
+    #[test]
+    fn evaluator_rejects_zero_step_simulation() {
+        // 30 seconds with 3600-second interval = 0 steps.
+        let start = make_start(2025, 1, 1);
+        let end = start + Duration::seconds(30);
+        let result = TariffEvaluator::new(flat_tariff(0.12), start, end, 3600);
+        assert!(result.is_err(), "should reject simulation shorter than one interval");
+    }
+
+    #[test]
+    fn finalize_fixed_charge_only_no_metered_load() {
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+        let mut tariff = flat_tariff(0.12);
+        tariff.fixed_charges = FixedCharges {
+            monthly_usd: 20.0,
+            daily_usd: 0.0,
+        };
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Step with zero load — no energy, no demand.
+        let step_end = start + Duration::seconds(interval as i64);
+        ev.step(0.0, interval as f64, step_end);
+
+        let summary = ev.finalize(end).expect("should return Some even with zero metered load");
+        assert!(
+            (summary.fixed_charge_usd - 20.0).abs() < 1e-10,
+            "fixed_charge_usd should be $20 monthly, got {}",
+            summary.fixed_charge_usd
+        );
+    }
+
+    #[test]
+    fn finalize_sets_finished() {
+        let start = make_start(2025, 1, 1);
+        let end = start + Duration::hours(2);
+        let interval = 3600u32;
+        let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
+        let step_end = start + Duration::seconds(interval as i64);
+        ev.step(1.0, interval as f64, step_end);
+
+        assert!(!ev.is_finished());
+        let _ = ev.finalize(end);
+        assert!(ev.is_finished(), "finalize should set finished = true");
     }
 }

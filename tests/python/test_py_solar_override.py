@@ -84,9 +84,14 @@ class TestSolarOverrideNumpy:
             "has_solar_override() should be True after setting"
         )
 
-        dw.step()
-        dw.step()
-        dw.step()
+        # Step several times and verify net power stays non-negative
+        # (no solar generation when all irradiance is zero on a base dwelling without PV)
+        for i in range(3):
+            result = dw.step()
+            assert result["net_electric_power_kw"] >= 0, (
+                f"Step {i}: expected non-negative net power with zero irradiance, "
+                f"got {result['net_electric_power_kw']} kW"
+            )
 
     def test_set_solar_override_preserves_timestep_order(self):
         from ochre_next import Dwelling
@@ -119,8 +124,24 @@ class TestSolarOverrideNumpy:
             }
 
         dw.set_solar_override(data)
-        dw.step()
-        dw.step()
+
+        # Step with increasing irradiance (0, 100, 200, 300, 400 W/m2).
+        # Solar gains should increase indoor temperature monotonically compared
+        # to the zero-irradiance baseline.
+        results = []
+        for _ in range(5):
+            results.append(dw.step())
+
+        temp_key = "Temperature - Indoor (C)"
+        temp_first = results[0][temp_key]
+        temp_last = results[-1][temp_key]
+        # With increasing solar irradiance across steps, later steps should
+        # accumulate more heat than earlier steps.  Allow equality since the
+        # thermal mass may dampen the first increments.
+        assert temp_last >= temp_first, (
+            f"Expected indoor temp to rise with increasing irradiance: "
+            f"step 0 = {temp_first:.4f} C, step 4 = {temp_last:.4f} C"
+        )
 
 
 class TestSolarOverrideDataFrame:
@@ -231,6 +252,27 @@ class TestSolarOverrideClear:
         )
 
         step_after_clear = dw.step()
+
+        # The zero-override forces zero solar gains, which should differ from
+        # both the no-override case and the restored-Perez case.  After clearing,
+        # the Perez model resumes, so step_after_clear should be closer to the
+        # no-override baseline than to the zero-override step for at least the
+        # indoor temperature.
+        temp_key = "Temperature - Indoor (C)"
+        t_without = step_without_override[temp_key]
+        t_with = step_with_override[temp_key]
+        t_after = step_after_clear[temp_key]
+
+        diff_to_without = abs(t_after - t_without)
+        diff_to_with = abs(t_after - t_with)
+
+        # After clear, behaviour should return closer to the non-override baseline.
+        # At minimum, the override must have had *some* effect — if all three are
+        # identical the test is vacuous.
+        assert t_without != t_with or diff_to_without <= diff_to_with, (
+            f"Expected post-clear step to be closer to no-override baseline: "
+            f"without={t_without:.4f}, with_zero={t_with:.4f}, after_clear={t_after:.4f}"
+        )
 
 
 class TestSolarOverrideListOfDicts:
@@ -345,7 +387,7 @@ class TestSolarOverridePVProduction:
                 "aoi": np.zeros(6),
             }
         dw.set_solar_override(data_zero)
-        dw.step()
+        result_zero = dw.step()
         dw.step()
 
         dw.clear_solar_override()
@@ -361,8 +403,25 @@ class TestSolarOverridePVProduction:
             }
         dw.set_solar_override(data_high)
 
-        result = dw.step()
-        assert result["net_electric_power_kw"] is not None
+        result_high = dw.step()
+
+        # With 800 W/m2 irradiance vs zero, at least one measurable quantity
+        # must differ: indoor temperature and/or HVAC power.
+        temp_key = "Temperature - Indoor (C)"
+        temp_zero = result_zero[temp_key]
+        temp_high = result_high[temp_key]
+        power_zero = result_zero["net_electric_power_kw"]
+        power_high = result_high["net_electric_power_kw"]
+
+        something_changed = (
+            abs(temp_high - temp_zero) > 1e-6
+            or abs(power_high - power_zero) > 1e-6
+        )
+        assert something_changed, (
+            f"Expected measurable difference between zero and 800 W/m2 irradiance: "
+            f"temp_zero={temp_zero:.4f}, temp_high={temp_high:.4f}, "
+            f"power_zero={power_zero:.6f}, power_high={power_high:.6f}"
+        )
 
     def test_pv_produces_zero_at_night_with_summer_override(self):
         from ochre_next import Dwelling

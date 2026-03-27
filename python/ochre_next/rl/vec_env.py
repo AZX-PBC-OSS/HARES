@@ -139,7 +139,10 @@ class VecDwellingGymEnv:
             self._apply_controls(dwelling, arr[idx])
 
         if rust_batch_step is not None:
-            raw = rust_batch_step(self._dwellings, arr.tolist(), self._observation_fields)
+            # Controls are already applied via _apply_controls above.
+            # Pass empty action lists — Rust-side action mapping (H-7) is not yet implemented.
+            empty_actions: list[list[float]] = [[] for _ in self._dwellings]
+            raw = rust_batch_step(self._dwellings, empty_actions, self._observation_fields)
             obs = np.asarray([row["obs"] for row in raw], dtype=np.float64)
             rewards = np.asarray([float(row["reward"]) for row in raw], dtype=np.float64)
             dones = np.asarray([bool(row["terminated"]) for row in raw], dtype=np.bool_)

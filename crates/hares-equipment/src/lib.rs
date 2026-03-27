@@ -206,6 +206,16 @@ pub fn save_postcard<T: Serialize>(state: &T) -> Vec<u8> {
     }
 }
 
+/// Non-panicking variant for callers that need graceful error handling
+/// (e.g., checkpoint paths where a serialization failure should not
+/// terminate a long-running simulation).
+#[must_use = "serialization errors should be handled, not silently discarded"]
+pub fn try_save_postcard<T: Serialize>(state: &T) -> Result<Vec<u8>> {
+    postcard::to_allocvec(state).map_err(|e| {
+        HaresError::Equipment(format!("state serialization failed: {e}"))
+    })
+}
+
 #[cold]
 #[inline(never)]
 fn panic_serialize(e: postcard::Error) -> ! {

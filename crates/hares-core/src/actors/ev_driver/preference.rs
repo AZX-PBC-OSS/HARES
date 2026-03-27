@@ -3,7 +3,6 @@
 use hares_types::EnvironmentState;
 
 /// Context passed to each preference for per-step evaluation.
-#[allow(dead_code)] // TARIFF-011: all fields used once departure/capacity preferences wired
 pub struct DecisionContext<'a> {
     pub current_soc: f64,
     pub capacity_kwh: f64,
@@ -63,6 +62,5 @@ pub trait ChargingPreference: Send + Sync {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote;
 
     /// Human-readable name for telemetry.
-    #[allow(dead_code)] // TARIFF-011: called from telemetry once wired
     fn name(&self) -> &'static str;
 }

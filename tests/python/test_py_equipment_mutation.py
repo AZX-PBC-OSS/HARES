@@ -24,10 +24,18 @@ class TestAddEquipment:
         from ochre_next import Battery
 
         dw = _make_dwelling()
+        # Take a baseline step without battery
+        baseline = dw.step()
+
+        dw2 = _make_dwelling()
         bat = Battery("TestBat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
-        dw.add_battery(bat)
-        result = dw.step()
+        dw2.add_battery(bat)
+        result = dw2.step()
         assert "time" in result
+
+        # Battery should appear in telemetry
+        tel = dw2.telemetry().equipment()
+        assert "TestBat" in tel["names"], "Battery should appear in equipment telemetry"
 
     def test_add_pv_appears_in_equipment_names(self):
         from ochre_next import PV
@@ -46,6 +54,10 @@ class TestAddEquipment:
         result = dw.step()
         assert "time" in result
 
+        # PV should appear in equipment telemetry after stepping
+        tel = dw.telemetry().equipment()
+        assert "TestPV" in tel["names"], "PV should appear in equipment telemetry"
+
     def test_add_ev_appears_in_equipment_names(self):
         from ochre_next import EV
 
@@ -62,6 +74,10 @@ class TestAddEquipment:
         dw.add_ev(ev)
         result = dw.step()
         assert "time" in result
+
+        # EV should appear in equipment telemetry after stepping
+        tel = dw.telemetry().equipment()
+        assert "TestEV" in tel["names"], "EV should appear in equipment telemetry"
 
 
     def test_ev_max_charging_kw_config_key_applied(self):
@@ -122,6 +138,12 @@ class TestRemoveEquipment:
         dw.remove_equipment("TestBat")
         result = dw.step()
         assert "time" in result
+
+        # After removal, the battery must not appear in equipment telemetry
+        tel = dw.telemetry().equipment()
+        assert "TestBat" not in tel["names"], (
+            "Removed battery should not appear in equipment telemetry"
+        )
 
 
 class TestReplaceEquipment:

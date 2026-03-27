@@ -798,6 +798,15 @@ impl PyDwelling {
             "max_charging_power_kw".to_string(),
             hares_equipment::config::ConfigValue::Float(max_power),
         );
+        raw_config.insert(
+            "charging_level".to_string(),
+            hares_equipment::config::ConfigValue::Text(
+                match preset.charging_level {
+                    hares_types::ChargingLevel::L1 => "L1".to_string(),
+                    hares_types::ChargingLevel::L2 => "L2".to_string(),
+                },
+            ),
+        );
 
         let config = hares_equipment::EquipmentConfig {
             name: spec.label.to_string(),

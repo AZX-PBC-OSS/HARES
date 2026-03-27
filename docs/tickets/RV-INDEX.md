@@ -28,12 +28,12 @@ Tickets partially advanced:
 
 | ID | Title | Kind | Crate(s) | Depends On |
 |----|-------|------|----------|------------|
-| [RV-001a](RV-001.md) | TariffEvaluator: bounds-check accessors (OOB panics) | fix | hares-tariff | — |
-| [RV-001b](RV-001b.md) | TariffEvaluator: fix ratchet drop for non-first demand rates | fix | hares-tariff | — |
-| [RV-001c](RV-001c.md) | TariffEvaluator: fix partial-period overbilling in finalize() | fix | hares-tariff | — |
-| [RV-001d](RV-001d.md) | TariffEvaluator: configurable demand window duration | fix | hares-tariff | — |
-| [RV-002](RV-002.md) | batch_step RL actions: raise NotImplementedError | fix | hares-python | — |
-| [RV-003](RV-003.md) | GridExportRule: wire into BMS evaluate_mode | fix | hares-core | — |
+| [RV-001a](RV-001.md) | TariffEvaluator: bounds-check accessors (OOB panics) | fix | hares-tariff | **Done** |
+| [RV-001b](RV-001b.md) | TariffEvaluator: fix ratchet drop for non-first demand rates | fix | hares-tariff | **Done** |
+| [RV-001c](RV-001c.md) | TariffEvaluator: fix partial-period overbilling in finalize() | fix | hares-tariff | **Done** |
+| [RV-001d](RV-001d.md) | TariffEvaluator: configurable demand window duration | fix | hares-tariff | **Done** |
+| [RV-002](RV-002.md) | batch_step RL actions: raise NotImplementedError | fix | hares-python | **Done** |
+| [RV-003](RV-003.md) | GridExportRule: wire into BMS evaluate_mode | fix | hares-core | **Done** |
 | ~~[RV-004](RV-004.md)~~ | ~~DutyCycle control signal~~ (already implemented) | — | — | Closed |
 
 ## Wave 2 — Hot-Loop Performance (all independent)
@@ -65,7 +65,7 @@ Tickets partially advanced:
 | [RV-016](RV-016.md) | Parity gaps design (islanded, generic, EVI-Pro) | implement | (design doc) | — |
 | [RV-017](RV-017.md) | Test collision, weak assertions, magic numbers, timing deps | fix | multiple | — |
 | [RV-018](RV-018.md) | Smoke test numeric assertions | test | tests | — |
-| [RV-019](RV-019.md) | Sentinels, panics, clippy, zero-div guard | fix | hares-core, hares-equipment | — |
+| [RV-019](RV-019.md) | Sentinels, panics, clippy, zero-div guard | fix | hares-core, hares-equipment | **Done** |
 | [RV-020](RV-020.md) | Config-driven summer months, duck typing, thresholds | fix | hares-tariff, hares-python, hares-core | — |
 
 ---

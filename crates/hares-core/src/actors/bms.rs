@@ -17,7 +17,6 @@ pub struct BatteryManagementActor {
     name: String,
     dispatch_target: DispatchTarget,
     bms_mode: BmsMode,
-    #[expect(dead_code)]
     grid_export_rule: GridExportRule,
     charge_price_threshold: f64,
     discharge_price_threshold: f64,
@@ -87,6 +86,33 @@ impl BatteryManagementActor {
         });
     }
 
+    /// Clamp discharge power (negative `active_power_kw`) based on grid export rule.
+    ///
+    /// - `Unrestricted`: no clamping.
+    /// - `Disabled`: clamp discharge so net export is zero (battery only offsets home load).
+    /// - `SolarOnly`: clamp discharge so net export does not exceed PV generation.
+    fn clamp_discharge_for_export(
+        &self,
+        discharge_kw: f64,
+        env: &EnvironmentState,
+    ) -> f64 {
+        // discharge_kw is the raw magnitude (positive value) of desired discharge.
+        match self.grid_export_rule {
+            GridExportRule::Unrestricted => discharge_kw,
+            GridExportRule::Disabled => {
+                // Battery can only offset home load, never export to grid.
+                discharge_kw.min(env.electrical.base_load_kw.max(0.0))
+            }
+            GridExportRule::SolarOnly => {
+                // Battery may discharge up to load + PV, so net grid export
+                // (discharge - load) is at most PV generation.
+                let max_allowed = env.electrical.base_load_kw.max(0.0)
+                    + env.electrical.pv_generation_kw.max(0.0);
+                discharge_kw.min(max_allowed)
+            }
+        }
+    }
+
     fn evaluate_mode(
         &mut self,
         mode: &BmsMode,
@@ -127,13 +153,31 @@ impl BatteryManagementActor {
                     );
                     self.last_action = "self_consumption:charge".into();
                 } else if surplus < 0.0 && soc > *min_soc {
-                    self.emit(
-                        ControlSignal::SelfConsumption {
-                            enabled: true,
-                            solar_only_charging: false,
-                        },
-                        out,
-                    );
+                    // Enforce grid export rule on discharge path.
+                    // SelfConsumption signal lets equipment decide discharge freely,
+                    // so when export is restricted we emit a clamped PowerSetpoint instead.
+                    match self.grid_export_rule {
+                        GridExportRule::Unrestricted => {
+                            self.emit(
+                                ControlSignal::SelfConsumption {
+                                    enabled: true,
+                                    solar_only_charging: false,
+                                },
+                                out,
+                            );
+                        }
+                        GridExportRule::Disabled | GridExportRule::SolarOnly => {
+                            let raw_discharge = (-surplus).min(self.max_discharge_kw);
+                            let clamped = self.clamp_discharge_for_export(raw_discharge, env);
+                            self.emit(
+                                ControlSignal::PowerSetpoint {
+                                    active_power_kw: -clamped,
+                                    reactive_power_kvar: None,
+                                },
+                                out,
+                            );
+                        }
+                    }
                     self.last_action = "self_consumption:discharge".into();
                 } else {
                     self.last_action = "idle:self_consumption".into();
@@ -179,9 +223,10 @@ impl BatteryManagementActor {
                     );
                     self.last_action = "tou:charge".into();
                 } else if price >= self.discharge_price_threshold && soc > *reserve_soc {
+                    let clamped = self.clamp_discharge_for_export(self.max_discharge_kw, env);
                     self.emit(
                         ControlSignal::PowerSetpoint {
-                            active_power_kw: -self.max_discharge_kw,
+                            active_power_kw: -clamped,
                             reactive_power_kvar: None,
                         },
                         out,
@@ -247,9 +292,11 @@ impl BatteryManagementActor {
                         return;
                     };
                     if soc > *min_soc_during_dr {
+                        let raw = dr_discharge_rate * self.max_discharge_kw;
+                        let clamped = self.clamp_discharge_for_export(raw, env);
                         self.emit(
                             ControlSignal::PowerSetpoint {
-                                active_power_kw: -(dr_discharge_rate * self.max_discharge_kw),
+                                active_power_kw: -clamped,
                                 reactive_power_kvar: None,
                             },
                             out,
@@ -281,9 +328,11 @@ impl BatteryManagementActor {
                             self.last_action = "scheduled:charge".into();
                         }
                         BmsAction::Discharge { rate_fraction } => {
+                            let raw = rate_fraction * self.max_discharge_kw;
+                            let clamped = self.clamp_discharge_for_export(raw, env);
                             self.emit(
                                 ControlSignal::PowerSetpoint {
-                                    active_power_kw: -(rate_fraction * self.max_discharge_kw),
+                                    active_power_kw: -clamped,
                                     reactive_power_kvar: None,
                                 },
                                 out,
@@ -1284,5 +1333,342 @@ mod tests {
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
         assert_eq!(actor.last_action(), "idle");
+    }
+
+    #[test]
+    fn bms_disabled_export_clamps_discharge_to_home_load() {
+        // Battery wants to discharge 5 kW, but home load is only 2 kW.
+        // With Disabled export rule, discharge should be clamped to 2 kW.
+        let prices = vec![0.10_f64; 24];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.1,
+                charge_threshold_percentile: 0.3,
+                discharge_threshold_percentile: 0.7,
+                solar_only_charging: false,
+            },
+            GridExportRule::Disabled,
+            5.0,
+            5.0,
+            Some(Arc::from(prices.as_slice())),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.30),
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                base_load_kw: 2.0,
+                pv_generation_kw: 0.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.8);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                // Clamped to home load: -2.0 kW (not -5.0)
+                assert!(
+                    (*active_power_kw + 2.0).abs() < 1e-10,
+                    "discharge should be clamped to home load (2 kW), got {}",
+                    active_power_kw
+                );
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_disabled_export_allows_full_discharge_when_load_exceeds() {
+        // Home load 8 kW > max discharge 5 kW → no clamping needed.
+        let prices = vec![0.10_f64; 24];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.1,
+                charge_threshold_percentile: 0.3,
+                discharge_threshold_percentile: 0.7,
+                solar_only_charging: false,
+            },
+            GridExportRule::Disabled,
+            5.0,
+            5.0,
+            Some(Arc::from(prices.as_slice())),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.30),
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                base_load_kw: 8.0,
+                pv_generation_kw: 0.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.8);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                // Full discharge allowed: load exceeds battery capacity.
+                assert!(
+                    (*active_power_kw + 5.0).abs() < 1e-10,
+                    "discharge should be full 5 kW when load exceeds, got {}",
+                    active_power_kw
+                );
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_unrestricted_export_no_clamping() {
+        // Unrestricted: full 5 kW discharge regardless of home load.
+        let prices = vec![0.10_f64; 24];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.1,
+                charge_threshold_percentile: 0.3,
+                discharge_threshold_percentile: 0.7,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            Some(Arc::from(prices.as_slice())),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.30),
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                base_load_kw: 1.0,
+                pv_generation_kw: 0.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.8);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(
+                    (*active_power_kw + 5.0).abs() < 1e-10,
+                    "unrestricted discharge should be full 5 kW, got {}",
+                    active_power_kw
+                );
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_solar_only_export_allows_load_plus_pv() {
+        // SolarOnly: discharge clamped to home load + PV generation.
+        // Home load 2 kW, PV 1 kW → max discharge 3 kW.
+        let prices = vec![0.10_f64; 24];
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::TimeOfUseOptimization {
+                reserve_soc: 0.1,
+                charge_threshold_percentile: 0.3,
+                discharge_threshold_percentile: 0.7,
+                solar_only_charging: false,
+            },
+            GridExportRule::SolarOnly,
+            5.0,
+            5.0,
+            Some(Arc::from(prices.as_slice())),
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .hour(14)
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.30),
+                ..Default::default()
+            })
+            .with_electrical(ElectricalSummary {
+                base_load_kw: 2.0,
+                pv_generation_kw: 1.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.8);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(
+                    (*active_power_kw + 3.0).abs() < 1e-10,
+                    "SolarOnly discharge should be clamped to load+PV (3 kW), got {}",
+                    active_power_kw
+                );
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_self_consumption_disabled_export_clamps_discharge() {
+        // SelfConsumption + Disabled: deficit is 3 kW (load 5, PV 2).
+        // Battery should discharge at most 5 kW (home load), not export.
+        // Raw discharge = min(3, 5) = 3 kW. Clamped to min(3, 5) = 3 kW.
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.9,
+                solar_only_charging: false,
+            },
+            GridExportRule::Disabled,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 2.0,
+                base_load_kw: 5.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                // Deficit is 3 kW. With Disabled export, clamped to min(3, 5) = 3.
+                assert!(
+                    (*active_power_kw + 3.0).abs() < 1e-10,
+                    "self_consumption+disabled discharge should be 3 kW (deficit), got {}",
+                    active_power_kw
+                );
+            }
+            other => panic!("expected PowerSetpoint for Disabled export, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_self_consumption_disabled_export_clamps_to_load_when_no_pv() {
+        // SelfConsumption + Disabled: PV=0, load=2, max_discharge=5.
+        // Deficit = 2 kW. Clamped to min(2, 2) = 2. (load only, no export)
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.9,
+                solar_only_charging: false,
+            },
+            GridExportRule::Disabled,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 0.0,
+                base_load_kw: 2.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        match &out[0].signal {
+            ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } => {
+                assert!(
+                    (*active_power_kw + 2.0).abs() < 1e-10,
+                    "discharge should match load (2 kW), got {}",
+                    active_power_kw
+                );
+            }
+            other => panic!("expected PowerSetpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bms_self_consumption_unrestricted_uses_self_consumption_signal() {
+        // SelfConsumption + Unrestricted: should emit SelfConsumption signal (not PowerSetpoint)
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.9,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_kw: 0.0,
+                base_load_kw: 3.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0].signal, ControlSignal::SelfConsumption { .. }),
+            "unrestricted self-consumption should emit SelfConsumption signal, got {:?}",
+            out[0].signal
+        );
     }
 }

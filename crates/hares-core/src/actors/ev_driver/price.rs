@@ -259,6 +259,34 @@ mod tests {
         assert!((compute_percentile(&prices, 1.0) - 0.50).abs() < 1e-9);
     }
 
+    // Finding 4: different price schedules produce different decisions
+    #[test]
+    fn different_price_schedules_produce_different_decisions() {
+        // Same electricity_price=0.10.
+        // Schedule A: spread 0.00..0.23 → charge_threshold(25th)≈0.06, discharge_threshold(75th)≈0.17
+        //   0.10 > 0.06 and 0.10 < 0.17 → neutral
+        // Schedule B: all 0.20 → charge_threshold=0.20, 0.10 <= 0.20 → charge
+        let schedule_a: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();
+        let schedule_b: Vec<f64> = vec![0.20; 24];
+
+        let mut pref_a = PriceOptimizer::new(0.25, 0.75, Some(schedule_a.into()), 24);
+        let mut pref_b = PriceOptimizer::new(0.25, 0.75, Some(schedule_b.into()), 24);
+
+        let env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.10),
+                ..Default::default()
+            })
+            .build();
+        let ctx = make_ctx_with_price(&env);
+
+        let vote_a = pref_a.score(&ctx);
+        let vote_b = pref_b.score(&ctx);
+
+        assert_eq!(vote_a.label, "price:neutral", "0.10 between thresholds → neutral");
+        assert_eq!(vote_b.label, "price:charge", "0.10 <= threshold 0.20 → charge");
+    }
+
     #[test]
     fn no_price_schedule_uses_defaults() {
         let mut pref = PriceOptimizer::new(0.25, 0.75, None, 24);

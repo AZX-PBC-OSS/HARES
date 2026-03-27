@@ -50,12 +50,12 @@ fn parse_window(d: &Bound<'_, PyDict>) -> PyResult<TimeWindow> {
             .get_item("end_hour")?
             .ok_or_else(|| PyValueError::new_err("window has 'start_hour' but missing 'end_hour'"))?
             .extract()?;
-        if start_h < 0.0 || start_h > 24.0 {
+        if !(0.0..=24.0).contains(&start_h) {
             return Err(PyValueError::new_err(format!(
                 "start_hour {start_h} out of range (must be 0..=24)"
             )));
         }
-        if end_h < 0.0 || end_h > 24.0 {
+        if !(0.0..=24.0).contains(&end_h) {
             return Err(PyValueError::new_err(format!(
                 "end_hour {end_h} out of range (must be 0..=24; use 24 for midnight end)"
             )));
@@ -450,7 +450,7 @@ impl PyTariffBuilder {
         let season_filter = parse_season(&season)?;
         let mut schedule = Vec::new();
         for item in windows.iter() {
-            let d: &Bound<'_, PyDict> = item.downcast()?;
+            let d: &Bound<'_, PyDict> = item.cast()?;
             schedule.push(parse_window(d)?);
         }
         slf.borrow_mut(py).demand_tou_periods.push(TouPeriod {
@@ -501,6 +501,7 @@ impl PyTariffBuilder {
             minimum_charge: self.minimum_charge,
             billing_cycle: self.billing_cycle,
             seasonal_split: self.seasonal_split,
+            demand_window_minutes: 15,
         };
         tariff
             .validate()

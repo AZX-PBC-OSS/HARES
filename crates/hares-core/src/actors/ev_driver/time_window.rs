@@ -18,12 +18,9 @@ impl TimeWindowPref {
     pub fn from_hours(start_hour: f64, end_hour: f64) -> Self {
         let start_minute = (start_hour * 60.0) as u16;
         let end_minute = (end_hour * 60.0).min(1440.0) as u16;
-        Self {
-            window: TimeWindow::new(DayFilter::Any, start_minute, end_minute, 0.0),
-        }
+        Self::from_time_window(TimeWindow::new(DayFilter::Any, start_minute, end_minute, 0.0))
     }
 
-    #[allow(dead_code)] // TARIFF-011: used when constructing from config
     pub fn from_time_window(window: TimeWindow) -> Self {
         Self { window }
     }

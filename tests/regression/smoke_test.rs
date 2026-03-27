@@ -246,7 +246,23 @@ mod tests {
                 eprintln!(
                     "    {ochre_name:55} OCHRE={ochre_val:8.4}  HARES={hares_kwh:8.4}  diff={diff_pct:+7.1}%  [{hares_col}]"
                 );
+
+                // Assert OCHRE parity within ±30% for non-trivial values
+                if ochre_val.abs() > 0.01 && !hares_kwh.is_nan() {
+                    assert!(
+                        diff_pct.abs() < 30.0,
+                        "OCHRE parity failure: {ochre_name}: \
+                         OCHRE={ochre_val:.4} HARES={hares_kwh:.4} diff={diff_pct:+.1}%"
+                    );
+                }
             }
+
+            // Total energy should be positive for a January heating simulation
+            assert!(
+                result.metrics.annual_energy_kwh.total > 0.0,
+                "total energy should be > 0 for a heating simulation, got {}",
+                result.metrics.annual_energy_kwh.total
+            );
 
             // Debug: dump heater stats from CSV
             let contents = fs::read_to_string(&csv_path).unwrap();
@@ -336,6 +352,13 @@ mod tests {
             result.status, result.elapsed
         );
         eprintln!("  total kWh: {:.4}", result.metrics.annual_energy_kwh.total);
+
+        // A 1-hour January Denver simulation must consume some energy
+        assert!(
+            result.metrics.annual_energy_kwh.total > 0.0,
+            "ResStock total energy should be > 0, got {}",
+            result.metrics.annual_energy_kwh.total
+        );
 
         if output_path.exists() {
             let breakdown = parse_csv_power_kwh(&output_path, 1.0);

@@ -21,17 +21,21 @@ pub struct StepResult {
 }
 
 /// Parallel batch stepping entry point used by vectorized gym environments.
+///
+/// # Panics
+///
+/// Panics if `actions` is non-empty — action mapping is not yet implemented (H-7).
+/// Pass an empty slice to step without actions.
 #[allow(dead_code)]
 pub fn batch_step(dwellings: &mut [PyDwelling], actions: &[Vec<f64>]) -> Vec<StepResult> {
+    assert!(
+        actions.is_empty(),
+        "batch_step action mapping is not yet implemented (H-7). \
+         Pass an empty slice to step without actions."
+    );
     dwellings
         .par_iter_mut()
-        .enumerate()
-        .map(|(idx, dwelling)| {
-            // TODO(H-7): action mapping is not yet implemented. Actions are
-            // accepted to keep the Python API stable but are not forwarded to
-            // equipment controls. RL callers are not influencing the simulation
-            // until this is wired up.
-            let _ = actions.get(idx);
+        .map(|dwelling| {
 
             let mut info = HashMap::new();
             match dwelling.step_core() {
@@ -110,6 +114,24 @@ pub fn batch_step_py(
     actions: Vec<Vec<f64>>,
     observation_fields: Vec<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
+    // Dimension check first (useful error regardless of H-7 status).
+    if !actions.is_empty() && actions.len() != dwellings.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "actions length ({}) must match dwellings length ({})",
+            actions.len(),
+            dwellings.len(),
+        )));
+    }
+    // Action mapping is not yet implemented (H-7). Reject non-empty actions
+    // at the Python boundary with a clear error before entering Rayon.
+    if actions.iter().any(|a| !a.is_empty()) {
+        return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "batch_step action mapping is not yet implemented (H-7). \
+             Apply controls via dwelling.apply_control() before calling batch_step, \
+             and pass empty action vectors.",
+        ));
+    }
+
     // Hold borrows alive for the duration of the parallel section.
     // The Py<PyDwelling> vec keeps every object alive for the entire function.
     let borrows: Vec<PyRef<'_, PyDwelling>> =
@@ -125,16 +147,11 @@ pub fn batch_step_py(
     let results: Vec<StepResult> = py.detach(|| {
         ptrs.par_iter()
             .enumerate()
-            .map(|(idx, SendDwellingPtr(ptr))| {
+            .map(|(_idx, SendDwellingPtr(ptr))| {
                 // SAFETY: the PyRef borrows in `borrows` and Py<PyDwelling> handles keep the
                 // objects alive. step_core() and observation() are GIL-free
                 // (they only lock the internal Mutex<Dwelling>).
                 let dwelling = unsafe { &**ptr };
-                // TODO(H-7): action mapping is not yet implemented. Actions are
-                // accepted to keep the Python API stable but are not forwarded to
-                // equipment controls. RL callers are not influencing the simulation
-                // until this is wired up.
-                let _ = actions.get(idx);
 
                 let mut info = HashMap::new();
                 match dwelling.step_core() {
