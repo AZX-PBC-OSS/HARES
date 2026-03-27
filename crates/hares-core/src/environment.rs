@@ -93,7 +93,6 @@ pub struct EnvironmentManager {
     solar_irradiance_buf: Vec<SurfaceIrradiance>,
     schedule_values_buf: Vec<f64>,
     mains_payload_buf: Vec<f64>,
-    equipment_telemetry_buf: std::collections::HashMap<String, hares_types::Telemetry>,
 }
 
 impl EnvironmentManager {
@@ -225,7 +224,6 @@ impl EnvironmentManager {
             solar_irradiance_buf: Vec::with_capacity(num_surfaces),
             schedule_values_buf: Vec::with_capacity(num_schedule_cols),
             mains_payload_buf: vec![0.0],
-            equipment_telemetry_buf: std::collections::HashMap::new(),
         })
     }
 
@@ -380,9 +378,26 @@ impl EnvironmentManager {
             .map(|(_, &idx)| idx)
     }
 
-    /// Update environment state for the current clock step.
-    #[must_use]
-    pub fn update(&mut self, clock: &SimClock, zone_states: &[ZoneState]) -> EnvironmentState {
+    /// Feed zone-state feedback into the internal zone buffer.
+    ///
+    /// Call this before [`update_in_place`] when the caller holds a borrow on
+    /// the zone slice that would conflict with a simultaneous `&mut self`. This
+    /// separates zone ingestion from the environment computation so the borrow
+    /// checker can see two distinct phases.
+    pub fn feed_zones(&mut self, zones: &[ZoneState]) {
+        if !zones.is_empty() {
+            self.zones.clear();
+            self.zones.extend_from_slice(zones);
+        }
+    }
+
+    /// Update `state` in-place for the current clock step.
+    ///
+    /// Reads zone temperatures from the internal buffer (populated by a prior
+    /// [`feed_zones`] call or the previous [`update`] call). All heap-allocated
+    /// fields inside `state` are cleared and refilled, reusing existing
+    /// capacity and eliminating per-step allocations on the hot path.
+    pub fn update_in_place(&mut self, state: &mut EnvironmentState, clock: &SimClock) {
         let step = usize::try_from(clock.current_step())
             .expect("step counter exceeds usize on this target");
         let weather_len = self.weather.len();
@@ -407,9 +422,9 @@ impl EnvironmentManager {
             wet_bulb_from_humidity_ratio(outdoor_temp_c, outdoor_humidity_ratio, pressure_pa);
         let outdoor_enthalpy_j_kg = moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
 
-        // Step 2: per-surface solar irradiance (reuse self.solar_irradiance_buf)
-        // solar_position() converts to UTC internally — it needs true UTC for
-        // solar geometry. We pass the local-time clock value.
+        // Step 2: per-surface solar irradiance — compute into self.solar_irradiance_buf,
+        // then swap into state.weather.solar_irradiance so the old Vec's capacity is
+        // returned to self.solar_irradiance_buf for reuse next step.
         let now = clock.current_time();
         let pos = solar_position(self.weather_meta.latitude, self.weather_meta.longitude, now);
         let ghi = self.weather.get(WeatherField::GhiWM2, weather_idx);
@@ -460,71 +475,87 @@ impl EnvironmentManager {
             }
         }
 
+        // Swap solar irradiance buffer into state — the previous Vec's capacity
+        // flows back into self.solar_irradiance_buf for use next step.
+        std::mem::swap(
+            &mut state.weather.solar_irradiance,
+            &mut self.solar_irradiance_buf,
+        );
+
         // Step 3: schedule values (reuse self.schedule_values_buf)
         self.schedule_values_buf.clear();
         self.schedule_values_buf
             .extend(self.schedule.columns.iter().map(|col| col[schedule_idx]));
 
-        // Step 4: zone-state feedback (reuse capacity)
-        if !zone_states.is_empty() {
-            self.zones.clear();
-            self.zones.extend_from_slice(zone_states);
-        }
+        // Step 4: zones — written from self.zones (already updated by feed_zones or update).
+        state.zones.clear();
+        state.zones.extend_from_slice(&self.zones);
 
         // Step 5: grid defaults / overrides
-        let grid = self.grid_override.clone().unwrap_or(GridState {
+        state.grid = self.grid_override.clone().unwrap_or(GridState {
             voltage_pu: DEFAULT_GRID_VOLTAGE_PU,
             frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
         });
 
-        // Step 6: build custom_domains, reusing buffer capacity across steps.
+        // Step 6: custom_domains — reuse Vec capacity; maintain exactly two slots.
         self.mains_payload_buf[0] = mains_temp_c;
-        let custom_domains = vec![
-            hares_types::DomainUpdate {
-                domain_id: schedule_domain_id(),
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(self.schedule_values_buf.clone()),
-            },
-            hares_types::DomainUpdate {
-                domain_id: MAINS_WATER_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(self.mains_payload_buf.clone()),
-            },
-        ];
+        state.custom_domains.clear();
+        state.custom_domains.push(hares_types::DomainUpdate {
+            domain_id: schedule_domain_id(),
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(self.schedule_values_buf.clone()),
+        });
+        state.custom_domains.push(hares_types::DomainUpdate {
+            domain_id: MAINS_WATER_DOMAIN_ID,
+            zone_temperatures_c: Vec::new(),
+            custom_payload: Some(self.mains_payload_buf.clone()),
+        });
 
-        // Reuse equipment telemetry map capacity.
-        self.equipment_telemetry_buf.clear();
+        // Step 7: weather scalar fields
+        state.weather.outdoor_temp_c = outdoor_temp_c;
+        state.weather.outdoor_humidity_ratio = outdoor_humidity_ratio;
+        state.weather.outdoor_wet_bulb_c = outdoor_wet_bulb_c;
+        state.weather.outdoor_enthalpy_j_kg = outdoor_enthalpy_j_kg;
+        state.weather.wind_speed_m_s = self.weather.get(WeatherField::WindSpeedMS, weather_idx);
+        state.weather.wind_dir_deg = self.weather.get(WeatherField::WindDirDeg, weather_idx);
+        state.weather.ground_temp_c = self.weather.get(WeatherField::GroundTempC, weather_idx);
+        state.weather.sky_temp_c = self.weather.get(WeatherField::SkyTempC, weather_idx);
+        state.weather.pressure_kpa = pressure_kpa;
+        state.weather.ghi_w_m2 = ghi;
+        state.weather.dni_w_m2 = dni;
+        state.weather.dhi_w_m2 = dhi;
+        state.weather.solar_altitude_deg = pos.altitude_deg;
+        state.weather.solar_azimuth_deg = pos.azimuth_deg;
+        state.weather.mains_temp_c = mains_temp_c;
+        state.weather.rainfall_m = self.weather.get(WeatherField::LiquidPrecipM, weather_idx);
+        state.weather.ground_albedo = ground_albedo;
 
-        EnvironmentState {
-            zones: self.zones.clone(),
-            weather: WeatherState {
-                outdoor_temp_c,
-                outdoor_humidity_ratio,
-                outdoor_wet_bulb_c,
-                outdoor_enthalpy_j_kg,
-                wind_speed_m_s: self.weather.get(WeatherField::WindSpeedMS, weather_idx),
-                wind_dir_deg: self.weather.get(WeatherField::WindDirDeg, weather_idx),
-                ground_temp_c: self.weather.get(WeatherField::GroundTempC, weather_idx),
-                sky_temp_c: self.weather.get(WeatherField::SkyTempC, weather_idx),
-                pressure_kpa,
-                solar_irradiance: self.solar_irradiance_buf.clone(),
-                ghi_w_m2: ghi,
-                dni_w_m2: dni,
-                dhi_w_m2: dhi,
-                solar_altitude_deg: pos.altitude_deg,
-                solar_azimuth_deg: pos.azimuth_deg,
-                mains_temp_c,
-                rainfall_m: self.weather.get(WeatherField::LiquidPrecipM, weather_idx),
-                ground_albedo,
-            },
-            grid,
-            custom_domains,
-            equipment_telemetry: self.equipment_telemetry_buf.clone(),
+        // Step 8: reset equipment telemetry map (capacity retained).
+        state.equipment_telemetry.clear();
+
+        state.current_time = clock.current_time();
+        state.time_res = clock.time_res;
+        state.price_signal = Default::default();
+        state.electrical = Default::default();
+    }
+
+    /// Update environment state for the current clock step.
+    #[must_use]
+    pub fn update(&mut self, clock: &SimClock, zone_states: &[ZoneState]) -> EnvironmentState {
+        self.feed_zones(zone_states);
+        let mut state = EnvironmentState {
+            zones: Vec::new(),
+            weather: WeatherState::default(),
+            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+            custom_domains: Vec::new(),
+            equipment_telemetry: std::collections::HashMap::new(),
             current_time: clock.current_time(),
             time_res: clock.time_res,
             price_signal: Default::default(),
             electrical: Default::default(),
-        }
+        };
+        self.update_in_place(&mut state, clock);
+        state
     }
 }
 

@@ -749,7 +749,7 @@ fn calc_startup_degradation(
             2 => 0.11,
             _ => 0.0,
         }
-    } else if equipment_name.contains("room") {
+    } else if equipment_name == "room ac" {
         0.22
     } else {
         match n_speeds {

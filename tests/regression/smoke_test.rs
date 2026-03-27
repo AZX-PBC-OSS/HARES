@@ -67,6 +67,13 @@ mod tests {
         let data = parse_csv_columns(csv_path);
 
         // --- 1. Zone temperatures in physical bounds [-50, 80]°C ---
+        let temp_col_count = data.keys()
+            .filter(|col| col.starts_with("Temperature -") && col.ends_with("(C)"))
+            .count();
+        assert!(
+            temp_col_count > 0,
+            "No temperature columns found in CSV — physics bounds check would be vacuous"
+        );
         for (col, values) in &data {
             if col.starts_with("Temperature -") && col.ends_with("(C)") {
                 for (i, &v) in values.iter().enumerate() {
@@ -82,8 +89,8 @@ mod tests {
         for (col, values) in &data {
             for (i, &v) in values.iter().enumerate() {
                 assert!(
-                    !v.is_nan(),
-                    "NaN detected in '{col}' at row {i}"
+                    v.is_finite(),
+                    "Non-finite value ({v}) detected in '{col}' at row {i}"
                 );
             }
         }
@@ -106,8 +113,14 @@ mod tests {
             .sum();
         if hvac_total_kwh <= 0.0 {
             // HVAC didn't run — verify zone temps are in comfort range
-            let zone_temps_ok = data.iter()
+            let indoor_temp_cols: Vec<_> = data.iter()
                 .filter(|(col, _)| col.starts_with("Temperature -") && col.ends_with("(C)") && col.contains("Indoor"))
+                .collect();
+            assert!(
+                !indoor_temp_cols.is_empty(),
+                "HVAC consumed zero energy but no indoor temperature columns found — check would be vacuous"
+            );
+            let zone_temps_ok = indoor_temp_cols.iter()
                 .all(|(_, values)| values.iter().all(|&v| v > 15.0 && v < 30.0));
             assert!(
                 zone_temps_ok,
@@ -348,7 +361,7 @@ mod tests {
                         "ASHP Cooler Electric Power (kW)",
                         "MSHP Cooler Electric Power (kW)",
                         "Air Conditioner Electric Power (kW)",
-                        "Room Air Conditioner Electric Power (kW)",
+                        "Room AC Electric Power (kW)",
                     ],
                 ),
                 (

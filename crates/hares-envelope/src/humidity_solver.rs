@@ -742,7 +742,7 @@ mod tests {
             moisture_buffering_multiplier: 1.0,
             ..HumiditySolverConfig::default()
         };
-        let mut solver = HumiditySolver::new(config, &env);
+        let mut solver = HumiditySolver::new(config.clone(), &env);
 
         // Apply 100W to zone A, 300W to zone B via port slots
         let ports = PortSlots {
@@ -780,6 +780,37 @@ mod tests {
         assert!(
             (ratio - 3.0).abs() < 1e-8,
             "zone B must evolve at 3x zone A's rate: ratio={ratio}"
+        );
+
+        // True independence check: zone A's dW in the two-zone solver must match
+        // what a single-zone solver with only zone A's gain would produce.
+        let env_single = EnvironmentState {
+            zones: vec![ZoneState {
+                id: zone_a,
+                temperature_c: 22.0,
+                humidity_ratio: w_init,
+                relative_humidity: 0.50,
+                wet_bulb_c: 19.0,
+                volume_m3: 200.0,
+            }],
+            ..env.clone()
+        };
+        let mut solver_single = HumiditySolver::new(config, &env_single);
+        let ports_single = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: zone_a,
+                sensible_gain_w: 0.0,
+                latent_gain_w: 100.0,
+                ..ThermalAccumulator::new(zone_a)
+            }],
+            ..Default::default()
+        };
+        let _ = solver_single.resolve(&ports_single, &env_single, Duration::from_secs(60));
+        let dw_a_solo = solver_single.humidity_ratio(zone_a) - w_init;
+        assert!(
+            (dw_a - dw_a_solo).abs() < 1e-15,
+            "zone A dW must be identical whether zone B exists or not: \
+             two_zone={dw_a}, solo={dw_a_solo}"
         );
     }
 }

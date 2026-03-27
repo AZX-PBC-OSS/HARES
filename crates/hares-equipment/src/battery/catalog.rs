@@ -10,7 +10,8 @@ use crate::EquipmentConfig;
 
 use super::{
     KEY_CAPACITY_KWH, KEY_CHARGE_EFFICIENCY, KEY_CHEMISTRY, KEY_DISCHARGE_EFFICIENCY,
-    KEY_MAX_CHARGE_KW, KEY_MAX_DISCHARGE_KW, KEY_MAX_SOC, KEY_MIN_SOC,
+    KEY_FULL_POWER_TEMP_C, KEY_HEATER_POWER_W, KEY_HEATER_THRESHOLD_C, KEY_MAX_CHARGE_KW,
+    KEY_MAX_DISCHARGE_KW, KEY_MAX_SOC, KEY_MIN_CHARGE_TEMP_C, KEY_MIN_SOC,
     KEY_SELF_DISCHARGE_PCT_PER_DAY, KEY_STANDBY_POWER_W,
 };
 
@@ -106,6 +107,14 @@ pub struct BatterySpec {
     pub self_discharge_pct_per_day: f64,
     pub min_soc: f64,
     pub max_soc: f64,
+    /// Battery pack heater power (W). 0 = no heater (passive thermal only).
+    pub heater_power_w: f64,
+    /// Cell temp below which heater activates (°C).
+    pub heater_threshold_c: f64,
+    /// Cell temp below which charging is blocked (°C). Li-ion safety limit.
+    pub min_charge_temp_c: f64,
+    /// Cell temp above which full charge rate is available (°C).
+    pub full_power_temp_c: f64,
 }
 
 impl BatterySpec {
@@ -138,6 +147,10 @@ impl BatterySpec {
         );
         rc.insert(KEY_MIN_SOC.into(), ConfigValue::Float(self.min_soc));
         rc.insert(KEY_MAX_SOC.into(), ConfigValue::Float(self.max_soc));
+        rc.insert(KEY_HEATER_POWER_W.into(), ConfigValue::Float(self.heater_power_w));
+        rc.insert(KEY_HEATER_THRESHOLD_C.into(), ConfigValue::Float(self.heater_threshold_c));
+        rc.insert(KEY_MIN_CHARGE_TEMP_C.into(), ConfigValue::Float(self.min_charge_temp_c));
+        rc.insert(KEY_FULL_POWER_TEMP_C.into(), ConfigValue::Float(self.full_power_temp_c));
         cfg
     }
 }
@@ -160,6 +173,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
+        heater_power_w: 300.0,
+        heater_threshold_c: 5.0,
+        min_charge_temp_c: 0.0,
+        full_power_temp_c: 10.0,
     },
     BatterySpec {
         id: BatteryProductId::TeslaPw2,
@@ -173,6 +190,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.067,
         min_soc: 0.10,
         max_soc: 1.0,
+        heater_power_w: 1500.0,
+        heater_threshold_c: 5.0,
+        min_charge_temp_c: 0.0,
+        full_power_temp_c: 10.0,
     },
     BatterySpec {
         id: BatteryProductId::TeslaPw3X2,
@@ -186,6 +207,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
+        heater_power_w: 600.0,
+        heater_threshold_c: 5.0,
+        min_charge_temp_c: 0.0,
+        full_power_temp_c: 10.0,
     },
     BatterySpec {
         id: BatteryProductId::EnphaseIq5p,
@@ -199,6 +224,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
+        heater_power_w: 0.0,
+        heater_threshold_c: 0.0,
+        min_charge_temp_c: -20.0,
+        full_power_temp_c: 15.0,
     },
     BatterySpec {
         id: BatteryProductId::EnphaseIq5pX2,
@@ -212,6 +241,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
+        heater_power_w: 0.0,
+        heater_threshold_c: 0.0,
+        min_charge_temp_c: -20.0,
+        full_power_temp_c: 15.0,
     },
     BatterySpec {
         id: BatteryProductId::EnphaseIq10c,
@@ -225,6 +258,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
+        heater_power_w: 0.0,
+        heater_threshold_c: 0.0,
+        min_charge_temp_c: -20.0,
+        full_power_temp_c: 15.0,
     },
     BatterySpec {
         id: BatteryProductId::FranklinApower,
@@ -238,6 +275,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
+        heater_power_w: 300.0,
+        heater_threshold_c: 5.0,
+        min_charge_temp_c: -20.0,
+        full_power_temp_c: 15.0,
     },
     BatterySpec {
         id: BatteryProductId::FranklinApower2,
@@ -251,6 +292,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
+        heater_power_w: 300.0,
+        heater_threshold_c: 5.0,
+        min_charge_temp_c: -20.0,
+        full_power_temp_c: 15.0,
     },
     BatterySpec {
         id: BatteryProductId::FranklinApower2X2,
@@ -264,6 +309,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.05,
         min_soc: 0.05,
         max_soc: 1.0,
+        heater_power_w: 600.0,
+        heater_threshold_c: 5.0,
+        min_charge_temp_c: -20.0,
+        full_power_temp_c: 15.0,
     },
     BatterySpec {
         id: BatteryProductId::SolaredgeHome,
@@ -277,6 +326,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.067,
         min_soc: 0.10,
         max_soc: 1.0,
+        heater_power_w: 0.0,
+        heater_threshold_c: 0.0,
+        min_charge_temp_c: -10.0,
+        full_power_temp_c: 15.0,
     },
     BatterySpec {
         id: BatteryProductId::LgResu10h,
@@ -290,6 +343,10 @@ static CATALOG: &[BatterySpec] = &[
         self_discharge_pct_per_day: 0.067,
         min_soc: 0.10,
         max_soc: 1.0,
+        heater_power_w: 0.0,
+        heater_threshold_c: 0.0,
+        min_charge_temp_c: -10.0,
+        full_power_temp_c: 15.0,
     },
 ];
 

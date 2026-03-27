@@ -145,7 +145,7 @@ OCHRE_TO_HARES: dict[str, list[str]] = {
         "ASHP Cooler Electric Power (kW)",
         "MSHP Cooler Electric Power (kW)",
         "Air Conditioner Electric Power (kW)",
-        "Room Air Conditioner Electric Power (kW)",
+        "Room AC Electric Power (kW)",
     ],
 }
 

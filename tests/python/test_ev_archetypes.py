@@ -96,3 +96,28 @@ class TestCustomConstructionStillWorks:
         ev = EV("CustomEV", capacity_kwh=100.0, max_charging_kw=7.2)
         assert ev.name == "CustomEV"
         assert ev.capacity_kwh == 100.0
+
+
+class TestEvFullDayCycle:
+    def test_ev_full_day_cycle(self):
+        dw = make_dwelling(duration_s=1500 * 60, time_res_s=60)
+        dw.initialize()
+        dw.add_ev_with_driver(
+            VehicleId.tesla_model_y_lr(),
+            EvArchetypeId.daily_commuter_l2(),
+            seed=42,
+        )
+
+        soc_values: list[float] = []
+        for _ in dw.timesteps():
+            soc = dw.get_equipment_telemetry("Tesla Model Y LR", "soc")
+            if soc is not None:
+                soc_values.append(soc)
+
+        assert len(soc_values) > 0, "no SOC telemetry recorded"
+        assert all(0.0 <= s <= 1.0 for s in soc_values), (
+            f"SOC out of [0, 1]: min={min(soc_values):.4f}, max={max(soc_values):.4f}"
+        )
+        assert soc_values[0] != soc_values[-1], (
+            f"SOC did not change over simulation: {soc_values[0]:.4f} -> {soc_values[-1]:.4f}"
+        )

@@ -1865,4 +1865,54 @@ mod tests {
             other => panic!("expected SelfConsumption signal, got {other:?}"),
         }
     }
+
+    #[test]
+    fn bms_storm_watch_custom_threshold_triggers_and_does_not_trigger() {
+        let make_actor = || {
+            BatteryManagementActor::new(
+                "bat1",
+                BmsMode::StormWatch {
+                    target_soc: 1.0,
+                    trigger: StormWatchTrigger::WeatherSignal {
+                        wind_speed_threshold_m_s: 20.0,
+                    },
+                    base_mode: Box::new(BmsMode::Manual),
+                },
+                GridExportRule::Unrestricted,
+                5.0,
+                5.0,
+                None,
+                24,
+            )
+        };
+
+        // 22 m/s exceeds 20 m/s threshold → storm watch activates
+        let mut actor_above = make_actor();
+        let env_above = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 22.0,
+                ..Default::default()
+            })
+            .build();
+        let mut out = Vec::new();
+        actor_above.decide(&env_above, &mut out);
+        assert_eq!(out.len(), 1, "wind 22 m/s should trigger at threshold 20 m/s");
+        assert!(matches!(out[0].signal, ControlSignal::SOCTarget { .. }));
+
+        // 18 m/s below 20 m/s threshold → delegates to base (Manual = no output)
+        let mut actor_below = make_actor();
+        let env_below = TestEnvBuilder::new()
+            .with_weather(WeatherState {
+                wind_speed_m_s: 18.0,
+                ..Default::default()
+            })
+            .build();
+        let mut out = Vec::new();
+        actor_below.decide(&env_below, &mut out);
+        assert!(
+            out.is_empty(),
+            "wind 18 m/s should NOT trigger at threshold 20 m/s, got {} signals",
+            out.len()
+        );
+    }
 }

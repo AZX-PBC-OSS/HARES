@@ -582,6 +582,8 @@ pub struct Dwelling {
     /// Pre-computed equipment execution order (sorted by stage rank).
     /// Computed once at init time, reused each timestep.
     equipment_execution_order: Vec<usize>,
+    /// Numerical invariant checker, allocated once and reused each step.
+    invariant_checker: InvariantChecker,
     /// Output config retained for schema rebuilds when equipment changes.
     output_verbosity: u8,
     output_chunk_size: usize,
@@ -946,6 +948,7 @@ impl Dwelling {
             actor_dispatch_buf: Vec::with_capacity(16),
             solver_feedback_actor,
             equipment_execution_order,
+            invariant_checker: InvariantChecker::new(),
             output_verbosity: config.sim_config.output_verbosity,
             output_chunk_size: config.sim_config.output_chunk_size,
             output_format: config.sim_config.output_format,
@@ -1701,10 +1704,12 @@ impl Dwelling {
         let mut obs_phases = PhaseSnapshots::default();
 
         // Step 1: update environment at current clock state.
+        // Feed zone temperatures back first so the borrow on self.latest_env.zones
+        // is released before we mutably borrow self.latest_env for update_in_place.
         #[cfg(feature = "profiling")]
         let schedule_started = Instant::now();
-        let env = self.environment.update(&self.clock, &self.latest_env.zones);
-        self.latest_env = env;
+        self.environment.feed_zones(&self.latest_env.zones);
+        self.environment.update_in_place(&mut self.latest_env, &self.clock);
 
         // Populate price signal from tariff evaluator (deterministic function of clock).
         if let Some(ref evaluator) = self.tariff_evaluator {
@@ -2228,7 +2233,7 @@ impl Dwelling {
     fn check_invariants(&self, dt: StdDuration) -> Result<()> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
-            let checker = InvariantChecker::new();
+            let checker = &self.invariant_checker;
 
             let dt_s = dt.as_secs_f64();
             if !dt_s.is_finite() || dt_s <= 0.0 {

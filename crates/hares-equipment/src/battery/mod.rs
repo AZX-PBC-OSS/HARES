@@ -43,14 +43,14 @@ pub(crate) const KEY_STANDBY_POWER_W: &str = "standby_power_w";
 const KEY_INITIAL_SOC: &str = "initial_soc";
 pub(crate) const KEY_MIN_SOC: &str = "min_soc";
 pub(crate) const KEY_MAX_SOC: &str = "max_soc";
-const KEY_HEATER_POWER_W: &str = "heater_power_w";
-const KEY_HEATER_THRESHOLD_C: &str = "heater_threshold_c";
+pub(crate) const KEY_HEATER_POWER_W: &str = "heater_power_w";
+pub(crate) const KEY_HEATER_THRESHOLD_C: &str = "heater_threshold_c";
 const KEY_HEATER_ON_DISCHARGE: &str = "heater_on_discharge";
 const KEY_CELL_THERMAL_MASS_J_PER_K: &str = "cell_thermal_mass_j_per_k";
 const KEY_CELL_UA_W_PER_K: &str = "cell_ua_w_per_k";
 const KEY_MIN_DISCHARGE_TEMP_C: &str = "min_discharge_temp_c";
-const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";
-const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
+pub(crate) const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";
+pub(crate) const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
 /// Symmetric round-trip inverter efficiency: splits as sqrt(rte) per direction.
 const KEY_INVERTER_EFFICIENCY: &str = "inverter_efficiency";
 /// Explicit charge-direction efficiency (AC→DC). Overrides sqrt split when set.

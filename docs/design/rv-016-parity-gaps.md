@@ -14,9 +14,9 @@ After all equipment have been stepped, OCHRE checks:
 - If `voltage > 0` OR `abs(total_p_kw) < 0.001`: grid-connected or self-sufficient islanded operation. No action needed.
 - Otherwise (grid disconnected and load not met): OCHRE resets all dwelling power to zero, zeros all zone internal/HVAC gains and surface gains, then sets `Voltage (-) = 0` on every electric equipment's schedule and **re-runs the entire model** via `super().update_model()`.
 
-This means gas equipment (gas furnace, gas water heater with `is_electric = False`) survives the shed. All electric loads are forced off for the re-step. The re-step recalculates thermal gains with only gas equipment contributing.
+Key detail: `Equipment.is_electric` defaults to `True` for ALL equipment (`Equipment.py:13`), including gas furnaces and gas boilers — these have electric blower fans and therefore require grid power. Gas furnaces inherit `is_electric = True` from the `Heater` base class and ARE shed in islanded mode. The only equipment that sets `is_electric = False` is tank-type gas water heaters with EF < 0.7 (`WaterHeater.py:713`), which have no electric ignition or controls. All other equipment — including all gas furnaces, gas boilers, and heat pumps — is treated as electric and gets shed when the grid is disconnected.
 
-Key detail: `Equipment.is_electric` defaults to `True` (`Equipment.py:13`). Gas water heaters explicitly set `self.is_electric = False` (`WaterHeater.py:713`). Gas furnaces inherit from `Heater` which inherits `is_electric = True` but their fuel consumption is tracked separately — they still get shed in islanded mode because they have electric components (blower fans).
+The re-step recalculates thermal gains with only non-electric equipment (gas water heaters with EF < 0.7) contributing. All electric loads are forced off.
 
 ### Proposed HARES Design
 
@@ -24,12 +24,16 @@ HARES already has `Dwelling::set_grid_voltage(voltage_pu)` and a `GridState` str
 
 **Implementation approach:**
 
-1. Add a `FuelType::is_electric()` method (or use `fuel != FuelType::Gas`) on each equipment's declared fuel type. This mirrors OCHRE's `is_electric` flag. Equipment that declares `FuelType::Electric` gets shed; `FuelType::Gas` survives.
+1. Add an `is_electric: bool` flag on `EquipmentDescriptor` (default `true`), mirroring OCHRE's `Equipment.is_electric`. This is NOT a fuel-type check — gas furnaces and gas boilers are electric (blower fans) and must be shed. Only gas water heaters with EF < 0.7 set `is_electric = false`. A `FuelType`-based predicate would incorrectly spare gas furnaces.
 
 2. In `Dwelling::step()`, after the normal equipment step loop, check `self.environment.grid().voltage_pu == 0.0`. If total electric draw > epsilon:
    - Zero all zone internal/HVAC/surface gains (mirrors OCHRE line 260-266).
-   - For each electric equipment, inject a `voltage_pu = 0.0` override into its environment snapshot.
-   - Re-run the equipment step loop. Gas equipment runs normally; electric equipment sees zero voltage and produces zero output.
+   - For each equipment with `is_electric == true`, inject a `voltage_pu = 0.0` override into its environment snapshot.
+   - Reset electric equipment's `PortContribution` entries in the `PortSlots` system so the re-step does not double-count prior contributions.
+   - Skip the actor/dispatch phase on re-step — only re-run equipment `step()` with the mutated environment. Actors have already made their decisions for this timestep.
+   - Re-run the equipment step loop. Non-electric equipment (gas water heaters with EF < 0.7) runs normally; electric equipment sees zero voltage and produces zero output.
+
+   Note: The PortSlots reset and selective re-step is a significant implementation concern. The follow-up ticket must include careful design of the reset mechanism to avoid corrupting accumulator state.
 
 3. Expose `Dwelling::is_islanded() -> bool` for Python/RL observability.
 
@@ -41,7 +45,7 @@ HARES already has `Dwelling::set_grid_voltage(voltage_pu)` and a `GridState` str
 
 1. **Grid-connected baseline:** `voltage_pu = 1.0`, electric HVAC runs normally, power draw > 0.
 2. **Islanded with electric load:** `voltage_pu = 0.0`, electric furnace + AC both shed, `total_electric_kw == 0`, zone gains zeroed.
-3. **Islanded with gas furnace:** `voltage_pu = 0.0`, gas furnace keeps heating, gas consumption > 0, electric consumption == 0. Zone HVAC gains reflect gas-only output.
+3. **Islanded with gas furnace:** `voltage_pu = 0.0`, gas furnace IS shed (blower fan is electric, `is_electric = true`). Heating output = 0 during islanded mode. Gas consumption == 0, electric consumption == 0.
 4. **Islanded self-sufficient:** `voltage_pu = 0.0` but battery/PV covers load (total_p_kw near zero). No shed occurs — equipment continues normally.
 5. **Transition:** Step with `voltage_pu = 1.0`, then `voltage_pu = 0.0`, then `voltage_pu = 1.0`. Verify equipment resumes normally after grid reconnection.
 6. **Telemetry:** `is_islanded()` returns correct value. Shed events appear in telemetry output.
@@ -51,15 +55,16 @@ HARES already has `Dwelling::set_grid_voltage(voltage_pu)` and a `GridState` str
 **RV-016a: Implement islanded/resilience mode**
 
 Scope:
-- Add `FuelType::is_electric()` helper.
-- Implement post-step voltage check and re-step logic in `Dwelling::step()`.
+- Add `is_electric: bool` field on `EquipmentDescriptor` (default `true`). Gas water heaters with EF < 0.7 set `is_electric = false`.
+- Implement post-step voltage check and re-step logic in `Dwelling::step()`, including `PortSlots` contribution reset for electric equipment.
+- Design the selective re-step mechanism: reset `PortContribution` entries, skip actor/dispatch, re-run equipment `step()` only.
 - Add `Dwelling::is_islanded()` accessor.
 - Expose islanded state in Python `DwellingWrapper`.
 
 Acceptance criteria:
 - All 6 test scenarios above pass.
 - No allocation in the re-step path (reuse existing equipment step infrastructure).
-- Gas equipment output is preserved exactly during islanded mode.
+- Non-electric equipment (gas water heaters with EF < 0.7) output is preserved exactly during islanded mode. Gas furnaces and boilers are correctly shed.
 
 ## 2. Generic Heater / Cooler
 
@@ -89,6 +94,8 @@ HARES already has `HvacEquipmentType::Other` in `hvac_core.rs:57` but it is not 
 4. Wire into HPXML resolver (`hares-io/src/hpxml/equipment.rs`): when system type does not match any specific equipment, fall back to `GenericHvac` instead of returning an error.
 
 5. Thermostat integration: reuse existing `HvacEquipment` thermostat/deadband/setpoint logic. No new control surface needed.
+
+6. Fan power: OCHRE's base `HVAC` class includes fan power consumption (`HVAC.py` `fan_power` attribute) even for the generic heater/cooler. HARES's `GenericHvac` should include a configurable `fan_power_w: f64` parameter (default 0.0) so that users can model blower fan draw. If omitted, this is a known divergence from OCHRE that should be documented.
 
 **Keep it minimal.** This is a catch-all, not a new physics model. The entire implementation should be under 150 lines.
 
@@ -130,7 +137,7 @@ Acceptance criteria:
 
 5. **Event assignment:** For each day, with probability `event_day_ratio`, pull all events for the sampled `day_id`. Convert `start_time` from minutes-from-midnight to absolute timestamps (`EV.py:172-176`).
 
-6. **Overlap resolution:** If two events from different days overlap (gap < 1 hour), truncate the first. Remove events shorter than 1 hour after truncation (`EV.py:189-197`).
+6. **Overlap resolution:** OCHRE only checks cross-`day_id` overlaps — events within the same sampled `day_id` are assumed non-overlapping. If two events from different `day_id`s overlap (gap < 1 hour), the first event is truncated. Events shorter than 1 hour after truncation are removed. The fix is non-transitive: truncating event A may create a new overlap with event B, but OCHRE does not re-check (`EV.py:189-197`).
 
 7. **SOC tracking:** `start_soc` from the PDF is used as arrival SOC. `end_soc` is computed from `start_soc + max_power * efficiency * hours / capacity`, clipped to 1.0 (`EV.py:206-208`). Unmet load from delayed charging carries forward to reduce the next event's start SOC (`EV.py:218-234`).
 
@@ -153,7 +160,7 @@ OCHRE also has `ScheduledEV` (`EV.py:364`) — a non-stochastic variant using a 
 
 3. Output format: list of dicts compatible with HARES EV driver `ChargingEvent` struct. The Python adapter converts these to the Rust-expected format before passing to `Dwelling::add_ev_schedule()`.
 
-4. Ship the EVI-Pro PDF CSV files as package data (they are small, ~100KB total for 8 files: 4 vehicle types x 2 charging levels).
+4. Ship the EVI-Pro PDF CSV files as package data (they are small, ~100KB total for 9 files: 4 vehicle types x 2 charging levels, plus a Level0 file for Vehicle 1).
 
 5. Expose a `seed` parameter for deterministic testing. OCHRE uses bare `np.random.rand()` / `np.random.choice()` which is not reproducible — we use `numpy.random.Generator` with explicit seeding.
 
@@ -179,8 +186,11 @@ Scope:
 - Integration with `DwellingWrapper` to accept generated schedules.
 - Explicit `seed` parameter on all RNG paths.
 
+**Scope note:** The `ChargingEvent` struct and `Dwelling::add_ev_schedule()` API referenced in the design above do not exist yet. This ticket must design and implement both the Rust-side `ChargingEvent` type (in `hares-core` or `hares-types`) and the `add_ev_schedule` method on `Dwelling` / `DwellingWrapper` before the Python generator can integrate with them.
+
 Acceptance criteria:
 - All 7 test scenarios above pass.
 - Generator runs in < 1 second for a 1-year schedule.
 - No `rand` crate additions to any Rust crate.
-- Generated schedules are compatible with existing HARES EV driver `ChargingEvent` format.
+- `ChargingEvent` struct and `add_ev_schedule()` API are implemented and documented.
+- Generated schedules are compatible with the new HARES EV driver `ChargingEvent` format.

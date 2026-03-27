@@ -41,9 +41,9 @@ Tickets partially advanced:
 | ID | Title | Kind | Crate(s) | Depends On |
 |----|-------|------|----------|------------|
 | [RV-005](RV-005.md) | Dwelling hot-path allocation elimination (env + step loop) | refactor | hares-core | — |
-| [RV-006](RV-006.md) | StratifiedTank: preallocate scratch buffers (~3.15M allocs/year) | refactor | hares-equipment | — |
-| [RV-007](RV-007.md) | ThermalSolver: prealloc, dedup infiltration lookups, borrow lwr_buf | refactor | hares-envelope | — |
-| [RV-007b](RV-007b.md) | ThermalSolver: precompute GlazingCurve (verify immutability first) | refactor | hares-envelope | — |
+| [RV-006](RV-006.md) | StratifiedTank: preallocate scratch buffers (~3.15M allocs/year) | refactor | hares-equipment | **Done** (pre-existing) |
+| [RV-007](RV-007.md) | ThermalSolver: prealloc, dedup infiltration lookups, borrow lwr_buf | refactor | hares-envelope | **Done** (all items implemented) |
+| [RV-007b](RV-007b.md) | ThermalSolver: precompute GlazingCurve (verify immutability first) | refactor | hares-envelope | **Done** (pre-existing) |
 | ~~[RV-008](RV-008.md)~~ | ~~Dwelling step loop alloc cleanup~~ | — | — | Subsumed by RV-005 |
 
 ## Wave 3 — Missing Tests + Invariant Wiring
@@ -66,7 +66,7 @@ Tickets partially advanced:
 | [RV-017](RV-017.md) | Test collision fixes (temp paths); remaining items tracked | fix | multiple | **Partial** |
 | [RV-018](RV-018.md) | Smoke test numeric assertions | test | tests | — |
 | [RV-019](RV-019.md) | Sentinels, panics, clippy, zero-div guard | fix | hares-core, hares-equipment | **Done** |
-| [RV-020](RV-020.md) | Config-driven summer months, duck typing, thresholds | fix | hares-tariff, hares-python, hares-core | — |
+| [RV-020](RV-020.md) | Config-driven summer months, duck typing, thresholds | fix | hares-tariff, hares-python, hares-core | **Done** (pre-existing) |
 
 ---
 

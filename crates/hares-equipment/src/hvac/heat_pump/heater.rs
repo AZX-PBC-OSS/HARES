@@ -298,7 +298,8 @@ impl HeatPumpHeaterCore {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
-                    | ControlCapabilities::DEMAND_RESPONSE,
+                    | ControlCapabilities::DEMAND_RESPONSE
+                    | ControlCapabilities::IDEAL_CAPACITY,
                 telemetry_fields: heater_telemetry_fields(),
             },
             ports: vec![

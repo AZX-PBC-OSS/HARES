@@ -1378,11 +1378,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Physics-grounded tests — validated against ASHRAE HOF Ch.16 / ASHRAE 152
-    // / Walker-Wilson 1998 / EnergyPlus cross-validation.
+    // Formula self-consistency checks — verify ashrae_wind_stack() output
+    // matches hand-evaluated Q = sqrt(Q_stack² + Q_wind²). These confirm
+    // the implementation is faithful to the formula, not that the formula
+    // itself is correct (see aim2_ochre_cross_validation for external check).
     // -----------------------------------------------------------------------
 
-    /// AIM-2 stack-dominated, normal shielding.
+    /// Formula self-consistency: stack-dominated, normal shielding.
     /// Q = sqrt((0.015 * 10^0.65)^2 + (0.0012 * (0.5*3)^1.3)^2)
     #[test]
     fn aim2_stack_dominated_normal_shielding() {
@@ -1390,14 +1392,14 @@ mod tests {
         approx_eq(q, 0.067_033_37, 1e-6);
     }
 
-    /// AIM-2 cold winter, well-shielded (shelter=0.3, dT=20, wind=5).
+    /// Formula self-consistency: cold winter, well-shielded (shelter=0.3, dT=20, wind=5).
     #[test]
     fn aim2_cold_winter_well_shielded() {
         let q = ashrae_wind_stack(0.015, 0.0012, 20.0, 5.0, 0.3, 0.65);
         approx_eq(q, 0.105_16, 1e-4);
     }
 
-    /// AIM-2 wind-dominated, exposed site (shelter=0.9, dT=2, wind=8).
+    /// Formula self-consistency: wind-dominated, exposed site (shelter=0.9, dT=2, wind=8).
     #[test]
     fn aim2_wind_dominated_exposed() {
         let q = ashrae_wind_stack(0.015, 0.0012, 2.0, 8.0, 0.9, 0.65);
@@ -1452,5 +1454,59 @@ mod tests {
             "depressurisation must produce less infiltration than pressurisation: \
              depress={q_depress}, press={q_press}"
         );
+    }
+
+    /// Cross-validate HARES AIM-2 against OCHRE `calculate_ashrae_infiltration_params`
+    /// (envelope.py:488-633). The dimensionless Walker-Wilson factors f_s and f_w must
+    /// match exactly. The combined coefficients c_s/c_w differ by <0.25% because OCHRE
+    /// routes through an IP SLA→ELA→C_i pipeline while HARES computes C directly from
+    /// ACH50 in SI. The shelter coefficient must also match.
+    ///
+    /// Reference scenario: 7 ACH50, 400 m³, 5 m height, slab, no flue, Normal
+    /// shielding, Suburban terrain. OCHRE values computed via its full pint-based
+    /// unit-conversion chain.
+    #[test]
+    fn aim2_ochre_cross_validation() {
+        let p = Aim2Params {
+            ach50: 7.0,
+            volume_m3: 400.0,
+            infiltration_height_m: 5.0,
+            foundation: FoundationLeakageClass::Other,
+            shielding: ShieldingClass::Normal,
+            terrain: TerrainClass::Suburban,
+            has_flue: false,
+            n_i: N_I_DEFAULT,
+            floors_above_grade: 2.0,
+        };
+        let coeffs = aim2_coefficients_from_ach50(&p);
+
+        // OCHRE reference values (computed via pint unit conversions):
+        //   c_s = 5.4956153940e-03  (inf_c × inf_Cs)
+        //   c_w = 9.8923972186e-03  (inf_c × inf_Cw)
+        //   shelter = 0.3077017406
+        //
+        // Dimensionless factors f_s and f_w are identical between OCHRE and HARES
+        // (both implement Walker-Wilson 1998 Eq. 9-25 identically). The ~0.2%
+        // difference in c_s/c_w arises from the flow-coefficient derivation:
+        // OCHRE uses SLA→ELA→C_i in IP units, HARES uses C = ACH50×V/(3600×50^n).
+        let ochre_c_s = 5.495_615_394_0e-3;
+        let ochre_c_w = 9.892_397_218_6e-3;
+        let ochre_shelter = 0.307_701_740_6;
+
+        let c_s_rel = (coeffs.c_s - ochre_c_s).abs() / ochre_c_s;
+        let c_w_rel = (coeffs.c_w - ochre_c_w).abs() / ochre_c_w;
+        assert!(
+            c_s_rel < 0.005,
+            "c_s relative error vs OCHRE too large: {c_s_rel:.4} (HARES={}, OCHRE={ochre_c_s})",
+            coeffs.c_s
+        );
+        assert!(
+            c_w_rel < 0.005,
+            "c_w relative error vs OCHRE too large: {c_w_rel:.4} (HARES={}, OCHRE={ochre_c_w})",
+            coeffs.c_w
+        );
+
+        // Shelter coefficient must match exactly (same terrain model, same formula)
+        approx_eq(coeffs.shelter_coeff, ochre_shelter, 1e-8);
     }
 }

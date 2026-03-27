@@ -45,19 +45,23 @@ fn parse_solar_override(
     if let Ok(list) = data.extract::<Bound<'_, PyList>>() {
         return parse_solar_override_from_list(py, &list);
     }
-    // Duck-type: DataFrame-like has .values and .columns attributes
-    if data.hasattr("values")? && data.hasattr("columns")? {
+    // Duck-type: Polars DataFrame has .values, .columns, and .height
+    if data.hasattr("values")? && data.hasattr("columns")? && data.hasattr("height")? {
         return parse_solar_override_from_dataframe(py, data);
     }
     // Duck-type: ndarray-like has .dtype and .shape attributes
     if data.hasattr("dtype")? && data.hasattr("shape")? {
         return parse_solar_override_from_dict(py, data);
     }
+    // Duck-type: pandas DataFrame has .values and .columns but no .height
+    if data.hasattr("values")? && data.hasattr("columns")? {
+        return parse_solar_override_from_dataframe(py, data);
+    }
     if let Ok(dict) = data.extract::<Bound<'_, PyDict>>() {
         return parse_solar_override_from_dict(py, dict.as_any());
     }
     Err(PyValueError::new_err(
-        "solar override must be a file path (str), polars DataFrame, numpy array dict, or list of dicts",
+        "solar override must be a file path (str), polars/pandas DataFrame, numpy array dict, or list of dicts",
     ))
 }
 

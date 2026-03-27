@@ -308,7 +308,8 @@ impl CoolingCore {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
-                    | ControlCapabilities::DEMAND_RESPONSE,
+                    | ControlCapabilities::DEMAND_RESPONSE
+                    | ControlCapabilities::IDEAL_CAPACITY,
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
@@ -471,8 +472,6 @@ impl CoolingCore {
             )
             .unwrap_or(DEFAULT_LATENT_TIME_CONSTANT_S),
         };
-
-        // fan_power_w_per_cfm → fan_power_w_per_m3_s conversion handled by hvac.init()
 
         // fan_power_w_per_cfm → fan_power_w_per_m3_s conversion handled by hvac.init()
 
@@ -1518,6 +1517,34 @@ mod tests {
             room_cooling > central_cooling,
             "Room AC (DSE=1.0) must deliver more cooling to zone ({room_cooling:.1} W) \
              than central AC with DSE=0.80 ({central_cooling:.1} W)"
+        );
+    }
+
+    #[test]
+    fn room_ac_airflow_rate() {
+        use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+        let mut cfg = ac_config();
+        cfg.ochre_class = "Room AC".to_string();
+        let environment = env(27.0, 0.010, 19.0, 35.0);
+
+        let expected = 312.0 * CFM_TO_M3_S / W_PER_TON;
+
+        // Construction-time default must be 312 CFM/ton.
+        let eq = RoomAC::new(cfg.clone());
+        assert!(
+            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
+            "RoomAC construction-time airflow must be 312 CFM/ton, got {} m3/s/W",
+            eq.core.hvac.airflow_m3_s_per_w
+        );
+
+        // init() must preserve the 312 CFM/ton default when no explicit airflow is configured.
+        let mut eq = RoomAC::new(cfg.clone());
+        eq.init(&cfg, &environment)
+            .expect("init must succeed with 312 CFM/ton default");
+        assert!(
+            (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
+            "init() must preserve 312 CFM/ton default for RoomAC, got {} m3/s/W",
+            eq.core.hvac.airflow_m3_s_per_w
         );
     }
 

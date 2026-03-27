@@ -445,6 +445,19 @@ mod tests {
         );
     }
 
+    /// High Cd produces raw PLF below 0.7, which must be clamped to max(0.7, PLR).
+    /// Cd=0.5, PLR=0.3 → raw PLF = 1 - 0.5*(1-0.3) = 0.65 → clamped to max(0.7, 0.3) = 0.7.
+    #[test]
+    fn plf_floor_clamp_with_high_cd() {
+        let mut hvac = make_single_speed();
+        hvac.plf_cooling_degradation_coeff = 0.5;
+        let plf = hvac.part_load_factor_for_stage(0.3, 0);
+        assert!(
+            (plf - 0.7).abs() < 1e-9,
+            "PLR=0.3, Cd=0.5: raw PLF=0.65 must clamp to 0.7, got {plf}"
+        );
+    }
+
     /// SingleSpeed: any load fraction yields speed_index=0, PLR=load_fraction.
     #[test]
     fn single_speed_always_stage_zero() {

@@ -200,6 +200,7 @@ const ITERATE_TOL_REL: f64 = 1e-5;
 const ITERATE_PERTURBATION: f64 = 0.1;
 
 /// Result of the SHR coil calculation, carrying all psychrometric coil state.
+#[derive(Debug)]
 pub(super) struct CoilResult {
     pub shr: f64,
     /// Apparatus dew point temperature [°C].
@@ -928,7 +929,7 @@ mod coil_psychrometric_tests {
 
     // AHRI 210/240 rated indoor conditions.
     const T_DB: f64 = 26.67; // 80 °F
-    const W_IN: f64 = 0.011159; // from T_wb=19.44°C at 101325 Pa
+    const W_IN: f64 = 0.011159; // psychrometric humidity ratio at T_DB=26.67°C, T_WB=19.44°C, P=101325 Pa (AHRI 210/240)
     const P_KPA: f64 = 101.325;
     // 3-ton unit
     const Q_KW: f64 = 10.5505;
@@ -936,30 +937,28 @@ mod coil_psychrometric_tests {
 
     // ------------------------------------------------------------------
     // Test 1: Bypass factor at AHRI rated conditions, SHR = 0.70.
-    // HARES uses dry-air mass flow rate per ASHRAE HOF Ch.1, producing
-    // ~1% lower mfr than OCHRE's moist-air convention. This yields a
-    // slightly lower BF (~0.153 vs OCHRE's 0.163). Both are valid;
-    // HARES is dimensionally correct for Q = ṁ_da × Δh.
+    // Reference: psychrolib with dry-air mass flow (ASHRAE HOF Ch.1).
+    // HARES uses ṁ_da (not ṁ_moist) so BF ≈ 0.154 vs OCHRE's 0.163.
     // ------------------------------------------------------------------
     #[test]
     fn coil_bypass_factor_ahri_rated_shr_070() {
         let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
         assert!(
-            bf > 0.10 && bf < 0.20,
-            "BF at SHR=0.70: expected in [0.10, 0.20] (ASHRAE dry-air basis), got {bf:.5}"
+            (bf - 0.154).abs() < 0.005,
+            "BF at SHR=0.70: expected 0.154 ± 0.005 (dry-air basis), got {bf:.5}"
         );
     }
 
     // ------------------------------------------------------------------
     // Test 2: Bypass factor at AHRI rated conditions, SHR = 0.74.
-    // Same dry-air basis as test 1.
+    // Reference: psychrolib with dry-air mass flow (ASHRAE HOF Ch.1).
     // ------------------------------------------------------------------
     #[test]
     fn coil_bypass_factor_ahri_rated_shr_074() {
         let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.74).unwrap();
         assert!(
-            bf > 0.01 && bf < 0.10,
-            "BF at SHR=0.74: expected in [0.01, 0.10] (ASHRAE dry-air basis), got {bf:.5}"
+            (bf - 0.040).abs() < 0.005,
+            "BF at SHR=0.74: expected 0.040 ± 0.005 (dry-air basis), got {bf:.5}"
         );
     }
 
@@ -981,17 +980,14 @@ mod coil_psychrometric_tests {
 
     // ------------------------------------------------------------------
     // Test 4: Ao factor at AHRI rated conditions, SHR = 0.70.
-    // Ao = -ln(BF) * mfr, where mfr ≈ 0.5796 kg/s.
-    // Reference: OCHRE/EnergyPlus enthalpy-based BF formula.
+    // Ao = -ln(BF) × ṁ_da. Reference: psychrolib dry-air basis.
     // ------------------------------------------------------------------
     #[test]
     fn coil_ao_factor_ahri_rated() {
         let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
-        // Ao = -ln(BF) × mfr_da. With dry-air mfr (~0.579 kg/s) and BF ~0.153:
-        // Ao ≈ 1.877 × 0.579 ≈ 1.09. OCHRE gets ~1.05 due to moist-air mfr.
         assert!(
-            ao > 0.90 && ao < 1.20,
-            "Ao at SHR=0.70: expected in [0.90, 1.20] (ASHRAE dry-air basis), got {ao:.5}"
+            (ao - 1.072).abs() < 0.02,
+            "Ao at SHR=0.70: expected 1.072 ± 0.02 kg/s (dry-air basis), got {ao:.5}"
         );
     }
 
@@ -1106,69 +1102,12 @@ mod coil_psychrometric_tests {
         let ao = coil_ao_factor(db_c, w_high, P_KPA, Q_KW, FLOW_M3S, shr_seed).unwrap();
         let result = calculate_shr(db_c, w_high, P_KPA, Q_KW, FLOW_M3S, ao).unwrap();
         assert!(
-            result.shr < 0.8,
-            "high-humidity SHR must be < 0.8, got {:.5}",
+            result.shr > 0.55 && result.shr < 0.8,
+            "high-humidity SHR must be in [0.55, 0.8], got {:.5}",
             result.shr
         );
     }
 
-    #[test]
-    fn debug_bf_intermediates() {
-        let mfr = calculate_mass_flow_rate(T_DB, W_IN, P_KPA, FLOW_M3S);
-        let d_h = Q_KW * 1000.0 / mfr;
-        let h_in = moist_air_enthalpy(T_DB, W_IN);
-        let h_tin_wout = h_in - (1.0 - 0.70) * d_h;
-        let w_out = humidity_ratio_from_enthalpy_and_t_dry_bulb(h_tin_wout, T_DB);
-        let d_w = W_IN - w_out;
-        let h_out = h_in - d_h;
-        let t_out = t_dry_bulb_from_enthalpy_and_humidity_ratio(h_out, w_out);
-        let p_pa = P_KPA * 1000.0;
-        let t_adp_init = dew_point(w_out.max(SHR_MIN_HUMIDITY_RATIO), p_pa);
-
-        eprintln!("HARES mfr: {mfr:.6}");
-        eprintln!("HARES d_h: {d_h:.4}");
-        eprintln!("HARES h_in: {h_in:.4}");
-        eprintln!("HARES h_out: {h_out:.4}");
-        eprintln!("HARES w_out: {w_out:.8}");
-        eprintln!("HARES t_out: {t_out:.6}");
-        eprintln!("HARES t_adp_init: {t_adp_init:.6}");
-        eprintln!("HARES d_w: {d_w:.8}");
-        eprintln!("HARES d_t: {:.6}", T_DB - t_out);
-        eprintln!("HARES m_c: {:.8}", d_w / (T_DB - t_out));
-
-        // Run iteration manually
-        let mut t_adp = t_adp_init;
-        let m_c = d_w / (T_DB - t_out);
-        let mut cnt = 0usize;
-        let mut err_last = 100.0_f64;
-        let mut d_t_adp = 5.0_f64;
-        let mut tol = 1.0;
-        while cnt < 100 && tol > 0.001 {
-            if cnt > 0 {
-                t_adp += d_t_adp;
-            }
-            let w_adp = humidity_ratio_from_rel_hum(t_adp, 1.0, p_pa);
-            let m = (W_IN - w_adp) / (T_DB - t_adp);
-            let err = (m - m_c) / m_c;
-            if cnt > 0 && err > 0.0 && err_last < 0.0 {
-                d_t_adp = -d_t_adp / 2.0;
-            }
-            if cnt > 0 && err < 0.0 && err_last > 0.0 {
-                d_t_adp = -d_t_adp / 2.0;
-            }
-            tol = err.abs();
-            err_last = err;
-            cnt += 1;
-        }
-        let w_adp_final = humidity_ratio_from_rel_hum(t_adp, 1.0, p_pa);
-        let h_adp = moist_air_enthalpy(t_adp, w_adp_final);
-        let bf = ((h_out - h_adp) / (h_in - h_adp)).max(0.01);
-        eprintln!("HARES final t_adp: {t_adp:.6}");
-        eprintln!("HARES w_adp: {w_adp_final:.8}");
-        eprintln!("HARES h_adp: {h_adp:.4}");
-        eprintln!("HARES bf: {bf:.6}");
-        eprintln!("HARES iterations: {cnt}");
-    }
 
     // Helper: call coil_bypass_factor and recover ADP via calculate_shr round-trip.
     fn bypass_factor_with_adp(
@@ -1208,6 +1147,35 @@ mod coil_psychrometric_tests {
         assert!(
             (t_adp - 12.79).abs() < 0.1,
             "T_ADP at SHR=0.74: expected 12.79 ± 0.1°C, got {t_adp:.3}°C"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test: Pathological inputs force calculate_shr to exhaust the
+    // SHR_ITERATION_LIMIT and return Err.
+    // ------------------------------------------------------------------
+    #[test]
+    fn calculate_shr_non_convergence_returns_error() {
+        // Ao=0 makes BF = exp(0) = 1.0, so d_h/(1-BF) = inf and h_adp = -inf.
+        // The iterate root-finder receives NaN errors and cannot converge.
+        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.0);
+        assert!(
+            result.is_err(),
+            "pathological Ao=0.0 must fail to converge, got {:?}",
+            result
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Test: SHR = 1.0 takes the enthalpy-only bypass factor path.
+    // BF must be in [BYPASS_FACTOR_FLOOR, 1.0].
+    // ------------------------------------------------------------------
+    #[test]
+    fn bypass_factor_shr_one_uses_enthalpy_path() {
+        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 1.0).unwrap();
+        assert!(
+            bf >= BYPASS_FACTOR_FLOOR && bf <= 1.0,
+            "SHR=1.0 BF must be in [{BYPASS_FACTOR_FLOOR}, 1.0], got {bf:.5}"
         );
     }
 }

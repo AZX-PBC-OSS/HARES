@@ -126,7 +126,8 @@ impl ElectricBoiler {
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
-                | ControlCapabilities::THERMAL_SETPOINT_DELTA,
+                | ControlCapabilities::THERMAL_SETPOINT_DELTA
+                | ControlCapabilities::IDEAL_CAPACITY,
             telemetry_fields: electric_boiler_telemetry_fields(),
         };
 
@@ -307,7 +308,8 @@ impl GasBoiler {
             fuel: FuelType::Gas,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
-                | ControlCapabilities::THERMAL_SETPOINT_DELTA,
+                | ControlCapabilities::THERMAL_SETPOINT_DELTA
+                | ControlCapabilities::IDEAL_CAPACITY,
             telemetry_fields: gas_boiler_telemetry_fields(),
         };
 

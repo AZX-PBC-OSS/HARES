@@ -56,7 +56,8 @@ impl ElectricBaseboard {
             fuel: FuelType::Electric,
             stage: ExecutionStage::Thermal,
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
-                | ControlCapabilities::THERMAL_SETPOINT_DELTA,
+                | ControlCapabilities::THERMAL_SETPOINT_DELTA
+                | ControlCapabilities::IDEAL_CAPACITY,
             telemetry_fields: telemetry_fields(),
         };
 

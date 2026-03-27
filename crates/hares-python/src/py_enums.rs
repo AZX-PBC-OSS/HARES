@@ -2028,24 +2028,54 @@ impl From<RustGridExportRule> for PyGridExportRule {
 // ---------------------------------------------------------------------------
 
 #[pyclass(name = "StormWatchTrigger", eq, hash, frozen, from_py_object)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PyStormWatchTrigger {
-    ManualEnable,
-    WeatherSignal,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PyStormWatchTrigger {
+    #[pyo3(get)]
+    pub is_manual: bool,
+    #[pyo3(get)]
+    pub wind_speed_threshold_m_s: f64,
+}
+
+impl Eq for PyStormWatchTrigger {}
+
+impl std::hash::Hash for PyStormWatchTrigger {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.is_manual.hash(state);
+        self.wind_speed_threshold_m_s.to_bits().hash(state);
+    }
 }
 
 #[pymethods]
 impl PyStormWatchTrigger {
+    #[staticmethod]
+    fn manual_enable() -> Self {
+        Self { is_manual: true, wind_speed_threshold_m_s: 0.0 }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (wind_speed_threshold_m_s = 25.0))]
+    fn weather_signal(wind_speed_threshold_m_s: f64) -> Self {
+        Self { is_manual: false, wind_speed_threshold_m_s }
+    }
+
     fn __repr__(&self) -> String {
-        format!("StormWatchTrigger.{self:?}")
+        if self.is_manual {
+            "StormWatchTrigger.manual_enable()".to_string()
+        } else {
+            format!(
+                "StormWatchTrigger.weather_signal(wind_speed_threshold_m_s={})",
+                self.wind_speed_threshold_m_s
+            )
+        }
     }
 }
 
 impl From<PyStormWatchTrigger> for RustStormWatchTrigger {
     fn from(v: PyStormWatchTrigger) -> Self {
-        match v {
-            PyStormWatchTrigger::ManualEnable => Self::ManualEnable,
-            PyStormWatchTrigger::WeatherSignal => Self::WeatherSignal { wind_speed_threshold_m_s: 25.0 },
+        if v.is_manual {
+            Self::ManualEnable
+        } else {
+            Self::WeatherSignal { wind_speed_threshold_m_s: v.wind_speed_threshold_m_s }
         }
     }
 }
@@ -2053,8 +2083,8 @@ impl From<PyStormWatchTrigger> for RustStormWatchTrigger {
 impl From<RustStormWatchTrigger> for PyStormWatchTrigger {
     fn from(v: RustStormWatchTrigger) -> Self {
         match v {
-            RustStormWatchTrigger::ManualEnable => Self::ManualEnable,
-            RustStormWatchTrigger::WeatherSignal { .. } => Self::WeatherSignal,
+            RustStormWatchTrigger::ManualEnable => Self { is_manual: true, wind_speed_threshold_m_s: 0.0 },
+            RustStormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s } => Self { is_manual: false, wind_speed_threshold_m_s },
         }
     }
 }

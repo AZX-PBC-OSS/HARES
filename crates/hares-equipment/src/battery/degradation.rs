@@ -13,7 +13,7 @@ use super::ocv::UNegTable;
 ///
 /// Tracks SOC reversals and counts completed cycles using the 3-point method.
 /// Per-cycle DOD amplitudes are stored separately so the degradation model can
-/// compute `Σ(DOD_i)` and `Σ(DOD_i²)` terms required by Smith 2017.
+/// compute the `Σ(count_i × DOD_i²)` weighted cycle-damage term required by Smith 2017.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct RainflowCounter {
     /// SOC values at detected reversals (peaks and valleys).
@@ -269,7 +269,8 @@ impl DegradationState {
     ///
     /// `u_neg_table`        — negative electrode potential lookup table
     /// `cell_temp_k`        — representative cell temperature for the day (K)
-    /// `sum_squared_dod`    — Σ DOD_i² from today's rainflow cycles
+    /// `sum_squared_dod`    — Σ(count_i × DOD_i²) from today's rainflow cycles,
+    ///                        where count_i is 0.5 for half-cycles and 1.0 for full cycles.
     pub(crate) fn update_daily(
         &mut self,
         u_neg_table: &UNegTable,
@@ -346,11 +347,9 @@ mod tests {
             rc.push(soc);
         }
         // ASTM E1049-85: two half-cycles are extracted (0.5 + 0.5 = 1.0 total).
-        // If the code conflates DOD amplitude with cycle count, this will fail.
         assert!(
-            rc.total_cycles() >= 1.0,
-            "ASTM E1049-85: [0.5,1.0,0.0,1.0] should yield total_cycles >= 1.0, got {}. \
-             Bug: cycle_count likely accumulates range*weight instead of weight alone.",
+            (rc.total_cycles() - 1.0).abs() < 1e-10,
+            "ASTM E1049-85: [0.5,1.0,0.0,1.0] should yield total_cycles = 1.0, got {}",
             rc.total_cycles()
         );
         assert!(
@@ -371,8 +370,8 @@ mod tests {
         }
         // Each reversal produces one half-cycle (weight 0.5); two reversals → 1.0 total.
         assert!(
-            rc.total_cycles() >= 1.0,
-            "Two-reversal sequence should yield total_cycles >= 1.0, got {}",
+            (rc.total_cycles() - 1.0).abs() < 1e-10,
+            "Two-reversal sequence should yield total_cycles = 1.0, got {}",
             rc.total_cycles()
         );
         // sum_squared_dod must be positive: at least one half-cycle with DOD > 0.
