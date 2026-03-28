@@ -256,37 +256,34 @@ impl StratifiedTank {
         &self.node_volumes_m3
     }
 
-    /// Compute the ideal heating power [W] needed to bring the lower half of
-    /// the tank to `setpoint_c` over one timestep of `dt_s` seconds, accounting
-    /// for standby losses at `ambient_c`. Returns 0.0 if the tank is already
-    /// at or above setpoint.
+    /// Compute the ideal heating power [W] for a specific element node.
     ///
-    /// Matches OCHRE `WaterHeater.solve_ideal_capacity()`: computes the thermal
-    /// energy deficit from current node temperatures to setpoint, divided by dt.
+    /// Predicts what the node temperature would be after one timestep with
+    /// heater OFF (standby loss only), then returns the power needed to bring
+    /// that single node back to `setpoint_c`. This matches the physical
+    /// reality: each element only heats its local node, not the whole tank.
     pub fn ideal_capacity_w(&self, setpoint_c: f64, ambient_c: f64, dt_s: f64) -> f64 {
-        if dt_s <= 0.0 {
+        self.ideal_capacity_for_node(self.node_temps_c.len() - 1, setpoint_c, ambient_c, dt_s)
+    }
+
+    /// Ideal capacity for a specific node index.
+    pub fn ideal_capacity_for_node(
+        &self,
+        node_idx: usize,
+        setpoint_c: f64,
+        ambient_c: f64,
+        dt_s: f64,
+    ) -> f64 {
+        if dt_s <= 0.0 || node_idx >= self.node_temps_c.len() {
             return 0.0;
         }
-        // Lower half of tank (OCHRE uses nodes at and above the lower element).
-        // For a 2-node tank the lower node is index 1 (last). For 12-node it's
-        // the bottom half. We use all nodes — the deficit from any node below
-        // setpoint contributes to the needed capacity.
-        let mut energy_deficit_j = 0.0;
-        for (i, (&temp, &vol)) in self
-            .node_temps_c
-            .iter()
-            .zip(self.node_volumes_m3.iter())
-            .enumerate()
-        {
-            let deficit_k = (setpoint_c - temp).max(0.0);
-            let mcp = WATER_DENSITY_KG_PER_M3 * vol * WATER_SPECIFIC_HEAT_J_PER_KG_K;
-            energy_deficit_j += deficit_k * mcp;
-            // Add estimated standby loss for this node during the timestep.
-            let ua = self.ua_per_node.get(i).copied().unwrap_or(0.0);
-            let loss_j = ua * (temp - ambient_c).max(0.0) * dt_s;
-            energy_deficit_j += loss_j;
-        }
-        (energy_deficit_j / dt_s).max(0.0)
+        let t_now = self.node_temps_c[node_idx];
+        let vol = self.node_volumes_m3[node_idx];
+        let mcp = WATER_DENSITY_KG_PER_M3 * vol * WATER_SPECIFIC_HEAT_J_PER_KG_K;
+        let ua = self.ua_per_node.get(node_idx).copied().unwrap_or(0.0);
+        let t_off = t_now - ua * (t_now - ambient_c) * dt_s / mcp;
+        let deficit_k = (setpoint_c - t_off).max(0.0);
+        (deficit_k * mcp / dt_s).max(0.0)
     }
 
     pub fn total_volume_m3(&self) -> f64 {

@@ -573,12 +573,11 @@ pub(super) fn resolve_ventilation(
             params.insert("ventilation_rate_cfm".to_string(), json!(flow_cfm));
         }
         if let Some(power_w) = child_f64(fan, "FanPower") {
+            // `fan_power_w` is the key the Ventilation equipment reads in init().
+            params.insert("fan_power_w".to_string(), json!(power_w));
+            // `power_w` is used by inject_constant_power_schedule for the
+            // ScheduledLoad fallback path (kept for compatibility).
             params.insert("power_w".to_string(), json!(power_w));
-            params.insert("max_electric_power_w".to_string(), json!(power_w));
-            // Constant power running 24h/day → annual kWh for schedule resolver.
-            let hours_per_day = child_f64(fan, "HoursInOperation").unwrap_or(24.0);
-            let annual_kwh = power_w / 1000.0 * hours_per_day * 365.0;
-            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
         }
         if let Some(fan_type) = child_text(fan, "FanType") {
             // OCHRE hpxml.py:556: balanced = fan_type in ["energy recovery ventilator",

@@ -284,6 +284,7 @@ impl Equipment for Ventilation {
         let is_running = self.mode != OperatingMode::Off && self.dr_level != DRLevel::GridEmergency;
 
         if !is_running {
+            self.telemetry.set("electric_kw", 0.0);
             self.telemetry.set("fan_power_w", 0.0);
             self.telemetry.set("sensible_recovery_w", 0.0);
             self.telemetry.set("latent_recovery_w", 0.0);
@@ -298,6 +299,7 @@ impl Equipment for Ventilation {
         let effective_fan_power_w = self.fan_power_w * schedule_frac;
 
         if effective_flow_rate_m3_s <= 0.0 {
+            self.telemetry.set("electric_kw", 0.0);
             self.telemetry.set("fan_power_w", 0.0);
             self.telemetry.set("sensible_recovery_w", 0.0);
             self.telemetry.set("latent_recovery_w", 0.0);
@@ -358,6 +360,7 @@ impl Equipment for Ventilation {
         })?;
 
         // Telemetry
+        self.telemetry.set("electric_kw", fan_kw);
         self.telemetry.set("fan_power_w", effective_fan_power_w);
         self.telemetry
             .set("sensible_recovery_w", q_recovery_sensible_w);
@@ -427,7 +430,8 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(5);
+    let mut t = Telemetry::with_capacity(6);
+    t.insert("electric_kw", 0.0);
     t.insert("fan_power_w", 0.0);
     t.insert("sensible_recovery_w", 0.0);
     t.insert("latent_recovery_w", 0.0);

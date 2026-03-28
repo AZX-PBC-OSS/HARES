@@ -445,12 +445,20 @@ impl Equipment for ResistanceWH {
         // power instead of full on/off cycling spikes.
         let use_ideal = env.time_res.num_seconds() >= 300;
         let duty = if use_ideal && mode == OperatingMode::Heating {
-            let rated_w = self.upper_element_power_w + self.lower_element_power_w;
-            if rated_w > 0.0 {
+            // Each element only heats its local node. Compute ideal capacity
+            // for the node where the active element sits, not the whole tank.
+            let (active_w, element_node) = if self.upper_element_on {
+                (self.upper_element_power_w, self.upper_node)
+            } else {
+                (self.lower_element_power_w, self.lower_node)
+            };
+            if active_w > 0.0 {
                 let dt_s = dt.as_secs_f64();
                 let ambient_c = self.ambient_temp_c(env);
-                let ideal_w = self.tank.ideal_capacity_w(self.setpoint_c, ambient_c, dt_s);
-                (ideal_w / rated_w).clamp(0.0, 1.0) * ctrl_duty
+                let ideal_w = self.tank.ideal_capacity_for_node(
+                    element_node, self.setpoint_c, ambient_c, dt_s,
+                );
+                (ideal_w / active_w).clamp(0.0, 1.0) * ctrl_duty
             } else {
                 0.0
             }
