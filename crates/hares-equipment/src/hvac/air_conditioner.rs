@@ -79,6 +79,12 @@ pub(super) struct CoolingCore {
     last_adp_c: f64,
     last_bypass_factor: f64,
 
+    // --- Ideal capacity (solver-driven) ---
+    /// Cached from last update_control; true when timestep >= 5 min.
+    use_ideal: bool,
+    /// Solver-provided ideal capacity [W]; set via IdealCapacity signal.
+    ideal_capacity_w: f64,
+
     // --- External control signals (sticky) ---
     ctrl_duty_cycle: f64,
     ctrl_power_limit_kw: f64,
@@ -239,6 +245,10 @@ impl Equipment for AirConditioner {
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         self.core.apply_control_unchecked(signal)
     }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        self.core.ideal_target()
+    }
 }
 
 impl Equipment for RoomAC {
@@ -335,6 +345,8 @@ impl CoolingCore {
             latent_degradation: LatentDegradationParams::default(),
             last_adp_c: 0.0,
             last_bypass_factor: 0.0,
+            use_ideal: false,
+            ideal_capacity_w: 0.0,
             ctrl_duty_cycle: 1.0,
             ctrl_power_limit_kw: f64::INFINITY,
             ctrl_mode_override: None,
@@ -495,6 +507,7 @@ impl CoolingCore {
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         // Reset transient signals each step.
         self.ctrl_load_fraction = 1.0;
+        self.use_ideal = self.hvac.use_ideal_capacity(env);
 
         // Advance DR duration; auto-revert to Normal when expired.
         if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
@@ -516,42 +529,24 @@ impl CoolingCore {
             return OperatingMode::Off;
         }
 
-        // Apply DR setpoint offset: positive offset raises cooling setpoint → less demand.
-        let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
-        let zone_temp = lookup_zone(env, self.hvac.zone_id)
-            .map(|z| z.temperature_c)
-            .unwrap_or(setpoint);
-
-        if self.hvac.use_ideal_capacity(env) {
-            // Ideal capacity mode (coarse timesteps >= 5 min or variable-speed):
-            // bypass the thermostat FSM and compute the exact capacity fraction
-            // needed to hold zone temperature at the setpoint, matching OCHRE's
-            // ideal_capacity solver. This produces time-averaged power rather
-            // than on/off cycling spikes.
-            let deadband = self
-                .hvac
-                .thermostat
-                .hysteresis_c
-                .max(MIN_LOAD_FRACTION_DEADBAND_C);
-            let load_fraction = ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0);
-            if load_fraction > 0.0 {
-                let selection = self.hvac.select_speed(load_fraction);
-                self.hvac.duty_cycle = selection.part_load_ratio;
-                self.operating_mode = OperatingMode::Cooling;
-                // Keep thermostat in Cooling so it doesn't fight ideal capacity.
-                self.hvac.mode = ThermostatMode::Cooling;
+        let mode = self
+            .hvac
+            .update_mode(env)
+            .unwrap_or(ThermostatMode::Deadband);
+        if mode == ThermostatMode::Cooling {
+            if self.use_ideal {
+                // Ideal capacity mode (coarse timesteps >= 5 min): the thermal
+                // solver provides exact PLR via calculate_performance. Set
+                // duty_cycle=1.0 as placeholder; the solver's IdealCapacity
+                // signal arrives before step() and overrides PLR there.
+                self.hvac.duty_cycle = 1.0;
             } else {
-                self.hvac.duty_cycle = 0.0;
-                self.operating_mode = OperatingMode::Off;
-                self.hvac.mode = ThermostatMode::Deadband;
-            }
-        } else {
-            // Fine timestep (< 5 min): use thermostat FSM for realistic cycling.
-            let mode = self
-                .hvac
-                .update_mode(env)
-                .unwrap_or(ThermostatMode::Deadband);
-            if mode == ThermostatMode::Cooling {
+                // Fine timestep: thermostat-driven load fraction.
+                let setpoint =
+                    self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
+                let zone_temp = lookup_zone(env, self.hvac.zone_id)
+                    .map(|z| z.temperature_c)
+                    .unwrap_or(setpoint);
                 let deadband = self
                     .hvac
                     .thermostat
@@ -569,15 +564,15 @@ impl CoolingCore {
                     }
                     _ => selection.part_load_ratio,
                 };
-                self.operating_mode = if self.hvac.duty_cycle > 0.0 {
-                    OperatingMode::Cooling
-                } else {
-                    OperatingMode::Off
-                };
-            } else {
-                self.hvac.duty_cycle = 0.0;
-                self.operating_mode = OperatingMode::Off;
             }
+            self.operating_mode = if self.hvac.duty_cycle > 0.0 {
+                OperatingMode::Cooling
+            } else {
+                OperatingMode::Off
+            };
+        } else {
+            self.hvac.duty_cycle = 0.0;
+            self.operating_mode = OperatingMode::Off;
         }
         self.operating_mode
     }
@@ -703,6 +698,9 @@ impl CoolingCore {
         self.telemetry.set("apparatus_dew_point_c", self.last_adp_c);
         self.telemetry.set("bypass_factor", self.last_bypass_factor);
 
+        // Clear solver-provided capacity so next step starts fresh.
+        self.ideal_capacity_w = 0.0;
+
         Ok(())
     }
 
@@ -776,17 +774,6 @@ impl CoolingCore {
             ),
         };
 
-        let plr = if self.hvac.speed_control_mode == SpeedControlMode::VariableSpeedIdeal {
-            1.0
-        } else {
-            self.hvac.duty_cycle.clamp(0.0, 1.0)
-        };
-        let plf = if self.hvac.speed_control_mode == SpeedControlMode::VariableSpeedIdeal {
-            1.0
-        } else {
-            self.hvac.part_load_factor(plr)
-        };
-
         // Fan shaft heat raises entering dry-bulb temperature seen by the coil.
         // OCHRE: coil_input_db += fan_power_per_flow_rate / 1000 / rho_air / cp_air
         // Applied as a first-order correction to the indoor wet-bulb temperature
@@ -815,13 +802,41 @@ impl CoolingCore {
         let coil_entering_wb_c = zone.wet_bulb_c + fan_shaft_heat_correction_c;
 
         let outdoor_c = env.weather.outdoor_temp_c;
-        // Capacity curve: PLF does not apply (PLF only penalises EIR).
+        // Capacity biquadratic: evaluate first — needed to derive PLR from
+        // solver-provided ideal capacity at current conditions.
         let (_, cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
             0,
             coil_entering_wb_c,
             outdoor_c,
             self.flow_fraction_correction,
         );
+
+        // Derive PLR: from solver's ideal capacity (coarse timestep) or
+        // thermostat duty cycle (fine timestep).
+        let is_variable_speed =
+            self.hvac.speed_control_mode == SpeedControlMode::VariableSpeedIdeal;
+        let steady_capacity_w = (stage_cap_w * cap_ratio).max(0.0);
+        let plr = if is_variable_speed {
+            1.0
+        } else if self.use_ideal && self.ideal_capacity_w.abs() > f64::EPSILON {
+            // Solver-provided ideal capacity (negative for cooling): derive PLR
+            // from biquadratic-corrected capacity at current conditions.
+            // Use 1% of nominal as floor to prevent near-zero denominators
+            // when biquadratic evaluates near zero at extreme conditions.
+            let min_cap = (stage_cap_w * 0.01).max(1.0);
+            let p = (-self.ideal_capacity_w / steady_capacity_w.max(min_cap)).clamp(0.0, 1.0);
+            // Write back so telemetry and RTF reporting see the solver-derived value.
+            self.hvac.duty_cycle = p;
+            p
+        } else {
+            self.hvac.duty_cycle.clamp(0.0, 1.0)
+        };
+        let plf = if is_variable_speed {
+            1.0
+        } else {
+            self.hvac.part_load_factor(plr)
+        };
+
         // EIR curve: divide by PLF — a lower PLF (more cycling) means worse efficiency.
         let (_, eir_ratio_base) = self.hvac.evaluate_biquadratic_with_flow(
             1,
@@ -835,7 +850,6 @@ impl CoolingCore {
             eir_ratio_base
         };
 
-        let steady_capacity_w = (stage_cap_w * cap_ratio).max(0.0);
         let staged_capacity_w = self
             .hvac
             .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
@@ -1050,9 +1064,25 @@ impl CoolingCore {
                 self.apply_dr_level(*level);
                 self.dr_duration_remaining_s = *duration_s;
             }
+            ControlSignal::IdealCapacity { capacity_w } => {
+                // Solver-provided load: negative = cooling needed.
+                self.ideal_capacity_w = *capacity_w;
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        if !self.use_ideal {
+            return None;
+        }
+        // Only report when thermostat says we need cooling.
+        if self.operating_mode != OperatingMode::Cooling {
+            return None;
+        }
+        let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
+        Some((self.hvac.zone_id, setpoint))
     }
 
     fn apply_dr_level(&mut self, level: DRLevel) {
@@ -2412,6 +2442,166 @@ mod crankcase_tests {
             restored.core.dr_load_fraction < 1.0,
             "dr_load_fraction must be < 1.0 after Critical DR (got {})",
             restored.core.dr_load_fraction
+        );
+    }
+}
+
+#[cfg(test)]
+mod ideal_capacity_tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_types::{
+        ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
+        ZoneId, ZoneState,
+    };
+
+    use super::AirConditioner;
+    use crate::{Equipment, EquipmentConfig};
+
+    /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
+    fn make_env(zone_temp_c: f64, time_res_s: i64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.010,
+                relative_humidity: 0.45,
+                wet_bulb_c: 19.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 35.0,
+                outdoor_humidity_ratio: 0.012,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(time_res_s),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// AC with setpoint=24°C, hysteresis=1°C, single-speed, flat biquadratic curves.
+    fn ac_config() -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
+        raw.insert("eir".to_string(), 0.33.into());
+        raw.insert("cooling_setpoint_c".to_string(), 24.0.into());
+        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
+        raw.insert("hysteresis_c".to_string(), 1.0.into());
+        raw.insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[1,0,0,0,0,0]".into(),
+        );
+        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        EquipmentConfig {
+            name: "AC".to_string(),
+            ochre_class: "Air Conditioner".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    fn make_ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        }
+    }
+
+    // At 60 s timestep (fine resolution), an IdealCapacity signal is ignored because
+    // use_ideal=false. Zone is above FSM turn-on threshold (setpoint + hysteresis = 25°C),
+    // so thermostat-driven load_fraction = (26 - 24) / 1 = 1.0 → RTF = 1.0 (full on).
+    #[test]
+    fn fine_timestep_fsm_cycling_ignores_ideal_capacity_signal() {
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        // 26°C exceeds FSM turn-on threshold of 25°C.
+        let env = make_env(26.0, 60);
+        eq.init(&cfg, &env).unwrap();
+        // Signal provides half-rated load; must be ignored when use_ideal=false.
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -4_000.0,
+        })
+        .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut make_ports())
+            .unwrap();
+
+        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        assert!(
+            (rtf - 1.0).abs() < 1e-9,
+            "FSM Cooling at 60 s must ignore IdealCapacity and produce RTF=1.0, got {rtf}"
+        );
+    }
+
+    // At 900 s timestep (coarse resolution), a solver-provided IdealCapacity signal for
+    // half the rated capacity (4000 W of 8000 W rated) produces fractional RTF.
+    // Flow: apply signal → update_control (use_ideal=true, FSM enters Cooling at 26°C) →
+    //   ideal_capacity_w=-4000 < 0 → load_fraction = 4000/8000 = 0.5 → RTF ≈ 0.5.
+    #[test]
+    fn coarse_timestep_ideal_signal_produces_fractional_rtf() {
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        // 26°C exceeds FSM turn-on threshold of 25°C; FSM enters Cooling.
+        let env = make_env(26.0, 900);
+        eq.init(&cfg, &env).unwrap();
+        // Half rated capacity: 4000 W of 8000 W rated → load_fraction = 0.5.
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -4_000.0,
+        })
+        .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        // Flat biquadratic [1,0,0,0,0,0] → cap_ratio=1.0. Raw PLR = 4000/8000 = 0.5,
+        // but PLF cycling-degradation (Cd=0.25) raises effective PLR to ~0.57.
+        assert!(
+            (rtf - 0.5).abs() < 0.15,
+            "IdealCapacity=-4000 W at 900 s (half rated) must produce RTF near 0.5, got {rtf}"
+        );
+    }
+
+    // At 900 s timestep with no solver signal and zone below the FSM cooling turn-on
+    // threshold (25°C), the thermostat stays Deadband → AC is off.
+    #[test]
+    fn coarse_timestep_no_signal_below_fsm_threshold_produces_zero_rtf() {
+        let cfg = ac_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        // 22°C is below FSM turn-on threshold (25°C); thermostat stays Deadband.
+        let env = make_env(22.0, 900);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        assert_eq!(
+            rtf, 0.0,
+            "900 s timestep with zone below FSM turn-on and no solver signal must \
+             produce RTF=0.0, got {rtf}"
         );
     }
 }

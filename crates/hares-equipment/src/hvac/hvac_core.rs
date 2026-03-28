@@ -314,6 +314,7 @@ impl HvacEquipment {
         self.heating_setpoint_source = build_setpoint_source(config, "heating");
         self.cooling_setpoint_source = build_setpoint_source(config, "cooling");
 
+
         // Seed static setpoints from the source so the initial deadband check
         // is reasonable before the first update_mode call.
         if let Some(ScheduleSource::DailyProfile { weekday, .. }) = &self.heating_setpoint_source {

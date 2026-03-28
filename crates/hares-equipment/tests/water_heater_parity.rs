@@ -143,7 +143,7 @@ fn standby_loss_over_24h() {
         .expect("tank_avg_temp_c must exist");
     let power = wh
         .telemetry()
-        .get("electric_power_w")
+        .get("electric_kw")
         .expect("electric_power_w must exist");
 
     // Element must be off (setpoint is 30°C < current tank temp for most of the run)
@@ -212,7 +212,7 @@ fn element_cycling_deadband_matches_ochre_default() {
     step_wh(&mut wh, &env, &mut ports);
     let power_step1 = wh
         .telemetry()
-        .get("electric_power_w")
+        .get("electric_kw")
         .expect("electric_power_w must exist");
     assert!(
         power_step1 > 0.0,
@@ -227,7 +227,7 @@ fn element_cycling_deadband_matches_ochre_default() {
         step_wh(&mut wh, &env, &mut ports);
         let power = wh
             .telemetry()
-            .get("electric_power_w")
+            .get("electric_kw")
             .expect("electric_power_w must exist");
         let temp = wh
             .telemetry()
@@ -456,7 +456,7 @@ fn hpwh_cop_at_multiple_ambient_temps() {
             .expect("cop must exist after step");
         let elec_w = wh
             .telemetry()
-            .get("electric_power_w")
+            .get("electric_kw")
             .expect("electric_power_w must exist");
 
         eprintln!("[wh_parity] hpwh_cop: ambient={ambient_c}°C cop={cop:.3} elec={elec_w:.1} W");

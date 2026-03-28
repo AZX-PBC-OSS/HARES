@@ -45,6 +45,24 @@ pub(super) fn resolve_scheduled_loads(
     }
 
     if let Some(appliances) = details.child("Appliances") {
+        let n_bedrooms = details
+            .path(&["BuildingSummary", "BuildingConstruction", "NumberofBedrooms"])
+            .and_then(|n| n.text.parse::<f64>().ok())
+            .unwrap_or(3.0);
+
+        // Pre-extract washer params for dryer energy calculation (OCHRE passes
+        // the actual ClothesWasher to parse_clothes_dryer).
+        let washer_node = appliances.children_named("ClothesWasher").next();
+        let washer_rated_kwh = washer_node
+            .and_then(|n| child_f64(n, "RatedAnnualkWh"))
+            .unwrap_or(400.0);
+        let washer_imef = washer_node
+            .and_then(|n| child_f64(n, "IntegratedModifiedEnergyFactor"))
+            .unwrap_or(1.0);
+        let washer_capacity_ft3 = washer_node
+            .and_then(|n| child_f64(n, "Capacity"))
+            .unwrap_or(3.0);
+
         for (tag, name) in [
             ("ClothesWasher", "Clothes Washer"),
             ("ClothesDryer", "Clothes Dryer"),
@@ -108,6 +126,66 @@ pub(super) fn resolve_scheduled_loads(
                         let frac_lat = 1.0 - frac_sens - frac_lost;
                         params.insert("sensible_gain_fraction".to_string(), json!(frac_sens));
                         params.insert("latent_gain_fraction".to_string(), json!(frac_lat));
+
+                        // Default annual energy when HPXML doesn't provide it
+                        // (OCHRE hpxml.py parse_clothes_dryer). Uses default washer values
+                        // (RatedAnnualkWh=400, IMEF=1.0, Capacity=3.0 ft³) since washer params
+                        // are not accessible here.
+                        if !params.contains_key("annual_electric_kwh")
+                            && !params.contains_key("annual_gas_therms")
+                        {
+                            let cef = params
+                                .get("combined_energy_factor")
+                                .and_then(|v| v.as_f64())
+                                .or_else(|| {
+                                    params
+                                        .get("energy_factor")
+                                        .and_then(|v| v.as_f64())
+                                        .map(|ef| ef / 1.15)
+                                })
+                                .unwrap_or(3.01);
+                            let multiplier = node
+                                .child("extension")
+                                .and_then(|e| child_f64(e, "UsageMultiplier"))
+                                .unwrap_or(1.0);
+                            // Use actual washer params from HPXML (pre-extracted above).
+                            let washer_capacity = washer_capacity_ft3;
+                            let washer_imef = washer_imef;
+                            let rmc = (0.97 * (washer_capacity / washer_imef)
+                                - washer_rated_kwh / 312.0)
+                                / ((2.0104 * washer_capacity + 1.4242) * 0.455)
+                                + 0.04;
+                            let acy = (164.0 + 46.5 * n_bedrooms)
+                                * ((3.0 * 2.08 + 1.59)
+                                    / (washer_capacity * 2.08 + 1.59));
+                            let base_kwh =
+                                (((rmc - 0.04) * 100.0) / 55.5) * (8.45 / cef) * acy;
+                            if fuel == FuelType::Electric {
+                                params.insert(
+                                    "annual_electric_kwh".to_string(),
+                                    json!(base_kwh * multiplier),
+                                );
+                            } else {
+                                // Gas dryer: ~7% electric parasitic, ~93% gas combustion
+                                // OCHRE hpxml.py:1312-1313
+                                let annual_kwh =
+                                    base_kwh * 0.07 * (3.73 / 3.30) * multiplier;
+                                let annual_therm = base_kwh
+                                    * 3412.0
+                                    * (1.0 - 0.07)
+                                    * (3.73 / 3.30)
+                                    / 100_000.0
+                                    * multiplier;
+                                params.insert(
+                                    "annual_electric_kwh".to_string(),
+                                    json!(annual_kwh),
+                                );
+                                params.insert(
+                                    "annual_gas_therms".to_string(),
+                                    json!(annual_therm),
+                                );
+                            }
+                        }
                     }
                     "Dishwasher" => {
                         if let Some(cap) = child_f64(node, "PlaceSettingCapacity") {
@@ -117,6 +195,47 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
                         }
                         params.insert("hot_water_draw_volume_l".to_string(), json!(6.0));
+                    }
+                    "CookingRange" => {
+                        // Default annual energy when HPXML doesn't provide it
+                        // (OCHRE hpxml.py parse_cooking_range:1451-1461).
+                        if !params.contains_key("annual_electric_kwh")
+                            && !params.contains_key("annual_gas_therms")
+                        {
+                            let is_induction = child_text(node, "IsInduction")
+                                .map(|v| v.eq_ignore_ascii_case("true"))
+                                .unwrap_or(false);
+                            let multiplier = node
+                                .child("extension")
+                                .and_then(|e| child_f64(e, "UsageMultiplier"))
+                                .unwrap_or(1.0);
+                            let burner_ef = if is_induction { 0.91_f64 } else { 1.0_f64 };
+                            // IsConvection lives on the sibling Oven node; default to false.
+                            let oven_ef = 1.0_f64;
+                            if fuel == FuelType::Electric {
+                                let annual_kwh = burner_ef
+                                    * oven_ef
+                                    * (331.0 + 39.0 * n_bedrooms)
+                                    * multiplier;
+                                params.insert(
+                                    "annual_electric_kwh".to_string(),
+                                    json!(annual_kwh),
+                                );
+                            } else {
+                                let annual_kwh =
+                                    (22.6 + 2.7 * n_bedrooms) * multiplier;
+                                let annual_therm =
+                                    oven_ef * (22.6 + 2.7 * n_bedrooms) * multiplier;
+                                params.insert(
+                                    "annual_electric_kwh".to_string(),
+                                    json!(annual_kwh),
+                                );
+                                params.insert(
+                                    "annual_gas_therms".to_string(),
+                                    json!(annual_therm),
+                                );
+                            }
+                        }
                     }
                     _ => {}
                 }

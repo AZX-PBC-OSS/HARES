@@ -436,8 +436,27 @@ impl Equipment for ResistanceWH {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let mode = self.update_control(env);
-        let duty =
+        let ctrl_duty =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
+
+        // Ideal capacity mode (coarse timesteps >= 5 min): compute the fraction
+        // of rated power needed to maintain tank temperature at setpoint, matching
+        // OCHRE's WaterHeater.solve_ideal_capacity(). This produces time-averaged
+        // power instead of full on/off cycling spikes.
+        let use_ideal = env.time_res.num_seconds() >= 300;
+        let duty = if use_ideal && mode == OperatingMode::Heating {
+            let rated_w = self.upper_element_power_w + self.lower_element_power_w;
+            if rated_w > 0.0 {
+                let dt_s = dt.as_secs_f64();
+                let ambient_c = self.ambient_temp_c(env);
+                let ideal_w = self.tank.ideal_capacity_w(self.setpoint_c, ambient_c, dt_s);
+                (ideal_w / rated_w).clamp(0.0, 1.0) * ctrl_duty
+            } else {
+                0.0
+            }
+        } else {
+            ctrl_duty
+        };
 
         let upper_power_w = if self.upper_element_on {
             self.upper_element_power_w * duty
@@ -516,7 +535,7 @@ impl Equipment for ResistanceWH {
         self.telemetry.set("tank_avg_temp_c", avg_temp_c);
         self.telemetry.set("upper_element_power_w", upper_power_w);
         self.telemetry.set("lower_element_power_w", lower_power_w);
-        self.telemetry.set("electric_power_w", electric_power_w);
+        self.telemetry.set("electric_kw", electric_power_w / 1_000.0);
         self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry.set(
             "operating_mode",
@@ -553,7 +572,7 @@ impl Equipment for ResistanceWH {
             tank_avg_temp_c: self.telemetry.get("tank_avg_temp_c").unwrap_or(0.0),
             upper_element_power_w: self.telemetry.get("upper_element_power_w").unwrap_or(0.0),
             lower_element_power_w: self.telemetry.get("lower_element_power_w").unwrap_or(0.0),
-            electric_power_w: self.telemetry.get("electric_power_w").unwrap_or(0.0),
+            electric_power_w: self.telemetry.get("electric_kw").unwrap_or(0.0),
             draw_flow_rate_kg_s: self.telemetry.get("draw_flow_rate_kg_s").unwrap_or(0.0),
             dr_level: self.dr_level,
             dr_setpoint_offset_c: self.dr_setpoint_offset_c,
@@ -585,7 +604,7 @@ impl Equipment for ResistanceWH {
         self.telemetry
             .insert("lower_element_power_w", decoded.lower_element_power_w);
         self.telemetry
-            .insert("electric_power_w", decoded.electric_power_w);
+            .insert("electric_kw", decoded.electric_power_w);
         self.telemetry
             .insert("draw_flow_rate_kg_s", decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -702,7 +721,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert("tank_avg_temp_c", 0.0);
     telemetry.insert("upper_element_power_w", 0.0);
     telemetry.insert("lower_element_power_w", 0.0);
-    telemetry.insert("electric_power_w", 0.0);
+    telemetry.insert("electric_kw", 0.0);
     telemetry.insert("draw_flow_rate_kg_s", 0.0);
     telemetry.insert("operating_mode", 0.0);
     telemetry
@@ -726,8 +745,8 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             description: "Lower element electric power".to_string(),
         },
         TelemetryField {
-            name: "electric_power_w".to_string(),
-            unit: "W".to_string(),
+            name: "electric_kw".to_string(),
+            unit: "kW".to_string(),
             description: "Total electric draw".to_string(),
         },
         TelemetryField {
@@ -1053,7 +1072,7 @@ mod tests {
         eq_base
             .step(&e, Duration::from_secs(60), &mut p_base)
             .unwrap();
-        let w_base = eq_base.telemetry().get("electric_power_w").unwrap_or(0.0);
+        let w_base = eq_base.telemetry().get("electric_kw").unwrap_or(0.0);
 
         // DR Critical: dr_load_fraction=0.5 → power halved.
         let mut eq_dr = ResistanceWH::new(cfg.clone());
@@ -1066,7 +1085,7 @@ mod tests {
             .unwrap();
         let mut p_dr = ports();
         eq_dr.step(&e, Duration::from_secs(60), &mut p_dr).unwrap();
-        let w_dr = eq_dr.telemetry().get("electric_power_w").unwrap_or(0.0);
+        let w_dr = eq_dr.telemetry().get("electric_kw").unwrap_or(0.0);
 
         assert!(w_base > 0.0, "baseline must draw power");
         assert!(
@@ -1283,8 +1302,8 @@ mod tests {
             .step(&e, Duration::from_secs(60), &mut p_base)
             .unwrap();
 
-        let w_compound = eq.telemetry().get("electric_power_w").unwrap_or(0.0);
-        let w_base = eq_base.telemetry().get("electric_power_w").unwrap_or(0.0);
+        let w_compound = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        let w_base = eq_base.telemetry().get("electric_kw").unwrap_or(0.0);
         assert!(w_base > 0.0, "baseline must draw power");
         let ratio = w_compound / w_base;
         assert!(

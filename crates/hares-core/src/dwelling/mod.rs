@@ -1847,6 +1847,19 @@ impl Dwelling {
                 .max(current_process_hwm_kb());
         }
 
+        // Step 2a: re-run update_control for thermal equipment that have a
+        // pending ideal capacity signal. The solver feedback actor computed and
+        // dispatched IdealCapacity between Step 1b and here; re-running
+        // update_control lets the equipment convert the solver-provided load
+        // into a fractional duty cycle for the current step (not one step late).
+        for &idx in &self.equipment_execution_order {
+            if self.equipment[idx].descriptor().stage == ExecutionStage::Thermal
+                && self.equipment[idx].ideal_target().is_some()
+            {
+                let _ = self.equipment[idx].update_control(&self.latest_env);
+            }
+        }
+
         let dt = chrono_to_std_duration(self.clock.time_res)?;
 
         // Step 2b: apply occupancy-driven internal heat gains.
@@ -2181,11 +2194,18 @@ impl Dwelling {
         for (eq, cols) in self.equipment.iter().zip(&self.equipment_column_map) {
             let telem = eq.telemetry();
             if let Some(idx) = cols.electric_power {
-                row[idx] = telem
+                let raw_kw = telem
                     .get("electric_kw")
                     .or_else(|| telem.get("active_power_kw"))
                     .or_else(|| telem.get("ac_power_kw"))
                     .unwrap_or(0.0);
+                // PV/generator telemetry reports positive generation; output
+                // convention (OCHRE) is negative for generation equipment.
+                row[idx] = if eq.descriptor().end_use == EndUse::PV {
+                    -raw_kw
+                } else {
+                    raw_kw
+                };
             }
             if let Some(idx) = cols.gas_power {
                 row[idx] = telem.get("fuel_input_w").unwrap_or(0.0) / GAS_THERMS_PER_HOUR_TO_W;

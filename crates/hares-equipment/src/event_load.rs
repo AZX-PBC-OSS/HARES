@@ -39,6 +39,42 @@ const KEY_EVENT_PROBABILITY_SCHEDULE_COL: &str = "event_probability_schedule_col
 const KEY_EVENT_PROBABILITY_CONSTANT: &str = "event_probability_constant";
 
 const KEY_HOT_WATER_DRAW_VOLUME_L: &str = "hot_water_draw_volume_l";
+const KEY_EVENT_POWER_KW_SERIES: &str = "event_power_kw_series";
+
+#[derive(Clone, Debug, PartialEq)]
+struct ExtractedEvent {
+    start_step: usize,
+    end_step: usize,
+    power_kw: f64,
+}
+
+/// Extract deterministic events from a kW time series.
+/// Contiguous non-zero regions become events with averaged power.
+/// Mirrors OCHRE's `EventBasedLoad.extract_events()`.
+fn extract_events_from_kw_series(kw_series: &[f64]) -> Vec<ExtractedEvent> {
+    let mut events = Vec::new();
+    let mut i = 0;
+    while i < kw_series.len() {
+        if kw_series[i] > 0.0 {
+            let start = i;
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            while i < kw_series.len() && kw_series[i] > 0.0 {
+                sum += kw_series[i];
+                count += 1;
+                i += 1;
+            }
+            events.push(ExtractedEvent {
+                start_step: start,
+                end_step: i,
+                power_kw: sum / count as f64,
+            });
+        } else {
+            i += 1;
+        }
+    }
+    events
+}
 
 const PHASE_POWER_PREFIX_A: &str = "phase_";
 const PHASE_POWER_SUFFIX_A: &str = "_power_kw";
@@ -74,6 +110,8 @@ struct EventBasedLoadState {
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
     delay_remaining_s: f64,
+    event_cursor: usize,
+    current_step: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -89,6 +127,8 @@ struct WetApplianceState {
     event_window_source_state: ScheduleSourceState,
     event_probability_source_state: ScheduleSourceState,
     delay_remaining_s: f64,
+    event_cursor: usize,
+    current_step: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +165,15 @@ pub struct EventBasedLoad {
     rng_seed: [u8; 32],
     rng_draws: u64,
     rng: ChaCha8Rng,
+
+    /// Pre-extracted deterministic events from schedule kW series.
+    extracted_events: Vec<ExtractedEvent>,
+    /// Index of the next event to check.
+    event_cursor: usize,
+    /// Current simulation step counter.
+    current_step: usize,
+    /// Length of the schedule for wrapping.
+    schedule_len: usize,
 }
 
 /// Multi-phase wet appliance cycle with stochastic starts.
@@ -155,6 +204,15 @@ pub struct WetAppliance {
     rng_seed: [u8; 32],
     rng_draws: u64,
     rng: ChaCha8Rng,
+
+    /// Pre-extracted deterministic events from schedule kW series.
+    extracted_events: Vec<ExtractedEvent>,
+    /// Index of the next event to check.
+    event_cursor: usize,
+    /// Current simulation step counter.
+    current_step: usize,
+    /// Length of the schedule for wrapping.
+    schedule_len: usize,
 }
 
 impl EventBasedLoad {
@@ -199,6 +257,10 @@ impl EventBasedLoad {
             rng_seed,
             rng_draws: 0,
             rng: ChaCha8Rng::from_seed(rng_seed),
+            extracted_events: Vec::new(),
+            event_cursor: 0,
+            current_step: 0,
+            schedule_len: 0,
         }
     }
 
@@ -404,6 +466,19 @@ impl Equipment for EventBasedLoad {
         self.rng_seed = derive_rng_seed(config);
         self.rng_draws = 0;
         self.rng = ChaCha8Rng::from_seed(self.rng_seed);
+
+        // If a kW time series was provided, pre-extract events for deterministic replay.
+        if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
+            self.extracted_events = extract_events_from_kw_series(kw_series);
+            self.schedule_len = kw_series.len();
+            self.event_cursor = 0;
+            self.current_step = 0;
+        } else {
+            self.extracted_events = Vec::new();
+            self.schedule_len = 0;
+            self.event_cursor = 0;
+            self.current_step = 0;
+        }
         Ok(())
     }
 
@@ -426,15 +501,53 @@ impl Equipment for EventBasedLoad {
         if self.delay_remaining_s > 0.0 {
             self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
         }
-        let window_open = self.event_window_source.value_at(env)? > 0.0;
-        let probability = self.event_probability_source.value_at(env)?;
-        self.maybe_start_event(window_open, probability);
+
+        if !self.extracted_events.is_empty() {
+            // Deterministic schedule-driven mode.
+            let step = self.current_step % self.schedule_len.max(1);
+
+            // Advance cursor past completed events.
+            while self.event_cursor < self.extracted_events.len()
+                && self.extracted_events[self.event_cursor].end_step <= step
+            {
+                self.event_cursor += 1;
+            }
+            // Wrap cursor when schedule wraps.
+            if self.event_cursor >= self.extracted_events.len() && self.schedule_len > 0 {
+                self.event_cursor = 0;
+            }
+
+            // Check if current step is within the current event.
+            let in_event = self.event_cursor < self.extracted_events.len() && {
+                let ev = &self.extracted_events[self.event_cursor];
+                step >= ev.start_step && step < ev.end_step
+            };
+
+            if in_event {
+                self.phase = EventPhase::Active;
+                self.active_power_kw = self.extracted_events[self.event_cursor].power_kw;
+                self.remaining_phase_s = dt_s;
+            } else {
+                self.phase = EventPhase::Idle;
+            }
+
+            self.current_step += 1;
+        } else {
+            // Stochastic fallback (no schedule data).
+            let window_open = self.event_window_source.value_at(env)? > 0.0;
+            let probability = self.event_probability_source.value_at(env)?;
+            self.maybe_start_event(window_open, probability);
+        }
+
         let month_scale = self
             .month_multipliers
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
         self.update_outputs(ports, month_scale)?;
-        self.advance_phase_timer(dt_s);
+
+        if self.extracted_events.is_empty() {
+            self.advance_phase_timer(dt_s);
+        }
         Ok(())
     }
 
@@ -455,6 +568,8 @@ impl Equipment for EventBasedLoad {
                 &self.event_probability_source,
             ),
             delay_remaining_s: self.delay_remaining_s,
+            event_cursor: self.event_cursor,
+            current_step: self.current_step,
         })
     }
 
@@ -467,6 +582,8 @@ impl Equipment for EventBasedLoad {
         self.delay_remaining_s = decoded.delay_remaining_s;
         self.rng_seed = decoded.rng_seed;
         self.rng_draws = decoded.rng_draws;
+        self.event_cursor = decoded.event_cursor;
+        self.current_step = decoded.current_step;
 
         self.rng = ChaCha8Rng::from_seed(self.rng_seed);
         self.rng.set_word_pos((self.rng_draws as u128) * 2);
@@ -574,6 +691,10 @@ impl WetAppliance {
             rng_seed,
             rng_draws: 0,
             rng: ChaCha8Rng::from_seed(rng_seed),
+            extracted_events: Vec::new(),
+            event_cursor: 0,
+            current_step: 0,
+            schedule_len: 0,
         }
     }
 
@@ -660,10 +781,16 @@ impl WetAppliance {
         month_scale: f64,
     ) -> std::result::Result<(), HaresError> {
         let active_power_kw = if self.active {
-            self.phases[self.phase_index].power_kw
-                * self.n_units
-                * self.load_fraction.max(0.0)
-                * month_scale
+            // In deterministic mode, use extracted event power directly.
+            // In stochastic mode, use configured phase power × n_units.
+            let base_kw = if !self.extracted_events.is_empty()
+                && self.event_cursor < self.extracted_events.len()
+            {
+                self.extracted_events[self.event_cursor].power_kw
+            } else {
+                self.phases[self.phase_index].power_kw * self.n_units
+            };
+            base_kw * self.load_fraction.max(0.0) * month_scale
         } else {
             0.0
         };
@@ -794,6 +921,19 @@ impl Equipment for WetAppliance {
         self.rng_seed = derive_rng_seed(config);
         self.rng_draws = 0;
         self.rng = ChaCha8Rng::from_seed(self.rng_seed);
+
+        // If a kW time series was provided, pre-extract events for deterministic replay.
+        if let Some(kw_series) = config.get_f64_array(KEY_EVENT_POWER_KW_SERIES) {
+            self.extracted_events = extract_events_from_kw_series(kw_series);
+            self.schedule_len = kw_series.len();
+            self.event_cursor = 0;
+            self.current_step = 0;
+        } else {
+            self.extracted_events = Vec::new();
+            self.schedule_len = 0;
+            self.event_cursor = 0;
+            self.current_step = 0;
+        }
         Ok(())
     }
 
@@ -816,15 +956,64 @@ impl Equipment for WetAppliance {
         if self.delay_remaining_s > 0.0 {
             self.delay_remaining_s = (self.delay_remaining_s - dt_s).max(0.0);
         }
-        let window_open = self.event_window_source.value_at(env)? > 0.0;
-        let probability = self.event_probability_source.value_at(env)?;
-        self.maybe_start_cycle(window_open, probability);
+
+        if !self.extracted_events.is_empty() {
+            // Deterministic schedule-driven mode: use extracted event power
+            // directly instead of multi-phase cycle power.
+            let step = self.current_step % self.schedule_len.max(1);
+
+            // Advance cursor past completed events.
+            while self.event_cursor < self.extracted_events.len()
+                && self.extracted_events[self.event_cursor].end_step <= step
+            {
+                self.event_cursor += 1;
+            }
+            if self.event_cursor >= self.extracted_events.len() && self.schedule_len > 0 {
+                self.event_cursor = 0;
+            }
+
+            let in_event = self.event_cursor < self.extracted_events.len() && {
+                let ev = &self.extracted_events[self.event_cursor];
+                step >= ev.start_step && step < ev.end_step
+            };
+
+            self.active = in_event;
+            if in_event {
+                self.phase_index = 0;
+            }
+
+            // Log first 5 events for debugging.
+            if self.current_step < 5 && !self.extracted_events.is_empty() {
+                let n_events = self.extracted_events.len();
+                let first_kw = self.extracted_events.first().map(|e| e.power_kw).unwrap_or(0.0);
+                tracing::debug!(
+                    eq = %self.descriptor.name,
+                    step = self.current_step,
+                    schedule_len = self.schedule_len,
+                    n_events,
+                    first_event_kw = first_kw,
+                    cursor = self.event_cursor,
+                    in_event,
+                    "WetAppliance deterministic step"
+                );
+            }
+
+            self.current_step += 1;
+        } else {
+            // Stochastic fallback.
+            let window_open = self.event_window_source.value_at(env)? > 0.0;
+            let probability = self.event_probability_source.value_at(env)?;
+            self.maybe_start_cycle(window_open, probability);
+        }
+
         let month_scale = self
             .month_multipliers
             .map(|m| m[env.current_time.month0() as usize])
             .unwrap_or(1.0);
         self.update_outputs(ports, month_scale)?;
-        self.advance_cycle(dt_s);
+        if self.extracted_events.is_empty() {
+            self.advance_cycle(dt_s);
+        }
         Ok(())
     }
 
@@ -847,6 +1036,8 @@ impl Equipment for WetAppliance {
                 &self.event_probability_source,
             ),
             delay_remaining_s: self.delay_remaining_s,
+            event_cursor: self.event_cursor,
+            current_step: self.current_step,
         })
     }
 
@@ -866,6 +1057,8 @@ impl Equipment for WetAppliance {
         self.forced_mode = decoded.forced_mode;
         self.delay_remaining_s = decoded.delay_remaining_s;
         self.hot_water_draw_rate_kg_s = decoded.hot_water_draw_rate_kg_s;
+        self.event_cursor = decoded.event_cursor;
+        self.current_step = decoded.current_step;
 
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.hot_water_draw_rate_kg_s > 0.0 {
@@ -1874,6 +2067,8 @@ mod tests {
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
             delay_remaining_s: 0.0,
+            event_cursor: 0,
+            current_step: 0,
         };
         let bytes = crate::save_postcard(&bad_state);
 
@@ -1978,6 +2173,8 @@ mod tests {
             event_window_source_state: super::ScheduleSourceState::Stateless,
             event_probability_source_state: super::ScheduleSourceState::Stateless,
             delay_remaining_s: 0.0,
+            event_cursor: 0,
+            current_step: 0,
         };
         let bytes = crate::save_postcard(&good_state);
 
@@ -2404,6 +2601,160 @@ mod tests {
             "error message should mention delay rejection, got: {msg}"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // extract_events_from_kw_series unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn extract_events_empty_series() {
+        let events = super::extract_events_from_kw_series(&[]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn extract_events_all_zeros() {
+        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 0.0]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn extract_events_single_step_event() {
+        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 5.0, 0.0, 0.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 2);
+        assert_eq!(events[0].end_step, 3);
+        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_multi_step_event_averages_power() {
+        let events = super::extract_events_from_kw_series(&[0.0, 2.0, 4.0, 6.0, 0.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 1);
+        assert_eq!(events[0].end_step, 4);
+        // avg(2, 4, 6) = 4.0
+        assert!((events[0].power_kw - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_two_separate_events() {
+        let events = super::extract_events_from_kw_series(&[1.0, 0.0, 0.0, 3.0, 3.0, 0.0]);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 1);
+        assert!((events[0].power_kw - 1.0).abs() < 1e-12);
+        assert_eq!(events[1].start_step, 3);
+        assert_eq!(events[1].end_step, 5);
+        assert!((events[1].power_kw - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_adjacent_events_separated_by_zero() {
+        let events = super::extract_events_from_kw_series(&[1.0, 1.0, 0.0, 2.0, 2.0]);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 2);
+        assert!((events[0].power_kw - 1.0).abs() < 1e-12);
+        assert_eq!(events[1].start_step, 3);
+        assert_eq!(events[1].end_step, 5);
+        assert!((events[1].power_kw - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_event_at_start() {
+        let events = super::extract_events_from_kw_series(&[5.0, 5.0, 0.0, 0.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 2);
+        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_event_at_end() {
+        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 5.0, 5.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 2);
+        assert_eq!(events[0].end_step, 4);
+        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_entire_series_is_one_event() {
+        let events = super::extract_events_from_kw_series(&[3.0, 3.0, 3.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 3);
+        assert!((events[0].power_kw - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extract_events_varying_power_averages_correctly() {
+        let events = super::extract_events_from_kw_series(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_step, 0);
+        assert_eq!(events[0].end_step, 5);
+        // avg(1, 2, 3, 4, 5) = 3.0
+        assert!((events[0].power_kw - 3.0).abs() < 1e-12);
+    }
+
+    /// Deterministic replay: EventBasedLoad driven by event_power_kw_series emits
+    /// power only during the steps that correspond to the non-zero regions, using
+    /// the averaged power for that region.
+    ///
+    /// Series: [0.0, 2.0, 4.0, 0.0, 0.0, 6.0, 6.0, 0.0]
+    ///   -> event 1: steps 1-3, power 3.0 kW (avg of 2+4)
+    ///   -> event 2: steps 5-7, power 6.0 kW
+    /// Expected per-step output (kW): 0, 3, 3, 0, 0, 6, 6, 0
+    #[test]
+    fn deterministic_replay_matches_schedule() {
+        use super::super::config::ConfigValue;
+
+        let kw_series = vec![0.0_f64, 2.0, 4.0, 0.0, 0.0, 6.0, 6.0, 0.0];
+        let expected_kw: &[f64] = &[0.0, 3.0, 3.0, 0.0, 0.0, 6.0, 6.0, 0.0];
+
+        let mut raw: std::collections::HashMap<String, ConfigValue> =
+            std::collections::HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        // active_power_kw is irrelevant in deterministic mode; the series power wins.
+        raw.insert("active_power_kw".to_string(), 99.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+        raw.insert("latent_gain_fraction".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        raw.insert(
+            "event_power_kw_series".to_string(),
+            ConfigValue::FloatArray(kw_series),
+        );
+        let config = crate::EquipmentConfig {
+            name: "replay_test".to_string(),
+            ochre_class: "EventBasedLoad".to_string(),
+            raw_config: raw,
+        };
+
+        let mut env = base_env();
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        for (step, &expected) in expected_kw.iter().enumerate() {
+            let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
+            // schedule payload is not used in deterministic mode but must be present
+            set_schedule_payload(&mut env, vec![1.0, 1.0]);
+            eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+            let actual = slots.electrical.load_power_kw;
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "step {step}: expected {expected} kW, got {actual} kW"
+            );
+            env.current_time += ChronoDuration::minutes(1);
+        }
+    }
+
+    // -------------------------------------------------------------------------
 
     /// save_state captures delay_remaining_s; load_state restores it so the event
     /// remains blocked for the same number of steps as it would have been without

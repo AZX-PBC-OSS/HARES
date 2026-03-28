@@ -101,6 +101,10 @@ struct HeatPumpHeaterCore {
     /// for crankcase heater power accounting.
     last_heating_rtf: f64,
 
+    // --- Ideal capacity (solver-driven) ---
+    use_ideal: bool,
+    ideal_capacity_w: f64,
+
     // --- External control signals (sticky) ---
     /// DutyCycle override fraction [0..1]; 1.0 = no effect (sticky).
     ctrl_duty_cycle: f64,
@@ -336,6 +340,8 @@ impl HeatPumpHeaterCore {
             prev_zone_temp_c: f64::NAN,
             er_soft_lockout: false,
             last_heating_rtf: 0.0,
+            use_ideal: false,
+            ideal_capacity_w: 0.0,
             ctrl_duty_cycle: 1.0,
             ctrl_power_limit_kw: f64::INFINITY,
             ctrl_mode_override: None,
@@ -503,6 +509,7 @@ impl HeatPumpHeaterCore {
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
         // Reset transient signals before each control step.
         self.ctrl_load_fraction = 1.0;
+        self.use_ideal = self.hvac.use_ideal_capacity(env);
 
         // Decrement DR duration and auto-revert to Normal when expired.
         let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
@@ -653,6 +660,9 @@ impl HeatPumpHeaterCore {
         self.telemetry
             .set("defrost_time_fraction", step.defrost_time_fraction);
 
+        // Clear solver-provided capacity so next step starts fresh.
+        self.ideal_capacity_w = 0.0;
+
         Ok(())
     }
 
@@ -679,16 +689,42 @@ impl HeatPumpHeaterCore {
                 )
             };
 
-        let plr = self.hvac.duty_cycle.clamp(0.0, 1.0);
-        let plf = self.hvac.part_load_factor(plr);
-
-        // Capacity curve: PLF does not apply (PLF only penalises EIR).
+        // Capacity biquadratic: evaluate first — needed to derive PLR from
+        // solver-provided ideal capacity at current conditions.
         let (_, cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
             0,
             zone.temperature_c,
             env.weather.outdoor_temp_c,
             1.0,
         );
+
+        // Derive PLR: from solver's ideal capacity (coarse timestep) or
+        // thermostat duty cycle (fine timestep).
+        let steady_capacity_w = (stage_capacity_w * cap_ratio).max(0.0);
+        let er_on = matches!(
+            self.operating_mode,
+            OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+        );
+        let plr = if self.use_ideal && self.ideal_capacity_w.abs() > f64::EPSILON {
+            // Solver-provided ideal capacity (positive for heating): derive PLR
+            // from biquadratic-corrected capacity at current conditions.
+            // When ER backup is active, include its capacity in the denominator
+            // so PLR × (hp_cap + er_cap) = ideal_load, preventing over-delivery.
+            let total_available = if er_on {
+                steady_capacity_w + self.backup_capacity_w
+            } else {
+                steady_capacity_w
+            };
+            let min_cap = (stage_capacity_w * 0.01).max(1.0);
+            let p = (self.ideal_capacity_w / total_available.max(min_cap)).clamp(0.0, 1.0);
+            // Write back so telemetry and RTF reporting see the solver-derived value.
+            self.hvac.duty_cycle = p;
+            p
+        } else {
+            self.hvac.duty_cycle.clamp(0.0, 1.0)
+        };
+        let plf = self.hvac.part_load_factor(plr);
+
         // EIR curve: divide by PLF — cycling reduces efficiency.
         let (_, eir_ratio_base) = self.hvac.evaluate_biquadratic_with_flow(
             1,
@@ -702,7 +738,6 @@ impl HeatPumpHeaterCore {
             eir_ratio_base
         };
 
-        let steady_capacity_w = (stage_capacity_w * cap_ratio).max(0.0);
         let staged_capacity_w = self
             .hvac
             .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
@@ -715,10 +750,6 @@ impl HeatPumpHeaterCore {
         let hp_on = matches!(
             self.operating_mode,
             OperatingMode::HeatingHP | OperatingMode::HeatingHPAndER
-        );
-        let er_on = matches!(
-            self.operating_mode,
-            OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
         );
 
         let mut defrost_active = false;
@@ -863,12 +894,7 @@ impl HeatPumpHeaterCore {
         }
         self.prev_zone_temp_c = zone.temperature_c;
 
-        // Ideal capacity mode (coarse timesteps >= 5 min): bypass the thermostat
-        // FSM and compute load fraction directly from zone temp vs setpoint. This
-        // prevents on/off cycling spikes at coarse resolution.
-        let ideal = self.hvac.use_ideal_capacity(env);
-
-        if !ideal && mode != ThermostatMode::Heating {
+        if mode != ThermostatMode::Heating {
             return Ok(HeaterControl {
                 hp_on: false,
                 er_on: false,
@@ -879,17 +905,15 @@ impl HeatPumpHeaterCore {
 
         let deadband = self.hvac.thermostat.hysteresis_c.max(0.1);
 
-        let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
-        let load_ratio = load_ratio_raw.clamp(0.0, 1.0);
-
-        if ideal && load_ratio <= 0.0 {
-            return Ok(HeaterControl {
-                hp_on: false,
-                er_on: false,
-                speed_index: 0,
-                duty_cycle: 0.0,
-            });
-        }
+        let load_ratio = if self.use_ideal {
+            // Ideal capacity mode: solver provides PLR via compute_step.
+            // Set load_ratio=1.0 as placeholder; actual PLR derived from
+            // biquadratic-corrected capacity in compute_step.
+            1.0
+        } else {
+            let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
+            load_ratio_raw.clamp(0.0, 1.0)
+        };
         let speed = self.hvac.select_speed(load_ratio);
 
         let hp_available = env.weather.outdoor_temp_c >= self.hp_lockout_temp_c;
@@ -1105,6 +1129,9 @@ impl HeatPumpHeaterCore {
                 self.apply_dr_level(*level);
                 self.dr_duration_remaining_s = *duration_s;
             }
+            ControlSignal::IdealCapacity { capacity_w } => {
+                self.ideal_capacity_w = *capacity_w;
+            }
             _ => {
                 apply_heating_control_unchecked(
                     &mut self.hvac,
@@ -1114,6 +1141,23 @@ impl HeatPumpHeaterCore {
             }
         }
         Ok(())
+    }
+
+    fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+        if !self.use_ideal {
+            return None;
+        }
+        if !matches!(
+            self.operating_mode,
+            OperatingMode::HeatingHP
+                | OperatingMode::HeatingER
+                | OperatingMode::HeatingHPAndER
+        )
+        {
+            return None;
+        }
+        let setpoint = self.hvac.effective_setpoints().heating_c + self.dr_setpoint_offset_c;
+        Some((self.hvac.zone_id, setpoint))
     }
 }
 
@@ -2376,5 +2420,169 @@ mod tests {
 
         let cop = eq.telemetry().get("cop").unwrap_or(-1.0);
         assert_eq!(cop, 0.0, "heater off must give COP=0, got {cop}");
+    }
+}
+
+#[cfg(test)]
+mod ideal_capacity_tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_types::{
+        ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
+        ZoneId, ZoneState,
+    };
+
+    use super::ASHPHeater;
+    use crate::{Equipment, EquipmentConfig};
+
+    /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
+    /// OAT is held above the HP lockout (default -17.78°C) and above the ER lockout
+    /// (default 4.44°C) so only HP heating is active — isolating the duty-cycle behaviour.
+    fn make_env(zone_temp_c: f64, time_res_s: i64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 8.0,
+                outdoor_humidity_ratio: 0.004,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::seconds(time_res_s),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    /// HP heater with setpoint=21°C, hysteresis=1°C, no ER strip heat (backup_capacity_w=0),
+    /// OAT above ER lockout so only the HP compressor runs.
+    fn heater_config() -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("heating_capacity_w".to_string(), 8_000.0.into());
+        raw.insert("eir".to_string(), 0.33.into());
+        // No backup strip so electric_kw comes purely from HP compressor.
+        raw.insert("backup_capacity_w".to_string(), 0.0.into());
+        raw.insert("heating_setpoint_c".to_string(), 21.0.into());
+        raw.insert("cooling_setpoint_c".to_string(), 26.0.into());
+        raw.insert("hysteresis_c".to_string(), 1.0.into());
+        raw.insert(
+            "biquadratic_coeffs".to_string(),
+            "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
+        );
+        EquipmentConfig {
+            name: "HP Heater".to_string(),
+            ochre_class: "ASHP Heater".to_string(),
+            raw_config: raw,
+        }
+    }
+
+    fn make_ports() -> PortSlots {
+        PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        }
+    }
+
+    // At 60 s timestep (fine resolution), an IdealCapacity signal is ignored because
+    // use_ideal=false. Zone is below FSM turn-on threshold (setpoint - hysteresis = 20°C),
+    // so FSM enters Heating with load_ratio = (21 - 19) / 1 = 1.0 (clamped) → RTF = 1.0.
+    #[test]
+    fn fine_timestep_fsm_cycling_ignores_ideal_capacity_signal() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // 19°C is below FSM turn-on threshold of 20°C.
+        let env = make_env(19.0, 60);
+        eq.init(&cfg, &env).unwrap();
+        // Signal provides half-rated load; must be ignored when use_ideal=false.
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 4_000.0,
+        })
+        .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut make_ports())
+            .unwrap();
+
+        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        assert!(
+            (rtf - 1.0).abs() < 1e-9,
+            "FSM Heating at 60 s must ignore IdealCapacity and produce RTF=1.0, got {rtf}"
+        );
+    }
+
+    // At 900 s timestep (coarse resolution), a solver-provided IdealCapacity signal for
+    // half the rated capacity (4000 W of 8000 W rated) produces fractional RTF.
+    // Flow: apply signal → update_control (use_ideal=true, FSM enters Heating at 19°C) →
+    //   ideal_capacity_w=4000 > 0 → load_ratio = 4000/8000 = 0.5 → RTF ≈ 0.5.
+    #[test]
+    fn coarse_timestep_ideal_signal_produces_fractional_rtf() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // 19°C is below FSM turn-on threshold of 20°C; FSM enters Heating.
+        let env = make_env(19.0, 900);
+        eq.init(&cfg, &env).unwrap();
+        // Half rated capacity: 4000 W of 8000 W rated → load_ratio = 0.5.
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 4_000.0,
+        })
+        .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        // Flat biquadratic [1,0,0,0,0,0] → cap_ratio=1.0, PLR = 4000/8000 = 0.5.
+        // PLF slightly adjusts, so allow ±5%.
+        assert!(
+            (rtf - 0.5).abs() < 0.05,
+            "IdealCapacity=4000 W at 900 s (half rated) must produce RTF ≈ 0.5, got {rtf}"
+        );
+    }
+
+    // At 900 s timestep with no solver signal and zone above the heating setpoint,
+    // the thermostat stays Deadband → heater is off regardless of timestep resolution.
+    #[test]
+    fn coarse_timestep_no_signal_above_setpoint_produces_zero_rtf() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // 22°C is above setpoint (21°C); FSM stays Deadband, no heating demand.
+        let env = make_env(22.0, 900);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        assert_eq!(
+            rtf, 0.0,
+            "900 s timestep with zone above heating setpoint must produce RTF=0.0, got {rtf}"
+        );
     }
 }

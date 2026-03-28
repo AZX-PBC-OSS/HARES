@@ -825,6 +825,8 @@ impl Equipment for HeatPumpWH {
         self.telemetry.set("compressor_power_w", compressor_power_w);
         self.telemetry.set("backup_element_power_w", backup_power_w);
         self.telemetry
+            .set("electric_kw", electric_power_w / 1_000.0);
+        self.telemetry
             .set("zone_heat_extraction_w", zone_heat_extraction_w);
         self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
         self.telemetry
@@ -1043,6 +1045,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert("tank_avg_temp_c", 0.0);
     telemetry.insert("cop", 0.0);
     telemetry.insert("cap_mult", 1.0);
+    telemetry.insert("electric_kw", 0.0);
     telemetry.insert("compressor_power_w", 0.0);
     telemetry.insert("backup_element_power_w", 0.0);
     telemetry.insert("zone_heat_extraction_w", 0.0);

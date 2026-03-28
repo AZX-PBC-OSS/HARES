@@ -699,7 +699,7 @@ fn inject_event_schedule(
     if spec
         .parameters
         .keys()
-        .any(|k| k == "event_window_schedule_col" || k == "event_window_source")
+        .any(|k| k == "event_window_schedule_col" || k == "event_window_source" || k == "event_power_kw_series")
     {
         return;
     }
@@ -708,16 +708,31 @@ fn inject_event_schedule(
     let schedule_len = schedule.len();
 
     if let Some(&col_idx) = csv_col_map.get(col_name.as_str()) {
-        if schedule.columns[col_idx].is_empty() {
+        let fraction_series = &schedule.columns[col_idx];
+        if fraction_series.is_empty() {
             return;
         }
+
+        // Always inject the column index for the stochastic fallback path.
         spec.parameters.insert(
             "event_window_schedule_col".to_string(),
             Value::from(col_idx as u64),
         );
+
+        // Compute kW time series from fractions × max_kw for deterministic event extraction.
+        let mean_fraction: f64 =
+            fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
+        if let Some(max_kw) = determine_max_kw(spec, mean_fraction) {
+            let kw_series: Vec<Value> = fraction_series
+                .iter()
+                .map(|f| Value::from(f * max_kw))
+                .collect();
+            spec.parameters.insert(
+                "event_power_kw_series".to_string(),
+                Value::Array(kw_series),
+            );
+        }
     } else if schedule_len > 0 {
-        // No CSV column — mark constant source.
-        let _ = schedule_len;
         spec.parameters
             .insert("event_window_source".to_string(), Value::from("constant"));
     }

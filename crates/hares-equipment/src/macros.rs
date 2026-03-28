@@ -64,6 +64,10 @@ macro_rules! delegate_equipment {
             ) -> $crate::Result<()> {
                 self.$inner.apply_control_unchecked(signal)
             }
+
+            fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
+                self.$inner.ideal_target()
+            }
         }
     };
 }
