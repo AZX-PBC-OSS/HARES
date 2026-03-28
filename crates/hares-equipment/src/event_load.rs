@@ -982,22 +982,6 @@ impl Equipment for WetAppliance {
                 self.phase_index = 0;
             }
 
-            // Log first 5 events for debugging.
-            if self.current_step < 5 && !self.extracted_events.is_empty() {
-                let n_events = self.extracted_events.len();
-                let first_kw = self.extracted_events.first().map(|e| e.power_kw).unwrap_or(0.0);
-                tracing::debug!(
-                    eq = %self.descriptor.name,
-                    step = self.current_step,
-                    schedule_len = self.schedule_len,
-                    n_events,
-                    first_event_kw = first_kw,
-                    cursor = self.event_cursor,
-                    in_event,
-                    "WetAppliance deterministic step"
-                );
-            }
-
             self.current_step += 1;
         } else {
             // Stochastic fallback.
