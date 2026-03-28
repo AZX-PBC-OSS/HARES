@@ -103,6 +103,40 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("imef".to_string(), json!(imef));
                         }
                         params.insert("hot_water_draw_volume_l".to_string(), json!(15.0));
+
+                        // Convert RatedAnnualkWh to actual annual energy (OCHRE hpxml.py:1243-1262).
+                        // RatedAnnualkWh is a test-cycle rating; actual usage depends on
+                        // household size, appliance capacity, and label usage cycles.
+                        if let Some(rated_kwh) = params.get("annual_electric_kwh").and_then(|v| v.as_f64()) {
+                            let capacity_ft3 = params
+                                .get("capacity_m3")
+                                .and_then(|v| v.as_f64())
+                                .map(|m3| m3 / 0.028_316_8)
+                                .unwrap_or(3.0);
+                            let label_usage = params
+                                .get("label_usage_cycles_per_week")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(6.0);
+                            let multiplier = node
+                                .child("extension")
+                                .and_then(|e| child_f64(e, "UsageMultiplier"))
+                                .unwrap_or(1.0);
+
+                            const GAS_H20: f64 = 0.3914;
+                            const ELEC_H20: f64 = 0.0178;
+                            const GAS_RATE: f64 = 1.09;
+                            const GAS_COST: f64 = 27.0;
+                            const ELECTRIC_RATE: f64 = 0.12;
+
+                            let lcy = label_usage * 52.0;
+                            let scy = 164.0 + n_bedrooms * 46.5;
+                            let acy = scy * ((3.0 * 2.08 + 1.59) / (capacity_ft3 * 2.08 + 1.59));
+                            let cw_appl = (GAS_COST * GAS_H20 / GAS_RATE
+                                - rated_kwh * ELECTRIC_RATE * ELEC_H20 / ELECTRIC_RATE)
+                                / (ELECTRIC_RATE * GAS_H20 / GAS_RATE - ELEC_H20);
+                            let actual_kwh = cw_appl / lcy * acy * multiplier;
+                            params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
+                        }
                     }
                     "ClothesDryer" => {
                         if let Some(cef) = child_f64(node, "CombinedEnergyFactor") {
@@ -195,6 +229,37 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
                         }
                         params.insert("hot_water_draw_volume_l".to_string(), json!(6.0));
+
+                        // Convert RatedAnnualkWh to actual annual energy (OCHRE hpxml.py:1336-1354).
+                        // RatedAnnualkWh is a test-cycle rating; actual usage depends on
+                        // household size, place-setting capacity, and label usage cycles.
+                        if let Some(rated_kwh) = params.get("annual_electric_kwh").and_then(|v| v.as_f64()) {
+                            let capacity = params
+                                .get("place_setting_capacity")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(12.0);
+                            let label_usage = params
+                                .get("label_usage_cycles_per_week")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(4.0);
+                            let multiplier = node
+                                .child("extension")
+                                .and_then(|e| child_f64(e, "UsageMultiplier"))
+                                .unwrap_or(1.0);
+
+                            const GAS_RATE: f64 = 1.09;
+                            const GAS_COST: f64 = 33.12;
+                            const ELECTRIC_RATE: f64 = 0.12;
+
+                            let usage_annual = label_usage * 52.0;
+                            let kwh_per_cyc = ((GAS_COST * 0.5497 / GAS_RATE
+                                - rated_kwh * ELECTRIC_RATE * 0.02504 / ELECTRIC_RATE)
+                                / (ELECTRIC_RATE * 0.5497 / GAS_RATE - 0.02504))
+                                / usage_annual;
+                            let dwcpy = (88.4 + 34.9 * n_bedrooms) * (12.0 / capacity);
+                            let actual_kwh = kwh_per_cyc * dwcpy * multiplier;
+                            params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
+                        }
                     }
                     "CookingRange" => {
                         // Default annual energy when HPXML doesn't provide it
@@ -509,6 +574,11 @@ pub(super) fn resolve_ventilation(
         }
         if let Some(power_w) = child_f64(fan, "FanPower") {
             params.insert("power_w".to_string(), json!(power_w));
+            params.insert("max_electric_power_w".to_string(), json!(power_w));
+            // Constant power running 24h/day → annual kWh for schedule resolver.
+            let hours_per_day = child_f64(fan, "HoursInOperation").unwrap_or(24.0);
+            let annual_kwh = power_w / 1000.0 * hours_per_day * 365.0;
+            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
         }
         if let Some(fan_type) = child_text(fan, "FanType") {
             // OCHRE hpxml.py:556: balanced = fan_type in ["energy recovery ventilator",

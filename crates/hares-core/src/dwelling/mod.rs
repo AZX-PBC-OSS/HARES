@@ -1495,9 +1495,11 @@ impl Dwelling {
             );
             equipment_power_kw.push(
                 telemetry
-                    .get("electric_power_kw")
-                    .or_else(|| telemetry.get("power_kw"))
+                    .get("electric_kw")
+                    .or_else(|| telemetry.get("ac_power_kw"))
                     .or_else(|| telemetry.get("active_power_kw"))
+                    .or_else(|| telemetry.get("electric_power_kw"))
+                    .or_else(|| telemetry.get("power_kw"))
                     .or_else(|| telemetry.get("net_power_kw"))
                     .unwrap_or(0.0),
             );
