@@ -137,7 +137,6 @@ fn parity_outputs_against_reference_corpus() {
 fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Error>> {
     let fixtures = discover_fixtures().expect("failed to discover parity fixtures");
 
-    let mut checks = 0usize;
     let mut failures = Vec::new();
 
     for fixture in fixtures {
@@ -166,12 +165,6 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
             }
         };
 
-        let Some(expectations) = config.property_parity else {
-            continue;
-        };
-
-        checks += 1;
-
         let building = match parse_hpxml(&building_xml) {
             Ok(building) => building,
             Err(err) => {
@@ -190,6 +183,22 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
             }
         };
         let equipment_names: Vec<String> = equipment.iter().map(|spec| spec.name.clone()).collect();
+        let conditioned = building
+            .zones
+            .iter()
+            .filter(|zone| matches!(zone.zone_type, ZoneType::Conditioned))
+            .count();
+
+        let Some(expectations) = config.property_parity else {
+            failures.push(format!(
+                "fixture={} missing [property_parity]; suggested: equipment_count={}, zone_count={}, conditioned_zone_count={}",
+                fixture_id,
+                equipment_names.len(),
+                building.zones.len(),
+                conditioned
+            ));
+            continue;
+        };
 
         if let Some(expected_count) = expectations.equipment_count
             && equipment_names.len() != expected_count
@@ -225,11 +234,6 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
         }
 
         if let Some(expected_conditioned) = expectations.conditioned_zone_count {
-            let conditioned = building
-                .zones
-                .iter()
-                .filter(|zone| matches!(zone.zone_type, ZoneType::Conditioned))
-                .count();
             if conditioned != expected_conditioned {
                 failures.push(format!(
                     "fixture={} conditioned zone count mismatch: expected={} actual={}",
@@ -237,11 +241,6 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
                 ));
             }
         }
-    }
-
-    if checks == 0 {
-        eprintln!("[parity] no property parity expectations configured; skipping assertions");
-        return Ok(());
     }
 
     assert!(

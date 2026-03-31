@@ -499,8 +499,8 @@ fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured
     );
 
     let mut eq = registry
-        .create("Reactive Plug Loads", cfg.clone())
-        .expect("registry must create Reactive Plug Loads");
+        .create("Plug Loads", cfg.clone())
+        .expect("registry must create Plug Loads");
     let mut env = env_with_zone_temp(21.0);
     env.grid.voltage_pu = 0.0;
     eq.init(&cfg, &env).expect("init must succeed");
@@ -849,7 +849,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 performance_adjustment: Some(0.92),
                 inlet_temp_c: None,
                 draw_flow_rate_kg_s: Some(0.2),
-                avg_water_draw_l_per_day: None,
+                avg_water_draw_l_per_day: Some(200.0),
             },
         ),
         "Gas Tankless Water Heater" => typed_alias_config(
@@ -867,7 +867,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 performance_adjustment: Some(0.92),
                 inlet_temp_c: None,
                 draw_flow_rate_kg_s: Some(0.2),
-                avg_water_draw_l_per_day: None,
+                avg_water_draw_l_per_day: Some(200.0),
             },
         ),
         "Heat Pump Water Heater" | "HPWH" => typed_alias_config(

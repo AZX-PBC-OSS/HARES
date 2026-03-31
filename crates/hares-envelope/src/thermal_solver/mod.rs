@@ -68,6 +68,12 @@ pub struct ThermalSolver {
     interior_surf_base_buf: Vec<f64>,
     /// Previous-iteration interior surface temperatures for damping.
     interior_surf_prev_buf: Vec<f64>,
+    /// Persistent interior surface temperatures [°C] for interior LWR continuity.
+    /// Indexed parallel to `config.interior_lwr_zones`, then per-zone surface order.
+    interior_surface_temps: Vec<Vec<f64>>,
+    /// Persistent previous-iteration interior surface temperatures [°C] used by
+    /// heavy-ball damping, indexed parallel to `interior_surface_temps`.
+    interior_surface_prev_temps: Vec<Vec<f64>>,
     /// Pre-allocated buffer for infiltration couplings returned by build_input_vector.
     infiltration_buf: Vec<InfiltrationCoupling>,
     /// Pre-allocated scratch buffer for per-zone infiltration gains; swapped into component_gains.
@@ -157,6 +163,33 @@ impl ThermalSolver {
             .map(|z| z.surfaces.len())
             .max()
             .unwrap_or(0);
+        let mut interior_surface_temps = Vec::with_capacity(n_lwr_zones);
+        let mut interior_surface_prev_temps = Vec::with_capacity(n_lwr_zones);
+        for zone_cfg in &config.interior_lwr_zones {
+            let t_zone_c = env
+                .zones
+                .iter()
+                .find(|z| z.id == zone_cfg.zone_id)
+                .map(|z| z.temperature_c)
+                .unwrap_or(indoor_temp_c);
+            let mut zone_temps = Vec::with_capacity(zone_cfg.surfaces.len());
+            for s in &zone_cfg.surfaces {
+                let t_boundary = if let Some(dt) = s.driving_temp {
+                    match dt {
+                        DrivingTemp::Outdoor => env.weather.outdoor_temp_c,
+                        DrivingTemp::Ground => env.weather.ground_temp_c,
+                    }
+                } else if s.state_index < x.len() {
+                    x[s.state_index]
+                } else {
+                    t_zone_c
+                };
+                zone_temps
+                    .push(s.radiation_frac * t_boundary + (1.0 - s.radiation_frac) * t_zone_c);
+            }
+            interior_surface_prev_temps.push(zone_temps.clone());
+            interior_surface_temps.push(zone_temps);
+        }
 
         let mut zone_temps_buf: Vec<(ZoneId, f64)> = wiring
             .zone_output_indices
@@ -190,6 +223,8 @@ impl ThermalSolver {
             interior_surf_temps_buf: Vec::with_capacity(max_interior_surfaces),
             interior_surf_base_buf: Vec::with_capacity(max_interior_surfaces),
             interior_surf_prev_buf: Vec::with_capacity(max_interior_surfaces),
+            interior_surface_temps,
+            interior_surface_prev_temps,
             infiltration_buf: Vec::with_capacity(env.zones.len()),
             infiltration_by_zone_buf: Vec::with_capacity(env.zones.len()),
             solar_absorbed_buf: Vec::new(),
@@ -538,13 +573,15 @@ mod tests {
     };
     use nalgebra::{DMatrix, DVector};
 
-    use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
+    use crate::longwave_radiation::{
+        InteriorSurface, SOLAR_ABSORPTANCE_DEFAULT, beta_factor,
+        interior_longwave_linearised_w_into,
+    };
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
         DrivingTemp, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
         InteriorSurfaceInfo, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
-        ThermalSolverConfig, VentilationConfig,
-        WindowSolarProperties,
+        ThermalSolverConfig, VentilationConfig, WindowSolarProperties,
     };
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
@@ -629,6 +666,85 @@ mod tests {
 
             exterior_surfaces: vec![],
             interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: VentilationConfig::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
+        };
+        ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
+    }
+
+    fn interior_lwr_solver(env: &EnvironmentState) -> ThermalSolver {
+        let a_c = DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                -1.0 / 50_000.0,
+                0.0,
+                0.0,
+                0.0,
+                -1.0 / 40_000.0,
+                0.0,
+                0.0,
+                0.0,
+                -1.0 / 30_000.0,
+            ],
+        );
+        let b_c = DMatrix::zeros(3, 3);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 0)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+
+        let interior_lwr_zone = InteriorLwrZoneConfig {
+            zone_id: ZoneId(1),
+            surfaces: vec![
+                InteriorSurfaceInfo {
+                    state_index: 1,
+                    input_index: 1,
+                    area_m2: 12.0,
+                    emissivity: 0.90,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 250.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+                InteriorSurfaceInfo {
+                    state_index: 2,
+                    input_index: 2,
+                    area_m2: 8.0,
+                    emissivity: 0.65,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 175.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+            ],
+            scriptf: None,
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![interior_lwr_zone],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
             ventilation: VentilationConfig::default(),
@@ -912,6 +1028,91 @@ mod tests {
             assert!(lhs < rhs, "lhs={lhs}, rhs={rhs}");
             env.zones[0].temperature_c = t_next;
         }
+    }
+
+    #[test]
+    fn interior_longwave_surface_states_persist_with_clamp_and_damping() {
+        let env = env_for_temp(21.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        solver.x = DVector::from_row_slice(&[21.0, 35.0, 5.0]);
+        let initial_temps = vec![34.5, 5.5];
+        let initial_prev_temps = vec![60.0, -10.0];
+        solver.interior_surface_temps[0] = initial_temps.clone();
+        solver.interior_surface_prev_temps[0] = initial_prev_temps.clone();
+
+        let mut u = DVector::zeros(3);
+        solver.apply_interior_longwave_inputs(&mut u, &env);
+
+        let surfaces = &solver.config.interior_lwr_zones[0].surfaces;
+        let zone_temp_c = env.zones[0].temperature_c;
+        let mut expected_buf = initial_temps;
+        let base_buf = expected_buf.clone();
+        let mut expected_prev = initial_prev_temps;
+        let t_surf_min = base_buf.iter().copied().fold(f64::INFINITY, f64::min);
+        let t_surf_max = base_buf.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lwr_surfaces = vec![
+            InteriorSurface {
+                area_m2: surfaces[0].area_m2,
+                emissivity: surfaces[0].emissivity,
+            },
+            InteriorSurface {
+                area_m2: surfaces[1].area_m2,
+                emissivity: surfaces[1].emissivity,
+            },
+        ];
+        let mut expected_flux = vec![0.0; 2];
+        for _ in 0..3 {
+            interior_longwave_linearised_w_into(
+                &lwr_surfaces,
+                &expected_buf,
+                zone_temp_c,
+                &mut expected_flux,
+            );
+            for (j, info) in surfaces.iter().enumerate() {
+                let t_new = base_buf[j] + expected_flux[j] * info.rad_res_k_w;
+                let t_new = t_new.clamp(t_surf_min, t_surf_max);
+                let t_next = expected_buf[j]
+                    + 0.3 * (t_new - expected_buf[j])
+                    + 0.2 * (expected_buf[j] - expected_prev[j]);
+                expected_prev[j] = expected_buf[j];
+                expected_buf[j] = t_next;
+            }
+        }
+        interior_longwave_linearised_w_into(
+            &lwr_surfaces,
+            &expected_buf,
+            zone_temp_c,
+            &mut expected_flux,
+        );
+
+        for (actual, expected) in solver.interior_surface_temps[0]
+            .iter()
+            .zip(expected_buf.iter())
+        {
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "interior surface temp drift"
+            );
+        }
+        for (actual, expected) in solver.interior_surface_prev_temps[0]
+            .iter()
+            .zip(expected_prev.iter())
+        {
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "interior surface prev-temp drift"
+            );
+        }
+        assert!(
+            (u[1] - expected_flux[0]).abs() < 1e-9 && (u[2] - expected_flux[1]).abs() < 1e-9,
+            "interior LWR input accumulation drift"
+        );
+        assert!(
+            solver.interior_surface_temps[0]
+                .iter()
+                .all(|t| *t >= t_surf_min - 1e-9 && *t <= t_surf_max + 1e-9),
+            "interior surface temps must stay within clamp range"
+        );
     }
 
     // -----------------------------------------------------------------------

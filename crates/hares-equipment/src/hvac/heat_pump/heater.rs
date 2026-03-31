@@ -629,9 +629,12 @@ impl HeatPumpHeaterCore {
 
         if self.operating_mode == OperatingMode::Off {
             self.cycle_off_steps += 1;
+            self.hvac.time_at_current_speed_s = 0.0;
+            self.hvac.update_prev_zone_temp(None);
         } else {
             self.cycle_on_steps += 1;
             self.run_time_s += dt.as_secs_f64();
+            self.hvac.advance_speed_timer(dt.as_secs_f64());
         }
 
         if step.defrost_active {
@@ -924,6 +927,7 @@ impl HeatPumpHeaterCore {
         self.prev_zone_temp_c = zone.temperature_c;
 
         if mode != ThermostatMode::Heating {
+            self.hvac.update_prev_zone_temp(None);
             return Ok(HeaterControl {
                 hp_on: false,
                 er_on: false,
@@ -943,7 +947,10 @@ impl HeatPumpHeaterCore {
             let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
             load_ratio_raw.clamp(0.0, 1.0)
         };
-        let speed = self.hvac.select_speed(load_ratio);
+        let speed = self
+            .hvac
+            .select_speed_with_zone_temp(load_ratio, Some(zone.temperature_c), true);
+        self.hvac.update_prev_zone_temp(Some(zone.temperature_c));
 
         let hp_available = env.weather.outdoor_temp_c >= self.hp_lockout_temp_c;
         // OCHRE HVAC.py aggressive lockout: ER off above er_lockout_temp_c (default 4.44°C).

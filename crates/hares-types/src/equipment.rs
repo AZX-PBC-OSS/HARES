@@ -903,7 +903,11 @@ pub struct CoreOutput {
     pub state: CoreState,
 }
 
-/// Validates that declared core capabilities are backed by populated CoreOutput fields.
+/// Validates that CoreOutput and declared capabilities agree in both directions.
+///
+/// Declared capabilities must be populated, undeclared capabilities must remain
+/// absent, and reactive power is only valid when real electric power is also
+/// present.
 pub fn validate_core_contract(
     desc: &EquipmentDescriptor,
     co: &CoreOutput,
@@ -913,6 +917,12 @@ pub fn validate_core_contract(
     if caps.contains(CoreCapabilities::REACTIVE) && !caps.contains(CoreCapabilities::ELECTRIC) {
         return Err(HaresError::Equipment(format!(
             "core_output contract violation for '{}' ({:?}): REACTIVE requires ELECTRIC",
+            desc.name, caps
+        )));
+    }
+    if co.flows.reactive_power_kvar.is_some() && co.flows.electric_kw.is_none() {
+        return Err(HaresError::Equipment(format!(
+            "core_output contract violation for '{}' ({:?}): flows.reactive_power_kvar requires flows.electric_kw",
             desc.name, caps
         )));
     }
@@ -2343,6 +2353,38 @@ mod tests {
             .expect_err("reactive capability without electric must error");
         assert!(
             err.to_string().contains("REACTIVE requires ELECTRIC"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_reactive_flow_without_electric_flow() {
+        let desc = EquipmentDescriptor {
+            id: EquipmentId(5),
+            name: "Validator Reactive Missing Electric Flow".to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE,
+            telemetry_fields: vec![],
+        };
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: None,
+                reactive_power_kvar: Some(0.1),
+                fuel_w: None,
+            },
+            state: CoreState::default(),
+        };
+
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("reactive flow without electric flow must error");
+        assert!(
+            err.to_string()
+                .contains("flows.reactive_power_kvar requires flows.electric_kw"),
             "unexpected error: {err}"
         );
     }

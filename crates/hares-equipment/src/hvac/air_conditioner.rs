@@ -596,7 +596,10 @@ impl CoolingCore {
                     .hysteresis_c
                     .max(MIN_LOAD_FRACTION_DEADBAND_C);
                 let load_fraction = ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0);
-                let selection = self.hvac.select_speed(load_fraction);
+                let selection =
+                    self.hvac
+                        .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false);
+                self.hvac.update_prev_zone_temp(Some(zone_temp));
                 self.hvac.duty_cycle = match self.hvac.speed_control_mode {
                     SpeedControlMode::VariableSpeedIdeal => {
                         if selection.speed_frac > 0.0 {
@@ -616,6 +619,7 @@ impl CoolingCore {
         } else {
             self.hvac.duty_cycle = 0.0;
             self.operating_mode = OperatingMode::Off;
+            self.hvac.update_prev_zone_temp(None);
         }
         self.operating_mode
     }
@@ -692,6 +696,8 @@ impl CoolingCore {
         } else {
             self.last_cooling_rtf = 0.0;
             self.cycle_off_steps += 1;
+            self.hvac.time_at_current_speed_s = 0.0;
+            self.hvac.update_prev_zone_temp(None);
             // apply_startup_capacity_degradation resets the ramp timer when off.
         }
 

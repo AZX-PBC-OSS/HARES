@@ -114,7 +114,7 @@ fn ochre_ashp_fixture_peak_hvac_power_aligns() {
     let peak_rel_pct = relative_percent_deviation(actual_peak, reference_peak);
     assert!(
         peak_rel_pct <= PEAK_HVAC_POWER_REL_PCT_MAX,
-        "ASHP fixture HVAC peak power must stay within the OCHRE parity tolerance: actual={peak_rel_pct:.6}%, allowed={PEAK_HVAC_POWER_REL_PCT_MAX:.6}%"
+        "ASHP fixture HVAC peak power must stay within the OCHRE parity tolerance: rel={peak_rel_pct:.6}% (actual={actual_peak:.6} kW, reference={reference_peak:.6} kW), allowed={PEAK_HVAC_POWER_REL_PCT_MAX:.6}%"
     );
 }
 

@@ -7,3 +7,8 @@ output_chunk_size = 1000
 master_seed = 0
 
 bldg_id = 1
+
+[property_parity]
+equipment_count = 17
+zone_count = 2
+conditioned_zone_count = 1

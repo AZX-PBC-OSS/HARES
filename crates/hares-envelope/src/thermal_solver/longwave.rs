@@ -80,8 +80,6 @@ impl ThermalSolver {
 
             let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
             let f_sky = sky_view_factor(info.tilt_deg);
-            let f_gnd = 1.0 - f_sky;
-            let beta = beta_factor(info.tilt_deg);
             let t_node_c = self.x[info.state_index];
 
             // Per-surface solar gain [W] for the iteration (no allocation).
@@ -103,7 +101,7 @@ impl ThermalSolver {
                 e_factor * t_air_k4
             } else {
                 let t_sky_k4 = (t_sky_raw + CELSIUS_TO_KELVIN).powi(4);
-                e_factor * ((f_gnd + (1.0 - beta) * f_sky) * t_air_k4 + beta * f_sky * t_sky_k4)
+                e_factor * ((1.0 - f_sky) * t_air_k4 + f_sky * t_sky_k4)
             };
 
             // Initial surface temperature estimate from linear interpolation.
@@ -158,7 +156,7 @@ impl ThermalSolver {
         env: &EnvironmentState,
     ) {
         self.lwr_by_zone_buf.clear();
-        for zone_cfg in &self.config.interior_lwr_zones {
+        for (zone_idx, zone_cfg) in self.config.interior_lwr_zones.iter().enumerate() {
             if zone_cfg.surfaces.len() < 2 {
                 continue;
             }
@@ -203,7 +201,20 @@ impl ThermalSolver {
                 buf.push(t_surf);
             }
             base_buf.extend_from_slice(buf);
-            prev_buf.extend_from_slice(buf);
+            if let Some(saved) = self.interior_surface_temps.get(zone_idx)
+                && saved.len() == buf.len()
+            {
+                buf.copy_from_slice(saved);
+            }
+            if let Some(saved_prev) = self.interior_surface_prev_temps.get(zone_idx)
+                && saved_prev.len() == buf.len()
+            {
+                prev_buf.extend_from_slice(saved_prev);
+            } else {
+                prev_buf.extend_from_slice(buf);
+            }
+            let t_surf_min = base_buf.iter().copied().fold(f64::INFINITY, f64::min);
+            let t_surf_max = base_buf.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
             let n_iter = (self.dt_s / 300.0_f64).floor() as u32 + 3;
             for _ in 0..n_iter {
@@ -229,7 +240,8 @@ impl ThermalSolver {
                 let mut converged = true;
                 for (j, info) in zone_cfg.surfaces.iter().enumerate() {
                     let t_new = base_buf[j] + self.lwr_net_flux_buf[j] * info.rad_res_k_w;
-                    let t_next = buf[j] + 0.5 * (t_new - buf[j]) + 0.1 * (buf[j] - prev_buf[j]);
+                    let t_new = t_new.clamp(t_surf_min, t_surf_max);
+                    let t_next = buf[j] + 0.3 * (t_new - buf[j]) + 0.2 * (buf[j] - prev_buf[j]);
                     prev_buf[j] = buf[j];
                     buf[j] = t_next;
                     if (buf[j] - prev_buf[j]).abs() >= 0.01 {
@@ -258,6 +270,16 @@ impl ThermalSolver {
                     &mut self.lwr_net_flux_buf,
                 );
             };
+            if let Some(saved) = self.interior_surface_temps.get_mut(zone_idx) {
+                if saved.len() == buf.len() {
+                    saved.copy_from_slice(buf);
+                }
+            }
+            if let Some(saved_prev) = self.interior_surface_prev_temps.get_mut(zone_idx) {
+                if saved_prev.len() == prev_buf.len() {
+                    saved_prev.copy_from_slice(prev_buf);
+                }
+            }
 
             let mut zone_total = 0.0_f64;
             for (_j, (info, &q)) in zone_cfg

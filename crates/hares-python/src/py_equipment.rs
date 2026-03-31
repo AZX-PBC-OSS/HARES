@@ -1090,11 +1090,51 @@ fn extract_u_neg_from_dataframe(py: Python<'_>, df: &Bound<'_, PyAny>) -> PyResu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hares_types::ElectricPower;
 
     #[test]
     fn py_core_output_missing_electric_has_no_convention() {
         let py_core = PyCoreOutput::new(RustCoreOutput::default());
         assert_eq!(py_core.electric_kw(), None);
         assert_eq!(py_core.electric_convention(), None);
+    }
+
+    #[test]
+    fn py_core_output_reports_electric_convention_variants() {
+        let consumption = PyCoreOutput::new(RustCoreOutput {
+            flows: hares_types::CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.2)),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            consumption.electric_convention(),
+            Some("consumption".to_string())
+        );
+
+        let generation = PyCoreOutput::new(RustCoreOutput {
+            flows: hares_types::CoreFlows {
+                electric_kw: Some(ElectricPower::Generation(1.2)),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            generation.electric_convention(),
+            Some("generation".to_string())
+        );
+
+        let bidirectional = PyCoreOutput::new(RustCoreOutput {
+            flows: hares_types::CoreFlows {
+                electric_kw: Some(ElectricPower::Bidirectional(-0.2)),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            bidirectional.electric_convention(),
+            Some("bidirectional".to_string())
+        );
     }
 }

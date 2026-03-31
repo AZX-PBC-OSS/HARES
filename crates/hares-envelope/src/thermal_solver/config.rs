@@ -305,7 +305,7 @@ pub struct ExteriorSurfaceInfo {
     /// Converts net surface heat flux [W] to a temperature perturbation on the
     /// exterior surface.
     pub rad_res_k_w: f64,
-    /// Number of sub-iterations per timestep: `ceil(dt_s / 300.0).max(1)`.
+    /// Number of sub-iterations per timestep: `floor(dt_s / 300.0) + 1`.
     pub n_iter: u32,
     /// Solar absorptance [-] (0–1). Default 0.60 for opaque surfaces, 0.05 for
     /// radiant barriers. Ref: OCHRE `Envelope.py:222`.

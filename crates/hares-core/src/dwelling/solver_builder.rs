@@ -411,6 +411,33 @@ fn include_interior_lwr(
     is_conditioned_interior || is_attic_interior
 }
 
+fn natural_ventilation_coefficients(
+    thermal_cfg: &ThermalSolverConfig,
+    building_height_m: f64,
+) -> (f64, f64) {
+    thermal_cfg
+        .infiltration
+        .iter()
+        .find_map(|(zone_id, method)| (*zone_id == thermal_cfg.indoor_zone_id).then_some(*method))
+        .and_then(|method| match method {
+            hares_envelope::InfiltrationMethod::Ela {
+                stack_coeff,
+                wind_coeff,
+                ..
+            } => Some((stack_coeff, wind_coeff)),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            hares_physics::infiltration::calculate_ela_coefficients(
+                0.0,
+                building_height_m,
+                0.0,
+                hares_physics::infiltration::TerrainClass::Suburban,
+                hares_physics::infiltration::SHIELDING_NORMAL,
+            )
+        })
+}
+
 /// Annual weather averages needed for film coefficient computation.
 pub(crate) struct WeatherAverages {
     pub(crate) avg_wind_m_s: f64,
@@ -682,34 +709,34 @@ pub(crate) fn build_default_solvers(
 
             let (emissivity, solar_absorptance, radiation_frac, rad_res_k_w, driving_temp) =
                 if is_window {
-                // Window LWR: emissivity=0.84 (EnergyPlus default).
-                // Surface temp driven by outdoor conduction.
-                // radiation_frac from EnergyPlus interior film decomposition:
-                //   res_int = 1 / (0.359073 × ln(U) + 6.949915)
-                //   radiation_frac = res_int / (1/U)
-                // where U is the window U-factor in W/(m²·K).
-                const WINDOW_EMISSIVITY: f64 = 0.84;
-                let diag = diag_by_idx.get(&sb.surface_idx);
-                let r_total = diag.map(|d| d.r_total_m2_k_w).unwrap_or(0.5);
-                let u_window = if r_total > 1e-9 { 1.0 / r_total } else { 2.0 };
-                let res_int = 1.0 / (0.359073 * u_window.ln() + 6.949915);
-                let rad_frac = (res_int / r_total).clamp(0.0, 1.0);
-                (
-                    WINDOW_EMISSIVITY,
-                    0.0,
-                    rad_frac,
-                    res_int / sb.area_m2.max(1e-9),
-                    Some(DrivingTemp::Outdoor),
-                )
-            } else {
-                (
-                    sb.attic_emissivity,
-                    if is_floor { 0.6 } else { 0.5 },
-                    sb.interior_rad_frac,
-                    sb.r_film_int_m2_k_w / sb.area_m2.max(1e-9),
-                    None,
-                )
-            };
+                    // Window LWR: emissivity=0.84 (EnergyPlus default).
+                    // Surface temp driven by outdoor conduction.
+                    // radiation_frac from EnergyPlus interior film decomposition:
+                    //   res_int = 1 / (0.359073 × ln(U) + 6.949915)
+                    //   radiation_frac = res_int / (1/U)
+                    // where U is the window U-factor in W/(m²·K).
+                    const WINDOW_EMISSIVITY: f64 = 0.84;
+                    let diag = diag_by_idx.get(&sb.surface_idx);
+                    let r_total = diag.map(|d| d.r_total_m2_k_w).unwrap_or(0.5);
+                    let u_window = if r_total > 1e-9 { 1.0 / r_total } else { 2.0 };
+                    let res_int = 1.0 / (0.359073 * u_window.ln() + 6.949915);
+                    let rad_frac = (res_int / r_total).clamp(0.0, 1.0);
+                    (
+                        WINDOW_EMISSIVITY,
+                        0.0,
+                        rad_frac,
+                        res_int / sb.area_m2.max(1e-9),
+                        Some(DrivingTemp::Outdoor),
+                    )
+                } else {
+                    (
+                        sb.attic_emissivity,
+                        if is_floor { 0.6 } else { 0.5 },
+                        sb.interior_rad_frac,
+                        sb.r_film_int_m2_k_w / sb.area_m2.max(1e-9),
+                        None,
+                    )
+                };
 
             surfaces_by_zone.entry(sb.zone_id).or_default().push(
                 hares_envelope::InteriorSurfaceInfo {
@@ -813,7 +840,7 @@ pub(crate) fn build_default_solvers(
             * building
                 .zones
                 .iter()
-                .filter(|z| z.zone_type == ZoneType::Conditioned)
+                .filter(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
                 .count()
                 .max(1) as f64;
 
@@ -961,10 +988,15 @@ pub(crate) fn build_default_solvers(
     // Compute effective open window area from per-window FractionOperable.
     // Formula: Σ(window_area × fraction_operable) × 0.5 (open fraction) × 0.2 (flow fraction).
     {
-        use hares_envelope::{InfiltrationMethod, NaturalVentilationConfig};
-        use hares_physics::infiltration::{
-            SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
-        };
+        use hares_envelope::NaturalVentilationConfig;
+        let default_ceiling_height_m = building.ceiling_height_m.unwrap_or(2.5);
+        let building_height_m = default_ceiling_height_m
+            * building
+                .zones
+                .iter()
+                .filter(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
+                .count()
+                .max(1) as f64;
 
         let total_operable_area: f64 = building
             .windows
@@ -982,33 +1014,10 @@ pub(crate) fn build_default_solvers(
             .sum();
         if total_operable_area > 0.0 {
             let open_area = total_operable_area * 0.5 * 0.2;
-            let ceiling_h = building.ceiling_height_m.unwrap_or(2.5);
+            let (stack, wind) = natural_ventilation_coefficients(&thermal_cfg, building_height_m);
             // Natural ventilation should use conditioned-zone ELA coefficients.
             // Prefer explicit indoor ELA coefficients when available; otherwise
-            // derive conditioned defaults (hor_lk_frac=0.0), not attic values.
-            let (stack, wind) = thermal_cfg
-                .infiltration
-                .iter()
-                .find_map(|(zone_id, method)| {
-                    (*zone_id == thermal_cfg.indoor_zone_id).then_some(*method)
-                })
-                .and_then(|method| match method {
-                    InfiltrationMethod::Ela {
-                        stack_coeff,
-                        wind_coeff,
-                        ..
-                    } => Some((stack_coeff, wind_coeff)),
-                    _ => None,
-                })
-                .unwrap_or_else(|| {
-                    calculate_ela_coefficients(
-                        0.0,
-                        ceiling_h,
-                        0.0,
-                        TerrainClass::Suburban,
-                        SHIELDING_NORMAL,
-                    )
-                });
+            // derive conditioned defaults at full building height.
             thermal_cfg.natural_ventilation = Some(NaturalVentilationConfig {
                 open_area_m2: open_area,
                 stack_coeff: stack,
@@ -1154,16 +1163,16 @@ fn foundation_height_m(zone: &hares_io::hpxml::Zone) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use hares_envelope::InfiltrationMethod;
+    use hares_envelope::ThermalSolverConfig;
     use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
     use hares_physics::infiltration::{
         N_I_DEFAULT, SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
     };
-    use hares_types::HaresError;
-
+    use hares_types::{HaresError, ZoneId};
     use super::{
         attic_infiltration_method, attic_interior_emissivity, attic_interior_solar_absorptance,
         exterior_emissivity, exterior_solar_absorptance, foundation_height_m,
-        foundation_infiltration_method, include_interior_lwr,
+        foundation_infiltration_method, include_interior_lwr, natural_ventilation_coefficients,
     };
 
     #[test]
@@ -1339,6 +1348,71 @@ mod tests {
     fn window_behavior_is_unchanged() {
         assert!(include_interior_lwr(true, true, false, false, 8.0));
         assert!(!include_interior_lwr(true, false, false, false, 8.0));
+    }
+
+    #[test]
+    fn natural_ventilation_coefficients_prefer_indoor_zone_ela() {
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![
+                (
+                    ZoneId(1),
+                    InfiltrationMethod::Ela {
+                        ela_m2: 0.01,
+                        stack_coeff: 1.23,
+                        wind_coeff: 4.56,
+                    },
+                ),
+                (
+                    ZoneId(2),
+                    InfiltrationMethod::Ela {
+                        ela_m2: 0.02,
+                        stack_coeff: 9.87,
+                        wind_coeff: 6.54,
+                    },
+                ),
+            ],
+            ..ThermalSolverConfig::default()
+        };
+
+        let (stack_coeff, wind_coeff) = natural_ventilation_coefficients(&config, 6.0);
+        assert_eq!(stack_coeff, 1.23);
+        assert_eq!(wind_coeff, 4.56);
+    }
+
+    #[test]
+    fn natural_ventilation_coefficients_fallback_use_building_height() {
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
+            ..ThermalSolverConfig::default()
+        };
+        let building_height_m = 6.0;
+        let ceiling_height_m = 3.0;
+
+        let expected = calculate_ela_coefficients(
+            0.0,
+            building_height_m,
+            0.0,
+            TerrainClass::Suburban,
+            SHIELDING_NORMAL,
+        );
+        let ceiling_expected = calculate_ela_coefficients(
+            0.0,
+            ceiling_height_m,
+            0.0,
+            TerrainClass::Suburban,
+            SHIELDING_NORMAL,
+        );
+        let actual = natural_ventilation_coefficients(&config, building_height_m);
+
+        assert!((actual.0 - expected.0).abs() < 1e-12);
+        assert!((actual.1 - expected.1).abs() < 1e-12);
+        assert!(
+            (actual.0 - ceiling_expected.0).abs() > 1e-12
+                || (actual.1 - ceiling_expected.1).abs() > 1e-12,
+            "fallback must use full building height, not ceiling height"
+        );
     }
 
     fn foundation_zone(
