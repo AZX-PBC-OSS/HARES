@@ -188,9 +188,39 @@ unknown equipment name to the registry and assert `Err`, not silent success.
 
 ---
 
-### B0-6 — `number_of_occupants` wired into registry lookup but not confirmed
+### B0-6 — Psychrometric wet-bulb bisection inverted bracket on supersaturated input
+**Ref:** DV-001 F4
+**Complexity:** S
+**File:** `crates/hares-physics/src/psychrometrics.rs:126–141`
 
-This item is already handled as part of B0-3 above. No separate work item needed.
+When `w > w_sat(t_db_c)` (corrupted EPW data or mis-coded caller), `dew_point(w, p)`
+returns `t_dp > t_db_c`. The existing bracket `low = t_dp.min(t_db_c)` / `high =
+t_db_c.max(t_dp)` evaluates the wet-bulb search *above* the dry-bulb — physically
+impossible. The bisection converges but returns a `wet_bulb_c >= t_db_c`, which then
+enters HVAC coil biquadratic lookups and can produce negative capacity or negative
+COP by extrapolation.
+
+**Change:** At the top of `wet_bulb_from_humidity_ratio`, clamp `w` to saturation
+before computing the bracket:
+
+```rust
+let w_sat = humidity_ratio_from_tdp(t_db_c, p_pa);
+if w_eff >= w_sat {
+    return t_db_c;   // saturated: Twb = Tdb
+}
+let t_dp = dew_point(w_eff, p_pa);
+bisect(t_dp, t_db_c, ...)
+```
+
+This also removes the `.min()/.max()` gymnastics — with the saturation guard the
+bracket is always `[t_dp, t_db_c]`.
+
+**Verify:**
+```
+cargo test -p hares-physics -- psychrometrics
+```
+New test: `wet_bulb_from_humidity_ratio(20.0, w_sat * 2.0, 101325.0)` must return
+`20.0 ± 0.01`. Existing tests must continue to pass.
 
 ---
 
