@@ -140,8 +140,8 @@ fn ochre_ashp_fixture_runtime_state_columns_are_populated() {
     let mut saw_nonzero_setpoint = false;
     let mut saw_nonzero_capacity = false;
     let mut saw_nonzero_cop = false;
-    for i in 0..heater_kw.len() {
-        if heater_kw[i] > 1e-6 {
+    for (i, kw) in heater_kw.iter().enumerate() {
+        if *kw > 1e-6 {
             saw_runtime_row = true;
             saw_nonzero_setpoint |= setpoint.get(i).copied().unwrap_or(0.0).abs() > 1e-6;
             saw_nonzero_capacity |= capacity.get(i).copied().unwrap_or(0.0).abs() > 1e-6;
