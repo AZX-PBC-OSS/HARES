@@ -56,8 +56,8 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
             .single()
             .expect("valid timestamp"),
         time_res: ChronoDuration::seconds(60),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 
@@ -746,7 +746,10 @@ fn no_ramp_rate_assigns_immediately() {
     // With initial tank temp 50 and setpoint 70, deadband 5 → element fires at 65.
     // Tank is at 50, well below 65, so element should be on.
     let upper_power = wh.telemetry().get("upper_element_power_w").unwrap_or(0.0);
-    assert!(upper_power > 0.0, "element should be on with immediate setpoint jump to 70");
+    assert!(
+        upper_power > 0.0,
+        "element should be on with immediate setpoint jump to 70"
+    );
 }
 
 #[test]
@@ -817,7 +820,8 @@ fn ramp_rate_checkpoint_round_trip() {
     let mut env2 = env.clone();
     env2.current_time += ChronoDuration::seconds(60);
     wh2.update_control(&env2);
-    wh2.step(&env2, Duration::from_secs(60), &mut ports).unwrap();
+    wh2.step(&env2, Duration::from_secs(60), &mut ports)
+        .unwrap();
 
     // Step original for comparison
     let mut ports_orig = PortSlots::from_declarations(wh.ports());
@@ -828,7 +832,8 @@ fn ramp_rate_checkpoint_round_trip() {
     })
     .unwrap();
     wh.update_control(&env2);
-    wh.step(&env2, Duration::from_secs(60), &mut ports_orig).unwrap();
+    wh.step(&env2, Duration::from_secs(60), &mut ports_orig)
+        .unwrap();
 
     // Both should produce identical telemetry
     let orig_temp = wh.telemetry().get("tank_avg_temp_c").unwrap_or(-1.0);

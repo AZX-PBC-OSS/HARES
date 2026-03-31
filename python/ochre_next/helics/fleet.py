@@ -1,0 +1,323 @@
+"""HELICS fleet-as-single-federate co-simulation orchestrator."""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+try:
+    import helics
+except ImportError as exc:  # pragma: no cover - exercised via import test
+    raise ImportError(
+        "HELICS not installed. Install with: pip install 'ochre_next[helics]'"
+    ) from exc
+
+from ochre_next import ControlSignal
+from ochre_next._hares import SteppableFleet as PySteppableFleet
+
+from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike
+from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig
+
+_LOG = logging.getLogger(__name__)
+
+
+class HELICSFleet:
+    """Wrap a ``PySteppableFleet`` as a single HELICS value federate."""
+
+    def __init__(
+        self,
+        fleet: PySteppableFleet,
+        fed_name: str,
+        broker_address: str = "localhost",
+        core_type: str = "zmq",
+    ) -> None:
+        self._fleet = fleet
+        self._fed_name = fed_name
+        self._broker_address = broker_address
+        self._core_type = core_type
+
+        self._time_res_s = float(fleet.time_res_s())
+        self._total_steps = int(fleet.total_steps())
+        self._n_dwellings = len(fleet)
+
+        fedinfo = self._create_federate_info()
+        self._configure_federate_info(fedinfo)
+        self._fed = helics.helicsCreateValueFederate(fed_name, fedinfo)
+
+        self._set_flag(helics.HELICS_FLAG_UNINTERRUPTIBLE, True)
+        self._set_flag(helics.HELICS_FLAG_TERMINATE_ON_ERROR, True)
+
+        self._pub_aggregate_power: HelicsPublicationLike | None = None
+        self._pub_aggregate_reactive: HelicsPublicationLike | None = None
+        self._pub_dwelling_power: list[HelicsPublicationLike] = []
+
+        self._sub_voltage_all: HelicsSubscriptionLike | None = None
+        self._sub_voltage_dwelling: list[HelicsSubscriptionLike] = []
+        self._sub_control: HelicsSubscriptionLike | None = None
+
+        self._publication_configs: list[HELICSPublicationConfig] = []
+        self._subscription_configs: list[HELICSSubscriptionConfig] = []
+        self._finalized = False
+
+    def register_publications(self, prefix: str = "") -> list[HELICSPublicationConfig]:
+        """Register aggregate and per-dwelling typed double publications."""
+        base = f"{prefix}{self._fed_name}/"
+
+        aggregate_power_key = f"{base}aggregate_power_kw"
+        aggregate_reactive_key = f"{base}aggregate_reactive_kvar"
+        self._pub_aggregate_power = self._fed.register_publication(aggregate_power_key, "double")
+        self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_key, "double")
+
+        self._pub_dwelling_power = []
+        configs = [
+            HELICSPublicationConfig(key=aggregate_power_key),
+            HELICSPublicationConfig(key=aggregate_reactive_key),
+        ]
+
+        for dwelling_index in range(self._n_dwellings):
+            key = f"{base}dwelling_{dwelling_index}/total_power_kw"
+            publication = self._fed.register_publication(key, "double")
+            self._pub_dwelling_power.append(publication)
+            configs.append(HELICSPublicationConfig(key=key))
+
+        self._publication_configs = configs
+        return list(self._publication_configs)
+
+    def register_subscriptions(
+        self,
+        voltage_topic: str | None = None,
+        control_topic: str | None = None,
+    ) -> list[HELICSSubscriptionConfig]:
+        """Register fleet-wide/per-dwelling voltage and control subscriptions."""
+        configs: list[HELICSSubscriptionConfig] = []
+
+        self._sub_voltage_dwelling = []
+        if voltage_topic is not None:
+            self._sub_voltage_all = self._fed.register_subscription(voltage_topic, "double")
+            configs.append(HELICSSubscriptionConfig(key=voltage_topic, type="double"))
+            for dwelling_index in range(self._n_dwellings):
+                key = f"{voltage_topic}/dwelling_{dwelling_index}"
+                subscription = self._fed.register_subscription(key, "double")
+                self._sub_voltage_dwelling.append(subscription)
+                configs.append(HELICSSubscriptionConfig(key=key, type="double"))
+        else:
+            self._sub_voltage_all = None
+
+        if control_topic is not None:
+            self._sub_control = self._fed.register_subscription(control_topic, "string")
+            configs.append(HELICSSubscriptionConfig(key=control_topic, type="string"))
+        else:
+            self._sub_control = None
+
+        self._subscription_configs = configs
+        return list(self._subscription_configs)
+
+    def run(self) -> None:
+        """Run HELICS-coupled stepping loop until fleet timesteps are exhausted."""
+        try:
+            self._fed.enter_executing_mode()
+            sim_time_s = 0.0
+            step_count = 0
+            while not self._fleet.is_finished():
+                if step_count >= self._total_steps:
+                    _LOG.warning(
+                        "Fleet exceeded configured total_steps=%d; terminating loop defensively",
+                        self._total_steps,
+                    )
+                    break
+
+                granted = float(self._fed.request_time(sim_time_s))
+                assert granted >= sim_time_s, "granted time must be monotonically increasing"
+
+                self._read_subscriptions()
+                self._fleet.step()
+                self._publish_results()
+
+                step_count += 1
+                sim_time_s += self._time_res_s
+        finally:
+            self.finalize()
+
+    def finalize(self) -> None:
+        """Disconnect federate explicitly (idempotent)."""
+        if self._finalized:
+            return
+        self._fed.disconnect()
+        self._finalized = True
+
+    def _read_subscriptions(self) -> None:
+        if self._sub_voltage_all is not None and self._sub_voltage_all.is_updated():
+            self._fleet.set_grid_voltage_all(float(self._sub_voltage_all.double))
+
+        for dwelling_index, subscription in enumerate(self._sub_voltage_dwelling):
+            if subscription.is_updated():
+                self._fleet.set_grid_voltage(dwelling_index, float(subscription.double))
+
+        if self._sub_control is None or not self._sub_control.is_updated():
+            return
+
+        try:
+            payload = json.loads(self._sub_control.string)
+        except (TypeError, ValueError) as exc:
+            _LOG.warning("Invalid control payload JSON: %s", exc)
+            return
+
+        try:
+            controls = self._iter_control_entries(payload)
+        except ValueError as exc:
+            _LOG.warning("Invalid control message shape: %s", exc)
+            return
+
+        for dwelling_index, equipment_name, signal_dict in controls:
+            if dwelling_index < 0 or dwelling_index >= self._n_dwellings:
+                _LOG.warning("Control payload references invalid dwelling index %d", dwelling_index)
+                continue
+            try:
+                signal = ControlSignal.from_dict(signal_dict)
+                self._fleet.apply_control(dwelling_index, equipment_name, signal)
+            except (ValueError, TypeError, KeyError) as exc:
+                _LOG.warning(
+                    "Failed to apply control for dwelling %d equipment '%s': %s",
+                    dwelling_index,
+                    equipment_name,
+                    exc,
+                )
+
+    def _publish_results(self) -> None:
+        if self._pub_aggregate_power is None or self._pub_aggregate_reactive is None:
+            raise RuntimeError("Publications are not registered; call register_publications() first")
+
+        aggregate_power_kw = 0.0
+        aggregate_reactive_kvar = 0.0
+        for dwelling_index in range(self._n_dwellings):
+            telemetry = self._fleet.telemetry(dwelling_index)
+            power_kw = float(telemetry.total_power_kw)
+            reactive_kvar = float(telemetry.reactive_power_kvar)
+
+            aggregate_power_kw += power_kw
+            aggregate_reactive_kvar += reactive_kvar
+
+            if dwelling_index < len(self._pub_dwelling_power):
+                self._pub_dwelling_power[dwelling_index].publish(power_kw)
+
+        self._pub_aggregate_power.publish(aggregate_power_kw)
+        self._pub_aggregate_reactive.publish(aggregate_reactive_kvar)
+
+    @staticmethod
+    def _create_federate_info() -> HelicsFederateInfoLike:
+        if hasattr(helics, "HelicsFederateInfo"):
+            try:
+                return helics.HelicsFederateInfo()
+            except TypeError:
+                # Some HELICS builds expose HelicsFederateInfo but require an internal handle.
+                pass
+        if hasattr(helics, "helicsCreateFederateInfo"):
+            return helics.helicsCreateFederateInfo()
+        raise RuntimeError("HELICS Python module does not expose federate info creation API")
+
+    def _configure_federate_info(self, fedinfo: HelicsFederateInfoLike) -> None:
+        if hasattr(helics, "helicsFederateInfoSetCoreTypeFromString"):
+            helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, self._core_type)
+        else:
+            fedinfo.core_type = self._core_type
+
+        broker_address = self._normalize_broker_address(self._broker_address)
+        core_init_value = f"--broker_address={broker_address}"
+        if hasattr(helics, "helicsFederateInfoSetCoreInitString"):
+            helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init_value)
+        else:
+            if hasattr(fedinfo, "core_init"):
+                fedinfo.core_init = core_init_value
+            if hasattr(fedinfo, "core_init_string"):
+                fedinfo.core_init_string = core_init_value
+
+        self._set_time_property(
+            fedinfo,
+            helics.HELICS_PROPERTY_TIME_PERIOD,
+            self._time_res_s,
+        )
+
+    @staticmethod
+    def _set_time_property(
+        fedinfo: HelicsFederateInfoLike, property_key: int, value: float
+    ) -> None:
+        if hasattr(fedinfo, "property"):
+            fedinfo.property[property_key] = value
+            return
+        helics.helicsFederateInfoSetTimeProperty(fedinfo, property_key, value)
+
+    def _set_flag(self, flag: int, enabled: bool) -> None:
+        if hasattr(self._fed, "set_flag_option"):
+            self._fed.set_flag_option(flag, enabled)
+            return
+        helics.helicsFederateSetFlagOption(self._fed, flag, int(enabled))
+
+    @staticmethod
+    def _normalize_broker_address(address: str) -> str:
+        if "://" in address:
+            return address
+        return f"tcp://{address}"
+
+    def _iter_control_entries(self, payload: Any) -> list[tuple[int, str, dict[str, Any]]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Control payload must decode to a JSON object")
+
+        if not payload:
+            return []
+
+        if any(self._is_negative_int_like(key) for key in payload):
+            raise ValueError("Control payload dwelling indices must be non-negative")
+
+        keys_are_dwelling_indices = all(self._is_int_like(key) for key in payload)
+
+        entries: list[tuple[int, str, dict[str, Any]]] = []
+        if keys_are_dwelling_indices:
+            for dwelling_key, body in payload.items():
+                dwelling_index = int(dwelling_key)
+                for equipment, signal in self._iter_equipment_entries(body):
+                    entries.append((dwelling_index, equipment, signal))
+            return entries
+
+        if any(self._is_int_like(key) for key in payload):
+            raise ValueError("Control payload may not mix dwelling indices with equipment names")
+
+        for equipment, signal in self._iter_equipment_entries(payload):
+            for dwelling_index in range(self._n_dwellings):
+                entries.append((dwelling_index, equipment, signal))
+        return entries
+
+    @staticmethod
+    def _is_int_like(value: Any) -> bool:
+        if isinstance(value, int):
+            return value >= 0
+        if not isinstance(value, str):
+            return False
+        return value.isdigit()
+
+    @staticmethod
+    def _is_negative_int_like(value: Any) -> bool:
+        if isinstance(value, int):
+            return value < 0
+        if not isinstance(value, str):
+            return False
+        return value.startswith("-") and value[1:].isdigit()
+
+    @staticmethod
+    def _iter_equipment_entries(body: Any) -> list[tuple[str, dict[str, Any]]]:
+        if not isinstance(body, dict):
+            raise ValueError("Each control entry must be a JSON object")
+
+        if "equipment" in body and "signal" in body:
+            equipment = body["equipment"]
+            signal = body["signal"]
+            if not isinstance(equipment, str) or not isinstance(signal, dict):
+                raise ValueError("Single-control payload requires string equipment + dict signal")
+            return [(equipment, signal)]
+
+        entries: list[tuple[str, dict[str, Any]]] = []
+        for equipment, signal in body.items():
+            if not isinstance(equipment, str) or not isinstance(signal, dict):
+                raise ValueError("Multi-control payload must be {str: dict}")
+            entries.append((equipment, signal))
+        return entries

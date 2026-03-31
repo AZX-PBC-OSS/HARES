@@ -21,7 +21,11 @@ pub(super) const DEFAULT_DEADBAND_C: f64 = 8.166_666_667; // 14.7°F (OCHRE HPWH
 pub(super) const DEFAULT_COMPRESSOR_POWER_W: f64 = 1_200.0;
 pub(super) const DEFAULT_BACKUP_ELEMENT_POWER_W: f64 = 4_500.0;
 pub(super) const DEFAULT_BACKUP_ENABLE_OFFSET_C: f64 = 8.0;
-pub(super) const DEFAULT_COP_CURVE: [f64; 6] = [2.4, 0.03, 0.0, -0.025, 0.0, 0.0];
+/// Standard EnergyPlus/OCHRE HPWH COP biquadratic curve (GE GeoSpring class).
+/// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
+/// Source: vendors/OCHRE/ochre/Equipment/WaterHeater.py lines 446-448.
+pub(super) const DEFAULT_COP_CURVE: [f64; 6] =
+    [1.0132, 0.0436, 0.0000117, -0.01113, 0.00003688, -0.000498];
 /// Standard EnergyPlus/OCHRE HPWH capacity curve (GE GeoSpring / A.O. Smith class).
 /// Inputs: wet-bulb temperature (°C), tank average temperature (°C).
 pub(super) const DEFAULT_CAPACITY_CURVE: [f64; 6] =

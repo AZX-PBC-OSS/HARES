@@ -46,7 +46,7 @@ pub struct StreamingRecorder {
     chunk_size: usize,
     timestamp_buf: Vec<String>,
     value_bufs: Vec<Vec<f64>>,
-    backend: Backend,
+    backend: Option<Backend>,
     total_rows: usize,
     output_path: PathBuf,
     flushed_batches: Vec<RecordBatch>,
@@ -100,7 +100,7 @@ impl StreamingRecorder {
             value_bufs: (0..n_value_cols)
                 .map(|_| Vec::with_capacity(chunk_size))
                 .collect(),
-            backend,
+            backend: Some(backend),
             total_rows: 0,
             output_path: output_path.to_path_buf(),
             flushed_batches: Vec::new(),
@@ -141,16 +141,40 @@ impl StreamingRecorder {
 
         let batch = self.build_batch()?;
 
-        match &mut self.backend {
-            Backend::Parquet(w) => {
+        match self.backend.as_mut() {
+            Some(Backend::Parquet(w)) => {
                 w.write(&batch)?;
             }
-            Backend::Csv(writer) => {
+            Some(Backend::Csv(writer)) => {
                 writer.write(&batch)?;
             }
+            None => {}
         }
 
         self.flushed_batches.push(batch);
+
+        Ok(())
+    }
+
+    /// Flush remaining rows and close the backend file writer.
+    ///
+    /// After this call, `push_row()` will still buffer but no further data
+    /// will be written to disk. `flushed_batches()` remains available.
+    pub fn flush_and_close(&mut self) -> Result<(), OutputError> {
+        self.flush()?;
+
+        if let Some(backend) = self.backend.take() {
+            match backend {
+                Backend::Parquet(w) => {
+                    w.close()?;
+                }
+                Backend::Csv(writer) => {
+                    use std::io::Write;
+                    let mut buf_writer = writer.into_inner();
+                    buf_writer.flush()?;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -163,21 +187,7 @@ impl StreamingRecorder {
 
     /// Flush remaining rows, close the file, and return summary statistics.
     pub fn finish(mut self) -> Result<OutputSummary, OutputError> {
-        self.flush()?;
-
-        match self.backend {
-            Backend::Parquet(w) => {
-                w.close()?;
-            }
-            Backend::Csv(writer) => {
-                // into_inner() flushes the CSV writer internals, then we
-                // explicitly flush the BufWriter to surface IO errors
-                // before drop, rather than silently losing data.
-                use std::io::Write;
-                let mut buf_writer = writer.into_inner();
-                buf_writer.flush()?;
-            }
-        }
+        self.flush_and_close()?;
 
         let byte_size = std::fs::metadata(&self.output_path)?.len();
 

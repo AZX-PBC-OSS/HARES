@@ -54,8 +54,8 @@ fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
             .single()
             .expect("valid"),
         time_res: ChronoDuration::seconds(60),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 

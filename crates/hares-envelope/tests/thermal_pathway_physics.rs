@@ -66,8 +66,8 @@ fn make_env(zone_temp: f64, outdoor_temp: f64, ground_temp: f64) -> EnvironmentS
             .single()
             .expect("valid timestamp"),
         time_res: chrono::Duration::seconds(DT_S as i64),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 

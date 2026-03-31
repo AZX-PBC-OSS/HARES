@@ -239,8 +239,8 @@ mod tests {
                 .single()
                 .expect("valid time"),
             time_res: chrono::Duration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 

@@ -203,9 +203,7 @@ impl DistributionKind {
                     "Gaussian requires finite mean and non-negative finite std_dev".into(),
                 ))
             }
-            Self::Uniform { low, high }
-                if !low.is_finite() || !high.is_finite() || low >= high =>
-            {
+            Self::Uniform { low, high } if !low.is_finite() || !high.is_finite() || low >= high => {
                 Err(HaresError::Equipment(format!(
                     "Uniform requires finite low < high, got {low}, {high}"
                 )))
@@ -217,21 +215,15 @@ impl DistributionKind {
                     "LogNormal requires finite mu and positive finite sigma".into(),
                 ))
             }
-            Self::Exponential { lambda } if !lambda.is_finite() || *lambda <= 0.0 => {
-                Err(HaresError::Equipment(
-                    "Exponential requires positive finite lambda".into(),
-                ))
-            }
-            Self::Poisson { lambda } if !lambda.is_finite() || *lambda <= 0.0 => {
-                Err(HaresError::Equipment(
-                    "Poisson requires positive finite lambda".into(),
-                ))
-            }
-            Self::Bernoulli { p } if !p.is_finite() || !(0.0..=1.0).contains(p) => {
-                Err(HaresError::Equipment(format!(
-                    "Bernoulli requires finite p in [0, 1], got {p}"
-                )))
-            }
+            Self::Exponential { lambda } if !lambda.is_finite() || *lambda <= 0.0 => Err(
+                HaresError::Equipment("Exponential requires positive finite lambda".into()),
+            ),
+            Self::Poisson { lambda } if !lambda.is_finite() || *lambda <= 0.0 => Err(
+                HaresError::Equipment("Poisson requires positive finite lambda".into()),
+            ),
+            Self::Bernoulli { p } if !p.is_finite() || !(0.0..=1.0).contains(p) => Err(
+                HaresError::Equipment(format!("Bernoulli requires finite p in [0, 1], got {p}")),
+            ),
             _ => Ok(()),
         }
     }
@@ -256,9 +248,7 @@ impl DistributionKind {
                 // Poisson samples are already integer-valued f64 (e.g. 3.0, not 3.01).
                 rand_distr::Poisson::new(*lambda)
                     .map(|d: rand_distr::Poisson<f64>| d.sample(rng))
-                    .map_err(|e| {
-                        HaresError::Equipment(format!("invalid Poisson params: {e}"))
-                    })
+                    .map_err(|e| HaresError::Equipment(format!("invalid Poisson params: {e}")))
             }
             Self::Bernoulli { p } => rand_distr::Bernoulli::new(*p)
                 .map(|d| if d.sample(rng) { 1.0 } else { 0.0 })
@@ -646,10 +636,9 @@ impl ScheduleSource {
                 ..
             } => {
                 // Rough average across a day (12h day, 6h evening, 6h overnight).
-                let day_avg = (daytime_fraction * 12.0
-                    + evening_fraction * 6.0
-                    + overnight_fraction * 6.0)
-                    / 24.0;
+                let day_avg =
+                    (daytime_fraction * 12.0 + evening_fraction * 6.0 + overnight_fraction * 6.0)
+                        / 24.0;
                 let month_avg: f64 = month_multipliers.iter().sum::<f64>() / 12.0;
                 day_avg * month_avg * max_value
             }
@@ -713,9 +702,7 @@ fn resolve_window_value(
         None => w.value,
         Some(dist) => {
             let st = rng_state.as_mut().ok_or_else(|| {
-                HaresError::Equipment(
-                    "time window has noise but no rng_state is set".into(),
-                )
+                HaresError::Equipment("time window has noise but no rng_state is set".into())
             })?;
             let noise = dist.sample(&mut st.rng)?;
             st.draw_count = st.draw_count.checked_add(1).expect("draw_count overflow");
@@ -771,10 +758,7 @@ impl SeasonFilter {
     /// Debug-asserts that `month` is in 1..=12; in release, returns `false`
     /// for out-of-range months.
     pub fn contains_month(self, month: u8) -> bool {
-        debug_assert!(
-            (1..=12).contains(&month),
-            "month out of range: {month}"
-        );
+        debug_assert!((1..=12).contains(&month), "month out of range: {month}");
         if !(1..=12).contains(&month) {
             return false;
         }
@@ -829,10 +813,7 @@ impl SeasonalSplit {
     /// Handles wrapping: if `summer_start_month > summer_end_month` the range
     /// spans the year boundary (e.g. start=11, end=2 → Nov, Dec, Jan, Feb).
     pub fn is_summer(&self, month: u8) -> bool {
-        debug_assert!(
-            (1..=12).contains(&month),
-            "month out of range: {month}"
-        );
+        debug_assert!((1..=12).contains(&month), "month out of range: {month}");
         if !(1..=12).contains(&month) {
             return false;
         }
@@ -1661,7 +1642,10 @@ mod tests {
                 break;
             }
         }
-        assert!(any_differ, "different seeds should produce different values");
+        assert!(
+            any_differ,
+            "different seeds should produce different values"
+        );
     }
 
     #[test]
@@ -1961,91 +1945,113 @@ mod tests {
 
     #[test]
     fn validate_rejects_nan_parameters() {
-        assert!(DistributionKind::Gaussian {
-            mean: f64::NAN,
-            std_dev: 1.0
-        }
-        .validate()
-        .is_err());
-        assert!(DistributionKind::Uniform {
-            low: f64::NAN,
-            high: 1.0
-        }
-        .validate()
-        .is_err());
-        assert!(DistributionKind::LogNormal {
-            mu: 0.0,
-            sigma: f64::NAN
-        }
-        .validate()
-        .is_err());
-        assert!(DistributionKind::Exponential { lambda: f64::NAN }
+        assert!(
+            DistributionKind::Gaussian {
+                mean: f64::NAN,
+                std_dev: 1.0
+            }
             .validate()
-            .is_err());
-        assert!(DistributionKind::Poisson { lambda: f64::NAN }
+            .is_err()
+        );
+        assert!(
+            DistributionKind::Uniform {
+                low: f64::NAN,
+                high: 1.0
+            }
             .validate()
-            .is_err());
-        assert!(DistributionKind::Bernoulli { p: f64::NAN }
+            .is_err()
+        );
+        assert!(
+            DistributionKind::LogNormal {
+                mu: 0.0,
+                sigma: f64::NAN
+            }
             .validate()
-            .is_err());
+            .is_err()
+        );
+        assert!(
+            DistributionKind::Exponential { lambda: f64::NAN }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            DistributionKind::Poisson { lambda: f64::NAN }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            DistributionKind::Bernoulli { p: f64::NAN }
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_infinity_parameters() {
-        assert!(DistributionKind::Gaussian {
-            mean: f64::INFINITY,
-            std_dev: 1.0
-        }
-        .validate()
-        .is_err());
-        assert!(DistributionKind::Exponential {
-            lambda: f64::INFINITY
-        }
-        .validate()
-        .is_err());
+        assert!(
+            DistributionKind::Gaussian {
+                mean: f64::INFINITY,
+                std_dev: 1.0
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DistributionKind::Exponential {
+                lambda: f64::INFINITY
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn validate_accepts_valid_parameters() {
-        assert!(DistributionKind::Gaussian {
-            mean: 0.0,
-            std_dev: 1.0
-        }
-        .validate()
-        .is_ok());
-        assert!(DistributionKind::Uniform {
-            low: 0.0,
-            high: 1.0
-        }
-        .validate()
-        .is_ok());
-        assert!(DistributionKind::LogNormal {
-            mu: 0.0,
-            sigma: 1.0
-        }
-        .validate()
-        .is_ok());
-        assert!(DistributionKind::Exponential { lambda: 2.0 }
+        assert!(
+            DistributionKind::Gaussian {
+                mean: 0.0,
+                std_dev: 1.0
+            }
             .validate()
-            .is_ok());
-        assert!(DistributionKind::Poisson { lambda: 5.0 }
+            .is_ok()
+        );
+        assert!(
+            DistributionKind::Uniform {
+                low: 0.0,
+                high: 1.0
+            }
             .validate()
-            .is_ok());
-        assert!(DistributionKind::Bernoulli { p: 0.5 }
+            .is_ok()
+        );
+        assert!(
+            DistributionKind::LogNormal {
+                mu: 0.0,
+                sigma: 1.0
+            }
             .validate()
-            .is_ok());
+            .is_ok()
+        );
+        assert!(
+            DistributionKind::Exponential { lambda: 2.0 }
+                .validate()
+                .is_ok()
+        );
+        assert!(DistributionKind::Poisson { lambda: 5.0 }.validate().is_ok());
+        assert!(DistributionKind::Bernoulli { p: 0.5 }.validate().is_ok());
     }
 
     // ── Boundary / edge-case tests ───────────────────────────────────
 
     #[test]
     fn validate_boundary_gaussian_zero_std_dev() {
-        assert!(DistributionKind::Gaussian {
-            mean: 5.0,
-            std_dev: 0.0
-        }
-        .validate()
-        .is_ok());
+        assert!(
+            DistributionKind::Gaussian {
+                mean: 5.0,
+                std_dev: 0.0
+            }
+            .validate()
+            .is_ok()
+        );
         // Zero std_dev degrades to constant — verify sampling returns mean.
         let env = default_env();
         let mut src = stochastic(
@@ -2060,32 +2066,32 @@ mod tests {
 
     #[test]
     fn validate_boundary_uniform_low_eq_high() {
-        assert!(DistributionKind::Uniform {
-            low: 3.0,
-            high: 3.0
-        }
-        .validate()
-        .is_err());
+        assert!(
+            DistributionKind::Uniform {
+                low: 3.0,
+                high: 3.0
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn validate_boundary_lognormal_zero_sigma() {
-        assert!(DistributionKind::LogNormal {
-            mu: 0.0,
-            sigma: 0.0
-        }
-        .validate()
-        .is_err());
+        assert!(
+            DistributionKind::LogNormal {
+                mu: 0.0,
+                sigma: 0.0
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn validate_boundary_bernoulli_zero_and_one() {
-        assert!(DistributionKind::Bernoulli { p: 0.0 }
-            .validate()
-            .is_ok());
-        assert!(DistributionKind::Bernoulli { p: 1.0 }
-            .validate()
-            .is_ok());
+        assert!(DistributionKind::Bernoulli { p: 0.0 }.validate().is_ok());
+        assert!(DistributionKind::Bernoulli { p: 1.0 }.validate().is_ok());
 
         // p=0 always returns 0, p=1 always returns 1
         let env = default_env();
@@ -2199,7 +2205,10 @@ mod tests {
     #[test]
     fn season_filter_contains_month_all() {
         for m in 1..=12 {
-            assert!(SeasonFilter::All.contains_month(m), "All should match month {m}");
+            assert!(
+                SeasonFilter::All.contains_month(m),
+                "All should match month {m}"
+            );
         }
     }
 

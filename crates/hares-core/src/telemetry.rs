@@ -21,6 +21,7 @@ pub struct DwellingTelemetry {
     pub setpoint_heat_c: Vec<f64>,
     pub setpoint_cool_c: Vec<f64>,
     pub total_power_kw: f64,
+    pub reactive_power_kvar: f64,
     pub outdoor_temp_c: f64,
     pub outdoor_rh: f64,
 }
@@ -43,6 +44,10 @@ impl DwellingTelemetry {
             }
             if field == "total_electric_kw" || field == "total_power_kw" {
                 out.push(self.total_power_kw);
+                continue;
+            }
+            if field == "reactive_power_kvar" {
+                out.push(self.reactive_power_kvar);
                 continue;
             }
             if let Some(name) = bracket_name(field, "zone_temp") {
@@ -153,6 +158,7 @@ mod tests {
             setpoint_heat_c: vec![20.0],
             setpoint_cool_c: vec![24.0],
             total_power_kw: 1.2,
+            reactive_power_kvar: 0.0,
             outdoor_temp_c: 10.0,
             outdoor_rh: 0.45,
         }
@@ -169,6 +175,14 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(obs, vec![21.0, 0.5, 10.0]);
+    }
+
+    #[test]
+    fn observation_vec_includes_reactive_power() {
+        let mut t = sample();
+        t.reactive_power_kvar = 1.5;
+        let obs = t.to_observation_vec(&["reactive_power_kvar"]).unwrap();
+        assert_eq!(obs, vec![1.5]);
     }
 
     #[test]

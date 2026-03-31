@@ -5,9 +5,41 @@ from __future__ import annotations
 import datetime
 from abc import abstractmethod
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 import polars as pl
+
+
+class StepResult(TypedDict):
+    """Result from ``Dwelling.step()``.
+
+    Zone temperatures are flattened as ``"Temperature - Indoor (C)"`` for zone 0,
+    and ``"Temperature - Zone_N (C)"`` for other zones.
+    """
+
+    timestamp: datetime.datetime
+    net_electric_power_kw: float
+    hvac_heating_w: float
+    hvac_cooling_w: float
+
+
+class SteppableStepResult(StepResult):
+    reactive_power_kvar: float
+
+
+class FleetStepEntry(TypedDict):
+    """Single per-dwelling entry returned by ``SteppableFleet.step()``."""
+
+    ok: bool
+    bldg_id: int
+    result: NotRequired[SteppableStepResult]
+    error: NotRequired[str]
+
+
+class SteppableBuildError(TypedDict):
+    bldg_id: int
+    error: str
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -757,7 +789,10 @@ class Actor:
 class Telemetry:
     def zone(self) -> dict[str, Any]: ...
     def equipment(self) -> dict[str, Any]: ...
+    @property
     def total_power_kw(self) -> float: ...
+    @property
+    def reactive_power_kvar(self) -> float: ...
     def __repr__(self) -> str: ...
 
 # ---------------------------------------------------------------------------
@@ -1303,6 +1338,7 @@ class SimulationConfig:
         time_res_s: int | None = ...,
         output_verbosity: int | None = ...,
         output_path: str | None = ...,
+        write_output: bool | None = ...,
         output_to_parquet: bool | None = ...,
         output_chunk_size: int | None = ...,
         master_seed: int | None = ...,
@@ -1325,6 +1361,8 @@ class SimulationConfig:
     def output_verbosity(self) -> int: ...
     @property
     def output_path(self) -> str | None: ...
+    @property
+    def write_output(self) -> bool: ...
     @property
     def output_to_parquet(self) -> bool: ...
     @property
@@ -1535,6 +1573,32 @@ class Fleet:
     def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
 
+class SteppableFleet:
+    @classmethod
+    def from_configs(
+        cls,
+        configs: list[DwellingConfig],
+        n_threads: int = ...,
+    ) -> SteppableFleet: ...
+    def step(self) -> list[FleetStepEntry]: ...
+    @property
+    def build_errors(self) -> list[SteppableBuildError]: ...
+    def set_grid_voltage(self, dwelling_index: int, voltage_pu: float) -> None: ...
+    def set_grid_voltage_all(self, voltage_pu: float) -> None: ...
+    def apply_control(
+        self,
+        dwelling_index: int,
+        name: str,
+        signal: ControlSignal,
+    ) -> None: ...
+    def telemetry(self, dwelling_index: int) -> Telemetry: ...
+    def is_finished(self) -> bool: ...
+    def time_res_s(self) -> float: ...
+    def total_steps(self) -> int: ...
+    def current_step(self) -> int: ...
+    def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+
 class FleetResults:
     @property
     def per_dwelling_metrics(self) -> pl.DataFrame: ...
@@ -1573,6 +1637,7 @@ class Dwelling:
         master_seed: int = ...,
         output_verbosity: int = ...,
         output_path: str | None = ...,
+        write_output: bool = ...,
         output_to_parquet: bool = ...,
         output_chunk_size: int = ...,
         civil_timezone: str | None = ...,
@@ -1582,7 +1647,7 @@ class Dwelling:
     def initialize(self) -> None: ...
     def timesteps(self) -> TimestepsIter: ...
     def simulate(self) -> pl.DataFrame: ...
-    def step(self) -> dict[str, Any]: ...
+    def step(self) -> StepResult: ...
     def apply_control(self, name: str, signal: ControlSignal) -> None: ...
     def add_actor(self, actor: Actor) -> None: ...
     def add_actor_by_name(

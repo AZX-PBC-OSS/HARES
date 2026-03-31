@@ -71,6 +71,7 @@ mod tests {
                 time_res: Duration::minutes(1),
                 output_verbosity: 6,
                 output_path: Some(output_path),
+                write_output: true,
                 output_format: OutputFormat::Csv,
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
@@ -173,7 +174,10 @@ mod tests {
     }
 
     fn run_freefloat_scenario(scenario: &str) {
-        let output_path = std::env::temp_dir().join(unique_temp_name(&format!("hares_freefloat_{scenario}"), "csv"));
+        let output_path = std::env::temp_dir().join(unique_temp_name(
+            &format!("hares_freefloat_{scenario}"),
+            "csv",
+        ));
         let _ = fs::remove_file(&output_path);
 
         let config = beopt_freefloat_config(scenario, output_path.clone());
@@ -1189,7 +1193,10 @@ mod tests {
     }
 
     fn run_freefloat_with_solar_override(scenario: &str) {
-        let output_path = std::env::temp_dir().join(unique_temp_name(&format!("hares_ff_solar_{scenario}"), "csv"));
+        let output_path = std::env::temp_dir().join(unique_temp_name(
+            &format!("hares_ff_solar_{scenario}"),
+            "csv",
+        ));
         let _ = fs::remove_file(&output_path);
 
         let config = beopt_freefloat_config(scenario, output_path.clone());

@@ -11,6 +11,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_types::telemetry_keys as tk;
+
 use crate::{Equipment, EquipmentConfig, load_postcard, save_postcard};
 
 use super::super::{
@@ -629,14 +631,15 @@ impl HeatPumpHeaterCore {
 
         // Telemetry reports delivered (post-DSE) thermal output for the conditioned zone.
         let delivered_thermal_w = step.thermal_output_w * self.hvac.duct_dse.clamp(0.0, 1.0);
-        self.telemetry.set("electric_kw", step.electric_kw);
-        self.telemetry.set("thermal_output_w", delivered_thermal_w);
+        self.telemetry.set(tk::ELECTRIC_KW, step.electric_kw);
         self.telemetry
-            .set("operating_mode", operating_mode_code(self.operating_mode));
+            .set(tk::THERMAL_OUTPUT_W, delivered_thermal_w);
         self.telemetry
-            .set("speed_index", self.hvac.last_speed_index as f64);
+            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        self.telemetry
+            .set(tk::SPEED_INDEX, self.hvac.last_speed_index as f64);
         self.telemetry.set(
-            "defrost_active",
+            tk::DEFROST_ACTIVE,
             if step.defrost_active { 1.0 } else { 0.0 },
         );
         // COP per AHRI/SEER convention: excludes fan power from denominator.
@@ -648,17 +651,17 @@ impl HeatPumpHeaterCore {
         } else {
             0.0
         };
-        self.telemetry.set("cop", cop);
+        self.telemetry.set(tk::COP, cop);
         // Runtime fraction = duty cycle (PLR) when on, 0 when off.
         let rtf = if self.operating_mode != OperatingMode::Off {
             self.hvac.duty_cycle.clamp(0.0, 1.0)
         } else {
             0.0
         };
-        self.telemetry.set("runtime_fraction", rtf);
-        self.telemetry.set("compressor_kw", step.compressor_kw);
+        self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
+        self.telemetry.set(tk::COMPRESSOR_KW, step.compressor_kw);
         self.telemetry
-            .set("defrost_time_fraction", step.defrost_time_fraction);
+            .set(tk::DEFROST_TIME_FRACTION, step.defrost_time_fraction);
 
         // Clear solver-provided capacity so next step starts fresh.
         self.ideal_capacity_w = 0.0;
@@ -1004,10 +1007,10 @@ impl HeatPumpHeaterCore {
             last_er_off_at: self.last_er_off_at,
             last_speed_index: self.hvac.last_speed_index,
             last_speed_frac: self.hvac.last_speed_frac,
-            electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get("thermal_output_w").unwrap_or(0.0),
-            speed_index: self.telemetry.get("speed_index").unwrap_or(0.0),
-            operating_mode_code: self.telemetry.get("operating_mode").unwrap_or(0.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+            speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
+            operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
             prev_base_setpoint: self.prev_base_setpoint,
             er_lockout_remaining_s: self.er_lockout_remaining_s,
             prev_zone_temp_c: self.prev_zone_temp_c,
@@ -1059,14 +1062,14 @@ impl HeatPumpHeaterCore {
         self.dr_duty_cycle = decoded.dr_duty_cycle;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
 
-        self.telemetry.insert("electric_kw", decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert("thermal_output_w", decoded.thermal_output_w);
-        self.telemetry.insert("speed_index", decoded.speed_index);
+            .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
+        self.telemetry.insert(tk::SPEED_INDEX, decoded.speed_index);
         self.telemetry
-            .insert("operating_mode", decoded.operating_mode_code);
+            .insert(tk::OPERATING_MODE, decoded.operating_mode_code);
         self.telemetry.insert(
-            "defrost_active",
+            tk::DEFROST_ACTIVE,
             if decoded.defrost_active { 1.0 } else { 0.0 },
         );
         self.prev_base_setpoint = decoded.prev_base_setpoint;
@@ -1149,11 +1152,8 @@ impl HeatPumpHeaterCore {
         }
         if !matches!(
             self.operating_mode,
-            OperatingMode::HeatingHP
-                | OperatingMode::HeatingER
-                | OperatingMode::HeatingHPAndER
-        )
-        {
+            OperatingMode::HeatingHP | OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+        ) {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().heating_c + self.dr_setpoint_offset_c;
@@ -1169,7 +1169,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DRLevel, EnvironmentState, GridState, OperatingMode, PortSlots,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{ASHPHeater, MinisplitHeater};
@@ -1212,8 +1212,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1273,7 +1273,7 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        assert_eq!(eq.telemetry().get("defrost_active"), Some(1.0));
+        assert_eq!(eq.telemetry().get(tk::DEFROST_ACTIVE), Some(1.0));
     }
 
     #[test]
@@ -1289,7 +1289,7 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        assert_eq!(eq.telemetry().get("defrost_active"), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::DEFROST_ACTIVE), Some(0.0));
     }
 
     #[test]
@@ -1424,8 +1424,8 @@ mod tests {
         restored.load_state(&state).unwrap();
 
         assert_eq!(
-            restored.telemetry().get("defrost_active"),
-            eq.telemetry().get("defrost_active")
+            restored.telemetry().get(tk::DEFROST_ACTIVE),
+            eq.telemetry().get(tk::DEFROST_ACTIVE)
         );
     }
 
@@ -1474,7 +1474,7 @@ mod tests {
         eq.step(&env_partial, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let electric_kw = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         // With PLR=0.5: ER draws backup_capacity_w * 0.5 * backup_eir = 2 kW.
         // The old bug used plr.max(1.0) = 1.0, giving the full 4 kW always.
         assert!(
@@ -1508,7 +1508,7 @@ mod tests {
 
         // operating_mode telemetry code 0.0 = Off (matches OPERATING_MODE_CODE_OFF)
         assert_eq!(
-            eq.telemetry().get("operating_mode"),
+            eq.telemetry().get(tk::OPERATING_MODE),
             Some(0.0),
             "step() must not change operating mode; it must remain Off when \
              update_control() was never called",
@@ -1650,8 +1650,8 @@ mod tests {
                 .expect("valid")
                 + chrono::Duration::seconds(second),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1915,7 +1915,7 @@ mod tests {
         eq_base
             .step(&e, Duration::from_secs(60), &mut ports_base)
             .unwrap();
-        let kw_base = eq_base.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw_base = eq_base.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
 
         // With DR Moderate: effective_setpoint=20°C → load_ratio=(20-19.5)/1=0.5 → partial output.
         let mut eq_dr = ASHPHeater::new(cfg.clone());
@@ -1934,7 +1934,7 @@ mod tests {
         eq_dr
             .step(&e, Duration::from_secs(60), &mut ports_dr)
             .unwrap();
-        let kw_dr = eq_dr.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw_dr = eq_dr.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
 
         assert!(kw_base > 0.0, "baseline must draw power; got {kw_base}");
         assert!(kw_dr >= 0.0, "DR case must draw non-negative power");
@@ -1967,7 +1967,7 @@ mod tests {
         eq.update_control(&e);
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let kw = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert_eq!(kw, 0.0, "GridEmergency must force zero output; got {kw}");
     }
 
@@ -1992,7 +1992,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&e, Duration::from_secs(60), &mut ports1).unwrap();
-        let kw_step1 = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw_step1 = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert_eq!(kw_step1, 0.0, "step 1 with LoadFraction=0 must be off");
 
         // Step 2: update_control resets ctrl_load_fraction=1.0; no signal reapplied → must heat.
@@ -2002,7 +2002,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&e, Duration::from_secs(60), &mut ports2).unwrap();
-        let kw_step2 = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw_step2 = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert!(
             kw_step2 > 0.0,
             "step 2 must draw power after transient LoadFraction resets; got {kw_step2}"
@@ -2356,9 +2356,12 @@ mod tests {
             .step(&e, Duration::from_secs(60), &mut ports_no_fan)
             .unwrap();
 
-        let cop_no_fan = eq_no_fan.telemetry().get("cop").unwrap_or(0.0);
-        let electric_kw_no_fan = eq_no_fan.telemetry().get("electric_kw").unwrap_or(0.0);
-        let thermal_w_no_fan = eq_no_fan.telemetry().get("thermal_output_w").unwrap_or(0.0);
+        let cop_no_fan = eq_no_fan.telemetry().get(tk::COP).unwrap_or(0.0);
+        let electric_kw_no_fan = eq_no_fan.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let thermal_w_no_fan = eq_no_fan
+            .telemetry()
+            .get(tk::THERMAL_OUTPUT_W)
+            .unwrap_or(0.0);
 
         // With zero fan, total electric = compressor only, so COP = thermal / electric.
         if electric_kw_no_fan > 1e-6 {
@@ -2387,8 +2390,8 @@ mod tests {
             .step(&e, Duration::from_secs(60), &mut ports_fan)
             .unwrap();
 
-        let cop_fan = eq_fan.telemetry().get("cop").unwrap_or(0.0);
-        let electric_kw_fan = eq_fan.telemetry().get("electric_kw").unwrap_or(0.0);
+        let cop_fan = eq_fan.telemetry().get(tk::COP).unwrap_or(0.0);
+        let electric_kw_fan = eq_fan.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
 
         // COP must NOT equal thermal / total_electric (which would include fan).
         // Reported COP should be >= no-fan COP because it uses compressor-only denominator.
@@ -2418,7 +2421,7 @@ mod tests {
         // Skip update_control so heater stays Off.
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let cop = eq.telemetry().get("cop").unwrap_or(-1.0);
+        let cop = eq.telemetry().get(tk::COP).unwrap_or(-1.0);
         assert_eq!(cop, 0.0, "heater off must give COP=0, got {cop}");
     }
 }
@@ -2430,7 +2433,7 @@ mod ideal_capacity_tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState,
+        ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::ASHPHeater;
@@ -2530,7 +2533,7 @@ mod ideal_capacity_tests {
         eq.step(&env, Duration::from_secs(60), &mut make_ports())
             .unwrap();
 
-        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
         assert!(
             (rtf - 1.0).abs() < 1e-9,
             "FSM Heating at 60 s must ignore IdealCapacity and produce RTF=1.0, got {rtf}"
@@ -2557,7 +2560,7 @@ mod ideal_capacity_tests {
         eq.step(&env, Duration::from_secs(900), &mut make_ports())
             .unwrap();
 
-        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
         // Flat biquadratic [1,0,0,0,0,0] → cap_ratio=1.0, PLR = 4000/8000 = 0.5.
         // PLF slightly adjusts, so allow ±5%.
         assert!(
@@ -2579,7 +2582,7 @@ mod ideal_capacity_tests {
         eq.step(&env, Duration::from_secs(900), &mut make_ports())
             .unwrap();
 
-        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
         assert_eq!(
             rtf, 0.0,
             "900 s timestep with zone above heating setpoint must produce RTF=0.0, got {rtf}"

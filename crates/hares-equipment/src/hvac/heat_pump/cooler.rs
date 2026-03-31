@@ -207,8 +207,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 

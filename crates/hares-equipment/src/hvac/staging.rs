@@ -418,11 +418,7 @@ mod tests {
         let mut hvac = make_single_speed();
         assert!((hvac.plf_cooling_degradation_coeff - 0.25).abs() < 1e-12);
 
-        let cases: &[(f64, f64)] = &[
-            (1.00, 1.000),
-            (0.75, 0.9375),
-            (0.50, 0.875),
-        ];
+        let cases: &[(f64, f64)] = &[(1.00, 1.000), (0.75, 0.9375), (0.50, 0.875)];
         for &(plr, expected_plf) in cases {
             let plf = hvac.part_load_factor_for_stage(plr, 0);
             assert!(

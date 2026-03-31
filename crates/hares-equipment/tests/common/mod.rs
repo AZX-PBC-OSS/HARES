@@ -123,8 +123,8 @@ impl EnvBuilder {
                 .single()
                 .expect("valid timestamp"),
             time_res: chrono::Duration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 }

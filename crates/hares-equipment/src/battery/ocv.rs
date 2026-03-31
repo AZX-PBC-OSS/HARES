@@ -335,7 +335,10 @@ mod tests {
     fn lfp_voltage_lower_than_nmc_at_mid_soc() {
         let lfp = OcvTable::default_lfp().voltage_at_soc(0.5);
         let nmc = OcvTable::default_li_nmc().voltage_at_soc(0.5);
-        assert!(lfp < nmc, "LFP ({lfp}V) should be < NMC ({nmc}V) at SOC=0.5");
+        assert!(
+            lfp < nmc,
+            "LFP ({lfp}V) should be < NMC ({nmc}V) at SOC=0.5"
+        );
     }
 
     #[test]

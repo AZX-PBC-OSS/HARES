@@ -3,9 +3,7 @@
 use chrono::Datelike;
 use hares_types::DepartureConstraint;
 
-use super::preference::{
-    ChargingPreference, Constraint, DecisionContext, PreferenceVote,
-};
+use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 
 pub struct DepartureDeadline {
     pub schedule: Vec<DepartureConstraint>,
@@ -48,7 +46,11 @@ impl DepartureDeadline {
         let dm = departure_minute as i32;
         let cm = ctx.current_minute as i32;
         let diff = dm - cm;
-        if diff > 0 { diff as f64 } else { (diff + 1440) as f64 }
+        if diff > 0 {
+            diff as f64
+        } else {
+            (diff + 1440) as f64
+        }
     }
 
     /// Resolve departure minute: prefer the actor-provided next_departure_minute
@@ -156,11 +158,7 @@ mod tests {
         }
     }
 
-    fn make_ctx(
-        env: &hares_types::EnvironmentState,
-        soc: f64,
-        minute: u16,
-    ) -> DecisionContext<'_> {
+    fn make_ctx(env: &hares_types::EnvironmentState, soc: f64, minute: u16) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: soc,
             capacity_kwh: 60.0,
@@ -249,7 +247,10 @@ mod tests {
 
         // Verify score doesn't return idle (there is time pressure)
         let vote = pref.score(&ctx);
-        assert!(vote.score > 0.0, "should have positive urgency across midnight wrap");
+        assert!(
+            vote.score > 0.0,
+            "should have positive urgency across midnight wrap"
+        );
     }
 
     #[test]

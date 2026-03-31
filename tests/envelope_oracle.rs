@@ -59,6 +59,7 @@ mod tests {
                 time_res: Duration::minutes(1),
                 output_verbosity: 6, // envelope component breakdown
                 output_path: Some(output_path),
+                write_output: true,
                 output_format: OutputFormat::Csv,
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
@@ -394,8 +395,8 @@ mod tests {
     /// 3. Is a feature missing? Track in the note.
     #[test]
     fn envelope_oracle_beopt_1h() {
-        let output_path = std::env::temp_dir()
-            .join(unique_temp_name("hares_envelope_oracle_beopt", "csv"));
+        let output_path =
+            std::env::temp_dir().join(unique_temp_name("hares_envelope_oracle_beopt", "csv"));
         let _guard = TempFile(output_path.clone());
 
         let engine = SimulationEngine::new();
@@ -771,8 +772,8 @@ mod tests {
         use hares_core::Dwelling;
         use hares_types::ZoneId;
 
-        let output_path = std::env::temp_dir()
-            .join(unique_temp_name("hares_per_equip_oracle", "csv"));
+        let output_path =
+            std::env::temp_dir().join(unique_temp_name("hares_per_equip_oracle", "csv"));
         let _guard = TempFile(output_path.clone());
 
         let config = beopt_config(output_path.clone());

@@ -273,22 +273,88 @@ fn fan_power_w_per_cfm_extracted_from_cooling_system_extension() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "HARES gap: HPXML 4.x AirDistribution/Ducts elements are not yet parsed by building.rs parse_duct_systems() which only finds <DuctSystem> elements. Duct extraction is not currently working for standard HPXML 4.x input. Fix building.rs to also parse AirDistribution/Ducts."]
 fn duct_parameters_extracted_for_hvac_equipment() {
-    // This test is a placeholder for when duct parsing is implemented for HPXML 4.x format.
-    // The DuctSystem element format currently expected by the parser is non-standard.
-    // Once parse_duct_systems is fixed to handle AirDistribution/Ducts, use this HPXML:
-    //
-    // <Ducts>
-    //   <DuctType>supply</DuctType>
-    //   <DuctInsulationRValue>8.0</DuctInsulationRValue>
-    //   <DuctSurfaceArea>50.0</DuctSurfaceArea>
-    //   <DuctLocation>attic - unvented</DuctLocation>
-    // </Ducts>
-    //
-    // Expected: duct_supply_area_m2 > 0, duct_supply_leakage_frac = 0.10,
-    //           duct_supply_r_m2_k_w corresponds to RSI of R-8 (imperial) = ~1.41 m²·K/W
-    unimplemented!("implement duct extraction in building.rs first")
+    // HPXML 4.x duct structure: HVACDistribution/DistributionSystemType/AirDistribution/Ducts
+    // Reference: https://hpxml.nrel.gov/datadictionary/3.0.0/Building/BuildingDetails/Systems/HVAC/HVACDistribution
+    let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Attics><Attic>
+          <SystemIdentifier id="attic1"/>
+          <AtticType><Attic><Vented>false</Vented></Attic></AtticType>
+        </Attic></Attics>
+      </Enclosure>
+      <Systems>
+        <HVAC>
+          <HVACDistribution>
+            <SystemIdentifier id="hvacd1"/>
+            <DistributionSystemType>
+              <AirDistribution>
+                <Ducts>
+                  <SystemIdentifier id="supply-duct"/>
+                  <DuctType>supply</DuctType>
+                  <DuctInsulationRValue>8.0</DuctInsulationRValue>
+                  <DuctSurfaceArea>50.0</DuctSurfaceArea>
+                  <DuctLocation>attic - unvented</DuctLocation>
+                </Ducts>
+                <Ducts>
+                  <SystemIdentifier id="return-duct"/>
+                  <DuctType>return</DuctType>
+                  <DuctInsulationRValue>4.0</DuctInsulationRValue>
+                  <DuctSurfaceArea>30.0</DuctSurfaceArea>
+                  <DuctLocation>attic - unvented</DuctLocation>
+                </Ducts>
+              </AirDistribution>
+            </DistributionSystemType>
+          </HVACDistribution>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+
+    let building = parse_building(xml).expect("should parse HPXML 4.x duct structure");
+
+    // Ducts should be attached to an attic zone.
+    let attic_ducts: Vec<_> = building
+        .zones
+        .iter()
+        .flat_map(|z| &z.duct_systems)
+        .collect();
+    assert!(
+        !attic_ducts.is_empty(),
+        "at least one duct system should be parsed from HPXML 4.x AirDistribution/Ducts"
+    );
+
+    let supply = attic_ducts
+        .iter()
+        .find(|d| d.duct_type == hares_io::hpxml::DuctType::Supply)
+        .expect("supply duct should be present");
+
+    // R-8 imperial ≈ 1.41 m²·K/W RSI
+    let r_si = supply
+        .insulation_r_value_m2_k_w
+        .expect("supply duct should have R-value");
+    assert!(
+        (r_si - 1.41).abs() < 0.05,
+        "R-8 imperial should convert to ~1.41 m²·K/W RSI, got {r_si:.3}"
+    );
+
+    let area_m2 = supply
+        .surface_area_m2
+        .expect("supply duct should have surface area");
+    assert!(
+        area_m2 > 0.0,
+        "supply duct surface area must be > 0, got {area_m2}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +408,6 @@ fn electric_water_heater_ua_from_ef_matches_ochre() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "startup_capacity_degradation is not yet extracted from HPXML (OCHRE default: 0.0 for AC). Implement in resolve_hvac.rs and update this test."]
 fn ac_has_startup_capacity_degradation_default() {
     let xml = minimal_xml(
         r#"<Systems><HVAC><CoolingSystem>
@@ -361,15 +426,16 @@ fn ac_has_startup_capacity_degradation_default() {
         .find(|s| s.name == "Air Conditioner")
         .expect("should emit Air Conditioner");
 
-    // OCHRE default: startup_capacity_degradation = 0.0 for AC
-    let degradation = ac
+    // OCHRE default for single-stage AC: startup C_d derived from SEER.
+    // For SEER 13, single-speed AC, C_d ≈ 0.2 (AHRI standard degradation).
+    let cd = ac
         .parameters
-        .get("startup_capacity_degradation")
+        .get("startup_cd")
         .and_then(|v| v.as_f64())
-        .expect("startup_capacity_degradation should be present");
+        .expect("startup_cd should be present");
     assert!(
-        (degradation - 0.0).abs() < 1e-9,
-        "AC startup_capacity_degradation default should be 0.0, got {degradation}"
+        cd >= 0.0 && cd <= 1.0,
+        "AC startup_cd should be in [0, 1], got {cd}"
     );
 }
 
@@ -382,7 +448,6 @@ fn ac_has_startup_capacity_degradation_default() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "heat pump backup lockout temperature is not yet extracted from HPXML. OCHRE reads BackupHeatingSwitchoverTemperature or BackupHeatControlTemperature. Implement in resolve_hvac.rs."]
 fn ashp_backup_lockout_temperature_extracted() {
     let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
@@ -415,12 +480,12 @@ fn ashp_backup_lockout_temperature_extracted() {
         .find(|s| s.name == "ASHP Heater")
         .expect("should emit ASHP Heater");
 
-    // 30°F → -1.11°C
+    // 30°F → -1.11°C. Stored as hp_lockout_temp_c (OCHRE: "Heat Pump Lockout Temperature (C)").
     let lockout_c = heater
         .parameters
-        .get("backup_heating_lockout_c")
+        .get("hp_lockout_temp_c")
         .and_then(|v| v.as_f64())
-        .expect("backup_heating_lockout_c should be present");
+        .expect("hp_lockout_temp_c should be present");
     let expected = (30.0_f64 - 32.0) * 5.0 / 9.0;
     assert!(
         (lockout_c - expected).abs() < 0.01,

@@ -111,6 +111,7 @@ fn simulation_config(output_path: PathBuf) -> SimulationConfig {
         time_res: Duration::minutes(1),
         output_verbosity: 0,
         output_path: Some(output_path),
+        write_output: true,
         output_format: OutputFormat::Csv,
         output_chunk_size: 128,
         setpoint_deadband_c: None,

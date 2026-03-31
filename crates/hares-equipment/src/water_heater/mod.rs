@@ -436,8 +436,8 @@ mod tests {
                 .single()
                 .expect("valid timestamp"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -663,8 +663,8 @@ mod dhw_integration_tests {
                 .single()
                 .expect("valid UTC timestamp"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 

@@ -5,7 +5,7 @@ use std::{f64::consts::PI, time::Duration};
 use serde::{Deserialize, Serialize};
 
 use crate::{Result, load_postcard, save_postcard};
-use hares_types::HaresError;
+use hares_types::{HaresError, telemetry_keys as tk};
 
 use super::WATER_DENSITY_KG_PER_M3;
 
@@ -179,9 +179,7 @@ impl StratifiedTank {
             element_nodes: config.element_nodes,
             ua_per_node,
             last_skin_loss_w: 0.0,
-            telemetry_keys: (0..config.n_nodes)
-                .map(|i| format!("tank_node_{i}_c"))
-                .collect(),
+            telemetry_keys: (0..config.n_nodes).map(|i| tk::tank_node_key(i)).collect(),
             scratch_old_temps: vec![0.0; config.n_nodes],
             scratch_delta_energy: vec![0.0; config.n_nodes],
             scratch_new_temps: vec![0.0; config.n_nodes],
@@ -241,7 +239,7 @@ impl StratifiedTank {
         for (key, &temp) in self.telemetry_keys.iter().zip(self.node_temps_c.iter()) {
             telemetry.insert(key.as_str(), temp);
         }
-        telemetry.insert("skin_loss_w", self.last_skin_loss_w);
+        telemetry.insert(tk::SKIN_LOSS_W, self.last_skin_loss_w);
     }
 
     /// Updates per-node temperature values in the telemetry map. Zero allocations.
@@ -249,7 +247,7 @@ impl StratifiedTank {
         for (key, &temp) in self.telemetry_keys.iter().zip(self.node_temps_c.iter()) {
             telemetry.set(key, temp);
         }
-        telemetry.set("skin_loss_w", self.last_skin_loss_w);
+        telemetry.set(tk::SKIN_LOSS_W, self.last_skin_loss_w);
     }
 
     pub fn node_volumes_m3(&self) -> &[f64] {
@@ -325,7 +323,8 @@ impl StratifiedTank {
         // Snapshot post-conduction/pre-injection temps for energy accounting.
         // energy_out_j must reflect the water actually in the tank before element
         // heat is added, not the heated water.
-        self.scratch_pre_injection_temps.copy_from_slice(&self.node_temps_c);
+        self.scratch_pre_injection_temps
+            .copy_from_slice(&self.node_temps_c);
         self.apply_heat_injections(heat_injections, dt)?;
         let mut draw = self.apply_draw(draw_volume_m3, mains_temp_c)?;
         draw.outlet_temp_c = pre_step_outlet_temp_c;
@@ -393,7 +392,8 @@ impl StratifiedTank {
         let clamped_draw = total_draw_m3.min(self.total_volume_m3);
 
         self.apply_conduction_and_standby(ambient_temp_c, dt)?;
-        self.scratch_pre_injection_temps.copy_from_slice(&self.node_temps_c);
+        self.scratch_pre_injection_temps
+            .copy_from_slice(&self.node_temps_c);
         self.apply_heat_injections(heat_injections, dt)?;
         let mut draw = self.apply_draw(clamped_draw, mains_temp_c)?;
         // Override outlet with pre-heating snapshot.
@@ -475,8 +475,7 @@ impl StratifiedTank {
                     self.scratch_inversion_volumes[upper] + self.scratch_inversion_volumes[lower];
                 let merged_temp = (self.scratch_inversion_temps[upper]
                     * self.scratch_inversion_volumes[upper]
-                    + self.scratch_inversion_temps[lower]
-                        * self.scratch_inversion_volumes[lower])
+                    + self.scratch_inversion_temps[lower] * self.scratch_inversion_volumes[lower])
                     / merged_volume;
 
                 self.scratch_inversion_temps[upper] = merged_temp;
@@ -554,8 +553,8 @@ impl StratifiedTank {
         let conduction_w_per_k =
             self.conductivity_w_m_k * self.cross_section_area_m2 / self.node_height_m;
         for idx in 0..(self.n_nodes() - 1) {
-            let heat_flow_w =
-                conduction_w_per_k * (self.scratch_old_temps[idx + 1] - self.scratch_old_temps[idx]);
+            let heat_flow_w = conduction_w_per_k
+                * (self.scratch_old_temps[idx + 1] - self.scratch_old_temps[idx]);
             let transfer_j = heat_flow_w * seconds;
             self.scratch_delta_energy[idx] += transfer_j;
             self.scratch_delta_energy[idx + 1] -= transfer_j;
@@ -583,11 +582,7 @@ impl StratifiedTank {
     /// from the bottom. Uses `scratch_pre_injection_temps` for energy accounting —
     /// typically the pre-injection snapshot so that element heat does not inflate
     /// the reported energy removed by the draw.
-    fn apply_draw(
-        &mut self,
-        draw_volume_m3: f64,
-        mains_temp_c: f64,
-    ) -> Result<DrawResult> {
+    fn apply_draw(&mut self, draw_volume_m3: f64, mains_temp_c: f64) -> Result<DrawResult> {
         let outlet_temp_c = self.node_temps_c[0];
         if draw_volume_m3 == 0.0 {
             return Ok(DrawResult {
@@ -1358,7 +1353,10 @@ mod tests {
         let draw1 = tank
             .step(20.0, 0.0, mains_temp_c, &[(0, power_w)], dt)
             .expect("step 1");
-        assert_eq!(draw1.outlet_temp_c, 50.0, "pre-step top-node must be initial temp");
+        assert_eq!(
+            draw1.outlet_temp_c, 50.0,
+            "pre-step top-node must be initial temp"
+        );
 
         let expected_top_after_heat = 50.0 + delta_t;
         assert!(
@@ -1434,7 +1432,8 @@ mod tests {
         let expected_loss_j = ua_node0 * (60.0 - ambient) * dt.as_secs_f64();
         let expected_temp0 = 60.0 - expected_loss_j / mcp_node0;
 
-        tank.step(ambient, 0.0, 15.0, &[], dt).expect("standby step");
+        tank.step(ambient, 0.0, 15.0, &[], dt)
+            .expect("standby step");
 
         assert!(
             (tank.node_temps()[0] - expected_temp0).abs() < 1e-9,
@@ -1488,10 +1487,8 @@ mod tests {
         );
 
         // Energy removed equals ρ·V·Cp·T_outlet (pre-injection top-node segment).
-        let expected_energy_out = WATER_DENSITY_KG_PER_M3
-            * WATER_SPECIFIC_HEAT_J_PER_KG_K
-            * node_vol
-            * 65.0;
+        let expected_energy_out =
+            WATER_DENSITY_KG_PER_M3 * WATER_SPECIFIC_HEAT_J_PER_KG_K * node_vol * 65.0;
         assert!(
             (draw.energy_out_j - expected_energy_out).abs() < 1e-6,
             "energy_out_j: expected {expected_energy_out:.6}, got {:.6}",
@@ -1501,7 +1498,12 @@ mod tests {
         // After a one-node draw each node shifts: node i takes content of node i+1.
         // Bottom node receives mains water.
         let expected_after = [62.0, 59.0, 56.0, 53.0, 50.0, mains_temp_c];
-        for (i, (&got, &exp)) in tank.node_temps().iter().zip(expected_after.iter()).enumerate() {
+        for (i, (&got, &exp)) in tank
+            .node_temps()
+            .iter()
+            .zip(expected_after.iter())
+            .enumerate()
+        {
             assert!(
                 (got - exp).abs() < 1e-9,
                 "node {i} after one-node draw: expected {exp}, got {got}"
@@ -1524,7 +1526,10 @@ mod tests {
         let before_energy = total_energy_j(&tank);
         let merges = tank.mix_inversions();
 
-        assert!(merges > 0, "bottom-hot profile must require at least one merge");
+        assert!(
+            merges > 0,
+            "bottom-hot profile must require at least one merge"
+        );
 
         // All six nodes must converge to 40°C (volume-weighted average of 20 and 60 with equal volumes).
         for (i, &t) in tank.node_temps().iter().enumerate() {
@@ -1604,8 +1609,8 @@ mod tests {
         // All final temperatures must be within physical bounds.
         // 100 steps: 50 heating steps × 4500 W × 60 s = 13_500_000 J max injection.
         // Adiabatic tank means no losses, so upper bound is initial energy + all injected heat.
-        let max_possible_delta =
-            50.0 * element_power_w * dt.as_secs_f64() / (WATER_DENSITY_KG_PER_M3 * tank.total_volume_m3() * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+        let max_possible_delta = 50.0 * element_power_w * dt.as_secs_f64()
+            / (WATER_DENSITY_KG_PER_M3 * tank.total_volume_m3() * WATER_SPECIFIC_HEAT_J_PER_KG_K);
         for (i, &t) in tank.node_temps().iter().enumerate() {
             assert!(
                 t >= mains_temp_c && t <= 55.0 + max_possible_delta,
@@ -1643,9 +1648,7 @@ mod tests {
 
         // Sanity: final energy must be bounded: [0, initial + all injected heat].
         let energy_final = total_energy_j(&tank);
-        let max_energy = energy_initial
-            + 50.0 * element_power_w * dt.as_secs_f64()
-            + 1.0;
+        let max_energy = energy_initial + 50.0 * element_power_w * dt.as_secs_f64() + 1.0;
         assert!(
             energy_final > 0.0 && energy_final <= max_energy,
             "final energy {energy_final:.0} J outside plausible range [0, {max_energy:.0}]"
@@ -1737,7 +1740,8 @@ mod tests {
         let expected_t0 = t_top + heat_flow_j / mcp0;
         let expected_t1 = t_bot - heat_flow_j / mcp1;
 
-        tank.step(20.0, 0.0, 15.0, &[], dt).expect("conduction step");
+        tank.step(20.0, 0.0, 15.0, &[], dt)
+            .expect("conduction step");
 
         assert!(
             (tank.node_temps()[0] - expected_t0).abs() < 1e-9,

@@ -1,8 +1,6 @@
 //! SocGate preference — "only act when SOC below threshold".
 
-use super::preference::{
-    ChargingPreference, Constraint, DecisionContext, PreferenceVote,
-};
+use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 
 pub struct SocGate {
     pub threshold: f64,

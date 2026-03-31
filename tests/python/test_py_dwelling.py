@@ -33,9 +33,9 @@ class TestStep:
 
         result = dw.step()
 
-        assert "time" in result, "step() result should have 'time' key"
-        assert isinstance(result["time"], datetime), "time should be a datetime"
-        assert result["time"].year == 2019, "time year should be 2019"
+        assert "timestamp" in result, "step() result should have 'timestamp' key"
+        assert isinstance(result["timestamp"], datetime), "timestamp should be a datetime"
+        assert result["timestamp"].year == 2019, "timestamp year should be 2019"
 
         net_electric_power_kw_keys = [
             k for k in result.keys() if "net_electric_power" in k

@@ -142,9 +142,24 @@ mod tests {
 
         assert_eq!(hvac.zone_heat_fractions.len(), 3);
 
-        let cond = hvac.zone_heat_fractions.iter().find(|&&(z, _)| z == ZoneId(1)).unwrap().1;
-        let bsmt = hvac.zone_heat_fractions.iter().find(|&&(z, _)| z == ZoneId(2)).unwrap().1;
-        let duct = hvac.zone_heat_fractions.iter().find(|&&(z, _)| z == ZoneId(3)).unwrap().1;
+        let cond = hvac
+            .zone_heat_fractions
+            .iter()
+            .find(|&&(z, _)| z == ZoneId(1))
+            .unwrap()
+            .1;
+        let bsmt = hvac
+            .zone_heat_fractions
+            .iter()
+            .find(|&&(z, _)| z == ZoneId(2))
+            .unwrap()
+            .1;
+        let duct = hvac
+            .zone_heat_fractions
+            .iter()
+            .find(|&&(z, _)| z == ZoneId(3))
+            .unwrap()
+            .1;
 
         assert!(
             (cond - 0.595).abs() < 1e-9,
@@ -174,7 +189,10 @@ mod tests {
         hvac.duct_zone_id = Some(ZoneId(3));
         hvac.update_zone_heat_fractions();
 
-        let has_duct = hvac.zone_heat_fractions.iter().any(|&(z, _)| z == ZoneId(3));
+        let has_duct = hvac
+            .zone_heat_fractions
+            .iter()
+            .any(|&(z, _)| z == ZoneId(3));
         assert!(
             !has_duct,
             "DSE=1.0 must not produce a duct zone entry, got {:?}",

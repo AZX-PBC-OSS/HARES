@@ -353,16 +353,10 @@ impl ThermalSolver {
             &mut self.infiltration_buf,
         );
 
-        let indoor_inf = self
-            .infiltration_buf
-            .iter()
-            .find(|c| c.zone == indoor_zone);
-        let infiltration_indoor_w =
-            indoor_inf.map(|c| c.q_infiltration_w).unwrap_or(0.0);
-        let ventilation_w =
-            indoor_inf.map(|c| c.q_forced_vent_w).unwrap_or(0.0);
-        let natural_ventilation_w =
-            indoor_inf.map(|c| c.q_natural_vent_w).unwrap_or(0.0);
+        let indoor_inf = self.infiltration_buf.iter().find(|c| c.zone == indoor_zone);
+        let infiltration_indoor_w = indoor_inf.map(|c| c.q_infiltration_w).unwrap_or(0.0);
+        let ventilation_w = indoor_inf.map(|c| c.q_forced_vent_w).unwrap_or(0.0);
+        let natural_ventilation_w = indoor_inf.map(|c| c.q_natural_vent_w).unwrap_or(0.0);
         let combined_airflow_sensible_w =
             indoor_inf.map(|c| c.q_sensible_diagnostic_w).unwrap_or(0.0);
 
@@ -384,8 +378,11 @@ impl ThermalSolver {
             .unwrap_or(0.0);
 
         self.infiltration_by_zone_buf.clear();
-        self.infiltration_by_zone_buf
-            .extend(self.infiltration_buf.iter().map(|c| (c.zone, c.q_infiltration_w)));
+        self.infiltration_by_zone_buf.extend(
+            self.infiltration_buf
+                .iter()
+                .map(|c| (c.zone, c.q_infiltration_w)),
+        );
         self.infiltration_by_zone_buf.sort_by_key(|(z, _)| *z);
 
         self.component_gains = EnvelopeComponentGains {
@@ -591,8 +588,8 @@ mod tests {
                 .single()
                 .expect("valid time"),
             time_res: chrono::Duration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1594,8 +1591,8 @@ mod tests {
                     .single()
                     .unwrap(),
                 time_res: chrono::Duration::seconds(60),
-            price_signal: Default::default(),
-            electrical: Default::default(),
+                price_signal: Default::default(),
+                electrical: Default::default(),
             }
         };
 
@@ -1739,8 +1736,8 @@ mod tests {
                 .single()
                 .unwrap(),
             time_res: chrono::Duration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         };
 
         let make_solver = |absorptance: f64| -> ThermalSolver {
@@ -1893,8 +1890,8 @@ mod tests {
                 .single()
                 .unwrap(),
             time_res: chrono::Duration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         };
 
         let make_solver = |absorptance: f64| -> ThermalSolver {
@@ -2233,8 +2230,8 @@ mod tests {
                     .single()
                     .unwrap(),
                 time_res: chrono::Duration::seconds(60),
-            price_signal: Default::default(),
-            electrical: Default::default(),
+                price_signal: Default::default(),
+                electrical: Default::default(),
             }
         };
 
@@ -2669,8 +2666,8 @@ mod tests {
                     .single()
                     .unwrap(),
                 time_res: chrono::Duration::seconds(60),
-            price_signal: Default::default(),
-            electrical: Default::default(),
+                price_signal: Default::default(),
+                electrical: Default::default(),
             }
         };
 

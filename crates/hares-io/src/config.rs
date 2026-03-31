@@ -58,6 +58,9 @@ pub struct SimulationConfig {
     /// Output file path; `None` means auto-generated in cwd.
     #[serde(default)]
     pub output_path: Option<PathBuf>,
+    /// Whether timeseries output should be written to disk.
+    #[serde(default = "default_write_output")]
+    pub write_output: bool,
     /// Output format (CSV or Parquet).
     #[serde(default)]
     pub output_format: OutputFormat,
@@ -142,6 +145,10 @@ fn default_output_chunk_size() -> usize {
     DEFAULT_CHUNK_SIZE
 }
 
+fn default_write_output() -> bool {
+    true
+}
+
 fn deserialize_duration_seconds<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
     D: Deserializer<'de>,
@@ -168,6 +175,7 @@ duration = 3600
         assert_eq!(cfg.setpoint_deadband_c, None);
         assert_eq!(cfg.master_seed, 0);
         assert!(cfg.output_path.is_none());
+        assert!(cfg.write_output);
     }
 
     #[test]
@@ -178,6 +186,7 @@ duration = 7200
 time_res = 300
 output_verbosity = 5
 output_path = "/tmp/sim_output.csv"
+write_output = false
 output_format = "parquet"
 output_chunk_size = 5000
 setpoint_deadband_c = 1.5
@@ -191,6 +200,7 @@ master_seed = 42
         assert_eq!(cfg.setpoint_deadband_c, Some(1.5));
         assert_eq!(cfg.master_seed, 42);
         assert_eq!(cfg.output_path, Some(PathBuf::from("/tmp/sim_output.csv")));
+        assert!(!cfg.write_output);
     }
 
     #[test]

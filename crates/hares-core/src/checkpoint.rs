@@ -110,8 +110,8 @@ mod tests {
             lwr_t_prev_c: vec![15.0, 18.0],
         };
 
-        let path = std::env::temp_dir()
-            .join(unique_temp_name("hares_core_checkpoint_roundtrip", "json"));
+        let path =
+            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_roundtrip", "json"));
         let _guard = TempFile(path.clone());
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
@@ -135,8 +135,8 @@ mod tests {
             lwr_t_prev_c: vec![],
         };
 
-        let path = std::env::temp_dir()
-            .join(unique_temp_name("hares_core_checkpoint_multizone", "json"));
+        let path =
+            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_multizone", "json"));
         let _guard = TempFile(path.clone());
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
@@ -163,8 +163,8 @@ mod tests {
             lwr_t_prev_c: vec![],
         };
 
-        let path = std::env::temp_dir()
-            .join(unique_temp_name("hares_core_checkpoint_version", "json"));
+        let path =
+            std::env::temp_dir().join(unique_temp_name("hares_core_checkpoint_version", "json"));
         let _guard = TempFile(path.clone());
         cp.save(&path).unwrap();
 

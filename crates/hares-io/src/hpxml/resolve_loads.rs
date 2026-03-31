@@ -46,7 +46,11 @@ pub(super) fn resolve_scheduled_loads(
 
     if let Some(appliances) = details.child("Appliances") {
         let n_bedrooms = details
-            .path(&["BuildingSummary", "BuildingConstruction", "NumberofBedrooms"])
+            .path(&[
+                "BuildingSummary",
+                "BuildingConstruction",
+                "NumberofBedrooms",
+            ])
             .and_then(|n| n.text.parse::<f64>().ok())
             .unwrap_or(3.0);
 
@@ -107,7 +111,9 @@ pub(super) fn resolve_scheduled_loads(
                         // Convert RatedAnnualkWh to actual annual energy (OCHRE hpxml.py:1243-1262).
                         // RatedAnnualkWh is a test-cycle rating; actual usage depends on
                         // household size, appliance capacity, and label usage cycles.
-                        if let Some(rated_kwh) = params.get("annual_electric_kwh").and_then(|v| v.as_f64()) {
+                        if let Some(rated_kwh) =
+                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                        {
                             let capacity_ft3 = params
                                 .get("capacity_m3")
                                 .and_then(|v| v.as_f64())
@@ -182,18 +188,14 @@ pub(super) fn resolve_scheduled_loads(
                                 .child("extension")
                                 .and_then(|e| child_f64(e, "UsageMultiplier"))
                                 .unwrap_or(1.0);
-                            // Use actual washer params from HPXML (pre-extracted above).
                             let washer_capacity = washer_capacity_ft3;
-                            let washer_imef = washer_imef;
                             let rmc = (0.97 * (washer_capacity / washer_imef)
                                 - washer_rated_kwh / 312.0)
                                 / ((2.0104 * washer_capacity + 1.4242) * 0.455)
                                 + 0.04;
                             let acy = (164.0 + 46.5 * n_bedrooms)
-                                * ((3.0 * 2.08 + 1.59)
-                                    / (washer_capacity * 2.08 + 1.59));
-                            let base_kwh =
-                                (((rmc - 0.04) * 100.0) / 55.5) * (8.45 / cef) * acy;
+                                * ((3.0 * 2.08 + 1.59) / (washer_capacity * 2.08 + 1.59));
+                            let base_kwh = (((rmc - 0.04) * 100.0) / 55.5) * (8.45 / cef) * acy;
                             if fuel == FuelType::Electric {
                                 params.insert(
                                     "annual_electric_kwh".to_string(),
@@ -202,22 +204,12 @@ pub(super) fn resolve_scheduled_loads(
                             } else {
                                 // Gas dryer: ~7% electric parasitic, ~93% gas combustion
                                 // OCHRE hpxml.py:1312-1313
-                                let annual_kwh =
-                                    base_kwh * 0.07 * (3.73 / 3.30) * multiplier;
-                                let annual_therm = base_kwh
-                                    * 3412.0
-                                    * (1.0 - 0.07)
-                                    * (3.73 / 3.30)
+                                let annual_kwh = base_kwh * 0.07 * (3.73 / 3.30) * multiplier;
+                                let annual_therm = base_kwh * 3412.0 * (1.0 - 0.07) * (3.73 / 3.30)
                                     / 100_000.0
                                     * multiplier;
-                                params.insert(
-                                    "annual_electric_kwh".to_string(),
-                                    json!(annual_kwh),
-                                );
-                                params.insert(
-                                    "annual_gas_therms".to_string(),
-                                    json!(annual_therm),
-                                );
+                                params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+                                params.insert("annual_gas_therms".to_string(), json!(annual_therm));
                             }
                         }
                     }
@@ -233,7 +225,9 @@ pub(super) fn resolve_scheduled_loads(
                         // Convert RatedAnnualkWh to actual annual energy (OCHRE hpxml.py:1336-1354).
                         // RatedAnnualkWh is a test-cycle rating; actual usage depends on
                         // household size, place-setting capacity, and label usage cycles.
-                        if let Some(rated_kwh) = params.get("annual_electric_kwh").and_then(|v| v.as_f64()) {
+                        if let Some(rated_kwh) =
+                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                        {
                             let capacity = params
                                 .get("place_setting_capacity")
                                 .and_then(|v| v.as_f64())
@@ -278,27 +272,14 @@ pub(super) fn resolve_scheduled_loads(
                             // IsConvection lives on the sibling Oven node; default to false.
                             let oven_ef = 1.0_f64;
                             if fuel == FuelType::Electric {
-                                let annual_kwh = burner_ef
-                                    * oven_ef
-                                    * (331.0 + 39.0 * n_bedrooms)
-                                    * multiplier;
-                                params.insert(
-                                    "annual_electric_kwh".to_string(),
-                                    json!(annual_kwh),
-                                );
-                            } else {
                                 let annual_kwh =
-                                    (22.6 + 2.7 * n_bedrooms) * multiplier;
-                                let annual_therm =
-                                    oven_ef * (22.6 + 2.7 * n_bedrooms) * multiplier;
-                                params.insert(
-                                    "annual_electric_kwh".to_string(),
-                                    json!(annual_kwh),
-                                );
-                                params.insert(
-                                    "annual_gas_therms".to_string(),
-                                    json!(annual_therm),
-                                );
+                                    burner_ef * oven_ef * (331.0 + 39.0 * n_bedrooms) * multiplier;
+                                params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+                            } else {
+                                let annual_kwh = (22.6 + 2.7 * n_bedrooms) * multiplier;
+                                let annual_therm = oven_ef * (22.6 + 2.7 * n_bedrooms) * multiplier;
+                                params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+                                params.insert("annual_gas_therms".to_string(), json!(annual_therm));
                             }
                         }
                     }

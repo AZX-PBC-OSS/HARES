@@ -211,9 +211,8 @@ pub fn save_postcard<T: Serialize>(state: &T) -> Vec<u8> {
 /// terminate a long-running simulation).
 #[must_use = "serialization errors should be handled, not silently discarded"]
 pub fn try_save_postcard<T: Serialize>(state: &T) -> Result<Vec<u8>> {
-    postcard::to_allocvec(state).map_err(|e| {
-        HaresError::Equipment(format!("state serialization failed: {e}"))
-    })
+    postcard::to_allocvec(state)
+        .map_err(|e| HaresError::Equipment(format!("state serialization failed: {e}")))
 }
 
 #[cold]
@@ -390,8 +389,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: chrono::Duration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 

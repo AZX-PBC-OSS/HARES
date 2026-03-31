@@ -77,8 +77,8 @@ fn one_zone_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
             .single()
             .expect("valid timestamp"),
         time_res: chrono::Duration::seconds(DT_S as i64),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 

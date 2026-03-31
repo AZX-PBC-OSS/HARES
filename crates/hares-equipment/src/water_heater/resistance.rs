@@ -7,7 +7,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -147,7 +147,7 @@ impl ResistanceWH {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
-                telemetry_fields: telemetry_fields(),
+                telemetry_fields: telemetry_fields(n_nodes),
             },
             ports: vec![
                 PortDeclaration::electrical(),
@@ -348,7 +348,10 @@ impl Equipment for ResistanceWH {
         // Setpoint ramp rate: config in C/min, stored internally in C/s.
         self.setpoint_ramp_rate_c_per_s = first_f64(
             config,
-            &["max_setpoint_ramp_rate_c_per_min", "setpoint_ramp_rate_c_per_min"],
+            &[
+                "max_setpoint_ramp_rate_c_per_min",
+                "setpoint_ramp_rate_c_per_min",
+            ],
         )
         .filter(|v| v.is_finite() && *v > 0.0)
         .map(|v| v / 60.0);
@@ -456,7 +459,10 @@ impl Equipment for ResistanceWH {
                 let dt_s = dt.as_secs_f64();
                 let ambient_c = self.ambient_temp_c(env);
                 let ideal_w = self.tank.ideal_capacity_for_node(
-                    element_node, self.setpoint_c, ambient_c, dt_s,
+                    element_node,
+                    self.setpoint_c,
+                    ambient_c,
+                    dt_s,
                 );
                 (ideal_w / active_w).clamp(0.0, 1.0) * ctrl_duty
             } else {
@@ -540,13 +546,14 @@ impl Equipment for ResistanceWH {
 
         let avg_temp_c =
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3());
-        self.telemetry.set("tank_avg_temp_c", avg_temp_c);
-        self.telemetry.set("upper_element_power_w", upper_power_w);
-        self.telemetry.set("lower_element_power_w", lower_power_w);
-        self.telemetry.set("electric_kw", electric_power_w / 1_000.0);
-        self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
+        self.telemetry.set(tk::TANK_AVG_TEMP_C, avg_temp_c);
+        self.telemetry.set(tk::UPPER_ELEMENT_POWER_W, upper_power_w);
+        self.telemetry.set(tk::LOWER_ELEMENT_POWER_W, lower_power_w);
+        self.telemetry
+            .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
+        self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(
-            "operating_mode",
+            tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {
                 1.0
             } else {
@@ -577,11 +584,11 @@ impl Equipment for ResistanceWH {
             mode_override: self.mode_override,
             element_priority: self.element_priority,
             tank_state: self.tank.save_state(),
-            tank_avg_temp_c: self.telemetry.get("tank_avg_temp_c").unwrap_or(0.0),
-            upper_element_power_w: self.telemetry.get("upper_element_power_w").unwrap_or(0.0),
-            lower_element_power_w: self.telemetry.get("lower_element_power_w").unwrap_or(0.0),
-            electric_power_w: self.telemetry.get("electric_kw").unwrap_or(0.0),
-            draw_flow_rate_kg_s: self.telemetry.get("draw_flow_rate_kg_s").unwrap_or(0.0),
+            tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
+            upper_element_power_w: self.telemetry.get(tk::UPPER_ELEMENT_POWER_W).unwrap_or(0.0),
+            lower_element_power_w: self.telemetry.get(tk::LOWER_ELEMENT_POWER_W).unwrap_or(0.0),
+            electric_power_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+            draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
             dr_level: self.dr_level,
             dr_setpoint_offset_c: self.dr_setpoint_offset_c,
             dr_load_fraction: self.dr_load_fraction,
@@ -606,17 +613,17 @@ impl Equipment for ResistanceWH {
         self.tank.load_state(&decoded.tank_state)?;
 
         self.telemetry
-            .insert("tank_avg_temp_c", decoded.tank_avg_temp_c);
+            .insert(tk::TANK_AVG_TEMP_C, decoded.tank_avg_temp_c);
         self.telemetry
-            .insert("upper_element_power_w", decoded.upper_element_power_w);
+            .insert(tk::UPPER_ELEMENT_POWER_W, decoded.upper_element_power_w);
         self.telemetry
-            .insert("lower_element_power_w", decoded.lower_element_power_w);
+            .insert(tk::LOWER_ELEMENT_POWER_W, decoded.lower_element_power_w);
         self.telemetry
-            .insert("electric_kw", decoded.electric_power_w);
+            .insert(tk::ELECTRIC_KW, decoded.electric_power_w);
         self.telemetry
-            .insert("draw_flow_rate_kg_s", decoded.draw_flow_rate_kg_s);
+            .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
-            "operating_mode",
+            tk::OPERATING_MODE,
             if decoded.upper_element_on || decoded.lower_element_on {
                 1.0
             } else {
@@ -726,53 +733,61 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(6);
-    telemetry.insert("tank_avg_temp_c", 0.0);
-    telemetry.insert("upper_element_power_w", 0.0);
-    telemetry.insert("lower_element_power_w", 0.0);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("draw_flow_rate_kg_s", 0.0);
-    telemetry.insert("operating_mode", 0.0);
+    telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
+    telemetry.insert(tk::UPPER_ELEMENT_POWER_W, 0.0);
+    telemetry.insert(tk::LOWER_ELEMENT_POWER_W, 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
 }
 
-fn telemetry_fields() -> Vec<TelemetryField> {
-    vec![
+fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
+    let mut fields = vec![
         TelemetryField {
-            name: "tank_avg_temp_c".to_string(),
+            name: tk::TANK_AVG_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Volume-weighted average tank temperature".to_string(),
         },
         TelemetryField {
-            name: "upper_element_power_w".to_string(),
+            name: tk::UPPER_ELEMENT_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Upper element electric power".to_string(),
         },
         TelemetryField {
-            name: "lower_element_power_w".to_string(),
+            name: tk::LOWER_ELEMENT_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Lower element electric power".to_string(),
         },
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total electric draw".to_string(),
         },
         TelemetryField {
-            name: "draw_flow_rate_kg_s".to_string(),
+            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
             unit: "kg/s".to_string(),
             description: "Domestic hot water draw flow rate".to_string(),
         },
         TelemetryField {
-            name: "skin_loss_w".to_string(),
-            unit: "W".to_string(),
-            description: "Tank jacket (skin) heat loss to zone".to_string(),
-        },
-        TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "0=Off, 1=Heating".to_string(),
         },
-    ]
+    ];
+    for i in 0..n_nodes {
+        fields.push(TelemetryField {
+            name: tk::tank_node_key(i),
+            unit: "C".to_string(),
+            description: format!("Tank node {i} temperature"),
+        });
+    }
+    fields.push(TelemetryField {
+        name: tk::SKIN_LOSS_W.to_string(),
+        unit: "W".to_string(),
+        description: "Tank jacket (skin) heat loss to zone".to_string(),
+    });
+    fields
 }
 
 #[cfg(test)]
@@ -782,7 +797,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState,
+        ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::ResistanceWH;
@@ -825,8 +840,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -865,9 +880,11 @@ mod tests {
         eq.step(&env(21.0), Duration::from_secs(60), &mut p)
             .unwrap();
 
-        assert!(eq.telemetry().get("upper_element_power_w").unwrap_or(0.0) > 0.0);
+        assert!(eq.telemetry().get(tk::UPPER_ELEMENT_POWER_W).unwrap_or(0.0) > 0.0);
         assert_eq!(
-            eq.telemetry().get("lower_element_power_w").unwrap_or(-1.0),
+            eq.telemetry()
+                .get(tk::LOWER_ELEMENT_POWER_W)
+                .unwrap_or(-1.0),
             0.0
         );
     }
@@ -1080,7 +1097,7 @@ mod tests {
         eq_base
             .step(&e, Duration::from_secs(60), &mut p_base)
             .unwrap();
-        let w_base = eq_base.telemetry().get("electric_kw").unwrap_or(0.0);
+        let w_base = eq_base.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
 
         // DR Critical: dr_load_fraction=0.5 → power halved.
         let mut eq_dr = ResistanceWH::new(cfg.clone());
@@ -1093,7 +1110,7 @@ mod tests {
             .unwrap();
         let mut p_dr = ports();
         eq_dr.step(&e, Duration::from_secs(60), &mut p_dr).unwrap();
-        let w_dr = eq_dr.telemetry().get("electric_kw").unwrap_or(0.0);
+        let w_dr = eq_dr.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
 
         assert!(w_base > 0.0, "baseline must draw power");
         assert!(
@@ -1239,7 +1256,7 @@ mod tests {
         );
 
         // Telemetry must agree with the port.
-        let telem = eq.telemetry().get("skin_loss_w").unwrap_or(0.0);
+        let telem = eq.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
         assert!(
             (jacket - telem).abs() < 1e-9,
             "thermal port jacket ({jacket:.3} W) must match telemetry skin_loss_w ({telem:.3} W)"
@@ -1310,8 +1327,8 @@ mod tests {
             .step(&e, Duration::from_secs(60), &mut p_base)
             .unwrap();
 
-        let w_compound = eq.telemetry().get("electric_kw").unwrap_or(0.0);
-        let w_base = eq_base.telemetry().get("electric_kw").unwrap_or(0.0);
+        let w_compound = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let w_base = eq_base.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert!(w_base > 0.0, "baseline must draw power");
         let ratio = w_compound / w_base;
         assert!(
@@ -1371,8 +1388,8 @@ mod element_priority_tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 

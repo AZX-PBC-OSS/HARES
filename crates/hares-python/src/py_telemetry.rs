@@ -48,8 +48,14 @@ impl PyTelemetry {
         Ok(out)
     }
 
+    #[getter]
     pub fn total_power_kw(&self) -> f64 {
         self.inner.total_power_kw
+    }
+
+    #[getter]
+    pub fn reactive_power_kvar(&self) -> f64 {
+        self.inner.reactive_power_kvar
     }
 
     fn __repr__(&self) -> String {
@@ -172,7 +178,10 @@ impl PyTariffTelemetry {
         d.set_item("cumulative_import_kwh", self.cumulative_import_kwh)?;
         d.set_item("cumulative_export_kwh", self.cumulative_export_kwh)?;
         d.set_item("peak_demand_kw", self.peak_demand_kw)?;
-        d.set_item("cumulative_energy_cost_usd", self.cumulative_energy_cost_usd)?;
+        d.set_item(
+            "cumulative_energy_cost_usd",
+            self.cumulative_energy_cost_usd,
+        )?;
         Ok(d)
     }
 

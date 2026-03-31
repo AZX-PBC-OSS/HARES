@@ -31,7 +31,7 @@ class TestAddEquipment:
         bat = Battery("TestBat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
         dw2.add_battery(bat)
         result = dw2.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # Battery should appear in telemetry
         tel = dw2.telemetry().equipment()
@@ -52,7 +52,7 @@ class TestAddEquipment:
         pv = PV("TestPV", 5.0, 30.0, 180.0)
         dw.add_pv(pv)
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # PV should appear in equipment telemetry after stepping
         tel = dw.telemetry().equipment()
@@ -73,7 +73,7 @@ class TestAddEquipment:
         ev = EV("TestEV", capacity_kwh=75.0, max_charging_kw=7.2)
         dw.add_ev(ev)
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # EV should appear in equipment telemetry after stepping
         tel = dw.telemetry().equipment()
@@ -137,7 +137,7 @@ class TestRemoveEquipment:
         dw.add_battery(bat)
         dw.remove_equipment("TestBat")
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # After removal, the battery must not appear in equipment telemetry
         tel = dw.telemetry().equipment()
@@ -183,7 +183,7 @@ class TestReplaceEquipment:
         dw.replace_equipment("TestBat", bat2)
 
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # After replacement, the battery should still appear in telemetry
         tel = dw.telemetry().equipment()
@@ -223,7 +223,7 @@ class TestUpdateEquipment:
         dw.update_equipment("TestBat", ocv_table=ocv_data)
 
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # Battery should be present in telemetry with valid SOC after LUT update
         tel = dw.telemetry().equipment()
@@ -259,7 +259,7 @@ class TestUpdateEquipment:
         ]
         dw.update_equipment("TestBat", uneg_table=uneg_data)
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # Battery should be present in telemetry with valid SOC after Uneg table update
         tel = dw.telemetry().equipment()
@@ -301,7 +301,7 @@ class TestSetEquipmentLut:
         }
         dw.set_equipment_lut("TestBat", LutType.ocv(), ocv_dict)
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # Battery should report valid telemetry after LUT injection
         tel = dw.telemetry().equipment()
@@ -329,7 +329,7 @@ class TestSetEquipmentLut:
         dw.set_equipment_lut("TestBat", LutType.ocv(), ocv_dict)
         dw.clear_equipment_lut("TestBat", LutType.ocv())
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
         # After clearing the custom LUT, the battery should still function
         # with valid telemetry (reverts to default OCV curve)
@@ -369,7 +369,7 @@ class TestMultipleMutations:
         assert "PV1" in names
 
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
     def test_add_then_remove_then_add_different(self):
         from ochre_next import Battery, PV
@@ -384,7 +384,7 @@ class TestMultipleMutations:
         assert "PV1" in names
 
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
 
 class TestBatteryConfigParams:
@@ -395,7 +395,7 @@ class TestBatteryConfigParams:
         bat = Battery("TestBat", 10.0, initial_soc=0.8, min_soc=0.15, max_soc=0.95)
         dw.add_battery(bat)
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
     def test_soc_limits_round_trip_via_getters(self):
         from ochre_next import Battery
@@ -412,7 +412,7 @@ class TestBatteryConfigParams:
         bat = Battery("TestBat", 10.0, chemistry=BatteryChemistry.Lfp)
         dw.add_battery(bat)
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
     def test_chemistry_getter_round_trips(self):
         from ochre_next import Battery, BatteryChemistry
@@ -427,7 +427,7 @@ class TestBatteryConfigParams:
         bat = Battery("TestBat", 10.0, standby_power_w=10.0, self_discharge_pct_per_day=0.05)
         dw.add_battery(bat)
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
     def test_standby_and_self_discharge_getters(self):
         from ochre_next import Battery
@@ -506,7 +506,7 @@ class TestBatteryConfigParams:
         try:
             dw.add_battery(bat)
             result = dw.step()
-            assert "time" in result
+            assert "timestamp" in result
             tel = dw.telemetry().equipment()
             names = tel["names"]
             powers = tel["power_kw"]
@@ -533,4 +533,4 @@ class TestCheckpointRoundTrip:
 
         assert "TestBat" in dw.equipment_names()
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result

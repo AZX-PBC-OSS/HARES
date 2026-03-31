@@ -162,7 +162,7 @@ class VecDwellingGymEnv:
                     step=step_data,
                     telemetry_zone=telemetry.zone(),
                     telemetry_equipment=telemetry.equipment(),
-                    total_power_kw=float(telemetry.total_power_kw()),
+                    total_power_kw=float(telemetry.total_power_kw),
                 )
                 rewards.append(float(self._reward_fn(ctx)))
                 dones.append(False)

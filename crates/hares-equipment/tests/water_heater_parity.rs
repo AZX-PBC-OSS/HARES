@@ -63,8 +63,8 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
             .single()
             .expect("valid"),
         time_res: chrono::Duration::seconds(60),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 
@@ -419,12 +419,13 @@ fn standby_loss_ua_magnitude() {
 // is complete.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "HPWH COP curves not yet fully implemented; document gap only"]
 fn hpwh_cop_at_multiple_ambient_temps() {
     use hares_equipment::water_heater::heat_pump_wh::HeatPumpWH;
 
     let setpoint_c = 51.7_f64;
-    let tank_temp_c = 50.0_f64;
+    // Tank must start below the compressor turn-on threshold
+    // (setpoint - deadband = 51.7 - 5.556 = 46.14°C) to trigger heating.
+    let tank_temp_c = 40.0_f64;
 
     for ambient_c in [10.0, 20.0, 30.0, 40.0_f64] {
         let env = make_env(ambient_c);
@@ -437,6 +438,9 @@ fn hpwh_cop_at_multiple_ambient_temps() {
         );
         raw.insert("draw_flow_rate_kg_s".to_string(), ConfigValue::Float(0.0));
         raw.insert("max_tank_temp_c".to_string(), ConfigValue::Float(300.0));
+        // Rated COP (UEF) scales the biquadratic curve multiplier to absolute COP.
+        // OCHRE default for standard HPWH ≈ 3.45 (GE GeoSpring class).
+        raw.insert("rated_cop".to_string(), ConfigValue::Float(3.45));
         let cfg = EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),

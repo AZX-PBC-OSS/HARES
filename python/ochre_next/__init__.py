@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ._hares import Dwelling
 from ._hares import Fleet
+from ._hares import SteppableFleet
 from ._hares import FleetResults
 from ._hares import SimulationConfig
 from ._hares import DwellingConfig
@@ -100,6 +101,7 @@ __all__ = [
     # Core simulation
     "Dwelling",
     "Fleet",
+    "SteppableFleet",
     "FleetResults",
     "SimulationConfig",
     "DwellingConfig",

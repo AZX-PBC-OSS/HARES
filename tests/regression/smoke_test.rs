@@ -67,7 +67,8 @@ mod tests {
         let data = parse_csv_columns(csv_path);
 
         // --- 1. Zone temperatures in physical bounds [-50, 80]°C ---
-        let temp_col_count = data.keys()
+        let temp_col_count = data
+            .keys()
             .filter(|col| col.starts_with("Temperature -") && col.ends_with("(C)"))
             .count();
         assert!(
@@ -99,28 +100,45 @@ mod tests {
         // In mild weather (spring/fall) HVAC may legitimately not run.
         // Assert: either HVAC consumed energy, or zone temps stayed in [15, 30]°C
         // (meaning the dwelling was comfortable without conditioning).
-        let hvac_keywords = ["Heater Electric Power", "Cooler Electric Power",
-                             "HVAC Heating", "HVAC Cooling", "Air Conditioner",
-                             "Furnace Electric Power", "Heat Pump"];
-        let hvac_total_kwh: f64 = data.iter()
+        let hvac_keywords = [
+            "Heater Electric Power",
+            "Cooler Electric Power",
+            "HVAC Heating",
+            "HVAC Cooling",
+            "Air Conditioner",
+            "Furnace Electric Power",
+            "Heat Pump",
+        ];
+        let hvac_total_kwh: f64 = data
+            .iter()
             .filter(|(col, _)| {
                 col.ends_with("(kW)") && hvac_keywords.iter().any(|kw| col.contains(kw))
             })
             .map(|(_, values)| {
                 let sum: f64 = values.iter().sum();
-                if values.is_empty() { 0.0 } else { sum * (duration_hours / values.len() as f64) }
+                if values.is_empty() {
+                    0.0
+                } else {
+                    sum * (duration_hours / values.len() as f64)
+                }
             })
             .sum();
         if hvac_total_kwh <= 0.0 {
             // HVAC didn't run — verify zone temps are in comfort range
-            let indoor_temp_cols: Vec<_> = data.iter()
-                .filter(|(col, _)| col.starts_with("Temperature -") && col.ends_with("(C)") && col.contains("Indoor"))
+            let indoor_temp_cols: Vec<_> = data
+                .iter()
+                .filter(|(col, _)| {
+                    col.starts_with("Temperature -")
+                        && col.ends_with("(C)")
+                        && col.contains("Indoor")
+                })
                 .collect();
             assert!(
                 !indoor_temp_cols.is_empty(),
                 "HVAC consumed zero energy but no indoor temperature columns found — check would be vacuous"
             );
-            let zone_temps_ok = indoor_temp_cols.iter()
+            let zone_temps_ok = indoor_temp_cols
+                .iter()
                 .all(|(_, values)| values.iter().all(|&v| v > 15.0 && v < 30.0));
             assert!(
                 zone_temps_ok,
@@ -155,13 +173,19 @@ mod tests {
         // --- 5. Water heater energy is non-negative if present ---
         // A water heater may not cycle in a short (1h) window, so we only
         // assert non-negative (catching sign-flip bugs), not strictly positive.
-        let wh_kwh: f64 = data.iter()
+        let wh_kwh: f64 = data
+            .iter()
             .filter(|(col, _)| {
-                col.ends_with("(kW)") && (col.contains("Water Heater") || col.contains("water_heater"))
+                col.ends_with("(kW)")
+                    && (col.contains("Water Heater") || col.contains("water_heater"))
             })
             .map(|(_, values)| {
                 let sum: f64 = values.iter().sum();
-                if values.is_empty() { 0.0 } else { sum * (duration_hours / values.len() as f64) }
+                if values.is_empty() {
+                    0.0
+                } else {
+                    sum * (duration_hours / values.len() as f64)
+                }
             })
             .sum();
         let has_water_heater = data.keys().any(|col| {
@@ -215,6 +239,7 @@ mod tests {
                 time_res: Duration::minutes(1),
                 output_verbosity: 3,
                 output_path: Some(output_path),
+                write_output: true,
                 output_format: OutputFormat::Csv,
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
@@ -434,8 +459,8 @@ mod tests {
                 // Schedule-based loads (lighting, ventilation, MELs) depend on
                 // exact hour alignment and can diverge in a 1-hour window.
                 if ochre_val.abs() > 0.01 && !hares_kwh.is_nan() {
-                    let is_physics_critical = ochre_name.contains("HVAC")
-                        || ochre_name.contains("Total");
+                    let is_physics_critical =
+                        ochre_name.contains("HVAC") || ochre_name.contains("Total");
                     let tolerance = if is_physics_critical { 30.0 } else { 300.0 };
                     assert!(
                         diff_pct.abs() < tolerance,
@@ -526,6 +551,7 @@ mod tests {
                 time_res: Duration::minutes(1),
                 output_verbosity: 3,
                 output_path: Some(output_path.clone()),
+                write_output: true,
                 output_format: OutputFormat::Csv,
                 output_chunk_size: 1024,
                 setpoint_deadband_c: None,
@@ -657,8 +683,8 @@ mod tests {
                 // Schedule-based loads use ±300% until OCHRE reference values
                 // are confirmed, to avoid false failures from unverified baselines.
                 if ochre_val.abs() > 0.01 && !hares_kwh.is_nan() {
-                    let is_physics_critical = ochre_name.contains("HVAC")
-                        || ochre_name.contains("Total");
+                    let is_physics_critical =
+                        ochre_name.contains("HVAC") || ochre_name.contains("Total");
                     let tolerance = if is_physics_critical { 30.0 } else { 300.0 };
                     assert!(
                         diff_pct.abs() < tolerance,

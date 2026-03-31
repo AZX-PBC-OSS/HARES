@@ -30,7 +30,6 @@ impl fmt::Display for RegressionFailure {
 }
 
 #[test]
-#[ignore = "long-running regression corpus — runs all validation sub-suites"]
 fn regression_full_suite() {
     let mut failures: Vec<RegressionFailure> = Vec::new();
 

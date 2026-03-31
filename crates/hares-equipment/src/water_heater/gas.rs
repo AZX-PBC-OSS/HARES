@@ -7,7 +7,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -145,7 +145,7 @@ impl GasWH {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
-                telemetry_fields: telemetry_fields(),
+                telemetry_fields: telemetry_fields(n_nodes),
             },
             ports: vec![
                 PortDeclaration::fuel(),
@@ -507,15 +507,15 @@ impl Equipment for GasWH {
 
         let avg_temp_c =
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3());
-        self.telemetry.set("tank_avg_temp_c", avg_temp_c);
-        self.telemetry.set("burner_power_w", burner_input_w);
-        self.telemetry.set("pilot_power_w", self.pilot_power_w);
-        self.telemetry.set("fuel_input_w", fuel_input_w);
-        self.telemetry.set("flue_loss_w", flue_loss_w);
-        self.telemetry.set("fan_electric_w", fan_electric_w);
-        self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
+        self.telemetry.set(tk::TANK_AVG_TEMP_C, avg_temp_c);
+        self.telemetry.set(tk::BURNER_POWER_W, burner_input_w);
+        self.telemetry.set(tk::PILOT_POWER_W, self.pilot_power_w);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
+        self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
+        self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
+        self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(
-            "operating_mode",
+            tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {
                 1.0
             } else {
@@ -543,13 +543,13 @@ impl Equipment for GasWH {
             duty_cycle: self.duty_cycle,
             mode_override: self.mode_override,
             tank_state: self.tank.save_state(),
-            tank_avg_temp_c: self.telemetry.get("tank_avg_temp_c").unwrap_or(0.0),
-            burner_power_w: self.telemetry.get("burner_power_w").unwrap_or(0.0),
-            pilot_power_w: self.telemetry.get("pilot_power_w").unwrap_or(0.0),
-            fuel_input_w: self.telemetry.get("fuel_input_w").unwrap_or(0.0),
-            flue_loss_w: self.telemetry.get("flue_loss_w").unwrap_or(0.0),
-            fan_electric_w: self.telemetry.get("fan_electric_w").unwrap_or(0.0),
-            draw_flow_rate_kg_s: self.telemetry.get("draw_flow_rate_kg_s").unwrap_or(0.0),
+            tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
+            burner_power_w: self.telemetry.get(tk::BURNER_POWER_W).unwrap_or(0.0),
+            pilot_power_w: self.telemetry.get(tk::PILOT_POWER_W).unwrap_or(0.0),
+            fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
+            flue_loss_w: self.telemetry.get(tk::FLUE_LOSS_W).unwrap_or(0.0),
+            fan_electric_w: self.telemetry.get(tk::FAN_ELECTRIC_W).unwrap_or(0.0),
+            draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
             dr_level: self.dr_level,
             dr_setpoint_offset_c: self.dr_setpoint_offset_c,
             dr_load_fraction: self.dr_load_fraction,
@@ -571,19 +571,22 @@ impl Equipment for GasWH {
         self.tank.load_state(&decoded.tank_state)?;
 
         self.telemetry
-            .insert("tank_avg_temp_c", decoded.tank_avg_temp_c);
+            .insert(tk::TANK_AVG_TEMP_C, decoded.tank_avg_temp_c);
         self.telemetry
-            .insert("burner_power_w", decoded.burner_power_w);
+            .insert(tk::BURNER_POWER_W, decoded.burner_power_w);
         self.telemetry
-            .insert("pilot_power_w", decoded.pilot_power_w);
-        self.telemetry.insert("fuel_input_w", decoded.fuel_input_w);
-        self.telemetry.insert("flue_loss_w", decoded.flue_loss_w);
+            .insert(tk::PILOT_POWER_W, decoded.pilot_power_w);
         self.telemetry
-            .insert("fan_electric_w", decoded.fan_electric_w);
+            .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
+        self.telemetry.insert(tk::FLUE_LOSS_W, decoded.flue_loss_w);
         self.telemetry
-            .insert("draw_flow_rate_kg_s", decoded.draw_flow_rate_kg_s);
+            .insert(tk::FAN_ELECTRIC_W, decoded.fan_electric_w);
         self.telemetry
-            .insert("operating_mode", if decoded.burner_on { 1.0 } else { 0.0 });
+            .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
+        self.telemetry.insert(
+            tk::OPERATING_MODE,
+            if decoded.burner_on { 1.0 } else { 0.0 },
+        );
 
         Ok(())
     }
@@ -680,60 +683,73 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(8);
-    telemetry.insert("tank_avg_temp_c", 0.0);
-    telemetry.insert("burner_power_w", 0.0);
-    telemetry.insert("pilot_power_w", 0.0);
-    telemetry.insert("fuel_input_w", 0.0);
-    telemetry.insert("flue_loss_w", 0.0);
-    telemetry.insert("fan_electric_w", 0.0);
-    telemetry.insert("draw_flow_rate_kg_s", 0.0);
-    telemetry.insert("operating_mode", 0.0);
+    telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
+    telemetry.insert(tk::BURNER_POWER_W, 0.0);
+    telemetry.insert(tk::PILOT_POWER_W, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::FLUE_LOSS_W, 0.0);
+    telemetry.insert(tk::FAN_ELECTRIC_W, 0.0);
+    telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
 }
 
-fn telemetry_fields() -> Vec<TelemetryField> {
-    vec![
+fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
+    let mut fields = vec![
         TelemetryField {
-            name: "tank_avg_temp_c".to_string(),
+            name: tk::TANK_AVG_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Volume-weighted average tank temperature".to_string(),
         },
         TelemetryField {
-            name: "burner_power_w".to_string(),
+            name: tk::BURNER_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Gas burner thermal input power".to_string(),
         },
         TelemetryField {
-            name: "pilot_power_w".to_string(),
+            name: tk::PILOT_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Pilot light fuel input power (continuous)".to_string(),
         },
         TelemetryField {
-            name: "fuel_input_w".to_string(),
+            name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Total fuel consumption rate".to_string(),
         },
         TelemetryField {
-            name: "flue_loss_w".to_string(),
+            name: tk::FLUE_LOSS_W.to_string(),
             unit: "W".to_string(),
             description: "Heat loss to flue (excluded from zone thermal gains)".to_string(),
         },
         TelemetryField {
-            name: "fan_electric_w".to_string(),
+            name: tk::FAN_ELECTRIC_W.to_string(),
             unit: "W".to_string(),
             description: "Auxiliary electric fan draw".to_string(),
         },
         TelemetryField {
-            name: "draw_flow_rate_kg_s".to_string(),
+            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
             unit: "kg/s".to_string(),
             description: "Domestic hot water draw flow rate".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "0=Off, 1=Heating".to_string(),
         },
-    ]
+    ];
+    for i in 0..n_nodes {
+        fields.push(TelemetryField {
+            name: tk::tank_node_key(i),
+            unit: "C".to_string(),
+            description: format!("Tank node {i} temperature"),
+        });
+    }
+    fields.push(TelemetryField {
+        name: tk::SKIN_LOSS_W.to_string(),
+        unit: "W".to_string(),
+        description: "Tank jacket (skin) heat loss to zone".to_string(),
+    });
+    fields
 }
 
 /// Compute skin loss fraction from burner efficiency (Energy Factor proxy).
@@ -798,7 +814,8 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+        ZoneState, telemetry_keys as tk,
     };
 
     use super::GasWH;
@@ -841,8 +858,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -885,7 +902,7 @@ mod tests {
         // Flue loss exits the building; it must NOT be part of the zone thermal gain.
         // However, skin losses (jacket losses) should produce a positive sensible gain.
         // The tank starts at 40°C and ambient is 21°C, so standby loss is positive.
-        let flue_loss = eq.telemetry().get("flue_loss_w").unwrap_or(0.0);
+        let flue_loss = eq.telemetry().get(tk::FLUE_LOSS_W).unwrap_or(0.0);
         assert!(flue_loss >= 0.0);
         // Skin loss is the sensible gain from jacket UA; must be non-negative.
         assert!(
@@ -1116,7 +1133,7 @@ mod tests {
 
         assert!(!eq.burner_on, "burner must be off during GridEmergency");
         assert_eq!(
-            eq.telemetry().get("burner_power_w").unwrap_or(1.0),
+            eq.telemetry().get(tk::BURNER_POWER_W).unwrap_or(1.0),
             0.0,
             "burner_power_w must be zero during GridEmergency"
         );
@@ -1124,7 +1141,7 @@ mod tests {
         // pilot remains. Verify burner contribution is zero — pilot is a continuous flame
         // and is not subject to DR load shedding.
         assert_eq!(
-            eq.telemetry().get("fuel_input_w").unwrap_or(1.0),
+            eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(1.0),
             eq.pilot_power_w,
             "fuel_input_w during GridEmergency must equal pilot only (burner is off)"
         );
@@ -1190,12 +1207,12 @@ mod tests {
         eq.step(&e, Duration::from_secs(3600), &mut p).unwrap();
 
         assert_eq!(
-            eq.telemetry().get("burner_power_w").unwrap_or(1.0),
+            eq.telemetry().get(tk::BURNER_POWER_W).unwrap_or(1.0),
             0.0,
             "burner should be off at setpoint with no draw"
         );
         assert!(
-            eq.telemetry().get("fuel_input_w").unwrap_or(0.0) > 0.0,
+            eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(0.0) > 0.0,
             "standing-pilot unit should report non-zero gas consumption at standby"
         );
     }

@@ -297,15 +297,18 @@ impl PyBattery {
 
     #[staticmethod]
     fn by_product_id(id: &str) -> PyResult<Self> {
-        let spec = hares_equipment::battery::catalog::by_id(id).ok_or_else(|| {
-            PyValueError::new_err(format!("unknown battery product: {id}"))
-        })?;
+        let spec = hares_equipment::battery::catalog::by_id(id)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown battery product: {id}")))?;
         Ok(Self::from_spec(spec))
     }
 
     #[staticmethod]
     fn product_catalog() -> Vec<PyBatteryProductId> {
-        BatteryProductId::ALL.iter().copied().map(PyBatteryProductId::from).collect()
+        BatteryProductId::ALL
+            .iter()
+            .copied()
+            .map(PyBatteryProductId::from)
+            .collect()
     }
 
     #[staticmethod]
@@ -602,15 +605,18 @@ impl PyEv {
 
     #[staticmethod]
     fn by_vehicle_id(id: &str) -> PyResult<Self> {
-        let spec = hares_equipment::ev::catalog::by_id(id).ok_or_else(|| {
-            PyValueError::new_err(format!("unknown vehicle: {id}"))
-        })?;
+        let spec = hares_equipment::ev::catalog::by_id(id)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown vehicle: {id}")))?;
         Ok(Self::from_spec(spec))
     }
 
     #[staticmethod]
     fn vehicle_catalog() -> Vec<PyVehicleId> {
-        VehicleId::ALL.iter().copied().map(PyVehicleId::from).collect()
+        VehicleId::ALL
+            .iter()
+            .copied()
+            .map(PyVehicleId::from)
+            .collect()
     }
 
     #[staticmethod]

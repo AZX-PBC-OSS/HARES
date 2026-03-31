@@ -223,7 +223,7 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
             out.append(float(zone.get("outdoor_rh", 0.0)))
             continue
         if key in {"total_power_kw", "total_electric_kw"}:
-            out.append(float(telemetry.total_power_kw()))
+            out.append(float(telemetry.total_power_kw))
             continue
 
         zone_name = _bracket_name(key, "zone_temp")
@@ -439,7 +439,7 @@ class DwellingGymEnv(_GYM_BASE):
             step=step_data,
             telemetry_zone=telemetry.zone(),
             telemetry_equipment=telemetry.equipment(),
-            total_power_kw=float(telemetry.total_power_kw()),
+            total_power_kw=float(telemetry.total_power_kw),
         )
         reward = float(self._reward_fn(reward_context))
         info = StepInfo(

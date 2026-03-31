@@ -234,8 +234,8 @@ mod tests {
                 .single()
                 .expect("valid time"),
             time_res: chrono::Duration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -670,12 +670,7 @@ mod tests {
         );
     }
 
-    fn env_with_two_zones(
-        vol_a: f64,
-        vol_b: f64,
-        w_a: f64,
-        w_b: f64,
-    ) -> EnvironmentState {
+    fn env_with_two_zones(vol_a: f64, vol_b: f64, w_a: f64, w_b: f64) -> EnvironmentState {
         EnvironmentState {
             zones: vec![
                 ZoneState {
@@ -721,7 +716,10 @@ mod tests {
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
             },
-            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)

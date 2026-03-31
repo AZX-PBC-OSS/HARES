@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Timelike};
+use hares_types::telemetry_keys as tk;
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal, EndUse,
     EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage,
@@ -15,8 +16,8 @@ use crate::battery::ocv::{OcvTable, UNegTable};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 pub mod catalog;
-mod checkpoint;
 mod charging_curve;
+mod checkpoint;
 mod config;
 mod telemetry;
 
@@ -398,15 +399,13 @@ impl Ev {
         self.active_power_kw = 0.0;
 
         if let Some(strat_str) = config.get_str(KEY_CHARGING_STRATEGY) {
-            self.charging_strategy = serde_json::from_str(strat_str).map_err(|e| {
-                HaresError::Equipment(format!("invalid charging_strategy: {e}"))
-            })?;
+            self.charging_strategy = serde_json::from_str(strat_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid charging_strategy: {e}")))?;
         }
 
         if let Some(policy_str) = config.get_str(KEY_PLUG_IN_POLICY) {
-            self.plug_in_policy = serde_json::from_str(policy_str).map_err(|e| {
-                HaresError::Equipment(format!("invalid plug_in_policy: {e}"))
-            })?;
+            self.plug_in_policy = serde_json::from_str(policy_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid plug_in_policy: {e}")))?;
         }
 
         self.power_setpoint_kw = None;
@@ -595,7 +594,11 @@ impl Ev {
     }
 
     fn charge_derate_factor(&self) -> f64 {
-        crate::linear_temp_derate(self.battery_temp_c, self.min_charge_temp_c, self.full_power_temp_c)
+        crate::linear_temp_derate(
+            self.battery_temp_c,
+            self.min_charge_temp_c,
+            self.full_power_temp_c,
+        )
     }
 
     fn l1_power_kw(&self) -> f64 {
@@ -606,10 +609,13 @@ impl Ev {
     }
 
     fn write_telemetry(&mut self) {
-        self.telemetry.set("soc", self.soc);
-        self.telemetry.set("active_power_kw", self.active_power_kw);
+        self.telemetry.set(tk::SOC, self.soc);
+        self.telemetry
+            .set(tk::ACTIVE_POWER_KW, self.active_power_kw);
+        self.telemetry
+            .set(tk::ELECTRIC_KW, self.active_power_kw);
         self.telemetry.set(
-            "connection_state",
+            tk::CONNECTION_STATE,
             match self.connection_state {
                 EvConnectionState::HomePluggedIn => 0.0,
                 EvConnectionState::AwayPluggedIn => 1.0,
@@ -617,10 +623,10 @@ impl Ev {
             },
         );
         self.telemetry
-            .set("charging_level", telemetry_code(self.charging_level));
-        self.telemetry.set("battery_temp_c", self.battery_temp_c);
+            .set(tk::CHARGING_LEVEL, telemetry_code(self.charging_level));
+        self.telemetry.set(tk::BATTERY_TEMP_C, self.battery_temp_c);
         self.telemetry.set(
-            "heater_power_w",
+            tk::HEATER_POWER_W,
             if self.heater_active {
                 self.heater_power_w
             } else {
@@ -628,18 +634,18 @@ impl Ev {
             },
         );
         self.telemetry
-            .set("charge_derate", self.charge_derate_factor());
+            .set(tk::CHARGE_DERATE, self.charge_derate_factor());
         self.telemetry
-            .set("v2l_active", if self.v2l_active { 1.0 } else { 0.0 });
-        self.telemetry.set("v2l_power_kw", self.v2l_power_kw);
+            .set(tk::V2L_ACTIVE, if self.v2l_active { 1.0 } else { 0.0 });
+        self.telemetry.set(tk::V2L_POWER_KW, self.v2l_power_kw);
         self.telemetry
-            .set("capacity_fade_pct", self.degradation.capacity_fade_pct());
+            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
         self.telemetry
-            .set("away_charge_power_kw", self.away_charge_actual_kw);
+            .set(tk::AWAY_CHARGE_POWER_KW, self.away_charge_actual_kw);
         self.telemetry
-            .set("capacity_kwh", self.battery_capacity_kwh);
+            .set(tk::CAPACITY_KWH, self.battery_capacity_kwh);
         self.telemetry
-            .set("fuel_economy_kwh_per_mi", self.fuel_economy_kwh_per_mi);
+            .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
     }
 
     /// Accumulate degradation and run daily update.
@@ -1108,6 +1114,10 @@ impl Equipment for Ev {
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     registry.register("EV", Box::new(|config| Box::new(Ev::new(config))));
+    registry.register(
+        "Electric Vehicle",
+        Box::new(|config| Box::new(Ev::new(config))),
+    );
     registry.register(
         "Scheduled EV",
         Box::new(|config| {

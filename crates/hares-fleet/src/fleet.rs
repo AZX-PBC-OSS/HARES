@@ -7,8 +7,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::{DwellingConfig, SimStatus as CoreSimStatus, SimulationEngine, SimulationResults};
+use hares_core::{
+    Dwelling, DwellingConfig, DwellingTelemetry, SimStatus as CoreSimStatus, SimulationEngine,
+    SimulationResults, StepResult,
+};
 use hares_io::{OutputFormat, ResStockVersion, SimulationConfig, parse_resstock_metadata};
+use hares_types::ControlSignal;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use thiserror::Error;
@@ -45,11 +49,24 @@ struct FleetEntry {
     sample_weight: f64,
 }
 
+/// Error captured when building an individual dwelling for [`SteppableFleet`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DwellingBuildError {
+    pub bldg_id: i64,
+    pub message: String,
+}
+
 /// Errors returned while building a [`Fleet`].
 #[derive(Debug, Error)]
 pub enum FleetError {
     #[error("resstock metadata parse failed: {0}")]
     ResStock(String),
+    #[error("from_configs requires at least one dwelling config")]
+    EmptySteppableFleetConfig,
+    #[error("all dwellings failed to initialize ({count} failure(s))")]
+    AllSteppableDwellingsFailed { count: usize },
+    #[error("failed to build local rayon thread pool: {0}")]
+    ThreadPoolBuild(String),
 }
 
 /// Errors returned by [`Fleet::simulate`].
@@ -238,6 +255,193 @@ impl Fleet {
     }
 }
 
+/// Fleet runner that owns initialized dwellings and advances one timestep at a time.
+pub struct SteppableFleet {
+    dwellings: Vec<Dwelling>,
+    step_pool: Option<rayon::ThreadPool>,
+    time_res_s: f64,
+    total_steps: u64,
+    current_step: u64,
+}
+
+impl std::fmt::Debug for SteppableFleet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SteppableFleet")
+            .field("dwellings", &self.dwellings.len())
+            .field("step_pool", &self.step_pool.as_ref().map(|_| "..."))
+            .field("time_res_s", &self.time_res_s)
+            .field("total_steps", &self.total_steps)
+            .field("current_step", &self.current_step)
+            .finish()
+    }
+}
+
+impl SteppableFleet {
+    /// Builds and initializes a steppable fleet from dwelling configs.
+    ///
+    /// Returns partial success as `(fleet, errors)`. If every dwelling fails,
+    /// returns `Err`.
+    pub fn from_configs(
+        configs: Vec<DwellingConfig>,
+        n_threads: usize,
+    ) -> Result<(Self, Vec<DwellingBuildError>)> {
+        if configs.is_empty() {
+            return Err(FleetError::EmptySteppableFleetConfig);
+        }
+
+        let step_pool = if n_threads > 0 {
+            Some(
+                ThreadPoolBuilder::new()
+                    .num_threads(n_threads)
+                    .build()
+                    .map_err(|err| FleetError::ThreadPoolBuild(err.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        let mut dwellings = Vec::with_capacity(configs.len());
+        let mut build_errors = Vec::new();
+
+        for config in configs {
+            let bldg_id = config.bldg_id;
+            let build_result =
+                panic::catch_unwind(AssertUnwindSafe(|| Dwelling::from_config(config)));
+            match build_result {
+                Ok(Ok(dwelling)) => dwellings.push(dwelling),
+                Ok(Err(err)) => build_errors.push(DwellingBuildError {
+                    bldg_id,
+                    message: err.to_string(),
+                }),
+                Err(payload) => build_errors.push(DwellingBuildError {
+                    bldg_id,
+                    message: panic_payload_to_string(payload),
+                }),
+            }
+        }
+
+        if dwellings.is_empty() {
+            return Err(FleetError::AllSteppableDwellingsFailed {
+                count: build_errors.len(),
+            });
+        }
+
+        let first = &dwellings[0].clock;
+        let total_steps = first.total_steps();
+        let time_res_s = first.time_res.num_milliseconds() as f64 / 1000.0;
+
+        Ok((
+            Self {
+                dwellings,
+                step_pool,
+                time_res_s,
+                total_steps,
+                current_step: 0,
+            },
+            build_errors,
+        ))
+    }
+
+    /// Advances all dwellings exactly one timestep in parallel.
+    #[must_use]
+    pub fn step(&mut self) -> Vec<std::result::Result<StepResult, SimError>> {
+        if self.is_finished() {
+            return self
+                .dwellings
+                .iter()
+                .map(|dwelling| {
+                    Err(SimError::Failed {
+                        bldg_id: dwelling.bldg_id,
+                        message: "simulation already reached configured end".to_string(),
+                    })
+                })
+                .collect();
+        }
+
+        let results = if let Some(pool) = &self.step_pool {
+            pool.install(|| step_dwellings_parallel(&mut self.dwellings))
+        } else {
+            step_dwellings_parallel(&mut self.dwellings)
+        };
+
+        self.current_step = self.current_step.saturating_add(1);
+        results
+    }
+
+    /// Applies a grid voltage override to one dwelling.
+    pub fn set_grid_voltage(&mut self, dwelling_index: usize, voltage_pu: f64) {
+        if let Some(dwelling) = self.dwellings.get_mut(dwelling_index) {
+            dwelling.set_grid_voltage(voltage_pu);
+        } else {
+            tracing::warn!(dwelling_index, "set_grid_voltage index out of bounds");
+        }
+    }
+
+    /// Applies a shared grid voltage override to all dwellings.
+    pub fn set_grid_voltage_all(&mut self, voltage_pu: f64) {
+        for dwelling in &mut self.dwellings {
+            dwelling.set_grid_voltage(voltage_pu);
+        }
+    }
+
+    /// Queues a control signal for one dwelling by equipment name.
+    pub fn apply_control(&mut self, dwelling_index: usize, name: &str, signal: ControlSignal) {
+        if let Some(dwelling) = self.dwellings.get_mut(dwelling_index) {
+            dwelling.apply_control(name, signal);
+        } else {
+            tracing::warn!(dwelling_index, "apply_control index out of bounds");
+        }
+    }
+
+    /// Returns telemetry for one dwelling, or `None` if the index is out of bounds.
+    #[must_use]
+    pub fn telemetry(&self, dwelling_index: usize) -> Option<DwellingTelemetry> {
+        self.dwellings.get(dwelling_index).map(|d| d.telemetry())
+    }
+
+    /// Returns building id for one dwelling index.
+    #[must_use]
+    pub fn bldg_id(&self, dwelling_index: usize) -> Option<i64> {
+        self.dwellings.get(dwelling_index).map(|d| d.bldg_id)
+    }
+
+    /// Returns fleet dwelling count.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.dwellings.len()
+    }
+
+    /// Returns true when the fleet has no dwellings.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.dwellings.is_empty()
+    }
+
+    /// Returns true after all configured timesteps have been stepped.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.current_step >= self.total_steps
+    }
+
+    /// Returns timestep resolution in seconds.
+    #[must_use]
+    pub fn time_res_s(&self) -> f64 {
+        self.time_res_s
+    }
+
+    /// Returns total simulation timesteps.
+    #[must_use]
+    pub fn total_steps(&self) -> u64 {
+        self.total_steps
+    }
+
+    /// Returns current global step index (0-based).
+    #[must_use]
+    pub fn current_step(&self) -> u64 {
+        self.current_step
+    }
+}
+
 fn run_entry(entry: &FleetEntry) -> std::result::Result<DwellingOutcome, SimError> {
     let engine = SimulationEngine::new();
     match engine.run(entry.config.clone()) {
@@ -263,6 +467,27 @@ fn run_entry(entry: &FleetEntry) -> std::result::Result<DwellingOutcome, SimErro
     }
 }
 
+fn step_dwellings_parallel(
+    dwellings: &mut [Dwelling],
+) -> Vec<std::result::Result<StepResult, SimError>> {
+    dwellings
+        .par_iter_mut()
+        .map(
+            |dwelling| match panic::catch_unwind(AssertUnwindSafe(|| dwelling.step())) {
+                Ok(Ok(step_result)) => Ok(step_result),
+                Ok(Err(err)) => Err(SimError::Engine {
+                    bldg_id: dwelling.bldg_id,
+                    message: err.to_string(),
+                }),
+                Err(payload) => Err(SimError::Panic {
+                    bldg_id: dwelling.bldg_id,
+                    message: panic_payload_to_string(payload),
+                }),
+            },
+        )
+        .collect()
+}
+
 fn map_status(status: &CoreSimStatus) -> SimStatus {
     match status {
         CoreSimStatus::Ok => SimStatus::Ok,
@@ -282,6 +507,7 @@ fn default_resstock_sim_config() -> SimulationConfig {
         time_res: Duration::minutes(1),
         output_verbosity: 0,
         output_path: None,
+        write_output: true,
         output_format: OutputFormat::Csv,
         output_chunk_size: 10_000,
         setpoint_deadband_c: None,
@@ -437,6 +663,7 @@ mod tests {
             time_res: Duration::minutes(1),
             output_verbosity: 0,
             output_path: Some(output_path),
+            write_output: true,
             output_format: OutputFormat::Csv,
             output_chunk_size: 128,
             setpoint_deadband_c: None,
@@ -607,5 +834,84 @@ mod tests {
 
         let result = remap_weather_path(&path, &hpxml_dir, &weather_dir);
         assert_eq!(result, PathBuf::from("/data/weather"));
+    }
+
+    #[test]
+    fn steppable_fleet_steps_and_finishes() {
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(3), 2).expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+        assert_eq!(fleet.len(), 3);
+        assert!(!fleet.is_finished());
+        assert_eq!(fleet.current_step(), 0);
+        assert!(fleet.total_steps() > 0);
+        assert!(fleet.time_res_s() > 0.0);
+
+        let first_step = fleet.step();
+        assert_eq!(first_step.len(), 3);
+        assert!(first_step.iter().all(|result| result.is_ok()));
+        for result in first_step {
+            let step = result.expect("step succeeds");
+            assert!(step.timestamp.timestamp() > 0);
+        }
+        assert_eq!(fleet.current_step(), 1);
+        assert!(!fleet.is_finished());
+
+        while !fleet.is_finished() {
+            let step = fleet.step();
+            assert_eq!(step.len(), 3);
+            assert!(step.iter().all(|result| result.is_ok()));
+        }
+
+        assert!(fleet.is_finished());
+        assert_eq!(fleet.current_step(), fleet.total_steps());
+        let post_end = fleet.step();
+        assert_eq!(post_end.len(), 3);
+        assert!(
+            post_end
+                .iter()
+                .all(|result| matches!(result, Err(SimError::Failed { .. })))
+        );
+    }
+
+    #[test]
+    fn steppable_fleet_from_configs_returns_partial_success() {
+        let mut configs = build_valid_configs(2);
+        let mut bad = build_missing_configs(1);
+        bad[0].bldg_id = 999;
+        configs.extend(bad);
+
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(configs, 0).expect("partial success should build");
+        assert_eq!(fleet.len(), 2);
+        assert_eq!(build_errors.len(), 1);
+        assert_eq!(build_errors[0].bldg_id, 999);
+        assert!(!build_errors[0].message.is_empty());
+
+        let results = fleet.step();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn steppable_fleet_empty_configs_returns_error() {
+        let result = SteppableFleet::from_configs(vec![], 0);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("at least one dwelling config")
+        );
+    }
+
+    #[test]
+    fn steppable_fleet_all_configs_fail_returns_error() {
+        let bad_configs = build_missing_configs(3);
+        let result = SteppableFleet::from_configs(bad_configs, 0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("all dwellings failed"));
+        assert!(err_msg.contains("3 failure"));
     }
 }

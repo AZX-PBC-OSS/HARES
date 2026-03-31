@@ -5,8 +5,8 @@ use std::fmt;
 use hares_types::BatteryChemistry;
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigValue;
 use crate::EquipmentConfig;
+use crate::config::ConfigValue;
 
 use super::{
     KEY_CAPACITY_KWH, KEY_CHARGE_EFFICIENCY, KEY_CHEMISTRY, KEY_DISCHARGE_EFFICIENCY,
@@ -131,26 +131,50 @@ impl BatterySpec {
             raw_config: Default::default(),
         };
         let rc = &mut cfg.raw_config;
-        rc.insert(KEY_CAPACITY_KWH.into(), ConfigValue::Float(self.capacity_kwh));
-        rc.insert(KEY_MAX_CHARGE_KW.into(), ConfigValue::Float(self.max_charge_kw));
-        rc.insert(KEY_MAX_DISCHARGE_KW.into(), ConfigValue::Float(self.max_discharge_kw));
+        rc.insert(
+            KEY_CAPACITY_KWH.into(),
+            ConfigValue::Float(self.capacity_kwh),
+        );
+        rc.insert(
+            KEY_MAX_CHARGE_KW.into(),
+            ConfigValue::Float(self.max_charge_kw),
+        );
+        rc.insert(
+            KEY_MAX_DISCHARGE_KW.into(),
+            ConfigValue::Float(self.max_discharge_kw),
+        );
         rc.insert(KEY_CHARGE_EFFICIENCY.into(), ConfigValue::Float(eta));
         rc.insert(KEY_DISCHARGE_EFFICIENCY.into(), ConfigValue::Float(eta));
         rc.insert(
             KEY_CHEMISTRY.into(),
             ConfigValue::Text(self.chemistry.as_config_str().to_string()),
         );
-        rc.insert(KEY_STANDBY_POWER_W.into(), ConfigValue::Float(self.standby_power_w));
+        rc.insert(
+            KEY_STANDBY_POWER_W.into(),
+            ConfigValue::Float(self.standby_power_w),
+        );
         rc.insert(
             KEY_SELF_DISCHARGE_PCT_PER_DAY.into(),
             ConfigValue::Float(self.self_discharge_pct_per_day),
         );
         rc.insert(KEY_MIN_SOC.into(), ConfigValue::Float(self.min_soc));
         rc.insert(KEY_MAX_SOC.into(), ConfigValue::Float(self.max_soc));
-        rc.insert(KEY_HEATER_POWER_W.into(), ConfigValue::Float(self.heater_power_w));
-        rc.insert(KEY_HEATER_THRESHOLD_C.into(), ConfigValue::Float(self.heater_threshold_c));
-        rc.insert(KEY_MIN_CHARGE_TEMP_C.into(), ConfigValue::Float(self.min_charge_temp_c));
-        rc.insert(KEY_FULL_POWER_TEMP_C.into(), ConfigValue::Float(self.full_power_temp_c));
+        rc.insert(
+            KEY_HEATER_POWER_W.into(),
+            ConfigValue::Float(self.heater_power_w),
+        );
+        rc.insert(
+            KEY_HEATER_THRESHOLD_C.into(),
+            ConfigValue::Float(self.heater_threshold_c),
+        );
+        rc.insert(
+            KEY_MIN_CHARGE_TEMP_C.into(),
+            ConfigValue::Float(self.min_charge_temp_c),
+        );
+        rc.insert(
+            KEY_FULL_POWER_TEMP_C.into(),
+            ConfigValue::Float(self.full_power_temp_c),
+        );
         cfg
     }
 }
@@ -358,9 +382,21 @@ mod tests {
     fn all_catalog_specs_valid() {
         assert_eq!(CATALOG.len(), 11);
         for (i, spec) in CATALOG.iter().enumerate() {
-            assert_eq!(spec.id as usize, i, "catalog order mismatch for {}", spec.label);
-            assert!(spec.capacity_kwh > 0.0, "{}: capacity must be positive", spec.label);
-            assert!(spec.max_charge_kw > 0.0, "{}: charge power must be positive", spec.label);
+            assert_eq!(
+                spec.id as usize, i,
+                "catalog order mismatch for {}",
+                spec.label
+            );
+            assert!(
+                spec.capacity_kwh > 0.0,
+                "{}: capacity must be positive",
+                spec.label
+            );
+            assert!(
+                spec.max_charge_kw > 0.0,
+                "{}: charge power must be positive",
+                spec.label
+            );
             assert!(
                 spec.max_discharge_kw > 0.0,
                 "{}: discharge power must be positive",
@@ -387,9 +423,18 @@ mod tests {
 
     #[test]
     fn from_str_case_insensitive_underscore_tolerant() {
-        assert_eq!("tesla_pw3".parse::<BatteryProductId>().unwrap(), BatteryProductId::TeslaPw3);
-        assert_eq!("TESLA_PW3".parse::<BatteryProductId>().unwrap(), BatteryProductId::TeslaPw3);
-        assert_eq!("TeslaPw3".parse::<BatteryProductId>().unwrap(), BatteryProductId::TeslaPw3);
+        assert_eq!(
+            "tesla_pw3".parse::<BatteryProductId>().unwrap(),
+            BatteryProductId::TeslaPw3
+        );
+        assert_eq!(
+            "TESLA_PW3".parse::<BatteryProductId>().unwrap(),
+            BatteryProductId::TeslaPw3
+        );
+        assert_eq!(
+            "TeslaPw3".parse::<BatteryProductId>().unwrap(),
+            BatteryProductId::TeslaPw3
+        );
         assert_eq!(
             "lg_resu_10h".parse::<BatteryProductId>().unwrap(),
             BatteryProductId::LgResu10h

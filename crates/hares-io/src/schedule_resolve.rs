@@ -419,12 +419,7 @@ const HEATING_EQUIPMENT: &[&str] = &[
 ];
 
 /// HVAC equipment names that consume cooling setpoints.
-const COOLING_EQUIPMENT: &[&str] = &[
-    "ASHP Cooler",
-    "MSHP Cooler",
-    "Air Conditioner",
-    "Room AC",
-];
+const COOLING_EQUIPMENT: &[&str] = &["ASHP Cooler", "MSHP Cooler", "Air Conditioner", "Room AC"];
 
 fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
@@ -696,11 +691,11 @@ fn inject_event_schedule(
     schedule: &ScheduleTimeSeries,
 ) {
     // Skip if equipment already has event source keys.
-    if spec
-        .parameters
-        .keys()
-        .any(|k| k == "event_window_schedule_col" || k == "event_window_source" || k == "event_power_kw_series")
-    {
+    if spec.parameters.keys().any(|k| {
+        k == "event_window_schedule_col"
+            || k == "event_window_source"
+            || k == "event_power_kw_series"
+    }) {
         return;
     }
 
@@ -727,10 +722,8 @@ fn inject_event_schedule(
                 .iter()
                 .map(|f| Value::from(f * max_kw))
                 .collect();
-            spec.parameters.insert(
-                "event_power_kw_series".to_string(),
-                Value::Array(kw_series),
-            );
+            spec.parameters
+                .insert("event_power_kw_series".to_string(), Value::Array(kw_series));
         }
     } else if schedule_len > 0 {
         spec.parameters

@@ -881,9 +881,7 @@ mod tests {
     #[test]
     fn parses_real_tmy3_fixture() {
         let mut fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        fixture.push(
-            "../../data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw",
-        );
+        fixture.push("../../data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw");
 
         let weather = parse_epw(&fixture).expect("fixture should parse");
         assert_eq!(weather.len(), 8760);

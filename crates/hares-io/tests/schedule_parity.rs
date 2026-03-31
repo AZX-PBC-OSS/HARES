@@ -288,7 +288,6 @@ fn missing_required_column_returns_typed_error_not_silent_fallback() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "OCHRE parity: regenerate reference values by running vendors/OCHRE/ochre/utils/schedule.py::resolve_schedule() with the fixture fractions and annual_kwh=876"]
 fn ochre_parity_24h_lighting_schedule_reference_values() {
     // 24-hour fraction profile (one complete day used as annual cycle).
     #[rustfmt::skip]

@@ -3,17 +3,17 @@
 
 use std::fmt;
 
+use hares_types::DayFilter;
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingStrategy, DistributionKind, PlugInPolicy,
     ScheduleSource, TimeWindow, VehicleType,
 };
-use hares_types::DayFilter;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigValue;
 use crate::EquipmentConfig;
+use crate::config::ConfigValue;
 
 use super::config::{
     KEY_BATTERY_CAPACITY_KWH, KEY_CHARGING_LEVEL, KEY_CHEMISTRY, KEY_FUEL_ECONOMY_KWH_PER_MI,
@@ -141,10 +141,7 @@ impl VehicleSpec {
             KEY_CHARGING_LEVEL.into(),
             ConfigValue::Text("L2".to_string()),
         );
-        rc.insert(
-            KEY_RANGE_MILES.into(),
-            ConfigValue::Float(self.range_miles),
-        );
+        rc.insert(KEY_RANGE_MILES.into(), ConfigValue::Float(self.range_miles));
         rc.insert(
             KEY_VEHICLE_TYPE.into(),
             ConfigValue::Text(self.vehicle_type.to_string()),
@@ -829,10 +826,26 @@ mod tests {
     fn all_catalog_specs_valid() {
         assert_eq!(CATALOG.len(), 13);
         for (i, spec) in CATALOG.iter().enumerate() {
-            assert_eq!(spec.id as usize, i, "catalog order mismatch for {}", spec.label);
-            assert!(spec.capacity_kwh > 0.0, "{}: capacity must be positive", spec.label);
-            assert!(spec.max_l2_power_kw > 0.0, "{}: L2 power must be positive", spec.label);
-            assert!(spec.range_miles > 0.0, "{}: range must be positive", spec.label);
+            assert_eq!(
+                spec.id as usize, i,
+                "catalog order mismatch for {}",
+                spec.label
+            );
+            assert!(
+                spec.capacity_kwh > 0.0,
+                "{}: capacity must be positive",
+                spec.label
+            );
+            assert!(
+                spec.max_l2_power_kw > 0.0,
+                "{}: L2 power must be positive",
+                spec.label
+            );
+            assert!(
+                spec.range_miles > 0.0,
+                "{}: range must be positive",
+                spec.label
+            );
             assert!(
                 spec.degradation_per_year > 0.0 && spec.degradation_per_year < 1.0,
                 "{}: degradation must be in (0,1)",
@@ -843,15 +856,28 @@ mod tests {
 
     #[test]
     fn phev_vehicles_have_no_dcfc() {
-        for spec in CATALOG.iter().filter(|s| s.vehicle_type == VehicleType::Phev) {
-            assert!(spec.dcfc_power_kw.is_none(), "{}: PHEV should not have DCFC", spec.label);
+        for spec in CATALOG
+            .iter()
+            .filter(|s| s.vehicle_type == VehicleType::Phev)
+        {
+            assert!(
+                spec.dcfc_power_kw.is_none(),
+                "{}: PHEV should not have DCFC",
+                spec.label
+            );
         }
     }
 
     #[test]
     fn bev_count_and_phev_count() {
-        let bev_count = CATALOG.iter().filter(|s| s.vehicle_type == VehicleType::Bev).count();
-        let phev_count = CATALOG.iter().filter(|s| s.vehicle_type == VehicleType::Phev).count();
+        let bev_count = CATALOG
+            .iter()
+            .filter(|s| s.vehicle_type == VehicleType::Bev)
+            .count();
+        let phev_count = CATALOG
+            .iter()
+            .filter(|s| s.vehicle_type == VehicleType::Phev)
+            .count();
         assert_eq!(bev_count, 10);
         assert_eq!(phev_count, 3);
     }

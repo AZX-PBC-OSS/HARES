@@ -120,8 +120,8 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
             .single()
             .expect("valid timestamp"),
         time_res: ChronoDuration::minutes(1),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 

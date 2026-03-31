@@ -32,9 +32,7 @@ pub struct RatchetConfig {
 impl RatchetConfig {
     pub fn validate(&self) -> Result<(), HaresError> {
         if self.lookback_months == 0 {
-            return Err(HaresError::Tariff(
-                "lookback_months must be > 0".into(),
-            ));
+            return Err(HaresError::Tariff("lookback_months must be > 0".into()));
         }
         if !self.minimum_fraction.is_finite() || self.minimum_fraction < 0.0 {
             return Err(HaresError::Tariff(format!(

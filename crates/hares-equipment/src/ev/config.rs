@@ -125,9 +125,7 @@ pub(super) fn default_max_power_kw(
 pub(super) fn vehicle_number_from_config(config: &EquipmentConfig, capacity_kwh: f64) -> u8 {
     let range_miles = config
         .get_f64(KEY_RANGE_MILES)
-        .or_else(|| {
-            (capacity_kwh > 0.0).then_some(capacity_kwh / DEFAULT_FUEL_ECONOMY_KWH_PER_MI)
-        })
+        .or_else(|| (capacity_kwh > 0.0).then_some(capacity_kwh / DEFAULT_FUEL_ECONOMY_KWH_PER_MI))
         .unwrap_or_default();
     let vehicle_type = config
         .get_str(KEY_VEHICLE_TYPE)

@@ -31,9 +31,7 @@ use hares_equipment::config::ConfigValue;
 use hares_types::HaresError;
 
 use hares_equipment::ev::catalog::archetype_by_id;
-use hares_types::{
-    BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource,
-};
+use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource};
 
 use crate::Actor;
 use crate::actors::{
@@ -100,8 +98,7 @@ impl ActorRegistry {
             "IdealThermostat",
             Box::new(|config: ActorConfig| {
                 let target = config.get_str("target").unwrap_or("HVAC");
-                let mut actor = IdealThermostat::new(target)
-                    .with_name(&config.name);
+                let mut actor = IdealThermostat::new(target).with_name(&config.name);
                 if let (Some(heat), Some(cool)) =
                     (config.get_f64("heating_c"), config.get_f64("cooling_c"))
                 {
@@ -144,9 +141,7 @@ impl ActorRegistry {
                 })? as u64;
 
                 // If a preset is specified, load defaults from the archetype catalog
-                let preset = config
-                    .get_str("preset")
-                    .and_then(archetype_by_id);
+                let preset = config.get_str("preset").and_then(archetype_by_id);
 
                 let seed_bytes = {
                     let mut b = [0u8; 32];
@@ -225,9 +220,7 @@ impl ActorRegistry {
                 let target = config
                     .get_str("target")
                     .ok_or_else(|| {
-                        HaresError::Control(
-                            "BatteryManagement requires 'target' parameter".into(),
-                        )
+                        HaresError::Control("BatteryManagement requires 'target' parameter".into())
                     })?
                     .to_string();
                 let mode_str = config.get_str("mode").unwrap_or("self_consumption");
@@ -254,9 +247,7 @@ impl ActorRegistry {
                     "backup" | "backup_reserve" => BmsMode::BackupReserve {
                         target_soc: config.get_f64("target_soc").unwrap_or(0.8),
                         charge_from_grid: config.get_bool("charge_from_grid").unwrap_or(true),
-                        charge_rate_fraction: config
-                            .get_f64("charge_rate_fraction")
-                            .unwrap_or(1.0),
+                        charge_rate_fraction: config.get_f64("charge_rate_fraction").unwrap_or(1.0),
                     },
                     "manual" => BmsMode::Manual,
                     other => {
@@ -379,7 +370,9 @@ mod tests {
             .with_param("target", ConfigValue::Text("EV1".into()))
             .with_param("seed", ConfigValue::Float(42.0))
             .with_param("preset", ConfigValue::Text("daily_commuter_l2".into()));
-        let actor = registry.create(config).expect("create ev driver with preset");
+        let actor = registry
+            .create(config)
+            .expect("create ev driver with preset");
         assert_eq!(actor.name(), "Driver2");
     }
 

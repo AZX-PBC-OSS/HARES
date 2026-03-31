@@ -9,7 +9,7 @@ use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId,
+    TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -404,11 +404,12 @@ impl EventBasedLoad {
             })?;
         }
 
-        self.telemetry.set("active_power_kw", electric_power_kw);
-        self.telemetry.set("sensible_gain_w", sensible_gain_w);
-        self.telemetry.set("latent_gain_w", latent_gain_w);
-        self.telemetry.set("fuel_input_w", fuel_consumption_w);
-        self.telemetry.set("state", phase_ordinal(self.phase));
+        self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
+        self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
+        self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
+        self.telemetry.set(tk::STATE, phase_ordinal(self.phase));
         Ok(())
     }
 }
@@ -842,12 +843,13 @@ impl WetAppliance {
             })?;
         }
 
-        self.telemetry.set("active_power_kw", electric_power_kw);
-        self.telemetry.set("sensible_gain_w", sensible_gain_w);
-        self.telemetry.set("latent_gain_w", latent_gain_w);
-        self.telemetry.set("fuel_input_w", fuel_consumption_w);
+        self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
+        self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
+        self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
         self.telemetry.set(
-            "cycle_phase",
+            tk::CYCLE_PHASE,
             cycle_phase_ordinal(self.active, self.phase_index),
         );
         Ok(())
@@ -1388,48 +1390,55 @@ fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
 
 fn default_event_load_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(5);
-    telemetry.insert("active_power_kw", 0.0);
-    telemetry.insert("sensible_gain_w", 0.0);
-    telemetry.insert("latent_gain_w", 0.0);
-    telemetry.insert("fuel_input_w", 0.0);
-    telemetry.insert("state", 0.0);
+    telemetry.insert(tk::ACTIVE_POWER_KW, 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::LATENT_GAIN_W, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::STATE, 0.0);
     telemetry
 }
 
 fn default_wet_appliance_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(5);
-    telemetry.insert("active_power_kw", 0.0);
-    telemetry.insert("sensible_gain_w", 0.0);
-    telemetry.insert("latent_gain_w", 0.0);
-    telemetry.insert("fuel_input_w", 0.0);
-    telemetry.insert("cycle_phase", 0.0);
+    let mut telemetry = Telemetry::with_capacity(6);
+    telemetry.insert(tk::ACTIVE_POWER_KW, 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::LATENT_GAIN_W, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::CYCLE_PHASE, 0.0);
     telemetry
 }
 
 fn event_load_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "active_power_kw".to_string(),
+            name: tk::ACTIVE_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Active electrical power draw".to_string(),
         },
         TelemetryField {
-            name: "sensible_gain_w".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Grid-boundary electrical power".to_string(),
+        },
+        TelemetryField {
+            name: tk::SENSIBLE_GAIN_W.to_string(),
             unit: "W".to_string(),
             description: "Sensible thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "latent_gain_w".to_string(),
+            name: tk::LATENT_GAIN_W.to_string(),
             unit: "W".to_string(),
             description: "Latent thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "fuel_input_w".to_string(),
+            name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Gas fuel consumption rate converted to watts".to_string(),
         },
         TelemetryField {
-            name: "state".to_string(),
+            name: tk::STATE.to_string(),
             unit: "ordinal".to_string(),
             description: "State machine phase (0=Idle,1=Active,2=Cooldown)".to_string(),
         },
@@ -1439,27 +1448,32 @@ fn event_load_telemetry_fields() -> Vec<TelemetryField> {
 fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "active_power_kw".to_string(),
+            name: tk::ACTIVE_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Active electrical power draw".to_string(),
         },
         TelemetryField {
-            name: "sensible_gain_w".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Grid-boundary electrical power".to_string(),
+        },
+        TelemetryField {
+            name: tk::SENSIBLE_GAIN_W.to_string(),
             unit: "W".to_string(),
             description: "Sensible thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "latent_gain_w".to_string(),
+            name: tk::LATENT_GAIN_W.to_string(),
             unit: "W".to_string(),
             description: "Latent thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "fuel_input_w".to_string(),
+            name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Gas fuel consumption rate converted to watts".to_string(),
         },
         TelemetryField {
-            name: "cycle_phase".to_string(),
+            name: tk::CYCLE_PHASE.to_string(),
             unit: "ordinal".to_string(),
             description: "Cycle phase (0=Idle,1..N=phase index + 1)".to_string(),
         },
@@ -1475,6 +1489,7 @@ mod tests {
     use hares_types::{
         ControlSignal, DomainUpdate, EnvironmentState, ExecutionStage, FuelType, GridState,
         PortSlots, PortType, WeatherState, ZoneId, ZoneState, schedule_domain_id,
+        telemetry_keys as tk,
     };
 
     use super::{
@@ -1523,8 +1538,8 @@ mod tests {
                 .single()
                 .expect("valid UTC timestamp"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1717,8 +1732,8 @@ mod tests {
 
         assert!((ports_a.electrical.load_power_kw - ports_b.electrical.load_power_kw).abs() < 1e-9);
         assert_eq!(
-            eq_a.telemetry().get("cycle_phase"),
-            eq_b.telemetry().get("cycle_phase")
+            eq_a.telemetry().get(tk::CYCLE_PHASE),
+            eq_b.telemetry().get(tk::CYCLE_PHASE)
         );
     }
 
@@ -2276,8 +2291,8 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
-        let gas_w = eq.telemetry().get("fuel_input_w").unwrap();
-        let elec_kw = eq.telemetry().get("active_power_kw").unwrap();
+        let gas_w = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let elec_kw = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
         assert!(
             gas_w > 0.0,
             "fuel_input_w must be positive for gas equipment"
@@ -2292,10 +2307,9 @@ mod tests {
 
     fn event_config_with_month_multiplier(month: usize, multiplier: f64) -> EquipmentConfig {
         let mut config = event_config("TestLoad", "EventBasedLoad");
-        config.raw_config.insert(
-            format!("month_multiplier_{month}"),
-            multiplier.into(),
-        );
+        config
+            .raw_config
+            .insert(format!("month_multiplier_{month}"), multiplier.into());
         config
     }
 
@@ -2317,7 +2331,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
-        let power = eq.telemetry().get("active_power_kw").unwrap();
+        let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
         assert_eq!(power, 0.0, "month_multiplier=0 should zero power output");
     }
 
@@ -2337,12 +2351,9 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
-        let power = eq.telemetry().get("active_power_kw").unwrap();
+        let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
         // active_power_kw=1.5 * load_fraction=1.0 * month_scale=0.5 = 0.75
-        assert!(
-            (power - 0.75).abs() < 1e-9,
-            "expected 0.75, got {power}"
-        );
+        assert!((power - 0.75).abs() < 1e-9, "expected 0.75, got {power}");
     }
 
     #[test]
@@ -2361,17 +2372,16 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
-        let power = eq.telemetry().get("active_power_kw").unwrap();
-        assert!(
-            (power - 1.5).abs() < 1e-9,
-            "expected 1.5, got {power}"
-        );
+        let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!((power - 1.5).abs() < 1e-9, "expected 1.5, got {power}");
     }
 
     #[test]
     fn wet_appliance_month_multiplier_zero_suppresses_output() {
         let mut config = wet_config("Washer", "Clothes Washer", 1.0);
-        config.raw_config.insert("month_multiplier_2".to_string(), 0.0.into());
+        config
+            .raw_config
+            .insert("month_multiplier_2".to_string(), 0.0.into());
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         let mut env = base_env();
         eq.init(&config, &env).unwrap();
@@ -2385,8 +2395,11 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
-        let power = eq.telemetry().get("active_power_kw").unwrap();
-        assert_eq!(power, 0.0, "month_multiplier=0 should zero wet appliance power");
+        let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert_eq!(
+            power, 0.0,
+            "month_multiplier=0 should zero wet appliance power"
+        );
     }
 
     // =======================================================================
@@ -2452,8 +2465,7 @@ mod tests {
         );
 
         // Applying EventDelay while Active must fail.
-        let result =
-            eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 });
+        let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 });
         assert!(
             result.is_err(),
             "EventDelay on an active event must return Err"
@@ -2573,8 +2585,7 @@ mod tests {
         );
 
         // Applying EventDelay while active must fail.
-        let result =
-            eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 });
+        let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 60.0 });
         assert!(
             result.is_err(),
             "EventDelay on an active WetAppliance cycle must return Err"
@@ -2789,5 +2800,4 @@ mod tests {
             "checkpoint round-trip must produce identical behaviour to the original instance"
         );
     }
-
 }

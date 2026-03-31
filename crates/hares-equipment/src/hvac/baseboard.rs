@@ -11,6 +11,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_types::telemetry_keys as tk;
+
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::{
@@ -129,10 +131,10 @@ impl Equipment for ElectricBaseboard {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        self.telemetry.set("electric_kw", electric_kw);
-        self.telemetry.set("thermal_output_w", thermal_output_w);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
-            .set("operating_mode", operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
 
         Ok(())
     }
@@ -149,8 +151,8 @@ impl Equipment for ElectricBaseboard {
             runtime_setpoints: self.hvac.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get("thermal_output_w").unwrap_or(0.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
         })
     }
 
@@ -162,11 +164,11 @@ impl Equipment for ElectricBaseboard {
         self.hvac.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
-        self.telemetry.insert("electric_kw", decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert("thermal_output_w", decoded.thermal_output_w);
+            .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry.insert(
-            "operating_mode",
+            tk::OPERATING_MODE,
             operating_mode_code(decoded.operating_mode),
         );
         Ok(())
@@ -186,26 +188,26 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(3);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("thermal_output_w", 0.0);
-    telemetry.insert("operating_mode", 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
 }
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electric baseboard active power draw".to_string(),
         },
         TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered sensible zone heat (baseboard bypasses ducts)".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
         },
@@ -262,8 +264,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -328,7 +330,12 @@ mod tests {
         let mut restored = ElectricBaseboard::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();
         restored.load_state(&state).unwrap();
-        assert_eq!(restored.telemetry().get("electric_kw"), Some(3.0));
+        assert_eq!(
+            restored
+                .telemetry()
+                .get(hares_types::telemetry_keys::ELECTRIC_KW),
+            Some(3.0)
+        );
     }
 
     #[test]

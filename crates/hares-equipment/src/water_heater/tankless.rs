@@ -6,7 +6,7 @@ use std::time::Duration;
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -316,14 +316,14 @@ impl Equipment for TanklessWH {
             })?;
         }
 
-        self.telemetry.set("outlet_temp_c", outlet_temp_c);
-        self.telemetry.set("thermal_output_w", thermal_output_w);
-        self.telemetry.set("fuel_input_w", fuel_input_w);
+        self.telemetry.set(tk::OUTLET_TEMP_C, outlet_temp_c);
+        self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
         self.telemetry
-            .set("parasitic_electric_w", self.parasitic_power_w);
-        self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
+            .set(tk::PARASITIC_ELECTRIC_W, self.parasitic_power_w);
+        self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(
-            "operating_mode",
+            tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {
                 1.0
             } else {
@@ -348,11 +348,11 @@ impl Equipment for TanklessWH {
             setpoint_c: self.setpoint_c,
             duty_cycle: self.duty_cycle,
             mode_override: self.mode_override,
-            outlet_temp_c: self.telemetry.get("outlet_temp_c").unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get("thermal_output_w").unwrap_or(0.0),
-            fuel_input_w: self.telemetry.get("fuel_input_w").unwrap_or(0.0),
-            parasitic_electric_w: self.telemetry.get("parasitic_electric_w").unwrap_or(0.0),
-            draw_flow_rate_kg_s: self.telemetry.get("draw_flow_rate_kg_s").unwrap_or(0.0),
+            outlet_temp_c: self.telemetry.get(tk::OUTLET_TEMP_C).unwrap_or(0.0),
+            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+            fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
+            parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
+            draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
             dr_level: self.dr_level,
             dr_setpoint_offset_c: self.dr_setpoint_offset_c,
             dr_load_fraction: self.dr_load_fraction,
@@ -371,16 +371,17 @@ impl Equipment for TanklessWH {
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
 
         self.telemetry
-            .insert("outlet_temp_c", decoded.outlet_temp_c);
+            .insert(tk::OUTLET_TEMP_C, decoded.outlet_temp_c);
         self.telemetry
-            .insert("thermal_output_w", decoded.thermal_output_w);
-        self.telemetry.insert("fuel_input_w", decoded.fuel_input_w);
+            .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry
-            .insert("parasitic_electric_w", decoded.parasitic_electric_w);
+            .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
         self.telemetry
-            .insert("draw_flow_rate_kg_s", decoded.draw_flow_rate_kg_s);
+            .insert(tk::PARASITIC_ELECTRIC_W, decoded.parasitic_electric_w);
+        self.telemetry
+            .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
-            "operating_mode",
+            tk::OPERATING_MODE,
             if decoded.thermal_output_w > 0.0 {
                 1.0
             } else {
@@ -468,45 +469,45 @@ fn build_ports(fuel_type: FuelType) -> Vec<PortDeclaration> {
 
 fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(6);
-    telemetry.insert("outlet_temp_c", 0.0);
-    telemetry.insert("thermal_output_w", 0.0);
-    telemetry.insert("fuel_input_w", 0.0);
-    telemetry.insert("parasitic_electric_w", 0.0);
-    telemetry.insert("draw_flow_rate_kg_s", 0.0);
-    telemetry.insert("operating_mode", 0.0);
+    telemetry.insert(tk::OUTLET_TEMP_C, 0.0);
+    telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::PARASITIC_ELECTRIC_W, 0.0);
+    telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
 }
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "outlet_temp_c".to_string(),
+            name: tk::OUTLET_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Delivered outlet water temperature".to_string(),
         },
         TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Instantaneous thermal output".to_string(),
         },
         TelemetryField {
-            name: "fuel_input_w".to_string(),
+            name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Input fuel/electric power".to_string(),
         },
         TelemetryField {
-            name: "parasitic_electric_w".to_string(),
+            name: tk::PARASITIC_ELECTRIC_W.to_string(),
             unit: "W".to_string(),
             description: "Gas ignition controller standby electric draw (gas units only)"
                 .to_string(),
         },
         TelemetryField {
-            name: "draw_flow_rate_kg_s".to_string(),
+            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
             unit: "kg/s".to_string(),
             description: "Domestic hot water draw flow rate".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "0=Off, 1=Heating".to_string(),
         },
@@ -518,7 +519,10 @@ mod tests {
     use std::{collections::HashMap, time::Duration};
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
-    use hares_types::{EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState};
+    use hares_types::{
+        EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
+    };
 
     use super::{DEFAULT_GAS_PARASITIC_POWER_W, TanklessWH, WATER_SPECIFIC_HEAT_J_PER_KG_K};
     use crate::{Equipment, EquipmentConfig};
@@ -560,8 +564,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -621,8 +625,10 @@ mod tests {
         let expected_thermal = 0.2 * 4183.0 * (50.0 - 20.0);
         let expected_input = expected_thermal / 0.8;
 
-        assert!((eq.telemetry().get("thermal_output_w").unwrap() - expected_thermal).abs() < 1e-6);
-        assert!((eq.telemetry().get("fuel_input_w").unwrap() - expected_input).abs() < 1e-6);
+        assert!(
+            (eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() - expected_thermal).abs() < 1e-6
+        );
+        assert!((eq.telemetry().get(tk::FUEL_INPUT_W).unwrap() - expected_input).abs() < 1e-6);
         assert!((ports.fuel.get(hares_types::FuelType::Gas) - expected_input).abs() < 1e-6);
     }
 
@@ -644,13 +650,13 @@ mod tests {
         eq.step(&env(), Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let outlet = eq.telemetry().get("outlet_temp_c").unwrap();
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
         assert_eq!(
             outlet, 20.0,
             "outlet_temp_c must equal inlet_temp_c (20.0) when off, got {outlet}"
         );
         assert_eq!(
-            eq.telemetry().get("thermal_output_w").unwrap(),
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap(),
             0.0,
             "thermal_output_w must be zero when off"
         );
@@ -708,7 +714,7 @@ mod tests {
         eq.step(&env(), Duration::from_secs(60), &mut p_before)
             .unwrap();
         assert!(
-            eq.telemetry().get("thermal_output_w").unwrap_or(0.0) > 0.0,
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0) > 0.0,
             "must be producing heat before DR is applied"
         );
 
@@ -728,12 +734,12 @@ mod tests {
         eq2.step(&env(), Duration::from_secs(60), &mut p).unwrap();
 
         assert_eq!(
-            eq2.telemetry().get("thermal_output_w").unwrap_or(1.0),
+            eq2.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(1.0),
             0.0,
             "thermal output must be zero during GridEmergency"
         );
         assert_eq!(
-            eq2.telemetry().get("fuel_input_w").unwrap_or(1.0),
+            eq2.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(1.0),
             0.0,
             "fuel input must be zero during GridEmergency"
         );
@@ -811,9 +817,9 @@ mod tests {
 
         step_once(&mut eq);
 
-        let outlet = eq.telemetry().get("outlet_temp_c").unwrap();
-        let thermal = eq.telemetry().get("thermal_output_w").unwrap();
-        let fuel = eq.telemetry().get("fuel_input_w").unwrap();
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
+        let thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let fuel = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         let expected_thermal = 0.2 * WATER_SPECIFIC_HEAT_J_PER_KG_K * 30.0;
 
         assert!(
@@ -854,9 +860,9 @@ mod tests {
 
         step_once(&mut eq);
 
-        let thermal = eq.telemetry().get("thermal_output_w").unwrap();
-        let fuel = eq.telemetry().get("fuel_input_w").unwrap();
-        let outlet = eq.telemetry().get("outlet_temp_c").unwrap();
+        let thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let fuel = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
 
         // Thermal output must be clamped at capacity.
         assert!(
@@ -908,12 +914,12 @@ mod tests {
         let ports = step_once(&mut eq);
 
         assert_eq!(
-            eq.telemetry().get("thermal_output_w").unwrap(),
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap(),
             0.0,
             "zero flow must produce zero thermal output"
         );
         assert_eq!(
-            eq.telemetry().get("fuel_input_w").unwrap(),
+            eq.telemetry().get(tk::FUEL_INPUT_W).unwrap(),
             0.0,
             "zero flow must produce zero fuel input"
         );
@@ -945,7 +951,7 @@ mod tests {
 
         step_once(&mut eq);
 
-        let fuel = eq.telemetry().get("fuel_input_w").unwrap();
+        let fuel = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         let max_input_w = 25_000.0 / 0.85;
 
         assert!(
@@ -976,7 +982,7 @@ mod tests {
 
         step_once(&mut eq);
 
-        let outlet = eq.telemetry().get("outlet_temp_c").unwrap();
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
         assert!(
             (outlet - 50.0).abs() < 1e-6,
             "very low flow must still deliver setpoint (50°C), got {outlet}"
@@ -1010,8 +1016,8 @@ mod tests {
 
         step_once(&mut eq);
 
-        let outlet = eq.telemetry().get("outlet_temp_c").unwrap();
-        let thermal = eq.telemetry().get("thermal_output_w").unwrap();
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
+        let thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
 
         assert!(
             (outlet - 50.0).abs() < 1e-6,
@@ -1055,8 +1061,8 @@ mod tests {
 
         step_once(&mut eq);
 
-        let thermal = eq.telemetry().get("thermal_output_w").unwrap();
-        let outlet = eq.telemetry().get("outlet_temp_c").unwrap();
+        let thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
         let effective_capacity = 20_000.0 * 0.5;
 
         assert!(
@@ -1106,7 +1112,7 @@ mod tests {
 
         step_once(&mut eq);
 
-        let fuel = eq.telemetry().get("fuel_input_w").unwrap();
+        let fuel = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         assert!(
             fuel <= 10_000.0 + 1e-6,
             "fuel input ({fuel:.1} W) must not exceed 10,000 W limit"
@@ -1130,12 +1136,12 @@ mod tests {
         let ports = step_once(&mut eq);
 
         assert_eq!(
-            eq.telemetry().get("thermal_output_w").unwrap(),
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap(),
             0.0,
             "thermal output must be zero when off"
         );
         assert_eq!(
-            eq.telemetry().get("fuel_input_w").unwrap(),
+            eq.telemetry().get(tk::FUEL_INPUT_W).unwrap(),
             0.0,
             "fuel input must be zero when burner is off"
         );
@@ -1163,7 +1169,7 @@ mod tests {
 
         // Burner should be on (flow > 0, enabled).
         assert!(
-            eq.telemetry().get("thermal_output_w").unwrap() > 0.0,
+            eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() > 0.0,
             "burner must be producing heat in this test"
         );
 
@@ -1246,11 +1252,11 @@ mod tests {
         })
         .unwrap();
         step_once(&mut eq);
-        let thermal_limited = eq.telemetry().get("thermal_output_w").unwrap();
+        let thermal_limited = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
 
         // Step again WITHOUT reapplying PowerLimit → full capacity restored
         step_once(&mut eq);
-        let thermal_full = eq.telemetry().get("thermal_output_w").unwrap();
+        let thermal_full = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
 
         assert!(
             thermal_full > thermal_limited,
@@ -1298,7 +1304,7 @@ mod tests {
 
         // Restored unit should use full rated capacity (power limit is transient)
         step_once(&mut restored);
-        let thermal = restored.telemetry().get("thermal_output_w").unwrap();
+        let thermal = restored.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
         assert!(
             (thermal - 20_000.0).abs() < 1e-6,
             "after restore, full rated capacity should apply: got {thermal}"
@@ -1378,8 +1384,8 @@ mod tests {
                     .single()
                     .expect("valid"),
                 time_res: ChronoDuration::seconds(60),
-            price_signal: Default::default(),
-            electrical: Default::default(),
+                price_signal: Default::default(),
+                electrical: Default::default(),
             }
         }
 
@@ -1408,7 +1414,7 @@ mod tests {
         eq_cold
             .step(&cold_env, Duration::from_secs(60), &mut ports_cold)
             .unwrap();
-        let thermal_cold = eq_cold.telemetry().get("thermal_output_w").unwrap_or(0.0);
+        let thermal_cold = eq_cold.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0);
 
         let mut eq_warm = TanklessWH::new(cfg.clone());
         eq_warm.init(&cfg, &warm_env).unwrap();
@@ -1416,7 +1422,7 @@ mod tests {
         eq_warm
             .step(&warm_env, Duration::from_secs(60), &mut ports_warm)
             .unwrap();
-        let thermal_warm = eq_warm.telemetry().get("thermal_output_w").unwrap_or(0.0);
+        let thermal_warm = eq_warm.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0);
 
         assert!(
             thermal_cold > thermal_warm,

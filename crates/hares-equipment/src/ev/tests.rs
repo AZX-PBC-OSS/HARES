@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_types::{
-    ControlSignal, EnvironmentState, EvConnectionState, GridState, PortSlots,
-    SurfaceIrradiance, WeatherState, ZoneState,
+    ControlSignal, EnvironmentState, EvConnectionState, GridState, PortSlots, SurfaceIrradiance,
+    WeatherState, ZoneState,
 };
 
 use super::*;
@@ -60,8 +60,8 @@ fn sample_env() -> EnvironmentState {
         equipment_telemetry: std::collections::HashMap::new(),
         current_time: dt(2026, 1, 1, 0, 0, 0),
         time_res: ChronoDuration::minutes(1),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 
@@ -114,7 +114,10 @@ fn no_power_when_disconnected() {
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
     assert_eq!(ev.telemetry().get("active_power_kw"), Some(0.0));
-    assert_eq!(ev.telemetry().get("connection_state"), Some(TELEMETRY_STATE_DISCONNECTED));
+    assert_eq!(
+        ev.telemetry().get("connection_state"),
+        Some(TELEMETRY_STATE_DISCONNECTED)
+    );
     assert_eq!(ports.electrical.load_power_kw, 0.0);
 }
 
@@ -457,9 +460,7 @@ fn heater_draw_slows_soc_gain() {
     raw_no_heater.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
     let config_no_heater = ev_config(raw_no_heater);
     let mut ev_no_heater = Ev::new(config_no_heater.clone());
-    ev_no_heater
-        .init(&config_no_heater, &sample_env())
-        .unwrap();
+    ev_no_heater.init(&config_no_heater, &sample_env()).unwrap();
     let soc_before_no_heater = ev_no_heater.soc;
     let mut ports = PortSlots::default();
     ev_no_heater
@@ -918,12 +919,7 @@ fn no_lut_charges_at_full_rated_power() {
 
 #[test]
 fn lut_with_soh_adjusted_c_rate() {
-    let axes = vec![
-        vec![0.0, 1.0],
-        vec![25.0],
-        vec![0.05, 0.30],
-        vec![0.5, 1.0],
-    ];
+    let axes = vec![vec![0.0, 1.0], vec![25.0], vec![0.05, 0.30], vec![0.5, 1.0]];
     let values = vec![1.0f32, 1.0, 0.1, 0.1, 1.0, 1.0, 0.1, 0.1];
     let lut = crate::ndinterp::RegularGridInterpolator::new(axes, values).unwrap();
 
@@ -1114,7 +1110,10 @@ fn ev_away_charge_increases_soc_no_residential_power() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
-    assert!(ev.soc > soc_before, "SOC should increase from away charging");
+    assert!(
+        ev.soc > soc_before,
+        "SOC should increase from away charging"
+    );
     assert_eq!(
         ev.telemetry().get("active_power_kw"),
         Some(0.0),
@@ -1284,7 +1283,10 @@ fn power_setpoint_zero_suppresses_charging() {
     let soc_before = ev.soc;
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
-    assert_eq!(ev.soc, soc_before, "PowerSetpoint=0 should suppress charging");
+    assert_eq!(
+        ev.soc, soc_before,
+        "PowerSetpoint=0 should suppress charging"
+    );
 }
 
 #[test]
@@ -1319,10 +1321,7 @@ fn ev_set_ready_by_delays_then_charges() {
         power_early, 0.0,
         "BMS should delay charging early in the evening"
     );
-    assert!(
-        power_late > 0.0,
-        "BMS should be charging close to deadline"
-    );
+    assert!(power_late > 0.0, "BMS should be charging close to deadline");
 }
 
 #[test]
@@ -1413,7 +1412,10 @@ fn already_at_target_produces_zero_power() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let power = ev.telemetry().get("active_power_kw").unwrap();
-    assert_eq!(power, 0.0, "already above target SOC should produce 0 power");
+    assert_eq!(
+        power, 0.0,
+        "already above target SOC should produce 0 power"
+    );
 }
 
 #[test]
@@ -1465,10 +1467,7 @@ fn negative_start_hour_charges_immediately() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let power = ev.telemetry().get("active_power_kw").unwrap();
-    assert!(
-        power > 0.0,
-        "negative start_hour should charge immediately"
-    );
+    assert!(power > 0.0, "negative start_hour should charge immediately");
 }
 
 #[test]
@@ -1600,7 +1599,10 @@ fn telemetry_disconnected() {
 
     assert_eq!(ev.telemetry().get("active_power_kw"), Some(0.0));
     assert_eq!(ev.telemetry().get("away_charge_power_kw"), Some(0.0));
-    assert_eq!(ev.telemetry().get("connection_state"), Some(TELEMETRY_STATE_DISCONNECTED));
+    assert_eq!(
+        ev.telemetry().get("connection_state"),
+        Some(TELEMETRY_STATE_DISCONNECTED)
+    );
 }
 
 #[test]
@@ -1642,7 +1644,10 @@ fn away_charge_zero_power_idles() {
     let soc_before = ev.soc;
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
-    assert_eq!(ev.soc, soc_before, "zero away charge power should not change SOC");
+    assert_eq!(
+        ev.soc, soc_before,
+        "zero away charge power should not change SOC"
+    );
 }
 
 #[test]
@@ -1827,10 +1832,7 @@ fn driving_soc_decrease_matches_fuel_economy() {
     let mut raw = base_raw();
     raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 1.0.into());
-    raw.insert(
-        KEY_FUEL_ECONOMY_KWH_PER_MI.to_string(),
-        0.325.into(),
-    );
+    raw.insert(KEY_FUEL_ECONOMY_KWH_PER_MI.to_string(), 0.325.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -1920,11 +1922,7 @@ fn soc_clamps_at_boundaries() {
     for _ in 0..600 {
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-        assert!(
-            ev.soc <= 1.0,
-            "SOC must never exceed 1.0, got {}",
-            ev.soc
-        );
+        assert!(ev.soc <= 1.0, "SOC must never exceed 1.0, got {}", ev.soc);
     }
     assert!(
         (ev.soc - 1.0).abs() < 1e-9,
@@ -2046,7 +2044,8 @@ fn charging_waste_heat_matches_efficiency_loss() {
 
     let temp_before = ev.battery_temp_c;
     let mut ports = PortSlots::default();
-    ev.step(&env, Duration::from_secs(3600), &mut ports).unwrap();
+    ev.step(&env, Duration::from_secs(3600), &mut ports)
+        .unwrap();
 
     // Waste heat = AC_kW * (1 - eta) = 7.2 * 0.10 = 0.72 kW = 720 W
     // Temperature rise = Q * dt / thermal_mass = 720 * 3600 / 20000 = 129.6 C
@@ -2281,7 +2280,10 @@ fn ev_connection_state_transitions() {
     .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    assert_eq!(ev.telemetry().get("connection_state"), Some(TELEMETRY_STATE_DISCONNECTED));
+    assert_eq!(
+        ev.telemetry().get("connection_state"),
+        Some(TELEMETRY_STATE_DISCONNECTED)
+    );
     assert_eq!(ev.connection_state, EvConnectionState::Disconnected);
 
     // Disconnected → AwayPluggedIn (away charging)
@@ -2301,7 +2303,10 @@ fn ev_connection_state_transitions() {
     .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    assert_eq!(ev.telemetry().get("connection_state"), Some(TELEMETRY_STATE_DISCONNECTED));
+    assert_eq!(
+        ev.telemetry().get("connection_state"),
+        Some(TELEMETRY_STATE_DISCONNECTED)
+    );
 
     // Disconnected → HomePluggedIn (arrival)
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
@@ -2378,10 +2383,8 @@ fn ev_insufficient_charge_before_departure() {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvDrive {
-        kwh: drive_kwh,
-    })
-    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
+        .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, dt, &mut ports).unwrap();
@@ -2510,9 +2513,5 @@ fn ev_departure_at_step_boundary() {
         "after 1440 min starting from urgent state SOC must be above initial 0.2, got {}",
         ev.soc
     );
-    assert!(
-        ev.soc <= 1.0,
-        "SOC must not exceed 1.0, got {}",
-        ev.soc
-    );
+    assert!(ev.soc <= 1.0, "SOC must not exceed 1.0, got {}", ev.soc);
 }

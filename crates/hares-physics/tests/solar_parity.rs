@@ -264,11 +264,33 @@ fn poa_total_zero_at_night() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "pvlib parity: run pvlib-python 0.10.x for GHI=900/DNI=800/DHI=100/zenith=30°/tilt=30°/az=180° and hardcode total POA reference value within 1%"]
 fn poa_total_matches_pvlib_reference() {
-    // Placeholder — fill in after running pvlib.
-    let _pvlib_expected_poa = 920.0_f64; // W/m² — replace with actual pvlib output
-    unimplemented!("fill in pvlib reference value and tolerance");
+    // pvlib 0.15.0, Perez model, albedo=0.2, day_of_year=80 (March equinox):
+    //   pvlib.irradiance.get_total_irradiance(
+    //       surface_tilt=30, surface_azimuth=180, solar_zenith=30, solar_azimuth=180,
+    //       dni=800, ghi=900, dhi=100, albedo=0.2, model='perez',
+    //       dni_extra=pvlib.irradiance.get_extra_radiation(80))
+    //   → poa_global=925.4807, poa_direct=800.0, poa_sky_diffuse=113.4230, poa_ground_diffuse=12.0577
+    let result = perez_tilted_irradiance(
+        0,     // surface_id
+        900.0, // ghi
+        800.0, // dni
+        100.0, // dhi
+        30.0,  // solar_zenith_deg
+        180.0, // solar_azimuth_deg
+        30.0,  // surface_tilt_deg
+        180.0, // surface_azimuth_deg
+        80,    // day_of_year (March equinox)
+        0.2,   // ground_albedo
+    );
+    let hares_poa = result.direct_w_m2 + result.diffuse_w_m2 + result.reflected_w_m2;
+    let pvlib_poa = 925.4807_f64;
+    let rel_err = (hares_poa - pvlib_poa).abs() / pvlib_poa;
+    assert!(
+        rel_err < 0.01,
+        "HARES POA ({hares_poa:.2} W/m²) must be within 1% of pvlib ({pvlib_poa:.2} W/m²), \
+         relative error = {rel_err:.4}"
+    );
 }
 
 // ---------------------------------------------------------------------------

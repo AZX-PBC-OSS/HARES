@@ -13,7 +13,7 @@ zone_volume_m3 = 129.6
 wall_r_value_m2_k_w = 2.0
 
 [hvac]
-equipment_name = "Furnace"
+equipment_name = "IdealHVAC"
 fuel = "electricity"
 heating_capacity_kbtu_h = 30.0
 

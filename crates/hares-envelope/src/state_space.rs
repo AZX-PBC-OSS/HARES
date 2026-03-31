@@ -276,14 +276,43 @@ impl StateSpaceModel {
 
         let eye = DMatrix::<f64>::identity(n, n);
 
-        // Stability check on discrete A_d
+        // Stability check on discrete A_d.
+        // Avoid exact eigendecomposition of A_c at runtime; some borderline RC
+        // matrices can stall Schur iterations in nalgebra during construction.
+        // Use a conservative Gershgorin check for continuous-time stability and
+        // keep exact discrete eigs (already computed here) for near-unity diagnostics.
         let max_discrete_eigenvalue_magnitude;
         if n <= 20 {
             let eigs = a_d.complex_eigenvalues();
             max_discrete_eigenvalue_magnitude =
                 Some(eigs.iter().map(|l| l.norm()).fold(0.0_f64, f64::max));
             let a_c_singular = is_singular(a_c);
-            if let Err(stability) = eigenvalue_check(a_c, &a_d) {
+            let continuous_stable = gershgorin_continuous_stable(a_c);
+            let discrete_stable = eigs.iter().all(|lambda| lambda.norm() < 1.0);
+            let near_unity_eigenvalues = eigs
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, lambda)| lambda.norm() > NEAR_UNITY_EIGENVALUE_THRESHOLD)
+                .collect::<Vec<_>>();
+
+            for (index, eigenvalue) in &near_unity_eigenvalues {
+                tracing::warn!(
+                    eigen_index = *index,
+                    eigen_real = eigenvalue.re,
+                    eigen_imag = eigenvalue.im,
+                    magnitude = eigenvalue.norm(),
+                    "Near-unity discrete eigenvalue detected; convergence may be slow"
+                );
+            }
+
+            let stability = StabilityResult {
+                continuous_stable,
+                discrete_stable,
+                near_unity_eigenvalues,
+            };
+
+            if !(stability.continuous_stable && stability.discrete_stable) {
                 let discrete_marginally_stable =
                     eigs.iter().all(|lambda| lambda.norm() <= 1.0 + 1e-10);
                 if !(a_c_singular && discrete_marginally_stable) {

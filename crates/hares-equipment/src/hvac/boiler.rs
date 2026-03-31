@@ -12,6 +12,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_types::telemetry_keys as tk;
+
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::{
@@ -234,12 +236,12 @@ impl Equipment for ElectricBoiler {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        self.telemetry.set("electric_kw", electric_kw);
-        self.telemetry.set("thermal_output_w", thermal_output_w);
-        self.telemetry.set("supply_temp_c", supply_temp_c);
-        self.telemetry.set("return_temp_c", return_temp_c);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
+        self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
+        self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
-            .set("operating_mode", operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
 
         Ok(())
     }
@@ -256,12 +258,12 @@ impl Equipment for ElectricBoiler {
             runtime_setpoints: self.hvac.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
             fuel_input_w: 0.0,
-            thermal_output_w: self.telemetry.get("thermal_output_w").unwrap_or(0.0),
+            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
             eir: 1.0 / self.efficiency,
-            supply_temp_c: self.telemetry.get("supply_temp_c").unwrap_or(0.0),
-            return_temp_c: self.telemetry.get("return_temp_c").unwrap_or(0.0),
+            supply_temp_c: self.telemetry.get(tk::SUPPLY_TEMP_C).unwrap_or(0.0),
+            return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
         })
     }
 
@@ -274,15 +276,15 @@ impl Equipment for ElectricBoiler {
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
 
-        self.telemetry.insert("electric_kw", decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert("thermal_output_w", decoded.thermal_output_w);
+            .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry
-            .insert("supply_temp_c", decoded.supply_temp_c);
+            .insert(tk::SUPPLY_TEMP_C, decoded.supply_temp_c);
         self.telemetry
-            .insert("return_temp_c", decoded.return_temp_c);
+            .insert(tk::RETURN_TEMP_C, decoded.return_temp_c);
         self.telemetry.insert(
-            "operating_mode",
+            tk::OPERATING_MODE,
             operating_mode_code(decoded.operating_mode),
         );
         Ok(())
@@ -524,15 +526,15 @@ impl Equipment for GasBoiler {
             }
         }
 
-        self.telemetry.set("electric_kw", electric_kw);
-        self.telemetry.set("fuel_input_w", fuel_input_w);
-        self.telemetry.set("thermal_output_w", thermal_output_w);
-        self.telemetry.set("jacket_loss_w", jacket_loss_w);
-        self.telemetry.set("eir", eir);
-        self.telemetry.set("supply_temp_c", supply_temp_c);
-        self.telemetry.set("return_temp_c", return_temp_c);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
+        self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
+        self.telemetry.set(tk::JACKET_LOSS_W, jacket_loss_w);
+        self.telemetry.set(tk::EIR, eir);
+        self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
+        self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
-            .set("operating_mode", operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
 
         Ok(())
     }
@@ -549,12 +551,12 @@ impl Equipment for GasBoiler {
             runtime_setpoints: self.hvac.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
-            fuel_input_w: self.telemetry.get("fuel_input_w").unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get("thermal_output_w").unwrap_or(0.0),
-            eir: self.telemetry.get("eir").unwrap_or(self.eir_max),
-            supply_temp_c: self.telemetry.get("supply_temp_c").unwrap_or(0.0),
-            return_temp_c: self.telemetry.get("return_temp_c").unwrap_or(0.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+            fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
+            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+            eir: self.telemetry.get(tk::EIR).unwrap_or(self.eir_max),
+            supply_temp_c: self.telemetry.get(tk::SUPPLY_TEMP_C).unwrap_or(0.0),
+            return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
         })
     }
 
@@ -567,17 +569,18 @@ impl Equipment for GasBoiler {
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
 
-        self.telemetry.insert("electric_kw", decoded.electric_kw);
-        self.telemetry.insert("fuel_input_w", decoded.fuel_input_w);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert("thermal_output_w", decoded.thermal_output_w);
-        self.telemetry.insert("eir", decoded.eir);
+            .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
         self.telemetry
-            .insert("supply_temp_c", decoded.supply_temp_c);
+            .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
+        self.telemetry.insert(tk::EIR, decoded.eir);
         self.telemetry
-            .insert("return_temp_c", decoded.return_temp_c);
+            .insert(tk::SUPPLY_TEMP_C, decoded.supply_temp_c);
+        self.telemetry
+            .insert(tk::RETURN_TEMP_C, decoded.return_temp_c);
         self.telemetry.insert(
-            "operating_mode",
+            tk::OPERATING_MODE,
             operating_mode_code(decoded.operating_mode),
         );
         Ok(())
@@ -615,51 +618,51 @@ fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
 
 fn electric_boiler_default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(5);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("thermal_output_w", 0.0);
-    telemetry.insert("supply_temp_c", 0.0);
-    telemetry.insert("return_temp_c", 0.0);
-    telemetry.insert("operating_mode", 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
+    telemetry.insert(tk::RETURN_TEMP_C, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
 }
 
 fn gas_boiler_default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(8);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("fuel_input_w", 0.0);
-    telemetry.insert("thermal_output_w", 0.0);
-    telemetry.insert("jacket_loss_w", 0.0);
-    telemetry.insert("eir", 0.0);
-    telemetry.insert("supply_temp_c", 0.0);
-    telemetry.insert("return_temp_c", 0.0);
-    telemetry.insert("operating_mode", 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::JACKET_LOSS_W, 0.0);
+    telemetry.insert(tk::EIR, 0.0);
+    telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
+    telemetry.insert(tk::RETURN_TEMP_C, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
 }
 
 fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electric boiler active power draw".to_string(),
         },
         TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Thermal output transferred to hydronic loop".to_string(),
         },
         TelemetryField {
-            name: "supply_temp_c".to_string(),
+            name: tk::SUPPLY_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Fluid supply temperature".to_string(),
         },
         TelemetryField {
-            name: "return_temp_c".to_string(),
+            name: tk::RETURN_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Fluid return temperature".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
         },
@@ -669,42 +672,42 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
 fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Gas boiler auxiliary electrical draw (pump/fan)".to_string(),
         },
         TelemetryField {
-            name: "fuel_input_w".to_string(),
+            name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Gas boiler fuel input power".to_string(),
         },
         TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Thermal output transferred to hydronic loop".to_string(),
         },
         TelemetryField {
-            name: "jacket_loss_w".to_string(),
+            name: tk::JACKET_LOSS_W.to_string(),
             unit: "W".to_string(),
             description: "Jacket heat loss to zone (fuel_input - thermal_output)".to_string(),
         },
         TelemetryField {
-            name: "eir".to_string(),
+            name: tk::EIR.to_string(),
             unit: "-".to_string(),
             description: "Instantaneous energy-input ratio after polynomial adjustment".to_string(),
         },
         TelemetryField {
-            name: "supply_temp_c".to_string(),
+            name: tk::SUPPLY_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Fluid supply temperature".to_string(),
         },
         TelemetryField {
-            name: "return_temp_c".to_string(),
+            name: tk::RETURN_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Fluid return temperature".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
         },
@@ -769,7 +772,7 @@ mod tests {
     use hares_types::{
         DomainUpdate, EnvironmentState, ExecutionStage, FLUID, FluidDomainPayload, FluidLoopState,
         FluidType, GridState, LoopId, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
-        ZoneState,
+        ZoneState, telemetry_keys as tk,
     };
 
     use super::{
@@ -815,8 +818,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -931,7 +934,7 @@ mod tests {
             + c[4] * t_in * t_in
             + c[5] * plr * t_in;
         let expected_eir = 1.2 / eff_curve;
-        let observed_eir = eq.telemetry().get("eir").unwrap();
+        let observed_eir = eq.telemetry().get(tk::EIR).unwrap();
         assert!(
             (observed_eir - expected_eir).abs() < 1e-4,
             "condensing EIR at PLR=0.5, t_zone=18°C: observed={observed_eir}, expected={expected_eir}"
@@ -1005,8 +1008,8 @@ mod tests {
             .step(&env, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let cond_eff = 1.0 / cond_boiler.telemetry().get("eir").unwrap();
-        let non_eff = 1.0 / non_boiler.telemetry().get("eir").unwrap();
+        let cond_eff = 1.0 / cond_boiler.telemetry().get(tk::EIR).unwrap();
+        let non_eff = 1.0 / non_boiler.telemetry().get(tk::EIR).unwrap();
         assert!(cond_eff > non_eff);
     }
 
@@ -1043,8 +1046,8 @@ mod tests {
         restored.init(&cfg, &env).unwrap();
         restored.load_state(&state).unwrap();
         assert_eq!(
-            restored.telemetry().get("fuel_input_w"),
-            eq.telemetry().get("fuel_input_w")
+            restored.telemetry().get(tk::FUEL_INPUT_W),
+            eq.telemetry().get(tk::FUEL_INPUT_W)
         );
     }
 
@@ -1100,7 +1103,7 @@ mod tests {
             + c[9] * plr * t_out * t_out;
         let eir_max = 1.0 / 0.8;
         let expected_eir = eir_max / curve;
-        let observed_eir = eq.telemetry().get("eir").unwrap();
+        let observed_eir = eq.telemetry().get(tk::EIR).unwrap();
         assert!(
             (observed_eir - expected_eir).abs() < 1e-4,
             "non-condensing EIR at PLR=0.5, t_out=82.22°C: observed={observed_eir}, expected={expected_eir}"
@@ -1149,9 +1152,9 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let fuel_input_w = eq.telemetry().get("fuel_input_w").unwrap();
-        let thermal_output_w = eq.telemetry().get("thermal_output_w").unwrap();
-        let jacket_loss_w = eq.telemetry().get("jacket_loss_w").unwrap();
+        let fuel_input_w = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let thermal_output_w = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let jacket_loss_w = eq.telemetry().get(tk::JACKET_LOSS_W).unwrap();
 
         // Fuel > thermal output for a sub-unity efficiency boiler.
         assert!(
@@ -1221,7 +1224,7 @@ mod tests {
             "jacket loss must be zero when boiler is off"
         );
         assert_eq!(
-            eq.telemetry().get("jacket_loss_w").unwrap(),
+            eq.telemetry().get(tk::JACKET_LOSS_W).unwrap(),
             0.0,
             "telemetry jacket_loss_w must be zero when boiler is off"
         );

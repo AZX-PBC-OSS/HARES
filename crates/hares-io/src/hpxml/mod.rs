@@ -19,8 +19,8 @@ use building::{parse_building_from_node, parse_xml_document};
 use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema_node};
 
 pub use building::{
-    Boundary, BoundaryType, Building, DuctLocation, DuctSystem, MaterialLayer, Site, SiteType,
-    Window, Zone, ZoneType,
+    Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer, Site,
+    SiteType, Window, Zone, ZoneType,
 };
 pub use equipment::{EquipmentSpec, nested_update, resolve_equipment};
 pub use validation::{ValidationReport, ValidationWarning};

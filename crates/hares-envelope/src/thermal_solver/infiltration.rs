@@ -291,7 +291,10 @@ mod tests {
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
             },
-            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
             custom_domains: vec![],
             equipment_telemetry: HashMap::new(),
             current_time: FixedOffset::east_opt(0)
@@ -584,16 +587,14 @@ mod tests {
 
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
-            infiltration: vec![(
-                ZoneId(1),
-                InfiltrationMethod::Ach { ach: 0.0 },
-            )],
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
             natural_ventilation: Some(NaturalVentilationConfig {
                 open_area_m2,
                 stack_coeff,
                 wind_coeff,
                 t_base_c,
-                max_outdoor_humidity_ratio: NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                max_outdoor_humidity_ratio:
+                    NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
             }),
             ..ThermalSolverConfig::default()
         };
@@ -612,8 +613,8 @@ mod tests {
         let nat_vent_area_cm2 = open_area_m2 * 0.6 * 10_000.0;
         let adj = ((t_zone - t_base_c) / (t_zone - t_out)).clamp(0.0, 1.0);
         let driver = stack_coeff * (t_zone - t_out).abs() + wind_coeff * wind_m_s.powi(2);
-        let q_expected = (nat_vent_area_cm2 * adj * driver.sqrt() / 1000.0)
-            .min(20.0 * volume_m3 / 3600.0);
+        let q_expected =
+            (nat_vent_area_cm2 * adj * driver.sqrt() / 1000.0).min(20.0 * volume_m3 / 3600.0);
 
         assert!(
             (nat_flow - q_expected).abs() < 1e-9,
@@ -629,16 +630,14 @@ mod tests {
 
         let config = ThermalSolverConfig {
             indoor_zone_id: ZoneId(1),
-            infiltration: vec![(
-                ZoneId(1),
-                InfiltrationMethod::Ach { ach: 0.0 },
-            )],
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
             natural_ventilation: Some(NaturalVentilationConfig {
                 open_area_m2: 0.5,
                 stack_coeff: 0.000_290,
                 wind_coeff: 0.000_150,
                 t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
-                max_outdoor_humidity_ratio: NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                max_outdoor_humidity_ratio:
+                    NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
             }),
             ..ThermalSolverConfig::default()
         };
@@ -662,8 +661,8 @@ mod tests {
     /// m_dot_lat * H_FG * (w_out - w_zone).
     #[test]
     fn infiltration_latent_output() {
-        use hares_physics::air_properties::moist_air_density_kg_m3;
         use super::super::H_FG_J_PER_KG;
+        use hares_physics::air_properties::moist_air_density_kg_m3;
 
         let volume_m3 = 300.0_f64;
         let ach = 0.5_f64;

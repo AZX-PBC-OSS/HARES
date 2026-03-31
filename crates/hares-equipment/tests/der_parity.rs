@@ -78,8 +78,8 @@ fn base_env() -> EnvironmentState {
             .single()
             .expect("valid"),
         time_res: chrono::Duration::seconds(60),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 

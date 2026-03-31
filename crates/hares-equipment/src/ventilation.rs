@@ -21,6 +21,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_types::telemetry_keys as tk;
+
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, restore_schedule_source_state,
 };
@@ -284,13 +286,13 @@ impl Equipment for Ventilation {
         let is_running = self.mode != OperatingMode::Off && self.dr_level != DRLevel::GridEmergency;
 
         if !is_running {
-            self.telemetry.set("electric_kw", 0.0);
-            self.telemetry.set("fan_power_w", 0.0);
-            self.telemetry.set("sensible_recovery_w", 0.0);
-            self.telemetry.set("latent_recovery_w", 0.0);
+            self.telemetry.set(tk::ELECTRIC_KW, 0.0);
+            self.telemetry.set(tk::FAN_POWER_W, 0.0);
+            self.telemetry.set(tk::SENSIBLE_RECOVERY_W, 0.0);
+            self.telemetry.set(tk::LATENT_RECOVERY_W, 0.0);
             self.telemetry
-                .set("supply_temp_c", env.weather.outdoor_temp_c);
-            self.telemetry.set("bypass_active", 0.0);
+                .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
+            self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
             return Ok(());
         }
 
@@ -299,13 +301,13 @@ impl Equipment for Ventilation {
         let effective_fan_power_w = self.fan_power_w * schedule_frac;
 
         if effective_flow_rate_m3_s <= 0.0 {
-            self.telemetry.set("electric_kw", 0.0);
-            self.telemetry.set("fan_power_w", 0.0);
-            self.telemetry.set("sensible_recovery_w", 0.0);
-            self.telemetry.set("latent_recovery_w", 0.0);
+            self.telemetry.set(tk::ELECTRIC_KW, 0.0);
+            self.telemetry.set(tk::FAN_POWER_W, 0.0);
+            self.telemetry.set(tk::SENSIBLE_RECOVERY_W, 0.0);
+            self.telemetry.set(tk::LATENT_RECOVERY_W, 0.0);
             self.telemetry
-                .set("supply_temp_c", env.weather.outdoor_temp_c);
-            self.telemetry.set("bypass_active", 0.0);
+                .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
+            self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
             return Ok(());
         }
 
@@ -360,14 +362,15 @@ impl Equipment for Ventilation {
         })?;
 
         // Telemetry
-        self.telemetry.set("electric_kw", fan_kw);
-        self.telemetry.set("fan_power_w", effective_fan_power_w);
+        self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
+        self.telemetry.set(tk::FAN_POWER_W, effective_fan_power_w);
         self.telemetry
-            .set("sensible_recovery_w", q_recovery_sensible_w);
-        self.telemetry.set("latent_recovery_w", q_recovery_latent_w);
-        self.telemetry.set("supply_temp_c", t_supply_c);
+            .set(tk::SENSIBLE_RECOVERY_W, q_recovery_sensible_w);
         self.telemetry
-            .set("bypass_active", if bypass_active { 1.0 } else { 0.0 });
+            .set(tk::LATENT_RECOVERY_W, q_recovery_latent_w);
+        self.telemetry.set(tk::SUPPLY_TEMP_C, t_supply_c);
+        self.telemetry
+            .set(tk::BYPASS_ACTIVE, if bypass_active { 1.0 } else { 0.0 });
 
         Ok(())
     }
@@ -431,39 +434,39 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn default_telemetry() -> Telemetry {
     let mut t = Telemetry::with_capacity(6);
-    t.insert("electric_kw", 0.0);
-    t.insert("fan_power_w", 0.0);
-    t.insert("sensible_recovery_w", 0.0);
-    t.insert("latent_recovery_w", 0.0);
-    t.insert("supply_temp_c", 20.0);
-    t.insert("bypass_active", 0.0);
+    t.insert(tk::ELECTRIC_KW, 0.0);
+    t.insert(tk::FAN_POWER_W, 0.0);
+    t.insert(tk::SENSIBLE_RECOVERY_W, 0.0);
+    t.insert(tk::LATENT_RECOVERY_W, 0.0);
+    t.insert(tk::SUPPLY_TEMP_C, 20.0);
+    t.insert(tk::BYPASS_ACTIVE, 0.0);
     t
 }
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "fan_power_w".to_string(),
+            name: tk::FAN_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Fan electrical power consumption".to_string(),
         },
         TelemetryField {
-            name: "sensible_recovery_w".to_string(),
+            name: tk::SENSIBLE_RECOVERY_W.to_string(),
             unit: "W".to_string(),
             description: "Sensible heat recovered by HRV/ERV".to_string(),
         },
         TelemetryField {
-            name: "latent_recovery_w".to_string(),
+            name: tk::LATENT_RECOVERY_W.to_string(),
             unit: "W".to_string(),
             description: "Latent heat recovered by ERV".to_string(),
         },
         TelemetryField {
-            name: "supply_temp_c".to_string(),
+            name: tk::SUPPLY_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Supply air temperature after recovery".to_string(),
         },
         TelemetryField {
-            name: "bypass_active".to_string(),
+            name: tk::BYPASS_ACTIVE.to_string(),
             unit: "-".to_string(),
             description: "Bypass mode active (1 = bypassing recovery)".to_string(),
         },
@@ -503,8 +506,8 @@ mod tests {
                 .single()
                 .expect("valid time"),
             time_res: chrono::TimeDelta::minutes(5),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -553,7 +556,10 @@ mod tests {
             .expect("step");
 
         // T_supply = 0 + 0.70 * (20 - 0) = 14°C
-        let t_supply = hrv.telemetry().get("supply_temp_c").expect("supply_temp_c");
+        let t_supply = hrv
+            .telemetry()
+            .get(tk::SUPPLY_TEMP_C)
+            .expect("supply_temp_c");
         assert!(
             (t_supply - 14.0).abs() < 0.5,
             "HRV supply at 0°C outdoor / 20°C indoor / 70% eff should be ~14°C, got {t_supply}"
@@ -576,7 +582,10 @@ mod tests {
             .expect("step");
 
         // T_supply = -20 + 0.35 * (20 - (-20)) = -20 + 14 = -6°C
-        let t_supply = hrv.telemetry().get("supply_temp_c").expect("supply_temp_c");
+        let t_supply = hrv
+            .telemetry()
+            .get(tk::SUPPLY_TEMP_C)
+            .expect("supply_temp_c");
         assert!(
             (t_supply - (-6.0)).abs() < 0.5,
             "HRV at -20°C with defrost (35% eff) should give ~-6°C supply, got {t_supply}"
@@ -606,7 +615,7 @@ mod tests {
 
         let recovery = hrv
             .telemetry()
-            .get("sensible_recovery_w")
+            .get(tk::SENSIBLE_RECOVERY_W)
             .expect("recovery");
         assert!(recovery > 0.0, "HRV should recover positive sensible heat");
 
@@ -638,7 +647,7 @@ mod tests {
         erv.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let latent_recovery = erv.telemetry().get("latent_recovery_w").expect("latent");
+        let latent_recovery = erv.telemetry().get(tk::LATENT_RECOVERY_W).expect("latent");
         assert!(
             latent_recovery > 0.0,
             "ERV should recover positive latent heat, got {latent_recovery}"
@@ -680,14 +689,14 @@ mod tests {
         hrv.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let bypass = hrv.telemetry().get("bypass_active").expect("bypass");
+        let bypass = hrv.telemetry().get(tk::BYPASS_ACTIVE).expect("bypass");
         assert!(
             (bypass - 1.0).abs() < 0.01,
             "bypass should be active when outdoor is in comfort range"
         );
         let recovery = hrv
             .telemetry()
-            .get("sensible_recovery_w")
+            .get(tk::SENSIBLE_RECOVERY_W)
             .expect("recovery");
         assert!(
             recovery.abs() < 0.1,
@@ -709,7 +718,7 @@ mod tests {
         };
         hrv.step(&cold_env, Duration::from_secs(300), &mut ports_cold)
             .expect("step cold");
-        let _recovery_cold = hrv.telemetry().get("sensible_recovery_w").expect("cold");
+        let _recovery_cold = hrv.telemetry().get(tk::SENSIBLE_RECOVERY_W).expect("cold");
 
         let mut ports_mild = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -751,7 +760,7 @@ mod tests {
 
         let recovery = fan
             .telemetry()
-            .get("sensible_recovery_w")
+            .get(tk::SENSIBLE_RECOVERY_W)
             .expect("recovery");
         assert!(
             recovery.abs() < 0.01,
@@ -819,11 +828,11 @@ mod tests {
 
         let power_half = hrv
             .telemetry()
-            .get("fan_power_w")
+            .get(tk::FAN_POWER_W)
             .expect("fan_power_w half");
         let power_full = hrv_full
             .telemetry()
-            .get("fan_power_w")
+            .get(tk::FAN_POWER_W)
             .expect("fan_power_w full");
         assert!(
             (power_half - power_full * 0.5).abs() < 0.01,

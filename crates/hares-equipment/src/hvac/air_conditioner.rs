@@ -11,6 +11,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_types::telemetry_keys as tk;
+
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::ac_config::{
@@ -672,14 +674,14 @@ impl CoolingCore {
 
         // Telemetry reports delivered (post-DSE) values for the conditioned zone.
         let dse = self.hvac.duct_dse.clamp(0.0, 1.0);
-        self.telemetry.set("electric_kw", electric_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
         self.telemetry
-            .set("sensible_cooling_w", sensible_cooling_w * dse);
+            .set(tk::SENSIBLE_COOLING_W, sensible_cooling_w * dse);
         self.telemetry
-            .set("latent_cooling_w", latent_cooling_w * dse);
-        self.telemetry.set("shr", self.hvac.shr);
+            .set(tk::LATENT_COOLING_W, latent_cooling_w * dse);
+        self.telemetry.set(tk::SHR, self.hvac.shr);
         self.telemetry
-            .set("operating_mode", operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         let compressor_only_w = compressor_kw * 1000.0;
         let total_cooling_w = sensible_cooling_w + latent_cooling_w;
@@ -688,15 +690,17 @@ impl CoolingCore {
         } else {
             0.0
         };
-        self.telemetry.set("cop", cop);
+        self.telemetry.set(tk::COP, cop);
         self.telemetry
-            .set("runtime_fraction", self.last_cooling_rtf.clamp(0.0, 1.0));
-        self.telemetry.set("compressor_kw", compressor_kw);
-        self.telemetry.set("fan_kw", fan_kw);
+            .set(tk::RUNTIME_FRACTION, self.last_cooling_rtf.clamp(0.0, 1.0));
+        self.telemetry.set(tk::COMPRESSOR_KW, compressor_kw);
+        self.telemetry.set(tk::FAN_KW, fan_kw);
         self.telemetry
-            .set("supply_temp_c", self.hvac.supply_air_temp_c);
-        self.telemetry.set("apparatus_dew_point_c", self.last_adp_c);
-        self.telemetry.set("bypass_factor", self.last_bypass_factor);
+            .set(tk::SUPPLY_TEMP_C, self.hvac.supply_air_temp_c);
+        self.telemetry
+            .set(tk::APPARATUS_DEW_POINT_C, self.last_adp_c);
+        self.telemetry
+            .set(tk::BYPASS_FACTOR, self.last_bypass_factor);
 
         // Clear solver-provided capacity so next step starts fresh.
         self.ideal_capacity_w = 0.0;
@@ -967,11 +971,11 @@ impl CoolingCore {
             plf_state: self.hvac.plf_state,
             last_speed_index: self.hvac.last_speed_index,
             last_speed_frac: self.hvac.last_speed_frac,
-            electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
-            sensible_cooling_w: self.telemetry.get("sensible_cooling_w").unwrap_or(0.0),
-            latent_cooling_w: self.telemetry.get("latent_cooling_w").unwrap_or(0.0),
-            shr: self.telemetry.get("shr").unwrap_or(self.hvac.shr),
-            operating_mode_code: self.telemetry.get("operating_mode").unwrap_or(0.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+            sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
+            latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
+            shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.shr),
+            operating_mode_code: self.telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0),
             ctrl_duty_cycle: self.ctrl_duty_cycle,
             ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
                 Some(self.ctrl_power_limit_kw)
@@ -1018,14 +1022,14 @@ impl CoolingCore {
         self.last_adp_c = decoded.last_adp_c;
         self.last_bypass_factor = decoded.last_bypass_factor;
 
-        self.telemetry.insert("electric_kw", decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert("sensible_cooling_w", decoded.sensible_cooling_w);
+            .insert(tk::SENSIBLE_COOLING_W, decoded.sensible_cooling_w);
         self.telemetry
-            .insert("latent_cooling_w", decoded.latent_cooling_w);
-        self.telemetry.insert("shr", decoded.shr);
+            .insert(tk::LATENT_COOLING_W, decoded.latent_cooling_w);
+        self.telemetry.insert(tk::SHR, decoded.shr);
         self.telemetry
-            .insert("operating_mode", decoded.operating_mode_code);
+            .insert(tk::OPERATING_MODE, decoded.operating_mode_code);
 
         Ok(())
     }
@@ -1133,7 +1137,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState,
+        ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{AirConditioner, RoomAC, register_with_registry};
@@ -1180,8 +1184,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1224,11 +1228,11 @@ mod tests {
             .iter()
             .map(|field| field.name.as_str())
             .collect();
-        assert!(telemetry_names.contains(&"electric_kw"));
-        assert!(telemetry_names.contains(&"sensible_cooling_w"));
-        assert!(telemetry_names.contains(&"latent_cooling_w"));
-        assert!(telemetry_names.contains(&"shr"));
-        assert!(telemetry_names.contains(&"operating_mode"));
+        assert!(telemetry_names.contains(&tk::ELECTRIC_KW));
+        assert!(telemetry_names.contains(&tk::SENSIBLE_COOLING_W));
+        assert!(telemetry_names.contains(&tk::LATENT_COOLING_W));
+        assert!(telemetry_names.contains(&tk::SHR));
+        assert!(telemetry_names.contains(&tk::OPERATING_MODE));
     }
 
     #[test]
@@ -1266,13 +1270,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            eq.telemetry().get("operating_mode"),
+            eq.telemetry().get(tk::OPERATING_MODE),
             Some(0.0),
             "step() must not change operating mode; it must remain Off when \
              update_control() was never called",
         );
         assert_eq!(
-            eq.telemetry().get("electric_kw"),
+            eq.telemetry().get(tk::ELECTRIC_KW),
             Some(0.0),
             "no power should be drawn when operating mode is Off",
         );
@@ -1347,8 +1351,8 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let sens = eq.telemetry().get("sensible_cooling_w").unwrap_or(0.0);
-        let lat = eq.telemetry().get("latent_cooling_w").unwrap_or(0.0);
+        let sens = eq.telemetry().get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0);
+        let lat = eq.telemetry().get(tk::LATENT_COOLING_W).unwrap_or(0.0);
         let sum = sens + lat;
         let total = -(ports.thermal[0].sensible_gain_w + ports.thermal[0].latent_gain_w);
         assert!((sum - total).abs() < 1e-6);
@@ -1388,8 +1392,8 @@ mod tests {
             .step(&env_high, Duration::from_secs(60), &mut ports_high)
             .unwrap();
 
-        let shr_low = eq_low.telemetry().get("shr").unwrap_or(1.0);
-        let shr_high = eq_high.telemetry().get("shr").unwrap_or(1.0);
+        let shr_low = eq_low.telemetry().get(tk::SHR).unwrap_or(1.0);
+        let shr_high = eq_high.telemetry().get(tk::SHR).unwrap_or(1.0);
         assert!(shr_high < shr_low, "shr_high={shr_high}, shr_low={shr_low}");
     }
 
@@ -1411,19 +1415,19 @@ mod tests {
         restored.init(&cfg, &env).unwrap();
         restored.load_state(&state).unwrap();
 
-        assert_eq!(restored.telemetry().get("operating_mode"), Some(2.0));
-        assert!(restored.telemetry().get("electric_kw").unwrap_or(0.0) > 0.0);
+        assert_eq!(restored.telemetry().get(tk::OPERATING_MODE), Some(2.0));
+        assert!(restored.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0) > 0.0);
     }
 
     /// Central AC uses 400 CFM/ton per RESNET HERS Addendum 82.
     #[test]
     fn ac_uses_400_cfm_per_ton_default() {
-        use uom::si::f64::{Energy, VolumeRate};
         use uom::si::energy::{btu_it, joule};
+        use uom::si::f64::{Energy, VolumeRate};
         use uom::si::volume_rate::{cubic_foot_per_minute, cubic_meter_per_second};
 
-        let airflow_m3_s = VolumeRate::new::<cubic_foot_per_minute>(400.0)
-            .get::<cubic_meter_per_second>();
+        let airflow_m3_s =
+            VolumeRate::new::<cubic_foot_per_minute>(400.0).get::<cubic_meter_per_second>();
         let w_per_ton = Energy::new::<btu_it>(12_000.0).get::<joule>() / 3600.0;
         let expected = airflow_m3_s / w_per_ton;
 
@@ -1443,8 +1447,7 @@ mod tests {
 
         let environment = env(27.0, 0.010, 19.0, 35.0);
         let mut eq = AirConditioner::new(cfg.clone());
-        eq.init(&cfg, &environment)
-            .expect("init must succeed");
+        eq.init(&cfg, &environment).expect("init must succeed");
         assert!(
             (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
             "init() must preserve 400 CFM/ton default, got {} m3/s/W",
@@ -1501,9 +1504,12 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let sens = eq.telemetry().get("sensible_cooling_w").unwrap_or(0.0);
-        let elec = eq.telemetry().get("electric_kw").unwrap_or(0.0);
-        assert!(sens > 0.0, "sensible_cooling_w must be positive (magnitude), got {sens}");
+        let sens = eq.telemetry().get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0);
+        let elec = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert!(
+            sens > 0.0,
+            "sensible_cooling_w must be positive (magnitude), got {sens}"
+        );
         assert!(elec > 0.0, "electric_kw must be positive, got {elec}");
         assert!(
             ports.thermal[0].sensible_gain_w < 0.0,
@@ -1595,12 +1601,12 @@ mod tests {
     /// because window AC fans are compact cross-flow blowers with no duct back-pressure.
     #[test]
     fn room_ac_airflow_rate() {
-        use uom::si::f64::{Energy, VolumeRate};
         use uom::si::energy::{btu_it, joule};
+        use uom::si::f64::{Energy, VolumeRate};
         use uom::si::volume_rate::{cubic_foot_per_minute, cubic_meter_per_second};
 
-        let airflow_m3_s = VolumeRate::new::<cubic_foot_per_minute>(320.0)
-            .get::<cubic_meter_per_second>();
+        let airflow_m3_s =
+            VolumeRate::new::<cubic_foot_per_minute>(320.0).get::<cubic_meter_per_second>();
         let w_per_ton = Energy::new::<btu_it>(12_000.0).get::<joule>() / 3600.0;
         let expected = airflow_m3_s / w_per_ton;
 
@@ -1610,8 +1616,7 @@ mod tests {
         // Construction-time default is 400 (AcCooler); init() overrides to 320.
         let environment = env(27.0, 0.010, 19.0, 35.0);
         let mut eq = RoomAC::new(cfg.clone());
-        eq.init(&cfg, &environment)
-            .expect("init must succeed");
+        eq.init(&cfg, &environment).expect("init must succeed");
         assert!(
             (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
             "RoomAC airflow must be 320 CFM/ton after init(), got {} m3/s/W",
@@ -1659,7 +1664,7 @@ mod tests {
         eq_high
             .step(&env_high_load, Duration::from_secs(60), &mut ports_high)
             .unwrap();
-        let kw_high = eq_high.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw_high = eq_high.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
 
         let mut eq_low = AirConditioner::new(cfg.clone());
         eq_low.init(&cfg, &env_low_load).unwrap();
@@ -1671,7 +1676,7 @@ mod tests {
         eq_low
             .step(&env_low_load, Duration::from_secs(60), &mut ports_low)
             .unwrap();
-        let kw_low = eq_low.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw_low = eq_low.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
 
         assert!(
             kw_high > 0.0,
@@ -1718,8 +1723,11 @@ mod tests {
         eq_full
             .step(&env_full, Duration::from_secs(60), &mut ports_full)
             .unwrap();
-        let kw_full = eq_full.telemetry().get("electric_kw").unwrap_or(0.0);
-        let cool_full = eq_full.telemetry().get("sensible_cooling_w").unwrap_or(0.0);
+        let kw_full = eq_full.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let cool_full = eq_full
+            .telemetry()
+            .get(tk::SENSIBLE_COOLING_W)
+            .unwrap_or(0.0);
 
         let mut eq_part = AirConditioner::new(cfg.clone());
         eq_part.init(&cfg, &env_part).unwrap();
@@ -1731,8 +1739,11 @@ mod tests {
         eq_part
             .step(&env_part, Duration::from_secs(60), &mut ports_part)
             .unwrap();
-        let kw_part = eq_part.telemetry().get("electric_kw").unwrap_or(0.0);
-        let cool_part = eq_part.telemetry().get("sensible_cooling_w").unwrap_or(0.0);
+        let kw_part = eq_part.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let cool_part = eq_part
+            .telemetry()
+            .get(tk::SENSIBLE_COOLING_W)
+            .unwrap_or(0.0);
 
         assert!(kw_full > 0.0, "full-load AC must draw power, got {kw_full}");
         assert!(kw_part > 0.0, "part-load AC must draw power, got {kw_part}");
@@ -1754,7 +1765,7 @@ mod dr_tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DRLevel, EnvironmentState, GridState, PortSlots, ThermalAccumulator,
-        WeatherState, ZoneId, ZoneState,
+        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::AirConditioner;
@@ -1797,8 +1808,8 @@ mod dr_tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1848,7 +1859,7 @@ mod dr_tests {
         let mut ports = make_ports();
         eq.update_control(env);
         eq.step(env, Duration::from_secs(60), &mut ports).unwrap();
-        eq.telemetry().get("electric_kw").unwrap_or(0.0)
+        eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0)
     }
 
     // DR Moderate: cooling setpoint offset = +1°C → unit is less likely to cool at
@@ -2049,7 +2060,7 @@ mod dr_tests {
         let mut ports = make_ports();
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
-        let kw = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert_eq!(kw, 0.0, "LoadFraction 0.0 must force zero output this step");
     }
 
@@ -2071,7 +2082,7 @@ mod dr_tests {
         let mut ports1 = make_ports();
         eq.step(&environment, Duration::from_secs(60), &mut ports1)
             .unwrap();
-        let kw_step1 = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        let kw_step1 = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert_eq!(kw_step1, 0.0, "step 1 with LoadFraction=0 must be off");
 
         // Step 2: update_control resets ctrl_load_fraction=1.0; no signal reapplied → AC runs.
@@ -2126,7 +2137,8 @@ mod crankcase_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+        ZoneState, telemetry_keys as tk,
     };
 
     use super::AirConditioner;
@@ -2173,8 +2185,8 @@ mod crankcase_tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -2233,8 +2245,8 @@ mod crankcase_tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -2270,7 +2282,7 @@ mod crankcase_tests {
         };
         eq.update_control(&e);
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
-        eq.telemetry().get("electric_kw").unwrap_or(0.0)
+        eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0)
     }
 
     // Test 1: Standalone AC crankcase power = rated when cooling RTF=0 and OAT < threshold
@@ -2386,7 +2398,7 @@ mod crankcase_tests {
         eq.update_control(&e);
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let electric_kw = eq.telemetry().get("electric_kw").unwrap_or(0.0);
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         let port_kw = ports.electrical.net_active_kw();
         // Crankcase (0.10 kW) must appear in both telemetry and port contribution.
         assert!(
@@ -2453,7 +2465,7 @@ mod ideal_capacity_tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState,
+        ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::AirConditioner;
@@ -2548,7 +2560,7 @@ mod ideal_capacity_tests {
         eq.step(&env, Duration::from_secs(60), &mut make_ports())
             .unwrap();
 
-        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
         assert!(
             (rtf - 1.0).abs() < 1e-9,
             "FSM Cooling at 60 s must ignore IdealCapacity and produce RTF=1.0, got {rtf}"
@@ -2575,7 +2587,7 @@ mod ideal_capacity_tests {
         eq.step(&env, Duration::from_secs(900), &mut make_ports())
             .unwrap();
 
-        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
         // Flat biquadratic [1,0,0,0,0,0] → cap_ratio=1.0. Raw PLR = 4000/8000 = 0.5,
         // but PLF cycling-degradation (Cd=0.25) raises effective PLR to ~0.57.
         assert!(
@@ -2597,7 +2609,7 @@ mod ideal_capacity_tests {
         eq.step(&env, Duration::from_secs(900), &mut make_ports())
             .unwrap();
 
-        let rtf = eq.telemetry().get("runtime_fraction").unwrap_or(-1.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
         assert_eq!(
             rtf, 0.0,
             "900 s timestep with zone below FSM turn-on and no solver signal must \

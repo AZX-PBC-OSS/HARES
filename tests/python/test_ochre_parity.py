@@ -92,7 +92,7 @@ def _run_hares() -> dict[str, float]:
     for _ in range(n_steps):
         step = dwelling.step()
         for key, val in step.items():
-            if key == "time":
+            if key == "timestamp":
                 continue
             sums[key] = sums.get(key, 0.0) + val
 

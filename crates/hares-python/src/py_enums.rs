@@ -6,19 +6,20 @@
 use std::hash::{Hash, Hasher};
 
 use hares_core::engine::SimStatus as CoreSimStatus;
+use hares_equipment::battery::catalog::BatteryProductId as RustBatteryProductId;
+use hares_equipment::ev::catalog::{
+    EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId,
+};
 use hares_fleet::fleet::SimStatus as FleetSimStatus;
 use hares_io::ResStockVersion as IoResStockVersion;
-use hares_equipment::battery::catalog::BatteryProductId as RustBatteryProductId;
-use hares_equipment::ev::catalog::{EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId};
 use hares_types::{
-    BatteryChemistry as RustBatteryChemistry, BmsAction as RustBmsAction,
-    BmsMode as RustBmsMode, BmsScheduleWindow as RustBmsScheduleWindow,
-    BmsTimeWindow as RustBmsTimeWindow, ChargingLevel as RustChargingLevel,
-    ChargingStrategy as RustChargingStrategy, ControlCapabilities as RustControlCapabilities,
-    DayFilter, DepartureConstraint as RustDepartureConstraint,
-    DutyCycleComponent as RustDutyCycleComponent, EndUse as RustEndUse,
-    EvConnectionState as RustEvConnectionState, ExecutionStage as RustExecutionStage,
-    FluidType as RustFluidType, FuelType as RustFuelType,
+    BatteryChemistry as RustBatteryChemistry, BmsAction as RustBmsAction, BmsMode as RustBmsMode,
+    BmsScheduleWindow as RustBmsScheduleWindow, BmsTimeWindow as RustBmsTimeWindow,
+    ChargingLevel as RustChargingLevel, ChargingStrategy as RustChargingStrategy,
+    ControlCapabilities as RustControlCapabilities, DayFilter,
+    DepartureConstraint as RustDepartureConstraint, DutyCycleComponent as RustDutyCycleComponent,
+    EndUse as RustEndUse, EvConnectionState as RustEvConnectionState,
+    ExecutionStage as RustExecutionStage, FluidType as RustFluidType, FuelType as RustFuelType,
     GridExportRule as RustGridExportRule, InverterPriority as RustInverterPriority,
     PlugInPolicy as RustPlugInPolicy, StormWatchTrigger as RustStormWatchTrigger,
     VehicleType as RustVehicleType,
@@ -952,7 +953,9 @@ impl PyControlCapabilities {
                 "POWER_FACTOR_SETPOINT" => caps |= RustControlCapabilities::POWER_FACTOR_SETPOINT,
                 "INVERTER_PRIORITY_MODE" => caps |= RustControlCapabilities::INVERTER_PRIORITY_MODE,
                 "IDEAL_CAPACITY" => caps |= RustControlCapabilities::IDEAL_CAPACITY,
-                "IDEAL_CAPACITY_MODE_OVERRIDE" => caps |= RustControlCapabilities::IDEAL_CAPACITY_MODE_OVERRIDE,
+                "IDEAL_CAPACITY_MODE_OVERRIDE" => {
+                    caps |= RustControlCapabilities::IDEAL_CAPACITY_MODE_OVERRIDE
+                }
                 "EV_PLUG_IN" => caps |= RustControlCapabilities::EV_PLUG_IN,
                 "EV_DRIVE" => caps |= RustControlCapabilities::EV_DRIVE,
                 "EV_AWAY_CHARGE" => caps |= RustControlCapabilities::EV_AWAY_CHARGE,
@@ -1410,13 +1413,17 @@ pub struct PyPlugInPolicy {
 impl PyPlugInPolicy {
     #[staticmethod]
     fn always() -> Self {
-        Self { inner: RustPlugInPolicy::Always }
+        Self {
+            inner: RustPlugInPolicy::Always,
+        }
     }
 
     #[staticmethod]
     fn low_soc(threshold: f64) -> PyResult<Self> {
         validate_soc("threshold", threshold)?;
-        Ok(Self { inner: RustPlugInPolicy::LowSoc { threshold } })
+        Ok(Self {
+            inner: RustPlugInPolicy::LowSoc { threshold },
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -1446,11 +1453,17 @@ impl PyChargingStrategy {
     #[staticmethod]
     fn immediate(target_soc: f64) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
-        Ok(Self { inner: RustChargingStrategy::Immediate { target_soc } })
+        Ok(Self {
+            inner: RustChargingStrategy::Immediate { target_soc },
+        })
     }
 
     #[staticmethod]
-    fn nightly(off_peak_start_hour: f64, off_peak_end_hour: f64, target_soc: f64) -> PyResult<Self> {
+    fn nightly(
+        off_peak_start_hour: f64,
+        off_peak_end_hour: f64,
+        target_soc: f64,
+    ) -> PyResult<Self> {
         validate_hour("off_peak_start_hour", off_peak_start_hour)?;
         validate_hour("off_peak_end_hour", off_peak_end_hour)?;
         validate_soc("target_soc", target_soc)?;
@@ -1467,18 +1480,28 @@ impl PyChargingStrategy {
     fn low_soc(threshold: f64, target_soc: f64) -> PyResult<Self> {
         validate_soc("threshold", threshold)?;
         validate_soc("target_soc", target_soc)?;
-        Ok(Self { inner: RustChargingStrategy::LowSoc { threshold, target_soc } })
+        Ok(Self {
+            inner: RustChargingStrategy::LowSoc {
+                threshold,
+                target_soc,
+            },
+        })
     }
 
     #[staticmethod]
     fn quick_then_wait(partial_soc: f64) -> PyResult<Self> {
         validate_soc("partial_soc", partial_soc)?;
-        Ok(Self { inner: RustChargingStrategy::QuickThenWait { partial_soc } })
+        Ok(Self {
+            inner: RustChargingStrategy::QuickThenWait { partial_soc },
+        })
     }
 
     #[staticmethod]
     #[pyo3(signature = (target_soc, departure_schedule = None))]
-    fn pre_departure(target_soc: f64, departure_schedule: Option<Vec<PyDepartureConstraint>>) -> PyResult<Self> {
+    fn pre_departure(
+        target_soc: f64,
+        departure_schedule: Option<Vec<PyDepartureConstraint>>,
+    ) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
         Ok(Self {
             inner: RustChargingStrategy::PreDeparture {
@@ -1494,7 +1517,11 @@ impl PyChargingStrategy {
 
     #[staticmethod]
     #[pyo3(signature = (target_soc, departure_schedule = None, charge_buffer_hours = 2.0))]
-    fn tou_aware(target_soc: f64, departure_schedule: Option<Vec<PyDepartureConstraint>>, charge_buffer_hours: f64) -> PyResult<Self> {
+    fn tou_aware(
+        target_soc: f64,
+        departure_schedule: Option<Vec<PyDepartureConstraint>>,
+        charge_buffer_hours: f64,
+    ) -> PyResult<Self> {
         validate_soc("target_soc", target_soc)?;
         Ok(Self {
             inner: RustChargingStrategy::TouAware {
@@ -1550,7 +1577,10 @@ impl PyChargingStrategy {
 
     #[staticmethod]
     #[pyo3(signature = (min_charge_rate_kw, departure_schedule = None))]
-    fn solar_surplus(min_charge_rate_kw: f64, departure_schedule: Option<Vec<PyDepartureConstraint>>) -> PyResult<Self> {
+    fn solar_surplus(
+        min_charge_rate_kw: f64,
+        departure_schedule: Option<Vec<PyDepartureConstraint>>,
+    ) -> PyResult<Self> {
         if !min_charge_rate_kw.is_finite() || min_charge_rate_kw < 0.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "min_charge_rate_kw must be finite and >= 0, got {min_charge_rate_kw}"
@@ -1577,10 +1607,19 @@ impl PyChargingStrategy {
             RustChargingStrategy::Immediate { target_soc } => {
                 format!("Immediate(target_soc={target_soc})")
             }
-            RustChargingStrategy::Nightly { off_peak_start_hour, off_peak_end_hour, target_soc } => {
-                format!("Nightly(off_peak_start={off_peak_start_hour}, off_peak_end={off_peak_end_hour}, target_soc={target_soc})")
+            RustChargingStrategy::Nightly {
+                off_peak_start_hour,
+                off_peak_end_hour,
+                target_soc,
+            } => {
+                format!(
+                    "Nightly(off_peak_start={off_peak_start_hour}, off_peak_end={off_peak_end_hour}, target_soc={target_soc})"
+                )
             }
-            RustChargingStrategy::LowSoc { threshold, target_soc } => {
+            RustChargingStrategy::LowSoc {
+                threshold,
+                target_soc,
+            } => {
                 format!("LowSoc(threshold={threshold}, target_soc={target_soc})")
             }
             RustChargingStrategy::QuickThenWait { partial_soc } => {
@@ -1589,17 +1628,32 @@ impl PyChargingStrategy {
             RustChargingStrategy::PreDeparture { target_soc, .. } => {
                 format!("PreDeparture(target_soc={target_soc})")
             }
-            RustChargingStrategy::TouAware { target_soc, charge_buffer_hours, .. } => {
+            RustChargingStrategy::TouAware {
+                target_soc,
+                charge_buffer_hours,
+                ..
+            } => {
                 format!("TouAware(target_soc={target_soc}, buffer_hours={charge_buffer_hours})")
             }
-            RustChargingStrategy::SolarSurplus { min_charge_rate_kw, .. } => {
+            RustChargingStrategy::SolarSurplus {
+                min_charge_rate_kw, ..
+            } => {
                 format!("SolarSurplus(min_charge_rate_kw={min_charge_rate_kw})")
             }
-            RustChargingStrategy::V2H { discharge_threshold_soc, min_soc } => {
+            RustChargingStrategy::V2H {
+                discharge_threshold_soc,
+                min_soc,
+            } => {
                 format!("V2H(discharge_threshold_soc={discharge_threshold_soc}, min_soc={min_soc})")
             }
-            RustChargingStrategy::V2G { min_soc, max_export_kw, price_threshold } => {
-                format!("V2G(min_soc={min_soc}, max_export_kw={max_export_kw}, price_threshold={price_threshold})")
+            RustChargingStrategy::V2G {
+                min_soc,
+                max_export_kw,
+                price_threshold,
+            } => {
+                format!(
+                    "V2G(min_soc={min_soc}, max_export_kw={max_export_kw}, price_threshold={price_threshold})"
+                )
             }
         }
     }
@@ -2049,13 +2103,19 @@ impl std::hash::Hash for PyStormWatchTrigger {
 impl PyStormWatchTrigger {
     #[staticmethod]
     fn manual_enable() -> Self {
-        Self { is_manual: true, wind_speed_threshold_m_s: 0.0 }
+        Self {
+            is_manual: true,
+            wind_speed_threshold_m_s: 0.0,
+        }
     }
 
     #[staticmethod]
     #[pyo3(signature = (wind_speed_threshold_m_s = 25.0))]
     fn weather_signal(wind_speed_threshold_m_s: f64) -> Self {
-        Self { is_manual: false, wind_speed_threshold_m_s }
+        Self {
+            is_manual: false,
+            wind_speed_threshold_m_s,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -2075,7 +2135,9 @@ impl From<PyStormWatchTrigger> for RustStormWatchTrigger {
         if v.is_manual {
             Self::ManualEnable
         } else {
-            Self::WeatherSignal { wind_speed_threshold_m_s: v.wind_speed_threshold_m_s }
+            Self::WeatherSignal {
+                wind_speed_threshold_m_s: v.wind_speed_threshold_m_s,
+            }
         }
     }
 }
@@ -2083,8 +2145,16 @@ impl From<PyStormWatchTrigger> for RustStormWatchTrigger {
 impl From<RustStormWatchTrigger> for PyStormWatchTrigger {
     fn from(v: RustStormWatchTrigger) -> Self {
         match v {
-            RustStormWatchTrigger::ManualEnable => Self { is_manual: true, wind_speed_threshold_m_s: 0.0 },
-            RustStormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s } => Self { is_manual: false, wind_speed_threshold_m_s },
+            RustStormWatchTrigger::ManualEnable => Self {
+                is_manual: true,
+                wind_speed_threshold_m_s: 0.0,
+            },
+            RustStormWatchTrigger::WeatherSignal {
+                wind_speed_threshold_m_s,
+            } => Self {
+                is_manual: false,
+                wind_speed_threshold_m_s,
+            },
         }
     }
 }
@@ -2195,9 +2265,8 @@ impl PyBmsScheduleWindow {
             start_minute,
             end_minute,
         };
-        tw.validate().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-        })?;
+        tw.validate()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(Self {
             inner: RustBmsScheduleWindow {
                 time_window: tw,
@@ -2235,7 +2304,10 @@ impl PyBmsScheduleWindow {
         let act = PyBmsAction {
             inner: self.inner.action.clone(),
         };
-        format!("BmsScheduleWindow(day={day:?}, start={s}, end={e}, action={})", act.__repr__())
+        format!(
+            "BmsScheduleWindow(day={day:?}, start={s}, end={e}, action={})",
+            act.__repr__()
+        )
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -2265,9 +2337,8 @@ impl PyDepartureConstraint {
             departure_minute,
             target_soc,
         };
-        dc.validate().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-        })?;
+        dc.validate()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(Self { inner: dc })
     }
 
@@ -2429,7 +2500,9 @@ impl PyBmsMode {
         validate_soc("target_soc", target_soc)?;
         let trigger = match trigger {
             "manual" => RustStormWatchTrigger::ManualEnable,
-            "weather_signal" => RustStormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s },
+            "weather_signal" => RustStormWatchTrigger::WeatherSignal {
+                wind_speed_threshold_m_s,
+            },
             other => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "trigger must be 'manual' or 'weather_signal', got {other:?}"
@@ -2462,7 +2535,11 @@ impl PyBmsMode {
                 max_soc,
                 solar_only_charging,
             } => {
-                let sc = if *solar_only_charging { "True" } else { "False" };
+                let sc = if *solar_only_charging {
+                    "True"
+                } else {
+                    "False"
+                };
                 format!(
                     "BmsMode.self_consumption(min_soc={min_soc}, max_soc={max_soc}, solar_only_charging={sc})"
                 )
@@ -2473,7 +2550,11 @@ impl PyBmsMode {
                 discharge_threshold_percentile,
                 solar_only_charging,
             } => {
-                let sc = if *solar_only_charging { "True" } else { "False" };
+                let sc = if *solar_only_charging {
+                    "True"
+                } else {
+                    "False"
+                };
                 format!(
                     "BmsMode.time_of_use_optimization(reserve_soc={reserve_soc}, charge_threshold_percentile={charge_threshold_percentile}, discharge_threshold_percentile={discharge_threshold_percentile}, solar_only_charging={sc})"
                 )

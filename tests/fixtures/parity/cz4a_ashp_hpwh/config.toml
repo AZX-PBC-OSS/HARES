@@ -1,5 +1,5 @@
 [simulation]
-start_time = "2024-01-01T00:00:00Z"
+start_time = "2023-01-01T00:00:00-07:00"
 duration = 3600
 time_res = 60
 output_verbosity = 3

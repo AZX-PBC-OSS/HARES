@@ -160,7 +160,7 @@ class TestBatteryLutInjection:
         dw.add_ev(ev)
         dw.set_equipment_lut("TestEV", LutType.Ocv, _lfp_ocv_table())
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
 
 # ---------------------------------------------------------------------------

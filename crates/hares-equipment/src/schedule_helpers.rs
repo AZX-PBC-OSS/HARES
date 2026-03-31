@@ -10,16 +10,20 @@ use rand_chacha::ChaCha8Rng;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigValue;
 use crate::EquipmentConfig;
+use crate::config::ConfigValue;
 
 pub(crate) const KEY_MONTH_MULTIPLIER_PREFIX: &str = "month_multiplier_";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ScheduleSourceState {
     Stateless,
-    Stochastic { draw_count: u64 },
-    Shared { cursor: usize },
+    Stochastic {
+        draw_count: u64,
+    },
+    Shared {
+        cursor: usize,
+    },
     /// TimeWindows with noisy windows: save RNG word position directly since
     /// we can't replay (the distribution sampled varies per matching window).
     NoisyTimeWindows {
@@ -90,8 +94,7 @@ pub(crate) fn restore_schedule_source_state(
         ) => {
             let st = rng_state.as_mut().ok_or_else(|| {
                 HaresError::Equipment(
-                    "checkpoint contains NoisyTimeWindows state but source has no rng_state"
-                        .into(),
+                    "checkpoint contains NoisyTimeWindows state but source has no rng_state".into(),
                 )
             })?;
             // Restore RNG to exact position via word-level seek.

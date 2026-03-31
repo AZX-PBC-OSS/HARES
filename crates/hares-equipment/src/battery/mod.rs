@@ -11,6 +11,7 @@ pub mod ocv;
 use std::borrow::Cow;
 use std::time::Duration;
 
+use hares_types::telemetry_keys as tk;
 use hares_types::{
     BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, DRLevel, EndUse,
     EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule,
@@ -605,7 +606,11 @@ impl Battery {
     /// Full power above `full_power_temp_c`, linearly derates to zero at
     /// `min_discharge_temp_c`. Returns 0.0 below min discharge temp.
     fn discharge_derate_factor(&self) -> f64 {
-        crate::linear_temp_derate(self.cell_temp_c, self.min_discharge_temp_c, self.full_power_temp_c)
+        crate::linear_temp_derate(
+            self.cell_temp_c,
+            self.min_discharge_temp_c,
+            self.full_power_temp_c,
+        )
     }
 
     /// Whether charging is allowed at current cell temperature.
@@ -804,14 +809,12 @@ impl Equipment for Battery {
         }
 
         if let Some(mode_str) = config.get_str(KEY_BMS_MODE) {
-            self.bms_mode = serde_json::from_str(mode_str).map_err(|e| {
-                HaresError::Equipment(format!("invalid bms_mode: {e}"))
-            })?;
+            self.bms_mode = serde_json::from_str(mode_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid bms_mode: {e}")))?;
         }
         if let Some(rule_str) = config.get_str(KEY_GRID_EXPORT_RULE) {
-            self.grid_export_rule = serde_json::from_str(rule_str).map_err(|e| {
-                HaresError::Equipment(format!("invalid grid_export_rule: {e}"))
-            })?;
+            self.grid_export_rule = serde_json::from_str(rule_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid grid_export_rule: {e}")))?;
         }
 
         let initial_soc = config
@@ -847,7 +850,7 @@ impl Equipment for Battery {
         self.last_daily_update_day = Self::day_ordinal(env);
 
         self.telemetry = default_telemetry();
-        self.telemetry.set("soc", self.soc);
+        self.telemetry.set(tk::SOC, self.soc);
 
         Ok(())
     }
@@ -990,9 +993,7 @@ impl Equipment for Battery {
         // from freezing regardless of charge/discharge demand. Tesla PW3 Heat
         // Mode and similar systems run proactively to maintain cells above the
         // min_charge_temp threshold.
-        let heater_w = if self.heater_power_w > 0.0
-            && self.cell_temp_c <= self.heater_threshold_c
-        {
+        let heater_w = if self.heater_power_w > 0.0 && self.cell_temp_c <= self.heater_threshold_c {
             self.heater_active = true;
             self.heater_power_w
         } else {
@@ -1078,24 +1079,26 @@ impl Equipment for Battery {
         }
 
         // -- Update telemetry --
-        self.telemetry.set("soc", self.soc);
-        self.telemetry.set("active_power_kw", port_power_kw);
-        self.telemetry.set("ohmic_loss_w", ohmic_loss_w);
-        self.telemetry.set("standby_power_w", self.standby_power_w);
-        self.telemetry.set("cell_temp_c", self.cell_temp_c);
-        self.telemetry.set("heater_power_w", heater_w);
+        self.telemetry.set(tk::SOC, self.soc);
+        self.telemetry.set(tk::ACTIVE_POWER_KW, port_power_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, port_power_kw);
+        self.telemetry.set(tk::OHMIC_LOSS_W, ohmic_loss_w);
         self.telemetry
-            .set("discharge_derate", self.discharge_derate_factor());
+            .set(tk::STANDBY_POWER_W, self.standby_power_w);
+        self.telemetry.set(tk::CELL_TEMP_C, self.cell_temp_c);
+        self.telemetry.set(tk::HEATER_POWER_W, heater_w);
+        self.telemetry
+            .set(tk::DISCHARGE_DERATE, self.discharge_derate_factor());
         self.telemetry.set(
-            "capacity_derate",
+            tk::CAPACITY_DERATE,
             self.capacity_derate_model.evaluate(self.cell_temp_c),
         );
         self.telemetry
-            .set("cycle_count", self.rainflow.total_cycles());
+            .set(tk::CYCLE_COUNT, self.rainflow.total_cycles());
         self.telemetry
-            .set("capacity_fade_pct", self.degradation.capacity_fade_pct());
-        self.telemetry.set("terminal_voltage_v", terminal_v);
-        self.telemetry.set("current_a", current_a);
+            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
+        self.telemetry.set(tk::TERMINAL_VOLTAGE_V, terminal_v);
+        self.telemetry.set(tk::CURRENT_A, current_a);
 
         Ok(())
     }
@@ -1163,29 +1166,30 @@ impl Equipment for Battery {
         self.external_power_limit_kw = cp.external_power_limit_kw;
 
         // Recompute all derived telemetry from restored state so no fields are stale.
-        self.telemetry.set("soc", self.soc);
-        self.telemetry.set("cell_temp_c", self.cell_temp_c);
+        self.telemetry.set(tk::SOC, self.soc);
+        self.telemetry.set(tk::CELL_TEMP_C, self.cell_temp_c);
         self.telemetry
-            .set("cycle_count", self.rainflow.total_cycles());
+            .set(tk::CYCLE_COUNT, self.rainflow.total_cycles());
         self.telemetry
-            .set("capacity_fade_pct", self.degradation.capacity_fade_pct());
+            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
         self.telemetry
-            .set("discharge_derate", self.discharge_derate_factor());
+            .set(tk::DISCHARGE_DERATE, self.discharge_derate_factor());
         self.telemetry.set(
-            "capacity_derate",
+            tk::CAPACITY_DERATE,
             self.capacity_derate_model.evaluate(self.cell_temp_c),
         );
         // active_power_kw, ohmic_loss_w, heater_power_w are operational — reset to
         // idle defaults; they will be updated on the next step() call.
         self.telemetry.set(
-            "heater_power_w",
+            tk::HEATER_POWER_W,
             if self.heater_active {
                 self.heater_power_w
             } else {
                 0.0
             },
         );
-        self.telemetry.set("standby_power_w", self.standby_power_w);
+        self.telemetry
+            .set(tk::STANDBY_POWER_W, self.standby_power_w);
         Ok(())
     }
 
@@ -1294,84 +1298,90 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn default_telemetry() -> Telemetry {
     let mut t = Telemetry::with_capacity(12);
-    t.insert("soc", 0.0);
-    t.insert("active_power_kw", 0.0);
-    t.insert("ohmic_loss_w", 0.0);
-    t.insert("standby_power_w", 0.0);
-    t.insert("cell_temp_c", 25.0);
-    t.insert("heater_power_w", 0.0);
-    t.insert("discharge_derate", 1.0);
-    t.insert("capacity_derate", 1.0);
-    t.insert("cycle_count", 0.0);
-    t.insert("capacity_fade_pct", 0.0);
-    t.insert("terminal_voltage_v", 0.0);
-    t.insert("current_a", 0.0);
+    t.insert(tk::SOC, 0.0);
+    t.insert(tk::ACTIVE_POWER_KW, 0.0);
+    t.insert(tk::ELECTRIC_KW, 0.0);
+    t.insert(tk::OHMIC_LOSS_W, 0.0);
+    t.insert(tk::STANDBY_POWER_W, 0.0);
+    t.insert(tk::CELL_TEMP_C, 25.0);
+    t.insert(tk::HEATER_POWER_W, 0.0);
+    t.insert(tk::DISCHARGE_DERATE, 1.0);
+    t.insert(tk::CAPACITY_DERATE, 1.0);
+    t.insert(tk::CYCLE_COUNT, 0.0);
+    t.insert(tk::CAPACITY_FADE_PCT, 0.0);
+    t.insert(tk::TERMINAL_VOLTAGE_V, 0.0);
+    t.insert(tk::CURRENT_A, 0.0);
     t
 }
 
 fn battery_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "soc".to_string(),
+            name: tk::SOC.to_string(),
             unit: "-".to_string(),
             description: "State of charge [0..1]".to_string(),
         },
         TelemetryField {
-            name: "active_power_kw".to_string(),
+            name: tk::ACTIVE_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Grid-side active power (positive=consuming, negative=generating)"
                 .to_string(),
         },
         TelemetryField {
-            name: "ohmic_loss_w".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Grid-boundary electrical power".to_string(),
+        },
+        TelemetryField {
+            name: tk::OHMIC_LOSS_W.to_string(),
             unit: "W".to_string(),
             description: "Ohmic heat dissipation from internal resistance".to_string(),
         },
         TelemetryField {
-            name: "standby_power_w".to_string(),
+            name: tk::STANDBY_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Parasitic standby power draw".to_string(),
         },
         TelemetryField {
-            name: "cell_temp_c".to_string(),
+            name: tk::CELL_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Cell temperature".to_string(),
         },
         TelemetryField {
-            name: "cycle_count".to_string(),
+            name: tk::CYCLE_COUNT.to_string(),
             unit: "-".to_string(),
             description: "Equivalent full cycles from rainflow counting".to_string(),
         },
         TelemetryField {
-            name: "heater_power_w".to_string(),
+            name: tk::HEATER_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Cell heater power draw (active when cells are cold and charge requested)"
                 .to_string(),
         },
         TelemetryField {
-            name: "discharge_derate".to_string(),
+            name: tk::DISCHARGE_DERATE.to_string(),
             unit: "-".to_string(),
             description: "Temperature-dependent discharge power derating factor [0..1]".to_string(),
         },
         TelemetryField {
-            name: "capacity_derate".to_string(),
+            name: tk::CAPACITY_DERATE.to_string(),
             unit: "-".to_string(),
             description:
                 "Temperature-dependent capacity and power derating factor (Arrhenius or piecewise)"
                     .to_string(),
         },
         TelemetryField {
-            name: "capacity_fade_pct".to_string(),
+            name: tk::CAPACITY_FADE_PCT.to_string(),
             unit: "%".to_string(),
             description: "Cumulative capacity degradation".to_string(),
         },
         TelemetryField {
-            name: "terminal_voltage_v".to_string(),
+            name: tk::TERMINAL_VOLTAGE_V.to_string(),
             unit: "V".to_string(),
             description: "Pack terminal voltage (Voc ± IR drop)".to_string(),
         },
         TelemetryField {
-            name: "current_a".to_string(),
+            name: tk::CURRENT_A.to_string(),
             unit: "A".to_string(),
             description: "Pack current (positive=charging, negative=discharging)".to_string(),
         },
@@ -1433,8 +1443,8 @@ mod tests {
                 .single()
                 .expect("valid UTC timestamp"),
             time_res: ChronoDuration::minutes(5),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1483,13 +1493,13 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert!(field_names.contains(&"soc"));
-        assert!(field_names.contains(&"active_power_kw"));
-        assert!(field_names.contains(&"ohmic_loss_w"));
-        assert!(field_names.contains(&"standby_power_w"));
-        assert!(field_names.contains(&"cell_temp_c"));
-        assert!(field_names.contains(&"cycle_count"));
-        assert!(field_names.contains(&"capacity_fade_pct"));
+        assert!(field_names.contains(&tk::SOC));
+        assert!(field_names.contains(&tk::ACTIVE_POWER_KW));
+        assert!(field_names.contains(&tk::OHMIC_LOSS_W));
+        assert!(field_names.contains(&tk::STANDBY_POWER_W));
+        assert!(field_names.contains(&tk::CELL_TEMP_C));
+        assert!(field_names.contains(&tk::CYCLE_COUNT));
+        assert!(field_names.contains(&tk::CAPACITY_FADE_PCT));
     }
 
     #[test]
@@ -1946,7 +1956,7 @@ mod tests {
             "heater should be active when cold and charge desired"
         );
         assert!(
-            bat.telemetry().get("heater_power_w").unwrap() > 0.0,
+            bat.telemetry().get(tk::HEATER_POWER_W).unwrap() > 0.0,
             "heater power should be reported in telemetry"
         );
         // Charging should be blocked (cell too cold), but heater draws power.
@@ -1989,7 +1999,7 @@ mod tests {
             .unwrap();
 
         assert!(!bat.heater_active, "heater should not activate when warm");
-        assert_eq!(bat.telemetry().get("heater_power_w").unwrap(), 0.0);
+        assert_eq!(bat.telemetry().get(tk::HEATER_POWER_W).unwrap(), 0.0);
     }
 
     #[test]
@@ -2057,7 +2067,7 @@ mod tests {
             bat.heater_active,
             "heater must activate at -25°C to protect cells, even when idle"
         );
-        let heater_kw = bat.telemetry().get("heater_power_w").unwrap() / 1000.0;
+        let heater_kw = bat.telemetry().get(tk::HEATER_POWER_W).unwrap() / 1000.0;
         assert!(
             heater_kw > 0.4,
             "heater should draw ~500W, got {heater_kw:.3} kW"
@@ -2485,7 +2495,7 @@ mod tests {
         let mut ports = default_ports();
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
-        let ohmic_quadratic = bat.telemetry().get("ohmic_loss_w").unwrap_or(0.0);
+        let ohmic_quadratic = bat.telemetry().get(tk::OHMIC_LOSS_W).unwrap_or(0.0);
 
         // Linear approximation: I = P / Voc
         let cell_ocv = bat.ocv_table.voltage_at_soc(0.5);
@@ -2585,7 +2595,7 @@ mod tests {
 
         assert!(bat.heater_active, "heater should be active for this test");
 
-        let ohmic_w = bat.telemetry().get("ohmic_loss_w").unwrap_or(0.0);
+        let ohmic_w = bat.telemetry().get(tk::OHMIC_LOSS_W).unwrap_or(0.0);
         // Zone 1 thermal gain should equal ohmic_loss_w only (heater not double-counted).
         let zone_gain_w = ports
             .thermal
@@ -2774,25 +2784,25 @@ mod tests {
 
         // Verify all telemetry fields are consistent with restored state.
         assert!(
-            (bat2.telemetry().get("soc").unwrap() - saved_soc).abs() < 1e-12,
+            (bat2.telemetry().get(tk::SOC).unwrap() - saved_soc).abs() < 1e-12,
             "soc telemetry mismatch after load_state"
         );
         assert!(
-            (bat2.telemetry().get("cell_temp_c").unwrap() - saved_temp).abs() < 1e-12,
+            (bat2.telemetry().get(tk::CELL_TEMP_C).unwrap() - saved_temp).abs() < 1e-12,
             "cell_temp_c telemetry mismatch: expected {saved_temp}, got {}",
-            bat2.telemetry().get("cell_temp_c").unwrap()
+            bat2.telemetry().get(tk::CELL_TEMP_C).unwrap()
         );
         assert!(
-            (bat2.telemetry().get("cycle_count").unwrap() - saved_cycles).abs() < 1e-12,
+            (bat2.telemetry().get(tk::CYCLE_COUNT).unwrap() - saved_cycles).abs() < 1e-12,
             "cycle_count telemetry mismatch after load_state"
         );
         assert!(
-            (bat2.telemetry().get("discharge_derate").unwrap() - saved_derate).abs() < 1e-10,
+            (bat2.telemetry().get(tk::DISCHARGE_DERATE).unwrap() - saved_derate).abs() < 1e-10,
             "discharge_derate telemetry stale after load_state: expected {saved_derate}, got {}",
-            bat2.telemetry().get("discharge_derate").unwrap()
+            bat2.telemetry().get(tk::DISCHARGE_DERATE).unwrap()
         );
         assert!(
-            (bat2.telemetry().get("standby_power_w").unwrap() - saved_standby).abs() < 1e-12,
+            (bat2.telemetry().get(tk::STANDBY_POWER_W).unwrap() - saved_standby).abs() < 1e-12,
             "standby_power_w telemetry stale after load_state"
         );
     }
@@ -3221,7 +3231,12 @@ mod tests {
         assert!((table.voltage_at_soc(1.0) - 4.2000).abs() < 1e-4);
 
         // Every grid point must interpolate to its exact value
-        for (i, (soc, v)) in table.soc_points.iter().zip(table.voltage_v.iter()).enumerate() {
+        for (i, (soc, v)) in table
+            .soc_points
+            .iter()
+            .zip(table.voltage_v.iter())
+            .enumerate()
+        {
             let actual = table.voltage_at_soc(*soc);
             assert!(
                 (actual - v).abs() < 1e-10,
@@ -3257,7 +3272,7 @@ mod tests {
 
         // Standby is always drawn on top; charging itself must not exceed 2 kW.
         let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
-        let charging_kw = bat.telemetry().get("active_power_kw").unwrap_or(0.0) - standby_kw;
+        let charging_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) - standby_kw;
         assert!(
             charging_kw <= 2.0 + 1e-9,
             "charge power {charging_kw:.4} kW should be capped at 2 kW by import_limit_w"
@@ -3294,7 +3309,7 @@ mod tests {
             .unwrap();
 
         // active_power_kw includes standby; subtract it to get net discharge.
-        let active_kw = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        let active_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
         let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
         let discharge_kw = active_kw - standby_kw;
         assert!(
@@ -3332,7 +3347,7 @@ mod tests {
             .unwrap();
 
         let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
-        let charging_kw = bat.telemetry().get("active_power_kw").unwrap_or(0.0) - standby_kw;
+        let charging_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) - standby_kw;
         // Should be close to 5 kW (max_charge_kw), not capped lower.
         // Ohmic losses from the OCV model reduce effective power slightly.
         assert!(
@@ -3389,7 +3404,7 @@ mod tests {
         let mut ports = default_ports();
         bat.step(&env, Duration::from_secs(60), &mut ports)
             .expect("step");
-        let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
         assert!(
             power.abs() <= 2.0 + 0.01,
             "discharge should be capped at 2 kW by PowerLimit, got {power}"
@@ -3418,7 +3433,7 @@ mod tests {
         let mut ports = default_ports();
         bat.step(&env, Duration::from_secs(60), &mut ports)
             .expect("step");
-        let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
         // Critical = 25% of max, so max discharge ≈ 1.25 kW
         assert!(
             power.abs() <= 1.3,
@@ -3448,7 +3463,7 @@ mod tests {
         let mut ports = default_ports();
         bat.step(&env, Duration::from_secs(60), &mut ports)
             .expect("step");
-        let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
         let standby = DEFAULT_STANDBY_POWER_W / 1000.0;
         assert!(
             (power - standby).abs() < 0.01,
@@ -3487,7 +3502,7 @@ mod tests {
 
         bat.step(&env, Duration::from_secs(60), &mut ports)
             .expect("step");
-        let power = bat.telemetry().get("active_power_kw").unwrap_or(0.0);
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
         assert!(
             power < -1.0,
             "after DR expiry, discharge should be available again, got {power}"
@@ -3555,7 +3570,10 @@ mod tests {
         bat.set_ocv_table(custom).unwrap();
         bat.reset_ocv_table().unwrap();
         let v = bat.ocv_table.voltage_at_soc(0.0);
-        assert!((v - 2.5).abs() < 1e-3, "should be default NMC voltage at SOC=0");
+        assert!(
+            (v - 2.5).abs() < 1e-3,
+            "should be default NMC voltage at SOC=0"
+        );
     }
 
     #[test]
@@ -3566,15 +3584,19 @@ mod tests {
         bat.set_u_neg_table(custom).unwrap();
         bat.reset_u_neg_table().unwrap();
         let p = bat.u_neg_table.potential_at_soc(0.0);
-        assert!((p - 1.1054).abs() < 1e-3, "should be default NMC U_neg at SOC=0");
+        assert!(
+            (p - 1.1054).abs() < 1e-3,
+            "should be default NMC U_neg at SOC=0"
+        );
     }
 
     #[test]
     fn lfp_chemistry_selects_lfp_ocv_on_init() {
         let mut config = battery_config(&[]);
-        config
-            .raw_config
-            .insert(KEY_CHEMISTRY.to_string(), ConfigValue::Text("lfp".to_string()));
+        config.raw_config.insert(
+            KEY_CHEMISTRY.to_string(),
+            ConfigValue::Text("lfp".to_string()),
+        );
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
 
@@ -3589,9 +3611,10 @@ mod tests {
     #[test]
     fn reset_ocv_on_lfp_battery_restores_lfp_default() {
         let mut config = battery_config(&[]);
-        config
-            .raw_config
-            .insert(KEY_CHEMISTRY.to_string(), ConfigValue::Text("lfp".to_string()));
+        config.raw_config.insert(
+            KEY_CHEMISTRY.to_string(),
+            ConfigValue::Text("lfp".to_string()),
+        );
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
 
@@ -3610,9 +3633,10 @@ mod tests {
     #[test]
     fn custom_ocv_not_overwritten_by_chemistry_on_init() {
         let mut config = battery_config(&[]);
-        config
-            .raw_config
-            .insert(KEY_CHEMISTRY.to_string(), ConfigValue::Text("lfp".to_string()));
+        config.raw_config.insert(
+            KEY_CHEMISTRY.to_string(),
+            ConfigValue::Text("lfp".to_string()),
+        );
         let mut bat = Battery::new(config.clone());
         let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
         bat.set_ocv_table(custom).unwrap();

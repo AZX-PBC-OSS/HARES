@@ -25,15 +25,15 @@ use py_dwelling::{PyDwelling, PyTimestepsIter};
 use py_enums::{
     PyAggregationResolution, PyBatteryChemistry, PyBatteryProductId, PyBmsAction, PyBmsMode,
     PyBmsScheduleWindow, PyChargingLevel, PyChargingStrategy, PyControlCapabilities,
-    PyDepartureConstraint, PyDutyCycleComponent, PyEndUse, PyEvArchetypeId,
-    PyEvConnectionState, PyExecutionStage, PyFluidType, PyFuelType, PyGridExportRule,
-    PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion, PySimStatus,
-    PyStormWatchTrigger, PyVehicleId, PyVehicleType,
+    PyDepartureConstraint, PyDutyCycleComponent, PyEndUse, PyEvArchetypeId, PyEvConnectionState,
+    PyExecutionStage, PyFluidType, PyFuelType, PyGridExportRule, PyInverterPriority, PyLutType,
+    PyPlugInPolicy, PyResStockVersion, PySimStatus, PyStormWatchTrigger, PyVehicleId,
+    PyVehicleType,
 };
 use py_equipment::{
     PyBattery, PyEquipmentDescriptor, PyEv, PyPv, PyPvSoilingConfig, PyTelemetryField,
 };
-use py_fleet::{PyFleet, PyFleetResults};
+use py_fleet::{PyFleet, PyFleetResults, PySteppableFleet};
 use py_metrics::{
     PyAnnualEnergyKwh, PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics,
     PyGridInteractionMetrics, PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics,
@@ -58,6 +58,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTelemetryField>()?;
     m.add_class::<PyEquipmentDescriptor>()?;
     m.add_class::<PyFleet>()?;
+    m.add_class::<PySteppableFleet>()?;
     m.add_class::<PyFleetResults>()?;
     m.add_class::<PyActor>()?;
     m.add_class::<PyDispatchRequest>()?;

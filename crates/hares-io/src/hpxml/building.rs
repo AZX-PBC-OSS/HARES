@@ -1475,10 +1475,51 @@ fn assign_walls_to_zones(boundaries: &[Boundary], zones: &mut HashMap<String, Zo
 
 fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
     let mut ducts = Vec::new();
+    // Legacy format: <DuctSystem> at BuildingDetails level.
     details.descendants("DuctSystem", &mut ducts);
+    // HPXML 4.x format: <HVACDistribution>/<DistributionSystemType>/<AirDistribution>/<Ducts>.
+    // DuctLeakageMeasurement is a sibling of Ducts under AirDistribution, matched by DuctType.
+    let mut air_dist_nodes = Vec::new();
+    details.descendants("AirDistribution", &mut air_dist_nodes);
+    let mut leakage_by_type: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    for air_dist in &air_dist_nodes {
+        let mut measurements = Vec::new();
+        air_dist.descendants("DuctLeakageMeasurement", &mut measurements);
+        for meas in &measurements {
+            let dtype = meas
+                .first_descendant("DuctType")
+                .map(|n| normalize_ascii(&n.text))
+                .unwrap_or_default();
+            if let Some(leak_node) = meas.first_descendant("DuctLeakage") {
+                let units = leak_node
+                    .first_descendant("Units")
+                    .map(|n| normalize_ascii(&n.text))
+                    .unwrap_or_default();
+                if let Some(value) = leak_node
+                    .first_descendant("Value")
+                    .and_then(XmlNode::text_as_f64)
+                {
+                    let fraction = match units.as_str() {
+                        "percent" => value / 100.0,
+                        _ => value, // CFM25 or fraction — store raw for now
+                    };
+                    leakage_by_type.insert(dtype, fraction);
+                }
+            }
+        }
+        let mut child_ducts = Vec::new();
+        air_dist.descendants("Ducts", &mut child_ducts);
+        ducts.extend(child_ducts);
+    }
 
     for duct_node in ducts {
         let id = element_id(duct_node).unwrap_or_else(|| "unknown".to_string());
+        // Try child elements first (legacy), then HPXML 4.x sibling lookup.
+        let duct_type_text = duct_node
+            .first_descendant("DuctType")
+            .map(|n| normalize_ascii(&n.text))
+            .unwrap_or_default();
         let leakage_fraction = duct_node
             .first_descendant("LeakageFraction")
             .and_then(XmlNode::text_as_f64)
@@ -1491,7 +1532,8 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
                 duct_node
                     .first_descendant("AnnualDuctLeakageValue")
                     .and_then(XmlNode::text_as_f64)
-            });
+            })
+            .or_else(|| leakage_by_type.get(&duct_type_text).copied());
 
         let insulation_r_value_m2_k_w = duct_node
             .first_descendant("DuctInsulationRValue")

@@ -11,6 +11,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_types::telemetry_keys as tk;
+
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::helpers::{equipment_id_from_config, first_f64, zone_id_from_config};
@@ -243,18 +245,22 @@ impl Dehumidifier {
 
     fn write_step_telemetry(&mut self, snapshot: PerformanceSnapshot) {
         self.telemetry
-            .set("water_removal_l_day", snapshot.water_removal_l_day);
+            .set(tk::WATER_REMOVAL_L_DAY, snapshot.water_removal_l_day);
         self.telemetry
-            .set("electric_power_w", snapshot.electric_power_w);
+            .set(tk::ELECTRIC_POWER_W, snapshot.electric_power_w);
+        self.telemetry.set(
+            tk::ELECTRIC_KW,
+            snapshot.electric_power_w / WATTS_PER_KILOWATT,
+        );
         self.telemetry
-            .set("latent_removal_w", snapshot.latent_removal_w);
+            .set(tk::LATENT_REMOVAL_W, snapshot.latent_removal_w);
         self.telemetry
-            .set("sensible_gain_w", snapshot.sensible_gain_w);
-        self.telemetry.set("target_rh", self.target_rh);
-        self.telemetry.set("min_rh", self.min_rh);
-        self.telemetry.set("max_rh", self.max_rh);
+            .set(tk::SENSIBLE_GAIN_W, snapshot.sensible_gain_w);
+        self.telemetry.set(tk::TARGET_RH, self.target_rh);
+        self.telemetry.set(tk::MIN_RH, self.min_rh);
+        self.telemetry.set(tk::MAX_RH, self.max_rh);
         self.telemetry
-            .set("is_on", if self.is_on { 1.0 } else { 0.0 });
+            .set(tk::IS_ON, if self.is_on { 1.0 } else { 0.0 });
     }
 }
 
@@ -464,10 +470,10 @@ impl Equipment for Dehumidifier {
             OperatingMode::Off
         };
         self.write_step_telemetry(PerformanceSnapshot {
-            water_removal_l_day: self.telemetry.get("water_removal_l_day").unwrap_or(0.0),
-            electric_power_w: self.telemetry.get("electric_power_w").unwrap_or(0.0),
-            latent_removal_w: self.telemetry.get("latent_removal_w").unwrap_or(0.0),
-            sensible_gain_w: self.telemetry.get("sensible_gain_w").unwrap_or(0.0),
+            water_removal_l_day: self.telemetry.get(tk::WATER_REMOVAL_L_DAY).unwrap_or(0.0),
+            electric_power_w: self.telemetry.get(tk::ELECTRIC_POWER_W).unwrap_or(0.0),
+            latent_removal_w: self.telemetry.get(tk::LATENT_REMOVAL_W).unwrap_or(0.0),
+            sensible_gain_w: self.telemetry.get(tk::SENSIBLE_GAIN_W).unwrap_or(0.0),
         });
         Ok(())
     }
@@ -490,9 +496,9 @@ impl Equipment for Dehumidifier {
                 self.target_rh = target;
                 self.min_rh = min;
                 self.max_rh = max;
-                self.telemetry.set("target_rh", self.target_rh);
-                self.telemetry.set("min_rh", self.min_rh);
-                self.telemetry.set("max_rh", self.max_rh);
+                self.telemetry.set(tk::TARGET_RH, self.target_rh);
+                self.telemetry.set(tk::MIN_RH, self.min_rh);
+                self.telemetry.set(tk::MAX_RH, self.max_rh);
             }
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
@@ -656,63 +662,69 @@ fn parse_coefficients_from_prefix(config: &EquipmentConfig, prefix: &str) -> Opt
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(8);
-    telemetry.insert("water_removal_l_day", 0.0);
-    telemetry.insert("electric_power_w", 0.0);
-    telemetry.insert("latent_removal_w", 0.0);
-    telemetry.insert("sensible_gain_w", 0.0);
-    telemetry.insert("target_rh", DEFAULT_TARGET_RH_FRACTION);
+    let mut telemetry = Telemetry::with_capacity(9);
+    telemetry.insert(tk::WATER_REMOVAL_L_DAY, 0.0);
+    telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::LATENT_REMOVAL_W, 0.0);
+    telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::TARGET_RH, DEFAULT_TARGET_RH_FRACTION);
     telemetry.insert(
-        "min_rh",
+        tk::MIN_RH,
         DEFAULT_TARGET_RH_FRACTION - DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION,
     );
     telemetry.insert(
-        "max_rh",
+        tk::MAX_RH,
         DEFAULT_TARGET_RH_FRACTION + DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION,
     );
-    telemetry.insert("is_on", 0.0);
+    telemetry.insert(tk::IS_ON, 0.0);
     telemetry
 }
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "water_removal_l_day".to_string(),
+            name: tk::WATER_REMOVAL_L_DAY.to_string(),
             unit: "L/day".to_string(),
             description: "Water removed from air at current conditions".to_string(),
         },
         TelemetryField {
-            name: "electric_power_w".to_string(),
+            name: tk::ELECTRIC_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Compressor + fan electric power draw".to_string(),
         },
         TelemetryField {
-            name: "latent_removal_w".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Total electric draw (kW, for dwelling power aggregation)".to_string(),
+        },
+        TelemetryField {
+            name: tk::LATENT_REMOVAL_W.to_string(),
             unit: "W".to_string(),
             description: "Latent cooling removed from zone air".to_string(),
         },
         TelemetryField {
-            name: "sensible_gain_w".to_string(),
+            name: tk::SENSIBLE_GAIN_W.to_string(),
             unit: "W".to_string(),
             description: "Sensible heat gain dumped back to zone".to_string(),
         },
         TelemetryField {
-            name: "target_rh".to_string(),
+            name: tk::TARGET_RH.to_string(),
             unit: "fraction".to_string(),
             description: "Active RH setpoint target".to_string(),
         },
         TelemetryField {
-            name: "min_rh".to_string(),
+            name: tk::MIN_RH.to_string(),
             unit: "fraction".to_string(),
             description: "Deadband lower bound".to_string(),
         },
         TelemetryField {
-            name: "max_rh".to_string(),
+            name: tk::MAX_RH.to_string(),
             unit: "fraction".to_string(),
             description: "Deadband upper bound".to_string(),
         },
         TelemetryField {
-            name: "is_on".to_string(),
+            name: tk::IS_ON.to_string(),
             unit: "bool".to_string(),
             description: "1 when compressor/fan are on, else 0".to_string(),
         },
@@ -726,7 +738,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, ExecutionStage, GridState, OperatingMode, PortSlots,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{
@@ -782,8 +794,8 @@ mod tests {
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
                 .unwrap(),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -818,10 +830,10 @@ mod tests {
         eq.step(&env(0.40), Duration::from_secs(60), &mut slots)
             .unwrap();
         assert_eq!(eq.update_control(&env(0.40)), OperatingMode::Off);
-        assert_eq!(eq.telemetry().get("water_removal_l_day"), Some(0.0));
-        assert_eq!(eq.telemetry().get("electric_power_w"), Some(0.0));
-        assert_eq!(eq.telemetry().get("latent_removal_w"), Some(0.0));
-        assert_eq!(eq.telemetry().get("sensible_gain_w"), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::WATER_REMOVAL_L_DAY), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::LATENT_REMOVAL_W), Some(0.0));
+        assert_eq!(eq.telemetry().get(tk::SENSIBLE_GAIN_W), Some(0.0));
         assert_eq!(slots.electrical.load_power_kw, 0.0);
         assert_eq!(slots.thermal[0].sensible_gain_w, 0.0);
         assert_eq!(slots.thermal[0].latent_gain_w, 0.0);
@@ -851,9 +863,9 @@ mod tests {
         eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
             .unwrap();
 
-        let water_l_day = eq.telemetry().get("water_removal_l_day").unwrap();
-        let electric_power_w = eq.telemetry().get("electric_power_w").unwrap();
-        let latent_removal_w = eq.telemetry().get("latent_removal_w").unwrap();
+        let water_l_day = eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap();
+        let electric_power_w = eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+        let latent_removal_w = eq.telemetry().get(tk::LATENT_REMOVAL_W).unwrap();
 
         // 70 pints/day -> liters/day
         let rated_l_day = 70.0 * 0.473_176_473;
@@ -875,9 +887,9 @@ mod tests {
         eq.step(&env(0.62), Duration::from_secs(60), &mut slots)
             .unwrap();
 
-        let electric_power_w = eq.telemetry().get("electric_power_w").unwrap();
-        let latent_removal_w = eq.telemetry().get("latent_removal_w").unwrap();
-        let sensible_gain_w = eq.telemetry().get("sensible_gain_w").unwrap();
+        let electric_power_w = eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
+        let latent_removal_w = eq.telemetry().get(tk::LATENT_REMOVAL_W).unwrap();
+        let sensible_gain_w = eq.telemetry().get(tk::SENSIBLE_GAIN_W).unwrap();
 
         approx_eq(sensible_gain_w, latent_removal_w + electric_power_w);
         approx_eq(
@@ -908,20 +920,20 @@ mod tests {
             .unwrap();
 
         approx_eq(
-            restored.telemetry().get("water_removal_l_day").unwrap(),
-            eq.telemetry().get("water_removal_l_day").unwrap(),
+            restored.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap(),
+            eq.telemetry().get(tk::WATER_REMOVAL_L_DAY).unwrap(),
         );
         approx_eq(
-            restored.telemetry().get("electric_power_w").unwrap(),
-            eq.telemetry().get("electric_power_w").unwrap(),
+            restored.telemetry().get(tk::ELECTRIC_POWER_W).unwrap(),
+            eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap(),
         );
         approx_eq(
-            restored.telemetry().get("latent_removal_w").unwrap(),
-            eq.telemetry().get("latent_removal_w").unwrap(),
+            restored.telemetry().get(tk::LATENT_REMOVAL_W).unwrap(),
+            eq.telemetry().get(tk::LATENT_REMOVAL_W).unwrap(),
         );
         approx_eq(
-            restored.telemetry().get("sensible_gain_w").unwrap(),
-            eq.telemetry().get("sensible_gain_w").unwrap(),
+            restored.telemetry().get(tk::SENSIBLE_GAIN_W).unwrap(),
+            eq.telemetry().get(tk::SENSIBLE_GAIN_W).unwrap(),
         );
     }
 
@@ -936,9 +948,9 @@ mod tests {
             max_rh: None,
         })
         .unwrap();
-        approx_eq(eq.telemetry().get("target_rh").unwrap(), 0.55);
-        approx_eq(eq.telemetry().get("min_rh").unwrap(), 0.525);
-        approx_eq(eq.telemetry().get("max_rh").unwrap(), 0.575);
+        approx_eq(eq.telemetry().get(tk::TARGET_RH).unwrap(), 0.55);
+        approx_eq(eq.telemetry().get(tk::MIN_RH).unwrap(), 0.525);
+        approx_eq(eq.telemetry().get(tk::MAX_RH).unwrap(), 0.575);
         assert_eq!(eq.update_control(&env(0.58)), OperatingMode::Cooling);
 
         eq.apply_control(&ControlSignal::ModeOverride {

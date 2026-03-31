@@ -72,6 +72,7 @@ pub struct PySimulationConfig {
     time_res: i64,
     output_verbosity: u8,
     output_path: Option<String>,
+    write_output: bool,
     output_to_parquet: bool,
     output_chunk_size: usize,
     setpoint_deadband_c: Option<f64>,
@@ -89,6 +90,7 @@ impl PySimulationConfig {
             time_res_s = None,
             output_verbosity = None,
             output_path = None,
+            write_output = None,
             output_to_parquet = None,
             output_chunk_size = None,
             master_seed = None,
@@ -104,6 +106,7 @@ impl PySimulationConfig {
         time_res_s: Option<i64>,
         output_verbosity: Option<u8>,
         output_path: Option<String>,
+        write_output: Option<bool>,
         output_to_parquet: Option<bool>,
         output_chunk_size: Option<usize>,
         master_seed: Option<u64>,
@@ -153,6 +156,7 @@ impl PySimulationConfig {
             time_res,
             output_verbosity,
             output_path,
+            write_output: write_output.unwrap_or(true),
             output_to_parquet: output_to_parquet.unwrap_or(false),
             output_chunk_size,
             setpoint_deadband_c,
@@ -235,6 +239,16 @@ impl PySimulationConfig {
     }
 
     #[getter]
+    pub fn write_output(&self) -> bool {
+        self.write_output
+    }
+
+    #[setter]
+    pub fn set_write_output(&mut self, value: bool) {
+        self.write_output = value;
+    }
+
+    #[getter]
     pub fn output_chunk_size(&self) -> usize {
         self.output_chunk_size
     }
@@ -284,10 +298,11 @@ impl PySimulationConfig {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, output_to_parquet={}, master_seed={})",
+            "SimulationConfig(start_time='{}', duration_s={}, time_res_s={}, write_output={}, output_to_parquet={}, master_seed={})",
             self.start_time.to_rfc3339(),
             self.duration,
             self.time_res,
+            self.write_output,
             self.output_to_parquet,
             self.master_seed
         )
@@ -308,6 +323,7 @@ impl PySimulationConfig {
             time_res: Duration::seconds(self.time_res),
             output_verbosity: self.output_verbosity,
             output_path: self.output_path.clone().map(PathBuf::from),
+            write_output: self.write_output,
             output_format: if self.output_to_parquet {
                 OutputFormat::Parquet
             } else {
@@ -330,6 +346,7 @@ impl PySimulationConfig {
                 .output_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
+            write_output: config.write_output,
             output_to_parquet: config.output_format == OutputFormat::Parquet,
             output_chunk_size: config.output_chunk_size,
             setpoint_deadband_c: config.setpoint_deadband_c,
@@ -545,6 +562,7 @@ impl PyDwellingConfig {
                 time_res: Duration::seconds(DEFAULT_STEP_S),
                 output_verbosity: 0,
                 output_path: None,
+                write_output: true,
                 output_format: OutputFormat::Csv,
                 output_chunk_size: DEFAULT_CHUNK_SIZE,
                 setpoint_deadband_c: None,

@@ -10,7 +10,7 @@ use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -335,11 +335,11 @@ impl Equipment for ScheduledLoad {
         if env.grid.voltage_pu == 0.0 {
             self.last_non_zero_power_kw = 0.0;
             self.last_non_zero_gas_w = 0.0;
-            self.telemetry.set("electric_kw", 0.0);
-            self.telemetry.set("reactive_power_kvar", 0.0);
-            self.telemetry.set("sensible_gain_w", 0.0);
-            self.telemetry.set("latent_gain_w", 0.0);
-            self.telemetry.set("fuel_input_w", 0.0);
+            self.telemetry.set(tk::ELECTRIC_KW, 0.0);
+            self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
+            self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
+            self.telemetry.set(tk::LATENT_GAIN_W, 0.0);
+            self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
             return Ok(());
         }
 
@@ -347,11 +347,11 @@ impl Equipment for ScheduledLoad {
         if self.mode_override == Some(OperatingMode::Off) {
             self.last_non_zero_power_kw = 0.0;
             self.last_non_zero_gas_w = 0.0;
-            self.telemetry.set("electric_kw", 0.0);
-            self.telemetry.set("reactive_power_kvar", 0.0);
-            self.telemetry.set("sensible_gain_w", 0.0);
-            self.telemetry.set("latent_gain_w", 0.0);
-            self.telemetry.set("fuel_input_w", 0.0);
+            self.telemetry.set(tk::ELECTRIC_KW, 0.0);
+            self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
+            self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
+            self.telemetry.set(tk::LATENT_GAIN_W, 0.0);
+            self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
             return Ok(());
         }
 
@@ -437,11 +437,12 @@ impl Equipment for ScheduledLoad {
             }
         }
 
-        self.telemetry.set("electric_kw", electric_power_kw);
-        self.telemetry.set("reactive_power_kvar", reactive_power_kvar);
-        self.telemetry.set("sensible_gain_w", sensible_gain_w);
-        self.telemetry.set("latent_gain_w", latent_gain_w);
-        self.telemetry.set("fuel_input_w", gas_consumption_w);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
+        self.telemetry
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+        self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
+        self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
+        self.telemetry.set(tk::FUEL_INPUT_W, gas_consumption_w);
         Ok(())
     }
 
@@ -490,22 +491,22 @@ impl Equipment for ScheduledLoad {
             (None, None) => {}
         }
         self.telemetry
-            .insert("electric_kw", self.last_non_zero_power_kw);
+            .insert(tk::ELECTRIC_KW, self.last_non_zero_power_kw);
         // last_non_zero_power_kw already holds the ZIP-adjusted kW value (set in step()),
         // so the thermal gain reconstruction below is accurate — it does not need a
         // separate voltage correction. The same ZIP-adjusted wattage drives sensible/latent
         // heat gains regardless of what the voltage was at the time of last non-zero output.
         let total_gain_source_w = self.last_non_zero_power_kw * 1_000.0 + self.last_non_zero_gas_w;
         self.telemetry.insert(
-            "sensible_gain_w",
+            tk::SENSIBLE_GAIN_W,
             total_gain_source_w * self.sensible_gain_fraction,
         );
         self.telemetry.insert(
-            "latent_gain_w",
+            tk::LATENT_GAIN_W,
             total_gain_source_w * self.latent_gain_fraction,
         );
         self.telemetry
-            .insert("fuel_input_w", self.last_non_zero_gas_w);
+            .insert(tk::FUEL_INPUT_W, self.last_non_zero_gas_w);
         Ok(())
     }
 
@@ -678,38 +679,38 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(5);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("reactive_power_kvar", 0.0);
-    telemetry.insert("sensible_gain_w", 0.0);
-    telemetry.insert("latent_gain_w", 0.0);
-    telemetry.insert("fuel_input_w", 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
+    telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::LATENT_GAIN_W, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry
 }
 
 fn scheduled_load_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "ZIP-adjusted active electrical power draw".to_string(),
         },
         TelemetryField {
-            name: "reactive_power_kvar".to_string(),
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
             unit: "kVAR".to_string(),
             description: "ZIP-adjusted reactive electrical power".to_string(),
         },
         TelemetryField {
-            name: "sensible_gain_w".to_string(),
+            name: tk::SENSIBLE_GAIN_W.to_string(),
             unit: "W".to_string(),
             description: "Sensible thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "latent_gain_w".to_string(),
+            name: tk::LATENT_GAIN_W.to_string(),
             unit: "W".to_string(),
             description: "Latent thermal gain to assigned zone".to_string(),
         },
         TelemetryField {
-            name: "fuel_input_w".to_string(),
+            name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Gas fuel consumption rate converted to watts".to_string(),
         },
@@ -992,7 +993,6 @@ fn is_schedule_source_zero(source: &ScheduleSource) -> bool {
     }
 }
 
-
 fn parse_bool(config: &EquipmentConfig, key: &str) -> crate::Result<Option<bool>> {
     if let Some(b) = config.get_bool(key) {
         return Ok(Some(b));
@@ -1025,12 +1025,14 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
+    use hares_types::telemetry_keys as tk;
+
     use super::{
         GAS_THERMS_PER_HOUR_TO_W, KEY_CONVECTIVE_GAIN_FRACTION, KEY_GAS_CONSTANT,
         KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE, KEY_LATENT_GAIN_FRACTION,
         KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE,
-        KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, KEY_ZIP_I, KEY_ZIP_P,
-        KEY_ZIP_V0, KEY_ZIP_Z, ScheduledLoad, register_with_registry,
+        KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, KEY_ZIP_I, KEY_ZIP_P, KEY_ZIP_V0,
+        KEY_ZIP_Z, ScheduledLoad, register_with_registry,
     };
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
@@ -1071,8 +1073,8 @@ mod tests {
                 .single()
                 .expect("valid UTC timestamp"),
             time_res: ChronoDuration::minutes(15),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1437,7 +1439,7 @@ mod tests {
         };
         restored.load_state(&state).unwrap();
         let telemetry = restored.telemetry();
-        assert_eq!(telemetry.get("electric_kw"), Some(2.0));
+        assert_eq!(telemetry.get(tk::ELECTRIC_KW), Some(2.0));
     }
 
     #[test]
@@ -1569,10 +1571,10 @@ mod tests {
             .iter()
             .map(TelemetryField::name_as_str)
             .collect();
-        assert!(names.contains(&"electric_kw"));
-        assert!(names.contains(&"sensible_gain_w"));
-        assert!(names.contains(&"latent_gain_w"));
-        assert!(names.contains(&"fuel_input_w"));
+        assert!(names.contains(&tk::ELECTRIC_KW));
+        assert!(names.contains(&tk::SENSIBLE_GAIN_W));
+        assert!(names.contains(&tk::LATENT_GAIN_W));
+        assert!(names.contains(&tk::FUEL_INPUT_W));
     }
 
     #[test]
@@ -1927,7 +1929,9 @@ mod tests {
         let mut registry = EquipmentRegistry::new();
         crate::ev::register_with_registry(&mut registry);
         let config = config_with_schedule("Scheduled EV", "Scheduled EV", &[3.5]);
-        let factory = registry.get("Scheduled EV").expect("Scheduled EV registered");
+        let factory = registry
+            .get("Scheduled EV")
+            .expect("Scheduled EV registered");
         let eq = factory(config);
         assert!(
             eq.descriptor().zone.is_none(),
@@ -1940,7 +1944,9 @@ mod tests {
         let mut registry = EquipmentRegistry::new();
         crate::ev::register_with_registry(&mut registry);
         let config = config_with_schedule("Scheduled EV", "Scheduled EV", &[3.5]);
-        let factory = registry.get("Scheduled EV").expect("Scheduled EV registered");
+        let factory = registry
+            .get("Scheduled EV")
+            .expect("Scheduled EV registered");
         let eq = factory(config);
         assert_eq!(
             eq.descriptor().end_use,
@@ -1982,7 +1988,7 @@ mod tests {
         let expected_kvar = 2.0_f64 * 0.9 * (0.0 + 0.8 * 1.0 + 0.2);
         let telemetry_kvar = eq
             .telemetry()
-            .get("reactive_power_kvar")
+            .get(tk::REACTIVE_POWER_KVAR)
             .expect("reactive_power_kvar must be present in telemetry");
         assert!(
             (telemetry_kvar - expected_kvar).abs() < 1e-12,
@@ -2012,7 +2018,7 @@ mod tests {
 
         let telemetry_kvar = eq
             .telemetry()
-            .get("reactive_power_kvar")
+            .get(tk::REACTIVE_POWER_KVAR)
             .expect("reactive_power_kvar must be present in telemetry even when zero");
         assert_eq!(
             telemetry_kvar, 0.0,

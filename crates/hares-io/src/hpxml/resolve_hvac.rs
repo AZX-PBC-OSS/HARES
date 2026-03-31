@@ -274,6 +274,12 @@ pub(super) fn resolve_hvac(
         let name = canonical_hvac_heating_name(&system_type, fuel);
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, heating, "HeatingCapacity");
+        insert_capacity_w(
+            &mut params,
+            heating,
+            "HeatingCapacity",
+            "heating_capacity_w",
+        );
         insert_annual_efficiency(&mut params, heating, true);
         params.insert("system_type".to_string(), Value::String(system_type));
 
@@ -566,6 +572,9 @@ fn parse_named_type(node: &XmlNode, tag: &str) -> Option<String> {
 
 fn canonical_hvac_heating_name(system_type: &str, fuel: FuelType) -> String {
     let ty = system_type.trim();
+    if matches!(ty, "IdealHVAC" | "Ideal HVAC" | "IdealHvac") {
+        return "Ideal HVAC".to_string();
+    }
     match (ty, fuel) {
         ("ElectricResistance", FuelType::Electric) => "Electric Baseboard".to_string(),
         ("Furnace", FuelType::Electric)

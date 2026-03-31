@@ -16,7 +16,6 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, FixedOffset};
 use chrono_tz::Tz;
 use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal};
-use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{ElectricalSolver, FluidSolver, HumiditySolver, ThermalSolver};
@@ -34,10 +33,11 @@ use hares_physics::constants::{
     OCCUPANT_SENSIBLE_GAIN_W,
 };
 use hares_physics::pv_sizing::RoofInfo;
+use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary, EndUse,
     EnvironmentState, ExecutionStage, GridState, HaresError, PortDeclaration, PortSlots,
-    ScheduleSource, SCHEDULE_DOMAIN_ID, ThermalCategory, ZoneId,
+    SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -521,7 +521,7 @@ pub struct Dwelling {
     pub clock: SimClock,
     pub environment: EnvironmentManager,
     pub ports: PortSlots,
-    pub recorder: StreamingRecorder,
+    pub recorder: Option<StreamingRecorder>,
     pub rng: ChaCha8Rng,
     pub warnings: Vec<String>,
 
@@ -572,7 +572,10 @@ pub struct Dwelling {
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
-    #[expect(dead_code, reason = "reserved for thermal balance invariant (see RV-014)")]
+    #[expect(
+        dead_code,
+        reason = "reserved for thermal balance invariant (see RV-014)"
+    )]
     zone_capacitances_j_k: Vec<(ZoneId, f64)>,
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     prev_humidity_ratios: Vec<(ZoneId, f64)>,
@@ -600,6 +603,7 @@ pub struct Dwelling {
     output_chunk_size: usize,
     output_format: hares_io::OutputFormat,
     output_path: PathBuf,
+    write_output: bool,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
     #[cfg(feature = "actor_profiling")]
@@ -647,6 +651,7 @@ impl Dwelling {
             time_res,
             output_verbosity: 0,
             output_path: None,
+            write_output: true,
             output_format: hares_io::OutputFormat::Csv,
             output_chunk_size: 10_000,
             setpoint_deadband_c: None,
@@ -691,10 +696,22 @@ impl Dwelling {
 
     /// Constructor for synthetic TOML dwelling definitions (BESTEST-style inputs).
     pub fn from_toml_config(path: &Path) -> Result<Self> {
+        Self::from_toml_config_with_write_output(path, None)
+    }
+
+    /// Constructor for synthetic TOML dwelling definitions with optional
+    /// output-write override.
+    pub fn from_toml_config_with_write_output(
+        path: &Path,
+        write_output_override: Option<bool>,
+    ) -> Result<Self> {
         let toml_str = std::fs::read_to_string(path)
             .map_err(|err| HaresError::Io(format!("failed to read TOML config: {err}")))?;
-        let config: SyntheticTomlConfig = toml::from_str(&toml_str)
+        let mut config: SyntheticTomlConfig = toml::from_str(&toml_str)
             .map_err(|err| HaresError::Io(format!("failed to parse TOML config: {err}")))?;
+        if let Some(write_output) = write_output_override {
+            config.output.write_output = write_output;
+        }
 
         let sim_config = SimulationConfig {
             start_time: config.simulation.start_time,
@@ -702,6 +719,7 @@ impl Dwelling {
             time_res: Duration::seconds(config.simulation.time_res_s),
             output_verbosity: config.output.output_verbosity,
             output_path: config.output.output_path.as_ref().map(PathBuf::from),
+            write_output: config.output.write_output,
             output_format: config.output.output_format,
             output_chunk_size: config.output.output_chunk_size,
             setpoint_deadband_c: None,
@@ -778,7 +796,12 @@ impl Dwelling {
             .defaults_path
             .clone()
             .unwrap_or_else(|| PathBuf::from("defaults"));
-        let defaults = match DefaultsStore::load(&defaults_dir) {
+        let resolved_defaults_dir = if defaults_dir.exists() {
+            defaults_dir.clone()
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+        };
+        let defaults = match DefaultsStore::load(&resolved_defaults_dir) {
             Ok(store) => store,
             Err(err) => {
                 warnings.push(format!(
@@ -818,7 +841,7 @@ impl Dwelling {
         hares_io::inject_schedule_into_specs(
             &mut equipment_specs,
             environment.schedule_mut(),
-            Some(&defaults_dir),
+            Some(&resolved_defaults_dir),
         );
         let override_root = config
             .overrides
@@ -889,13 +912,19 @@ impl Dwelling {
             .output_path
             .clone()
             .unwrap_or_else(|| default_output_path(&config));
-        let recorder = StreamingRecorder::new(
-            schema,
-            config.sim_config.output_chunk_size,
-            config.sim_config.output_format,
-            &output_path,
-        )
-        .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?;
+        let recorder = if config.sim_config.write_output {
+            Some(
+                StreamingRecorder::new(
+                    schema,
+                    config.sim_config.output_chunk_size,
+                    config.sim_config.output_format,
+                    &output_path,
+                )
+                .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?,
+            )
+        } else {
+            None
+        };
 
         let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&building);
         let latitude_deg = building.site.latitude_deg;
@@ -956,7 +985,11 @@ impl Dwelling {
             zone_temp_columns: zone_caches.temp_columns,
             zone_infiltration_columns: zone_caches.infiltration_columns,
             zone_lwr_columns: zone_caches.lwr_columns,
-            zone_temp_scratch: zone_caches.sorted_zone_ids.iter().map(|&z| (z, 0.0)).collect(),
+            zone_temp_scratch: zone_caches
+                .sorted_zone_ids
+                .iter()
+                .map(|&z| (z, 0.0))
+                .collect(),
             sorted_zone_ids: zone_caches.sorted_zone_ids,
             zone_env_indices: zone_caches.zone_env_indices,
             zone_temp_col_indices: zone_caches.zone_temp_col_indices,
@@ -983,6 +1016,7 @@ impl Dwelling {
             output_chunk_size: config.sim_config.output_chunk_size,
             output_format: config.sim_config.output_format,
             output_path: output_path.clone(),
+            write_output: config.sim_config.write_output,
             #[cfg(feature = "profiling")]
             profiling: DwellingProfilingSummary::default(),
             #[cfg(feature = "actor_profiling")]
@@ -1011,12 +1045,14 @@ impl Dwelling {
     /// Runs the full configured horizon and returns accumulated results.
     pub fn simulate(&mut self) -> Result<SimulationResults> {
         while self.clock.current_step() < self.clock.total_steps() {
-            let _ = self.run_timestep(true)?;
+            let _ = self.run_timestep(self.write_output)?;
         }
         self.finalize_billing();
-        self.recorder
-            .flush()
-            .map_err(|err| HaresError::Io(format!("output flush failed: {err}")))?;
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder
+                .flush_and_close()
+                .map_err(|err| HaresError::Io(format!("output close failed: {err}")))?;
+        }
         Ok(self.simulation_results.clone())
     }
 
@@ -1041,7 +1077,7 @@ impl Dwelling {
 
     /// Executes exactly one simulation timestep.
     pub fn step(&mut self) -> Result<StepResult> {
-        self.run_timestep(true)
+        self.run_timestep(self.write_output)
     }
 
     /// Queues a control signal for one equipment instance by name.
@@ -1347,7 +1383,12 @@ impl Dwelling {
         // Rebuild output schema so dynamically added equipment gets columns.
         // Only safe before any rows have been recorded; mid-simulation schema
         // changes would corrupt the output file.
-        if self.recorder.total_rows() == 0 {
+        if self
+            .recorder
+            .as_ref()
+            .map_or(0, StreamingRecorder::total_rows)
+            == 0
+        {
             let specs: Vec<hares_io::EquipmentSpec> = self
                 .equipment
                 .iter()
@@ -1375,20 +1416,26 @@ impl Dwelling {
             self.zone_temp_columns = zone_caches.temp_columns;
             self.zone_infiltration_columns = zone_caches.infiltration_columns;
             self.zone_lwr_columns = zone_caches.lwr_columns;
-            self.zone_temp_scratch = zone_caches.sorted_zone_ids.iter().map(|&z| (z, 0.0)).collect();
+            self.zone_temp_scratch = zone_caches
+                .sorted_zone_ids
+                .iter()
+                .map(|&z| (z, 0.0))
+                .collect();
             self.sorted_zone_ids = zone_caches.sorted_zone_ids;
             self.zone_env_indices = zone_caches.zone_env_indices;
             self.zone_temp_col_indices = zone_caches.zone_temp_col_indices;
             self.record_scratch.clear();
             self.record_scratch.resize(self.output_value_count, 0.0);
 
-            if let Ok(recorder) = StreamingRecorder::new(
-                schema,
-                self.output_chunk_size,
-                self.output_format,
-                &self.output_path,
-            ) {
-                self.recorder = recorder;
+            if self.write_output
+                && let Ok(recorder) = StreamingRecorder::new(
+                    schema,
+                    self.output_chunk_size,
+                    self.output_format,
+                    &self.output_path,
+                )
+            {
+                self.recorder = Some(recorder);
             }
         }
     }
@@ -1485,32 +1532,25 @@ impl Dwelling {
         for eq in &self.equipment {
             let telemetry = eq.telemetry();
             equipment_names.push(eq.descriptor().name.clone());
-            equipment_modes.push(telemetry.get("mode").unwrap_or(0.0));
-            equipment_states.push(telemetry.get("state").unwrap_or(0.0));
-            equipment_soc.push(
-                telemetry
-                    .get("soc")
-                    .or_else(|| telemetry.get("state_of_charge"))
-                    .unwrap_or(0.0),
-            );
+            equipment_modes.push(telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0));
+            equipment_states.push(telemetry.get(tk::STATE).unwrap_or(0.0));
+            equipment_soc.push(telemetry.get(tk::SOC).unwrap_or(0.0));
             equipment_power_kw.push(
                 telemetry
-                    .get("electric_kw")
-                    .or_else(|| telemetry.get("ac_power_kw"))
-                    .or_else(|| telemetry.get("active_power_kw"))
-                    .or_else(|| telemetry.get("electric_power_kw"))
-                    .or_else(|| telemetry.get("power_kw"))
-                    .or_else(|| telemetry.get("net_power_kw"))
+                    .get(tk::ELECTRIC_KW)
+                    .or_else(|| telemetry.get(tk::AC_POWER_KW))
+                    .or_else(|| telemetry.get(tk::ACTIVE_POWER_KW))
+                    .or_else(|| telemetry.get(tk::ELECTRIC_OUTPUT_KW))
                     .unwrap_or(0.0),
             );
 
             if let Some(zone_id) = eq.descriptor().zone
                 && let Some(zone_idx) = zone_ids.iter().position(|z| *z == zone_id)
             {
-                if let Some(heat_sp) = telemetry.get("heating_setpoint_c") {
+                if let Some(heat_sp) = telemetry.get(tk::HEATING_SETPOINT_C) {
                     setpoint_heat_c[zone_idx] = heat_sp;
                 }
-                if let Some(cool_sp) = telemetry.get("cooling_setpoint_c") {
+                if let Some(cool_sp) = telemetry.get(tk::COOLING_SETPOINT_C) {
                     setpoint_cool_c[zone_idx] = cool_sp;
                 }
             }
@@ -1529,6 +1569,7 @@ impl Dwelling {
             setpoint_heat_c,
             setpoint_cool_c,
             total_power_kw: self.electrical_solver.net_active_kw(),
+            reactive_power_kvar: self.electrical_solver.net_reactive_kvar(),
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,
             outdoor_rh: self.latest_env.weather.outdoor_humidity_ratio,
         }
@@ -1577,7 +1618,9 @@ impl Dwelling {
     /// Returns all record batches flushed by the streaming recorder so far.
     #[must_use]
     pub fn flushed_batches(&self) -> &[arrow::record_batch::RecordBatch] {
-        self.recorder.flushed_batches()
+        self.recorder
+            .as_ref()
+            .map_or(&[], StreamingRecorder::flushed_batches)
     }
 
     /// Snapshot current simulation state to an in-memory checkpoint struct.
@@ -1741,7 +1784,8 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         let schedule_started = Instant::now();
         self.environment.feed_zones(&self.latest_env.zones);
-        self.environment.update_in_place(&mut self.latest_env, &self.clock);
+        self.environment
+            .update_in_place(&mut self.latest_env, &self.clock);
 
         // Populate price signal from tariff evaluator (deterministic function of clock).
         if let Some(ref evaluator) = self.tariff_evaluator {
@@ -2089,10 +2133,7 @@ impl Dwelling {
             hvac_cooling_w,
         };
 
-        // Step 5: record outputs.
-        // Note: step_result.clone() is unavoidable here — we need both a
-        // stored copy (for simulation_results) and a returned copy (for
-        // the caller). The zone_temperatures_c Vec is the only heap alloc.
+        // Step 5: record outputs to disk (when enabled) and accumulate step results.
         if record_output {
             #[cfg(feature = "profiling")]
             let io_started = Instant::now();
@@ -2107,8 +2148,8 @@ impl Dwelling {
                     .memory_high_water_kb
                     .max(current_process_hwm_kb());
             }
-            self.simulation_results.steps.push(step_result.clone());
         }
+        self.simulation_results.steps.push(step_result.clone());
 
         #[cfg(feature = "profiling")]
         {
@@ -2150,11 +2191,11 @@ impl Dwelling {
             let end_use = &eq.descriptor().end_use;
             let telem = eq.telemetry();
             if *end_use == EndUse::BATTERY {
-                battery_kw += telem.get("active_power_kw").unwrap_or(0.0);
+                battery_kw += telem.get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
             } else if *end_use == EndUse::EV {
-                ev_kw += telem.get("active_power_kw").unwrap_or(0.0);
+                ev_kw += telem.get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
             } else if *end_use == EndUse::PV {
-                pv_kw += telem.get("active_power_kw").unwrap_or(0.0);
+                pv_kw += telem.get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
             }
         }
         let net_grid = self.electrical_solver.net_active_kw();
@@ -2197,9 +2238,10 @@ impl Dwelling {
             let telem = eq.telemetry();
             if let Some(idx) = cols.electric_power {
                 let raw_kw = telem
-                    .get("electric_kw")
-                    .or_else(|| telem.get("active_power_kw"))
-                    .or_else(|| telem.get("ac_power_kw"))
+                    .get(tk::ELECTRIC_KW)
+                    .or_else(|| telem.get(tk::ACTIVE_POWER_KW))
+                    .or_else(|| telem.get(tk::AC_POWER_KW))
+                    .or_else(|| telem.get(tk::ELECTRIC_OUTPUT_KW))
                     .unwrap_or(0.0);
                 // PV/generator telemetry reports positive generation; output
                 // convention (OCHRE) is negative for generation equipment.
@@ -2210,19 +2252,20 @@ impl Dwelling {
                 };
             }
             if let Some(idx) = cols.gas_power {
-                row[idx] = telem.get("fuel_input_w").unwrap_or(0.0) / GAS_THERMS_PER_HOUR_TO_W;
+                row[idx] = telem.get(tk::FUEL_INPUT_W).unwrap_or(0.0) / GAS_THERMS_PER_HOUR_TO_W;
             }
             if let Some(idx) = cols.mode {
-                row[idx] = telem.get("mode").unwrap_or(0.0);
+                row[idx] = telem.get(tk::OPERATING_MODE).unwrap_or(0.0);
             }
             if let Some(idx) = cols.reactive_power {
-                let q = telem.get("reactive_power_kvar").unwrap_or(0.0);
+                let q = telem.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0);
                 row[idx] = q;
                 if let Some(pf_idx) = cols.power_factor {
                     let p = telem
-                        .get("electric_kw")
-                        .or_else(|| telem.get("active_power_kw"))
-                        .or_else(|| telem.get("ac_power_kw"))
+                        .get(tk::ELECTRIC_KW)
+                        .or_else(|| telem.get(tk::ACTIVE_POWER_KW))
+                        .or_else(|| telem.get(tk::AC_POWER_KW))
+                        .or_else(|| telem.get(tk::ELECTRIC_OUTPUT_KW))
                         .unwrap_or(0.0);
                     let s = (p * p + q * q).sqrt();
                     row[pf_idx] = if s > 1e-9 { (p / s).abs() } else { 1.0 };
@@ -2296,9 +2339,12 @@ impl Dwelling {
         use std::fmt::Write;
         write!(&mut self.timestamp_buf, "{}", step.timestamp.format("%+"))
             .expect("write to String is infallible");
-        self.recorder
-            .push_row(&self.timestamp_buf, row)
-            .map_err(|err| HaresError::Io(format!("record push failed: {err}")))
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder
+                .push_row(&self.timestamp_buf, row)
+                .map_err(|err| HaresError::Io(format!("record push failed: {err}")))?;
+        }
+        Ok(())
     }
 
     /// Runs per-timestep invariant checks.
@@ -2363,11 +2409,7 @@ impl Dwelling {
                     }
                 }
             }
-            checker.check_temperatures(
-                &conditioned_temps,
-                &unconditioned_temps,
-                &tank_temps_c,
-            )?;
+            checker.check_temperatures(&conditioned_temps, &unconditioned_temps, &tank_temps_c)?;
 
             // SOC bounds for storage equipment.
             for eq in &self.equipment {
@@ -2375,7 +2417,7 @@ impl Dwelling {
                 if *end_use != EndUse::BATTERY && *end_use != EndUse::EV {
                     continue;
                 }
-                if let Some(soc) = eq.telemetry().get("soc") {
+                if let Some(soc) = eq.telemetry().get(tk::SOC) {
                     checker.check_soc(soc, 0.0)?;
                 }
             }
@@ -2435,8 +2477,7 @@ impl Dwelling {
                     let zone_raw = pair[0];
                     let latent = pair[1];
                     if zone_raw.is_finite() && zone_raw >= 0.0 {
-                        infiltration_latent_by_zone
-                            .push((ZoneId(zone_raw as u16), latent));
+                        infiltration_latent_by_zone.push((ZoneId(zone_raw as u16), latent));
                     }
                 }
             }
@@ -2543,9 +2584,7 @@ fn build_actors_from_seeds(
                     continue;
                 }
 
-                if !has_tariff
-                    && matches!(bms_mode, BmsMode::TimeOfUseOptimization { .. })
-                {
+                if !has_tariff && matches!(bms_mode, BmsMode::TimeOfUseOptimization { .. }) {
                     tracing::warn!(
                         equipment = %name,
                         "TimeOfUseOptimization requires tariff; falling back to SelfConsumption"
@@ -2653,14 +2692,42 @@ mod tests {
     use hares_control::PriorityTier;
     use hares_equipment::config::ConfigValue;
     use hares_equipment::{Equipment, EquipmentConfig};
-    use hares_types::ports::PortSlots;
+    use hares_types::ports::{PortContribution, PortSlots};
     use hares_types::{
         ControlCapabilities, ControlSignal, EndUse, EquipmentDescriptor, EquipmentId,
         ExecutionStage, FuelType, OperatingMode, PortDeclaration, Telemetry, TelemetryField,
         ZoneId,
     };
     use std::borrow::Cow;
+    use std::fs;
+    use std::path::PathBuf;
     use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn replace_equipment_for_test(dwelling: &mut Dwelling, equipment: Vec<Box<dyn Equipment>>) {
+        dwelling.equipment = equipment;
+        dwelling.equipment_execution_order = compute_equipment_execution_order(&dwelling.equipment);
+        dwelling.equipment_column_map =
+            build_equipment_column_map(&dwelling.equipment, &dwelling.output_column_index);
+        dwelling
+            .solver_feedback_actor
+            .set_dispatch_targets(compute_equipment_dispatch_targets(&dwelling.equipment));
+        dwelling.latest_env.equipment_telemetry.retain(|name, _| {
+            dwelling
+                .equipment
+                .iter()
+                .any(|eq| eq.descriptor().name == *name)
+        });
+
+        let mut declarations: Vec<PortDeclaration> = Vec::new();
+        for eq in &dwelling.equipment {
+            declarations.extend_from_slice(eq.ports());
+        }
+        for zone in &dwelling.latest_env.zones {
+            declarations.push(PortDeclaration::thermal(zone.id));
+        }
+        dwelling.ports = PortSlots::from_declarations(&declarations);
+    }
 
     struct TestEquipment {
         descriptor: EquipmentDescriptor,
@@ -2681,7 +2748,7 @@ mod tests {
                     stage: ExecutionStage::Independent,
                     control_capabilities: capabilities,
                     telemetry_fields: vec![TelemetryField {
-                        name: "last_power_kw".to_string(),
+                        name: tk::LAST_POWER_KW.to_string(),
                         unit: "kW".to_string(),
                         description: "last applied power".to_string(),
                     }],
@@ -2706,7 +2773,7 @@ mod tests {
             _config: &EquipmentConfig,
             _env: &hares_types::EnvironmentState,
         ) -> std::result::Result<(), hares_types::HaresError> {
-            self.telemetry.insert("last_power_kw", self.last_power_kw);
+            self.telemetry.insert(tk::LAST_POWER_KW, self.last_power_kw);
             Ok(())
         }
 
@@ -2747,8 +2814,110 @@ mod tests {
             } = signal
             {
                 self.last_power_kw = *active_power_kw;
-                self.telemetry.insert("last_power_kw", self.last_power_kw);
+                self.telemetry.insert(tk::LAST_POWER_KW, self.last_power_kw);
             }
+            Ok(())
+        }
+    }
+
+    struct TestReactiveEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        active_power_kw: f64,
+        reactive_power_kvar: f64,
+        ports: Vec<PortDeclaration>,
+    }
+
+    impl TestReactiveEquipment {
+        fn new(name: &str, active_power_kw: f64, reactive_power_kvar: f64) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(2),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("TestReactiveEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: ControlCapabilities::empty(),
+                    telemetry_fields: vec![
+                        TelemetryField {
+                            name: "active_power_kw".to_string(),
+                            unit: "kW".to_string(),
+                            description: "active electrical power".to_string(),
+                        },
+                        TelemetryField {
+                            name: "reactive_power_kvar".to_string(),
+                            unit: "kVAR".to_string(),
+                            description: "reactive electrical power".to_string(),
+                        },
+                    ],
+                },
+                telemetry: Telemetry::with_capacity(2),
+                active_power_kw,
+                reactive_power_kvar,
+                ports: vec![PortDeclaration::electrical()],
+            }
+        }
+    }
+
+    impl Equipment for TestReactiveEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &self.ports
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            self.telemetry
+                .insert("active_power_kw", self.active_power_kw);
+            self.telemetry
+                .insert("reactive_power_kvar", self.reactive_power_kvar);
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_kw: self.active_power_kw,
+                reactive_power_kvar: self.reactive_power_kvar,
+            })?;
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn save_state(&self) -> Vec<u8> {
+            vec![]
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
             Ok(())
         }
     }
@@ -2757,6 +2926,94 @@ mod tests {
     fn stage_rank_orders_execution_stages() {
         assert!(stage_rank(ExecutionStage::Independent) < stage_rank(ExecutionStage::Electrical));
         assert!(stage_rank(ExecutionStage::Electrical) < stage_rank(ExecutionStage::Thermal));
+    }
+
+    #[test]
+    fn telemetry_reports_reactive_power_after_dwelling_step() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let mut reactive_eq = TestReactiveEquipment::new("ReactiveLoad", 2.0, 0.75);
+        reactive_eq
+            .init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init reactive test equipment");
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(reactive_eq)]);
+
+        let _ = dwelling.run_timestep(false).expect("dwelling step");
+        let telemetry = dwelling.telemetry();
+
+        assert!((telemetry.reactive_power_kvar - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn simulate_accumulates_steps_when_write_output_disabled() {
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-write-output-off-{nanos}.toml"));
+            path
+        };
+
+        fs::write(
+            &toml_path,
+            r#"building_id = 424242
+
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = -10.0
+dew_point_c = -5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+
+[output]
+write_output = false
+output_verbosity = 0
+output_format = "csv"
+output_chunk_size = 1000
+master_seed = 0
+"#,
+        )
+        .expect("write synthetic TOML");
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        let _ = fs::remove_file(&toml_path);
+        let results = dwelling.simulate().expect("simulate");
+
+        assert_eq!(
+            results.steps.len(),
+            10,
+            "simulate() must still accumulate in-memory step results when write_output=false"
+        );
+        assert!(
+            dwelling.flushed_batches().is_empty(),
+            "write_output=false must not produce recorder batches"
+        );
     }
 
     #[test]
@@ -2863,7 +3120,7 @@ mod tests {
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
         assert!(warnings.is_empty());
-        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(5.0));
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
     }
 
     #[test]
@@ -2910,7 +3167,7 @@ mod tests {
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
 
         assert!(warnings.is_empty());
-        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(0.0));
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(0.0));
     }
 
     #[test]
@@ -3003,7 +3260,7 @@ mod tests {
 
         // Should find the equipment and apply the signal
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
-        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(2.5));
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(2.5));
     }
 
     #[test]
@@ -3114,7 +3371,7 @@ mod tests {
                     control_capabilities: ControlCapabilities::IDEAL_CAPACITY
                         | ControlCapabilities::THERMAL_SETPOINT,
                     telemetry_fields: vec![TelemetryField {
-                        name: "ideal_capacity_w".to_string(),
+                        name: tk::IDEAL_CAPACITY_W.to_string(),
                         unit: "W".to_string(),
                         description: "ideal capacity from solver".to_string(),
                     }],
@@ -3142,7 +3399,7 @@ mod tests {
             _env: &hares_types::EnvironmentState,
         ) -> std::result::Result<(), hares_types::HaresError> {
             self.telemetry
-                .insert("ideal_capacity_w", self.ideal_capacity_w);
+                .insert(tk::IDEAL_CAPACITY_W, self.ideal_capacity_w);
             Ok(())
         }
 
@@ -3180,7 +3437,7 @@ mod tests {
         ) -> std::result::Result<(), hares_types::HaresError> {
             if let ControlSignal::IdealCapacity { capacity_w } = signal {
                 self.ideal_capacity_w = *capacity_w;
-                self.telemetry.insert("ideal_capacity_w", *capacity_w);
+                self.telemetry.insert(tk::IDEAL_CAPACITY_W, *capacity_w);
             }
             Ok(())
         }
@@ -3232,7 +3489,7 @@ mod tests {
         assert!(
             (equipment[0]
                 .telemetry()
-                .get("ideal_capacity_w")
+                .get(tk::IDEAL_CAPACITY_W)
                 .unwrap_or(0.0)
                 - 5000.0)
                 .abs()
@@ -3409,8 +3666,8 @@ mod tests {
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
         assert_eq!(delivered_count, 3, "all 3 signals must be delivered");
         // Eq1 gets Grid (3.0) as last write, Eq2 gets Schedule (2.0)
-        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(3.0));
-        assert_eq!(equipment[1].telemetry().get("last_power_kw"), Some(2.0));
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(3.0));
+        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(2.0));
     }
 
     // -----------------------------------------------------------------------
@@ -3446,7 +3703,7 @@ mod tests {
 
         assert!(warnings.is_empty());
         // Last queued signal in the same tier wins (FIFO within tier, last write wins)
-        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(9.0));
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(9.0));
     }
 
     // -----------------------------------------------------------------------
@@ -3479,10 +3736,10 @@ mod tests {
 
         assert!(warnings.is_empty());
         // Both HVAC_HEATING equipment should receive the signal
-        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(5.0));
-        assert_eq!(equipment[1].telemetry().get("last_power_kw"), Some(5.0));
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
+        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
         // Battery should NOT receive it
-        assert_eq!(equipment[2].telemetry().get("last_power_kw"), None);
+        assert_eq!(equipment[2].telemetry().get(tk::LAST_POWER_KW), None);
     }
 
     // -----------------------------------------------------------------------
@@ -3508,7 +3765,7 @@ mod tests {
 
         // First dispatch
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
-        assert_eq!(equipment[0].telemetry().get("last_power_kw"), Some(5.0));
+        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
 
         // Second dispatch with nothing queued — queues should be empty
         let mut delivered_count = 0u32;
@@ -3614,7 +3871,7 @@ mod tests {
         assert!(
             (equipment[0]
                 .telemetry()
-                .get("ideal_capacity_w")
+                .get(tk::IDEAL_CAPACITY_W)
                 .unwrap_or(999.0)
                 - 0.0)
                 .abs()
@@ -3653,7 +3910,7 @@ mod tests {
         assert_eq!(warnings.len(), 1, "one warning for rejected signal");
         assert!(warnings[0].contains("control apply failed"));
         assert_eq!(
-            equipment[1].telemetry().get("last_power_kw"),
+            equipment[1].telemetry().get(tk::LAST_POWER_KW),
             Some(7.0),
             "second equipment should still receive signal despite first rejecting"
         );
@@ -3708,10 +3965,7 @@ mod tests {
         fn save_state(&self) -> Vec<u8> {
             self.inner.save_state()
         }
-        fn load_state(
-            &mut self,
-            state: &[u8],
-        ) -> std::result::Result<(), hares_types::HaresError> {
+        fn load_state(&mut self, state: &[u8]) -> std::result::Result<(), hares_types::HaresError> {
             self.inner.load_state(state)
         }
         fn apply_control_unchecked(
@@ -3791,8 +4045,7 @@ mod tests {
     #[test]
     fn manual_mode_no_bms_actor() {
         // Equipment with no ActorSeed (simulates BmsMode::Manual)
-        let eq: Box<dyn Equipment> =
-            Box::new(SeedableTestEquipment::new("Battery1", None));
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("Battery1", None));
 
         let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
         assert!(actors.is_empty());
@@ -3801,8 +4054,7 @@ mod tests {
     #[test]
     fn immediate_no_ev_actor() {
         // Equipment with no ActorSeed (simulates ChargingStrategy::Immediate)
-        let eq: Box<dyn Equipment> =
-            Box::new(SeedableTestEquipment::new("EV1", None));
+        let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("EV1", None));
 
         let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
         assert!(actors.is_empty());
@@ -3907,7 +4159,10 @@ mod tests {
         let existing: Vec<Box<dyn crate::Actor>> = vec![existing_actor];
 
         let built_in = build_actors_from_seeds(&[eq], &existing, false, None, 24);
-        assert!(built_in.is_empty(), "duplicate actor should not be registered");
+        assert!(
+            built_in.is_empty(),
+            "duplicate actor should not be registered"
+        );
     }
 
     #[test]
@@ -4002,5 +4257,4 @@ mod tests {
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
     }
-
 }

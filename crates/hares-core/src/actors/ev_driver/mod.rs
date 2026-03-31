@@ -17,8 +17,8 @@ mod soc_gate;
 mod soc_target;
 mod solar;
 mod time_window;
-mod v2h;
 mod v2g;
+mod v2h;
 
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     ChargingStrategy, ControlSignal, EnvironmentState, EvConnectionState, PlugInPolicy,
-    ScheduleSource,
+    ScheduleSource, telemetry_keys as tk,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -333,8 +333,7 @@ impl EvDriverActor {
 
     /// Roll a daily event for a new day if needed.
     fn maybe_roll_daily_event(&mut self, env: &EnvironmentState) {
-        let ordinal = env.current_time.ordinal0() as i32
-            + env.current_time.year() * 366;
+        let ordinal = env.current_time.ordinal0() as i32 + env.current_time.year() * 366;
         if ordinal == self.current_day_ordinal {
             return;
         }
@@ -393,7 +392,7 @@ impl EvDriverActor {
         };
         env.equipment_telemetry
             .get(target_name)
-            .and_then(|tel| tel.get("soc"))
+            .and_then(|tel| tel.get(tk::SOC))
             .unwrap_or(self.estimated_soc)
     }
 
@@ -422,7 +421,12 @@ impl EvDriverActor {
     }
 
     /// Evaluate the composer per-step while plugged in at home.
-    fn evaluate_charging(&mut self, env: &EnvironmentState, current_minute: u16, out: &mut Vec<DispatchRequest>) {
+    fn evaluate_charging(
+        &mut self,
+        env: &EnvironmentState,
+        current_minute: u16,
+        out: &mut Vec<DispatchRequest>,
+    ) {
         // Range anxiety override: if tomorrow's trip would strand the driver,
         // charge to full regardless of strategy.
         if self.needs_range_anxiety_override(env) {
@@ -475,8 +479,7 @@ impl Actor for EvDriverActor {
             None => return,
         };
 
-        let current_minute =
-            (env.current_time.hour() * 60 + env.current_time.minute()) as u16;
+        let current_minute = (env.current_time.hour() * 60 + env.current_time.minute()) as u16;
 
         match self.phase {
             DriverPhase::HomePluggedIn => {
@@ -498,8 +501,7 @@ impl Actor for EvDriverActor {
                         0.0
                     };
                     let trip_minutes = (trip_hours * 60.0).max(self.time_res_minutes);
-                    let total_steps =
-                        (trip_minutes / self.time_res_minutes).ceil().max(1.0) as u32;
+                    let total_steps = (trip_minutes / self.time_res_minutes).ceil().max(1.0) as u32;
 
                     self.phase = DriverPhase::Driving {
                         remaining_kwh: event.drive_kwh,
@@ -535,9 +537,7 @@ impl Actor for EvDriverActor {
 
                 out.push(DispatchRequest {
                     target: self.dispatch_target.clone(),
-                    signal: ControlSignal::EvDrive {
-                        kwh: kwh_this_step,
-                    },
+                    signal: ControlSignal::EvDrive { kwh: kwh_this_step },
                     priority: PriorityTier::Schedule,
                 });
 
@@ -551,11 +551,9 @@ impl Actor for EvDriverActor {
                     // Trip complete — defer away-charge signals to the next
                     // step so EvDrive is fully processed before EvPlugIn.
                     if self.away_charge_fraction > 0.0 {
-                        let recoup_kwh =
-                            event.drive_kwh * self.away_charge_fraction;
+                        let recoup_kwh = event.drive_kwh * self.away_charge_fraction;
                         let recoup_soc = recoup_kwh / self.capacity_kwh.max(0.01);
-                        self.estimated_soc =
-                            (self.estimated_soc + recoup_soc).min(1.0);
+                        self.estimated_soc = (self.estimated_soc + recoup_soc).min(1.0);
                         self.needs_away_charge = true;
                     }
                     self.phase = DriverPhase::Away;
@@ -640,16 +638,16 @@ mod tests {
             strategy,
             policy,
             ScheduleSource::Constant(30.0),  // 30 miles/day
-            ScheduleSource::Constant(480.0),  // depart 08:00
-            ScheduleSource::Constant(600.0),  // 10h away → arrive 18:00
-            1.0,  // event every day
-            0.3,  // 0.3 kWh/mi
-            60.0, // 60 kWh battery
-            7.2,  // L2 charge rate
-            30.0, // 30 mph average
-            20.0, // 20 miles range anxiety buffer
-            0.0,  // no away charging
-            6.6,  // workplace L2 default
+            ScheduleSource::Constant(480.0), // depart 08:00
+            ScheduleSource::Constant(600.0), // 10h away → arrive 18:00
+            1.0,                             // event every day
+            0.3,                             // 0.3 kWh/mi
+            60.0,                            // 60 kWh battery
+            7.2,                             // L2 charge rate
+            30.0,                            // 30 mph average
+            20.0,                            // 20 miles range anxiety buffer
+            0.0,                             // no away charging
+            6.6,                             // workplace L2 default
             seed,
         )
     }
@@ -1144,16 +1142,16 @@ mod tests {
 
     #[test]
     fn ev_immediate_max_rate() {
-        let mut actor = make_plugged_in_actor(
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            0.4,
-        );
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.4);
         let out = plugged_in_step(&mut actor, 19 * 60);
 
         let has_soc_target = out.iter().any(|r| {
             matches!(r.signal, ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.9).abs() < 0.01)
         });
-        assert!(has_soc_target, "Immediate should charge to 0.9, got: {out:?}");
+        assert!(
+            has_soc_target,
+            "Immediate should charge to 0.9, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1232,7 +1230,10 @@ mod tests {
     #[test]
     fn ev_low_soc_below_threshold_charges() {
         let mut actor = make_plugged_in_actor(
-            ChargingStrategy::LowSoc { threshold: 0.5, target_soc: 0.8 },
+            ChargingStrategy::LowSoc {
+                threshold: 0.5,
+                target_soc: 0.8,
+            },
             0.3,
         );
         let out = plugged_in_step(&mut actor, 19 * 60);
@@ -1240,13 +1241,19 @@ mod tests {
         let has_soc_target = out.iter().any(|r| {
             matches!(r.signal, ControlSignal::SOCTarget { target_soc, .. } if (target_soc - 0.8).abs() < 0.01)
         });
-        assert!(has_soc_target, "LowSoc should charge below threshold, got: {out:?}");
+        assert!(
+            has_soc_target,
+            "LowSoc should charge below threshold, got: {out:?}"
+        );
     }
 
     #[test]
     fn ev_low_soc_above_threshold_idles() {
         let mut actor = make_plugged_in_actor(
-            ChargingStrategy::LowSoc { threshold: 0.5, target_soc: 0.8 },
+            ChargingStrategy::LowSoc {
+                threshold: 0.5,
+                target_soc: 0.8,
+            },
             0.7,
         );
         let out = plugged_in_step(&mut actor, 19 * 60);
@@ -1259,7 +1266,10 @@ mod tests {
                     | ControlSignal::EvSetReadyBy { .. }
             )
         });
-        assert!(!has_charging, "LowSoc should idle above threshold, got: {out:?}");
+        assert!(
+            !has_charging,
+            "LowSoc should idle above threshold, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1327,7 +1337,10 @@ mod tests {
                     | ControlSignal::EvSetReadyBy { .. }
             )
         });
-        assert!(has_signal, "TOU with uniform prices should still charge, got: {out:?}");
+        assert!(
+            has_signal,
+            "TOU with uniform prices should still charge, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1353,7 +1366,10 @@ mod tests {
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if (active_power_kw - 3.5).abs() < 0.1
             )
         });
-        assert!(has_power, "SolarSurplus should modulate to surplus (3.5kW), got: {out:?}");
+        assert!(
+            has_power,
+            "SolarSurplus should modulate to surplus (3.5kW), got: {out:?}"
+        );
     }
 
     #[test]
@@ -1379,7 +1395,10 @@ mod tests {
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() > 0.01
             )
         });
-        assert!(!has_power, "SolarSurplus should idle below min rate, got: {out:?}");
+        assert!(
+            !has_power,
+            "SolarSurplus should idle below min rate, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1406,7 +1425,10 @@ mod tests {
                     | ControlSignal::PowerSetpoint { .. }
             )
         });
-        assert!(has_signal, "PreDeparture should plan charging, got: {out:?}");
+        assert!(
+            has_signal,
+            "PreDeparture should plan charging, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1434,13 +1456,19 @@ mod tests {
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
             )
         });
-        assert!(has_urgent, "PreDeparture should urgently charge near deadline, got: {out:?}");
+        assert!(
+            has_urgent,
+            "PreDeparture should urgently charge near deadline, got: {out:?}"
+        );
     }
 
     #[test]
     fn ev_v2h_discharges_during_deficit() {
         let mut actor = make_plugged_in_actor(
-            ChargingStrategy::V2H { discharge_threshold_soc: 0.5, min_soc: 0.2 },
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.5,
+                min_soc: 0.2,
+            },
             0.7,
         );
         let mut env = env_at_minute(19 * 60);
@@ -1452,13 +1480,23 @@ mod tests {
         let out = plugged_in_step_with_env(&mut actor, &env);
 
         let discharge_power = out.iter().find_map(|r| {
-            if let ControlSignal::PowerSetpoint { active_power_kw, .. } = &r.signal {
-                if *active_power_kw < 0.0 { Some(*active_power_kw) } else { None }
+            if let ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } = &r.signal
+            {
+                if *active_power_kw < 0.0 {
+                    Some(*active_power_kw)
+                } else {
+                    None
+                }
             } else {
                 None
             }
         });
-        assert!(discharge_power.is_some(), "V2H should discharge during deficit, got: {out:?}");
+        assert!(
+            discharge_power.is_some(),
+            "V2H should discharge during deficit, got: {out:?}"
+        );
         let power = discharge_power.unwrap();
         assert!(
             (power + 3.0).abs() < 0.1,
@@ -1469,7 +1507,10 @@ mod tests {
     #[test]
     fn ev_v2h_idles_with_low_soc() {
         let mut actor = make_plugged_in_actor(
-            ChargingStrategy::V2H { discharge_threshold_soc: 0.5, min_soc: 0.2 },
+            ChargingStrategy::V2H {
+                discharge_threshold_soc: 0.5,
+                min_soc: 0.2,
+            },
             0.15,
         );
         let mut env = env_at_minute(19 * 60);
@@ -1486,13 +1527,20 @@ mod tests {
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < -0.01
             )
         });
-        assert!(!has_discharge, "V2H should not discharge below min_soc, got: {out:?}");
+        assert!(
+            !has_discharge,
+            "V2H should not discharge below min_soc, got: {out:?}"
+        );
     }
 
     #[test]
     fn ev_v2g_discharges_above_price() {
         let mut actor = make_plugged_in_actor(
-            ChargingStrategy::V2G { min_soc: 0.3, max_export_kw: 5.0, price_threshold: 0.20 },
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_kw: 5.0,
+                price_threshold: 0.20,
+            },
             0.7,
         );
         let mut env = env_at_minute(19 * 60);
@@ -1503,13 +1551,23 @@ mod tests {
         let out = plugged_in_step_with_env(&mut actor, &env);
 
         let discharge_power = out.iter().find_map(|r| {
-            if let ControlSignal::PowerSetpoint { active_power_kw, .. } = &r.signal {
-                if *active_power_kw < 0.0 { Some(*active_power_kw) } else { None }
+            if let ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } = &r.signal
+            {
+                if *active_power_kw < 0.0 {
+                    Some(*active_power_kw)
+                } else {
+                    None
+                }
             } else {
                 None
             }
         });
-        assert!(discharge_power.is_some(), "V2G should discharge above price threshold, got: {out:?}");
+        assert!(
+            discharge_power.is_some(),
+            "V2G should discharge above price threshold, got: {out:?}"
+        );
         let power = discharge_power.unwrap();
         assert!(
             (power + 5.0).abs() < 0.1,
@@ -1520,7 +1578,11 @@ mod tests {
     #[test]
     fn ev_v2g_idles_below_price() {
         let mut actor = make_plugged_in_actor(
-            ChargingStrategy::V2G { min_soc: 0.3, max_export_kw: 5.0, price_threshold: 0.20 },
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_kw: 5.0,
+                price_threshold: 0.20,
+            },
             0.7,
         );
         let mut env = env_at_minute(19 * 60);
@@ -1536,7 +1598,10 @@ mod tests {
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < -0.01
             )
         });
-        assert!(!has_discharge, "V2G should not discharge below price threshold, got: {out:?}");
+        assert!(
+            !has_discharge,
+            "V2G should not discharge below price threshold, got: {out:?}"
+        );
     }
 
     fn make_away_charge_actor(seed: u64) -> EvDriverActor {
@@ -1554,7 +1619,7 @@ mod tests {
             7.2,
             30.0,
             20.0,
-            0.5,  // 50% away charge
+            0.5, // 50% away charge
             6.6,
             seed,
         )
@@ -1612,8 +1677,14 @@ mod tests {
         let has_away_charge = out
             .iter()
             .any(|r| matches!(r.signal, ControlSignal::EvAwayCharge { .. }));
-        assert!(has_away_now, "first Away step should emit deferred AwayPluggedIn");
-        assert!(has_away_charge, "first Away step should emit deferred EvAwayCharge");
+        assert!(
+            has_away_now,
+            "first Away step should emit deferred AwayPluggedIn"
+        );
+        assert!(
+            has_away_charge,
+            "first Away step should emit deferred EvAwayCharge"
+        );
 
         // Subsequent Away step: no re-emission
         out.clear();
@@ -1626,7 +1697,10 @@ mod tests {
                 }
             )
         });
-        assert!(!has_away_again, "subsequent Away steps should not re-emit AwayPluggedIn");
+        assert!(
+            !has_away_again,
+            "subsequent Away steps should not re-emit AwayPluggedIn"
+        );
     }
 
     #[test]
@@ -1712,13 +1786,11 @@ mod tests {
             matches!(
                 r.signal,
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
-            ) || matches!(
-                r.signal,
-                ControlSignal::EvSetReadyBy { .. }
-            ) || matches!(
-                r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if target_soc >= 0.9
-            )
+            ) || matches!(r.signal, ControlSignal::EvSetReadyBy { .. })
+                || matches!(
+                    r.signal,
+                    ControlSignal::SOCTarget { target_soc, .. } if target_soc >= 0.9
+                )
         });
         assert!(
             has_positive_power,
@@ -1898,7 +1970,10 @@ mod tests {
                 ControlSignal::SOCTarget { target_soc, .. } if target_soc > 0.0
             )
         });
-        assert!(has_charge, "TOU should charge at cheap price, got: {out_cheap:?}");
+        assert!(
+            has_charge,
+            "TOU should charge at cheap price, got: {out_cheap:?}"
+        );
 
         // Expensive price step: PriceOptimizer scores a discharge (negative
         // PowerSetpoint) because price 0.44 > discharge_threshold (~0.34).
@@ -1914,10 +1989,7 @@ mod tests {
             matches!(
                 r.signal,
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.01
-            ) || matches!(
-                r.signal,
-                ControlSignal::SOCTarget { .. }
-            )
+            ) || matches!(r.signal, ControlSignal::SOCTarget { .. })
         });
         assert!(
             !has_positive_charge,
@@ -2003,10 +2075,7 @@ mod tests {
 
     #[test]
     fn ev_immediate_charges_every_step() {
-        let mut actor = make_plugged_in_actor(
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            0.3,
-        );
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.3);
 
         for step in 0..5 {
             let minute = 19 * 60 + step;
@@ -2075,7 +2144,10 @@ mod tests {
         };
         let out2 = plugged_in_step_with_env(&mut actor, &env2);
         let power2 = out2.iter().find_map(|r| {
-            if let ControlSignal::PowerSetpoint { active_power_kw, .. } = &r.signal {
+            if let ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } = &r.signal
+            {
                 Some(*active_power_kw)
             } else {
                 None
@@ -2095,7 +2167,10 @@ mod tests {
         };
         let out3 = plugged_in_step_with_env(&mut actor, &env3);
         let power3 = out3.iter().find_map(|r| {
-            if let ControlSignal::PowerSetpoint { active_power_kw, .. } = &r.signal {
+            if let ControlSignal::PowerSetpoint {
+                active_power_kw, ..
+            } = &r.signal
+            {
                 Some(*active_power_kw)
             } else {
                 None
@@ -2136,8 +2211,7 @@ mod tests {
         let has_signal = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::SOCTarget { .. }
-                    | ControlSignal::PowerSetpoint { .. }
+                ControlSignal::SOCTarget { .. } | ControlSignal::PowerSetpoint { .. }
             )
         });
         assert!(
@@ -2218,7 +2292,11 @@ mod tests {
             None,
             24,
         );
-        assert_eq!(prefs.len(), 3, "TouAware should install 3 preferences (PriceOptimizer + DepartureDeadline + SocTarget)");
+        assert_eq!(
+            prefs.len(),
+            3,
+            "TouAware should install 3 preferences (PriceOptimizer + DepartureDeadline + SocTarget)"
+        );
     }
 
     #[test]
@@ -2230,7 +2308,11 @@ mod tests {
             None,
             24,
         );
-        assert_eq!(prefs.len(), 1, "Immediate should install 1 preference (SocTarget)");
+        assert_eq!(
+            prefs.len(),
+            1,
+            "Immediate should install 1 preference (SocTarget)"
+        );
     }
 
     #[test]
@@ -2245,16 +2327,17 @@ mod tests {
             None,
             24,
         );
-        assert_eq!(prefs.len(), 2, "SolarSurplus should install 2 preferences (SolarTracking + DepartureDeadline)");
+        assert_eq!(
+            prefs.len(),
+            2,
+            "SolarSurplus should install 2 preferences (SolarTracking + DepartureDeadline)"
+        );
     }
 
     // Finding 6: evaluate_charging path not proven
     #[test]
     fn evaluate_charging_updates_last_action() {
-        let mut actor = make_plugged_in_actor(
-            ChargingStrategy::Immediate { target_soc: 0.9 },
-            0.5,
-        );
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
 
         let out = plugged_in_step(&mut actor, 19 * 60);
         assert!(
@@ -2415,13 +2498,11 @@ mod tests {
             matches!(
                 r.signal,
                 ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
-            ) || matches!(
-                r.signal,
-                ControlSignal::EvSetReadyBy { .. }
-            ) || matches!(
-                r.signal,
-                ControlSignal::SOCTarget { target_soc, .. } if target_soc >= 0.9
-            )
+            ) || matches!(r.signal, ControlSignal::EvSetReadyBy { .. })
+                || matches!(
+                    r.signal,
+                    ControlSignal::SOCTarget { target_soc, .. } if target_soc >= 0.9
+                )
         });
         assert!(
             has_positive_charge,
@@ -2518,7 +2599,12 @@ mod tests {
 
         // ---- 1. Departure emits Disconnected --------------------------------
         let has_disconnect = departure_signals.iter().any(|s| {
-            matches!(s, ControlSignal::EvPlugIn { state: EvConnectionState::Disconnected })
+            matches!(
+                s,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::Disconnected
+                }
+            )
         });
         assert!(
             has_disconnect,
@@ -2568,7 +2654,12 @@ mod tests {
 
         // ---- 6. Arrival emits HomePluggedIn ---------------------------------
         let has_home_plugin = arrival_signals.iter().any(|s| {
-            matches!(s, ControlSignal::EvPlugIn { state: EvConnectionState::HomePluggedIn })
+            matches!(
+                s,
+                ControlSignal::EvPlugIn {
+                    state: EvConnectionState::HomePluggedIn
+                }
+            )
         });
         assert!(
             has_home_plugin,

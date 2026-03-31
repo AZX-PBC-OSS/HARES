@@ -64,10 +64,7 @@ fn extract_schedule(root: &Value, field: &str) -> Result<Schedule, UrdbParseErro
         let mut row = Vec::with_capacity(24);
         for (h, hval) in hours.iter().enumerate() {
             let idx = hval.as_u64().ok_or_else(|| {
-                UrdbParseError::malformed(
-                    field,
-                    &format!("month {m} hour {h} is not an integer"),
-                )
+                UrdbParseError::malformed(field, &format!("month {m} hour {h} is not an integer"))
             })?;
             row.push(idx);
         }
@@ -145,7 +142,11 @@ fn detect_summer_months(weekday: &Schedule, weekend: &Schedule) -> Option<BTreeS
         differ_from_dec
     };
 
-    if summer.is_empty() { None } else { Some(summer) }
+    if summer.is_empty() {
+        None
+    } else {
+        Some(summer)
+    }
 }
 
 /// Build a `SeasonalSplit` from a set of summer months.
@@ -570,7 +571,11 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
     let clear_credits = matches!(export_mode, ExportMode::FlatRate(_) | ExportMode::None);
     let export_rate = ExportRate {
         mode: export_mode,
-        tou_credits: if clear_credits { Vec::new() } else { sell_credits },
+        tou_credits: if clear_credits {
+            Vec::new()
+        } else {
+            sell_credits
+        },
     };
 
     let fixed_charges = parse_fixed_charges(&root);
@@ -615,10 +620,8 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
 mod tests {
     use super::*;
 
-    const FLAT_RATE_JSON: &str =
-        include_str!("../../../tests/fixtures/urdb/flat_rate.json");
-    const PGE_TOU_C_JSON: &str =
-        include_str!("../../../tests/fixtures/urdb/pge_e_tou_c.json");
+    const FLAT_RATE_JSON: &str = include_str!("../../../tests/fixtures/urdb/flat_rate.json");
+    const PGE_TOU_C_JSON: &str = include_str!("../../../tests/fixtures/urdb/pge_e_tou_c.json");
 
     #[test]
     fn urdb_flat_rate_parses() {
@@ -769,7 +772,8 @@ mod tests {
 
     fn minimal_valid_json(overrides: &str) -> String {
         let row = minimal_schedule_row();
-        let sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let sched =
+            format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
         if overrides.is_empty() {
             format!(
                 r#"{{"energyweekdayschedule":{sched},"energyweekendschedule":{sched},"energyratestructure":[[{{"rate":0.10}}]]}}"#,
@@ -785,13 +789,19 @@ mod tests {
     fn urdb_schedule_wrong_month_count() {
         let row = minimal_schedule_row();
         // 11 months instead of 12
-        let bad_sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
-        let good_sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let bad_sched =
+            format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let good_sched =
+            format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
         let json = format!(
             r#"{{"energyweekdayschedule":{bad_sched},"energyweekendschedule":{good_sched},"energyratestructure":[[{{"rate":0.10}}]]}}"#,
         );
         let err = parse(&json).unwrap_err();
-        assert!(err.message.contains("12"), "should mention 12 months: {}", err.message);
+        assert!(
+            err.message.contains("12"),
+            "should mention 12 months: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -799,32 +809,47 @@ mod tests {
         let row = minimal_schedule_row();
         let bad_row = "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]"; // 23 hours
         // Month 0 has 23 hours
-        let bad_sched = format!("[{bad_row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
-        let good_sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let bad_sched = format!(
+            "[{bad_row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]"
+        );
+        let good_sched =
+            format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
         let json = format!(
             r#"{{"energyweekdayschedule":{bad_sched},"energyweekendschedule":{good_sched},"energyratestructure":[[{{"rate":0.10}}]]}}"#,
         );
         let err = parse(&json).unwrap_err();
-        assert!(err.message.contains("24"), "should mention 24 hours: {}", err.message);
+        assert!(
+            err.message.contains("24"),
+            "should mention 24 hours: {}",
+            err.message
+        );
     }
 
     #[test]
     fn urdb_schedule_non_integer_value() {
         let row = minimal_schedule_row();
         let bad_row = "[0.5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
-        let bad_sched = format!("[{bad_row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
-        let good_sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let bad_sched = format!(
+            "[{bad_row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]"
+        );
+        let good_sched =
+            format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
         let json = format!(
             r#"{{"energyweekdayschedule":{bad_sched},"energyweekendschedule":{good_sched},"energyratestructure":[[{{"rate":0.10}}]]}}"#,
         );
         let err = parse(&json).unwrap_err();
-        assert!(err.message.contains("not an integer"), "should mention non-integer: {}", err.message);
+        assert!(
+            err.message.contains("not an integer"),
+            "should mention non-integer: {}",
+            err.message
+        );
     }
 
     #[test]
     fn urdb_tier_missing_rate_defaults_zero() {
         let row = minimal_schedule_row();
-        let sched = format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
+        let sched =
+            format!("[{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row},{row}]");
         let json = format!(
             r#"{{"energyweekdayschedule":{sched},"energyweekendschedule":{sched},"energyratestructure":[[{{"adj":0.0}}]]}}"#,
         );

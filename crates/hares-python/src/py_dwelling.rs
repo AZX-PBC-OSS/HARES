@@ -17,7 +17,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
 use std::sync::MutexGuard;
 
-use crate::conversions::batches_or_steps_to_polars_df;
+use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
 use crate::py_actor::PyActor;
 use crate::py_config::PySimulationConfig;
 use crate::py_control::PyControlSignal;
@@ -169,7 +169,9 @@ fn parse_solar_override_from_ndarray(
     }
     let n_rows = shape[0];
     if n_rows == 0 {
-        return Err(PyValueError::new_err("numpy solar override array has no rows"));
+        return Err(PyValueError::new_err(
+            "numpy solar override array has no rows",
+        ));
     }
 
     let flat: Vec<f64> = data
@@ -561,7 +563,7 @@ impl PyDwelling {
         }
 
         let out = PyDict::new(py);
-        out.set_item("time", chrono_to_py_datetime(py, step.timestamp)?)?;
+        out.set_item("timestamp", chrono_to_py_datetime(py, step.timestamp)?)?;
         out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
         out.set_item("hvac_heating_w", step.hvac_heating_w)?;
         out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
@@ -756,9 +758,8 @@ impl PyDwelling {
 
         // Register the PV surface orientation with the environment so that
         // Perez irradiance is computed for this panel during simulation.
-        let surface_id =
-            hares_equipment::pv::surface_id_for_orientation(pv.tilt, pv.azimuth, 5.0)
-                .map_err(to_py_err)?;
+        let surface_id = hares_equipment::pv::surface_id_for_orientation(pv.tilt, pv.azimuth, 5.0)
+            .map_err(to_py_err)?;
         dwelling.environment.register_surface(SurfaceGeometry {
             surface_id,
             azimuth_deg: pv.azimuth,
@@ -873,12 +874,10 @@ impl PyDwelling {
         );
         raw_config.insert(
             "charging_level".to_string(),
-            hares_equipment::config::ConfigValue::Text(
-                match preset.charging_level {
-                    hares_types::ChargingLevel::L1 => "L1".to_string(),
-                    hares_types::ChargingLevel::L2 => "L2".to_string(),
-                },
-            ),
+            hares_equipment::config::ConfigValue::Text(match preset.charging_level {
+                hares_types::ChargingLevel::L1 => "L1".to_string(),
+                hares_types::ChargingLevel::L2 => "L2".to_string(),
+            }),
         );
 
         let config = hares_equipment::EquipmentConfig {
@@ -1390,9 +1389,7 @@ impl PyDwelling {
             if let Some(state) = &ev.initial_connection_state {
                 raw_config.insert(
                     "initial_connection_state".to_string(),
-                    ConfigValue::Text(
-                        EvConnectionState::from(*state).to_string(),
-                    ),
+                    ConfigValue::Text(EvConnectionState::from(*state).to_string()),
                 );
             }
             let config = EquipmentConfig {
@@ -1511,6 +1508,13 @@ fn build_config(
             .map(|obj| obj.extract::<String>().map(PathBuf::from))
             .transpose()?;
 
+        let write_output = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("write_output").ok().flatten())
+            .map(|obj| obj.extract::<bool>())
+            .transpose()?
+            .unwrap_or(true);
+
         let output_verbosity = kwargs
             .as_ref()
             .and_then(|k| k.get_item("output_verbosity").ok().flatten())
@@ -1550,6 +1554,7 @@ fn build_config(
             time_res,
             output_verbosity,
             output_path,
+            write_output,
             output_format: if output_to_parquet {
                 OutputFormat::Parquet
             } else {
@@ -1646,12 +1651,6 @@ fn extract_seconds(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 
 fn default_start() -> DateTime<FixedOffset> {
     DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START is a valid RFC3339 constant")
-}
-
-fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {
-    let datetime = py.import("datetime")?.getattr("datetime")?;
-    let obj = datetime.call_method1("fromisoformat", (dt.to_rfc3339(),))?;
-    Ok(obj.unbind())
 }
 
 fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {

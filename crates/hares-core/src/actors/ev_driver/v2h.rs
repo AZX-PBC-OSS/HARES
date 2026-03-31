@@ -1,8 +1,6 @@
 //! V2HDischarge — discharge to home when deficit exists.
 
-use super::preference::{
-    ChargingPreference, Constraint, DecisionContext, PreferenceVote,
-};
+use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 
 pub struct V2HDischarge {
     pub threshold_soc: f64,
@@ -51,10 +49,7 @@ mod tests {
     use crate::actor::testing::TestEnvBuilder;
     use hares_types::ElectricalSummary;
 
-    fn make_ctx(
-        env: &hares_types::EnvironmentState,
-        soc: f64,
-    ) -> DecisionContext<'_> {
+    fn make_ctx(env: &hares_types::EnvironmentState, soc: f64) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: soc,
             capacity_kwh: 60.0,

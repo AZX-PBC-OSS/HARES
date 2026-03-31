@@ -87,10 +87,9 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     } else {
         (year, month + 1)
     };
-    let next = NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .expect("valid NaiveDate for day=1");
-    let this = NaiveDate::from_ymd_opt(year, month, 1)
-        .expect("valid NaiveDate for day=1");
+    let next =
+        NaiveDate::from_ymd_opt(next_year, next_month, 1).expect("valid NaiveDate for day=1");
+    let this = NaiveDate::from_ymd_opt(year, month, 1).expect("valid NaiveDate for day=1");
     (next - this).num_days() as u32
 }
 
@@ -182,7 +181,10 @@ impl BillingState {
             *slot = slot.max(avg);
         }
         if demand_period_idx != period_idx {
-            if let Some(slot) = self.period_peak_demand_kw.get_mut(demand_period_idx as usize) {
+            if let Some(slot) = self
+                .period_peak_demand_kw
+                .get_mut(demand_period_idx as usize)
+            {
                 *slot = slot.max(avg);
             }
         }
@@ -323,10 +325,7 @@ fn apply_ratchet(
 ) -> f64 {
     match ratchet {
         Some(rc) if !prior_peaks.is_empty() => {
-            let lookback = prior_peaks
-                .iter()
-                .rev()
-                .take(rc.lookback_months as usize);
+            let lookback = prior_peaks.iter().rev().take(rc.lookback_months as usize);
             let max_prior = lookback.copied().fold(0.0_f64, f64::max);
             current_peak.max(rc.minimum_fraction * max_prior)
         }
@@ -360,14 +359,8 @@ mod tests {
 
     #[test]
     fn demand_window_peak_tracking() {
-        let mut state = BillingState::new(
-            make_dt(2025, 1, 1),
-            BillingCycle::Monthly,
-            15,
-            300,
-            0,
-            0,
-        );
+        let mut state =
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0);
         // 15-min window with 5-min interval = 3 samples
         // Push sequence: 2, 4, 6 -> avg 4.0, then 8, 10, 12 -> avg 10.0
         for &kw in &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0] {
@@ -378,14 +371,8 @@ mod tests {
 
     #[test]
     fn billing_state_energy_accumulation() {
-        let mut state = BillingState::new(
-            make_dt(2025, 1, 1),
-            BillingCycle::Monthly,
-            15,
-            3600,
-            0,
-            0,
-        );
+        let mut state =
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0);
         // Constant 1 kW for 1 hour (one step of 3600s)
         state.update(1.0, 3600.0, 0.10, 0.0, 0, 0);
         assert!((state.cumulative_import_kwh - 1.0).abs() < 1e-10);
@@ -395,14 +382,8 @@ mod tests {
 
     #[test]
     fn billing_state_export_accumulation() {
-        let mut state = BillingState::new(
-            make_dt(2025, 1, 1),
-            BillingCycle::Monthly,
-            15,
-            3600,
-            0,
-            0,
-        );
+        let mut state =
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0);
         // Constant -2 kW for 1 hour
         state.update(-2.0, 3600.0, 0.10, 0.05, 0, 0);
         assert!((state.cumulative_import_kwh).abs() < 1e-10);
@@ -548,9 +529,7 @@ mod tests {
 
     #[test]
     fn compute_period_end_jan29_leap_year() {
-        let start = New_York
-            .with_ymd_and_hms(2024, 1, 29, 0, 0, 0)
-            .unwrap();
+        let start = New_York.with_ymd_and_hms(2024, 1, 29, 0, 0, 0).unwrap();
         let end = compute_period_end(start, BillingCycle::Monthly);
         // Feb 2024 has 29 days (leap year); day 29 fits.
         assert_eq!(end.month(), 2);
@@ -576,9 +555,7 @@ mod tests {
 
     #[test]
     fn compute_period_end_feb29_to_mar() {
-        let start = New_York
-            .with_ymd_and_hms(2024, 2, 29, 0, 0, 0)
-            .unwrap();
+        let start = New_York.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
         let end = compute_period_end(start, BillingCycle::Monthly);
         assert_eq!(end.month(), 3);
         assert_eq!(end.day(), 29);
@@ -670,8 +647,9 @@ mod tests {
             500.0,
             100.0,
         );
-        let expected_net = summary.energy_charge_usd + summary.demand_charge_usd
-            + summary.fixed_charge_usd - summary.export_credit_usd;
+        let expected_net =
+            summary.energy_charge_usd + summary.demand_charge_usd + summary.fixed_charge_usd
+                - summary.export_credit_usd;
         assert!((summary.net_bill_usd - expected_net).abs() < 1e-10);
         assert!((summary.net_bill_usd - 82.5).abs() < 1e-10);
     }

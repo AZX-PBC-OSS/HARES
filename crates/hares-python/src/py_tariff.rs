@@ -3,10 +3,10 @@ use hares_tariff::types::{
     GasTieredBlock, RatchetConfig, TieredBlock,
 };
 use hares_types::{BillingCycle, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod};
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyType};
-use pyo3::IntoPyObjectExt;
 
 fn parse_season(s: &str) -> PyResult<SeasonFilter> {
     match s.to_lowercase().as_str() {
@@ -207,11 +207,7 @@ impl PyElectricTariff {
     }
 
     fn __repr__(&self) -> String {
-        let name = self
-            .inner
-            .name
-            .as_deref()
-            .unwrap_or("<unnamed>");
+        let name = self.inner.name.as_deref().unwrap_or("<unnamed>");
         let periods = self.inner.tou_schedule.len();
         let rates = self.inner.energy_rates.len();
         format!("ElectricTariff(name='{name}', tou_periods={periods}, energy_rates={rates})")
@@ -279,9 +275,9 @@ impl PyTariffBuilder {
         let season = parse_season(season)?;
         let mut parsed_windows = Vec::with_capacity(windows.len());
         for item in windows.iter() {
-            let dict = item.cast::<PyDict>().map_err(|_| {
-                PyValueError::new_err("each window must be a dict")
-            })?;
+            let dict = item
+                .cast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("each window must be a dict"))?;
             parsed_windows.push(parse_window(dict)?);
         }
         slf.borrow_mut(py).tou_periods.push(TouPeriod {
@@ -424,9 +420,9 @@ impl PyTariffBuilder {
     ) -> PyResult<Py<Self>> {
         let mut credits = Vec::with_capacity(tou_credits.len());
         for item in tou_credits.iter() {
-            let d = item.cast::<PyDict>().map_err(|_| {
-                PyValueError::new_err("each tou_credit must be a dict")
-            })?;
+            let d = item
+                .cast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("each tou_credit must be a dict"))?;
             let period_name: String = d
                 .get_item("period_name")?
                 .ok_or_else(|| PyValueError::new_err("tou_credit missing 'period_name'"))?
@@ -500,11 +496,7 @@ impl PyTariffBuilder {
 
     /// Set billing cycle: "monthly" (default) or a custom number of days.
     #[pyo3(signature = (cycle_days=None))]
-    fn set_billing_cycle(
-        slf: Py<Self>,
-        py: Python<'_>,
-        cycle_days: Option<u32>,
-    ) -> Py<Self> {
+    fn set_billing_cycle(slf: Py<Self>, py: Python<'_>, cycle_days: Option<u32>) -> Py<Self> {
         slf.borrow_mut(py).billing_cycle = match cycle_days {
             None => BillingCycle::Monthly,
             Some(days) => BillingCycle::Custom(days),
@@ -692,11 +684,7 @@ impl PyGasTariffBuilder {
     }
 
     #[pyo3(signature = (cycle_days=None))]
-    fn set_billing_cycle(
-        slf: Py<Self>,
-        py: Python<'_>,
-        cycle_days: Option<u32>,
-    ) -> Py<Self> {
+    fn set_billing_cycle(slf: Py<Self>, py: Python<'_>, cycle_days: Option<u32>) -> Py<Self> {
         slf.borrow_mut(py).billing_cycle = match cycle_days {
             None => BillingCycle::Monthly,
             Some(days) => BillingCycle::Custom(days),

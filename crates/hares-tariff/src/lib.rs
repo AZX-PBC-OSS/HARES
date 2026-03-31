@@ -9,4 +9,4 @@ pub use types::{
     DemandRate, ElectricTariff, EnergyRate, ExportMode, ExportRate, FixedCharges, GasTariff,
     GasTieredBlock, RatchetConfig, TieredBlock,
 };
-pub use urdb::{parse as parse_urdb, UrdbParseError};
+pub use urdb::{UrdbParseError, parse as parse_urdb};

@@ -95,6 +95,7 @@ occupancy = 1.0
 output_verbosity = 0
 output_format = "csv"
 output_chunk_size = 1000
+write_output = false
 master_seed = 0
 "#
     );
@@ -389,6 +390,7 @@ occupancy = 1.0
 output_verbosity = 0
 output_format = "csv"
 output_chunk_size = 1000
+write_output = false
 master_seed = 0
 "#,
     )
@@ -430,6 +432,7 @@ occupancy = 0.0
 output_verbosity = 0
 output_format = "csv"
 output_chunk_size = 1000
+write_output = false
 master_seed = 0
 "#,
     )

@@ -449,8 +449,8 @@ impl EnvironmentManager {
             let idx = step % overrides.len();
             self.solar_irradiance_buf.extend_from_slice(&overrides[idx]);
         } else {
-            self.solar_irradiance_buf.extend(
-                self.surfaces.iter().map(|surface| {
+            self.solar_irradiance_buf
+                .extend(self.surfaces.iter().map(|surface| {
                     perez_tilted_irradiance(
                         surface.surface_id,
                         ghi,
@@ -463,8 +463,7 @@ impl EnvironmentManager {
                         day_of_year,
                         ground_albedo,
                     )
-                }),
-            );
+                }));
         }
 
         // Apply PV roof shading in-place: reduce irradiance on covered roof surfaces.
@@ -574,7 +573,10 @@ impl EnvironmentManager {
         let mut state = EnvironmentState {
             zones: Vec::new(),
             weather: WeatherState::default(),
-            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
             custom_domains: Vec::new(),
             equipment_telemetry: std::collections::HashMap::new(),
             current_time: clock.current_time(),

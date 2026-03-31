@@ -17,10 +17,7 @@ pub struct ChargingComposer {
 }
 
 impl ChargingComposer {
-    pub fn new(
-        preferences: Vec<Box<dyn ChargingPreference>>,
-        target_name: &str,
-    ) -> Self {
+    pub fn new(preferences: Vec<Box<dyn ChargingPreference>>, target_name: &str) -> Self {
         Self {
             preferences,
             scratch: Vec::with_capacity(8),
@@ -40,11 +37,7 @@ impl ChargingComposer {
     /// 3. Resolve: highest-scored target_soc, most conservative power_kw,
     ///    max min_soc, earliest departure.
     /// 4. Translate to ControlSignal.
-    pub fn evaluate(
-        &mut self,
-        ctx: &DecisionContext,
-        out: &mut Vec<DispatchRequest>,
-    ) {
+    pub fn evaluate(&mut self, ctx: &DecisionContext, out: &mut Vec<DispatchRequest>) {
         // Check constraints first
         for pref in &mut self.preferences {
             if let Constraint::Override(vote) = pref.constraint(ctx) {
@@ -62,7 +55,12 @@ impl ChargingComposer {
         self.scratch.clear();
         for pref in &mut self.preferences {
             let vote = pref.score(ctx);
-            tracing::trace!(preference = pref.name(), score = vote.score, label = vote.label, "preference scored");
+            tracing::trace!(
+                preference = pref.name(),
+                score = vote.score,
+                label = vote.label,
+                "preference scored"
+            );
             self.scratch.push(vote);
         }
 

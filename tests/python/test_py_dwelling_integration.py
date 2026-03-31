@@ -110,8 +110,8 @@ class TestStepByStep:
         dw = _init_dwelling(duration_s=180, time_res_s=60)
         for _ in range(3):
             result = dw.step()
-            assert "time" in result
-            assert isinstance(result["time"], datetime)
+            assert "timestamp" in result
+            assert isinstance(result["timestamp"], datetime)
             power_keys = [k for k in result if "net_electric_power" in k]
             assert len(power_keys) > 0
             temp_keys = [k for k in result if "Temperature" in k]
@@ -281,13 +281,13 @@ class TestPriceAndGridVoltage:
         dw = _init_dwelling()
         dw.set_price_signal({"electricity_price": 0.15})
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
     def test_set_grid_voltage(self):
         dw = _init_dwelling()
         dw.set_grid_voltage(1.05)
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ class TestTelemetry:
         for key in ("names", "modes", "states", "soc", "power_kw"):
             assert key in equip, f"Missing equipment key: {key}"
 
-        power = t.total_power_kw()
+        power = t.total_power_kw
         assert isinstance(power, float)
         assert math.isfinite(power)
 
@@ -391,7 +391,7 @@ class TestCheckpoint:
 
         # Next step after restore should succeed
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ class TestDeterministicReplay:
         dw.reset_with_seed(42)
         r2 = dw.step()
 
-        assert r1["time"] == r2["time"]
+        assert r1["timestamp"] == r2["timestamp"]
         p1 = [v for k, v in r1.items() if "net_electric_power" in k]
         p2 = [v for k, v in r2.items() if "net_electric_power" in k]
         assert p1 == p2
@@ -602,7 +602,7 @@ class TestBatteryLutInjection:
         # Step should succeed
         for _ in range(5):
             result = dw.step()
-            assert "time" in result
+            assert "timestamp" in result
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +621,7 @@ class TestEvLifecycle:
 
         for _ in range(3):
             result = dw.step()
-            assert "time" in result
+            assert "timestamp" in result
 
     def test_add_ev_with_charging_curve_lut(self):
         import numpy as np
@@ -654,7 +654,7 @@ class TestEvLifecycle:
 
         for _ in range(5):
             result = dw.step()
-            assert "time" in result
+            assert "timestamp" in result
 
 
 # ---------------------------------------------------------------------------
@@ -767,7 +767,7 @@ class TestEquipmentMutationRoundTrip:
 
         # Step after removal should still work
         result = dw.step()
-        assert "time" in result
+        assert "timestamp" in result
 
     @pytest.mark.xfail(
         reason="checkpoint deserialization does not yet support dynamically added equipment"
@@ -818,7 +818,7 @@ class TestActorSystem:
 
         for _ in range(3):
             result = dw.step()
-            assert "time" in result
+            assert "timestamp" in result
 
     def test_builtin_actor_by_name(self):
         dw = _init_dwelling(duration_s=300, time_res_s=60)
@@ -826,7 +826,7 @@ class TestActorSystem:
 
         for _ in range(3):
             result = dw.step()
-            assert "time" in result
+            assert "timestamp" in result
 
 
 # ---------------------------------------------------------------------------

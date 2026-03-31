@@ -24,6 +24,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -576,7 +577,8 @@ impl Equipment for Generator {
 
         let has_chp = self.eta_thermal > 0.0;
         self.telemetry = default_telemetry(has_chp);
-        self.telemetry.set("eta_electric", self.efficiency.rated());
+        self.telemetry
+            .set(tk::ETA_ELECTRIC, self.efficiency.rated());
 
         Ok(())
     }
@@ -698,15 +700,16 @@ impl Equipment for Generator {
             OperatingMode::Off
         };
 
-        self.telemetry.set("electric_output_kw", output_kw);
-        self.telemetry.set("fuel_input_w", fuel_w);
-        self.telemetry.set("eta_electric", eta);
+        self.telemetry.set(tk::ELECTRIC_OUTPUT_KW, output_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, output_kw);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
+        self.telemetry.set(tk::ETA_ELECTRIC, eta);
         self.telemetry
-            .set("ramp_limited", if ramp_limited { 1.0 } else { 0.0 });
+            .set(tk::RAMP_LIMITED, if ramp_limited { 1.0 } else { 0.0 });
 
         if self.eta_thermal > 0.0 {
-            self.telemetry.set("thermal_output_w", q_thermal_w);
-            self.telemetry.set("flue_loss_w", q_flue_w);
+            self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
+            self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
         }
 
         Ok(())
@@ -743,15 +746,17 @@ impl Equipment for Generator {
         };
 
         self.telemetry
-            .set("electric_output_kw", self.current_power_kw);
-        self.telemetry.set("fuel_input_w", fuel_w);
-        self.telemetry.set("eta_electric", eta);
+            .set(tk::ELECTRIC_OUTPUT_KW, self.current_power_kw);
+        self.telemetry
+            .set(tk::ELECTRIC_KW, self.current_power_kw);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
+        self.telemetry.set(tk::ETA_ELECTRIC, eta);
 
         if self.eta_thermal > 0.0 {
             let q_thermal_w = fuel_w * self.eta_thermal;
             let q_flue_w = fuel_w - self.current_power_kw * 1000.0 - q_thermal_w;
-            self.telemetry.set("thermal_output_w", q_thermal_w);
-            self.telemetry.set("flue_loss_w", q_flue_w);
+            self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
+            self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
         }
 
         Ok(())
@@ -849,13 +854,14 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 fn default_telemetry(has_chp: bool) -> Telemetry {
     let capacity = if has_chp { 6 } else { 4 };
     let mut t = Telemetry::with_capacity(capacity);
-    t.insert("electric_output_kw", 0.0);
-    t.insert("fuel_input_w", 0.0);
-    t.insert("eta_electric", 0.0);
-    t.insert("ramp_limited", 0.0);
+    t.insert(tk::ELECTRIC_OUTPUT_KW, 0.0);
+    t.insert(tk::ELECTRIC_KW, 0.0);
+    t.insert(tk::FUEL_INPUT_W, 0.0);
+    t.insert(tk::ETA_ELECTRIC, 0.0);
+    t.insert(tk::RAMP_LIMITED, 0.0);
     if has_chp {
-        t.insert("thermal_output_w", 0.0);
-        t.insert("flue_loss_w", 0.0);
+        t.insert(tk::THERMAL_OUTPUT_W, 0.0);
+        t.insert(tk::FLUE_LOSS_W, 0.0);
     }
     t
 }
@@ -863,22 +869,27 @@ fn default_telemetry(has_chp: bool) -> Telemetry {
 fn generator_telemetry_fields(has_chp: bool) -> Vec<TelemetryField> {
     let mut fields = vec![
         TelemetryField {
-            name: "electric_output_kw".to_string(),
+            name: tk::ELECTRIC_OUTPUT_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electrical generation output".to_string(),
         },
         TelemetryField {
-            name: "fuel_input_w".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Grid-boundary electrical power".to_string(),
+        },
+        TelemetryField {
+            name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Fuel input power (P_electric / eta)".to_string(),
         },
         TelemetryField {
-            name: "eta_electric".to_string(),
+            name: tk::ETA_ELECTRIC.to_string(),
             unit: "-".to_string(),
             description: "Effective electrical efficiency at current load [0..1]".to_string(),
         },
         TelemetryField {
-            name: "ramp_limited".to_string(),
+            name: tk::RAMP_LIMITED.to_string(),
             unit: "-".to_string(),
             description: "1.0 when this step's power change was clamped by ramp-rate limit"
                 .to_string(),
@@ -886,12 +897,12 @@ fn generator_telemetry_fields(has_chp: bool) -> Vec<TelemetryField> {
     ];
     if has_chp {
         fields.push(TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "CHP thermal recovery output (P_fuel * eta_thermal)".to_string(),
         });
         fields.push(TelemetryField {
-            name: "flue_loss_w".to_string(),
+            name: tk::FLUE_LOSS_W.to_string(),
             unit: "W".to_string(),
             description: "Residual flue loss (P_fuel - P_electric - Q_thermal)".to_string(),
         });
@@ -912,6 +923,7 @@ mod tests {
     use hares_types::{
         ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType, GridState,
         OperatingMode, PortSlots, PortType, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
     };
 
     use crate::config::ConfigValue;
@@ -961,8 +973,8 @@ mod tests {
                 .single()
                 .expect("valid UTC timestamp"),
             time_res: ChronoDuration::minutes(5),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1125,10 +1137,10 @@ mod tests {
             .map(|f| f.name.as_str())
             .collect();
         for expected in &[
-            "electric_output_kw",
-            "fuel_input_w",
-            "eta_electric",
-            "ramp_limited",
+            tk::ELECTRIC_OUTPUT_KW,
+            tk::FUEL_INPUT_W,
+            tk::ETA_ELECTRIC,
+            tk::RAMP_LIMITED,
         ] {
             assert!(
                 names.contains(expected),
@@ -1159,8 +1171,8 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let output_kw = generator.telemetry().get("electric_output_kw").unwrap();
-        let fuel_w = generator.telemetry().get("fuel_input_w").unwrap();
+        let output_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         let expected_fuel_w = (output_kw / 0.30) * 1000.0;
         assert!(
             (fuel_w - expected_fuel_w).abs() < 1.0,
@@ -1202,7 +1214,7 @@ mod tests {
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
-        let eta_full = generator.telemetry().get("eta_electric").unwrap();
+        let eta_full = generator.telemetry().get(tk::ETA_ELECTRIC).unwrap();
         assert!(
             (eta_full - 0.95).abs() < 1e-6,
             "full load eta should be 0.95, got {eta_full}"
@@ -1219,7 +1231,7 @@ mod tests {
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
-        let eta_partial = generator.telemetry().get("eta_electric").unwrap();
+        let eta_partial = generator.telemetry().get(tk::ETA_ELECTRIC).unwrap();
         assert!(
             (eta_partial - 0.475).abs() < 1e-6,
             "partial load eta should be 0.475, got {eta_partial}"
@@ -1255,7 +1267,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            (generator.telemetry().get("eta_electric").unwrap() - 0.40).abs() < 1e-6,
+            (generator.telemetry().get(tk::ETA_ELECTRIC).unwrap() - 0.40).abs() < 1e-6,
             "full load"
         );
 
@@ -1271,7 +1283,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            (generator.telemetry().get("eta_electric").unwrap() - 0.25).abs() < 1e-6,
+            (generator.telemetry().get(tk::ETA_ELECTRIC).unwrap() - 0.25).abs() < 1e-6,
             "half load"
         );
     }
@@ -1327,7 +1339,7 @@ mod tests {
             "step 1: got {}",
             generator.current_power_kw
         );
-        assert_eq!(generator.telemetry().get("ramp_limited").unwrap(), 1.0);
+        assert_eq!(generator.telemetry().get(tk::RAMP_LIMITED).unwrap(), 1.0);
 
         for _ in 0..4 {
             slots.zero();
@@ -1571,9 +1583,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let fuel_w = generator.telemetry().get("fuel_input_w").unwrap();
-        let thermal_w = generator.telemetry().get("thermal_output_w").unwrap();
-        let electric_kw = generator.telemetry().get("electric_output_kw").unwrap();
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let electric_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         assert!(
             (thermal_w - fuel_w * 0.40).abs() < 1.0,
             "Q_thermal = P_fuel * eta_thermal"
@@ -1610,10 +1622,10 @@ mod tests {
 
         // fuel_input_w, thermal_output_w, flue_loss_w are in W; electric_output_kw is in kW
         // fuel_input_w, thermal_output_w, flue_loss_w are in W; electric_output_kw is in kW
-        let fuel_w = generator.telemetry().get("fuel_input_w").unwrap();
-        let electric_w = generator.telemetry().get("electric_output_kw").unwrap() * 1000.0;
-        let thermal_w = generator.telemetry().get("thermal_output_w").unwrap();
-        let flue_w = generator.telemetry().get("flue_loss_w").unwrap();
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
         assert!(
             (fuel_w - electric_w - thermal_w - flue_w).abs() < 1.0,
             "energy balance violated"
@@ -1646,8 +1658,8 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let fuel_w = generator.telemetry().get("fuel_input_w").unwrap();
-        let electric_w = generator.telemetry().get("electric_output_kw").unwrap() * 1000.0;
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
         let expected_heat_w = fuel_w - electric_w;
 
         assert!(expected_heat_w > 0.0, "waste heat must be positive");
@@ -1737,10 +1749,10 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let fuel_w = generator.telemetry().get("fuel_input_w").unwrap();
-        let electric_w = generator.telemetry().get("electric_output_kw").unwrap() * 1000.0;
-        let thermal_w = generator.telemetry().get("thermal_output_w").unwrap();
-        let flue_w = generator.telemetry().get("flue_loss_w").unwrap();
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
 
         // Verify energy balance
         assert!(
@@ -1789,7 +1801,7 @@ mod tests {
         assert!((generator2.current_power_kw - saved).abs() < f64::EPSILON);
         assert_eq!(generator2.power_setpoint_kw, Some(10.0));
         assert!(
-            (generator2.telemetry().get("electric_output_kw").unwrap() - saved).abs()
+            (generator2.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() - saved).abs()
                 < f64::EPSILON
         );
     }
@@ -1845,7 +1857,7 @@ mod tests {
         let config = gen_config(&[(KEY_ETA_ELECTRIC, 0.45.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        assert!((generator.telemetry().get("eta_electric").unwrap() - 0.45).abs() < f64::EPSILON);
+        assert!((generator.telemetry().get(tk::ETA_ELECTRIC).unwrap() - 0.45).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1891,8 +1903,8 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert!(names.contains(&"thermal_output_w"));
-        assert!(names.contains(&"flue_loss_w"));
+        assert!(names.contains(&tk::THERMAL_OUTPUT_W));
+        assert!(names.contains(&tk::FLUE_LOSS_W));
     }
 
     #[test]
@@ -1904,8 +1916,8 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert!(!names.contains(&"thermal_output_w"));
-        assert!(!names.contains(&"flue_loss_w"));
+        assert!(!names.contains(&tk::THERMAL_OUTPUT_W));
+        assert!(!names.contains(&tk::FLUE_LOSS_W));
     }
 
     // =======================================================================
@@ -2048,8 +2060,8 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        assert!(generator.telemetry().get("fuel_input_w").unwrap() < IDLE_KW_THRESHOLD);
-        assert!(generator.telemetry().get("electric_output_kw").unwrap() < IDLE_KW_THRESHOLD);
+        assert!(generator.telemetry().get(tk::FUEL_INPUT_W).unwrap() < IDLE_KW_THRESHOLD);
+        assert!(generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() < IDLE_KW_THRESHOLD);
         assert!(slots.electrical.generation_power_kw.abs() < IDLE_KW_THRESHOLD);
         assert!(slots.fuel.get(FuelType::Gas) < IDLE_KW_THRESHOLD);
     }
@@ -2073,7 +2085,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let fuel_w = generator.telemetry().get("fuel_input_w").unwrap();
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         // At 10 kW electric / 0.30 eta → fuel ≈ 33333 W.
         let expected_fuel_w = (10.0 / 0.30) * 1000.0;
         assert!(
@@ -2105,8 +2117,8 @@ mod tests {
         generator2.init(&config, &base_env()).unwrap();
         generator2.load_state(&bytes).unwrap();
 
-        let fuel_w = generator2.telemetry().get("fuel_input_w").unwrap();
-        let eta = generator2.telemetry().get("eta_electric").unwrap();
+        let fuel_w = generator2.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let eta = generator2.telemetry().get(tk::ETA_ELECTRIC).unwrap();
 
         assert!(
             fuel_w > 0.0,
@@ -2118,7 +2130,7 @@ mod tests {
         );
 
         // Consistency: fuel_w ≈ (electric_kw * 1000) / eta
-        let electric_kw = generator2.telemetry().get("electric_output_kw").unwrap();
+        let electric_kw = generator2.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         let expected_fuel_w = (electric_kw * 1000.0) / eta;
         assert!(
             (fuel_w - expected_fuel_w).abs() < 1.0,
@@ -2145,7 +2157,7 @@ mod tests {
             .map(|f| f.name.as_str())
             .collect();
         assert!(
-            names_no_chp.contains(&"fuel_input_w"),
+            names_no_chp.contains(&tk::FUEL_INPUT_W),
             "must use fuel_input_w"
         );
         assert!(
@@ -2171,12 +2183,12 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert!(names_chp.contains(&"fuel_input_w"));
+        assert!(names_chp.contains(&tk::FUEL_INPUT_W));
         assert!(
-            names_chp.contains(&"thermal_output_w"),
+            names_chp.contains(&tk::THERMAL_OUTPUT_W),
             "must use thermal_output_w"
         );
-        assert!(names_chp.contains(&"flue_loss_w"), "must use flue_loss_w");
+        assert!(names_chp.contains(&tk::FLUE_LOSS_W), "must use flue_loss_w");
     }
 
     #[test]
@@ -2201,9 +2213,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let fuel_w = generator.telemetry().get("fuel_input_w").unwrap();
-        let thermal_w = generator.telemetry().get("thermal_output_w").unwrap();
-        let flue_w = generator.telemetry().get("flue_loss_w").unwrap();
+        let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
 
         // fuel_input_w should be 5000 / 0.25 = 20000 W
         let expected_fuel_w = 5000.0 / 0.25;
@@ -2253,7 +2265,7 @@ mod tests {
         fc.step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let eta = fc.telemetry().get("eta_electric").unwrap();
+        let eta = fc.telemetry().get(tk::ETA_ELECTRIC).unwrap();
         // Curve: eta = 0.95 * 0.5 = 0.475 (cr=0.25 interpolates to er=0.5 on OCHRE default)
         // Constant: eta = 0.95
         assert!(

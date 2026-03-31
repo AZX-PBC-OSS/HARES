@@ -75,8 +75,8 @@ fn env_with_zone(zone_temp_c: f64, outdoor_temp_c: f64, humidity_ratio: f64) -> 
             .single()
             .expect("valid timestamp"),
         time_res: chrono::Duration::seconds(60),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 

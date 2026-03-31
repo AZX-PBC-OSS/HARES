@@ -1,7 +1,7 @@
 //! Configuration parsing and initialization helpers for heat-pump heaters.
 
 use hares_physics::constants::BTU_PER_HR_PER_W;
-use hares_types::{HaresError, Telemetry, TelemetryField};
+use hares_types::{HaresError, Telemetry, TelemetryField, telemetry_keys as tk};
 
 use crate::EquipmentConfig;
 
@@ -18,64 +18,64 @@ const OPERATING_MODE_CODE_ER_ON: f64 = 5.0;
 
 pub(super) fn default_heater_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(HEATER_TELEMETRY_CAPACITY);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("thermal_output_w", 0.0);
-    telemetry.insert("operating_mode", OPERATING_MODE_CODE_OFF);
-    telemetry.insert("speed_index", 0.0);
-    telemetry.insert("defrost_active", 0.0);
-    telemetry.insert("cop", 0.0);
-    telemetry.insert("runtime_fraction", 0.0);
-    telemetry.insert("compressor_kw", 0.0);
-    telemetry.insert("defrost_time_fraction", 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, OPERATING_MODE_CODE_OFF);
+    telemetry.insert(tk::SPEED_INDEX, 0.0);
+    telemetry.insert(tk::DEFROST_ACTIVE, 0.0);
+    telemetry.insert(tk::COP, 0.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::COMPRESSOR_KW, 0.0);
+    telemetry.insert(tk::DEFROST_TIME_FRACTION, 0.0);
     telemetry
 }
 
 pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total heater electric power".to_string(),
         },
         TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered sensible heating".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code".to_string(),
         },
         TelemetryField {
-            name: "speed_index".to_string(),
+            name: tk::SPEED_INDEX.to_string(),
             unit: "index".to_string(),
             description: "Selected compressor speed stage".to_string(),
         },
         TelemetryField {
-            name: "defrost_active".to_string(),
+            name: tk::DEFROST_ACTIVE.to_string(),
             unit: "bool".to_string(),
             description: "1 when defrost correction is active".to_string(),
         },
         TelemetryField {
-            name: "cop".to_string(),
+            name: tk::COP.to_string(),
             unit: "-".to_string(),
             description:
                 "COP per AHRI convention: gross thermal output / compressor-only electric input"
                     .to_string(),
         },
         TelemetryField {
-            name: "runtime_fraction".to_string(),
+            name: tk::RUNTIME_FRACTION.to_string(),
             unit: "-".to_string(),
             description: "Compressor runtime fraction (part-load ratio) this timestep".to_string(),
         },
         TelemetryField {
-            name: "compressor_kw".to_string(),
+            name: tk::COMPRESSOR_KW.to_string(),
             unit: "kW".to_string(),
             description: "Compressor-only electric power".to_string(),
         },
         TelemetryField {
-            name: "defrost_time_fraction".to_string(),
+            name: tk::DEFROST_TIME_FRACTION.to_string(),
             unit: "-".to_string(),
             description: "Fraction of timestep in defrost mode [0..1]".to_string(),
         },

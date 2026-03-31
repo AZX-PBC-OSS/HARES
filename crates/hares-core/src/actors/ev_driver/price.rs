@@ -123,9 +123,7 @@ mod tests {
     use crate::actor::testing::TestEnvBuilder;
     use hares_types::PriceSignal;
 
-    fn make_ctx_with_price(
-        env: &hares_types::EnvironmentState,
-    ) -> DecisionContext<'_> {
+    fn make_ctx_with_price(env: &hares_types::EnvironmentState) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: 0.5,
             capacity_kwh: 60.0,
@@ -283,8 +281,14 @@ mod tests {
         let vote_a = pref_a.score(&ctx);
         let vote_b = pref_b.score(&ctx);
 
-        assert_eq!(vote_a.label, "price:neutral", "0.10 between thresholds → neutral");
-        assert_eq!(vote_b.label, "price:charge", "0.10 <= threshold 0.20 → charge");
+        assert_eq!(
+            vote_a.label, "price:neutral",
+            "0.10 between thresholds → neutral"
+        );
+        assert_eq!(
+            vote_b.label, "price:charge",
+            "0.10 <= threshold 0.20 → charge"
+        );
     }
 
     #[test]

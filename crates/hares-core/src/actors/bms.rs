@@ -8,7 +8,7 @@ use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     BmsAction, BmsMode, BmsScheduleWindow, ControlSignal, EnvironmentState, GridExportRule,
-    StormWatchTrigger,
+    StormWatchTrigger, telemetry_keys as tk,
 };
 
 use crate::Actor;
@@ -94,14 +94,10 @@ impl BatteryManagementActor {
         };
         env.equipment_telemetry
             .get(battery_name)
-            .and_then(|t| t.0.get("soc").copied())
+            .and_then(|t| t.0.get(tk::SOC).copied())
     }
 
-    fn emit(
-        &self,
-        signal: ControlSignal,
-        out: &mut Vec<DispatchRequest>,
-    ) {
+    fn emit(&self, signal: ControlSignal, out: &mut Vec<DispatchRequest>) {
         out.push(DispatchRequest {
             target: self.dispatch_target.clone(),
             signal,
@@ -114,11 +110,7 @@ impl BatteryManagementActor {
     /// - `Unrestricted`: no clamping.
     /// - `Disabled`: clamp discharge so net export is zero (battery only offsets home load).
     /// - `SolarOnly`: clamp discharge so net export does not exceed PV generation.
-    fn clamp_discharge_for_export(
-        &self,
-        discharge_kw: f64,
-        env: &EnvironmentState,
-    ) -> f64 {
+    fn clamp_discharge_for_export(&self, discharge_kw: f64, env: &EnvironmentState) -> f64 {
         // discharge_kw is the raw magnitude (positive value) of desired discharge.
         match self.grid_export_rule {
             GridExportRule::Unrestricted => discharge_kw,
@@ -129,8 +121,8 @@ impl BatteryManagementActor {
             GridExportRule::SolarOnly => {
                 // Battery may discharge up to load + PV, so net grid export
                 // (discharge - load) is at most PV generation.
-                let max_allowed = env.electrical.base_load_kw.max(0.0)
-                    + env.electrical.pv_generation_kw.max(0.0);
+                let max_allowed =
+                    env.electrical.base_load_kw.max(0.0) + env.electrical.pv_generation_kw.max(0.0);
                 discharge_kw.min(max_allowed)
             }
         }
@@ -170,10 +162,8 @@ impl BatteryManagementActor {
                     // When GridExportRule::Disabled, force solar-only charging
                     // to prevent grid-to-battery import that would increase
                     // net grid consumption.
-                    let force_solar_only = matches!(
-                        self.grid_export_rule,
-                        GridExportRule::Disabled
-                    );
+                    let force_solar_only =
+                        matches!(self.grid_export_rule, GridExportRule::Disabled);
                     self.emit(
                         ControlSignal::SelfConsumption {
                             enabled: true,
@@ -235,10 +225,7 @@ impl BatteryManagementActor {
                     self.last_action = "idle:no_soc".into();
                     return;
                 };
-                let price = env
-                    .price_signal
-                    .electricity_price
-                    .unwrap_or(0.0);
+                let price = env.price_signal.electricity_price.unwrap_or(0.0);
 
                 if price <= self.charge_price_threshold && soc < (1.0 - reserve_soc) {
                     if *solar_only_charging && env.electrical.pv_generation_kw <= 0.0 {
@@ -312,10 +299,7 @@ impl BatteryManagementActor {
                 dr_discharge_rate,
                 min_soc_during_dr,
             } => {
-                let price = env
-                    .price_signal
-                    .electricity_price
-                    .unwrap_or(0.0);
+                let price = env.price_signal.electricity_price.unwrap_or(0.0);
                 let dr_active = self.is_dr_active(env, price);
 
                 if dr_active {
@@ -398,8 +382,9 @@ impl BatteryManagementActor {
             } => {
                 let active = match trigger {
                     StormWatchTrigger::ManualEnable => true,
-                    StormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s } =>
-                        env.weather.wind_speed_m_s > *wind_speed_threshold_m_s,
+                    StormWatchTrigger::WeatherSignal {
+                        wind_speed_threshold_m_s,
+                    } => env.weather.wind_speed_m_s > *wind_speed_threshold_m_s,
                 };
 
                 if active {
@@ -469,16 +454,6 @@ impl BatteryManagementActor {
     }
 
     fn is_dr_active(&mut self, env: &EnvironmentState, current_price: f64) -> bool {
-        let battery_name = match &self.dispatch_target {
-            DispatchTarget::ByName(n) => &**n,
-            _ => return false,
-        };
-        if let Some(telemetry) = env.equipment_telemetry.get(battery_name) {
-            if let Some(&flag) = telemetry.0.get("dr_active") {
-                return flag > 0.0;
-            }
-        }
-
         self.ensure_daily_prices(env);
 
         if self.price_schedule.is_none() {
@@ -521,8 +496,7 @@ fn compute_percentile(prices: &[f64], percentile: f64) -> f64 {
     }
     let mut sorted: Vec<f64> = prices.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx =
-        ((percentile * (sorted.len() - 1) as f64).round() as usize).min(sorted.len() - 1);
+    let idx = ((percentile * (sorted.len() - 1) as f64).round() as usize).min(sorted.len() - 1);
     sorted[idx]
 }
 
@@ -539,8 +513,7 @@ mod tests {
     fn set_soc(env: &mut EnvironmentState, battery_name: &str, soc: f64) {
         let mut t = Telemetry::default();
         t.0.insert("soc".to_string(), soc);
-        env.equipment_telemetry
-            .insert(battery_name.to_string(), t);
+        env.equipment_telemetry.insert(battery_name.to_string(), t);
     }
 
     #[test]
@@ -895,43 +868,6 @@ mod tests {
     }
 
     #[test]
-    fn bms_demand_response_via_telemetry_flag() {
-        let mut actor = BatteryManagementActor::new(
-            "bat1",
-            BmsMode::DemandResponse {
-                base_mode: Box::new(BmsMode::Manual),
-                dr_discharge_rate: 0.8,
-                min_soc_during_dr: 0.1,
-            },
-            GridExportRule::Unrestricted,
-            5.0,
-            5.0,
-            None,
-            24,
-        );
-
-        let mut env = TestEnvBuilder::new().build();
-        let mut t = Telemetry::default();
-        t.0.insert("soc".to_string(), 0.6);
-        t.0.insert("dr_active".to_string(), 1.0);
-        env.equipment_telemetry
-            .insert("bat1".to_string(), t);
-
-        let mut out = Vec::new();
-        actor.decide(&env, &mut out);
-
-        assert_eq!(out.len(), 1);
-        match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!(*active_power_kw < 0.0);
-            }
-            other => panic!("expected PowerSetpoint, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn bms_demand_response_delegates_to_base() {
         let prices: Vec<f64> = vec![0.10; 24];
         let mut actor = BatteryManagementActor::new(
@@ -1075,7 +1011,9 @@ mod tests {
             "bat1",
             BmsMode::StormWatch {
                 target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s: 25.0 },
+                trigger: StormWatchTrigger::WeatherSignal {
+                    wind_speed_threshold_m_s: 25.0,
+                },
                 base_mode: Box::new(BmsMode::Manual),
             },
             GridExportRule::Unrestricted,
@@ -1104,7 +1042,9 @@ mod tests {
             "bat1",
             BmsMode::StormWatch {
                 target_soc: 1.0,
-                trigger: StormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s: 25.0 },
+                trigger: StormWatchTrigger::WeatherSignal {
+                    wind_speed_threshold_m_s: 25.0,
+                },
                 base_mode: Box::new(BmsMode::SelfConsumption {
                     min_soc: 0.1,
                     max_soc: 0.95,
@@ -1178,12 +1118,8 @@ mod tests {
         out.clear();
         actor.decide(&env, &mut out);
 
-        assert!(
-            (actor.charge_price_threshold - charge_threshold_after_first).abs() < 1e-15,
-        );
-        assert!(
-            (actor.discharge_price_threshold - discharge_threshold_after_first).abs() < 1e-15,
-        );
+        assert!((actor.charge_price_threshold - charge_threshold_after_first).abs() < 1e-15,);
+        assert!((actor.discharge_price_threshold - discharge_threshold_after_first).abs() < 1e-15,);
     }
 
     #[test]
@@ -1919,7 +1855,11 @@ mod tests {
             .build();
         let mut out = Vec::new();
         actor_above.decide(&env_above, &mut out);
-        assert_eq!(out.len(), 1, "wind 22 m/s should trigger at threshold 20 m/s");
+        assert_eq!(
+            out.len(),
+            1,
+            "wind 22 m/s should trigger at threshold 20 m/s"
+        );
         assert!(matches!(out[0].signal, ControlSignal::SOCTarget { .. }));
 
         // 18 m/s below 20 m/s threshold → delegates to base (Manual = no output)

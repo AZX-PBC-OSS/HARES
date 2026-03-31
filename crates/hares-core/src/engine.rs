@@ -125,7 +125,7 @@ impl SimulationEngine {
         let mut warnings = dwelling.take_warnings();
         let result = match sim_outcome {
             Ok(Ok(_dwelling_results)) => {
-                let batches = dwelling.recorder.flushed_batches().to_vec();
+                let batches = dwelling.flushed_batches().to_vec();
                 #[cfg(feature = "profiling")]
                 emit_dwelling_profiling_summary(&dwelling.profiling_summary());
 
@@ -136,7 +136,7 @@ impl SimulationEngine {
                         "simulation produced zero output batches (zero-step run)".to_string(),
                     );
                     SimulationResults {
-                        timeseries_path: Some(output_path),
+                        timeseries_path: output_path.clone(),
                         timeseries: Some(Vec::new()),
                         metrics: empty_metrics(),
                         warnings,
@@ -156,7 +156,7 @@ impl SimulationEngine {
                         SimStatus::Flagged(format!("{} warning(s)", warnings.len()))
                     };
                     SimulationResults {
-                        timeseries_path: Some(output_path),
+                        timeseries_path: output_path.clone(),
                         timeseries: Some(batches),
                         metrics: outcome.metrics,
                         warnings,
@@ -168,7 +168,7 @@ impl SimulationEngine {
             Ok(Err(err)) => {
                 warnings.push(format!("simulation error: {err}"));
                 SimulationResults {
-                    timeseries_path: Some(output_path),
+                    timeseries_path: output_path.clone(),
                     timeseries: None,
                     metrics: empty_metrics(),
                     warnings,
@@ -177,7 +177,7 @@ impl SimulationEngine {
                 }
             }
             Err(payload) => SimulationResults {
-                timeseries_path: Some(output_path),
+                timeseries_path: output_path,
                 timeseries: None,
                 metrics: empty_metrics(),
                 warnings,
@@ -214,7 +214,7 @@ impl SimulationEngine {
         let mut warnings = dwelling.take_warnings();
         let result = match sim_outcome {
             Ok(Ok(_)) => {
-                let batches = dwelling.recorder.flushed_batches().to_vec();
+                let batches = dwelling.flushed_batches().to_vec();
                 if batches.is_empty() {
                     warnings.push(
                         "simulation produced zero output batches (zero-step run)".to_string(),
@@ -321,15 +321,21 @@ fn validate_path_exists(path: &Path, field_name: &str) -> Result<(), HaresError>
     )))
 }
 
-fn resolved_output_path(config: &DwellingConfig) -> PathBuf {
+fn resolved_output_path(config: &DwellingConfig) -> Option<PathBuf> {
+    if !config.sim_config.write_output {
+        return None;
+    }
     if let Some(path) = &config.sim_config.output_path {
-        return path.clone();
+        return Some(path.clone());
     }
     let ext = match config.sim_config.output_format {
         OutputFormat::Csv => "csv",
         OutputFormat::Parquet => "parquet",
     };
-    PathBuf::from(format!("dwelling_{}.{}", config.bldg_id, ext))
+    Some(PathBuf::from(format!(
+        "dwelling_{}.{}",
+        config.bldg_id, ext
+    )))
 }
 
 fn compute_metrics_from_batches(

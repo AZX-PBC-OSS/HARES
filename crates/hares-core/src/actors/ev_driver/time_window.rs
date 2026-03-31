@@ -6,9 +6,7 @@
 use chrono::Datelike;
 use hares_types::{DayFilter, TimeWindow};
 
-use super::preference::{
-    ChargingPreference, Constraint, DecisionContext, PreferenceVote,
-};
+use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 
 pub struct TimeWindowPref {
     window: TimeWindow,
@@ -18,7 +16,12 @@ impl TimeWindowPref {
     pub fn from_hours(start_hour: f64, end_hour: f64) -> Self {
         let start_minute = (start_hour * 60.0) as u16;
         let end_minute = (end_hour * 60.0).min(1440.0) as u16;
-        Self::from_time_window(TimeWindow::new(DayFilter::Any, start_minute, end_minute, 0.0))
+        Self::from_time_window(TimeWindow::new(
+            DayFilter::Any,
+            start_minute,
+            end_minute,
+            0.0,
+        ))
     }
 
     pub fn from_time_window(window: TimeWindow) -> Self {

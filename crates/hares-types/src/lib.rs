@@ -13,6 +13,7 @@ pub mod fluid;
 pub mod ports;
 pub mod schedule;
 pub mod telemetry;
+pub mod telemetry_keys;
 pub mod text;
 
 pub use control_signal::*;

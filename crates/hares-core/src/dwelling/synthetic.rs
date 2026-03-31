@@ -115,6 +115,8 @@ pub(crate) struct SyntheticOutputConfig {
     pub(crate) output_verbosity: u8,
     #[serde(default)]
     pub(crate) output_path: Option<String>,
+    #[serde(default = "default_write_output")]
+    pub(crate) write_output: bool,
     #[serde(default)]
     pub(crate) output_format: hares_io::OutputFormat,
     #[serde(default = "default_output_chunk_size")]
@@ -128,11 +130,16 @@ impl Default for SyntheticOutputConfig {
         Self {
             output_verbosity: 0,
             output_path: None,
+            write_output: default_write_output(),
             output_format: hares_io::OutputFormat::Csv,
             output_chunk_size: default_output_chunk_size(),
             master_seed: 0,
         }
     }
+}
+
+fn default_write_output() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +197,10 @@ pub(crate) struct SyntheticSetpointConfig {
 pub(crate) struct SyntheticInfiltrationConfig {
     /// Continuous ACH (not ACH50).
     pub(crate) ach: f64,
+    /// Optional constant internal gains when provided under `[infiltration]`
+    /// in synthetic BESTEST-style fixtures.
+    #[serde(default)]
+    pub(crate) internal_gains_w: Option<f64>,
 }
 
 fn default_interior_zone() -> String {
@@ -257,8 +268,10 @@ fn parse_boundary_type(s: &str) -> hares_io::hpxml::BoundaryType {
 
 pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building {
     use hares_io::hpxml::{Boundary, BoundaryType, MaterialLayer, Site, Window, Zone, ZoneType};
+    use hares_physics::units as conv;
 
-    let heating_capacity = config.hvac.heating_capacity_kbtu_h.unwrap_or(30.0);
+    let heating_capacity_kbtu_h = config.hvac.heating_capacity_kbtu_h.unwrap_or(30.0);
+    let heating_capacity_btu_h = heating_capacity_kbtu_h * 1000.0;
     let floor_area = if config.geometry.floor_area_m2 > 0.0 {
         config.geometry.floor_area_m2
     } else {
@@ -269,49 +282,137 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         .fuel
         .clone()
         .unwrap_or_else(|| "natural gas".to_string());
+    let equipment_name_norm = config.hvac.equipment_name.to_ascii_lowercase();
+    let is_ideal_hvac = matches!(equipment_name_norm.as_str(), "idealhvac" | "ideal hvac");
+    let has_heating = !config.hvac.equipment_name.eq_ignore_ascii_case("none");
+    let has_cooling = has_heating && config.setpoints.is_some() && !is_ideal_hvac;
+    let internal_gains_w = config.internal_gains_w.or_else(|| {
+        config
+            .infiltration
+            .as_ref()
+            .and_then(|i| i.internal_gains_w)
+    });
+
+    let mut hvac_children = Vec::new();
+    if has_heating {
+        hvac_children.push(hares_io::hpxml::building::XmlNode {
+            name: "HeatingSystem".to_string(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![
+                hares_io::hpxml::building::XmlNode {
+                    name: "HeatingSystemType".to_string(),
+                    attrs: HashMap::new(),
+                    text: config.hvac.equipment_name.clone(),
+                    children: Vec::new(),
+                },
+                hares_io::hpxml::building::XmlNode {
+                    name: "HeatingSystemFuel".to_string(),
+                    attrs: HashMap::new(),
+                    text: fuel.clone(),
+                    children: Vec::new(),
+                },
+                hares_io::hpxml::building::XmlNode {
+                    name: "HeatingCapacity".to_string(),
+                    attrs: HashMap::new(),
+                    text: heating_capacity_btu_h.to_string(),
+                    children: Vec::new(),
+                },
+            ],
+        });
+    }
+    if has_cooling {
+        hvac_children.push(hares_io::hpxml::building::XmlNode {
+            name: "CoolingSystem".to_string(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![
+                hares_io::hpxml::building::XmlNode {
+                    name: "CoolingSystemType".to_string(),
+                    attrs: HashMap::new(),
+                    text: "central air conditioner".to_string(),
+                    children: Vec::new(),
+                },
+                hares_io::hpxml::building::XmlNode {
+                    name: "CoolingSystemFuel".to_string(),
+                    attrs: HashMap::new(),
+                    text: "electricity".to_string(),
+                    children: Vec::new(),
+                },
+                hares_io::hpxml::building::XmlNode {
+                    name: "CoolingCapacity".to_string(),
+                    attrs: HashMap::new(),
+                    text: heating_capacity_btu_h.to_string(),
+                    children: Vec::new(),
+                },
+            ],
+        });
+    }
+
+    let mut details_children = vec![hares_io::hpxml::building::XmlNode {
+        name: "Systems".to_string(),
+        attrs: HashMap::new(),
+        text: String::new(),
+        children: vec![hares_io::hpxml::building::XmlNode {
+            name: "HVAC".to_string(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: hvac_children,
+        }],
+    }];
+
+    if let Some(internal_gains_w) = internal_gains_w
+        && internal_gains_w.is_finite()
+        && internal_gains_w > 0.0
+    {
+        let annual_kwh = internal_gains_w * 8760.0 / 1000.0;
+        details_children.push(hares_io::hpxml::building::XmlNode {
+            name: "MiscLoads".to_string(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![hares_io::hpxml::building::XmlNode {
+                name: "PlugLoad".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![
+                    hares_io::hpxml::building::XmlNode {
+                        name: "PlugLoadType".to_string(),
+                        attrs: HashMap::new(),
+                        text: "other".to_string(),
+                        children: Vec::new(),
+                    },
+                    hares_io::hpxml::building::XmlNode {
+                        name: "Load".to_string(),
+                        attrs: HashMap::new(),
+                        text: String::new(),
+                        children: vec![
+                            hares_io::hpxml::building::XmlNode {
+                                name: "Units".to_string(),
+                                attrs: HashMap::new(),
+                                text: "kWh/year".to_string(),
+                                children: Vec::new(),
+                            },
+                            hares_io::hpxml::building::XmlNode {
+                                name: "Value".to_string(),
+                                attrs: HashMap::new(),
+                                text: annual_kwh.to_string(),
+                                children: Vec::new(),
+                            },
+                        ],
+                    },
+                ],
+            }],
+        });
+    }
 
     let details_xml = hares_io::hpxml::building::XmlNode {
         name: "BuildingDetails".to_string(),
         attrs: HashMap::new(),
         text: String::new(),
-        children: vec![hares_io::hpxml::building::XmlNode {
-            name: "Systems".to_string(),
-            attrs: HashMap::new(),
-            text: String::new(),
-            children: vec![hares_io::hpxml::building::XmlNode {
-                name: "HVAC".to_string(),
-                attrs: HashMap::new(),
-                text: String::new(),
-                children: vec![hares_io::hpxml::building::XmlNode {
-                    name: "HeatingSystem".to_string(),
-                    attrs: HashMap::new(),
-                    text: String::new(),
-                    children: vec![
-                        hares_io::hpxml::building::XmlNode {
-                            name: "HeatingSystemType".to_string(),
-                            attrs: HashMap::new(),
-                            text: config.hvac.equipment_name.clone(),
-                            children: Vec::new(),
-                        },
-                        hares_io::hpxml::building::XmlNode {
-                            name: "HeatingSystemFuel".to_string(),
-                            attrs: HashMap::new(),
-                            text: fuel,
-                            children: Vec::new(),
-                        },
-                        hares_io::hpxml::building::XmlNode {
-                            name: "HeatingCapacity".to_string(),
-                            attrs: HashMap::new(),
-                            text: (heating_capacity * 1000.0).to_string(),
-                            children: Vec::new(),
-                        },
-                    ],
-                }],
-            }],
-        }],
+        children: details_children,
     };
 
-    let boundaries: Vec<Boundary> = if let Some(boundary_configs) = &config.boundaries {
+    let mut boundaries: Vec<Boundary> = if let Some(boundary_configs) = &config.boundaries {
         boundary_configs
             .iter()
             .map(|bc| {
@@ -408,6 +509,33 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         })
         .collect();
 
+    // Mirror parsed-HPXML behavior by materializing each window as a boundary.
+    // Without this, synthetic cases carry window metadata but never wire window
+    // solar gains into the thermal solver.
+    for win in &windows {
+        boundaries.push(Boundary {
+            id: win.id.clone(),
+            boundary_type: BoundaryType::Window,
+            area_m2: win.area_m2,
+            azimuth_deg: win.azimuth_deg,
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: Vec::new(),
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            tilt_deg: Some(90.0),
+            framing_factor: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+        });
+    }
+
     // Build constant 24-hour setpoint vectors when setpoints are configured.
     let (heating_weekday, cooling_weekday) = if let Some(sp) = &config.setpoints {
         (Some(vec![sp.heating_c; 24]), Some(vec![sp.cooling_c; 24]))
@@ -419,7 +547,11 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
     // assumption: infiltration at 50 Pa ≈ 20× natural infiltration).
     let infiltration_ach50 = config.infiltration.as_ref().map(|inf| inf.ach * 20.0);
 
-    let wall_ids: Vec<String> = boundaries.iter().map(|b| b.id.clone()).collect();
+    let wall_ids: Vec<String> = boundaries
+        .iter()
+        .filter(|b| b.boundary_type != BoundaryType::Window)
+        .map(|b| b.id.clone())
+        .collect();
 
     Building {
         site: Site {
@@ -444,7 +576,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         infiltration_ach50,
         infiltration_cfm50: None,
         infiltration_ela_cm2: None,
-        hvac_capacity_w: Some(heating_capacity),
+        hvac_capacity_w: Some(conv::power_btu_h_to_w(heating_capacity_btu_h)),
         seer2: None,
         hspf2: None,
         water_heater_setpoint_c: None,

@@ -339,8 +339,8 @@ impl DegradationState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::deg_const::*;
+    use super::*;
 
     fn make_u_neg_table() -> UNegTable {
         UNegTable::default_li_nmc()
@@ -626,7 +626,12 @@ mod tests {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5);
             ds.update_daily(&u_neg, T_REF, 0.0);
 
-            assert_eq!(ds.day_age, day + 1, "day_age should increment to {}", day + 1);
+            assert_eq!(
+                ds.day_age,
+                day + 1,
+                "day_age should increment to {}",
+                day + 1
+            );
 
             let fade = ds.capacity_fade_pct();
             assert!(
@@ -640,11 +645,21 @@ mod tests {
 
             ds.reset_day_tracking(0.5);
 
-            assert_eq!(ds.capacity_fade_pct(), fade_before, "capacity_fade must survive reset");
+            assert_eq!(
+                ds.capacity_fade_pct(),
+                fade_before,
+                "capacity_fade must survive reset"
+            );
             assert_eq!(ds.q_li3, q_li3_before, "q_li3 must survive reset");
             assert_eq!(ds.dod_max_today, 0.0, "dod_max_today should reset to 0");
-            assert_eq!(ds.soc_max_today, 0.5, "soc_max_today should reset to current SOC");
-            assert_eq!(ds.soc_min_today, 0.5, "soc_min_today should reset to current SOC");
+            assert_eq!(
+                ds.soc_max_today, 0.5,
+                "soc_max_today should reset to current SOC"
+            );
+            assert_eq!(
+                ds.soc_min_today, 0.5,
+                "soc_min_today should reset to current SOC"
+            );
         }
     }
 
@@ -720,13 +735,19 @@ mod tests {
         let day_age_after_day1 = ds.day_age;
 
         // Verify day_age incremented.
-        assert_eq!(day_age_after_day1, 1, "day_age should be 1 after first update_daily");
+        assert_eq!(
+            day_age_after_day1, 1,
+            "day_age should be 1 after first update_daily"
+        );
 
         // Cross the boundary at SOC 0.5.
         ds.reset_day_tracking(0.5);
 
         // Daily tracking must be cleared.
-        assert_eq!(ds.dod_max_today, 0.0, "dod_max_today must reset to 0 at day boundary");
+        assert_eq!(
+            ds.dod_max_today, 0.0,
+            "dod_max_today must reset to 0 at day boundary"
+        );
         assert!(
             (ds.soc_max_today - 0.5).abs() < 1e-12,
             "soc_max_today must reset to current SOC 0.5, got {}",
@@ -763,7 +784,10 @@ mod tests {
             "Fade after day 2 ({:.10}) must be >= day 1 ({fade_after_day1:.10})",
             ds.capacity_fade_pct()
         );
-        assert_eq!(ds.day_age, 2, "day_age should be 2 after second update_daily");
+        assert_eq!(
+            ds.day_age, 2,
+            "day_age should be 2 after second update_daily"
+        );
     }
 
     /// Regression test for the HARES 3-point residue rainflow algorithm on a

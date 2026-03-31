@@ -18,7 +18,7 @@ use chrono::{Datelike, Timelike};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField,
+    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -170,16 +170,17 @@ impl PV {
         };
 
         let mut telemetry = Telemetry::with_capacity(9);
-        telemetry.insert("dc_power_kw", 0.0);
-        telemetry.insert("ac_power_kw", 0.0);
-        telemetry.insert("reactive_power_kvar", 0.0);
-        telemetry.insert("cell_temp_c", 0.0);
-        telemetry.insert("irradiance_w_m2", 0.0);
-        telemetry.insert("inverter_efficiency", DEFAULT_INVERTER_EFFICIENCY);
-        telemetry.insert("curtailment_kw", 0.0);
-        telemetry.insert("inverter_clipping_kw", 0.0);
-        telemetry.insert("soiling_ratio", 1.0);
-        telemetry.insert("shading_factor", 1.0);
+        telemetry.insert(tk::DC_POWER_KW, 0.0);
+        telemetry.insert(tk::AC_POWER_KW, 0.0);
+        telemetry.insert(tk::ELECTRIC_KW, 0.0);
+        telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
+        telemetry.insert(tk::CELL_TEMP_C, 0.0);
+        telemetry.insert(tk::IRRADIANCE_W_M2, 0.0);
+        telemetry.insert(tk::INVERTER_EFFICIENCY, DEFAULT_INVERTER_EFFICIENCY);
+        telemetry.insert(tk::CURTAILMENT_KW, 0.0);
+        telemetry.insert(tk::INVERTER_CLIPPING_KW, 0.0);
+        telemetry.insert(tk::SOILING_RATIO, 1.0);
+        telemetry.insert(tk::SHADING_FACTOR, 1.0);
 
         Self {
             descriptor,
@@ -473,16 +474,17 @@ impl Equipment for PV {
         }
 
         self.telemetry
-            .set("inverter_efficiency", self.inverter_efficiency);
-        self.telemetry.set("dc_power_kw", 0.0);
-        self.telemetry.set("ac_power_kw", 0.0);
-        self.telemetry.set("reactive_power_kvar", 0.0);
+            .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
+        self.telemetry.set(tk::DC_POWER_KW, 0.0);
+        self.telemetry.set(tk::AC_POWER_KW, 0.0);
+        self.telemetry.set(tk::ELECTRIC_KW, 0.0);
+        self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
         self.telemetry
-            .set("cell_temp_c", env.weather.outdoor_temp_c);
-        self.telemetry.set("irradiance_w_m2", 0.0);
-        self.telemetry.set("curtailment_kw", 0.0);
-        self.telemetry.set("inverter_clipping_kw", 0.0);
-        self.telemetry.set("soiling_ratio", 1.0);
+            .set(tk::CELL_TEMP_C, env.weather.outdoor_temp_c);
+        self.telemetry.set(tk::IRRADIANCE_W_M2, 0.0);
+        self.telemetry.set(tk::CURTAILMENT_KW, 0.0);
+        self.telemetry.set(tk::INVERTER_CLIPPING_KW, 0.0);
+        self.telemetry.set(tk::SOILING_RATIO, 1.0);
         Ok(())
     }
 
@@ -587,18 +589,20 @@ impl Equipment for PV {
         };
 
         self.last_ac_power_kw = final_p_kw;
-        self.telemetry.set("dc_power_kw", total_dc_power_kw);
-        self.telemetry.set("ac_power_kw", final_p_kw);
-        self.telemetry.set("reactive_power_kvar", final_q_kvar);
-        self.telemetry.set("cell_temp_c", mean_cell_temp_c);
-        self.telemetry.set("irradiance_w_m2", mean_irradiance_w_m2);
+        self.telemetry.set(tk::DC_POWER_KW, total_dc_power_kw);
+        self.telemetry.set(tk::AC_POWER_KW, final_p_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, final_p_kw);
+        self.telemetry.set(tk::REACTIVE_POWER_KVAR, final_q_kvar);
+        self.telemetry.set(tk::CELL_TEMP_C, mean_cell_temp_c);
         self.telemetry
-            .set("inverter_efficiency", self.inverter_efficiency);
-        self.telemetry.set("curtailment_kw", curtailment_kw);
+            .set(tk::IRRADIANCE_W_M2, mean_irradiance_w_m2);
         self.telemetry
-            .set("inverter_clipping_kw", inverter_clipping_kw);
-        self.telemetry.set("soiling_ratio", soiling_ratio);
-        self.telemetry.set("shading_factor", shading_factor);
+            .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
+        self.telemetry.set(tk::CURTAILMENT_KW, curtailment_kw);
+        self.telemetry
+            .set(tk::INVERTER_CLIPPING_KW, inverter_clipping_kw);
+        self.telemetry.set(tk::SOILING_RATIO, soiling_ratio);
+        self.telemetry.set(tk::SHADING_FACTOR, shading_factor);
 
         Ok(())
     }
@@ -714,57 +718,62 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "dc_power_kw".to_string(),
+            name: tk::DC_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total PV DC output power before inverter efficiency and curtailment"
                 .to_string(),
         },
         TelemetryField {
-            name: "ac_power_kw".to_string(),
+            name: tk::AC_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total PV AC output power after inverter efficiency and curtailment"
                 .to_string(),
         },
         TelemetryField {
-            name: "reactive_power_kvar".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Grid-boundary electrical power".to_string(),
+        },
+        TelemetryField {
+            name: tk::REACTIVE_POWER_KVAR.to_string(),
             unit: "kVAR".to_string(),
             description: "Reactive power output derived from configured static power factor"
                 .to_string(),
         },
         TelemetryField {
-            name: "cell_temp_c".to_string(),
+            name: tk::CELL_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Capacity-weighted average PV cell temperature".to_string(),
         },
         TelemetryField {
-            name: "irradiance_w_m2".to_string(),
+            name: tk::IRRADIANCE_W_M2.to_string(),
             unit: "W/m2".to_string(),
             description: "Capacity-weighted average incident irradiance on PV arrays".to_string(),
         },
         TelemetryField {
-            name: "inverter_efficiency".to_string(),
+            name: tk::INVERTER_EFFICIENCY.to_string(),
             unit: "-".to_string(),
             description: "Inverter efficiency applied to DC power".to_string(),
         },
         TelemetryField {
-            name: "curtailment_kw".to_string(),
+            name: tk::CURTAILMENT_KW.to_string(),
             unit: "kW".to_string(),
             description: "Power curtailed by active PowerLimit signal".to_string(),
         },
         TelemetryField {
-            name: "inverter_clipping_kw".to_string(),
+            name: tk::INVERTER_CLIPPING_KW.to_string(),
             unit: "kW".to_string(),
             description: "Power lost to inverter AC capacity clipping (DC/AC ratio > 1)"
                 .to_string(),
         },
         TelemetryField {
-            name: "soiling_ratio".to_string(),
+            name: tk::SOILING_RATIO.to_string(),
             unit: "-".to_string(),
             description: "PV soiling ratio (1.0 = clean, < 1.0 = soiled). Kimber model."
                 .to_string(),
         },
         TelemetryField {
-            name: "shading_factor".to_string(),
+            name: tk::SHADING_FACTOR.to_string(),
             unit: "-".to_string(),
             description: "PV shading factor (1.0 = unshaded, 0.0 = fully shaded)".to_string(),
         },
@@ -779,7 +788,7 @@ mod tests {
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, InverterPriority, PortSlots, SurfaceIrradiance,
-        WeatherState, ZoneId, ZoneState,
+        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::lut::PvLut;
@@ -836,8 +845,8 @@ mod tests {
                 .single()
                 .expect("valid timestamp"),
             time_res: chrono::Duration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -880,7 +889,7 @@ mod tests {
             pv.descriptor()
                 .telemetry_fields
                 .iter()
-                .any(|f| f.name == "curtailment_kw")
+                .any(|f| f.name == tk::CURTAILMENT_KW)
         );
     }
 
@@ -911,8 +920,8 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        approx_eq(pv.telemetry().get("dc_power_kw").unwrap_or(-1.0), 0.0);
-        approx_eq(pv.telemetry().get("ac_power_kw").unwrap_or(-1.0), 0.0);
+        approx_eq(pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(-1.0), 0.0);
+        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0), 0.0);
         approx_eq(ports.electrical.generation_power_kw, 0.0);
     }
 
@@ -944,7 +953,7 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let dc = pv.telemetry().get("dc_power_kw").unwrap_or(0.0);
+        let dc = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(0.0);
         let expected_fraction = 1.0 + DEFAULT_GAMMA_PER_C * 40.0;
         approx_eq(dc, 5.0 * expected_fraction);
     }
@@ -996,10 +1005,10 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        assert!(pv.telemetry().get("ac_power_kw").unwrap_or(0.0) > 0.0);
+        assert!(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0) > 0.0);
         approx_eq(
             ports.electrical.generation_power_kw,
-            -pv.telemetry().get("ac_power_kw").unwrap_or(0.0),
+            -pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0),
         );
     }
 
@@ -1028,8 +1037,8 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        approx_eq(pv.telemetry().get("ac_power_kw").unwrap_or(0.0), 1.5);
-        assert!(pv.telemetry().get("curtailment_kw").unwrap_or(0.0) > 0.0);
+        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0), 1.5);
+        assert!(pv.telemetry().get(tk::CURTAILMENT_KW).unwrap_or(0.0) > 0.0);
         approx_eq(ports.electrical.generation_power_kw, -1.5);
     }
 
@@ -1227,8 +1236,8 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let ac_kw = pv.telemetry().get("ac_power_kw").unwrap_or(0.0);
-        let clipping_kw = pv.telemetry().get("inverter_clipping_kw").unwrap_or(0.0);
+        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let clipping_kw = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
 
         // AC output must be clamped at inverter rating.
         approx_eq(ac_kw, 3.0);
@@ -1278,8 +1287,8 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let ac_kw = pv.telemetry().get("ac_power_kw").unwrap_or(0.0);
-        let q_kvar = pv.telemetry().get("reactive_power_kvar").unwrap_or(0.0);
+        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let q_kvar = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0);
 
         assert!(
             q_kvar > 0.0,
@@ -1337,7 +1346,7 @@ mod tests {
         pv_std
             .step(&env, Duration::from_secs(60), &mut ports)
             .unwrap();
-        let dc_standard = pv_std.telemetry().get("dc_power_kw").unwrap_or(0.0);
+        let dc_standard = pv_std.telemetry().get(tk::DC_POWER_KW).unwrap_or(0.0);
 
         let mut pv_tf = PV::new(make_cfg("ThinFilm"));
         let cfg_tf = make_cfg("ThinFilm");
@@ -1346,7 +1355,7 @@ mod tests {
         pv_tf
             .step(&env, Duration::from_secs(60), &mut ports2)
             .unwrap();
-        let dc_thinfilm = pv_tf.telemetry().get("dc_power_kw").unwrap_or(0.0);
+        let dc_thinfilm = pv_tf.telemetry().get(tk::DC_POWER_KW).unwrap_or(0.0);
 
         // ThinFilm gamma is less negative → less derating → higher output at elevated temp.
         assert!(
@@ -1412,7 +1421,7 @@ mod tests {
         pv_zero
             .step(&env, Duration::from_secs(60), &mut ports)
             .unwrap();
-        let dc_zero = pv_zero.telemetry().get("dc_power_kw").unwrap();
+        let dc_zero = pv_zero.telemetry().get(tk::DC_POWER_KW).unwrap();
 
         // Default 14% losses config.
         let cfg_default = config_single();
@@ -1422,7 +1431,7 @@ mod tests {
         pv_default
             .step(&env, Duration::from_secs(60), &mut ports2)
             .unwrap();
-        let dc_default = pv_default.telemetry().get("dc_power_kw").unwrap();
+        let dc_default = pv_default.telemetry().get(tk::DC_POWER_KW).unwrap();
 
         approx_eq(dc_default, dc_zero * (1.0 - DEFAULT_SYSTEM_LOSSES_FRACTION));
     }
@@ -1563,8 +1572,8 @@ mod tests {
         pv.q_setpoint_kvar = 3.0;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let p = pv.telemetry().get("ac_power_kw").unwrap();
-        let q = pv.telemetry().get("reactive_power_kvar").unwrap();
+        let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
         assert!(p <= 4.0 + 1e-9);
         assert!(s <= 4.0 + 1e-9, "S={s} exceeds inverter cap 4.0");
@@ -1579,8 +1588,8 @@ mod tests {
         pv.inverter_min_pf = None;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let p = pv.telemetry().get("ac_power_kw").unwrap();
-        let q = pv.telemetry().get("reactive_power_kvar").unwrap();
+        let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
         approx_eq(q, 2.0);
         let max_p = (4.0_f64.powi(2) - 2.0_f64.powi(2)).sqrt();
@@ -1595,8 +1604,8 @@ mod tests {
         pv.q_setpoint_kvar = 2.0;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let p = pv.telemetry().get("ac_power_kw").unwrap();
-        let q = pv.telemetry().get("reactive_power_kvar").unwrap();
+        let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
         assert!(s <= 3.0 + 1e-9, "S={s} exceeds inverter cap 3.0");
         // CPF preserves P/Q ratio: both scaled by same factor.
@@ -1613,8 +1622,8 @@ mod tests {
             let mut ports2 = PortSlots::default();
             pv2.step(&env2, Duration::from_secs(60), &mut ports2)
                 .unwrap();
-            let p2 = pv2.telemetry().get("ac_power_kw").unwrap();
-            let q2 = pv2.telemetry().get("reactive_power_kvar").unwrap();
+            let p2 = pv2.telemetry().get(tk::AC_POWER_KW).unwrap();
+            let q2 = pv2.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
             p2 / (p2 * p2 + q2 * q2).sqrt()
         };
         assert!(
@@ -1629,7 +1638,7 @@ mod tests {
         pv.inverter_priority = InverterPriority::Watt;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let clipping = pv.telemetry().get("inverter_clipping_kw").unwrap();
+        let clipping = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap();
         approx_eq(clipping, 0.0);
     }
 
@@ -1655,14 +1664,14 @@ mod tests {
         let mut ports_full = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports_full)
             .unwrap();
-        let ac_full = pv.telemetry().get("ac_power_kw").unwrap();
+        let ac_full = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
 
         pv.apply_control(&ControlSignal::CurtailmentPercent { percent: 50.0 })
             .unwrap();
         let mut ports_half = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports_half)
             .unwrap();
-        let ac_half = pv.telemetry().get("ac_power_kw").unwrap();
+        let ac_half = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
 
         assert!(
             (ac_half - ac_full * 0.5).abs() < 0.01,
@@ -1679,7 +1688,7 @@ mod tests {
             .unwrap();
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let q = pv.telemetry().get("reactive_power_kvar").unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         approx_eq(q, 1.5);
     }
 
@@ -1691,8 +1700,8 @@ mod tests {
             .unwrap();
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let p = pv.telemetry().get("ac_power_kw").unwrap();
-        let q = pv.telemetry().get("reactive_power_kvar").unwrap();
+        let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let expected_q = p * (0.9_f64.acos().tan());
         assert!(
             (q - expected_q).abs() < 1e-6,
@@ -1727,11 +1736,11 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert!(field_names.contains(&"inverter_clipping_kw"));
-        assert!(field_names.contains(&"reactive_power_kvar"));
-        assert!(field_names.contains(&"dc_power_kw"));
-        assert!(field_names.contains(&"ac_power_kw"));
-        assert!(field_names.contains(&"curtailment_kw"));
+        assert!(field_names.contains(&tk::INVERTER_CLIPPING_KW));
+        assert!(field_names.contains(&tk::REACTIVE_POWER_KVAR));
+        assert!(field_names.contains(&tk::DC_POWER_KW));
+        assert!(field_names.contains(&tk::AC_POWER_KW));
+        assert!(field_names.contains(&tk::CURTAILMENT_KW));
     }
 
     // --- New tests for issue fixes ---
@@ -1781,7 +1790,7 @@ mod tests {
         pv.q_setpoint_kvar = 3.0;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let q = pv.telemetry().get("reactive_power_kvar").unwrap();
+        let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let max_q_cap = 0.8_f64.acos().sin() * 4.0;
         assert!(
             q <= max_q_cap + 1e-9,
@@ -1816,7 +1825,7 @@ mod tests {
 
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let dc_5pct = pv.telemetry().get("dc_power_kw").unwrap();
+        let dc_5pct = pv.telemetry().get(tk::DC_POWER_KW).unwrap();
 
         // Compare with 20% losses.
         let mut cfg2 = config_single();
@@ -1827,7 +1836,7 @@ mod tests {
         let mut ports2 = PortSlots::default();
         pv2.step(&env, Duration::from_secs(60), &mut ports2)
             .unwrap();
-        let dc_20pct = pv2.telemetry().get("dc_power_kw").unwrap();
+        let dc_20pct = pv2.telemetry().get(tk::DC_POWER_KW).unwrap();
 
         // 5% losses should give more power than 20% losses.
         assert!(
@@ -1879,7 +1888,7 @@ mod tests {
         let mut ports_unconstrained = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports_unconstrained)
             .unwrap();
-        let unconstrained_ac = pv.telemetry().get("ac_power_kw").unwrap_or(0.0);
+        let unconstrained_ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
         assert!(
             unconstrained_ac > 2.0,
             "unconstrained AC power must be > 2.0 kW, got {unconstrained_ac}"
@@ -1895,7 +1904,7 @@ mod tests {
         let mut ports_limited = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports_limited)
             .unwrap();
-        let limited_ac = pv.telemetry().get("ac_power_kw").unwrap_or(0.0);
+        let limited_ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
 
         assert!(
             limited_ac <= 2.0 + 1e-9,
@@ -1972,7 +1981,7 @@ mod tests {
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         // Verify telemetry field exists and equals expected value (1.0 - 0.20 = 0.80)
-        let shading_factor = pv.telemetry().get("shading_factor").unwrap_or(-1.0);
+        let shading_factor = pv.telemetry().get(tk::SHADING_FACTOR).unwrap_or(-1.0);
         approx_eq(shading_factor, 0.80);
 
         // Verify the field is declared in descriptor
@@ -1983,7 +1992,7 @@ mod tests {
             .map(|f| f.name.as_str())
             .collect();
         assert!(
-            field_names.contains(&"shading_factor"),
+            field_names.contains(&tk::SHADING_FACTOR),
             "shading_factor must be in telemetry_fields"
         );
     }
@@ -2032,9 +2041,9 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let ac_kw = pv.telemetry().get("ac_power_kw").unwrap_or(0.0);
-        let dc_kw = pv.telemetry().get("dc_power_kw").unwrap_or(0.0);
-        let clipping_kw = pv.telemetry().get("inverter_clipping_kw").unwrap_or(0.0);
+        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let dc_kw = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(0.0);
+        let clipping_kw = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
 
         // DC must exceed the 4 kW cap (cold boost ensures this).
         assert!(

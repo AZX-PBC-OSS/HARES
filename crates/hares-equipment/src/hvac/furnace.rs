@@ -11,6 +11,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_types::telemetry_keys as tk;
+
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::{
@@ -176,14 +178,14 @@ impl Equipment for ElectricFurnace {
         // consistent with OCHRE's "thermal_output_w" reporting.
         let thermal_output_w = gross_capacity_w * self.hvac.duct_dse.clamp(0.0, 1.0);
         let sp = self.hvac.effective_setpoints();
-        self.telemetry.set("electric_kw", electric_kw);
-        self.telemetry.set("thermal_output_w", thermal_output_w);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
-            .set("operating_mode", operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
         self.telemetry
-            .set("supply_air_temp_c", self.hvac.supply_air_temp_c);
-        self.telemetry.set("heating_setpoint_c", sp.heating_c);
-        self.telemetry.set("cooling_setpoint_c", sp.cooling_c);
+            .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
+        self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
+        self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
 
         Ok(())
     }
@@ -200,8 +202,8 @@ impl Equipment for ElectricFurnace {
             runtime_setpoints: self.hvac.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get("thermal_output_w").unwrap_or(0.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
             fuel_input_w: 0.0,
         })
     }
@@ -214,15 +216,15 @@ impl Equipment for ElectricFurnace {
         self.hvac.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
-        self.telemetry.insert("electric_kw", decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert("thermal_output_w", decoded.thermal_output_w);
+            .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry.insert(
-            "operating_mode",
+            tk::OPERATING_MODE,
             operating_mode_code(decoded.operating_mode),
         );
         self.telemetry
-            .insert("supply_air_temp_c", self.hvac.supply_air_temp_c);
+            .insert(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
         Ok(())
     }
 
@@ -359,10 +361,14 @@ impl Equipment for GasFurnace {
             })?;
         }
 
-        if gross_capacity_w > 0.0 {
+        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
+        let fan_heat_w = fan_kw * 1000.0;
+        let total_sensible_w = gross_capacity_w + fan_heat_w;
+
+        if total_sensible_w > 0.0 {
             self.hvac.write_zone_thermal_contributions(
                 ports,
-                gross_capacity_w,
+                total_sensible_w,
                 0.0,
                 ThermalCategory::HvacHeating,
             )?;
@@ -373,18 +379,18 @@ impl Equipment for GasFurnace {
         }
 
         // Telemetry reports delivered capacity (post-DSE) for the conditioned zone.
-        let thermal_output_w = gross_capacity_w * self.hvac.duct_dse.clamp(0.0, 1.0);
+        let thermal_output_w = total_sensible_w * self.hvac.duct_dse.clamp(0.0, 1.0);
         let sp = self.hvac.effective_setpoints();
-        self.telemetry.set("fan_kw", fan_kw);
-        self.telemetry.set("electric_kw", fan_kw);
-        self.telemetry.set("fuel_input_w", fuel_input_w);
-        self.telemetry.set("thermal_output_w", thermal_output_w);
+        self.telemetry.set(tk::FAN_KW, fan_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
+        self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
+        self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
-            .set("operating_mode", operating_mode_code(self.operating_mode));
+            .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
         self.telemetry
-            .set("supply_air_temp_c", self.hvac.supply_air_temp_c);
-        self.telemetry.set("heating_setpoint_c", sp.heating_c);
-        self.telemetry.set("cooling_setpoint_c", sp.cooling_c);
+            .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
+        self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
+        self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
 
         Ok(())
     }
@@ -401,9 +407,9 @@ impl Equipment for GasFurnace {
             runtime_setpoints: self.hvac.runtime_setpoints,
             operating_mode: self.operating_mode,
             run_time_s: self.run_time_s,
-            electric_kw: self.telemetry.get("electric_kw").unwrap_or(0.0),
-            thermal_output_w: self.telemetry.get("thermal_output_w").unwrap_or(0.0),
-            fuel_input_w: self.telemetry.get("fuel_input_w").unwrap_or(0.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+            thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
+            fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
         })
     }
 
@@ -416,17 +422,18 @@ impl Equipment for GasFurnace {
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
 
-        self.telemetry.insert("fan_kw", decoded.electric_kw);
-        self.telemetry.insert("electric_kw", decoded.electric_kw);
-        self.telemetry.insert("fuel_input_w", decoded.fuel_input_w);
+        self.telemetry.insert(tk::FAN_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert("thermal_output_w", decoded.thermal_output_w);
+            .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
+        self.telemetry
+            .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry.insert(
-            "operating_mode",
+            tk::OPERATING_MODE,
             operating_mode_code(decoded.operating_mode),
         );
         self.telemetry
-            .insert("supply_air_temp_c", self.hvac.supply_air_temp_c);
+            .insert(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
         Ok(())
     }
 
@@ -448,37 +455,37 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn electric_furnace_default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(6);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("thermal_output_w", 0.0);
-    telemetry.insert("operating_mode", 0.0);
-    telemetry.insert("supply_air_temp_c", 0.0);
-    telemetry.insert("heating_setpoint_c", 0.0);
-    telemetry.insert("cooling_setpoint_c", 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::SUPPLY_AIR_TEMP_C, 0.0);
+    telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
     telemetry
 }
 
 fn gas_furnace_default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(8);
-    telemetry.insert("fan_kw", 0.0);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("fuel_input_w", 0.0);
-    telemetry.insert("thermal_output_w", 0.0);
-    telemetry.insert("operating_mode", 0.0);
-    telemetry.insert("supply_air_temp_c", 0.0);
-    telemetry.insert("heating_setpoint_c", 0.0);
-    telemetry.insert("cooling_setpoint_c", 0.0);
+    telemetry.insert(tk::FAN_KW, 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::SUPPLY_AIR_TEMP_C, 0.0);
+    telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
     telemetry
 }
 
 fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "heating_setpoint_c".to_string(),
+            name: tk::HEATING_SETPOINT_C.to_string(),
             unit: "C".to_string(),
             description: "Active heating setpoint from thermostat schedule".to_string(),
         },
         TelemetryField {
-            name: "cooling_setpoint_c".to_string(),
+            name: tk::COOLING_SETPOINT_C.to_string(),
             unit: "C".to_string(),
             description: "Active cooling setpoint from thermostat schedule".to_string(),
         },
@@ -488,22 +495,22 @@ fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
 fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electric furnace active power draw".to_string(),
         },
         TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered sensible heat to conditioned zone after duct DSE".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
         },
         TelemetryField {
-            name: "supply_air_temp_c".to_string(),
+            name: tk::SUPPLY_AIR_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Configured furnace supply-air temperature".to_string(),
         },
@@ -515,33 +522,33 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
 fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
         TelemetryField {
-            name: "fan_kw".to_string(),
+            name: tk::FAN_KW.to_string(),
             unit: "kW".to_string(),
             description: "Gas furnace fan-only electric power".to_string(),
         },
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total electric power draw (fan-only for gas furnace)".to_string(),
         },
         TelemetryField {
-            name: "fuel_input_w".to_string(),
+            name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Fuel input power derived from delivered capacity and fuel efficiency"
                 .to_string(),
         },
         TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered sensible heat to conditioned zone after duct DSE".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 1=Heating".to_string(),
         },
         TelemetryField {
-            name: "supply_air_temp_c".to_string(),
+            name: tk::SUPPLY_AIR_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Configured furnace supply-air temperature".to_string(),
         },
@@ -558,7 +565,7 @@ mod tests {
     use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
     use hares_types::{
         EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState,
+        ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{ElectricFurnace, FURNACE_FAN_CFM_PER_TON, GasFurnace, register_with_registry};
@@ -601,8 +608,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::minutes(1),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -824,8 +831,8 @@ mod tests {
         restored.init(&cfg, &env).unwrap();
         restored.load_state(&state).unwrap();
         assert_eq!(
-            restored.telemetry().get("electric_kw"),
-            eq.telemetry().get("electric_kw")
+            restored.telemetry().get(tk::ELECTRIC_KW),
+            eq.telemetry().get(tk::ELECTRIC_KW)
         );
     }
 
@@ -914,7 +921,7 @@ mod tests {
 
         let fuel_input_w = eq
             .telemetry()
-            .get("fuel_input_w")
+            .get(tk::FUEL_INPUT_W)
             .expect("furnace must write fuel_input_w telemetry key");
         assert!(
             fuel_input_w > 0.0,

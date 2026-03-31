@@ -961,6 +961,7 @@ mod tests {
             time_res: Duration::hours(1),
             output_verbosity: 0,
             output_path: None,
+            write_output: true,
             output_format: crate::OutputFormat::Csv,
             output_chunk_size: 16,
             master_seed: 0,

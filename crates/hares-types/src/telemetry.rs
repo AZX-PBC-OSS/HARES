@@ -32,11 +32,9 @@ impl Telemetry {
         if let Some(v) = self.0.get_mut(key) {
             *v = value;
         } else {
-            debug_assert!(
-                false,
+            panic!(
                 "Telemetry::set called with unknown key '{key}'; pre-populate via insert() at init"
             );
-            self.0.insert(key.to_owned(), value);
         }
     }
 

@@ -32,9 +32,7 @@ impl TariffEvaluator {
         interval_seconds: u32,
     ) -> Result<Self, HaresError> {
         if interval_seconds == 0 {
-            return Err(HaresError::Tariff(
-                "interval_seconds must be > 0".into(),
-            ));
+            return Err(HaresError::Tariff("interval_seconds must be > 0".into()));
         }
 
         let total_seconds = (simulation_end - simulation_start).num_seconds();
@@ -133,9 +131,7 @@ impl TariffEvaluator {
                             .export_rate
                             .tou_credits
                             .iter()
-                            .find(|er| {
-                                er.period_name == name && er.season.contains_month(month)
-                            })
+                            .find(|er| er.period_name == name && er.season.contains_month(month))
                             .map(|er| er.rate_per_kwh)
                             .unwrap_or(0.0)
                     } else {
@@ -192,8 +188,7 @@ impl TariffEvaluator {
         // divisible — that silently truncates the averaging window.
         let window_seconds = demand_window_minutes as u64 * 60;
         #[allow(clippy::manual_is_multiple_of)]
-        if window_seconds > interval_seconds as u64
-            && window_seconds % interval_seconds as u64 != 0
+        if window_seconds > interval_seconds as u64 && window_seconds % interval_seconds as u64 != 0
         {
             return Err(HaresError::Tariff(format!(
                 "demand_window_minutes ({demand_window_minutes}) must be evenly \
@@ -234,8 +229,12 @@ impl TariffEvaluator {
 
     /// Clamped index: returns the last valid index when step_index exceeds bounds.
     fn clamped_index(&self) -> usize {
-        debug_assert!(!self.price_array.is_empty(), "price_array must be non-empty");
-        self.step_index.min(self.price_array.len().saturating_sub(1))
+        debug_assert!(
+            !self.price_array.is_empty(),
+            "price_array must be non-empty"
+        );
+        self.step_index
+            .min(self.price_array.len().saturating_sub(1))
     }
 
     pub fn current_price(&self) -> f64 {
@@ -324,8 +323,8 @@ impl TariffEvaluator {
 
             let demand_charge = self.compute_demand_charge(month);
 
-            let days_in_period = (self.billing_state.period_end - self.billing_state.period_start)
-                .num_days() as f64;
+            let days_in_period =
+                (self.billing_state.period_end - self.billing_state.period_start).num_days() as f64;
             let fixed_charge = self.tariff.fixed_charges.monthly_usd
                 + self.tariff.fixed_charges.daily_usd * days_in_period;
 
@@ -426,7 +425,9 @@ impl TariffEvaluator {
         // scheduled period length. Clamp to period end in case sim_end
         // exceeds the billing period boundary.
         let actual_end = sim_end.min(self.billing_state.period_end());
-        let elapsed_days = (actual_end - self.billing_state.period_start()).num_days().max(0) as f64;
+        let elapsed_days = (actual_end - self.billing_state.period_start())
+            .num_days()
+            .max(0) as f64;
         let fixed_charge = self.tariff.fixed_charges.monthly_usd
             + self.tariff.fixed_charges.daily_usd * elapsed_days;
 
@@ -537,13 +538,23 @@ mod tests {
 
     #[test]
     fn evaluator_hourly_array_length() {
-        let ev = make_evaluator(test_tariff(), make_start(2025, 1, 1), make_start(2026, 1, 1), 3600);
+        let ev = make_evaluator(
+            test_tariff(),
+            make_start(2025, 1, 1),
+            make_start(2026, 1, 1),
+            3600,
+        );
         assert_eq!(ev.total_steps(), 8760);
     }
 
     #[test]
     fn evaluator_15min_array_length() {
-        let ev = make_evaluator(test_tariff(), make_start(2025, 1, 1), make_start(2026, 1, 1), 900);
+        let ev = make_evaluator(
+            test_tariff(),
+            make_start(2025, 1, 1),
+            make_start(2026, 1, 1),
+            900,
+        );
         assert_eq!(ev.total_steps(), 35040);
     }
 
@@ -615,7 +626,12 @@ mod tests {
 
     #[test]
     fn evaluator_price_slice() {
-        let ev = make_evaluator(test_tariff(), make_start(2025, 1, 1), make_start(2025, 1, 2), 3600);
+        let ev = make_evaluator(
+            test_tariff(),
+            make_start(2025, 1, 1),
+            make_start(2025, 1, 2),
+            3600,
+        );
         let slice = ev.price_slice(0, 3).unwrap();
         assert_eq!(slice.len(), 3);
 
@@ -640,7 +656,12 @@ mod tests {
             }],
             ..Default::default()
         };
-        let ev = make_evaluator(flat_tariff, make_start(2025, 1, 1), make_start(2026, 1, 1), 3600);
+        let ev = make_evaluator(
+            flat_tariff,
+            make_start(2025, 1, 1),
+            make_start(2026, 1, 1),
+            3600,
+        );
         assert_eq!(ev.total_steps(), 8760);
         for price in &ev.price_array {
             assert_eq!(*price, 0.12);
@@ -824,7 +845,11 @@ mod tests {
 
         let summaries = run_all_steps(&mut ev, |_| 2.0);
 
-        assert_eq!(summaries.len(), 2, "expected exactly 2 billing period closes");
+        assert_eq!(
+            summaries.len(),
+            2,
+            "expected exactly 2 billing period closes"
+        );
 
         let s0 = &summaries[0];
         assert!(s0.energy_charge_usd > 0.0);
@@ -856,7 +881,10 @@ mod tests {
 
         let summaries = run_all_steps(&mut ev, |i| if i < half { 5.0 } else { 1.0 });
 
-        let summary = summaries.into_iter().next().expect("billing period should close");
+        let summary = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
         assert!(
             summary.demand_charge_usd > 0.0,
             "demand_charge_usd should be > 0"
@@ -946,7 +974,10 @@ mod tests {
             }
         });
 
-        let s = summaries.into_iter().next().expect("billing period should close");
+        let s = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
 
         // On-peak demand charge: ~10 kW * $10/kW = ~$100
         // Off-peak demand charge: ~2 kW * $5/kW = ~$10
@@ -979,7 +1010,10 @@ mod tests {
 
         let summaries = run_all_steps(&mut ev, |_| -3.0);
 
-        let summary = summaries.into_iter().next().expect("billing period should close");
+        let summary = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
         assert!(
             summary.export_credit_usd > 0.0,
             "export_credit_usd should be > 0"
@@ -1016,9 +1050,12 @@ mod tests {
 
         let summaries = run_all_steps(&mut ev, |i| if i % 2 == 0 { 3.0 } else { -1.0 });
 
-        let s = summaries.into_iter().next().expect("billing period should close");
-        let expected = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd
-            - s.export_credit_usd;
+        let s = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
+        let expected =
+            s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd - s.export_credit_usd;
         assert!(
             (s.net_bill_usd - expected).abs() < 1e-10,
             "net_bill_usd={} != energy({}) + demand({}) + fixed({}) - export({})",
@@ -1080,9 +1117,12 @@ mod tests {
         // With no demand/fixed/export, raw bill < $50 minimum
         let summaries = run_all_steps(&mut ev, |_| 0.1);
 
-        let s = summaries.into_iter().next().expect("billing period should close");
-        let raw = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd
-            - s.export_credit_usd;
+        let s = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
+        let raw =
+            s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd - s.export_credit_usd;
         assert!(raw < 50.0, "raw bill should be below minimum, got {raw}");
         assert!(
             (s.net_bill_usd - 50.0).abs() < 1e-10,
@@ -1104,9 +1144,12 @@ mod tests {
         // 5 kW for the whole month → ~3720 kWh → ~$446 energy, well above $10 min
         let summaries = run_all_steps(&mut ev, |_| 5.0);
 
-        let s = summaries.into_iter().next().expect("billing period should close");
-        let raw = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd
-            - s.export_credit_usd;
+        let s = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
+        let raw =
+            s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd - s.export_credit_usd;
         assert!(
             (s.net_bill_usd - raw).abs() < 1e-10,
             "net_bill_usd should equal raw bill when above minimum, got {} vs {raw}",
@@ -1201,7 +1244,10 @@ mod tests {
             }
         });
 
-        let s = summaries.into_iter().next().expect("billing period should close");
+        let s = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
         assert!(
             s.demand_charge_usd > 0.0,
             "demand_charge_usd should be > 0 when load is present during demand TOU window, got {}",
@@ -1225,7 +1271,10 @@ mod tests {
         assert!(first.is_some(), "first finalize() should return Some");
 
         let second = ev.finalize(end);
-        assert!(second.is_none(), "second finalize() should return None after billing state was reset");
+        assert!(
+            second.is_none(),
+            "second finalize() should return None after billing state was reset"
+        );
     }
 
     #[test]
@@ -1308,7 +1357,10 @@ mod tests {
 
         // Any subsequent call must return None — the evaluator is finished.
         let result = ev.step(1.0, interval as f64, step_end + Duration::hours(1));
-        assert!(result.is_none(), "step() after simulation end should return None");
+        assert!(
+            result.is_none(),
+            "step() after simulation end should return None"
+        );
     }
 
     #[test]
@@ -1431,7 +1483,10 @@ mod tests {
         let start = make_start(2025, 1, 1);
         let end = start + Duration::seconds(30);
         let result = TariffEvaluator::new(flat_tariff(0.12), start, end, 3600);
-        assert!(result.is_err(), "should reject simulation shorter than one interval");
+        assert!(
+            result.is_err(),
+            "should reject simulation shorter than one interval"
+        );
     }
 
     #[test]
@@ -1450,7 +1505,9 @@ mod tests {
         let step_end = start + Duration::seconds(interval as i64);
         ev.step(0.0, interval as f64, step_end);
 
-        let summary = ev.finalize(end).expect("should return Some even with zero metered load");
+        let summary = ev
+            .finalize(end)
+            .expect("should return Some even with zero metered load");
         assert!(
             (summary.fixed_charge_usd - 20.0).abs() < 1e-10,
             "fixed_charge_usd should be $20 monthly, got {}",

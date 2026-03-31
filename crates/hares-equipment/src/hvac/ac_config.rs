@@ -2,7 +2,7 @@
 //!
 //! Extracted from `air_conditioner.rs` — pure structural refactor, no logic changes.
 
-use hares_types::{HaresError, Telemetry, TelemetryField, parse_trimmed_f64};
+use hares_types::{HaresError, Telemetry, TelemetryField, parse_trimmed_f64, telemetry_keys as tk};
 
 use super::core_config::parse_biquadratic_list;
 use crate::EquipmentConfig;
@@ -18,80 +18,80 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
 
 pub(super) fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(12);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("sensible_cooling_w", 0.0);
-    telemetry.insert("latent_cooling_w", 0.0);
-    telemetry.insert("shr", 1.0);
-    telemetry.insert("operating_mode", 0.0);
-    telemetry.insert("cop", 0.0);
-    telemetry.insert("runtime_fraction", 0.0);
-    telemetry.insert("compressor_kw", 0.0);
-    telemetry.insert("fan_kw", 0.0);
-    telemetry.insert("supply_temp_c", 0.0);
-    telemetry.insert("apparatus_dew_point_c", 0.0);
-    telemetry.insert("bypass_factor", 0.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
+    telemetry.insert(tk::LATENT_COOLING_W, 0.0);
+    telemetry.insert(tk::SHR, 1.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::COP, 0.0);
+    telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
+    telemetry.insert(tk::COMPRESSOR_KW, 0.0);
+    telemetry.insert(tk::FAN_KW, 0.0);
+    telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
+    telemetry.insert(tk::APPARATUS_DEW_POINT_C, 0.0);
+    telemetry.insert(tk::BYPASS_FACTOR, 0.0);
     telemetry
 }
 
 pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "electric_kw".to_string(),
+            name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total cooling electric power: compressor + fan + crankcase".to_string(),
         },
         TelemetryField {
-            name: "sensible_cooling_w".to_string(),
+            name: tk::SENSIBLE_COOLING_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered sensible cooling magnitude".to_string(),
         },
         TelemetryField {
-            name: "latent_cooling_w".to_string(),
+            name: tk::LATENT_COOLING_W.to_string(),
             unit: "W".to_string(),
             description: "Delivered latent cooling magnitude".to_string(),
         },
         TelemetryField {
-            name: "shr".to_string(),
+            name: tk::SHR.to_string(),
             unit: "-".to_string(),
             description: "Sensible heat ratio".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 2=Cooling".to_string(),
         },
         TelemetryField {
-            name: "cop".to_string(),
+            name: tk::COP.to_string(),
             unit: "-".to_string(),
             description: "Coefficient of performance (AHRI: excludes fan)".to_string(),
         },
         TelemetryField {
-            name: "runtime_fraction".to_string(),
+            name: tk::RUNTIME_FRACTION.to_string(),
             unit: "-".to_string(),
             description: "Runtime fraction (PLR/PLF) [0..1]".to_string(),
         },
         TelemetryField {
-            name: "compressor_kw".to_string(),
+            name: tk::COMPRESSOR_KW.to_string(),
             unit: "kW".to_string(),
             description: "Compressor-only electric power".to_string(),
         },
         TelemetryField {
-            name: "fan_kw".to_string(),
+            name: tk::FAN_KW.to_string(),
             unit: "kW".to_string(),
             description: "Supply fan electric power".to_string(),
         },
         TelemetryField {
-            name: "supply_temp_c".to_string(),
+            name: tk::SUPPLY_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Supply air temperature leaving the coil".to_string(),
         },
         TelemetryField {
-            name: "apparatus_dew_point_c".to_string(),
+            name: tk::APPARATUS_DEW_POINT_C.to_string(),
             unit: "C".to_string(),
             description: "Apparatus dew point temperature at the coil".to_string(),
         },
         TelemetryField {
-            name: "bypass_factor".to_string(),
+            name: tk::BYPASS_FACTOR.to_string(),
             unit: "-".to_string(),
             description: "Coil bypass factor (fraction of air bypassing the coil)".to_string(),
         },

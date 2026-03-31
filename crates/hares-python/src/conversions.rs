@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
-use chrono::SecondsFormat;
+use chrono::{DateTime, FixedOffset, SecondsFormat};
 use hares_core::StepResult;
 use hares_fleet::{DwellingMetrics, FleetResults, SimStatus};
 use numpy::{IntoPyArray, PyArray1};
@@ -82,7 +82,9 @@ pub fn record_batches_to_polars_df(py: Python<'_>, batches: &[RecordBatch]) -> P
     }
 
     let io = py.import("io")?;
-    let buf = io.getattr("BytesIO")?.call1((pyo3::types::PyBytes::new(py, &ipc_buffer),))?;
+    let buf = io
+        .getattr("BytesIO")?
+        .call1((pyo3::types::PyBytes::new(py, &ipc_buffer),))?;
 
     let polars = py.import("polars")?;
     let read_ipc = polars.getattr("read_ipc")?;
@@ -140,6 +142,12 @@ pub fn record_batch_arc_to_polars_df(
     batch: &Arc<RecordBatch>,
 ) -> PyResult<Py<PyAny>> {
     record_batches_to_polars_df(py, std::slice::from_ref(batch.as_ref()))
+}
+
+pub fn chrono_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {
+    let datetime = py.import("datetime")?.getattr("datetime")?;
+    let obj = datetime.call_method1("fromisoformat", (dt.to_rfc3339(),))?;
+    Ok(obj.unbind())
 }
 
 fn sim_status_to_string(status: &SimStatus) -> String {

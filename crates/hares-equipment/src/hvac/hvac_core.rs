@@ -314,7 +314,6 @@ impl HvacEquipment {
         self.heating_setpoint_source = build_setpoint_source(config, "heating");
         self.cooling_setpoint_source = build_setpoint_source(config, "cooling");
 
-
         // Seed static setpoints from the source so the initial deadband check
         // is reasonable before the first update_mode call.
         if let Some(ScheduleSource::DailyProfile { weekday, .. }) = &self.heating_setpoint_source {
@@ -464,6 +463,22 @@ impl HvacEquipment {
             }
         }
         self.basement_heat_frac = extract_numeric(config, "basement_airflow_ratio").unwrap_or(0.0);
+
+        // Evaluate initial thermostat mode from zone temperature so the
+        // FSM doesn't start stuck in Deadband when the zone is already
+        // outside the comfort band (cold-start fix).
+        if let Ok(zone_temp) = lookup_zone_temp(env, self.zone_id) {
+            let sp = self.effective_setpoints();
+            let hysteresis = self.thermostat.hysteresis_c;
+            let offset = self.thermostat.deadband_offset.clamp(0.0, 1.0);
+            let heat_turn_on = sp.heating_c - hysteresis * (1.0 - offset);
+            let cool_turn_on = sp.cooling_c + hysteresis * (1.0 - offset);
+            if zone_temp < heat_turn_on {
+                self.mode = ThermostatMode::Heating;
+            } else if zone_temp > cool_turn_on {
+                self.mode = ThermostatMode::Cooling;
+            }
+        }
 
         Ok(())
     }
@@ -645,8 +660,19 @@ impl HvacEquipment {
     }
 
     pub fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
-        self.thermostat.use_ideal_capacity
-            || env.time_res >= ChronoDuration::seconds(IDEAL_CAPACITY_TIME_RES_THRESHOLD_S)
+        let coarse_auto =
+            env.time_res >= ChronoDuration::seconds(IDEAL_CAPACITY_TIME_RES_THRESHOLD_S);
+        // Coarse-timestep auto-ideal is only valid for equipment paths that
+        // implement ideal-capacity signal handling.
+        let supports_auto_ideal = matches!(
+            self.equipment_type,
+            HvacEquipmentType::AcCooler
+                | HvacEquipmentType::MiniSplitCool
+                | HvacEquipmentType::AshpHeatPumpOnly
+                | HvacEquipmentType::AshpHeatPumpAux
+                | HvacEquipmentType::MiniSplitHeat
+        );
+        self.thermostat.use_ideal_capacity || (coarse_auto && supports_auto_ideal)
     }
 
     /// Set the thermostat mode and record the transition timestamp.
@@ -805,8 +831,8 @@ mod tests {
                 .expect("valid")
                 + ChronoDuration::seconds(second),
             time_res: ChronoDuration::seconds(time_res_s),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 

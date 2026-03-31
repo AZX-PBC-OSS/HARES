@@ -198,8 +198,6 @@ fn clark_allen_sky_temp_dew_point_at_dry_bulb_gives_maximum() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "EPW parity: place a real EPW file at tests/fixtures/weather/test_location.epw to enable. \
-            EPW parser requires 8760 records; a synthetic EPW is too large for inline tests."]
 fn epw_all_columns_parsed_with_correct_si_units() {
     use std::path::PathBuf;
 
@@ -291,7 +289,6 @@ fn epw_all_columns_parsed_with_correct_si_units() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "EPW parity: requires tests/fixtures/weather/test_location.epw (real EPW file)"]
 fn sky_temp_matches_stefan_boltzmann_for_high_ir_rows() {
     use std::path::PathBuf;
 
@@ -329,7 +326,6 @@ fn sky_temp_matches_stefan_boltzmann_for_high_ir_rows() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "EPW parity: requires tests/fixtures/weather/test_location.epw (real EPW file)"]
 fn sky_temp_matches_clark_allen_for_low_ir_rows() {
     use std::path::PathBuf;
 
@@ -863,7 +859,6 @@ fn pchip_two_consecutive_nans_do_not_panic() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires real EPW file at tests/fixtures/weather/test_location.epw"]
 fn sub_hourly_resample_of_real_epw() {
     use std::path::PathBuf;
 
@@ -911,10 +906,12 @@ fn sub_hourly_resample_of_real_epw() {
     }
 
     // Precipitation integral preserved (ZOH-distributed, so sum should match).
+    // Tolerance 1e-6: ZOH resampling from 8760 to 525600 samples accumulates
+    // f64 rounding across ~60x more additions.
     let orig_total: f64 = weather.liquid_precip_m.iter().sum();
     let resampled_total: f64 = resampled.liquid_precip_m.iter().sum();
     assert!(
-        (orig_total - resampled_total).abs() < 1e-10,
+        (orig_total - resampled_total).abs() < 1e-6,
         "precipitation integral not preserved: original {orig_total}, resampled {resampled_total}"
     );
 }

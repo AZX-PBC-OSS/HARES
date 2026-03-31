@@ -63,8 +63,8 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, zone_wb_c: f64) -> Environmen
             .single()
             .expect("valid"),
         time_res: chrono::Duration::seconds(60),
-    price_signal: Default::default(),
-    electrical: Default::default(),
+        price_signal: Default::default(),
+        electrical: Default::default(),
     }
 }
 

@@ -9,7 +9,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, DutyCycleComponent, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -202,7 +202,7 @@ impl HeatPumpWH {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
-                telemetry_fields: telemetry_fields(),
+                telemetry_fields: telemetry_fields(n_nodes),
             },
             ports: vec![
                 PortDeclaration::electrical(),
@@ -403,7 +403,10 @@ impl Equipment for HeatPumpWH {
         .unwrap_or(DEFAULT_SETPOINT_C);
         self.setpoint_ramp_rate_c_per_s = first_f64(
             config,
-            &["max_setpoint_ramp_rate_c_per_min", "setpoint_ramp_rate_c_per_min"],
+            &[
+                "max_setpoint_ramp_rate_c_per_min",
+                "setpoint_ramp_rate_c_per_min",
+            ],
         )
         .filter(|v| v.is_finite() && *v > 0.0)
         .map(|v| v / 60.0);
@@ -817,23 +820,25 @@ impl Equipment for HeatPumpWH {
         }
 
         self.telemetry.set(
-            "tank_avg_temp_c",
+            tk::TANK_AVG_TEMP_C,
             weighted_average_tank_temp(self.tank.node_temps(), self.tank.node_volumes_m3()),
         );
-        self.telemetry.set("cop", cop);
-        self.telemetry.set("cap_mult", cap_mult);
-        self.telemetry.set("compressor_power_w", compressor_power_w);
-        self.telemetry.set("backup_element_power_w", backup_power_w);
+        self.telemetry.set(tk::COP, cop);
+        self.telemetry.set(tk::CAP_MULT, cap_mult);
         self.telemetry
-            .set("electric_kw", electric_power_w / 1_000.0);
+            .set(tk::COMPRESSOR_POWER_W, compressor_power_w);
         self.telemetry
-            .set("zone_heat_extraction_w", zone_heat_extraction_w);
-        self.telemetry.set("draw_flow_rate_kg_s", total_draw_kg_s);
+            .set(tk::BACKUP_ELEMENT_POWER_W, backup_power_w);
         self.telemetry
-            .set("wall_sensible_gain_w", sensible_to_wall_w);
-        self.telemetry.set("unmet_load_w", draw.unmet_load_w);
+            .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
+        self.telemetry
+            .set(tk::ZONE_HEAT_EXTRACTION_W, zone_heat_extraction_w);
+        self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
+        self.telemetry
+            .set(tk::WALL_SENSIBLE_GAIN_W, sensible_to_wall_w);
+        self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(
-            "operating_mode",
+            tk::OPERATING_MODE,
             match mode {
                 OperatingMode::HeatPumpWH => 1.0,
                 OperatingMode::BackupElement => 2.0,
@@ -867,13 +872,19 @@ impl Equipment for HeatPumpWH {
             mode_override: self.mode_override,
             element_hp_control: self.element_hp_control,
             tank_state: self.tank.save_state(),
-            tank_avg_temp_c: self.telemetry.get("tank_avg_temp_c").unwrap_or(0.0),
-            cop: self.telemetry.get("cop").unwrap_or(0.0),
-            cap_mult: self.telemetry.get("cap_mult").unwrap_or(1.0),
-            compressor_power_w: self.telemetry.get("compressor_power_w").unwrap_or(0.0),
-            backup_element_power_w: self.telemetry.get("backup_element_power_w").unwrap_or(0.0),
-            zone_heat_extraction_w: self.telemetry.get("zone_heat_extraction_w").unwrap_or(0.0),
-            draw_flow_rate_kg_s: self.telemetry.get("draw_flow_rate_kg_s").unwrap_or(0.0),
+            tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
+            cop: self.telemetry.get(tk::COP).unwrap_or(0.0),
+            cap_mult: self.telemetry.get(tk::CAP_MULT).unwrap_or(1.0),
+            compressor_power_w: self.telemetry.get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0),
+            backup_element_power_w: self
+                .telemetry
+                .get(tk::BACKUP_ELEMENT_POWER_W)
+                .unwrap_or(0.0),
+            zone_heat_extraction_w: self
+                .telemetry
+                .get(tk::ZONE_HEAT_EXTRACTION_W)
+                .unwrap_or(0.0),
+            draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
             compressor_on_since_s: self.compressor_on_since_s,
             compressor_off_since_s: self.compressor_off_since_s,
             min_on_time_s: self.min_on_time_s,
@@ -908,19 +919,19 @@ impl Equipment for HeatPumpWH {
         self.tank.load_state(&decoded.tank_state)?;
 
         self.telemetry
-            .insert("tank_avg_temp_c", decoded.tank_avg_temp_c);
-        self.telemetry.insert("cop", decoded.cop);
-        self.telemetry.insert("cap_mult", decoded.cap_mult);
+            .insert(tk::TANK_AVG_TEMP_C, decoded.tank_avg_temp_c);
+        self.telemetry.insert(tk::COP, decoded.cop);
+        self.telemetry.insert(tk::CAP_MULT, decoded.cap_mult);
         self.telemetry
-            .insert("compressor_power_w", decoded.compressor_power_w);
+            .insert(tk::COMPRESSOR_POWER_W, decoded.compressor_power_w);
         self.telemetry
-            .insert("backup_element_power_w", decoded.backup_element_power_w);
+            .insert(tk::BACKUP_ELEMENT_POWER_W, decoded.backup_element_power_w);
         self.telemetry
-            .insert("zone_heat_extraction_w", decoded.zone_heat_extraction_w);
+            .insert(tk::ZONE_HEAT_EXTRACTION_W, decoded.zone_heat_extraction_w);
         self.telemetry
-            .insert("draw_flow_rate_kg_s", decoded.draw_flow_rate_kg_s);
+            .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
-            "operating_mode",
+            tk::OPERATING_MODE,
             match (decoded.compressor_on, decoded.backup_on) {
                 (true, false) => 1.0,
                 (false, true) => 2.0,
@@ -1042,78 +1053,91 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(10);
-    telemetry.insert("tank_avg_temp_c", 0.0);
-    telemetry.insert("cop", 0.0);
-    telemetry.insert("cap_mult", 1.0);
-    telemetry.insert("electric_kw", 0.0);
-    telemetry.insert("compressor_power_w", 0.0);
-    telemetry.insert("backup_element_power_w", 0.0);
-    telemetry.insert("zone_heat_extraction_w", 0.0);
-    telemetry.insert("draw_flow_rate_kg_s", 0.0);
-    telemetry.insert("operating_mode", 0.0);
-    telemetry.insert("wall_sensible_gain_w", 0.0);
-    telemetry.insert("unmet_load_w", 0.0);
+    telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
+    telemetry.insert(tk::COP, 0.0);
+    telemetry.insert(tk::CAP_MULT, 1.0);
+    telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::COMPRESSOR_POWER_W, 0.0);
+    telemetry.insert(tk::BACKUP_ELEMENT_POWER_W, 0.0);
+    telemetry.insert(tk::ZONE_HEAT_EXTRACTION_W, 0.0);
+    telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::WALL_SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::UNMET_LOAD_W, 0.0);
     telemetry
 }
 
-fn telemetry_fields() -> Vec<TelemetryField> {
-    vec![
+fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
+    let mut fields = vec![
         TelemetryField {
-            name: "tank_avg_temp_c".to_string(),
+            name: tk::TANK_AVG_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Volume-weighted average tank temperature".to_string(),
         },
         TelemetryField {
-            name: "cop".to_string(),
+            name: tk::COP.to_string(),
             unit: "-".to_string(),
             description: "Instantaneous heat-pump COP".to_string(),
         },
         TelemetryField {
-            name: "cap_mult".to_string(),
+            name: tk::CAP_MULT.to_string(),
             unit: "-".to_string(),
             description: "Capacity curve multiplier (function of wet-bulb and tank temperature)"
                 .to_string(),
         },
         TelemetryField {
-            name: "compressor_power_w".to_string(),
+            name: tk::COMPRESSOR_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Compressor electric power".to_string(),
         },
         TelemetryField {
-            name: "backup_element_power_w".to_string(),
+            name: tk::BACKUP_ELEMENT_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Backup resistance element power".to_string(),
         },
         TelemetryField {
-            name: "zone_heat_extraction_w".to_string(),
+            name: tk::ZONE_HEAT_EXTRACTION_W.to_string(),
             unit: "W".to_string(),
             description: "Heat extracted from surrounding zone air".to_string(),
         },
         TelemetryField {
-            name: "draw_flow_rate_kg_s".to_string(),
+            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
             unit: "kg/s".to_string(),
             description: "Domestic hot water draw flow rate".to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "0=Off, 1=HP, 2=Backup, 3=HP+Backup".to_string(),
         },
         TelemetryField {
-            name: "wall_sensible_gain_w".to_string(),
+            name: tk::WALL_SENSIBLE_GAIN_W.to_string(),
             unit: "W".to_string(),
             description:
                 "Sensible heat directed to interior wall surfaces (wall_heat_fraction share)"
                     .to_string(),
         },
         TelemetryField {
-            name: "unmet_load_w".to_string(),
+            name: tk::UNMET_LOAD_W.to_string(),
             unit: "W".to_string(),
             description:
                 "Unmet fixture load: heat not delivered because outlet temp < fixture setpoint"
                     .to_string(),
         },
-    ]
+    ];
+    for i in 0..n_nodes {
+        fields.push(TelemetryField {
+            name: tk::tank_node_key(i),
+            unit: "C".to_string(),
+            description: format!("Tank node {i} temperature"),
+        });
+    }
+    fields.push(TelemetryField {
+        name: tk::SKIN_LOSS_W.to_string(),
+        unit: "W".to_string(),
+        description: "Tank jacket (skin) heat loss to zone".to_string(),
+    });
+    fields
 }
 
 fn build_heat_injections(weights: &[f64], q_w: f64, n_nodes: usize) -> Vec<(usize, f64)> {
@@ -1134,7 +1158,8 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+        ZoneState, telemetry_keys as tk,
     };
 
     use super::HeatPumpWH;
@@ -1176,8 +1201,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1245,8 +1270,8 @@ mod tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -1259,7 +1284,7 @@ mod tests {
         eq.step(&env(24.0), Duration::from_secs(60), &mut p)
             .unwrap();
 
-        assert!(eq.telemetry().get("compressor_power_w").unwrap_or(0.0) > 0.0);
+        assert!(eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0) > 0.0);
         assert!(p.thermal[0].sensible_gain_w < 0.0);
     }
 
@@ -1274,9 +1299,9 @@ mod tests {
         eq.step(&env(24.0), Duration::from_secs(60), &mut p)
             .unwrap();
 
-        let cop = eq.telemetry().get("cop").unwrap();
-        let comp = eq.telemetry().get("compressor_power_w").unwrap();
-        let extracted = eq.telemetry().get("zone_heat_extraction_w").unwrap();
+        let cop = eq.telemetry().get(tk::COP).unwrap();
+        let comp = eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap();
+        let extracted = eq.telemetry().get(tk::ZONE_HEAT_EXTRACTION_W).unwrap();
 
         // extracted = delivered_hp - comp = comp * cop - comp = comp * (cop - 1)
         let expected_extraction = comp * (cop - 1.0);
@@ -1304,7 +1329,7 @@ mod tests {
         eq_low
             .step(&env_low_wb, Duration::from_secs(60), &mut p_low)
             .unwrap();
-        let cop_low_wb = eq_low.telemetry().get("cop").unwrap();
+        let cop_low_wb = eq_low.telemetry().get(tk::COP).unwrap();
 
         let mut eq_high = HeatPumpWH::new(config());
         eq_high.init(&config(), &env_high_wb).unwrap();
@@ -1312,7 +1337,7 @@ mod tests {
         eq_high
             .step(&env_high_wb, Duration::from_secs(60), &mut p_high)
             .unwrap();
-        let cop_high_wb = eq_high.telemetry().get("cop").unwrap();
+        let cop_high_wb = eq_high.telemetry().get(tk::COP).unwrap();
 
         // Higher wet-bulb → more available enthalpy → higher COP.
         // The default COP curve has a positive first-order wet-bulb coefficient.
@@ -1521,8 +1546,8 @@ mod tests {
         eq.step(&env(24.0), Duration::from_secs(60), &mut p)
             .unwrap();
 
-        let comp = eq.telemetry().get("compressor_power_w").unwrap();
-        let backup = eq.telemetry().get("backup_element_power_w").unwrap();
+        let comp = eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap();
+        let backup = eq.telemetry().get(tk::BACKUP_ELEMENT_POWER_W).unwrap();
         assert!(comp > 0.0, "compressor must be running for this test");
         let total_electric_w = p.electrical.net_active_kw() * 1000.0;
         let expected_with_fan = comp + backup + 35.0;
@@ -1548,7 +1573,7 @@ mod tests {
         let mut p = ports();
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
 
-        let comp = eq.telemetry().get("compressor_power_w").unwrap();
+        let comp = eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap();
         assert!(comp > 0.0, "compressor must be running for SHR test");
         // HP extracts heat from zone (COP > 1), so hp_waste < 0.
         // Latent = hp_waste * (1-SHR) * keep_frac < 0 (dehumidification).
@@ -1588,7 +1613,7 @@ mod tests {
         // Direct approach: lower the setpoint below the current tank temperature.
         let tank_avg = eq
             .telemetry()
-            .get("tank_avg_temp_c")
+            .get(tk::TANK_AVG_TEMP_C)
             .expect("tank_avg_temp_c telemetry present");
         eq.setpoint_c = tank_avg - 10.0; // setpoint now well below tank → no call for heat
 
@@ -1759,11 +1784,11 @@ mod tests {
 
         let cap_low = eq_low
             .telemetry()
-            .get("cap_mult")
+            .get(tk::CAP_MULT)
             .expect("cap_mult must be in telemetry");
         let cap_unit = eq_unit
             .telemetry()
-            .get("cap_mult")
+            .get(tk::CAP_MULT)
             .expect("cap_mult must be in telemetry");
 
         assert!(
@@ -1777,11 +1802,11 @@ mod tests {
 
         let comp_low = eq_low
             .telemetry()
-            .get("compressor_power_w")
+            .get(tk::COMPRESSOR_POWER_W)
             .expect("compressor_power_w in telemetry");
         let comp_unit = eq_unit
             .telemetry()
-            .get("compressor_power_w")
+            .get(tk::COMPRESSOR_POWER_W)
             .expect("compressor_power_w in telemetry");
 
         assert!(
@@ -1867,24 +1892,24 @@ mod tests {
         eq_100
             .step(&e, Duration::from_secs(60), &mut p_100)
             .unwrap();
-        let backup_100 = eq_100.telemetry().get("backup_element_power_w").unwrap();
+        let backup_100 = eq_100.telemetry().get(tk::BACKUP_ELEMENT_POWER_W).unwrap();
         assert!(
             backup_100 > 0.0,
             "backup must fire for this test: got {backup_100}"
         );
-        let tank_100 = eq_100.telemetry().get("tank_avg_temp_c").unwrap();
+        let tank_100 = eq_100.telemetry().get(tk::TANK_AVG_TEMP_C).unwrap();
 
         let cfg_80 = make_cfg(0.8);
         let mut eq_80 = HeatPumpWH::new(cfg_80.clone());
         eq_80.init(&cfg_80, &e).unwrap();
         let mut p_80 = ports();
         eq_80.step(&e, Duration::from_secs(60), &mut p_80).unwrap();
-        let backup_80 = eq_80.telemetry().get("backup_element_power_w").unwrap();
+        let backup_80 = eq_80.telemetry().get(tk::BACKUP_ELEMENT_POWER_W).unwrap();
         assert!(
             backup_80 > 0.0,
             "backup must fire for this test: got {backup_80}"
         );
-        let tank_80 = eq_80.telemetry().get("tank_avg_temp_c").unwrap();
+        let tank_80 = eq_80.telemetry().get(tk::TANK_AVG_TEMP_C).unwrap();
 
         // Both draw the same backup electrical power, but the 80% efficient
         // unit delivers less heat to the tank.
@@ -1952,8 +1977,8 @@ mod mutual_exclusion_tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -2221,7 +2246,7 @@ mod dr_tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DRLevel, EnvironmentState, GridState, OperatingMode, PortSlots,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::HeatPumpWH;
@@ -2263,8 +2288,8 @@ mod dr_tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -2378,12 +2403,14 @@ mod dr_tests {
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
 
         assert_eq!(
-            eq.telemetry().get("compressor_power_w").unwrap_or(1.0),
+            eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap_or(1.0),
             0.0,
             "compressor must be off during GridEmergency"
         );
         assert_eq!(
-            eq.telemetry().get("backup_element_power_w").unwrap_or(1.0),
+            eq.telemetry()
+                .get(tk::BACKUP_ELEMENT_POWER_W)
+                .unwrap_or(1.0),
             0.0,
             "backup element must be off during GridEmergency"
         );
@@ -2397,8 +2424,12 @@ mod dr_tests {
             "backup_on must be false during GridEmergency"
         );
         // Compressor and backup element must contribute zero power.
-        let comp_kw = eq.telemetry().get("compressor_power_w").unwrap_or(1.0) / 1_000.0;
-        let backup_kw = eq.telemetry().get("backup_element_power_w").unwrap_or(1.0) / 1_000.0;
+        let comp_kw = eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap_or(1.0) / 1_000.0;
+        let backup_kw = eq
+            .telemetry()
+            .get(tk::BACKUP_ELEMENT_POWER_W)
+            .unwrap_or(1.0)
+            / 1_000.0;
         assert!(
             comp_kw < 1e-9,
             "compressor power must be zero during GridEmergency, got {comp_kw} kW"
@@ -2447,7 +2478,10 @@ mod dr_tests {
         eq_base
             .step(&e, Duration::from_secs(60), &mut p_base)
             .unwrap();
-        let comp_w_base = eq_base.telemetry().get("compressor_power_w").unwrap_or(0.0);
+        let comp_w_base = eq_base
+            .telemetry()
+            .get(tk::COMPRESSOR_POWER_W)
+            .unwrap_or(0.0);
         assert!(comp_w_base > 0.0, "baseline compressor must be running");
 
         // DR Critical: load_fraction=0.5 → compressor power halved.
@@ -2467,10 +2501,10 @@ mod dr_tests {
         let mut p_dr = ports();
         eq_dr.step(&e, Duration::from_secs(60), &mut p_dr).unwrap();
 
-        let comp_w_dr = eq_dr.telemetry().get("compressor_power_w").unwrap_or(0.0);
+        let comp_w_dr = eq_dr.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0);
         let backup_w_dr = eq_dr
             .telemetry()
-            .get("backup_element_power_w")
+            .get(tk::BACKUP_ELEMENT_POWER_W)
             .unwrap_or(0.0);
 
         // Compressor power should be ~50% of baseline.
@@ -2562,7 +2596,7 @@ mod new_feature_tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DutyCycleComponent, EnvironmentState, GridState, OperatingMode, PortSlots,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::HeatPumpWH;
@@ -2604,8 +2638,8 @@ mod new_feature_tests {
                 .single()
                 .expect("valid"),
             time_res: ChronoDuration::seconds(60),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 
@@ -2737,7 +2771,10 @@ mod new_feature_tests {
             "zone port must receive full sensible gain for energy balance: ratio={ratio:.4}"
         );
         // Telemetry tracks the wall-fraction split for future wall-surface modeling.
-        let wall_w = eq50.telemetry().get("wall_sensible_gain_w").unwrap_or(0.0);
+        let wall_w = eq50
+            .telemetry()
+            .get(tk::WALL_SENSIBLE_GAIN_W)
+            .unwrap_or(0.0);
         assert!(
             (wall_w.abs() - sens0.abs() * 0.5).abs() < 1.0,
             "wall_sensible_gain_w telemetry should be half of total: {wall_w:.2} vs {:.2}",
@@ -2812,7 +2849,7 @@ mod new_feature_tests {
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
         assert!(eq.compressor_on, "compressor should be running initially");
 
-        eq.setpoint_c = eq.telemetry().get("tank_avg_temp_c").unwrap_or(40.0) - 20.0;
+        eq.setpoint_c = eq.telemetry().get(tk::TANK_AVG_TEMP_C).unwrap_or(40.0) - 20.0;
         let mut p2 = ports();
         eq.step(&e, Duration::from_secs(60), &mut p2).unwrap();
         assert!(!eq.compressor_on, "compressor should now be off");

@@ -2,21 +2,25 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
 use hares_fleet::aggregation::{AggregationResolution, aggregate};
-use hares_fleet::{Fleet, FleetResults, SimError};
+use hares_fleet::{DwellingBuildError, Fleet, FleetResults, SimError, SteppableFleet};
 use hares_io::ResStockVersion as IoResStockVersion;
 use pyo3::Python;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyType};
 use tracing::warn;
 
 use crate::conversions::{
-    dwelling_metrics_to_polars_df, fleet_results_to_py, record_batches_to_polars_df,
+    chrono_to_py_datetime, dwelling_metrics_to_polars_df, fleet_results_to_py,
+    record_batches_to_polars_df,
 };
 use crate::py_config::PyDwellingConfig;
+use crate::py_control::PyControlSignal;
 use crate::py_enums::{PyAggregationResolution, PyResStockVersion};
+use crate::py_telemetry::PyTelemetry;
 
 fn parse_resstock_version(s: &str) -> PyResult<IoResStockVersion> {
     let normalized: String = s
@@ -199,9 +203,9 @@ impl PyFleet {
                         SimError::Failed { bldg_id, .. } => *bldg_id,
                         SimError::Engine { bldg_id, .. } => *bldg_id,
                         SimError::Panic { bldg_id, .. } => *bldg_id,
-                        SimError::ThreadPoolBuild(_) => 0,
+                        SimError::ThreadPoolBuild(_) => -1,
                     };
-                    failures.push((bldg_id, format_sim_error(&err)));
+                    failures.push((bldg_id, err.to_string()));
                 }
             }
         }
@@ -332,12 +336,219 @@ fn normalize_thread_count(n_threads: Option<isize>) -> PyResult<usize> {
     }
 }
 
-fn format_sim_error(err: &SimError) -> String {
-    err.to_string()
-}
-
 fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {
     PyValueError::new_err(err.to_string())
+}
+
+fn lock_steppable_fleet(fleet: &Mutex<SteppableFleet>) -> PyResult<MutexGuard<'_, SteppableFleet>> {
+    fleet.lock().map_err(|e| {
+        PyRuntimeError::new_err(format!(
+            "steppable fleet state is corrupted (internal panic: {}); create a new SteppableFleet instance",
+            e
+        ))
+    })
+}
+
+#[pyclass(name = "SteppableFleet")]
+pub struct PySteppableFleet {
+    fleet: Mutex<SteppableFleet>,
+    build_errors: Vec<DwellingBuildError>,
+}
+
+#[pymethods]
+impl PySteppableFleet {
+    #[classmethod]
+    #[pyo3(signature = (configs, n_threads=0))]
+    pub fn from_configs(
+        _cls: &Bound<'_, PyType>,
+        configs: Vec<PyDwellingConfig>,
+        n_threads: isize,
+    ) -> PyResult<Self> {
+        let thread_count = normalize_thread_count(Some(n_threads))?;
+        let dwelling_configs: Vec<_> = configs
+            .iter()
+            .map(|c| c.to_dwelling_config())
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let (fleet, build_errors) =
+            SteppableFleet::from_configs(dwelling_configs, thread_count).map_err(to_py_err)?;
+        if !build_errors.is_empty() {
+            warn!(
+                "SteppableFleet initialized with {} build failure(s)",
+                build_errors.len()
+            );
+            for err in &build_errors {
+                warn!(
+                    bldg_id = err.bldg_id,
+                    error = err.message,
+                    "dwelling failed during SteppableFleet init"
+                );
+            }
+        }
+        Ok(Self {
+            fleet: Mutex::new(fleet),
+            build_errors,
+        })
+    }
+
+    pub fn step(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let (step_results, bldg_ids, reactive_power_kvar) = py
+            .detach(|| {
+                let mut fleet = self.fleet.lock().map_err(|e| {
+                    format!(
+                        "steppable fleet state is corrupted (internal panic: {e}); \
+                         create a new SteppableFleet instance"
+                    )
+                })?;
+                let step_results = fleet.step();
+                let bldg_ids = (0..fleet.len())
+                    .map(|idx| fleet.bldg_id(idx).unwrap_or(-1))
+                    .collect::<Vec<_>>();
+                let reactive_power_kvar = (0..fleet.len())
+                    .map(|idx| fleet.telemetry(idx).map(|t| t.reactive_power_kvar))
+                    .collect::<Vec<_>>();
+                Ok::<_, String>((step_results, bldg_ids, reactive_power_kvar))
+            })
+            .map_err(PyRuntimeError::new_err)?;
+
+        let out = PyList::empty(py);
+        for (idx, entry) in step_results.into_iter().enumerate() {
+            let item = PyDict::new(py);
+            match entry {
+                Ok(step) => {
+                    let result = PyDict::new(py);
+                    result.set_item("timestamp", chrono_to_py_datetime(py, step.timestamp)?)?;
+                    result.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
+                    result.set_item("hvac_heating_w", step.hvac_heating_w)?;
+                    result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
+                    if let Some(value) = reactive_power_kvar.get(idx).and_then(|v| *v) {
+                        result.set_item("reactive_power_kvar", value)?;
+                    }
+                    for (zone_id, temp_c) in &step.zone_temperatures_c {
+                        let key = if zone_id.0 == 0 {
+                            "Temperature - Indoor (C)".to_string()
+                        } else {
+                            format!("Temperature - Zone_{} (C)", zone_id.0)
+                        };
+                        result.set_item(key, *temp_c)?;
+                    }
+                    item.set_item("ok", true)?;
+                    item.set_item("bldg_id", bldg_ids[idx])?;
+                    item.set_item("result", result)?;
+                }
+                Err(err) => {
+                    item.set_item("ok", false)?;
+                    item.set_item("error", err.to_string())?;
+                    let bldg_id = match err {
+                        SimError::Failed { bldg_id, .. } => bldg_id,
+                        SimError::Engine { bldg_id, .. } => bldg_id,
+                        SimError::Panic { bldg_id, .. } => bldg_id,
+                        SimError::ThreadPoolBuild(_) => -1,
+                    };
+                    item.set_item("bldg_id", bldg_id)?;
+                }
+            }
+            out.append(item)?;
+        }
+
+        Ok(out.unbind())
+    }
+
+    #[getter]
+    pub fn build_errors(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let list = PyList::empty(py);
+        for err in &self.build_errors {
+            let item = PyDict::new(py);
+            item.set_item("bldg_id", err.bldg_id)?;
+            item.set_item("error", &err.message)?;
+            list.append(item)?;
+        }
+        Ok(list.unbind())
+    }
+
+    pub fn set_grid_voltage(&self, dwelling_index: usize, voltage_pu: f64) -> PyResult<()> {
+        let mut fleet = lock_steppable_fleet(&self.fleet)?;
+        if dwelling_index >= fleet.len() {
+            return Err(PyIndexError::new_err(format!(
+                "dwelling_index {dwelling_index} out of range (len={})",
+                fleet.len()
+            )));
+        }
+        fleet.set_grid_voltage(dwelling_index, voltage_pu);
+        Ok(())
+    }
+
+    pub fn set_grid_voltage_all(&self, voltage_pu: f64) -> PyResult<()> {
+        let mut fleet = lock_steppable_fleet(&self.fleet)?;
+        fleet.set_grid_voltage_all(voltage_pu);
+        Ok(())
+    }
+
+    pub fn apply_control(
+        &self,
+        dwelling_index: usize,
+        name: String,
+        signal: &PyControlSignal,
+    ) -> PyResult<()> {
+        let mut fleet = lock_steppable_fleet(&self.fleet)?;
+        if dwelling_index >= fleet.len() {
+            return Err(PyIndexError::new_err(format!(
+                "dwelling_index {dwelling_index} out of range (len={})",
+                fleet.len()
+            )));
+        }
+        fleet.apply_control(dwelling_index, &name, signal.signal.clone());
+        Ok(())
+    }
+
+    pub fn telemetry(&self, dwelling_index: usize) -> PyResult<PyTelemetry> {
+        let fleet = lock_steppable_fleet(&self.fleet)?;
+        fleet
+            .telemetry(dwelling_index)
+            .map(PyTelemetry::new)
+            .ok_or_else(|| {
+                PyIndexError::new_err(format!(
+                    "dwelling_index {dwelling_index} out of range (len={})",
+                    fleet.len()
+                ))
+            })
+    }
+
+    pub fn is_finished(&self) -> PyResult<bool> {
+        let fleet = lock_steppable_fleet(&self.fleet)?;
+        Ok(fleet.is_finished())
+    }
+
+    pub fn time_res_s(&self) -> PyResult<f64> {
+        let fleet = lock_steppable_fleet(&self.fleet)?;
+        Ok(fleet.time_res_s())
+    }
+
+    pub fn total_steps(&self) -> PyResult<u64> {
+        let fleet = lock_steppable_fleet(&self.fleet)?;
+        Ok(fleet.total_steps())
+    }
+
+    pub fn current_step(&self) -> PyResult<u64> {
+        let fleet = lock_steppable_fleet(&self.fleet)?;
+        Ok(fleet.current_step())
+    }
+
+    fn __len__(&self) -> PyResult<usize> {
+        let fleet = lock_steppable_fleet(&self.fleet)?;
+        Ok(fleet.len())
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        let fleet = lock_steppable_fleet(&self.fleet)?;
+        Ok(format!(
+            "SteppableFleet(n_dwellings={}, current_step={}, total_steps={}, build_errors={})",
+            fleet.len(),
+            fleet.current_step(),
+            fleet.total_steps(),
+            self.build_errors.len(),
+        ))
+    }
 }
 
 #[cfg(test)]

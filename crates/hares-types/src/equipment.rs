@@ -437,9 +437,9 @@ impl ChargingStrategy {
     pub fn validate(&self) -> Result<(), crate::HaresError> {
         match self {
             Self::Immediate { target_soc }
-            | Self::QuickThenWait { partial_soc: target_soc } => {
-                validate_fraction("target_soc", *target_soc)
-            }
+            | Self::QuickThenWait {
+                partial_soc: target_soc,
+            } => validate_fraction("target_soc", *target_soc),
             Self::Nightly {
                 off_peak_start_hour,
                 off_peak_end_hour,
@@ -687,10 +687,7 @@ impl BmsMode {
                 ..
             } => {
                 validate_fraction("reserve_soc", *reserve_soc)?;
-                validate_fraction(
-                    "charge_threshold_percentile",
-                    *charge_threshold_percentile,
-                )?;
+                validate_fraction("charge_threshold_percentile", *charge_threshold_percentile)?;
                 validate_fraction(
                     "discharge_threshold_percentile",
                     *discharge_threshold_percentile,
@@ -1030,9 +1027,18 @@ mod tests {
 
     #[test]
     fn battery_chemistry_from_str_case_insensitive() {
-        assert_eq!("nmc".parse::<BatteryChemistry>().unwrap(), BatteryChemistry::Nmc);
-        assert_eq!("NMC".parse::<BatteryChemistry>().unwrap(), BatteryChemistry::Nmc);
-        assert_eq!("Lfp".parse::<BatteryChemistry>().unwrap(), BatteryChemistry::Lfp);
+        assert_eq!(
+            "nmc".parse::<BatteryChemistry>().unwrap(),
+            BatteryChemistry::Nmc
+        );
+        assert_eq!(
+            "NMC".parse::<BatteryChemistry>().unwrap(),
+            BatteryChemistry::Nmc
+        );
+        assert_eq!(
+            "Lfp".parse::<BatteryChemistry>().unwrap(),
+            BatteryChemistry::Lfp
+        );
         assert!("invalid".parse::<BatteryChemistry>().is_err());
     }
 
@@ -1088,7 +1094,10 @@ mod tests {
 
     #[test]
     fn ev_connection_state_default_is_home_plugged_in() {
-        assert_eq!(EvConnectionState::default(), EvConnectionState::HomePluggedIn);
+        assert_eq!(
+            EvConnectionState::default(),
+            EvConnectionState::HomePluggedIn
+        );
     }
 
     #[test]
@@ -1139,7 +1148,10 @@ mod tests {
                 off_peak_end_hour: 6.0,
                 target_soc: 0.9,
             },
-            ChargingStrategy::LowSoc { threshold: 0.2, target_soc: 0.8 },
+            ChargingStrategy::LowSoc {
+                threshold: 0.2,
+                target_soc: 0.8,
+            },
             ChargingStrategy::QuickThenWait { partial_soc: 0.5 },
             ChargingStrategy::PreDeparture {
                 target_soc: 0.95,
@@ -1197,7 +1209,10 @@ mod tests {
         let decoded: ChargingStrategy = serde_json::from_str(raw).expect("deserialize raw JSON");
         assert_eq!(
             decoded,
-            ChargingStrategy::LowSoc { threshold: 0.15, target_soc: 0.7 }
+            ChargingStrategy::LowSoc {
+                threshold: 0.15,
+                target_soc: 0.7
+            }
         );
     }
 
@@ -1280,7 +1295,9 @@ mod tests {
     fn bms_mode_storm_watch_nested_serde() {
         let mode = BmsMode::StormWatch {
             target_soc: 1.0,
-            trigger: StormWatchTrigger::WeatherSignal { wind_speed_threshold_m_s: 25.0 },
+            trigger: StormWatchTrigger::WeatherSignal {
+                wind_speed_threshold_m_s: 25.0,
+            },
             base_mode: Box::new(BmsMode::SelfConsumption {
                 min_soc: 0.1,
                 max_soc: 0.95,
@@ -1387,9 +1404,25 @@ mod tests {
 
     #[test]
     fn bms_action_validate_rejects_invalid() {
-        assert!(BmsAction::Charge { rate_fraction: -0.1 }.validate().is_err());
-        assert!(BmsAction::Discharge { rate_fraction: 1.1 }.validate().is_err());
-        assert!(BmsAction::Hold { target_soc: f64::INFINITY }.validate().is_err());
+        assert!(
+            BmsAction::Charge {
+                rate_fraction: -0.1
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            BmsAction::Discharge { rate_fraction: 1.1 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            BmsAction::Hold {
+                target_soc: f64::INFINITY
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
@@ -1725,7 +1758,10 @@ mod tests {
                 off_peak_end_hour: 6.0,
                 target_soc: 0.9,
             },
-            ChargingStrategy::LowSoc { threshold: 0.2, target_soc: 0.8 },
+            ChargingStrategy::LowSoc {
+                threshold: 0.2,
+                target_soc: 0.8,
+            },
             ChargingStrategy::QuickThenWait { partial_soc: 0.5 },
             ChargingStrategy::PreDeparture {
                 target_soc: 0.95,

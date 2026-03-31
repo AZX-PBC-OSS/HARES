@@ -11,6 +11,8 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use hares_types::telemetry_keys as tk;
+
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::core_config::build_setpoint_source;
@@ -428,9 +430,9 @@ impl Equipment for IdealHvac {
             })?;
         }
 
-        self.telemetry.set("thermal_output_w", capacity_w);
+        self.telemetry.set(tk::THERMAL_OUTPUT_W, capacity_w);
         self.telemetry.set(
-            "operating_mode",
+            tk::OPERATING_MODE,
             operating_mode_code(match self.mode {
                 ThermostatMode::Heating => OperatingMode::Heating,
                 ThermostatMode::Cooling => OperatingMode::Cooling,
@@ -438,9 +440,9 @@ impl Equipment for IdealHvac {
             }),
         );
         self.telemetry
-            .set("ideal_capacity_w", self.ideal_capacity_w);
+            .set(tk::IDEAL_CAPACITY_W, self.ideal_capacity_w);
         self.telemetry
-            .set("current_target_c", self.current_target_c);
+            .set(tk::CURRENT_TARGET_C, self.current_target_c);
 
         Ok(())
     }
@@ -558,34 +560,34 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn ideal_hvac_default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(4);
-    telemetry.insert("thermal_output_w", 0.0);
-    telemetry.insert("operating_mode", 0.0);
-    telemetry.insert("ideal_capacity_w", 0.0);
-    telemetry.insert("current_target_c", 0.0);
+    telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
+    telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::IDEAL_CAPACITY_W, 0.0);
+    telemetry.insert(tk::CURRENT_TARGET_C, 0.0);
     telemetry
 }
 
 fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
     vec![
         TelemetryField {
-            name: "thermal_output_w".to_string(),
+            name: tk::THERMAL_OUTPUT_W.to_string(),
             unit: "W".to_string(),
             description: "Thermal power delivered to zone (positive=heating, negative=cooling)"
                 .to_string(),
         },
         TelemetryField {
-            name: "operating_mode".to_string(),
+            name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode: 0=Off, 1=Heating, 2=Cooling".to_string(),
         },
         TelemetryField {
-            name: "ideal_capacity_w".to_string(),
+            name: tk::IDEAL_CAPACITY_W.to_string(),
             unit: "W".to_string(),
             description: "Ideal capacity from solver (positive=heating, negative=cooling)"
                 .to_string(),
         },
         TelemetryField {
-            name: "current_target_c".to_string(),
+            name: tk::CURRENT_TARGET_C.to_string(),
             unit: "C".to_string(),
             description: "Current setpoint target temperature".to_string(),
         },
@@ -651,8 +653,8 @@ mod tests {
                 .expect("valid")
                 + ChronoDuration::seconds(second),
             time_res: ChronoDuration::seconds(time_res_s),
-        price_signal: Default::default(),
-        electrical: Default::default(),
+            price_signal: Default::default(),
+            electrical: Default::default(),
         }
     }
 

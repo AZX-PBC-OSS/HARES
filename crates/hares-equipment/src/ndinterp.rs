@@ -331,10 +331,10 @@ mod tests {
     #[test]
     fn single_point_axis() {
         // Single-point axis: always returns that value.
-        let interp = RegularGridInterpolator::new(vec![vec![0.5]], vec![3.14]).unwrap();
-        assert!((interp.interpolate(&[0.0]) - 3.14).abs() < 1e-5);
-        assert!((interp.interpolate(&[0.5]) - 3.14).abs() < 1e-5);
-        assert!((interp.interpolate(&[1.0]) - 3.14).abs() < 1e-5);
+        let interp = RegularGridInterpolator::new(vec![vec![0.5]], vec![3.125]).unwrap();
+        assert!((interp.interpolate(&[0.0]) - 3.125).abs() < 1e-5);
+        assert!((interp.interpolate(&[0.5]) - 3.125).abs() < 1e-5);
+        assert!((interp.interpolate(&[1.0]) - 3.125).abs() < 1e-5);
     }
 
     #[test]

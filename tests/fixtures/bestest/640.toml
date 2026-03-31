@@ -14,7 +14,7 @@ wall_area_m2 = 145.0
 wall_r_value_m2_k_w = 2.8
 
 [hvac]
-equipment_name = "Furnace"
+equipment_name = "IdealHVAC"
 fuel = "electricity"
 heating_capacity_kbtu_h = 30.0
 

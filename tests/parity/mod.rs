@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, Float64Array};
 use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
-use hares_core::{DwellingConfig, SimStatus, SimulationEngine};
+use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationEngine};
 use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
 use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -64,7 +64,6 @@ struct FixtureRunResult {
 }
 
 #[test]
-#[ignore = "long-running OCHRE parity validation"]
 fn parity_outputs_against_reference_corpus() {
     let discovered = discover_fixtures().expect("failed to discover parity fixtures");
     let mut complete = Vec::new();
@@ -135,7 +134,6 @@ fn parity_outputs_against_reference_corpus() {
 }
 
 #[test]
-#[ignore = "long-running OCHRE property parity validation"]
 fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Error>> {
     let fixtures = discover_fixtures().expect("failed to discover parity fixtures");
 
@@ -287,12 +285,13 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     sim_config.output_format = hares_io::OutputFormat::Parquet;
     sim_config.output_path = Some(output_path.clone());
 
+    let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
     let dwelling_config = DwellingConfig {
         hpxml_path: fixture.building_xml.clone(),
         schedule_path: fixture.schedule_csv.clone(),
         weather_path: fixture.weather_epw.clone(),
         sim_config,
-        defaults_path: None,
+        defaults_path: Some(defaults_path),
         overrides: None,
         bldg_id: config.bldg_id.unwrap_or(1),
         initialization_duration: config
@@ -306,6 +305,11 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     let outcome = engine
         .run(dwelling_config)
         .map_err(|err| format!("simulation failed: {err}"))?;
+
+    eprintln!(
+        "[parity] fixture={} status={:?} elapsed={:?} warnings={:?}",
+        fixture.id, outcome.status, outcome.elapsed, outcome.warnings
+    );
 
     if matches!(outcome.status, SimStatus::Failed(_)) {
         return Err(format!("simulation status failed: {:?}", outcome.status));
@@ -439,10 +443,13 @@ fn compare_metrics(
     }
 
     if let (Some(a_hvac), Some(r_hvac)) = (
-        annual_energy_for_prefixes(actual, &["hvac", "air conditioner", "heat pump", "furnace"]),
+        annual_energy_for_prefixes(
+            actual,
+            &["hvac", "air conditioner", "heat pump", "furnace", "ashp", "mshp", "baseboard"],
+        ),
         annual_energy_for_prefixes(
             reference,
-            &["hvac", "air conditioner", "heat pump", "furnace"],
+            &["hvac", "air conditioner", "heat pump", "furnace", "ashp", "mshp", "baseboard"],
         ),
     ) {
         checks.push(check_relative_percent(
@@ -579,7 +586,7 @@ fn peak_hvac_power(columns: &BTreeMap<String, Vec<f64>>) -> Option<f64> {
         if !lowered.ends_with("electric power (kw)") {
             continue;
         }
-        if !["hvac", "air conditioner", "heat pump", "furnace"]
+        if !["hvac", "air conditioner", "heat pump", "furnace", "ashp", "mshp", "baseboard"]
             .iter()
             .any(|needle| lowered.contains(needle))
         {

@@ -6,8 +6,8 @@ use hares_physics::{
         EPSILON as PSYCHROMETRIC_PRESSURE_RATIO,
         LATENT_HEAT_VAPORISATION_KJ_KG as VAPOR_LATENT_HEAT_KJ_PER_KG,
         SPECIFIC_HEAT_DRY_AIR_KJ_KG_K as DRY_AIR_CP_KJ_PER_KG_K,
-        SPECIFIC_HEAT_WATER_VAPOUR_KJ_KG_K as VAPOR_CP_KJ_PER_KG_K, dew_point,
-        moist_air_enthalpy, saturation_pressure_pa,
+        SPECIFIC_HEAT_WATER_VAPOUR_KJ_KG_K as VAPOR_CP_KJ_PER_KG_K, dew_point, moist_air_enthalpy,
+        saturation_pressure_pa,
     },
 };
 use hares_types::HaresError;
@@ -1028,10 +1028,7 @@ mod coil_psychrometric_tests {
     #[test]
     fn calculate_shr_zero_capacity_returns_one() {
         let result = calculate_shr(T_DB, W_IN, P_KPA, 0.0, FLOW_M3S, 1.0).unwrap();
-        assert_eq!(
-            result.shr, 1.0,
-            "SHR must be exactly 1.0 when Q = 0"
-        );
+        assert_eq!(result.shr, 1.0, "SHR must be exactly 1.0 when Q = 0");
     }
 
     // ------------------------------------------------------------------
@@ -1124,7 +1121,6 @@ mod coil_psychrometric_tests {
             result.shr
         );
     }
-
 
     // Helper: call coil_bypass_factor and recover ADP via calculate_shr round-trip.
     fn bypass_factor_with_adp(
