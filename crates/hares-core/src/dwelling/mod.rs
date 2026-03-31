@@ -199,6 +199,7 @@ struct ZoneColumnCaches {
 
 fn build_zone_column_caches(
     zones: &[hares_types::ZoneState],
+    zone_types: &[hares_io::hpxml::ZoneType],
     indoor_zone: ZoneId,
     column_index: &HashMap<String, usize>,
 ) -> ZoneColumnCaches {
@@ -212,14 +213,15 @@ fn build_zone_column_caches(
     let mut zone_temp_col_indices = Vec::with_capacity(sorted_zone_ids.len());
 
     for &zone_id in &sorted_zone_ids {
-        let label = zone_display_name(zone_id, indoor_zone);
+        // Pre-compute the index of this zone in the zones slice for O(1) hot-loop access.
+        let env_idx = zones.iter().position(|z| z.id == zone_id);
+        let zone_type = env_idx.and_then(|idx| zone_types.get(idx));
+        let label = zone_display_name(zone_id, indoor_zone, zone_type);
         let temp_key = format!("Temperature - {label} (C)");
         let temp_col = column_index.get(&temp_key).copied();
         if let Some(idx) = temp_col {
             temp_columns.push((zone_id, idx));
         }
-        zone_temp_col_indices.push(temp_col);
-
         if zone_id != indoor_zone {
             let inf_key = format!("Infiltration Heat Gain - {label} (W)");
             if let Some(&idx) = column_index.get(&inf_key) {
@@ -230,10 +232,8 @@ fn build_zone_column_caches(
         if let Some(&idx) = column_index.get(&lwr_key) {
             lwr_columns.insert(zone_id, idx);
         }
-
-        // Pre-compute the index of this zone in the zones slice for O(1) hot-loop access.
-        let env_idx = zones.iter().position(|z| z.id == zone_id);
         zone_env_indices.push(env_idx);
+        zone_temp_col_indices.push(temp_col);
     }
 
     ZoneColumnCaches {
@@ -985,8 +985,10 @@ impl Dwelling {
         let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
 
         let equipment_column_map = build_equipment_column_map(&equipment, &output_column_index);
+        let zone_types = environment.zone_types().to_vec();
         let zone_caches = build_zone_column_caches(
             &initial_env.zones,
+            &zone_types,
             solvers.thermal.config().indoor_zone_id,
             &output_column_index,
         );
@@ -1464,8 +1466,10 @@ impl Dwelling {
             self.output_column_index = build_output_column_index(&schema);
             self.equipment_column_map =
                 build_equipment_column_map(&self.equipment, &self.output_column_index);
+            let zone_types = self.environment.zone_types().to_vec();
             let zone_caches = build_zone_column_caches(
                 &self.latest_env.zones,
+                &zone_types,
                 self.thermal_solver.config().indoor_zone_id,
                 &self.output_column_index,
             );
@@ -2598,15 +2602,18 @@ impl Dwelling {
 }
 
 /// Maps a ZoneId to its display name for output column labels.
-/// The configured indoor zone = "Indoor", ZoneId(2) = "Attic", others = "Zone_{id}".
-fn zone_display_name(zone: ZoneId, indoor_zone: ZoneId) -> String {
+/// The configured indoor zone = "Indoor", attic zones = "Attic", others = "Zone_{id}".
+fn zone_display_name(
+    zone: ZoneId,
+    indoor_zone: ZoneId,
+    zone_type: Option<&hares_io::hpxml::ZoneType>,
+) -> String {
     if zone == indoor_zone {
         "Indoor".to_string()
+    } else if matches!(zone_type, Some(hares_io::hpxml::ZoneType::Attic)) {
+        "Attic".to_string()
     } else {
-        match zone.0 {
-            2 => "Attic".to_string(),
-            n => format!("Zone_{n}"),
-        }
+        format!("Zone_{}", zone.0)
     }
 }
 
@@ -2765,7 +2772,7 @@ mod tests {
     use hares_types::{
         ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse,
         EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, OperatingMode, PortDeclaration,
-        Telemetry, TelemetryField, ZoneId,
+        Telemetry, TelemetryField, ZoneId, ZoneState,
     };
     use std::borrow::Cow;
     use std::fs;
@@ -4939,6 +4946,51 @@ occupancy = 1.0
         assert!(
             msg.contains("unknown equipment class"),
             "error should preserve registry failure context, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn attic_temperature_column_uses_zone_type_not_zone_id() {
+        use hares_io::hpxml::ZoneType;
+
+        let zones = vec![
+            ZoneState {
+                id: ZoneId(10),
+                temperature_c: 21.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            },
+            ZoneState {
+                id: ZoneId(3),
+                temperature_c: 16.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 120.0,
+            },
+        ];
+        let zone_types = vec![ZoneType::Conditioned, ZoneType::Attic];
+        let schema = hares_io::build_schema(&[], 2);
+        let column_index = build_output_column_index(&schema);
+        let caches = build_zone_column_caches(&zones, &zone_types, ZoneId(10), &column_index);
+
+        let attic_idx = column_index
+            .get("Temperature - Attic (C)")
+            .copied()
+            .expect("schema must include attic temperature column");
+        assert!(
+            caches.temp_columns.contains(&(ZoneId(3), attic_idx)),
+            "attic zone should resolve to the attic output column even when its ZoneId is not 2"
+        );
+        assert_eq!(
+            caches.zone_temp_col_indices,
+            vec![
+                Some(attic_idx),
+                Some(column_index["Temperature - Indoor (C)"])
+            ],
+            "zone temperatures should be mapped by zone type, not zone number"
         );
     }
 }

@@ -1086,3 +1086,15 @@ fn extract_u_neg_from_dataframe(py: Python<'_>, df: &Bound<'_, PyAny>) -> PyResu
     let potential = extract_f64_column(df, "potential")?;
     UNegTable::new(soc, potential).map_err(|e| PyValueError::new_err(e.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn py_core_output_missing_electric_has_no_convention() {
+        let py_core = PyCoreOutput::new(RustCoreOutput::default());
+        assert_eq!(py_core.electric_kw(), None);
+        assert_eq!(py_core.electric_convention(), None);
+    }
+}

@@ -910,6 +910,13 @@ pub fn validate_core_contract(
 ) -> Result<(), HaresError> {
     let caps = desc.core_capabilities;
 
+    if caps.contains(CoreCapabilities::REACTIVE) && !caps.contains(CoreCapabilities::ELECTRIC) {
+        return Err(HaresError::Equipment(format!(
+            "core_output contract violation for '{}' ({:?}): REACTIVE requires ELECTRIC",
+            desc.name, caps
+        )));
+    }
+
     // Count missing/undeclared-populated fields without allocating.
     let mut missing_bits = 0u8;
     let mut unexpected_bits = 0u8;
@@ -2307,6 +2314,37 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("flows.reactive_power_kvar"));
         assert!(msg.contains("state.operating_mode"));
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_reactive_without_electric() {
+        let desc = EquipmentDescriptor {
+            id: EquipmentId(4),
+            name: "Validator Reactive Only".to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::REACTIVE,
+            telemetry_fields: vec![],
+        };
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: None,
+                reactive_power_kvar: Some(0.1),
+                fuel_w: None,
+            },
+            state: CoreState::default(),
+        };
+
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("reactive capability without electric must error");
+        assert!(
+            err.to_string().contains("REACTIVE requires ELECTRIC"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

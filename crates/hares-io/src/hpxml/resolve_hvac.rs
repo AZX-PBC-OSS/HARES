@@ -13,7 +13,7 @@ use hares_equipment::hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
 };
-use hares_types::{BoundaryPolicy, FuelType, ScheduleSourceConfig};
+use hares_types::{FuelType, ScheduleSourceConfig};
 
 use super::HpxmlError;
 use super::building::{Boundary, BoundaryType, Building, DuctLocation, XmlNode, Zone, ZoneType};
@@ -385,24 +385,6 @@ fn n_speeds_from_params(params: &Map<String, Value>) -> u8 {
         .unwrap_or(1) as u8
 }
 
-fn array24_from_params(params: &Map<String, Value>, key: &str) -> Option<[f64; 24]> {
-    let values = params.get(key)?.as_array()?;
-    if values.is_empty() {
-        return None;
-    }
-    let mut out = [0.0; 24];
-    let mut count = 0usize;
-    for (idx, value) in values.iter().take(24).enumerate() {
-        out[idx] = value.as_f64()?;
-        count = idx + 1;
-    }
-    let fill = *out.get(count.saturating_sub(1))?;
-    for slot in out.iter_mut().skip(count) {
-        *slot = fill;
-    }
-    Some(out)
-}
-
 fn schedule_source_from_params(
     params: &Map<String, Value>,
     prefix: &str,
@@ -411,33 +393,20 @@ fn schedule_source_from_params(
     if let Some(source) = params.get(&source_key) {
         return serde_json::from_value::<ScheduleSourceConfig>(source.clone()).ok();
     }
+    None
+}
 
-    let col_key = format!("{prefix}_setpoint_schedule_col");
-    if let Some(col) = params.get(&col_key).and_then(Value::as_u64) {
-        return Some(ScheduleSourceConfig::ColumnRef {
-            col_idx: col as usize,
-            boundary: BoundaryPolicy::Clamp,
-        });
-    }
+fn setpoint_source_value(source: ScheduleSourceConfig) -> Value {
+    serde_json::to_value(source).expect("ScheduleSourceConfig serialization must succeed")
+}
 
-    let weekday_key = format!("{prefix}_weekday_setpoints_c");
-    let weekend_key = format!("{prefix}_weekend_setpoints_c");
-    let weekday = array24_from_params(params, &weekday_key);
-    let weekend = array24_from_params(params, &weekend_key);
-    if let Some(wd) = weekday {
-        return Some(ScheduleSourceConfig::DailyProfile {
-            weekday: wd,
-            weekend: weekend.unwrap_or(wd),
-            month_multipliers: [1.0; 12],
-            max_value: 1.0,
-        });
-    }
-
-    let setpoint_key = format!("{prefix}_setpoint_c");
-    params
-        .get(&setpoint_key)
-        .and_then(Value::as_f64)
-        .map(ScheduleSourceConfig::Constant)
+fn daily_profile_source(weekday: [f64; 24], weekend: [f64; 24]) -> Value {
+    setpoint_source_value(ScheduleSourceConfig::DailyProfile {
+        weekday,
+        weekend,
+        month_multipliers: [1.0; 12],
+        max_value: 1.0,
+    })
 }
 
 fn static_setpoint_from_source(source: &Option<ScheduleSourceConfig>) -> Option<f64> {
@@ -1930,13 +1899,21 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
     };
 
     for (hvac_type, param_prefix) in [("Heating", "heating"), ("Cooling", "cooling")] {
-        for (weekday, day_suffix) in [(true, "weekday"), (false, "weekend")] {
-            let param_key = format!("{param_prefix}_{day_suffix}_setpoints_c");
-            if let Some(vals) =
-                super::xml_helpers::parse_setpoint_from_control(control, hvac_type, weekday)
-            {
-                out.push((param_key, json!(vals)));
-            }
+        let weekday = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, true);
+        let weekend = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, false);
+        if let Some(wd) = weekday {
+            let mut weekday_arr = [0.0; 24];
+            weekday_arr.copy_from_slice(&wd[..24]);
+            let weekend_arr = weekend.unwrap_or_else(|| wd.clone());
+            let weekend_arr = {
+                let mut arr = [0.0; 24];
+                arr.copy_from_slice(&weekend_arr[..24]);
+                arr
+            };
+            out.push((
+                format!("{param_prefix}_setpoint_source"),
+                daily_profile_source(weekday_arr, weekend_arr),
+            ));
         }
     }
 
@@ -1951,18 +1928,40 @@ fn apply_building_setpoint_profiles(
 ) {
     if include_heating {
         if let Some(ref wd) = building.heating_weekday_setpoints_c {
-            params.insert("heating_weekday_setpoints_c".to_string(), json!(wd));
-        }
-        if let Some(ref we) = building.heating_weekend_setpoints_c {
-            params.insert("heating_weekend_setpoints_c".to_string(), json!(we));
+            let mut weekday = [0.0; 24];
+            weekday.copy_from_slice(&wd[..24]);
+            let weekend = building
+                .heating_weekend_setpoints_c
+                .as_ref()
+                .map(|vals| {
+                    let mut arr = [0.0; 24];
+                    arr.copy_from_slice(&vals[..24]);
+                    arr
+                })
+                .unwrap_or(weekday);
+            params.insert(
+                "heating_setpoint_source".to_string(),
+                daily_profile_source(weekday, weekend),
+            );
         }
     }
     if include_cooling {
         if let Some(ref wd) = building.cooling_weekday_setpoints_c {
-            params.insert("cooling_weekday_setpoints_c".to_string(), json!(wd));
-        }
-        if let Some(ref we) = building.cooling_weekend_setpoints_c {
-            params.insert("cooling_weekend_setpoints_c".to_string(), json!(we));
+            let mut weekday = [0.0; 24];
+            weekday.copy_from_slice(&wd[..24]);
+            let weekend = building
+                .cooling_weekend_setpoints_c
+                .as_ref()
+                .map(|vals| {
+                    let mut arr = [0.0; 24];
+                    arr.copy_from_slice(&vals[..24]);
+                    arr
+                })
+                .unwrap_or(weekday);
+            params.insert(
+                "cooling_setpoint_source".to_string(),
+                daily_profile_source(weekday, weekend),
+            );
         }
     }
 }
@@ -1971,6 +1970,9 @@ fn apply_building_setpoint_profiles(
 mod tests {
     use super::super::building::{DuctSystem, DuctType, Site, XmlNode, Zone};
     use super::*;
+    use crate::hpxml::parse_xml_document;
+    use hares_physics::units as conv;
+    use hares_types::{BoundaryPolicy, ScheduleSourceConfig};
     use std::collections::HashMap;
 
     fn empty_building(zones: Vec<Zone>) -> Building {
@@ -2012,6 +2014,20 @@ mod tests {
                 children: vec![],
             },
         }
+    }
+
+    fn building_with_setpoint_profiles(
+        heating_weekday: [f64; 24],
+        heating_weekend: [f64; 24],
+        cooling_weekday: [f64; 24],
+        cooling_weekend: [f64; 24],
+    ) -> Building {
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.heating_weekday_setpoints_c = Some(heating_weekday.to_vec());
+        building.heating_weekend_setpoints_c = Some(heating_weekend.to_vec());
+        building.cooling_weekday_setpoints_c = Some(cooling_weekday.to_vec());
+        building.cooling_weekend_setpoints_c = Some(cooling_weekend.to_vec());
+        building
     }
 
     fn duct(duct_type: DuctType, area_m2: f64, r_val: f64) -> DuctSystem {
@@ -2572,6 +2588,120 @@ mod tests {
     }
 
     #[test]
+    fn parse_hvac_setpoint_params_reads_realistic_control_xml() {
+        let xml = r#"
+            <Building>
+              <BuildingDetails>
+                <HVACPlant>
+                  <HVACControl>
+                    <extension>
+                      <WeekdaySetpointTempsHeatingSeason>
+                        68,68,68,68,68,68,70,72,72,72,72,72,72,72,72,72,72,70,68,68,68,68,68,68
+                      </WeekdaySetpointTempsHeatingSeason>
+                      <WeekendSetpointTempsHeatingSeason>
+                        68,68,68,68,68,68,69,69,70,70,70,70,70,70,70,70,70,70,68,68,68,68,68,68
+                      </WeekendSetpointTempsHeatingSeason>
+                      <WeekdaySetpointTempsCoolingSeason>
+                        78,78,78,78,78,78,76,74,74,74,74,74,74,74,74,74,74,74,76,78,78,78,78,78
+                      </WeekdaySetpointTempsCoolingSeason>
+                      <WeekendSetpointTempsCoolingSeason>
+                        78,78,78,78,78,78,77,77,76,76,76,76,76,76,76,76,76,76,78,78,78,78,78,78
+                      </WeekendSetpointTempsCoolingSeason>
+                    </extension>
+                  </HVACControl>
+                </HVACPlant>
+              </BuildingDetails>
+            </Building>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details node must exist");
+
+        let params = parse_hvac_setpoint_params(details);
+        let mut map = Map::new();
+        for (key, value) in params {
+            map.insert(key, value);
+        }
+
+        let source: ScheduleSourceConfig = serde_json::from_value(
+            map.get("heating_setpoint_source")
+                .cloned()
+                .expect("heating_setpoint_source must be present"),
+        )
+        .expect("heating_setpoint_source must deserialize");
+
+        match source {
+            ScheduleSourceConfig::DailyProfile {
+                weekday,
+                weekend,
+                month_multipliers,
+                max_value,
+            } => {
+                assert!((weekday[0] - conv::temperature_f_to_c(68.0)).abs() < 1e-9);
+                assert!((weekday[8] - conv::temperature_f_to_c(72.0)).abs() < 1e-9);
+                assert!((weekend[6] - conv::temperature_f_to_c(69.0)).abs() < 1e-9);
+                assert_eq!(month_multipliers, [1.0; 12]);
+                assert_eq!(max_value, 1.0);
+            }
+            other => panic!("expected DailyProfile source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn building_setpoint_profiles_are_emitted_as_typed_sources() {
+        let heating_weekday = [20.0f64; 24];
+        let heating_weekend = [19.0f64; 24];
+        let cooling_weekday = [26.0f64; 24];
+        let cooling_weekend = [25.0f64; 24];
+        let building = building_with_setpoint_profiles(
+            heating_weekday,
+            heating_weekend,
+            cooling_weekday,
+            cooling_weekend,
+        );
+
+        let mut params = Map::new();
+        apply_building_setpoint_profiles(&building, &mut params, true, true);
+
+        let heating_source: ScheduleSourceConfig = serde_json::from_value(
+            params
+                .get("heating_setpoint_source")
+                .cloned()
+                .expect("heating_setpoint_source must be present"),
+        )
+        .expect("heating_setpoint_source must deserialize");
+        let cooling_source: ScheduleSourceConfig = serde_json::from_value(
+            params
+                .get("cooling_setpoint_source")
+                .cloned()
+                .expect("cooling_setpoint_source must be present"),
+        )
+        .expect("cooling_setpoint_source must deserialize");
+
+        match heating_source {
+            ScheduleSourceConfig::DailyProfile {
+                weekday, weekend, ..
+            } => {
+                assert_eq!(weekday[0], 20.0);
+                assert_eq!(weekend[0], 19.0);
+            }
+            other => panic!("expected heating DailyProfile source, got {other:?}"),
+        }
+        match cooling_source {
+            ScheduleSourceConfig::DailyProfile {
+                weekday, weekend, ..
+            } => {
+                assert_eq!(weekday[0], 26.0);
+                assert_eq!(weekend[0], 25.0);
+            }
+            other => panic!("expected cooling DailyProfile source, got {other:?}"),
+        }
+        assert!(!params.contains_key("heating_weekday_setpoints_c"));
+        assert!(!params.contains_key("cooling_weekday_setpoints_c"));
+    }
+
+    #[test]
     fn room_ac_builder_returns_none_when_only_seer_available() {
         let mut params = Map::new();
         params.insert("cooling_capacity_w".to_string(), json!(3_500.0));
@@ -2661,16 +2791,11 @@ mod tests {
 
     #[test]
     fn ideal_hvac_builder_parses_daily_profile_setpoint_source() {
+        let building =
+            building_with_setpoint_profiles([20.0; 24], [19.0; 24], [26.0; 24], [25.0; 24]);
         let mut params = Map::new();
         params.insert("heating_capacity_w".to_string(), json!(9_000.0));
-        params.insert(
-            "heating_weekday_setpoints_c".to_string(),
-            json!(vec![20.0; 24]),
-        );
-        params.insert(
-            "heating_weekend_setpoints_c".to_string(),
-            json!(vec![19.0; 24]),
-        );
+        apply_building_setpoint_profiles(&building, &mut params, true, true);
         let ec = try_build_ideal_hvac_config("Ideal HVAC", &params)
             .expect("Ideal HVAC typed config should be built");
 
@@ -2686,6 +2811,7 @@ mod tests {
             other => panic!("expected DailyProfile setpoint source, got {other:?}"),
         }
         assert_eq!(cfg.heating_setpoint_c, Some(20.0));
+        assert_eq!(cfg.cooling_setpoint_c, Some(26.0));
     }
 
     #[test]
@@ -2693,8 +2819,20 @@ mod tests {
         let mut params = Map::new();
         params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
         params.insert("efficiency_seer".to_string(), json!(16.0));
-        params.insert("heating_setpoint_schedule_col".to_string(), json!(3));
-        params.insert("cooling_setpoint_schedule_col".to_string(), json!(4));
+        params.insert(
+            "heating_setpoint_source".to_string(),
+            setpoint_source_value(ScheduleSourceConfig::ColumnRef {
+                col_idx: 3,
+                boundary: BoundaryPolicy::Clamp,
+            }),
+        );
+        params.insert(
+            "cooling_setpoint_source".to_string(),
+            setpoint_source_value(ScheduleSourceConfig::ColumnRef {
+                col_idx: 4,
+                boundary: BoundaryPolicy::Clamp,
+            }),
+        );
         let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
             .expect("AC typed config should be built");
 

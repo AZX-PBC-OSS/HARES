@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use hares_types::{normalize_ascii, parse_trimmed_f64};
+use hares_equipment::ConfigPayload;
+use hares_types::{BoundaryPolicy, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64};
 use serde_json::Value;
 use tracing::warn;
 
@@ -446,6 +447,7 @@ fn inject_setpoint_schedules(
                 "heating_setpoint_schedule_col".to_string(),
                 Value::from(col_idx as u64),
             );
+            set_typed_setpoint_source(spec, "heating", col_idx);
         }
         if COOLING_EQUIPMENT.contains(&spec.name.as_str())
             && let Some(col_idx) = cooling_col
@@ -454,7 +456,28 @@ fn inject_setpoint_schedules(
                 "cooling_setpoint_schedule_col".to_string(),
                 Value::from(col_idx as u64),
             );
+            set_typed_setpoint_source(spec, "cooling", col_idx);
         }
+    }
+}
+
+fn set_typed_setpoint_source(spec: &mut EquipmentSpec, prefix: &str, col_idx: usize) {
+    let Some(typed) = spec.typed_config.as_mut() else {
+        return;
+    };
+    let ConfigPayload::Typed { data, .. } = &mut typed.payload else {
+        return;
+    };
+    let Some(obj) = data.as_object_mut() else {
+        return;
+    };
+
+    let source = ScheduleSourceConfig::ColumnRef {
+        col_idx,
+        boundary: BoundaryPolicy::Clamp,
+    };
+    if let Ok(json) = serde_json::to_value(source) {
+        obj.insert(format!("{prefix}_setpoint_source"), json);
     }
 }
 
@@ -892,6 +915,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{DateTime, Duration};
+    use hares_equipment::ConfigPayload;
+    use hares_types::BoundaryPolicy;
     use hares_types::FuelType;
     use serde_json::{Map, Value};
     use tempfile::tempdir;
@@ -1033,6 +1058,41 @@ mod tests {
             column_index,
             source_step_secs: 3600,
             column_aggregations: vec![crate::ColumnAggregation::Mean],
+        }
+    }
+
+    fn make_schedule_with_setpoint_columns(
+        heating_values: &[f64],
+        cooling_values: &[f64],
+    ) -> ScheduleTimeSeries {
+        assert_eq!(
+            heating_values.len(),
+            cooling_values.len(),
+            "heating and cooling setpoint vectors must match"
+        );
+
+        let start =
+            DateTime::parse_from_rfc3339("2025-01-01T00:00:00+00:00").expect("valid datetime");
+        let timestamps = (0..heating_values.len())
+            .map(|i| start + Duration::hours(i as i64))
+            .collect::<Vec<_>>();
+
+        let mut column_index = HashMap::new();
+        column_index.insert("heating_setpoint".to_string(), 0);
+        column_index.insert("cooling_setpoint".to_string(), 1);
+        ScheduleTimeSeries {
+            timestamps,
+            column_names: vec![
+                "heating_setpoint".to_string(),
+                "cooling_setpoint".to_string(),
+            ],
+            columns: vec![heating_values.to_vec(), cooling_values.to_vec()],
+            column_index,
+            source_step_secs: 3600,
+            column_aggregations: vec![
+                crate::ColumnAggregation::Mean,
+                crate::ColumnAggregation::Mean,
+            ],
         }
     }
 
@@ -1319,6 +1379,131 @@ mod tests {
             Some("constant")
         );
         assert!(!specs[0].parameters.contains_key("event_window_len"));
+    }
+
+    fn make_typed_spec<T: hares_equipment::EquipmentTypedConfig>(
+        name: &str,
+        ochre_class: &str,
+        config: T,
+    ) -> EquipmentSpec {
+        EquipmentSpec {
+            name: name.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: Some(hares_equipment::EquipmentConfig::from_typed(
+                name.to_string(),
+                ochre_class.to_string(),
+                config,
+            )),
+        }
+    }
+
+    #[test]
+    fn typed_hvac_specs_receive_column_ref_setpoint_sources() {
+        use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+
+        let mut schedule = make_schedule_with_setpoint_columns(&[20.0, 19.5], &[26.0, 25.5]);
+        let mut specs = vec![
+            make_typed_spec(
+                "ASHP Heater",
+                "ASHP Heater",
+                HeatPumpHeaterConfig {
+                    zone_id: Some(1),
+                    ..Default::default()
+                },
+            ),
+            make_typed_spec(
+                "ASHP Cooler",
+                "ASHP Cooler",
+                HeatPumpCoolerConfig {
+                    equipment_id: None,
+                    zone_id: Some(1),
+                    heating_capacity_w: None,
+                    heating_eir: None,
+                    stage_heating_capacities_w: None,
+                    stage_heating_eirs: None,
+                    backup_fuel: None,
+                    backup_capacity_w: None,
+                    backup_eir: None,
+                    fraction_heating_load_served: None,
+                    cooling_capacity_w: None,
+                    cooling_eir: None,
+                    stage_cooling_capacities_w: None,
+                    stage_cooling_eirs: None,
+                    stage_shrs: None,
+                    fraction_cooling_load_served: None,
+                    number_of_speeds: 1,
+                    is_mini_split: false,
+                    shr: None,
+                    fan_power_w: None,
+                    fan_power_w_per_cfm: None,
+                    airflow_m3_s_per_w: None,
+                    heating_setpoint_c: None,
+                    cooling_setpoint_c: None,
+                    hysteresis_c: None,
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                    duct: hares_equipment::DuctConfig::default(),
+                    biquadratic_x1_min: None,
+                    biquadratic_x1_max: None,
+                    biquadratic_x2_min: None,
+                    biquadratic_x2_max: None,
+                    ff_min: None,
+                    ff_max: None,
+                    plf_min: None,
+                    plf_max: None,
+                },
+            ),
+        ];
+
+        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+
+        let heater_typed = specs[0]
+            .typed_config
+            .as_ref()
+            .expect("heater typed config must remain present");
+        let heater_data = match &heater_typed.payload {
+            ConfigPayload::Typed { data, .. } => data,
+            other => panic!("expected typed payload, got {other:?}"),
+        };
+        let heater_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
+            heater_data
+                .get("heating_setpoint_source")
+                .cloned()
+                .expect("heater heating_setpoint_source must be injected"),
+        )
+        .expect("heater source must deserialize");
+        assert_eq!(
+            heater_source,
+            hares_types::ScheduleSourceConfig::ColumnRef {
+                col_idx: 0,
+                boundary: BoundaryPolicy::Clamp
+            }
+        );
+
+        let cooler_typed = specs[1]
+            .typed_config
+            .as_ref()
+            .expect("cooler typed config must remain present");
+        let cooler_data = match &cooler_typed.payload {
+            ConfigPayload::Typed { data, .. } => data,
+            other => panic!("expected typed payload, got {other:?}"),
+        };
+        let cooler_source: hares_types::ScheduleSourceConfig = serde_json::from_value(
+            cooler_data
+                .get("cooling_setpoint_source")
+                .cloned()
+                .expect("cooler cooling_setpoint_source must be injected"),
+        )
+        .expect("cooler source must deserialize");
+        assert_eq!(
+            cooler_source,
+            hares_types::ScheduleSourceConfig::ColumnRef {
+                col_idx: 1,
+                boundary: BoundaryPolicy::Clamp
+            }
+        );
     }
 
     fn make_water_heater_spec(name: &str, avg_water_draw_l_per_day: f64) -> EquipmentSpec {

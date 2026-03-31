@@ -1,4 +1,4 @@
-//! State-space representation and Crank-Nicolson implicit discretization.
+//! State-space representation with ZOH discretization and implicit-coupling support.
 
 use nalgebra::linalg::LU;
 use nalgebra::{Complex, DMatrix, DVector, Dyn};
@@ -98,7 +98,7 @@ pub struct OutputMapping {
     pub input_to_output: Vec<(usize, usize, f64)>,
 }
 
-/// Implicit (Crank-Nicolson) state-space model.
+/// Discrete-time state-space model (ZOH base step) with optional implicit couplings.
 ///
 /// Each step solves: `x[k+1] = M⁻¹ · (N · x[k] + B_eff · u[k])`
 /// where `M = I - dt/2·A_c`, `N = I + dt/2·A_c`, `B_eff = dt·B_c`.
@@ -250,9 +250,6 @@ impl StateSpaceModel {
         }
     }
 
-    /// Constructs from continuous-time matrices using Crank-Nicolson discretization.
-    ///
-    /// Pre-computes M = I - dt/2·A_c (LU-factored), N = I + dt/2·A_c, B_eff = dt·B_c.
     /// Constructs from continuous A_c, B_c using ZOH (matrix exponential) discretization.
     ///
     /// ZOH is unconditionally stable and matches OCHRE's approach. The step becomes:
@@ -440,7 +437,7 @@ impl StateSpaceModel {
         }
     }
 
-    /// CN step with per-step diagonal coupling, using a pre-built LU.
+    /// Coupled discrete step with per-step diagonal coupling, using a pre-built LU.
     ///
     /// Builds the RHS `(N - D)·x + B_eff·u + f` into `buf`, then solves
     /// `(M + D)·x[k+1] = buf` using the provided LU factorization.
@@ -459,7 +456,7 @@ impl StateSpaceModel {
         coupled_lu.solve_mut(buf);
     }
 
-    /// CN step with per-step diagonal coupling (convenience: builds LU internally).
+    /// Coupled discrete step with per-step diagonal coupling (convenience: builds LU internally).
     ///
     /// Equivalent to calling `build_coupled_lu` then `step_with_coupled_lu_into`.
     /// For one-shot use when the LU doesn't need to be shared with the HVAC solve.

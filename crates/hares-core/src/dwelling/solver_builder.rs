@@ -583,7 +583,8 @@ pub(crate) fn build_default_solvers(
         wiring.ground_temp_input_indices = vec![];
     }
 
-    let n_iter = ((dt_s / 300.0).ceil() as u32).max(1);
+    // Match OCHRE: iterations = floor(dt / 300 s) + 1.
+    let n_iter = (dt_s / 300.0).floor() as u32 + 1;
 
     // Single pass: populate exterior surfaces, window properties, interior surfaces, diagnostics.
     let mut surfaces_by_zone: HashMap<ZoneId, Vec<hares_envelope::InteriorSurfaceInfo>> =
@@ -778,7 +779,6 @@ pub(crate) fn build_default_solvers(
         use hares_io::hpxml::ZoneType;
         use hares_physics::infiltration::{
             Aim2Params, FoundationLeakageClass, N_I_DEFAULT, aim2_coefficients_from_ach50,
-            attic_ela_coefficients,
         };
 
         // Resolve ACH50 from whatever input form is available.
@@ -851,38 +851,12 @@ pub(crate) fn build_default_solvers(
                     }
                 }
                 ZoneType::Attic => {
-                    if let Some(ach) = bz.ventilation_ach {
-                        InfiltrationMethod::Ach { ach }
-                    } else if let Some(sla) = bz.ventilation_sla {
-                        // Attic floor area = conditioned zone floor area if not explicit.
-                        let conditioned_area = building
-                            .zones
-                            .iter()
-                            .find(|z| z.zone_type == ZoneType::Conditioned)
-                            .and_then(|z| z.floor_area_m2);
-                        let floor_area_m2 = bz.floor_area_m2.or(conditioned_area).unwrap_or(100.0);
-                        let ela_m2 = sla * floor_area_m2;
-                        // Attic height from volume: V = 0.5 × A × h → h = 2V/A.
-                        let attic_height_m = bz
-                            .volume_m3
-                            .filter(|&v| v > 0.0)
-                            .map(|v| 2.0 * v / floor_area_m2)
-                            .unwrap_or(1.5);
-                        let (stack_coeff, wind_coeff) =
-                            attic_ela_coefficients(attic_height_m, building_height_m);
-                        InfiltrationMethod::Ela {
-                            ela_m2,
-                            stack_coeff,
-                            wind_coeff,
-                        }
-                    } else if bz.vented {
-                        // Vented attic with no HPXML data: default 2.0 ACH
-                        // (ASHRAE 62.2 typical for vented attics).
-                        InfiltrationMethod::Ach { ach: 2.0 }
-                    } else {
-                        // Unvented attic: minimal air exchange.
-                        InfiltrationMethod::Ach { ach: 0.1 }
-                    }
+                    let conditioned_area = building
+                        .zones
+                        .iter()
+                        .find(|z| z.zone_type == ZoneType::Conditioned)
+                        .and_then(|z| z.floor_area_m2);
+                    attic_infiltration_method(bz, conditioned_area, building_height_m, zone_idx)?
                 }
                 ZoneType::Garage => {
                     // Garage: use building ACH50 if available, else default 0.5 ACH.
@@ -1117,6 +1091,49 @@ fn foundation_infiltration_method(
     }
 }
 
+fn attic_infiltration_method(
+    zone: &hares_io::hpxml::Zone,
+    conditioned_floor_area_m2: Option<f64>,
+    building_height_m: f64,
+    zone_idx: usize,
+) -> Result<hares_envelope::InfiltrationMethod> {
+    use hares_envelope::InfiltrationMethod;
+    use hares_physics::infiltration::attic_ela_coefficients;
+
+    if let Some(ach) = zone.ventilation_ach {
+        return Ok(InfiltrationMethod::Ach { ach });
+    }
+
+    if let Some(sla) = zone.ventilation_sla {
+        let floor_area_m2 = zone
+            .floor_area_m2
+            .or(conditioned_floor_area_m2)
+            .unwrap_or(100.0);
+        let ela_m2 = sla * floor_area_m2;
+        // Attic height from volume: V = 0.5 × A × h → h = 2V/A.
+        let attic_height_m = zone
+            .volume_m3
+            .filter(|&v| v > 0.0)
+            .map(|v| 2.0 * v / floor_area_m2)
+            .unwrap_or(1.5);
+        let (stack_coeff, wind_coeff) = attic_ela_coefficients(attic_height_m, building_height_m);
+        return Ok(InfiltrationMethod::Ela {
+            ela_m2,
+            stack_coeff,
+            wind_coeff,
+        });
+    }
+
+    if zone.vented {
+        return Err(HaresError::Envelope(format!(
+            "Vented attic zone {zone_idx} requires explicit ventilation data (ACH or SLA)"
+        )));
+    }
+
+    // Unvented attic default matches OCHRE attic handling: 0.1 ACH.
+    Ok(InfiltrationMethod::Ach { ach: 0.1 })
+}
+
 fn foundation_height_m(zone: &hares_io::hpxml::Zone) -> Option<f64> {
     zone.volume_m3
         .zip(zone.floor_area_m2)
@@ -1132,19 +1149,19 @@ mod tests {
     use hares_physics::infiltration::{
         N_I_DEFAULT, SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
     };
+    use hares_types::HaresError;
 
     use super::{
-        attic_interior_emissivity, attic_interior_solar_absorptance, exterior_emissivity,
-        exterior_solar_absorptance, foundation_height_m, foundation_infiltration_method,
-        include_interior_lwr,
+        attic_infiltration_method, attic_interior_emissivity, attic_interior_solar_absorptance,
+        exterior_emissivity, exterior_solar_absorptance, foundation_height_m,
+        foundation_infiltration_method, include_interior_lwr,
     };
 
     #[test]
-    fn n_iter_matches_ceil_formula() {
+    fn n_iter_matches_ochre_formula() {
         for &dt_s in &[60.0_f64, 300.0, 600.0, 900.0, 3600.0] {
-            let n_iter = ((dt_s / 300.0_f64).ceil() as u32).max(1);
-            let expected = (dt_s / 300.0_f64).ceil() as u32;
-            let expected = expected.max(1);
+            let n_iter = (dt_s / 300.0_f64).floor() as u32 + 1;
+            let expected = (dt_s / 300.0_f64).floor() as u32 + 1;
             assert_eq!(
                 n_iter, expected,
                 "n_iter mismatch for dt_s={dt_s}: got {n_iter}, expected {expected}"
@@ -1152,11 +1169,11 @@ mod tests {
         }
 
         // Specific expected values
-        assert_eq!(((60.0_f64 / 300.0).ceil() as u32).max(1), 1);
-        assert_eq!(((300.0_f64 / 300.0).ceil() as u32).max(1), 1);
-        assert_eq!(((600.0_f64 / 300.0).ceil() as u32).max(1), 2);
-        assert_eq!(((900.0_f64 / 300.0).ceil() as u32).max(1), 3);
-        assert_eq!(((3600.0_f64 / 300.0).ceil() as u32).max(1), 12);
+        assert_eq!((60.0_f64 / 300.0).floor() as u32 + 1, 1);
+        assert_eq!((300.0_f64 / 300.0).floor() as u32 + 1, 2);
+        assert_eq!((600.0_f64 / 300.0).floor() as u32 + 1, 3);
+        assert_eq!((900.0_f64 / 300.0).floor() as u32 + 1, 4);
+        assert_eq!((3600.0_f64 / 300.0).floor() as u32 + 1, 13);
     }
 
     /// CFM50 → ACH50 conversion: ach50 = (cfm50 × 60) / volume_ft3.
@@ -1334,6 +1351,25 @@ mod tests {
         }
     }
 
+    fn attic_zone(
+        floor_area_m2: Option<f64>,
+        volume_m3: Option<f64>,
+        vented: bool,
+        ventilation_ach: Option<f64>,
+        ventilation_sla: Option<f64>,
+    ) -> Zone {
+        Zone {
+            zone_type: ZoneType::Attic,
+            floor_area_m2,
+            volume_m3,
+            attached_wall_ids: Vec::new(),
+            duct_systems: Vec::new(),
+            vented,
+            ventilation_ach,
+            ventilation_sla,
+        }
+    }
+
     #[test]
     fn foundation_height_comes_from_zone_geometry() {
         let zone = foundation_zone(Some(50.0), Some(75.0), false, None, None);
@@ -1401,5 +1437,23 @@ mod tests {
             foundation_infiltration_method(&unvented, None, None),
             InfiltrationMethod::Ach { ach: 0.0 }
         );
+    }
+
+    #[test]
+    fn attic_vented_requires_explicit_ventilation_rate() {
+        let zone = attic_zone(Some(100.0), Some(120.0), true, None, None);
+        let err = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect_err("expected err");
+        assert!(matches!(err, HaresError::Envelope(_)));
+        assert!(
+            err.to_string()
+                .contains("requires explicit ventilation data")
+        );
+    }
+
+    #[test]
+    fn attic_unvented_default_is_minimal_ach() {
+        let zone = attic_zone(Some(100.0), Some(120.0), false, None, None);
+        let method = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect("method");
+        assert_eq!(method, InfiltrationMethod::Ach { ach: 0.1 });
     }
 }

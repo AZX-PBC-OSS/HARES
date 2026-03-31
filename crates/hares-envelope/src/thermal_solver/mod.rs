@@ -46,7 +46,7 @@ pub struct ThermalSolver {
     u_buf: DVector<f64>,
     /// Reusable latent-load accumulator: cleared at the start of each infiltration pass.
     latent_buf: HashMap<ZoneId, f64>,
-    /// Reusable buffer for Crank-Nicolson step: receives M⁻¹(N·x + B_eff·u).
+    /// Reusable state-step buffer: receives M⁻¹(N·x + B_eff·u).
     rhs_buf: DVector<f64>,
     /// Pre-allocated scratch matrix for per-step modified implicit matrix (M + D).
     m_scratch: DMatrix<f64>,
@@ -276,7 +276,7 @@ impl ThermalSolver {
     /// Populates `self.infiltration_buf` with per-zone coupling terms.
     ///
     /// Returns `(u, latent_by_zone)` where the infiltration couplings are
-    /// stored in `self.infiltration_buf` for semi-implicit CN wiring.
+    /// stored in `self.infiltration_buf` for semi-implicit coupling wiring.
     fn build_input_vector(
         &mut self,
         ports: &PortSlots,
@@ -1209,6 +1209,82 @@ mod tests {
         // Pin state to zone temp so the infiltration delta-T is deterministic.
         solver.x[0] = env.zones[0].temperature_c;
         solver
+    }
+
+    fn stiff_solver_with_infiltration(
+        env: &EnvironmentState,
+        method: InfiltrationMethod,
+    ) -> ThermalSolver {
+        let r = 0.01;
+        let c = 100.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![(ZoneId(1), method)],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: VentilationConfig::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
+        };
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
+                .unwrap();
+        solver.x[0] = env.zones[0].temperature_c;
+        solver
+    }
+
+    #[test]
+    fn infiltration_coupling_uses_continuous_b_coeff_scaling() {
+        use hares_physics::constants::CP_DRY_AIR_J_KG_K;
+        use hares_physics::infiltration::ach_infiltration;
+
+        let zone_temp = 22.0;
+        let outdoor_temp = 5.0;
+        let env = env_for_temp(zone_temp, outdoor_temp);
+        let ach = 0.1;
+        let mut solver = stiff_solver_with_infiltration(&env, InfiltrationMethod::Ach { ach });
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let t_next = update.zone_temperatures_c[0].1;
+
+        let h_inf = 1.2 * ach_infiltration(ach, env.zones[0].volume_m3) * CP_DRY_AIR_J_KG_K;
+        let b_coeff = solver.dt_s * solver.model.b_c().expect("continuous model")[(0, 1)];
+        let d = h_inf * b_coeff;
+        let a_d = solver.model.n_mat()[(0, 0)];
+        let b_out = solver.model.b_eff()[(0, 0)];
+        let expected =
+            (a_d * zone_temp + b_out * outdoor_temp + h_inf * b_coeff * outdoor_temp) / (1.0 + d);
+
+        assert!(
+            (t_next - expected).abs() < 1e-9,
+            "implicit infiltration mismatch: t_next={t_next:.12}, expected={expected:.12}"
+        );
     }
 
     /// ASHRAE wind+stack infiltration with a warm zone and cold outdoor must

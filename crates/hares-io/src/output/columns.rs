@@ -83,11 +83,16 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
 
     if verbosity >= 2 {
         // Zone columns — we always include at least one conditioned zone.
-        // At schema-build time we don't know zone count, so we emit a single
-        // "Indoor" zone. The dwelling orchestrator can extend later.
-        // OCHRE convention: "Temperature - Indoor (C)"
+        // At schema-build time we don't know exact zone count, so emit the
+        // common indoor + attic temperature channels used by parity/oracle
+        // paths. Dwelling record logic writes whichever zones exist.
         fields.push(Field::new(
             format!("{ZONE_TEMP_PREFIX} Indoor {ZONE_TEMP_UNIT}"),
+            DataType::Float64,
+            true,
+        ));
+        fields.push(Field::new(
+            format!("{ZONE_TEMP_PREFIX} Attic {ZONE_TEMP_UNIT}"),
             DataType::Float64,
             true,
         ));
@@ -225,6 +230,7 @@ pub fn expected_columns_at_verbosity(verbosity: u8) -> Vec<&'static str> {
 
     if verbosity >= 2 {
         cols.push("Temperature - Indoor (C)");
+        cols.push("Temperature - Attic (C)");
         cols.push(ZONE_UNMET_LOAD_COL);
     }
 

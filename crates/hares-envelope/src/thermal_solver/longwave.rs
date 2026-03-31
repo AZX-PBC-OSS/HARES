@@ -111,16 +111,17 @@ impl ThermalSolver {
 
             // Iterative solve with heavy-ball damping (matches OCHRE).
             let mut t_surf = self.exterior_surface_temps[i];
-            let mut t_prev_iter = self.exterior_surface_temps[i];
+            let mut t_surf_prev = self.exterior_surface_temps[i];
 
             for _ in 0..info.n_iter {
                 let lwr = h_lwr_inj - e_factor * (t_surf + CELSIUS_TO_KELVIN).powi(4);
                 let t_new = t_surf_init + (solar_w + lwr) * info.rad_res_k_w;
                 let t_new = t_new.clamp(t_surf - 2.0, t_surf + 2.0);
-                let t_next = t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_prev_iter);
-                t_prev_iter = t_surf;
+                let t_next = t_surf + 0.5 * (t_new - t_surf) + 0.1 * (t_surf - t_surf_prev);
+                t_surf_prev = t_surf;
                 t_surf = t_next;
-                if (t_surf - t_prev_iter).abs() < 0.01 {
+                // Converged when the per-iteration surface-temperature step is small.
+                if (t_surf - t_surf_prev).abs() < 0.01 {
                     break;
                 }
             }

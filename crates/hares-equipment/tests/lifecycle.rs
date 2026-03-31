@@ -481,6 +481,44 @@ fn scheduled_load_writes_positive_thermal_gain_to_port() {
     );
 }
 
+#[test]
+fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured() {
+    let registry = EquipmentRegistry::new();
+    let cfg = config_mixed(
+        "Reactive Plug Loads",
+        "Plug Loads",
+        &[
+            ("zone_id", 1.0),
+            ("power_constant_kw", 1.5),
+            ("zip_zq", 0.2),
+            ("zip_iq", 0.3),
+            ("zip_pq", 0.5),
+            ("zip_pf", 0.9),
+        ],
+        &[("power_schedule_source", "constant")],
+    );
+
+    let mut eq = registry
+        .create("Reactive Plug Loads", cfg.clone())
+        .expect("registry must create Reactive Plug Loads");
+    let mut env = env_with_zone_temp(21.0);
+    env.grid.voltage_pu = 0.0;
+    eq.init(&cfg, &env).expect("init must succeed");
+
+    let mut ports = ports_for(eq.as_ref());
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports)
+        .expect("step must succeed under outage");
+
+    let co = eq.core_output();
+    assert_core_output_contract(eq.descriptor(), co);
+    assert_eq!(
+        co.flows.reactive_power_kvar,
+        Some(0.0),
+        "reactive core output must remain present and zeroed when configured"
+    );
+}
+
 fn typed_alias_config<T: EquipmentTypedConfig>(name: &str, cfg: T) -> EquipmentConfig {
     let mut out =
         EquipmentConfig::from_typed(name.to_string(), T::equipment_type_name().to_string(), cfg);

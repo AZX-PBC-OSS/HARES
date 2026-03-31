@@ -15,11 +15,10 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 
 def assert_core_output_semantics(co):
-    assert co.electric_convention in {"consumption", "generation", "bidirectional"}
-
     if co.electric_kw is not None:
         assert isinstance(co.electric_kw, (int, float))
         assert math.isfinite(co.electric_kw)
+        assert co.electric_convention in {"consumption", "generation", "bidirectional"}
         if co.electric_convention == "consumption":
             assert co.electric_kw >= 0.0
         elif co.electric_convention == "generation":
@@ -27,8 +26,7 @@ def assert_core_output_semantics(co):
         else:
             assert co.electric_convention == "bidirectional"
     else:
-        # Python binding maps missing electric output to "consumption".
-        assert co.electric_convention == "consumption"
+        assert co.electric_convention is None
 
     if co.reactive_power_kvar is not None:
         assert isinstance(co.reactive_power_kvar, (int, float))

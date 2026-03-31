@@ -1,6 +1,6 @@
 //! State-space integration and ideal HVAC capacity solving.
 //!
-//! Contains `resolve_internal` (the per-timestep CN step with semi-implicit
+//! Contains `resolve_internal` (the per-timestep ZOH step with semi-implicit
 //! infiltration coupling) and the ideal capacity solving method:
 //! - `solve_ideal_capacity_for_target`: compute HVAC capacity needed to reach an explicit target
 //!
@@ -64,7 +64,7 @@ impl ThermalSolver {
     }
 
     /// Core per-timestep resolve: builds input vector, applies semi-implicit
-    /// infiltration coupling, runs CN step, and returns the domain update.
+    /// infiltration coupling, runs the base ZOH step, and returns the domain update.
     pub(super) fn resolve_internal(
         &mut self,
         ports: &PortSlots,
@@ -83,10 +83,16 @@ impl ThermalSolver {
             let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&inf.zone) else {
                 continue;
             };
-            let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
+            // Use the continuous sensible-gain coefficient when available
+            // (scaled by dt to match the discrete implicit diagonal term).
+            // Falling back to b_eff preserves behavior for from_discrete models.
+            let b_coeff = self
+                .model
+                .b_c()
+                .map(|b_c| self.dt_s * b_c[(state_idx, input_idx)])
+                .unwrap_or_else(|| self.model.b_eff()[(state_idx, input_idx)]);
             // Backward Euler for infiltration coupling: add full d to M diagonal
-            // and cancel the N-side subtraction via forcing. This is unconditionally
-            // stable and matches EnergyPlus's fully-implicit infiltration treatment.
+            // and cancel the N-side subtraction via forcing.
             let d = inf.h_inf_w_k * b_coeff;
             let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));

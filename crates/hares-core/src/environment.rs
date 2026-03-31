@@ -51,6 +51,10 @@ pub enum EnvironmentManagerError {
     InvalidTimezone(String),
     #[error("civil_timezone requires the 'dst' cargo feature")]
     DstNotEnabled,
+    #[error(
+        "attic zone {zone_idx} is missing volume_m3; provide attic geometry or explicit ventilation data"
+    )]
+    MissingAtticVolume { zone_idx: usize },
 }
 
 /// Produces a complete [`EnvironmentState`] at each timestep.
@@ -59,6 +63,7 @@ pub struct EnvironmentManager {
     weather: WeatherTimeSeries,
     schedule: ScheduleTimeSeries,
     weather_meta: WeatherMeta,
+    zone_types: Vec<hares_io::hpxml::ZoneType>,
     surfaces: Vec<SurfaceGeometry>,
     grid_override: Option<GridState>,
     zones: Vec<ZoneState>,
@@ -188,6 +193,11 @@ impl EnvironmentManager {
         } else {
             hares_physics::ground::DEFAULT_PHASE_DAY_NORTHERN
         };
+        let zone_types = building
+            .zones
+            .iter()
+            .map(|zone| zone.zone_type.clone())
+            .collect();
         let surfaces = build_surface_geometry(building);
         // Use the shifted offset (with midpoint_offset_secs applied) for initial conditions
         // to match OCHRE's behavior of reading weather at the period midpoint.
@@ -209,7 +219,7 @@ impl EnvironmentManager {
             initial_outdoor_temp_c,
             initial_ground_temp_c,
             start_hour,
-        );
+        )?;
 
         let num_surfaces = surfaces.len();
         let num_schedule_cols = schedule.columns.len();
@@ -218,6 +228,7 @@ impl EnvironmentManager {
             weather,
             schedule,
             weather_meta,
+            zone_types,
             surfaces,
             grid_override: None,
             zones,
@@ -363,6 +374,12 @@ impl EnvironmentManager {
     /// Mutably borrow the parsed schedule time series.
     pub fn schedule_mut(&mut self) -> &mut ScheduleTimeSeries {
         &mut self.schedule
+    }
+
+    /// Zone types aligned with [`EnvironmentState::zones`].
+    #[must_use]
+    pub fn zone_types(&self) -> &[hares_io::hpxml::ZoneType] {
+        &self.zone_types
     }
 
     /// Returns the schedule column index for the occupancy column, if present.
@@ -728,42 +745,51 @@ fn initial_zones(
     outdoor_temp_c: f64,
     ground_temp_c: f64,
     start_hour: usize,
-) -> Vec<ZoneState> {
+) -> Result<Vec<ZoneState>, EnvironmentManagerError> {
     let default_temp = determine_initial_indoor_temp_c(building, outdoor_temp_c, start_hour);
     if building.zones.is_empty() {
-        return vec![ZoneState {
+        return Ok(vec![ZoneState {
             id: ZoneId(1),
             temperature_c: default_temp,
             humidity_ratio: 0.008,
             relative_humidity: 0.45,
             wet_bulb_c: default_temp,
             volume_m3: DEFAULT_ZONE_VOLUME_M3,
-        }];
+        }]);
     }
 
     building
         .zones
         .iter()
         .enumerate()
-        .map(|(idx, zone)| {
-            use hares_io::hpxml::ZoneType;
-            // Conditioned zones start at the HVAC setpoint.
-            // Foundation zones start at ground temperature.
-            // Other unconditioned zones (attic, garage) start at outdoor temp.
-            let temp = match zone.zone_type {
-                ZoneType::Conditioned => default_temp,
-                ZoneType::Foundation => ground_temp_c,
-                _ => outdoor_temp_c,
-            };
-            ZoneState {
-                id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
-                temperature_c: temp,
-                humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: temp,
-                volume_m3: zone.volume_m3.unwrap_or(DEFAULT_ZONE_VOLUME_M3),
-            }
-        })
+        .map(
+            |(idx, zone)| -> Result<ZoneState, EnvironmentManagerError> {
+                use hares_io::hpxml::ZoneType;
+                // Conditioned zones start at the HVAC setpoint.
+                // Foundation zones start at ground temperature.
+                // Other unconditioned zones (attic, garage) start at outdoor temp.
+                let temp = match zone.zone_type {
+                    ZoneType::Conditioned => default_temp,
+                    ZoneType::Foundation => ground_temp_c,
+                    _ => outdoor_temp_c,
+                };
+                let volume_m3 = match (&zone.zone_type, zone.volume_m3) {
+                    (ZoneType::Attic, None) => {
+                        return Err(EnvironmentManagerError::MissingAtticVolume { zone_idx: idx });
+                    }
+                    (_, Some(volume_m3)) => volume_m3,
+                    (_, None) => DEFAULT_ZONE_VOLUME_M3,
+                };
+                Ok(ZoneState {
+                    id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
+                    temperature_c: temp,
+                    humidity_ratio: 0.008,
+                    relative_humidity: 0.45,
+                    wet_bulb_c: temp,
+                    volume_m3,
+                })
+            },
+        )
         .collect()
 }
 
@@ -968,6 +994,21 @@ mod tests {
         }
     }
 
+    fn building_with_missing_attic_volume() -> Building {
+        let mut b = building(Some(21.0));
+        b.zones.push(Zone {
+            zone_type: ZoneType::Attic,
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            attached_wall_ids: vec![],
+            duct_systems: vec![],
+            vented: true,
+            ventilation_ach: None,
+            ventilation_sla: None,
+        });
+        b
+    }
+
     fn clock() -> SimClock {
         let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00").expect("parse");
         SimClock::new(start, Duration::seconds(60), Duration::hours(2))
@@ -989,6 +1030,23 @@ mod tests {
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
         let env = manager.update(&sim_clock, &[]);
         assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn manager_errors_when_attic_volume_is_missing() {
+        let err = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building_with_missing_attic_volume(),
+            StdDuration::from_secs(60),
+            utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
+            None,
+        )
+        .expect_err("expected attic volume validation error");
+        assert!(matches!(
+            err,
+            EnvironmentManagerError::MissingAtticVolume { zone_idx: 1 }
+        ));
     }
 
     #[test]

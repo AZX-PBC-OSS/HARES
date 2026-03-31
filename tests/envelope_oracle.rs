@@ -461,14 +461,8 @@ mod tests {
         checks.push(Check::compare_mean(
             "Attic zone temperature",
             &OCHRE_TEMP_ATTIC,
-            col_mean(&hares, "Temperature - Attic (C)").or_else(|| {
-                // HARES may use different zone naming; try zone 2
-                hares
-                    .keys()
-                    .find(|k| k.contains("Attic") && k.contains("(C)"))
-                    .and_then(|k| col_mean(&hares, k))
-            }),
-            50.0, // wide — attic coupling is complex
+            col_mean(&hares, "Temperature - Attic (C)"),
+            25.0,
             "attic insulation, roof solar, infiltration",
         ));
 
@@ -744,7 +738,21 @@ mod tests {
         }
 
         eprintln!("\n  Total: {n_pass} pass, {n_fail} fail, {n_missing} missing");
-        eprintln!("  (Missing = HARES doesn't output this column yet at verbosity 6)");
+        eprintln!("  (Missing = required column absent from output schema)");
+
+        let attic_temp_check = checks
+            .iter()
+            .find(|check| check.name == "Attic zone temperature")
+            .expect("attic zone temperature check");
+        assert!(
+            attic_temp_check.hares.is_finite(),
+            "Attic temperature oracle missing from HARES output"
+        );
+        assert!(
+            attic_temp_check.passed,
+            "Attic temperature oracle failed: {}",
+            attic_temp_check.note
+        );
 
         // Hard assertions: zone temperatures must be physical
         if let Some((mn, mx)) = col_range(&hares, "Temperature - Indoor (C)") {
