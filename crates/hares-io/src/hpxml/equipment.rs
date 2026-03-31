@@ -156,7 +156,7 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use hares_physics::units as conv;
-    use hares_types::FuelType;
+    use hares_types::{FuelType, ScheduleSourceConfig};
 
     use super::{HpxmlError, nested_update, resolve_equipment};
     use crate::defaults::DefaultsStore;
@@ -1196,22 +1196,28 @@ mod tests {
             "Room Air Conditioner must not have duct_zone_type"
         );
 
-        // Room AC must get cooling setpoints injected.
-        assert!(
-            rac.parameters.contains_key("cooling_weekday_setpoints_c"),
-            "Room Air Conditioner must receive cooling setpoints"
-        );
-        let setpoints = rac
-            .parameters
-            .get("cooling_weekday_setpoints_c")
-            .and_then(Value::as_array)
-            .expect("setpoints array");
-        assert_eq!(setpoints.len(), 24, "setpoints must have 24 values");
-        let expected_c = conv::temperature_f_to_c(75.0);
-        assert!(
-            (setpoints[0].as_f64().unwrap() - expected_c).abs() < 1e-6,
-            "setpoint should be 75F converted to C"
-        );
+        // Room AC must receive cooling setpoints via typed setpoint source.
+        let cooling_source: ScheduleSourceConfig = serde_json::from_value(
+            rac.parameters
+                .get("cooling_setpoint_source")
+                .cloned()
+                .expect("Room Air Conditioner must receive cooling_setpoint_source"),
+        )
+        .expect("cooling_setpoint_source must deserialize");
+        match cooling_source {
+            ScheduleSourceConfig::DailyProfile {
+                weekday, weekend, ..
+            } => {
+                assert_eq!(weekday.len(), 24, "weekday setpoints must have 24 values");
+                assert_eq!(weekend.len(), 24, "weekend setpoints must have 24 values");
+                let expected_c = conv::temperature_f_to_c(75.0);
+                assert!(
+                    (weekday[0] - expected_c).abs() < 1e-6,
+                    "weekday setpoint should be 75F converted to C"
+                );
+            }
+            other => panic!("expected DailyProfile setpoint source, got {other:?}"),
+        }
     }
 
     /// Both `building.rs::parse_hvac_setpoints` and `resolve_hvac.rs::parse_hvac_setpoint_params`
@@ -1249,11 +1255,18 @@ mod tests {
             .find(|s| s.name == "Gas Furnace")
             .expect("Gas Furnace");
 
-        let spec_heating_wd = furnace
-            .parameters
-            .get("heating_weekday_setpoints_c")
-            .and_then(Value::as_array)
-            .expect("spec heating setpoints");
+        let spec_heating_source: ScheduleSourceConfig = serde_json::from_value(
+            furnace
+                .parameters
+                .get("heating_setpoint_source")
+                .cloned()
+                .expect("spec heating setpoint source"),
+        )
+        .expect("heating_setpoint_source must deserialize");
+        let spec_heating_wd = match spec_heating_source {
+            ScheduleSourceConfig::DailyProfile { weekday, .. } => weekday,
+            other => panic!("expected heating DailyProfile setpoint source, got {other:?}"),
+        };
 
         // Both paths should produce the same 24-element array.
         assert_eq!(bldg_heating_wd.len(), 24);
@@ -1263,10 +1276,9 @@ mod tests {
             .zip(spec_heating_wd.iter())
             .enumerate()
         {
-            let sv = spec_val.as_f64().unwrap();
             assert!(
-                (bldg_val - sv).abs() < 1e-10,
-                "heating setpoint mismatch at index {i}: building={bldg_val}, spec={sv}"
+                (bldg_val - spec_val).abs() < 1e-10,
+                "heating setpoint mismatch at index {i}: building={bldg_val}, spec={spec_val}"
             );
         }
 
