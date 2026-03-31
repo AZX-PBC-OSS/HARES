@@ -10,7 +10,7 @@ observe = ["hares-core/observe"]
 
 [lib]
 name = "_hares"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 hares-core = { workspace = true }
@@ -21,7 +21,7 @@ hares-io = { workspace = true }
 hares-physics = { workspace = true }
 hares-tariff = { workspace = true }
 hares-types = { workspace = true }
-pyo3 = { workspace = true, features = ["extension-module"] }
+pyo3 = { workspace = true, features = ["auto-initialize"] }
 numpy = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = "0.10"

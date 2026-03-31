@@ -58,6 +58,8 @@ pub struct HvacCurveVariant {
     pub eir_t: BiquadraticCurve,
     pub eir_ff: [f64; 3],
     pub eir_plr: [f64; 3],
+    pub ff_bounds: Option<(f64, f64)>,
+    pub plf_bounds: Option<(f64, f64)>,
 }
 
 /// Collection of HVAC biquadratic curve variants for one equipment type.
@@ -447,6 +449,8 @@ fn load_hvac_curve_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
             },
             eir_ff: v.eir_ff,
             eir_plr: v.eir_plr,
+            ff_bounds: None,
+            plf_bounds: None,
         })
         .collect();
     Ok(HvacCurveSet { variants })
@@ -494,6 +498,15 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
             .cloned()
             .unwrap_or_else(|| vec![0.0; n_variants])
     };
+    let get_row_with_default = |name: &str, default: f64| -> Vec<f64> {
+        data.get(name)
+            .cloned()
+            .unwrap_or_else(|| vec![default; n_variants])
+    };
+    let ff_min_row = data.get("min_ff").cloned();
+    let ff_max_row = data.get("max_ff").cloned();
+    let plf_min_row = data.get("min_plf").cloned();
+    let plf_max_row = data.get("max_plf").cloned();
 
     let variants: Vec<HvacCurveVariant> = (0..n_variants)
         .map(|i| {
@@ -513,10 +526,10 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                 get_row("e_cap_t")[i],
                 get_row("f_cap_t")[i],
             ];
-            let twb_min = get_row("min_Twb")[i];
-            let twb_max = get_row("max_Twb")[i];
-            let tdb_min = get_row("min_Tdb")[i];
-            let tdb_max = get_row("max_Tdb")[i];
+            let twb_min = get_row_with_default("min_Twb", -100.0)[i];
+            let twb_max = get_row_with_default("max_Twb", 100.0)[i];
+            let tdb_min = get_row_with_default("min_Tdb", -100.0)[i];
+            let tdb_max = get_row_with_default("max_Tdb", 100.0)[i];
 
             HvacCurveVariant {
                 name: variant_names[i].clone(),
@@ -545,6 +558,14 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
                     get_row("b_eir_plr")[i],
                     get_row("c_eir_plr")[i],
                 ],
+                ff_bounds: match (&ff_min_row, &ff_max_row) {
+                    (Some(mins), Some(maxs)) => Some((mins[i], maxs[i])),
+                    _ => None,
+                },
+                plf_bounds: match (&plf_min_row, &plf_max_row) {
+                    (Some(mins), Some(maxs)) => Some((mins[i], maxs[i])),
+                    _ => None,
+                },
             }
         })
         .collect();
@@ -874,6 +895,47 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
         assert_eq!(row.capacity_ratios, vec![0.72, 1.0]);
         assert_eq!(row.cops, vec![4.33748, 3.99889]);
         assert_eq!(row.shrs, vec![0.71597, 0.72878]);
+    }
+
+    #[test]
+    fn hvac_csv_missing_temperature_bounds_defaults_to_plus_minus_100_and_reads_plf_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("mshp.csv");
+        std::fs::write(
+            &csv_path,
+            "Name,Variable_1\n\
+a_eir_t,0.1\n\
+b_eir_t,0.0\n\
+c_eir_t,0.0\n\
+d_eir_t,0.0\n\
+e_eir_t,0.0\n\
+f_eir_t,0.0\n\
+a_eir_ff,1.0\n\
+b_eir_ff,0.0\n\
+c_eir_ff,0.0\n\
+a_eir_plr,1.0\n\
+b_eir_plr,0.0\n\
+c_eir_plr,0.0\n\
+a_cap_t,1.0\n\
+b_cap_t,0.0\n\
+c_cap_t,0.0\n\
+d_cap_t,0.0\n\
+e_cap_t,0.0\n\
+f_cap_t,0.0\n\
+a_cap_ff,1.0\n\
+b_cap_ff,0.0\n\
+c_cap_ff,0.0\n\
+min_plf,0.48\n\
+max_plf,1.0\n",
+        )
+        .unwrap();
+
+        let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
+        let v = &set.variants[0];
+        assert_eq!(v.cap_t.x1_bounds, (-100.0, 100.0));
+        assert_eq!(v.cap_t.x2_bounds, (-100.0, 100.0));
+        assert_eq!(v.plf_bounds, Some((0.48, 1.0)));
+        assert_eq!(v.ff_bounds, None);
     }
 
     #[test]

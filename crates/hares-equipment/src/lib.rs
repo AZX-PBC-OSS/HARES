@@ -103,20 +103,7 @@ pub trait Equipment: Send + Sync {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError>;
     fn telemetry(&self) -> &Telemetry;
-    fn core_output(&self) -> &CoreOutput {
-        static DEFAULT: CoreOutput = CoreOutput {
-            flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: None,
-                fuel_w: None,
-            },
-            state: CoreState {
-                operating_mode: None,
-                soc: None,
-            },
-        };
-        &DEFAULT
-    }
+    fn core_output(&self) -> &CoreOutput;
 
     fn save_state(&self) -> Vec<u8>;
     fn load_state(&mut self, state: &[u8]) -> Result<()>;

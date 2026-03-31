@@ -13,6 +13,7 @@ from ._hares import Telemetry
 
 # Equipment types
 from ._hares import Battery
+from ._hares import CoreOutput
 from ._hares import PV
 from ._hares import PvSoilingConfig
 from ._hares import EV
@@ -109,6 +110,7 @@ __all__ = [
     "Telemetry",
     # Equipment
     "Battery",
+    "CoreOutput",
     "PV",
     "PvSoilingConfig",
     "EV",

@@ -1,13 +1,17 @@
 //! HVAC equipment resolution from HPXML into canonical equipment specs.
+// Invariant: HVAC typed configs are built from typed/defaults-derived fields
+// (including curve metadata), not from ad-hoc string-key translation logic.
 
 use serde_json::{Map, Value, json};
 
 use hares_equipment::EquipmentConfig;
-use hares_equipment::hvac::cooling_config::{CentralAirConditionerConfig, RoomAcConfig};
+use hares_equipment::hvac::cooling_config::{
+    CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
+};
 use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
 use hares_equipment::hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
-    GasBoilerConfig, GasFurnaceConfig,
+    GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
 };
 use hares_types::FuelType;
 
@@ -22,6 +26,68 @@ use crate::defaults::DefaultsStore;
 const SEER2_TO_SEER_FACTOR: f64 = 1.0 / 0.95;
 const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.95;
 
+#[derive(Debug, Clone, Default)]
+struct DuctDseParams {
+    zone_id: Option<u16>,
+    zone_type: Option<String>,
+    house_volume_m3: f64,
+    supply_leakage_frac: f64,
+    supply_area_m2: f64,
+    supply_r_m2_k_w: f64,
+    return_leakage_frac: f64,
+    return_area_m2: f64,
+    return_r_m2_k_w: f64,
+    latitude_deg: f64,
+    longitude_deg: f64,
+}
+
+impl DuctDseParams {
+    fn insert_into_map(&self, params: &mut Map<String, Value>) {
+        if self.zone_id.is_none() || self.zone_type.is_none() {
+            return;
+        }
+        if let Some(zone_id) = self.zone_id {
+            params.insert("duct_zone_id".to_string(), json!(zone_id));
+        }
+        if let Some(zone_type) = &self.zone_type {
+            params.insert(
+                "duct_zone_type".to_string(),
+                Value::String(zone_type.clone()),
+            );
+        }
+        params.insert(
+            "duct_house_volume_m3".to_string(),
+            json!(self.house_volume_m3),
+        );
+        params.insert(
+            "duct_supply_leakage_frac".to_string(),
+            json!(self.supply_leakage_frac),
+        );
+        params.insert(
+            "duct_supply_area_m2".to_string(),
+            json!(self.supply_area_m2),
+        );
+        params.insert(
+            "duct_supply_r_m2_k_w".to_string(),
+            json!(self.supply_r_m2_k_w),
+        );
+        params.insert(
+            "duct_return_leakage_frac".to_string(),
+            json!(self.return_leakage_frac),
+        );
+        params.insert(
+            "duct_return_area_m2".to_string(),
+            json!(self.return_area_m2),
+        );
+        params.insert(
+            "duct_return_r_m2_k_w".to_string(),
+            json!(self.return_r_m2_k_w),
+        );
+        params.insert("duct_latitude_deg".to_string(), json!(self.latitude_deg));
+        params.insert("duct_longitude_deg".to_string(), json!(self.longitude_deg));
+    }
+}
+
 /// Extract raw duct parameters for ASHRAE 152 DSE calculation.
 ///
 /// Scans `building.zones` for non-conditioned duct systems and passes through
@@ -30,10 +96,9 @@ const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.95;
 /// when capacity and fan flow are known.
 ///
 /// Falls back to `AnnualDistributionSystemEfficiency` from HPXML if present.
-fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
+fn compute_duct_dse_params(building: &Building) -> DuctDseParams {
     use super::building::DuctType;
 
-    let mut params = Map::new();
     let house_volume_m3 = building.conditioned_volume_m3.unwrap_or(400.0);
 
     // Check for direct DSE override from HPXML first.
@@ -100,13 +165,11 @@ fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
     }
 
     if supply_count == 0 && return_count == 0 {
-        return params;
+        return DuctDseParams::default();
     }
 
     let zone_idx = duct_zone_idx.unwrap_or(0);
     let zone_id = (zone_idx as u16) + 1;
-    params.insert("duct_zone_id".to_string(), json!(zone_id));
-    params.insert("duct_house_volume_m3".to_string(), json!(house_volume_m3));
     let supply_r_m2_k_w = if supply_area_m2 > 0.0 {
         supply_r_area_product / supply_area_m2
     } else {
@@ -117,35 +180,22 @@ fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
     } else {
         0.0
     };
-    params.insert(
-        "duct_supply_leakage_frac".to_string(),
-        json!(supply_leakage),
-    );
-    params.insert("duct_supply_area_m2".to_string(), json!(supply_area_m2));
-    params.insert("duct_supply_r_m2_k_w".to_string(), json!(supply_r_m2_k_w));
-    params.insert(
-        "duct_return_leakage_frac".to_string(),
-        json!(return_leakage),
-    );
-    params.insert("duct_return_area_m2".to_string(), json!(return_area_m2));
-    params.insert("duct_return_r_m2_k_w".to_string(), json!(return_r_m2_k_w));
-    params.insert(
-        "duct_latitude_deg".to_string(),
-        json!(building.site.latitude_deg),
-    );
-    params.insert(
-        "duct_longitude_deg".to_string(),
-        json!(building.site.longitude_deg),
-    );
-
-    if let Some(zt) = duct_zone_type_str {
-        params.insert("duct_zone_type".to_string(), Value::String(zt));
+    DuctDseParams {
+        zone_id: Some(zone_id),
+        zone_type: duct_zone_type_str,
+        house_volume_m3,
+        supply_leakage_frac: supply_leakage,
+        supply_area_m2,
+        supply_r_m2_k_w,
+        return_leakage_frac: return_leakage,
+        return_area_m2,
+        return_r_m2_k_w,
+        latitude_deg: building.site.latitude_deg.unwrap_or(40.0),
+        longitude_deg: building.site.longitude_deg.unwrap_or(-100.0),
     }
-
-    params
 }
 
-/// Compute a `DuctConfig` from the duct parameter map produced by
+/// Compute a `DuctConfig` from the duct parameter bundle produced by
 /// `compute_duct_dse_params`.
 ///
 /// DSE is pre-computed here using ASHRAE 152 so that typed-config equipment
@@ -155,7 +205,7 @@ fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
 /// Returns `DuctConfig { dse_heat: None, dse_cool: None }` when no duct zone
 /// type was recorded (i.e., ducts are in conditioned space or absent).
 fn compute_duct_config(
-    duct_params: &Map<String, Value>,
+    duct_params: &DuctDseParams,
     capacity_w: f64,
     is_heating: bool,
     n_speeds: u8,
@@ -164,7 +214,7 @@ fn compute_duct_config(
     use hares_physics::ashrae152::{Ashrae152ZoneType, DuctDseInput, calculate_dse};
     use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
 
-    let Some(zone_type_str) = duct_params.get("duct_zone_type").and_then(Value::as_str) else {
+    let Some(zone_type_str) = duct_params.zone_type.as_deref() else {
         return DuctConfig::default();
     };
 
@@ -188,44 +238,15 @@ fn compute_duct_config(
         _ => return DuctConfig::default(),
     };
 
-    let lat = duct_params
-        .get("duct_latitude_deg")
-        .and_then(Value::as_f64)
-        .unwrap_or(40.0);
-    let lon = duct_params
-        .get("duct_longitude_deg")
-        .and_then(Value::as_f64)
-        .unwrap_or(-100.0);
-    let house_vol = duct_params
-        .get("duct_house_volume_m3")
-        .and_then(Value::as_f64)
-        .unwrap_or(400.0);
-    let supply_leak = duct_params
-        .get("duct_supply_leakage_frac")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    let supply_area = duct_params
-        .get("duct_supply_area_m2")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let supply_r = duct_params
-        .get("duct_supply_r_m2_k_w")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let return_leak = duct_params
-        .get("duct_return_leakage_frac")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    let return_area = duct_params
-        .get("duct_return_area_m2")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let return_r = duct_params
-        .get("duct_return_r_m2_k_w")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
+    let lat = duct_params.latitude_deg;
+    let lon = duct_params.longitude_deg;
+    let house_vol = duct_params.house_volume_m3;
+    let supply_leak = duct_params.supply_leakage_frac.clamp(0.0, 1.0);
+    let supply_area = duct_params.supply_area_m2;
+    let supply_r = duct_params.supply_r_m2_k_w;
+    let return_leak = duct_params.return_leakage_frac.clamp(0.0, 1.0);
+    let return_area = duct_params.return_area_m2;
+    let return_r = duct_params.return_r_m2_k_w;
 
     if capacity_w <= 0.0 {
         return DuctConfig::default();
@@ -372,13 +393,38 @@ fn fan_power_from_params(params: &Map<String, Value>) -> Option<f64> {
     params.get("fan_power_w").and_then(Value::as_f64)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct CurveBounds {
+    x1_min: Option<f64>,
+    x1_max: Option<f64>,
+    x2_min: Option<f64>,
+    x2_max: Option<f64>,
+    ff_min: Option<f64>,
+    ff_max: Option<f64>,
+    plf_min: Option<f64>,
+    plf_max: Option<f64>,
+}
+
+fn extract_curve_bounds(params: &Map<String, Value>) -> CurveBounds {
+    CurveBounds {
+        x1_min: params.get("biquadratic_x1_min").and_then(Value::as_f64),
+        x1_max: params.get("biquadratic_x1_max").and_then(Value::as_f64),
+        x2_min: params.get("biquadratic_x2_min").and_then(Value::as_f64),
+        x2_max: params.get("biquadratic_x2_max").and_then(Value::as_f64),
+        ff_min: params.get("ff_min").and_then(Value::as_f64),
+        ff_max: params.get("ff_max").and_then(Value::as_f64),
+        plf_min: params.get("plf_min").and_then(Value::as_f64),
+        plf_max: params.get("plf_max").and_then(Value::as_f64),
+    }
+}
+
 /// Build a `GasFurnaceConfig` typed config from the resolved params map.
 /// Returns `None` when required fields are missing (capacity_w).
 /// AFUE defaults to 0.80 when not specified in the HPXML.
 fn try_build_gas_furnace_config(
     name: &str,
     params: &Map<String, Value>,
-    duct_params: &Map<String, Value>,
+    duct_params: &DuctDseParams,
 ) -> Option<EquipmentConfig> {
     let afue = afue_from_params(params).unwrap_or(0.80);
     let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
@@ -407,7 +453,7 @@ fn try_build_gas_furnace_config(
 fn try_build_electric_furnace_config(
     name: &str,
     params: &Map<String, Value>,
-    duct_params: &Map<String, Value>,
+    duct_params: &DuctDseParams,
 ) -> Option<EquipmentConfig> {
     let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
     let heating_efficiency = resistance_efficiency_from_params(params);
@@ -529,11 +575,40 @@ fn try_build_electric_baseboard_config(
     ))
 }
 
+/// Build an `IdealHvacConfig` typed config.
+fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+    let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
+    let cooling_capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64);
+    let heating_eir = params
+        .get("heating_efficiency")
+        .and_then(Value::as_f64)
+        .map(|v| 1.0 / v.max(1e-6));
+    let cooling_eir = seer_from_params(params).map(|seer| 3.412_141_633_f64 / seer.max(1e-6));
+    let fraction = params.get("fraction_load_served").and_then(Value::as_f64);
+
+    let cfg = IdealHvacConfig {
+        equipment_id: None,
+        zone_id: None,
+        heating_capacity_w,
+        cooling_capacity_w,
+        heating_eir,
+        cooling_eir,
+        shr: params.get("shr").and_then(Value::as_f64),
+        fraction_heating_load_served: fraction,
+        fraction_cooling_load_served: fraction,
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Ideal HVAC".to_string(),
+        cfg,
+    ))
+}
+
 /// Build a `CentralAirConditionerConfig` typed config.
 fn try_build_central_ac_config(
     name: &str,
     params: &Map<String, Value>,
-    duct_params: &Map<String, Value>,
+    duct_params: &DuctDseParams,
 ) -> Option<EquipmentConfig> {
     let seer = seer_from_params(params)?;
     let capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64)?;
@@ -547,6 +622,7 @@ fn try_build_central_ac_config(
     let startup_cd = params.get("startup_cd").and_then(Value::as_f64);
     let fraction_load_served = params.get("fraction_load_served").and_then(Value::as_f64);
     let duct = compute_duct_config(duct_params, capacity_w, false, n_speeds, false);
+    let curve_bounds = extract_curve_bounds(params);
 
     let cfg = CentralAirConditionerConfig {
         equipment_id: None,
@@ -564,14 +640,14 @@ fn try_build_central_ac_config(
         duct,
         system_type,
         startup_cd,
-        biquadratic_x1_min: None,
-        biquadratic_x1_max: None,
-        biquadratic_x2_min: None,
-        biquadratic_x2_max: None,
-        ff_min: None,
-        ff_max: None,
-        plf_min: None,
-        plf_max: None,
+        biquadratic_x1_min: curve_bounds.x1_min,
+        biquadratic_x1_max: curve_bounds.x1_max,
+        biquadratic_x2_min: curve_bounds.x2_min,
+        biquadratic_x2_max: curve_bounds.x2_max,
+        ff_min: curve_bounds.ff_min,
+        ff_max: curve_bounds.ff_max,
+        plf_min: curve_bounds.plf_min,
+        plf_max: curve_bounds.plf_max,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -588,19 +664,20 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     // SEER as EER would overestimate efficiency by ~10–15%.
     let eer = eer_from_params(params)?;
 
+    let curve_bounds = extract_curve_bounds(params);
     let cfg = RoomAcConfig {
         equipment_id: None,
         zone_id: None,
         capacity_w,
         eer,
-        biquadratic_x1_min: None,
-        biquadratic_x1_max: None,
-        biquadratic_x2_min: None,
-        biquadratic_x2_max: None,
-        ff_min: None,
-        ff_max: None,
-        plf_min: None,
-        plf_max: None,
+        biquadratic_x1_min: curve_bounds.x1_min,
+        biquadratic_x1_max: curve_bounds.x1_max,
+        biquadratic_x2_min: curve_bounds.x2_min,
+        biquadratic_x2_max: curve_bounds.x2_max,
+        ff_min: curve_bounds.ff_min,
+        ff_max: curve_bounds.ff_max,
+        plf_min: curve_bounds.plf_min,
+        plf_max: curve_bounds.plf_max,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -609,11 +686,36 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     ))
 }
 
+/// Build a `DehumidifierConfig` typed config.
+fn try_build_dehumidifier_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let cfg = DehumidifierConfig {
+        equipment_id: None,
+        zone_id: None,
+        capacity_liters_per_day: params
+            .get("capacity_liters_per_day")
+            .and_then(Value::as_f64),
+        energy_factor: params.get("energy_factor").and_then(Value::as_f64),
+        integrated_energy_factor: params
+            .get("integrated_energy_factor")
+            .and_then(Value::as_f64),
+        fraction_served: params.get("fraction_served").and_then(Value::as_f64),
+        target_rh: params.get("target_rh").and_then(Value::as_f64),
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Dehumidifier".to_string(),
+        cfg,
+    ))
+}
+
 /// Build a `HeatPumpHeaterConfig` typed config from combined heat-pump params.
 fn try_build_heat_pump_heater_config(
     name: &str,
     params: &Map<String, Value>,
-    duct_params: &Map<String, Value>,
+    duct_params: &DuctDseParams,
     is_mini_split: bool,
 ) -> Option<EquipmentConfig> {
     let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
@@ -639,6 +741,7 @@ fn try_build_heat_pump_heater_config(
     let fraction_cooling_load_served = params
         .get("fraction_cooling_load_served")
         .and_then(Value::as_f64);
+    let curve_bounds = extract_curve_bounds(params);
 
     let ref_cap = heating_capacity_w.or(cooling_capacity_w).unwrap_or(0.0);
     let duct = if is_mini_split {
@@ -676,14 +779,14 @@ fn try_build_heat_pump_heater_config(
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
         duct,
-        biquadratic_x1_min: None,
-        biquadratic_x1_max: None,
-        biquadratic_x2_min: None,
-        biquadratic_x2_max: None,
-        ff_min: None,
-        ff_max: None,
-        plf_min: None,
-        plf_max: None,
+        biquadratic_x1_min: curve_bounds.x1_min,
+        biquadratic_x1_max: curve_bounds.x1_max,
+        biquadratic_x2_min: curve_bounds.x2_min,
+        biquadratic_x2_max: curve_bounds.x2_max,
+        ff_min: curve_bounds.ff_min,
+        ff_max: curve_bounds.ff_max,
+        plf_min: curve_bounds.plf_min,
+        plf_max: curve_bounds.plf_max,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -696,7 +799,7 @@ fn try_build_heat_pump_heater_config(
 fn try_build_heat_pump_cooler_config(
     name: &str,
     params: &Map<String, Value>,
-    duct_params: &Map<String, Value>,
+    duct_params: &DuctDseParams,
     is_mini_split: bool,
 ) -> Option<EquipmentConfig> {
     let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
@@ -722,6 +825,7 @@ fn try_build_heat_pump_cooler_config(
     let fraction_cooling_load_served = params
         .get("fraction_cooling_load_served")
         .and_then(Value::as_f64);
+    let curve_bounds = extract_curve_bounds(params);
 
     let ref_cap = cooling_capacity_w.or(heating_capacity_w).unwrap_or(0.0);
     let duct = if is_mini_split {
@@ -759,14 +863,14 @@ fn try_build_heat_pump_cooler_config(
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
         duct,
-        biquadratic_x1_min: None,
-        biquadratic_x1_max: None,
-        biquadratic_x2_min: None,
-        biquadratic_x2_max: None,
-        ff_min: None,
-        ff_max: None,
-        plf_min: None,
-        plf_max: None,
+        biquadratic_x1_min: curve_bounds.x1_min,
+        biquadratic_x1_max: curve_bounds.x1_max,
+        biquadratic_x2_min: curve_bounds.x2_min,
+        biquadratic_x2_max: curve_bounds.x2_max,
+        ff_min: curve_bounds.ff_min,
+        ff_max: curve_bounds.ff_max,
+        plf_min: curve_bounds.plf_min,
+        plf_max: curve_bounds.plf_max,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -915,7 +1019,16 @@ pub(super) fn resolve_hvac(
             "HeatingCapacity",
             "heating_capacity_w",
         );
+        insert_capacity_w(
+            &mut params,
+            heating,
+            "CoolingCapacity",
+            "cooling_capacity_w",
+        );
         insert_annual_efficiency(&mut params, heating, true);
+        if name == "Ideal HVAC" {
+            insert_annual_efficiency(&mut params, heating, false);
+        }
         params.insert("system_type".to_string(), Value::String(system_type));
 
         if let Some(frac) = child_f64(heating, "FractionHeatLoadServed")
@@ -940,9 +1053,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
-        for (k, v) in &duct_params {
-            params.insert(k.clone(), v.clone());
-        }
+        duct_params.insert_into_map(&mut params);
         for (k, v) in &basement_params {
             params.insert(k.clone(), v.clone());
         }
@@ -950,8 +1061,6 @@ pub(super) fn resolve_hvac(
         // not for furnaces, boilers, or baseboard.
         if matches!(name.as_str(), "ASHP Heater" | "MSHP Heater") {
             insert_startup_degradation(&mut params, &name, true);
-        } else {
-            params.insert("startup_cd".to_string(), json!(0.0));
         }
         let typed_config = match name.as_str() {
             "Gas Furnace" => try_build_gas_furnace_config(&name, &params, &duct_params),
@@ -959,6 +1068,7 @@ pub(super) fn resolve_hvac(
             "Gas Boiler" => try_build_gas_boiler_config(&name, &params),
             "Electric Boiler" => try_build_electric_boiler_config(&name, &params),
             "Electric Baseboard" => try_build_electric_baseboard_config(&name, &params),
+            "Ideal HVAC" => try_build_ideal_hvac_config(&name, &params),
             _ => None,
         };
         let mut spec = build_spec(name, fuel, params, defaults);
@@ -1013,9 +1123,7 @@ pub(super) fn resolve_hvac(
             params.insert(k.clone(), v.clone());
         }
         if name != "Room AC" {
-            for (k, v) in &duct_params {
-                params.insert(k.clone(), v.clone());
-            }
+            duct_params.insert_into_map(&mut params);
         }
         let typed_config = match name.as_str() {
             "Air Conditioner" => try_build_central_ac_config(&name, &params, &duct_params),
@@ -1140,9 +1248,7 @@ pub(super) fn resolve_hvac(
             params.insert(k.clone(), v.clone());
         }
         if heat_pump_type != "mini-split" {
-            for (k, v) in &duct_params {
-                params.insert(k.clone(), v.clone());
-            }
+            duct_params.insert_into_map(&mut params);
         }
 
         if let Some((heater_name, cooler_name)) = split {
@@ -1188,6 +1294,39 @@ pub(super) fn resolve_hvac(
             cooler_spec.typed_config = cooler_typed;
             specs.push(cooler_spec);
         }
+    }
+
+    for dehumidifier in descendants_named(hvac, "Dehumidifier") {
+        let mut params = Map::new();
+        if let Some(cap_pints_day) = child_f64(dehumidifier, "Capacity") {
+            params.insert(
+                "capacity_liters_per_day".to_string(),
+                json!(cap_pints_day * 0.473_176_473),
+            );
+        }
+        if let Some(ef) = child_f64(dehumidifier, "EnergyFactor") {
+            params.insert("energy_factor".to_string(), json!(ef));
+        }
+        if let Some(ief) = child_f64(dehumidifier, "IntegratedEnergyFactor") {
+            params.insert("integrated_energy_factor".to_string(), json!(ief));
+        }
+        if let Some(frac) = child_f64(dehumidifier, "FractionDehumidificationLoadServed")
+            .or_else(|| child_f64(dehumidifier, "FractionLoadServed"))
+        {
+            params.insert("fraction_served".to_string(), json!(frac));
+        }
+        if let Some(setpoint) = child_f64(dehumidifier, "DehumidistatSetpoint") {
+            params.insert("target_rh".to_string(), json!(setpoint));
+        }
+        let typed_config = try_build_dehumidifier_config("Dehumidifier", &params);
+        let mut spec = build_spec(
+            "Dehumidifier".to_string(),
+            FuelType::Electric,
+            params,
+            defaults,
+        );
+        spec.typed_config = typed_config;
+        specs.push(spec);
     }
 
     inject_setpoint_profiles(building, specs);
@@ -1593,15 +1732,27 @@ fn apply_multispeed_parameters(
                 Value::String(coeff_text),
             );
         }
-        if let Some((cap, eir)) = select_primary_curve_pair(curve_set, n_speeds) {
+        if let Some(primary) = select_primary_curve_pair(curve_set, n_speeds) {
             params.insert(
                 "capacity_biquadratic_coeffs".to_string(),
-                Value::String(format!("{:?}", cap)),
+                Value::String(format!("{:?}", primary.cap_coeffs)),
             );
             params.insert(
                 "eir_biquadratic_coeffs".to_string(),
-                Value::String(format!("{:?}", eir)),
+                Value::String(format!("{:?}", primary.eir_coeffs)),
             );
+            params.insert("biquadratic_x1_min".to_string(), json!(primary.x1_bounds.0));
+            params.insert("biquadratic_x1_max".to_string(), json!(primary.x1_bounds.1));
+            params.insert("biquadratic_x2_min".to_string(), json!(primary.x2_bounds.0));
+            params.insert("biquadratic_x2_max".to_string(), json!(primary.x2_bounds.1));
+            if let Some((ff_min, ff_max)) = primary.ff_bounds {
+                params.insert("ff_min".to_string(), json!(ff_min));
+                params.insert("ff_max".to_string(), json!(ff_max));
+            }
+            if let Some((plf_min, plf_max)) = primary.plf_bounds {
+                params.insert("plf_min".to_string(), json!(plf_min));
+                params.insert("plf_max".to_string(), json!(plf_max));
+            }
         }
     }
 }
@@ -1622,13 +1773,29 @@ fn serialize_stage_plr_coefficients(
     Some(format!("[{}]", coeffs.join(", ")))
 }
 
+struct PrimaryCurvePair {
+    cap_coeffs: [f64; 6],
+    eir_coeffs: [f64; 6],
+    x1_bounds: (f64, f64),
+    x2_bounds: (f64, f64),
+    ff_bounds: Option<(f64, f64)>,
+    plf_bounds: Option<(f64, f64)>,
+}
+
 fn select_primary_curve_pair(
     curve_set: &crate::defaults::HvacCurveSet,
     n_speeds: usize,
-) -> Option<([f64; 6], [f64; 6])> {
+) -> Option<PrimaryCurvePair> {
     let variants = select_variants_for_speed_count(curve_set, n_speeds);
     let selected = variants.last().copied()?;
-    Some((selected.cap_t.coeffs, selected.eir_t.coeffs))
+    Some(PrimaryCurvePair {
+        cap_coeffs: selected.cap_t.coeffs,
+        eir_coeffs: selected.eir_t.coeffs,
+        x1_bounds: selected.cap_t.x1_bounds,
+        x2_bounds: selected.cap_t.x2_bounds,
+        ff_bounds: selected.ff_bounds,
+        plf_bounds: selected.plf_bounds,
+    })
 }
 
 fn select_variants_for_speed_count(
@@ -1767,7 +1934,7 @@ mod tests {
             duct(DuctType::Supply, 10.0, 4.0),
         ])]);
         let params = compute_duct_dse_params(&building);
-        let supply_r = params["duct_supply_r_m2_k_w"].as_f64().unwrap();
+        let supply_r = params.supply_r_m2_k_w;
         assert!(
             (supply_r - 6.0).abs() < 1e-9,
             "expected area-weighted average R-6, got {supply_r}"
@@ -1783,7 +1950,7 @@ mod tests {
             duct(DuctType::Return, 10.0, 9.0),
         ])]);
         let params = compute_duct_dse_params(&building);
-        let return_r = params["duct_return_r_m2_k_w"].as_f64().unwrap();
+        let return_r = params.return_r_m2_k_w;
         assert!(
             (return_r - 5.0).abs() < 1e-9,
             "expected area-weighted average R-5, got {return_r}"
@@ -1841,6 +2008,35 @@ mod tests {
         assert!(
             (calc_startup_degradation(false, "central ac", 22.0, 4) - 0.0).abs() < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn select_primary_curve_pair_carries_bounds_and_ff_plf_limits() {
+        let curve_set = crate::defaults::HvacCurveSet {
+            variants: vec![crate::defaults::HvacCurveVariant {
+                name: "Variable_1".to_string(),
+                cap_t: hares_physics::biquadratic::BiquadraticCurve {
+                    coeffs: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    x1_bounds: (12.0, 24.0),
+                    x2_bounds: (18.0, 50.0),
+                },
+                cap_ff: [1.0, 0.0, 0.0],
+                eir_t: hares_physics::biquadratic::BiquadraticCurve {
+                    coeffs: [1.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    x1_bounds: (12.0, 24.0),
+                    x2_bounds: (18.0, 50.0),
+                },
+                eir_ff: [1.0, 0.0, 0.0],
+                eir_plr: [1.0, 0.0, 0.0],
+                ff_bounds: Some((0.4, 1.0)),
+                plf_bounds: Some((0.5, 1.0)),
+            }],
+        };
+        let selected = select_primary_curve_pair(&curve_set, 4).expect("variable speed pair");
+        assert_eq!(selected.x1_bounds, (12.0, 24.0));
+        assert_eq!(selected.x2_bounds, (18.0, 50.0));
+        assert_eq!(selected.ff_bounds, Some((0.4, 1.0)));
+        assert_eq!(selected.plf_bounds, Some((0.5, 1.0)));
     }
 
     // -----------------------------------------------------------------------
@@ -2196,7 +2392,7 @@ mod tests {
     #[test]
     fn gas_furnace_builder_produces_typed_config_with_correct_afue() {
         let params = minimal_furnace_params(0.96, 10_000.0);
-        let duct_params = Map::new();
+        let duct_params = DuctDseParams::default();
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
             .expect("gas furnace builder must succeed with valid params");
         assert!(ec.is_typed(), "EquipmentConfig must be typed");
@@ -2213,7 +2409,7 @@ mod tests {
     #[test]
     fn central_ac_builder_produces_typed_config_with_correct_seer() {
         let params = minimal_central_ac_params(16.0, 12_000.0);
-        let duct_params = Map::new();
+        let duct_params = DuctDseParams::default();
         let ec = try_build_central_ac_config("Air Conditioner", &params, &duct_params)
             .expect("central AC builder must succeed with valid params");
         assert!(ec.is_typed(), "EquipmentConfig must be typed");
@@ -2231,6 +2427,33 @@ mod tests {
             cfg.seer
         );
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn central_ac_builder_propagates_curve_bounds() {
+        let mut params = minimal_central_ac_params(16.0, 12_000.0);
+        params.insert("biquadratic_x1_min".to_string(), json!(12.0));
+        params.insert("biquadratic_x1_max".to_string(), json!(24.0));
+        params.insert("biquadratic_x2_min".to_string(), json!(18.0));
+        params.insert("biquadratic_x2_max".to_string(), json!(50.0));
+        params.insert("ff_min".to_string(), json!(0.5));
+        params.insert("ff_max".to_string(), json!(1.0));
+        params.insert("plf_min".to_string(), json!(0.6));
+        params.insert("plf_max".to_string(), json!(1.0));
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
+            .expect("central AC builder must succeed");
+        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+        let cfg: CentralAirConditionerConfig = ec
+            .typed()
+            .expect("must deserialize to CentralAirConditionerConfig");
+        assert_eq!(cfg.biquadratic_x1_min, Some(12.0));
+        assert_eq!(cfg.biquadratic_x1_max, Some(24.0));
+        assert_eq!(cfg.biquadratic_x2_min, Some(18.0));
+        assert_eq!(cfg.biquadratic_x2_max, Some(50.0));
+        assert_eq!(cfg.ff_min, Some(0.5));
+        assert_eq!(cfg.ff_max, Some(1.0));
+        assert_eq!(cfg.plf_min, Some(0.6));
+        assert_eq!(cfg.plf_max, Some(1.0));
     }
 
     #[test]
@@ -2265,8 +2488,13 @@ mod tests {
         params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
         params.insert("efficiency_seer".to_string(), json!(18.0));
         params.insert("number_of_speeds".to_string(), json!(1));
-        let ec = try_build_heat_pump_cooler_config("MSHP Cooler", &params, &Map::new(), true)
-            .expect("MSHP cooler typed config should be built");
+        let ec = try_build_heat_pump_cooler_config(
+            "MSHP Cooler",
+            &params,
+            &DuctDseParams::default(),
+            true,
+        )
+        .expect("MSHP cooler typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
         let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
@@ -2282,13 +2510,55 @@ mod tests {
         params.insert("number_of_speeds".to_string(), json!(2));
         params.insert("shr_0".to_string(), json!(0.81));
         params.insert("shr_1".to_string(), json!(0.74));
-        let ec = try_build_heat_pump_cooler_config("ASHP Cooler", &params, &Map::new(), false)
-            .expect("ASHP cooler typed config should be built");
+        let ec = try_build_heat_pump_cooler_config(
+            "ASHP Cooler",
+            &params,
+            &DuctDseParams::default(),
+            false,
+        )
+        .expect("ASHP cooler typed config should be built");
 
         use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
         let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
         assert_eq!(cfg.number_of_speeds, 2);
         assert_eq!(cfg.stage_shrs, Some(vec![0.81, 0.74]));
+    }
+
+    #[test]
+    fn ideal_hvac_builder_produces_typed_config() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(9_000.0));
+        params.insert("cooling_capacity_w".to_string(), json!(8_000.0));
+        params.insert("heating_efficiency".to_string(), json!(0.95));
+        params.insert("efficiency_seer".to_string(), json!(16.0));
+        params.insert("fraction_load_served".to_string(), json!(0.9));
+        let ec = try_build_ideal_hvac_config("Ideal HVAC", &params)
+            .expect("Ideal HVAC typed config should be built");
+
+        use hares_equipment::hvac::heating_config::IdealHvacConfig;
+        let cfg: IdealHvacConfig = ec.typed().expect("typed ideal config");
+        assert_eq!(cfg.heating_capacity_w, Some(9_000.0));
+        assert_eq!(cfg.cooling_capacity_w, Some(8_000.0));
+        assert_eq!(cfg.fraction_heating_load_served, Some(0.9));
+        assert_eq!(cfg.fraction_cooling_load_served, Some(0.9));
+    }
+
+    #[test]
+    fn dehumidifier_builder_produces_typed_config() {
+        let mut params = Map::new();
+        params.insert("capacity_liters_per_day".to_string(), json!(25.0));
+        params.insert("integrated_energy_factor".to_string(), json!(2.0));
+        params.insert("fraction_served".to_string(), json!(0.8));
+        params.insert("target_rh".to_string(), json!(0.5));
+        let ec = try_build_dehumidifier_config("Dehumidifier", &params)
+            .expect("dehumidifier typed config should be built");
+
+        use hares_equipment::hvac::cooling_config::DehumidifierConfig;
+        let cfg: DehumidifierConfig = ec.typed().expect("typed dehumidifier config");
+        assert_eq!(cfg.capacity_liters_per_day, Some(25.0));
+        assert_eq!(cfg.integrated_energy_factor, Some(2.0));
+        assert_eq!(cfg.fraction_served, Some(0.8));
+        assert_eq!(cfg.target_rh, Some(0.5));
     }
 
     #[test]
@@ -2367,7 +2637,7 @@ mod tests {
         // Zero fan power so the fuel/thermal ratio equals exactly 1/AFUE.
         params.insert("fan_power_w".to_string(), json!(0.0));
 
-        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &Map::new())
+        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
             .expect("try_build_gas_furnace_config must succeed with AFUE and capacity");
 
         let typed_cfg: GasFurnaceConfig = ec
@@ -2420,7 +2690,7 @@ mod tests {
         params.insert("efficiency_seer".to_string(), json!(16.0));
         params.insert("cooling_capacity_w".to_string(), json!(10_000.0));
 
-        let ec = try_build_central_ac_config("Air Conditioner", &params, &Map::new())
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
             .expect("try_build_central_ac_config must succeed with SEER and capacity");
 
         let typed_cfg: CentralAirConditionerConfig = ec
