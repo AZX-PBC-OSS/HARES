@@ -80,6 +80,9 @@ pub struct HeatPumpHeaterConfig {
     /// Fan power per CFM of airflow (W/CFM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w_per_cfm: Option<f64>,
+    /// Rated airflow in SI units [m^3/s/W].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub airflow_m3_s_per_w: Option<f64>,
     /// Heating setpoint used by the HVAC thermostat FSM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heating_setpoint_c: Option<f64>,
@@ -157,6 +160,7 @@ impl Default for HeatPumpHeaterConfig {
             shr: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
             heating_setpoint_c: None,
             cooling_setpoint_c: None,
             hysteresis_c: None,
@@ -229,6 +233,7 @@ impl HeatPumpHeaterConfig {
             ("heating_setpoint_c", self.heating_setpoint_c),
             ("cooling_setpoint_c", self.cooling_setpoint_c),
             ("hysteresis_c", self.hysteresis_c),
+            ("airflow_m3_s_per_w", self.airflow_m3_s_per_w),
             ("hp_lockout_temp_c", self.hp_lockout_temp_c),
             ("er_lockout_temp_c", self.er_lockout_temp_c),
             ("max_oat_supplemental_c", self.max_oat_supplemental_c),
@@ -248,6 +253,13 @@ impl HeatPumpHeaterConfig {
         {
             return Err(HaresError::Equipment(
                 "HeatPumpHeaterConfig: hysteresis_c must be >= 0".to_string(),
+            ));
+        }
+        if let Some(v) = self.airflow_m3_s_per_w
+            && v <= 0.0
+        {
+            return Err(HaresError::Equipment(
+                "HeatPumpHeaterConfig: airflow_m3_s_per_w must be > 0".to_string(),
             ));
         }
         if let Some(v) = self.er_hard_lockout_time_s
@@ -313,6 +325,9 @@ pub struct HeatPumpCoolerConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w_per_cfm: Option<f64>,
+    /// Rated airflow in SI units [m^3/s/W].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub airflow_m3_s_per_w: Option<f64>,
     #[serde(flatten)]
     pub duct: DuctConfig,
     /// Biquadratic curve x1 (wet-bulb) lower bound [C].
@@ -387,6 +402,7 @@ mod tests {
             shr: Some(0.75),
             fan_power_w: Some(300.0),
             fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: Some(4.0e-5),
             heating_setpoint_c: Some(21.0),
             cooling_setpoint_c: Some(26.0),
             hysteresis_c: Some(1.0),
@@ -438,6 +454,7 @@ mod tests {
             shr: Some(0.75),
             fan_power_w: Some(300.0),
             fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: Some(4.0e-5),
             duct: DuctConfig::default(),
             biquadratic_x1_min: Some(12.0),
             biquadratic_x1_max: Some(24.0),

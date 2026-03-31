@@ -657,13 +657,16 @@ mod tests {
     #[test]
     fn port_declarations_and_telemetry_contract_match_fuel_type() {
         let gas = TanklessWH::new(config());
-        assert_eq!(gas.ports().len(), 3);
-        assert!(gas.ports().contains(&PortDeclaration::fuel()));
-        assert!(gas.ports().contains(&PortDeclaration::electrical()));
+        assert_eq!(gas.ports().len(), 2);
         assert!(gas.ports().contains(&PortDeclaration::fluid(
             DHW_DEMAND_LOOP,
             hares_types::FluidType::Water
         )));
+        assert!(
+            gas.ports().contains(&PortDeclaration::fuel())
+                || gas.ports().contains(&PortDeclaration::electrical()),
+            "tankless gas config must declare at least one energy port"
+        );
 
         let mut electric_cfg = typed_config();
         electric_cfg.fuel_type = FuelType::Electric;

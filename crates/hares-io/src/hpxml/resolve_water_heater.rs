@@ -138,6 +138,7 @@ pub(super) fn resolve_water_heaters(
                     first_hour_rating_m3,
                     element_power_w: heating_capacity_w,
                     element_priority_mode: None,
+                    max_setpoint_ramp_rate_c_per_min: None,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }

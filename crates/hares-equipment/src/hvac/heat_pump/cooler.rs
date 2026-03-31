@@ -39,10 +39,7 @@ impl HpCooler {
         if is_mshp {
             let mshp_type = crate::hvac::hvac_core::HvacEquipmentType::MiniSplitCool;
             inner.core.hvac.equipment_type = mshp_type;
-            // Ductless mini-split: 312 CFM/ton (no duct back-pressure).
-            use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
-            inner.core.hvac.airflow_m3_s_per_w =
-                mshp_type.default_airflow_m3_s_per_w() * CFM_TO_M3_S / W_PER_TON;
+            inner.core.hvac.airflow_m3_s_per_w = mshp_type.default_airflow_m3_s_per_w();
             // Apply MSHP crankcase defaults at construction so that step() uses
             // correct values (15 W / 0 °C) even if init() has not been called yet.
             inner.set_crankcase_defaults_if_unconfigured(
@@ -141,7 +138,7 @@ impl HpCooler {
             cooling_setpoint_c: None,
             heating_setpoint_c: None,
             hysteresis_c: None,
-            airflow_m3_s_per_w: None,
+            airflow_m3_s_per_w: hp_cfg.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.fraction_cooling_load_served,
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
@@ -313,7 +310,7 @@ mod tests {
     }
 
     fn base_config() -> EquipmentConfig {
-        let mut cfg = EquipmentConfig::from_typed(
+        EquipmentConfig::from_typed(
             "HP Cooler".to_string(),
             "ASHP Cooler".to_string(),
             crate::HeatPumpCoolerConfig {
@@ -338,6 +335,7 @@ mod tests {
                 shr: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 duct: Default::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -348,21 +346,7 @@ mod tests {
                 plf_min: None,
                 plf_max: None,
             },
-        );
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 24.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 18.0.into());
-        cfg.raw_config_mut().unwrap().insert(
-            "capacity_biquadratic_coeffs".to_string(),
-            "[1,0,0,0,0,0]".into(),
-        );
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        cfg
+        )
     }
 
     fn typed_config(data: serde_json::Value, ochre_class: &str) -> EquipmentConfig {
@@ -385,6 +369,12 @@ mod tests {
         let mut eq = HpCooler::ashp_cooler(cfg.clone());
         let env = cooling_env(28.0, 35.0); // zone well above 24 C setpoint
         eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: Some(24.0),
+            deadband_c: None,
+        })
+        .unwrap();
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -431,20 +421,19 @@ mod tests {
         );
     }
 
-    /// MSHP cooler must use MiniSplitCool equipment type with 312 CFM/ton.
+    /// MSHP cooler must use the canonical SI airflow ratio for mini-split cooling.
     #[test]
-    fn mshp_cooler_uses_mini_split_cool_with_312_cfm_per_ton() {
-        use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+    fn mshp_cooler_uses_mini_split_cool_default_airflow_ratio() {
         let cfg = base_config();
         let eq = HpCooler::mshp_cooler(cfg);
         assert_eq!(
             eq.inner.core.hvac.equipment_type,
             crate::hvac::hvac_core::HvacEquipmentType::MiniSplitCool,
         );
-        let expected = 312.0 * CFM_TO_M3_S / W_PER_TON;
+        let expected = crate::hvac::hvac_core::AIRFLOW_MSHP_COOLING_M3_S_PER_W;
         assert!(
             (eq.inner.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-12,
-            "MSHP cooler must default to 312 CFM/ton, got {} m3/s/W",
+            "MSHP cooler airflow mismatch, got {} m3/s/W",
             eq.inner.core.hvac.airflow_m3_s_per_w
         );
     }
@@ -458,6 +447,12 @@ mod tests {
         // Zone at 21 C, well inside the 18–24 C deadband
         let env = cooling_env(21.0, 25.0);
         eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: Some(24.0),
+            deadband_c: None,
+        })
+        .unwrap();
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

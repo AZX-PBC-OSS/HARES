@@ -350,7 +350,6 @@ impl DehumidifierConfig {
 mod tests {
     use super::*;
     use crate::config::{ConfigPayload, EquipmentConfig};
-    use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
 
     fn typed_config<T: EquipmentTypedConfig>(config: T) -> EquipmentConfig {
         EquipmentConfig::from_typed(
@@ -358,10 +357,6 @@ mod tests {
             T::equipment_type_name().to_string(),
             config,
         )
-    }
-
-    fn airflow_m3_s_per_w(cfm_per_ton: f64) -> f64 {
-        cfm_per_ton * CFM_TO_M3_S / W_PER_TON
     }
 
     #[test]
@@ -381,7 +376,7 @@ mod tests {
             cooling_setpoint_c: None,
             heating_setpoint_c: None,
             hysteresis_c: None,
-            airflow_m3_s_per_w: Some(airflow_m3_s_per_w(400.0)),
+            airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
             fraction_load_served: Some(1.0),
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
@@ -517,7 +512,7 @@ mod tests {
             cooling_setpoint_c: None,
             heating_setpoint_c: None,
             hysteresis_c: None,
-            airflow_m3_s_per_w: Some(airflow_m3_s_per_w(320.0)),
+            airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
             biquadratic_x1_min: Some(10.0),
             biquadratic_x1_max: Some(25.0),
             biquadratic_x2_min: None,

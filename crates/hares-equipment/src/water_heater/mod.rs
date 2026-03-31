@@ -1006,11 +1006,15 @@ mod dhw_integration_tests {
         let env = base_env();
 
         // WH with schedule draw of 0.05 kg/s.
-        let mut wh_cfg = wh_config();
-        wh_cfg
-            .raw_config_mut()
-            .unwrap()
-            .insert("draw_flow_rate_kg_s".to_string(), 0.05.into());
+        let base_cfg = wh_config();
+        let mut typed: crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig =
+            base_cfg.typed().expect("typed resistance config");
+        typed.draw_flow_rate_kg_s = Some(0.05);
+        let wh_cfg = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            typed,
+        );
 
         let mut wh = ResistanceWH::new(wh_cfg.clone());
         wh.init(&wh_cfg, &env).unwrap();

@@ -416,7 +416,7 @@ impl CoolingCore {
 
             self.hvac.airflow_m3_s_per_w = cfg
                 .airflow_m3_s_per_w
-                .unwrap_or(super::super::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W);
+                .unwrap_or(super::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W);
             self.hvac.plf_cooling_degradation_coeff = 0.22;
             self.hvac.startup.c_d = 0.22;
         } else {
@@ -1195,7 +1195,7 @@ fn typed_ac_test_config(seer: f64) -> EquipmentConfig {
             cooling_setpoint_c: Some(24.0),
             heating_setpoint_c: Some(18.0),
             hysteresis_c: Some(1.0),
-            airflow_m3_s_per_w: Some(super::super::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+            airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
             fraction_load_served: None,
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
@@ -1295,7 +1295,7 @@ mod tests {
                 cooling_setpoint_c: Some(24.0),
                 heating_setpoint_c: Some(18.0),
                 hysteresis_c: Some(1.0),
-                airflow_m3_s_per_w: Some(super::super::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
                 biquadratic_x2_min: None,
@@ -1312,11 +1312,31 @@ mod tests {
     }
 
     fn ac_config_with_extras(extras: &[(&str, crate::config::ConfigValue)]) -> EquipmentConfig {
-        let mut cfg = ac_config();
+        let mut typed = ac_config().typed::<CentralAirConditionerConfig>().unwrap();
+        let mut raw_extras = HashMap::new();
         for (k, v) in extras {
-            cfg.raw_config_mut()
-                .unwrap()
-                .insert(k.to_string(), v.clone());
+            match *k {
+                "cooling_setpoint_c" => typed.cooling_setpoint_c = v.as_f64(),
+                "heating_setpoint_c" => typed.heating_setpoint_c = v.as_f64(),
+                "hysteresis_c" => typed.hysteresis_c = v.as_f64(),
+                "airflow_m3_s_per_w" => typed.airflow_m3_s_per_w = v.as_f64(),
+                "duct_dse" => typed.duct.dse_cool = v.as_f64(),
+                "startup_cd" => typed.startup_cd = v.as_f64(),
+                "crankcase_heater_kw" => typed.crankcase_heater_kw = v.as_f64(),
+                "crankcase_heater_threshold_c" => typed.crankcase_heater_threshold_c = v.as_f64(),
+                "crankcase_capacity_curve_coeffs" => {
+                    typed.crankcase_capacity_curve_coeffs = v.as_f64_array().and_then(|arr| {
+                        (arr.len() == 3).then_some([arr[0], arr[1], arr[2]])
+                    });
+                }
+                _ => {
+                    raw_extras.insert(k.to_string(), v.clone());
+                }
+            }
+        }
+        let mut cfg = EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);
+        if !raw_extras.is_empty() {
+            cfg.raw_config_mut().unwrap().extend(raw_extras);
         }
         cfg
     }
@@ -1347,8 +1367,10 @@ mod tests {
 
     #[test]
     fn room_ac_forces_single_speed_and_duct_dse_one() {
-        let mut cfg = ac_config_with_extras(&[("speed_control_mode", "two_speed".into())]);
-        cfg.ochre_class = "Room AC".to_string();
+        let mut cfg = room_ac_config();
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("speed_control_mode".to_string(), "two_speed".into());
 
         let mut eq = RoomAC::new(cfg.clone());
         let err = eq
@@ -1535,29 +1557,23 @@ mod tests {
         assert!(restored.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0) > 0.0);
     }
 
-    /// Central AC uses 400 CFM/ton per RESNET HERS Addendum 82.
+    /// Central AC uses the canonical SI airflow ratio for central cooling.
+    /// Reference provenance is RESNET HERS Addendum 82 / OpenStudio-HPXML defaults.
     #[test]
-    fn ac_uses_400_cfm_per_ton_default() {
-        use uom::si::energy::{btu_it, joule};
-        use uom::si::f64::{Energy, VolumeRate};
-        use uom::si::volume_rate::{cubic_foot_per_minute, cubic_meter_per_second};
-
-        let airflow_m3_s =
-            VolumeRate::new::<cubic_foot_per_minute>(400.0).get::<cubic_meter_per_second>();
-        let w_per_ton = Energy::new::<btu_it>(12_000.0).get::<joule>() / 3600.0;
-        let expected = airflow_m3_s / w_per_ton;
+    fn ac_uses_default_airflow_ratio() {
+        let expected = crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W;
 
         let cfg = ac_config();
         let eq = AirConditioner::new(cfg.clone());
         assert_eq!(
             eq.core.hvac.equipment_type,
-            super::super::hvac_core::HvacEquipmentType::AcCooler,
+            crate::hvac::hvac_core::HvacEquipmentType::AcCooler,
         );
         // Tolerance 1e-9: uom ft³ constant (0.02831685) differs from NIST-exact
         // (0.028316846592) by ~3 ppm; implementation uses the NIST constant.
         assert!(
             (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
-            "Central AC default airflow must be 400 CFM/ton, got {} m3/s/W",
+            "Central AC default airflow mismatch, got {} m3/s/W",
             eq.core.hvac.airflow_m3_s_per_w
         );
 
@@ -1566,7 +1582,7 @@ mod tests {
         eq.init(&cfg, &environment).expect("init must succeed");
         assert!(
             (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
-            "init() must preserve 400 CFM/ton default, got {} m3/s/W",
+            "init() must preserve default airflow ratio, got {} m3/s/W",
             eq.core.hvac.airflow_m3_s_per_w
         );
     }
@@ -1710,30 +1726,20 @@ mod tests {
         );
     }
 
-    /// Room AC uses 320 CFM/ton — manufacturer data median across window units
-    /// (range 248–338, AHRI 310/380 test conditions). Lower than central AC (400)
-    /// because window AC fans are compact cross-flow blowers with no duct back-pressure.
+    /// Room AC uses the canonical SI airflow ratio for room cooling.
+    /// Reference provenance is manufacturer/AHRI room-unit airflow medians.
     #[test]
     fn room_ac_airflow_rate() {
-        use uom::si::energy::{btu_it, joule};
-        use uom::si::f64::{Energy, VolumeRate};
-        use uom::si::volume_rate::{cubic_foot_per_minute, cubic_meter_per_second};
+        let expected = crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W;
 
-        let airflow_m3_s =
-            VolumeRate::new::<cubic_foot_per_minute>(320.0).get::<cubic_meter_per_second>();
-        let w_per_ton = Energy::new::<btu_it>(12_000.0).get::<joule>() / 3600.0;
-        let expected = airflow_m3_s / w_per_ton;
-
-        let mut cfg = ac_config();
-        cfg.ochre_class = "Room AC".to_string();
-
-        // Construction-time default is 400 (AcCooler); init() overrides to 320.
+        // Construction-time default is central-cooling airflow; init() overrides to room-AC airflow.
         let environment = env(27.0, 0.010, 19.0, 35.0);
+        let cfg = room_ac_config();
         let mut eq = RoomAC::new(cfg.clone());
         eq.init(&cfg, &environment).expect("init must succeed");
         assert!(
             (eq.core.hvac.airflow_m3_s_per_w - expected).abs() < 1e-9,
-            "RoomAC airflow must be 320 CFM/ton after init(), got {} m3/s/W",
+            "RoomAC airflow must equal the typed SI default after init(), got {} m3/s/W",
             eq.core.hvac.airflow_m3_s_per_w
         );
     }
@@ -1876,7 +1882,7 @@ mod dr_tests {
     };
 
     use super::AirConditioner;
-    use crate::{Equipment, EquipmentConfig};
+    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig};
 
     /// Zone above cooling setpoint, suitable for triggering active cooling.
     fn hot_env(zone_temp_c: f64) -> EnvironmentState {
@@ -1936,19 +1942,42 @@ mod dr_tests {
     }
 
     fn base_config() -> EquipmentConfig {
-        let mut cfg = super::typed_ac_test_config(3.412_141_633 / 0.33);
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 24.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 18.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("hysteresis_c".to_string(), 0.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("airflow_m3_s_per_w".to_string(), 375.0.into());
+        let mut cfg = EquipmentConfig::from_typed(
+            "AC".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                seer: 3.412_141_633 / 0.33,
+                shr: Some(0.75),
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: Some(26.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(0.0),
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_kw: Some(0.10),
+                crankcase_heater_threshold_c: Some(12.8),
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
         cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -2254,7 +2283,7 @@ mod crankcase_tests {
     };
 
     use super::AirConditioner;
-    use crate::{Equipment, EquipmentConfig};
+    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig};
 
     fn env(
         zone_temp_c: f64,
@@ -2304,13 +2333,42 @@ mod crankcase_tests {
     }
 
     fn ac_config() -> EquipmentConfig {
-        let mut cfg = super::typed_ac_test_config(3.412_141_633 / 0.33);
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 24.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 18.0.into());
+        let mut cfg = EquipmentConfig::from_typed(
+            "AC".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                seer: 3.412_141_633 / 0.33,
+                shr: Some(0.75),
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
         cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -2364,16 +2422,42 @@ mod crankcase_tests {
     }
 
     fn base_config() -> EquipmentConfig {
-        let mut cfg = super::typed_ac_test_config(3.412_141_633 / 0.33);
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 26.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 18.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("airflow_m3_s_per_w".to_string(), 375.0.into());
+        let mut cfg = EquipmentConfig::from_typed(
+            "AC".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                seer: 3.412_141_633 / 0.33,
+                shr: Some(0.75),
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: Some(26.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(0.0),
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_kw: Some(0.10),
+                crankcase_heater_threshold_c: Some(12.8),
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
         cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
@@ -2381,12 +2465,6 @@ mod crankcase_tests {
         cfg.raw_config_mut()
             .unwrap()
             .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("crankcase_heater_kw".to_string(), 0.10.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("crankcase_heater_threshold_c".to_string(), 12.8_f64.into());
         cfg
     }
 

@@ -58,7 +58,11 @@ pub use hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
 };
-pub use hvac::{EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride};
+pub use hvac::{
+    AIRFLOW_CENTRAL_AC_M3_S_PER_W, AIRFLOW_HEATING_M3_S_PER_W, AIRFLOW_MSHP_COOLING_M3_S_PER_W,
+    AIRFLOW_ROOM_AC_M3_S_PER_W, EquivalentBatteryModel, HvacEquipment, HvacEquipmentType,
+    RuntimeSetpointOverride,
+};
 pub use ndinterp::RegularGridInterpolator;
 pub use pv::PvConfig;
 pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};

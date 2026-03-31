@@ -19,12 +19,21 @@ use super::HpxmlError;
 use super::building::{Boundary, BoundaryType, Building, DuctLocation, XmlNode, Zone, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec};
 use super::xml_helpers::{child_f64, child_text, descendants_named};
+use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
 use hares_physics::units as conv;
 
 use crate::defaults::DefaultsStore;
 
 const SEER2_TO_SEER_FACTOR: f64 = 1.0 / 0.95;
 const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.95;
+
+fn airflow_defect_multiplier(params: &Map<String, Value>) -> f64 {
+    params
+        .get("airflow_defect_ratio")
+        .or_else(|| params.get("AirflowDefectRatio"))
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0)
+}
 
 #[derive(Debug, Clone, Default)]
 struct DuctDseParams {
@@ -623,6 +632,7 @@ fn try_build_central_ac_config(
     let fraction_load_served = params.get("fraction_load_served").and_then(Value::as_f64);
     let duct = compute_duct_config(duct_params, capacity_w, false, n_speeds, false);
     let curve_bounds = extract_curve_bounds(params);
+    let airflow_m3_s_per_w = 400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
 
     let cfg = CentralAirConditionerConfig {
         equipment_id: None,
@@ -636,7 +646,14 @@ fn try_build_central_ac_config(
         stage_shrs: extract_stage_values(params, "shr"),
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
+        cooling_setpoint_c: None,
+        heating_setpoint_c: None,
+        hysteresis_c: None,
+        airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         fraction_load_served,
+        crankcase_heater_kw: None,
+        crankcase_heater_threshold_c: None,
+        crankcase_capacity_curve_coeffs: None,
         duct,
         system_type,
         startup_cd,
@@ -665,11 +682,16 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     let eer = eer_from_params(params)?;
 
     let curve_bounds = extract_curve_bounds(params);
+    let airflow_m3_s_per_w = 320.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
     let cfg = RoomAcConfig {
         equipment_id: None,
         zone_id: None,
         capacity_w,
         eer,
+        cooling_setpoint_c: None,
+        heating_setpoint_c: None,
+        hysteresis_c: None,
+        airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         biquadratic_x1_min: curve_bounds.x1_min,
         biquadratic_x1_max: curve_bounds.x1_max,
         biquadratic_x2_min: curve_bounds.x2_min,
@@ -678,6 +700,9 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
         ff_max: curve_bounds.ff_max,
         plf_min: curve_bounds.plf_min,
         plf_max: curve_bounds.plf_max,
+        crankcase_heater_kw: None,
+        crankcase_heater_threshold_c: None,
+        crankcase_capacity_curve_coeffs: None,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -742,6 +767,11 @@ fn try_build_heat_pump_heater_config(
         .get("fraction_cooling_load_served")
         .and_then(Value::as_f64);
     let curve_bounds = extract_curve_bounds(params);
+    let airflow_m3_s_per_w = if is_mini_split {
+        312.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
+    } else {
+        400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
+    };
 
     let ref_cap = heating_capacity_w.or(cooling_capacity_w).unwrap_or(0.0);
     let duct = if is_mini_split {
@@ -778,6 +808,15 @@ fn try_build_heat_pump_heater_config(
         shr,
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
+        airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
+        heating_setpoint_c: None,
+        cooling_setpoint_c: None,
+        hysteresis_c: None,
+        hp_lockout_temp_c: None,
+        er_lockout_temp_c: None,
+        max_oat_supplemental_c: None,
+        er_setpoint_offset_c: None,
+        er_hard_lockout_time_s: None,
         duct,
         biquadratic_x1_min: curve_bounds.x1_min,
         biquadratic_x1_max: curve_bounds.x1_max,
@@ -826,6 +865,11 @@ fn try_build_heat_pump_cooler_config(
         .get("fraction_cooling_load_served")
         .and_then(Value::as_f64);
     let curve_bounds = extract_curve_bounds(params);
+    let airflow_m3_s_per_w = if is_mini_split {
+        312.0_f64 * CFM_TO_M3_S / W_PER_TON
+    } else {
+        400.0_f64 * CFM_TO_M3_S / W_PER_TON
+    } * airflow_defect_multiplier(params);
 
     let ref_cap = cooling_capacity_w.or(heating_capacity_w).unwrap_or(0.0);
     let duct = if is_mini_split {
@@ -862,6 +906,7 @@ fn try_build_heat_pump_cooler_config(
         shr,
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
+        airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         duct,
         biquadratic_x1_min: curve_bounds.x1_min,
         biquadratic_x1_max: curve_bounds.x1_max,

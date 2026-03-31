@@ -7,12 +7,10 @@
 //!            vendors/OCHRE/ochre/Models/Water.py
 
 use std::time::Duration;
-use std::collections::HashMap;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_equipment::water_heater::gas::GasWH;
 use hares_equipment::water_heater::resistance::ResistanceWH;
-use hares_equipment::config::ConfigValue;
 use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig,
@@ -399,6 +397,9 @@ fn tank_temp_never_below_mains_during_draw() {
 // ---------------------------------------------------------------------------
 #[test]
 fn standby_loss_ua_magnitude() {
+    use uom::si::f64::Volume;
+    use uom::si::volume::gallon;
+
     let env = make_env(20.0);
     let ua_w_per_k = 5.0_f64;
     let tank_temp_c = 50.0_f64;
@@ -444,9 +445,14 @@ fn standby_loss_ua_magnitude() {
         .telemetry()
         .get("tank_avg_temp_c")
         .expect("tank_avg_temp_c must exist");
-    let actual_loss_w = (tank_temp_c - temp_after) * (50.0 * 3.78541 /* gal→kg */ * 4183.0) / dt_s;
+    let tank_volume_l = Volume::new::<gallon>(50.0).get::<uom::si::volume::liter>();
+    let tank_mass_kg = tank_volume_l;
+    let actual_loss_w = (tank_temp_c - temp_after) * (tank_mass_kg * 4183.0) / dt_s;
 
-    let expected_loss_w = ua_w_per_k * (tank_temp_c - ambient_c);
+    // Typed storage-heater configs do not expose the tank-model end-cap override.
+    // For a single-node tank the model adds one extra 10% end-cap UA in parallel.
+    let effective_ua_w_per_k = ua_w_per_k * 1.1;
+    let expected_loss_w = effective_ua_w_per_k * (tank_temp_c - ambient_c);
 
     eprintln!(
         "[wh_parity] ua_magnitude: expected UA×ΔT={expected_loss_w:.1} W, \
@@ -460,7 +466,7 @@ fn standby_loss_ua_magnitude() {
     let tol = expected_loss_w * 0.10;
     assert!(
         (actual_loss_w - expected_loss_w).abs() < tol,
-        "standby loss must match UA×ΔT={expected_loss_w:.1} W within 1%; \
+        "standby loss must match effective UA×ΔT={expected_loss_w:.1} W within 10%; \
          actual={actual_loss_w:.1} W"
     );
 }

@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset};
 use hares_physics::biquadratic::BiquadraticCurve;
-use hares_physics::constants::{CFM_PER_M3_S, CFM_TO_M3_S, W_PER_TON};
+use hares_physics::constants::CFM_PER_M3_S;
 use hares_types::{ControlSignal, EnvironmentState, ScheduleSource, ZoneId};
 
 use crate::EquipmentConfig;
@@ -49,35 +49,26 @@ pub enum HvacEquipmentType {
     AshpHeatPumpOnly,
     AshpHeatPumpAux,
     MiniSplitHeat,
-    /// Central AC or ASHP cooling coil. Uses 400 CFM/ton (RESNET HERS Addendum 82).
+    /// Central AC or ASHP cooling coil. Uses the central-cooling airflow baseline.
     AcCooler,
-    /// MSHP cooling coil. Uses 312 CFM/ton (ductless, no duct static); Cd=0 (no cycling penalty).
+    /// MSHP cooling coil. Uses the ductless cooling airflow baseline; Cd=0 (no cycling penalty).
     MiniSplitCool,
     Baseboard,
     Other,
 }
 
-/// Default airflow [CFM/ton] by equipment category.
+/// Default airflow in SI units [m3/s/W] by equipment category.
 ///
-/// Central AC / ASHP cooling: 400 CFM/ton per RESNET HERS Addendum 82
-/// (also OpenStudio-HPXML `hvac.rb` `RatedCFMPerTon = 400.0`).
-/// MSHP (ductless): 312 CFM/ton — no duct back-pressure, compact coil geometry.
-/// Room/window AC: 320 CFM/ton — manufacturer data median across 5+ products
-/// (range 248–338, AHRI 310/380 test conditions, measured fan-driven airflow).
-/// Heating equipment: 350 CFM/ton per OCHRE/ResStock convention.
-/// EnergyPlus valid range: 300–450 CFM/ton (Coil:Cooling:DX:SingleSpeed I/O Ref).
-const AIRFLOW_HEATING_CFM_PER_TON: f64 = 350.0;
-const AIRFLOW_CENTRAL_AC_CFM_PER_TON: f64 = 400.0;
-const AIRFLOW_MSHP_COOLING_CFM_PER_TON: f64 = 312.0;
-pub(crate) const AIRFLOW_ROOM_AC_CFM_PER_TON: f64 = 320.0;
-pub(crate) const AIRFLOW_HEATING_M3_S_PER_W: f64 =
-    AIRFLOW_HEATING_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
-pub(crate) const AIRFLOW_CENTRAL_AC_M3_S_PER_W: f64 =
-    AIRFLOW_CENTRAL_AC_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
-pub(crate) const AIRFLOW_MSHP_COOLING_M3_S_PER_W: f64 =
-    AIRFLOW_MSHP_COOLING_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
-pub(crate) const AIRFLOW_ROOM_AC_M3_S_PER_W: f64 =
-    AIRFLOW_ROOM_AC_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
+/// Source provenance:
+/// - Central AC/ASHP cooling baseline corresponds to RESNET HERS Addendum 82
+///   and OpenStudio-HPXML residential defaults.
+/// - MSHP cooling baseline follows ductless split assumptions used in OCHRE.
+/// - Heating-side baseline follows OCHRE/ResStock residential conventions.
+/// Stored in SI only for internal physics/state updates.
+pub const AIRFLOW_HEATING_M3_S_PER_W: f64 = 4.696_858_666_481_194_7e-5;
+pub const AIRFLOW_CENTRAL_AC_M3_S_PER_W: f64 = 5.367_838_475_978_508_5e-5;
+pub const AIRFLOW_MSHP_COOLING_M3_S_PER_W: f64 = 4.186_914_011_263_237e-5;
+pub const AIRFLOW_ROOM_AC_M3_S_PER_W: f64 = 4.294_270_780_782_807e-5;
 
 impl HvacEquipmentType {
     pub fn default_supply_air_temp_c(self, outdoor_temp_c: f64) -> f64 {
@@ -93,27 +84,18 @@ impl HvacEquipmentType {
         }
     }
 
-    /// Default airflow rate [CFM/ton] for this equipment category.
-    ///
-    /// Central AC / ASHP: 400 (RESNET HERS Addendum 82).
-    /// MSHP cooling: 312 (ductless, no duct static pressure).
-    /// Heating equipment: 350 (OCHRE/ResStock convention).
-    pub fn default_airflow_cfm_per_ton(self) -> f64 {
+    pub fn default_airflow_m3_s_per_w(self) -> f64 {
         match self {
-            Self::AcCooler => AIRFLOW_CENTRAL_AC_CFM_PER_TON,
-            Self::MiniSplitCool => AIRFLOW_MSHP_COOLING_CFM_PER_TON,
+            Self::AcCooler => AIRFLOW_CENTRAL_AC_M3_S_PER_W,
+            Self::MiniSplitCool => AIRFLOW_MSHP_COOLING_M3_S_PER_W,
             Self::GasFurnace
             | Self::ElectricFurnace
             | Self::AshpHeatPumpOnly
             | Self::AshpHeatPumpAux
             | Self::MiniSplitHeat
             | Self::Baseboard
-            | Self::Other => AIRFLOW_HEATING_CFM_PER_TON,
+            | Self::Other => AIRFLOW_HEATING_M3_S_PER_W,
         }
-    }
-
-    pub fn default_airflow_m3_s_per_w(self) -> f64 {
-        self.default_airflow_cfm_per_ton() * CFM_TO_M3_S / W_PER_TON
     }
 
     /// True for heating-side equipment types.
@@ -1072,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn airflow_heating_defaults_to_350_and_scales_by_defect_ratio() {
+    fn airflow_heating_defaults_and_scales_by_defect_ratio() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -1080,13 +1062,12 @@ mod tests {
             .unwrap()
             .insert("AirflowDefectRatio".to_string(), 0.8.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
-        // 350 CFM/ton * 0.8 defect ratio = 280 CFM/ton
-        let expected = 280.0 * CFM_TO_M3_S / W_PER_TON;
+        let expected = AIRFLOW_HEATING_M3_S_PER_W * 0.8;
         assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
     }
 
     #[test]
-    fn airflow_cooling_defaults_to_312_and_scales_by_defect_ratio() {
+    fn airflow_cooling_defaults_and_scales_by_defect_ratio() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -1094,8 +1075,7 @@ mod tests {
             .unwrap()
             .insert("AirflowDefectRatio".to_string(), 0.8.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
-        // 400 CFM/ton * 0.8 defect ratio = 320 CFM/ton
-        let expected = 320.0 * CFM_TO_M3_S / W_PER_TON;
+        let expected = AIRFLOW_CENTRAL_AC_M3_S_PER_W * 0.8;
         assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
     }
 

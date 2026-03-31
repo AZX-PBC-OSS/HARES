@@ -82,7 +82,7 @@ impl GasWaterHeaterConfig {
             0.0,
             false,
         )?;
-        check_finite("gas_wh: ua_w_per_k", self.ua_w_per_k, 0.0, true)?;
+        check_finite("gas_wh: ua_w_per_k", self.ua_w_per_k, 0.0, false)?;
         check_finite(
             "gas_wh: setpoint_c",
             self.setpoint_c,
@@ -203,7 +203,7 @@ impl ElectricResistanceWaterHeaterConfig {
             0.0,
             false,
         )?;
-        check_finite("resistance_wh: ua_w_per_k", self.ua_w_per_k, 0.0, true)?;
+        check_finite("resistance_wh: ua_w_per_k", self.ua_w_per_k, 0.0, false)?;
         check_finite(
             "resistance_wh: setpoint_c",
             self.setpoint_c,
@@ -400,7 +400,7 @@ impl HeatPumpWaterHeaterConfig {
             0.0,
             false,
         )?;
-        check_finite("hpwh: ua_w_per_k", self.ua_w_per_k, 0.0, true)?;
+        check_finite("hpwh: ua_w_per_k", self.ua_w_per_k, 0.0, false)?;
         check_finite(
             "hpwh: setpoint_c",
             self.setpoint_c,
