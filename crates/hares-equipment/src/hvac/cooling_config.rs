@@ -10,7 +10,7 @@ fn default_one() -> u8 {
 }
 
 /// Typed configuration for central air conditioners.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CentralAirConditionerConfig {
     pub equipment_id: Option<u32>,
@@ -105,7 +105,7 @@ impl CentralAirConditionerConfig {
 }
 
 /// Typed configuration for room air conditioners (window/through-wall units).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoomAcConfig {
     pub equipment_id: Option<u32>,
@@ -167,7 +167,7 @@ impl RoomAcConfig {
 }
 
 /// Typed configuration for standalone dehumidifiers.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DehumidifierConfig {
     pub equipment_id: Option<u32>,

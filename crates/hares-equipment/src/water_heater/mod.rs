@@ -70,7 +70,7 @@ pub(super) fn resolve_storage_step_inputs(
     env: &EnvironmentState,
     fallback_mains_temp_c: f64,
     fallback_draw_rate_kg_s: f64,
-    draw_l_per_min_source: Option<&mut ScheduleSource>,
+    draw_rate_kg_s_source: Option<&mut ScheduleSource>,
     mains_temp_c_source: Option<&mut ScheduleSource>,
 ) -> (f64, f64) {
     let mains_temp_c = mains_temp_c_source
@@ -78,11 +78,11 @@ pub(super) fn resolve_storage_step_inputs(
         .filter(|v| v.is_finite())
         .unwrap_or_else(|| resolve_mains_temp_c(env, fallback_mains_temp_c));
 
-    // Schedule draw is interpreted as L/min; convert to kg/s (water ≈ 1 kg/L).
-    let draw_rate_kg_s = draw_l_per_min_source
+    // Schedule draw is interpreted as SI mass flow [kg/s].
+    let draw_rate_kg_s = draw_rate_kg_s_source
         .and_then(|source| source.value_at(env).ok())
         .filter(|v| v.is_finite())
-        .map(|draw_l_per_min| (draw_l_per_min / 60.0).max(0.0))
+        .map(|draw_kg_s| draw_kg_s.max(0.0))
         .unwrap_or(fallback_draw_rate_kg_s);
 
     (mains_temp_c, draw_rate_kg_s)
@@ -537,7 +537,7 @@ mod tests {
         );
 
         assert!((mains_temp_c - 6.0).abs() < 1e-12);
-        assert!((draw_rate_kg_s - (10.0 / 60.0)).abs() < 1e-12);
+        assert!((draw_rate_kg_s - 10.0).abs() < 1e-12);
     }
 
     #[test]

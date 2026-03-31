@@ -9,7 +9,7 @@ use crate::config::EquipmentTypedConfig;
 /// `inverter_efficiency` is the one-way charge/discharge efficiency as a
 /// fraction in (0, 1]. HPXML resolvers convert round-trip efficiency to
 /// one-way by applying `sqrt()` once before constructing this struct.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BatteryConfig {
     // Identity

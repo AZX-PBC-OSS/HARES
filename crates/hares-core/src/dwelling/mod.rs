@@ -73,38 +73,19 @@ use synthetic::{current_process_hwm_kb, hot_path_alloc_counter};
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 
-fn is_critical_class_name(class_name: &str) -> bool {
-    matches!(
-        class_name,
-        // HVAC (heating/cooling)
-        "Gas Furnace"
-            | "Electric Furnace"
-            | "Electric Baseboard"
-            | "Gas Boiler"
-            | "Electric Boiler"
-            | "Air Conditioner"
-            | "Room AC"
-            | "Dehumidifier"
-            | "Ideal HVAC"
-            | "ASHP Heater"
-            | "MSHP Heater"
-            | "ASHP Cooler"
-            | "MSHP Cooler"
-            | "Heat Pump Heater"
-            // Water heating
-            | "Gas Water Heater"
-            | "Resistance Water Heater"
-            | "Electric Resistance Water Heater"
-            | "Tankless Water Heater"
-            | "Gas Tankless Water Heater"
-            | "Heat Pump Water Heater"
-            | "HPWH"
-            // Core DER
-            | "EV"
-            | "Electric Vehicle"
-            | "Battery"
-            | "PV"
-    )
+fn create_equipment_from_spec(
+    registry: &EquipmentRegistry,
+    spec: &hares_io::EquipmentSpec,
+) -> Result<Box<dyn Equipment>> {
+    let base_cfg = equipment_config_from_spec(spec);
+    let name = base_cfg.name.clone();
+    let ochre_class = base_cfg.ochre_class.clone();
+    registry.create(&ochre_class, base_cfg).map_err(|err| {
+        HaresError::Equipment(format!(
+            "equipment '{}' (class '{}') create failed: {err}",
+            name, ochre_class,
+        ))
+    })
 }
 
 /// Core result type for dwelling operations.
@@ -918,22 +899,7 @@ impl Dwelling {
             if HANDLED_OUTSIDE_REGISTRY.contains(&spec.name.as_str()) {
                 continue;
             }
-            let base_cfg = equipment_config_from_spec(spec);
-            let mut eq = match registry.create(&base_cfg.ochre_class, base_cfg.clone()) {
-                Ok(eq) => eq,
-                Err(err) => {
-                    let msg = format!(
-                        "equipment '{}' (class '{}') create failed: {err}",
-                        base_cfg.name, base_cfg.ochre_class,
-                    );
-                    if is_critical_class_name(&base_cfg.ochre_class) {
-                        return Err(HaresError::Equipment(msg));
-                    }
-                    tracing::error!("{msg}");
-                    warnings.push(msg);
-                    continue;
-                }
-            };
+            let mut eq = create_equipment_from_spec(&registry, spec)?;
 
             let merged_cfg = merged_equipment_config(spec, &override_root);
             match eq.init(&merged_cfg, &initial_env) {
@@ -4960,5 +4926,31 @@ occupancy = 1.0
                 thermal.latent_gain_w
             );
         }
+    }
+
+    #[test]
+    fn dwelling_equipment_creation_errors_on_unknown_class() {
+        let registry = EquipmentRegistry::new();
+        let spec = hares_io::EquipmentSpec {
+            name: "Imaginary Widget".to_string(),
+            fuel_type: hares_types::FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: None,
+        };
+
+        let err = match create_equipment_from_spec(&registry, &spec) {
+            Err(err) => err,
+            Ok(_) => panic!("unknown equipment class must return Err"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Imaginary Widget"),
+            "error should preserve equipment name, got: {msg}"
+        );
+        assert!(
+            msg.contains("unknown equipment class"),
+            "error should preserve registry failure context, got: {msg}"
+        );
     }
 }

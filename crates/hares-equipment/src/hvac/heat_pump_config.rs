@@ -13,7 +13,7 @@ fn default_one() -> u8 {
 ///
 /// For mini-splits, `number_of_speeds` is forced to 4 in the equipment init path,
 /// not in this struct — the struct records user intent; the equipment enforces the rule.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeatPumpHeaterConfig {
     pub equipment_id: Option<u32>,
@@ -201,7 +201,7 @@ impl HeatPumpHeaterConfig {
 ///
 /// Contains the same fields as `HeatPumpHeaterConfig` but registers under the
 /// "ASHP Cooler" equipment type name so that typed configs round-trip correctly.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeatPumpCoolerConfig {
     pub equipment_id: Option<u32>,

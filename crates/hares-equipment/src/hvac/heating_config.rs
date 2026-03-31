@@ -7,7 +7,7 @@ use crate::config::EquipmentTypedConfig;
 
 pub use super::core_config::DuctConfig;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GasFurnaceConfig {
     pub equipment_id: Option<u32>,
@@ -42,7 +42,7 @@ impl Default for GasFurnaceConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ElectricFurnaceConfig {
     pub equipment_id: Option<u32>,
@@ -77,7 +77,7 @@ impl Default for ElectricFurnaceConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GasBoilerConfig {
     pub equipment_id: Option<u32>,
@@ -120,7 +120,7 @@ impl Default for GasBoilerConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ElectricBoilerConfig {
     pub equipment_id: Option<u32>,
@@ -163,7 +163,7 @@ impl Default for ElectricBoilerConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ElectricBaseboardConfig {
     pub equipment_id: Option<u32>,
@@ -189,7 +189,7 @@ impl Default for ElectricBaseboardConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdealHvacConfig {
     pub equipment_id: Option<u32>,

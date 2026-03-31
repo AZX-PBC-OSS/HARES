@@ -8,7 +8,7 @@ use crate::config::EquipmentTypedConfig;
 ///
 /// Supports a single array (the common residential case). Multi-array
 /// systems continue to use the raw config path via `array_count`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PvConfig {
     // Identity

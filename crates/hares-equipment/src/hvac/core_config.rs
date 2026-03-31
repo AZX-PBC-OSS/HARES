@@ -10,7 +10,7 @@ use super::hvac_core::DEFAULT_BIQUADRATIC_COEFFS;
 use super::speed_control::SpeedControlMode;
 
 /// Shared duct configuration fields for heating/cooling equipment.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DuctConfig {
     /// Heating duct distribution system efficiency (DSE), [0, 1].

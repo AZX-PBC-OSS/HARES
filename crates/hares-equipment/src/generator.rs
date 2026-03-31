@@ -37,7 +37,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 // ---------------------------------------------------------------------------
 
 /// Typed configuration for gas generator and fuel cell equipment.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratorConfig {
     pub equipment_id: Option<u32>,

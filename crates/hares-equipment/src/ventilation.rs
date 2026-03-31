@@ -38,7 +38,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 ///
 /// `flow_rate_m3_s` must be provided in SI units (m³/s). Convert CFM at the
 /// parse boundary using `hares_physics::constants::CFM_TO_M3_S`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VentilationConfig {
     pub equipment_id: Option<u32>,

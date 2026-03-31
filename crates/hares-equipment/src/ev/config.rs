@@ -159,7 +159,7 @@ pub(super) fn validate_optional_hour(field_name: &str, value: Option<f64>) -> cr
 ///
 /// All power values are in kW, energy in kWh, temperatures in °C.
 /// `charging_efficiency` is the AC→DC onboard charger efficiency as a fraction in (0, 1].
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvConfig {
     /// Equipment instance identifier.
