@@ -21,7 +21,9 @@ pub(crate) const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
 pub(crate) const DEFAULT_TANK_VOLUME_M3: f64 = 0.189_270_589_2;
 pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 
-use hares_types::{BoundaryPolicy, DomainId, EnvironmentState, LoopId, PortSlots, ScheduleSource};
+#[cfg(test)]
+use hares_types::BoundaryPolicy;
+use hares_types::{DomainId, EnvironmentState, LoopId, PortSlots, ScheduleSource};
 
 use crate::EquipmentRegistry;
 
@@ -88,11 +90,13 @@ pub(super) fn resolve_storage_step_inputs(
     (mains_temp_c, draw_rate_kg_s)
 }
 
+#[cfg(test)]
 fn resolve_schedule_col(config: &crate::EquipmentConfig, keys: &[&str]) -> Option<usize> {
     keys.iter()
         .find_map(|&key| parse_usize(config.get_f64(key)))
 }
 
+#[cfg(test)]
 pub(super) fn draw_schedule_source(config: &crate::EquipmentConfig) -> Option<ScheduleSource> {
     resolve_schedule_col(
         config,
@@ -110,6 +114,7 @@ pub(super) fn draw_schedule_source(config: &crate::EquipmentConfig) -> Option<Sc
     })
 }
 
+#[cfg(test)]
 pub(super) fn mains_temp_schedule_source(
     config: &crate::EquipmentConfig,
 ) -> Option<ScheduleSource> {
@@ -143,6 +148,7 @@ pub(super) fn resolve_mains_temp_c(env: &EnvironmentState, fallback_mains_temp_c
 
 /// Apply insulation jacket R-value correction to tank UA.
 /// Shared by resistance, gas, and heat-pump water heater modules.
+#[cfg(test)]
 pub(super) fn apply_jacket_r_value(
     ua_base: f64,
     height_m: f64,
@@ -267,6 +273,7 @@ impl WaterHeaterZip {
     ///
     /// Keys: `zip_z`, `zip_i`, `zip_p`, `zip_zq`, `zip_iq`, `zip_pq`, `zip_pf`.
     /// Falls back to constant-power defaults (0, 0, 1) if keys are absent.
+    #[cfg(test)]
     pub(super) fn from_config(
         config: &crate::EquipmentConfig,
     ) -> std::result::Result<Self, hares_types::HaresError> {
@@ -310,43 +317,7 @@ impl WaterHeaterZip {
     }
 }
 
-/// Compute the draw flow rate [kg/s] for a water heater from config.
-///
-/// If `draw_profile_fraction` AND `avg_water_draw_l_per_day` are both present,
-/// the fraction is normalized using the OCHRE draw normalization:
-///   `draw_kg_s = fraction * (avg_l_per_day / 1440) / mean_fraction / 60`
-/// where the division by 60 converts L/min to L/s (≈ kg/s for water).
-///
-/// If only `draw_flow_rate_kg_s` or `draw_rate_kg_s` is present, it is used directly.
-/// Returns 0.0 if neither key is present.
-pub(super) fn resolve_draw_rate_kg_s(config: &crate::EquipmentConfig) -> f64 {
-    // Try direct physical value first.
-    if let Some(direct) = config
-        .get_f64("draw_flow_rate_kg_s")
-        .or_else(|| config.get_f64("draw_rate_kg_s"))
-    {
-        return direct.max(0.0);
-    }
-
-    // Try normalized profile fraction.
-    let fraction = config.get_f64("draw_profile_fraction");
-    let avg_daily_l = config.get_f64("avg_water_draw_l_per_day");
-
-    match (fraction, avg_daily_l) {
-        (Some(f), Some(avg_l)) if f > 0.0 && avg_l > 0.0 => {
-            // OCHRE convert_water_column: scale = (avg_l / 1440) / profile_mean
-            // Here we have a single fraction value (timestep value), not a full profile.
-            // For a single-fraction config, we treat the fraction as already the mean,
-            // giving: draw = fraction * (avg_l / 1440) / fraction / 60 = avg_l / (1440 * 60)
-            // More generally: draw_kg_s = f * (avg_l / 1440) / profile_mean / 60
-            // When only one value is given, profile_mean == f, so it simplifies to avg_l / 86400.
-            // This matches OCHRE's "average draw rate" used when no schedule is present.
-            avg_l / 86_400.0
-        }
-        _ => 0.0,
-    }
-}
-
+#[cfg(test)]
 fn validate_zip_terms(
     z: f64,
     i: f64,
@@ -756,7 +727,7 @@ mod dhw_integration_tests {
     }
 
     fn wh_config() -> EquipmentConfig {
-        let cfg = EquipmentConfig::from_typed(
+        EquipmentConfig::from_typed(
             "WH".to_string(),
             "Resistance Water Heater".to_string(),
             crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
@@ -783,8 +754,7 @@ mod dhw_integration_tests {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
             },
-        );
-        cfg
+        )
     }
 
     /// Merge port declarations from multiple equipment into shared PortSlots,

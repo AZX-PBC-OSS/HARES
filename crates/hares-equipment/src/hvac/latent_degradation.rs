@@ -7,12 +7,6 @@ use hares_types::HaresError;
 
 use super::coil_physics::coil_ao_factor;
 
-/// Henderson-Rengarajan latent degradation defaults (EnergyPlus/ASHRAE RP-1120).
-pub(super) const DEFAULT_TWET_RATED_S: f64 = 1000.0;
-pub(super) const DEFAULT_GAMMA_RATED: f64 = 1.5;
-pub(super) const DEFAULT_MAX_CYCLING_RATE: f64 = 3.0;
-pub(super) const DEFAULT_LATENT_TIME_CONSTANT_S: f64 = 45.0;
-
 pub(super) const AHRI_RATED_INDOOR_DB_C: f64 = 26.666_666_666_7;
 pub(super) const AHRI_RATED_INDOOR_WB_C: f64 = 19.444_444_444_4;
 pub(super) const AHRI_RATED_OUTDOOR_DB_C: f64 = 35.0;

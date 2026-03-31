@@ -36,6 +36,8 @@ pub struct PvConfig {
 
     // Surface resolution for irradiance lookup
     pub surface_resolution_deg: Option<f64>,
+    // Optional SAM LUT path (CSV/Parquet ingestion handled at init boundary)
+    pub sam_lut_path: Option<String>,
 }
 
 impl EquipmentTypedConfig for PvConfig {
@@ -116,6 +118,7 @@ mod tests {
             inverter_capacity_kw: None,
             power_factor: None,
             surface_resolution_deg: None,
+            sam_lut_path: None,
         }
     }
 

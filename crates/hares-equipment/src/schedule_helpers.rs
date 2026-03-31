@@ -2,16 +2,13 @@
 //!
 //! Used by both `scheduled_load` and `event_load` modules.
 
-use std::collections::HashMap;
-
 use hares_types::{HaresError, ScheduleSource, ZoneId};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use serde::{Deserialize, Serialize};
 
-use crate::EquipmentConfig;
-use crate::config::ConfigValue;
+use crate::{ConfigPayload, EquipmentConfig};
 
 pub(crate) const KEY_MONTH_MULTIPLIER_PREFIX: &str = "month_multiplier_";
 
@@ -123,16 +120,13 @@ pub(crate) fn restore_schedule_source_state(
     }
 }
 
-pub(crate) fn parse_zone_id(raw: &HashMap<String, ConfigValue>) -> Option<ZoneId> {
-    let zone = parse_u16(raw, "zone_id").ok()??;
+pub(crate) fn parse_zone_id(config: &EquipmentConfig) -> Option<ZoneId> {
+    let zone = parse_u16(config, "zone_id").ok()??;
     Some(ZoneId(zone))
 }
 
-pub(crate) fn parse_u16(
-    raw: &HashMap<String, ConfigValue>,
-    key: &str,
-) -> crate::Result<Option<u16>> {
-    let value = match raw.get(key).and_then(|v| v.as_f64()) {
+pub(crate) fn parse_u16(config: &EquipmentConfig, key: &str) -> crate::Result<Option<u16>> {
+    let value = match config.get_f64(key).or_else(|| typed_f64(config, key)) {
         Some(value) => value,
         None => return Ok(None),
     };
@@ -144,8 +138,11 @@ pub(crate) fn parse_u16(
     Ok(Some(value as u16))
 }
 
-pub(crate) fn parse_u32(raw: &HashMap<String, ConfigValue>, key: &str) -> crate::Result<u32> {
-    let value = raw.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+pub(crate) fn parse_u32(config: &EquipmentConfig, key: &str) -> crate::Result<u32> {
+    let value = config
+        .get_f64(key)
+        .or_else(|| typed_f64(config, key))
+        .unwrap_or(0.0);
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
         return Err(HaresError::Equipment(format!(
             "invalid integer value for key {key}: {value}"
@@ -154,11 +151,8 @@ pub(crate) fn parse_u32(raw: &HashMap<String, ConfigValue>, key: &str) -> crate:
     Ok(value as u32)
 }
 
-pub(crate) fn parse_usize(
-    raw: &HashMap<String, ConfigValue>,
-    key: &str,
-) -> crate::Result<Option<usize>> {
-    let value = match raw.get(key).and_then(|v| v.as_f64()) {
+pub(crate) fn parse_usize(config: &EquipmentConfig, key: &str) -> crate::Result<Option<usize>> {
+    let value = match config.get_f64(key).or_else(|| typed_f64(config, key)) {
         Some(value) => value,
         None => return Ok(None),
     };
@@ -168,6 +162,13 @@ pub(crate) fn parse_usize(
         )));
     }
     Ok(Some(value as usize))
+}
+
+fn typed_f64(config: &EquipmentConfig, key: &str) -> Option<f64> {
+    match &config.payload {
+        ConfigPayload::Typed { data, .. } => data.get(key).and_then(|v| v.as_f64()),
+        ConfigPayload::Raw { .. } => None,
+    }
 }
 
 /// Parse per-month scale factors from config keys `month_multiplier_0` through

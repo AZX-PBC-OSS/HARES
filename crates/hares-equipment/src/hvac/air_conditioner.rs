@@ -31,9 +31,6 @@ use super::{
 const CRANKCASE_HEATER_KW: f64 = 0.05;
 const CRANKCASE_HEATER_THRESHOLD_C: f64 = 12.8;
 const MIN_LOAD_FRACTION_DEADBAND_C: f64 = 0.5;
-const DEFAULT_CENTRAL_AC_CAPACITY_W: f64 = 12_000.0;
-const DEFAULT_ROOM_AC_CAPACITY_W: f64 = 3_500.0;
-const DEFAULT_EIR_FALLBACK: f64 = 0.35;
 
 pub struct AirConditioner {
     pub(super) core: CoolingCore,
@@ -478,7 +475,16 @@ impl CoolingCore {
                 dse
             } else {
                 super::helpers::resolve_duct_dse(
-                    config, false, rated_cap, fan_flow, n_speeds, cap_low, flow_low, false,
+                    config,
+                    &super::helpers::DuctDseContext {
+                        is_heating: false,
+                        capacity_w: rated_cap,
+                        fan_flow_m3_s: fan_flow,
+                        n_speeds,
+                        capacity_low_w: cap_low,
+                        fan_flow_low_m3_s: flow_low,
+                        is_heat_pump: false,
+                    },
                 )
             };
 

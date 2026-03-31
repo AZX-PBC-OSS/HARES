@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn central_ac_hpxml_parse_produces_typed_config_with_correct_seer() {
+    fn central_ac_hpxml_parse_produces_typed_config_with_correct_eir() {
         let xml = minimal_hvac_xml(
             r#"<CoolingSystem>
               <CoolingSystemFuel>electricity</CoolingSystemFuel>
@@ -1336,10 +1336,11 @@ mod tests {
             .typed()
             .expect("must deserialize as CentralAirConditionerConfig");
 
+        let expected_eir = 3.412_141_633_f64 / 16.0_f64;
         assert!(
-            (cfg.seer - 16.0).abs() < 1e-12,
-            "seer must be 16.0, got {}",
-            cfg.seer
+            (cfg.eir - expected_eir).abs() < 1e-12,
+            "eir must equal 3.412141633/16={expected_eir:.9}, got {}",
+            cfg.eir
         );
         let expected_w = conv::power_btu_h_to_w(36_000.0);
         assert!(

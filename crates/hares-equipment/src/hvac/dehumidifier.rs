@@ -32,39 +32,13 @@ const RH_MIN_FRACTION: f64 = 0.0;
 const RH_MAX_FRACTION: f64 = 1.0;
 const DEFAULT_DB_BOUNDS_C: (f64, f64) = (10.0, 40.0);
 const DEFAULT_RH_BOUNDS: (f64, f64) = (RH_MIN_FRACTION, RH_MAX_FRACTION);
-const RATED_DRY_BULB_C: f64 = 26.666_666_666_7;
-const RATED_RH_FRACTION: f64 = 0.60;
 const LATENT_HEAT_VAPORIZATION_J_KG: f64 = 2_454_000.0;
 const WATTS_PER_KILOWATT: f64 = 1_000.0;
 const WATTS_PER_KILOWATT_HOUR: f64 = 3_600_000.0;
 const DEFAULT_NORMALIZED_CURVE: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
-const KEY_RATED_CAPACITY_PINTS_DAY: &str = "Capacity";
-const KEY_RATED_CAPACITY_PINTS_DAY_ALT: &str = "capacity_pints_day";
-const KEY_RATED_CAPACITY_L_DAY: &str = "capacity_l_day";
-const KEY_INTEGRATED_ENERGY_FACTOR: &str = "IntegratedEnergyFactor";
-const KEY_INTEGRATED_ENERGY_FACTOR_ALT: &str = "integrated_energy_factor";
-const KEY_ENERGY_FACTOR: &str = "EnergyFactor";
-const KEY_ENERGY_FACTOR_ALT: &str = "energy_factor";
-const KEY_DEHUMIDISTAT_SETPOINT: &str = "DehumidistatSetpoint";
-const KEY_DEHUMIDISTAT_SETPOINT_ALT: &str = "dehumidistat_setpoint";
-const KEY_TARGET_RH: &str = "target_rh";
 const KEY_MIN_RH: &str = "min_rh";
 const KEY_MAX_RH: &str = "max_rh";
-const KEY_FRACTION_LOAD_SERVED: &str = "FractionDehumidificationLoadServed";
-const KEY_FRACTION_LOAD_SERVED_ALT: &str = "fraction_dehumidification_load_served";
-const KEY_WR_CURVE: &str = "water_removal_biquadratic_coeffs";
-const KEY_EF_CURVE: &str = "energy_factor_biquadratic_coeffs";
-const KEY_WR_PREFIX: &str = "water_removal_curve";
-const KEY_EF_PREFIX: &str = "energy_factor_curve";
-const KEY_WR_T_MIN_C: &str = "water_removal_t_min_c";
-const KEY_WR_T_MAX_C: &str = "water_removal_t_max_c";
-const KEY_WR_RH_MIN: &str = "water_removal_rh_min";
-const KEY_WR_RH_MAX: &str = "water_removal_rh_max";
-const KEY_EF_T_MIN_C: &str = "energy_factor_t_min_c";
-const KEY_EF_T_MAX_C: &str = "energy_factor_t_max_c";
-const KEY_EF_RH_MIN: &str = "energy_factor_rh_min";
-const KEY_EF_RH_MAX: &str = "energy_factor_rh_max";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DehumidifierState {
@@ -514,90 +488,6 @@ fn evaluate_normalized_curve(
         return 0.0;
     }
     (value / rated_value).max(0.0)
-}
-
-fn parse_curve(
-    config: &EquipmentConfig,
-    list_key: &str,
-    prefix: &str,
-    default_coeffs: [f64; 6],
-    t_bound_keys: [&str; 2],
-    rh_bound_keys: [&str; 2],
-) -> crate::Result<BiquadraticCurve> {
-    let coeffs = if let Some(raw) = config.get_str(list_key) {
-        parse_coefficients(raw)?
-    } else if let Some(coeffs) = parse_coefficients_from_prefix(config, prefix) {
-        coeffs
-    } else {
-        default_coeffs
-    };
-
-    let t_min = config
-        .get_f64(t_bound_keys[0])
-        .unwrap_or(DEFAULT_DB_BOUNDS_C.0);
-    let t_max = config
-        .get_f64(t_bound_keys[1])
-        .unwrap_or(DEFAULT_DB_BOUNDS_C.1);
-    let rh_min_raw = config
-        .get_f64(rh_bound_keys[0])
-        .unwrap_or(DEFAULT_RH_BOUNDS.0);
-    let rh_max_raw = config
-        .get_f64(rh_bound_keys[1])
-        .unwrap_or(DEFAULT_RH_BOUNDS.1);
-    let rh_min = parse_rh_fraction(rh_min_raw, rh_bound_keys[0])?;
-    let rh_max = parse_rh_fraction(rh_max_raw, rh_bound_keys[1])?;
-    if !t_min.is_finite() || !t_max.is_finite() || t_min >= t_max {
-        return Err(HaresError::Equipment(format!(
-            "invalid temperature bounds for {prefix}: [{t_min}, {t_max}]"
-        )));
-    }
-    if rh_min >= rh_max {
-        return Err(HaresError::Equipment(format!(
-            "invalid RH bounds for {prefix}: [{rh_min}, {rh_max}]"
-        )));
-    }
-
-    Ok(BiquadraticCurve {
-        coeffs,
-        x1_bounds: (t_min, t_max),
-        x2_bounds: (rh_min, rh_max),
-    })
-}
-
-fn parse_coefficients(raw: &str) -> crate::Result<[f64; 6]> {
-    let mut coeffs = [0.0; 6];
-    let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
-    if parts.len() != coeffs.len() {
-        return Err(HaresError::Equipment(format!(
-            "expected 6 biquadratic coefficients, got {} in '{raw}'",
-            parts.len()
-        )));
-    }
-    for (idx, part) in parts.iter().enumerate() {
-        coeffs[idx] = part.parse::<f64>().map_err(|error| {
-            HaresError::Equipment(format!(
-                "failed to parse biquadratic coefficient index {idx} ('{part}'): {error}"
-            ))
-        })?;
-    }
-    Ok(coeffs)
-}
-
-fn parse_coefficients_from_prefix(config: &EquipmentConfig, prefix: &str) -> Option<[f64; 6]> {
-    let keys = [
-        format!("{prefix}_a"),
-        format!("{prefix}_b"),
-        format!("{prefix}_c"),
-        format!("{prefix}_d"),
-        format!("{prefix}_e"),
-        format!("{prefix}_f"),
-    ];
-    let mut coeffs = [0.0; 6];
-    for (idx, key) in keys.iter().enumerate() {
-        let value = config.get_f64(key)?;
-        coeffs[idx] = value;
-    }
-    Some(coeffs)
 }
 
 fn default_telemetry() -> Telemetry {

@@ -2456,7 +2456,7 @@ mod tests {
     }
 
     #[test]
-    fn central_ac_builder_produces_typed_config_with_correct_seer() {
+    fn central_ac_builder_produces_typed_config_with_correct_eir() {
         let params = minimal_central_ac_params(16.0, 12_000.0);
         let duct_params = DuctDseParams::default();
         let ec = try_build_central_ac_config("Air Conditioner", &params, &duct_params)
@@ -2470,10 +2470,11 @@ mod tests {
         let cfg: CentralAirConditionerConfig = ec
             .typed()
             .expect("must deserialize to CentralAirConditionerConfig");
+        let expected_eir = 3.412_141_633_f64 / 16.0_f64;
         assert!(
-            (cfg.seer - 16.0).abs() < 1e-12,
-            "seer must be 16.0, got {}",
-            cfg.seer
+            (cfg.eir - expected_eir).abs() < 1e-12,
+            "eir must equal 3.412141633/16={expected_eir:.9}, got {}",
+            cfg.eir
         );
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-9);
     }
@@ -2528,7 +2529,8 @@ mod tests {
         assert!(ec.is_typed());
         use hares_equipment::hvac::cooling_config::RoomAcConfig;
         let cfg: RoomAcConfig = ec.typed().expect("must deserialize to RoomAcConfig");
-        assert!((cfg.eer - 10.5).abs() < 1e-12);
+        let expected_eir = 3.412_141_633_f64 / 10.5_f64;
+        assert!((cfg.eir - expected_eir).abs() < 1e-12);
     }
 
     #[test]
@@ -2745,10 +2747,11 @@ mod tests {
         let typed_cfg: CentralAirConditionerConfig = ec
             .typed()
             .expect("config must deserialize as CentralAirConditionerConfig");
+        let expected_eir = 3.412_141_633_f64 / 16.0_f64;
         assert!(
-            (typed_cfg.seer - 16.0).abs() < 1e-12,
-            "SEER must round-trip: expected 16.0, got {}",
-            typed_cfg.seer
+            (typed_cfg.eir - expected_eir).abs() < 1e-12,
+            "EIR must equal 3.412141633/16={expected_eir:.9}, got {}",
+            typed_cfg.eir
         );
 
         // Build and init the equipment object.

@@ -424,7 +424,8 @@ mod tests {
         let ec = typed_config(cfg.clone());
         let recovered: HeatPumpHeaterConfig = ec.typed().unwrap();
         assert!((recovered.cooling_eir.unwrap() - cfg.cooling_eir.unwrap()).abs() < 1e-12);
-        assert!(recovered.is_mini_split);        assert_eq!(recovered.stage_shrs, cfg.stage_shrs);
+        assert!(recovered.is_mini_split);
+        assert_eq!(recovered.stage_shrs, cfg.stage_shrs);
         assert_eq!(recovered.biquadratic_x1_min, cfg.biquadratic_x1_min);
         assert_eq!(recovered.ff_min, cfg.ff_min);
     }
@@ -521,5 +522,4 @@ mod tests {
         };
         assert!(cfg.validate().is_err());
     }
-
 }

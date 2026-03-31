@@ -19,11 +19,6 @@ pub const DEFROST_CAPACITY_UNIT_FACTOR: f64 = 1.01667;
 /// the result is in watts: `(eir * capacity_W * mult + power_defrost) / capacity_W`.
 pub const DEFROST_EIR_TEMP_MODIFIER: f64 = 0.1528;
 
-/// No secondary capacity scaling beyond the physics-derived defrost cap_mult.
-/// OCHRE and EnergyPlus OnDemand defrost have no equivalent factor.
-pub const DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR: f64 = 1.0;
-pub const DEFAULT_DEFROST_POWER_W: f64 = 0.0;
-
 // Timed defrost mode constants (EnergyPlus / DOE-2)
 /// Default timed defrost fraction: ~3.5 min/hr (EnergyPlus default).
 pub const DEFAULT_DEFROST_TIME_FRACTION: f64 = 0.058;
@@ -57,12 +52,6 @@ pub const DEFAULT_HEATING_CAPACITY_W: f64 = 10_000.0;
 pub const DEFAULT_HEATING_EIR: f64 = 0.35;
 pub const DEFAULT_BACKUP_CAPACITY_W: f64 = 5_000.0;
 pub const DEFAULT_BACKUP_EIR: f64 = 1.0;
-pub const DEFAULT_MSHP_SPEED_MAP: [u8; 4] = [1, 3, 5, 9];
-pub const MAX_MSHP_SPEED_INDEX: u8 = 9;
-pub const MSHP_PAN_HEATER_DEFAULT_KW: f64 = 0.150;
 pub const MSHP_PAN_HEATER_DEFAULT_TEMP_C: f64 = 0.0;
-
-pub const DEFAULT_AC_SPEED_MAP_ERROR: &str =
-    "mshp_speed_map must contain 4 comma-separated integers in [0, 9]";
 
 pub const HEATER_TELEMETRY_CAPACITY: usize = 9;

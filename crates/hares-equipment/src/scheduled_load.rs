@@ -177,7 +177,7 @@ impl ScheduledLoad {
             None
         } else if name_lower.contains("exterior") || name_lower.contains("outdoor") {
             None
-        } else if let Some(explicit) = parse_zone_id(config.raw_data_or_empty()) {
+        } else if let Some(explicit) = parse_zone_id(&config) {
             Some(explicit)
         } else if name_lower.contains("garage") {
             Some(GARAGE_ZONE_ID)
@@ -188,9 +188,7 @@ impl ScheduledLoad {
             Some(ZoneId(1))
         };
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(
-                parse_u32(config.raw_data_or_empty(), KEY_EQUIPMENT_ID).unwrap_or_default(),
-            ),
+            id: EquipmentId(parse_u32(&config, KEY_EQUIPMENT_ID).unwrap_or_default()),
             name: config.name,
             end_use,
             equipment_type: Cow::Borrowed(equipment_type),
@@ -867,8 +865,7 @@ fn parse_power_schedule_source(config: &EquipmentConfig) -> crate::Result<Schedu
 
     match source.as_str() {
         "column" => {
-            let raw = config.raw_data_or_empty();
-            let Some(col_idx) = parse_usize(raw, KEY_POWER_SCHEDULE_COL)? else {
+            let Some(col_idx) = parse_usize(config, KEY_POWER_SCHEDULE_COL)? else {
                 return Err(HaresError::Equipment(format!(
                     "missing required key `{KEY_POWER_SCHEDULE_COL}` for column power schedule"
                 )));
@@ -936,10 +933,9 @@ fn parse_optional_gas_schedule_source(
         return Ok((None, GasScheduleUnit::ThermsPerHour));
     };
     let source = source.to_ascii_lowercase();
-    let raw = config.raw_data_or_empty();
     let gas_source = match source.as_str() {
         "column" => {
-            let Some(col_idx) = parse_usize(raw, KEY_GAS_SCHEDULE_COL)? else {
+            let Some(col_idx) = parse_usize(config, KEY_GAS_SCHEDULE_COL)? else {
                 return Err(HaresError::Equipment(format!(
                     "missing required key `{KEY_GAS_SCHEDULE_COL}` for column gas schedule"
                 )));
@@ -1120,7 +1116,7 @@ mod tests {
         KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE, KEY_LATENT_GAIN_FRACTION,
         KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE,
         KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, KEY_ZIP_I, KEY_ZIP_P, KEY_ZIP_V0,
-        KEY_ZIP_Z, ScheduledLoad, register_with_registry,
+        KEY_ZIP_Z, ScheduledLoad,
     };
 
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;

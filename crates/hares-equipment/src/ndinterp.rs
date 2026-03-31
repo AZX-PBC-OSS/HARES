@@ -271,7 +271,7 @@ mod tests {
         for t in 0..2 {
             for c in 0..2 {
                 for h in 0..2 {
-                    values[1 * 8 + t * 4 + c * 2 + h] = 1.0;
+                    values[8 + t * 4 + c * 2 + h] = 1.0;
                 }
             }
         }
@@ -401,7 +401,7 @@ mod tests {
         for s in 0..2 {
             for c in 0..2 {
                 for h in 0..2 {
-                    values[s * 8 + 1 * 4 + c * 2 + h] = 1.0;
+                    values[s * 8 + 4 + c * 2 + h] = 1.0;
                 }
             }
         }

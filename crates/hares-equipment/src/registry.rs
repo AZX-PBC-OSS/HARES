@@ -212,12 +212,11 @@ mod tests {
     #[test]
     fn known_aliases_resolve() {
         let registry = EquipmentRegistry::new();
-        for class in ["Gas Tankless Water Heater"] {
-            assert!(
-                registry.get(class).is_some(),
-                "expected '{class}' to be registered"
-            );
-        }
+        let class = "Gas Tankless Water Heater";
+        assert!(
+            registry.get(class).is_some(),
+            "expected '{class}' to be registered"
+        );
     }
 
     #[test]

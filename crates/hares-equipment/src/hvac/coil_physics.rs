@@ -1187,7 +1187,7 @@ mod coil_psychrometric_tests {
     fn bypass_factor_shr_one_uses_enthalpy_path() {
         let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 1.0).unwrap();
         assert!(
-            bf >= BYPASS_FACTOR_FLOOR && bf <= 1.0,
+            (BYPASS_FACTOR_FLOOR..=1.0).contains(&bf),
             "SHR=1.0 BF must be in [{BYPASS_FACTOR_FLOOR}, 1.0], got {bf:.5}"
         );
     }
@@ -1220,14 +1220,13 @@ mod coil_psychrometric_tests {
         // Ao=0.0 drives BF=exp(0/mfr)=1.0 (no contact with coil), so calculate_shr
         // must return SHR=1.0 (no dehumidification) or return Err — but must not panic.
         let shr_result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, 0.0, ao);
-        match shr_result {
-            Ok(result) => assert_eq!(
+        if let Ok(result) = shr_result {
+            assert_eq!(
                 result.shr, 1.0,
                 "calculate_shr with Ao=0 and zero flow must return SHR=1.0, got {:.6}",
                 result.shr
-            ),
-            Err(_) => {} // non-convergence is also an acceptable outcome for Ao=0
-        }
+            )
+        } // non-convergence is also an acceptable outcome for Ao=0
     }
 
     // ------------------------------------------------------------------

@@ -426,7 +426,7 @@ mod tests {
     ///   - Push 1.0, 0.2: initialises reversal buffer (two-point ramp, no extraction)
     ///   - Push 1.0: direction reverses; 3-point extraction extracts a half-cycle
     ///     with range = |0.2 - 1.0| = 0.8 → stored as (DOD=0.8, count=0.5)
-    ///   sum_squared_dod = 0.5 × 0.8² = 0.32  (Smith 2017 b2 input term)
+    ///     sum_squared_dod = 0.5 × 0.8² = 0.32  (Smith 2017 b2 input term)
     #[test]
     fn rainflow_sum_squared_dod() {
         let mut rc = RainflowCounter::default();

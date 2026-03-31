@@ -373,6 +373,7 @@ fn pv_cell_temperature_noct_model() {
             inverter_capacity_kw: None,
             power_factor: None,
             surface_resolution_deg: Some(5.0),
+            sam_lut_path: None,
         },
     );
 
@@ -468,6 +469,7 @@ fn pv_power_temperature_derating() {
                 inverter_capacity_kw: None,
                 power_factor: None,
                 surface_resolution_deg: Some(5.0),
+                sam_lut_path: None,
             },
         );
         let mut env = base_env();

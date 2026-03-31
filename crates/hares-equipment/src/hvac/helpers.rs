@@ -176,16 +176,17 @@ pub fn apply_heating_control_unchecked(
 /// systems so the ASHRAE 152 low-speed branch uses actual low-speed values.
 /// Passing `None` for a multi-speed system causes the low-speed branch to fall
 /// back to high-speed values, which underestimates duct losses.
-pub fn resolve_duct_dse(
-    config: &EquipmentConfig,
-    is_heating: bool,
-    capacity_w: f64,
-    fan_flow_m3_s: f64,
-    n_speeds: u8,
-    capacity_low_w: Option<f64>,
-    fan_flow_low_m3_s: Option<f64>,
-    is_heat_pump: bool,
-) -> f64 {
+pub struct DuctDseContext {
+    pub is_heating: bool,
+    pub capacity_w: f64,
+    pub fan_flow_m3_s: f64,
+    pub n_speeds: u8,
+    pub capacity_low_w: Option<f64>,
+    pub fan_flow_low_m3_s: Option<f64>,
+    pub is_heat_pump: bool,
+}
+
+pub fn resolve_duct_dse(config: &EquipmentConfig, ctx: &DuctDseContext) -> f64 {
     // Direct override takes priority.
     if let Some(dse) = first_f64(config, &["duct_dse", "duct_distribution_efficiency"]) {
         return dse.clamp(0.0, 1.0);
@@ -216,7 +217,7 @@ pub fn resolve_duct_dse(
     let return_r = config.get_f64("duct_return_r_m2_k_w").unwrap_or(0.0);
 
     // Need positive capacity and fan flow for meaningful DSE calculation.
-    if capacity_w <= 0.0 || fan_flow_m3_s <= 0.0 {
+    if ctx.capacity_w <= 0.0 || ctx.fan_flow_m3_s <= 0.0 {
         return 1.0;
     }
 
@@ -231,13 +232,13 @@ pub fn resolve_duct_dse(
         return_leakage_frac: return_leak,
         return_area_m2: return_area,
         return_r_nominal_m2_k_w: return_r,
-        is_heating,
-        capacity_w,
-        fan_flow_m3_s,
-        n_speeds,
-        capacity_low_w,
-        fan_flow_low_m3_s,
-        is_heat_pump,
+        is_heating: ctx.is_heating,
+        capacity_w: ctx.capacity_w,
+        fan_flow_m3_s: ctx.fan_flow_m3_s,
+        n_speeds: ctx.n_speeds,
+        capacity_low_w: ctx.capacity_low_w,
+        fan_flow_low_m3_s: ctx.fan_flow_low_m3_s,
+        is_heat_pump: ctx.is_heat_pump,
     };
 
     hares_physics::ashrae152::calculate_dse(&input)

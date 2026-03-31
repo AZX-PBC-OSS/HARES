@@ -12,8 +12,6 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use hares_types::normalize_ascii;
-
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::tank::{StratifiedTank, StratifiedTankConfig};
@@ -34,10 +32,8 @@ const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE storage WH defaul
 const DEFAULT_BURNER_INPUT_W: f64 = 11_000.0;
 const DEFAULT_BURNER_EFFICIENCY: f64 = 0.78;
 const DEFAULT_FLUE_LOSS_FRACTION: f64 = 0.10;
-/// Standing pilot flame power (thermal). Central estimate from DOE 10 CFR 430
-/// test-procedure/manufacturer ranges for natural-draft atmospheric gas water heaters.
+#[cfg(test)]
 const DEFAULT_PILOT_POWER_W: f64 = 5.0;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GasWhState {
     setpoint_c: f64,
@@ -764,49 +760,6 @@ fn default_skin_loss_fraction(burner_efficiency: f64) -> f64 {
     } else {
         0.96
     }
-}
-
-fn parse_poly3(config: &EquipmentConfig, key: &str) -> crate::Result<Option<[f64; 3]>> {
-    let Some(raw) = config.get_str(key) else {
-        return Ok(None);
-    };
-
-    let parts: Vec<&str> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect();
-    if parts.len() != 3 {
-        return Err(HaresError::Equipment(format!(
-            "expected 3 coefficients in '{key}', got {}",
-            parts.len()
-        )));
-    }
-
-    let mut coeffs = [0.0_f64; 3];
-    for (idx, part) in parts.into_iter().enumerate() {
-        coeffs[idx] = part.parse::<f64>().map_err(|error| {
-            HaresError::Equipment(format!(
-                "failed to parse coefficient {idx} ('{part}') in '{key}': {error}"
-            ))
-        })?;
-    }
-    Ok(Some(coeffs))
-}
-
-fn first_str<'a>(config: &'a EquipmentConfig, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|key| config.get_str(key))
-}
-
-fn ignition_uses_standing_pilot(raw: Option<&str>) -> bool {
-    let Some(raw_value) = raw else {
-        // Default assumption favors older storage gas WH stock where standing pilots are common.
-        return true;
-    };
-    !matches!(
-        normalize_ascii(raw_value).as_str(),
-        "electronic" | "electronic_ignition" | "intermittent_ignition"
-    )
 }
 
 #[cfg(test)]

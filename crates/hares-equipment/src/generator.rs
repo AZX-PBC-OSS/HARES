@@ -2344,15 +2344,15 @@ mod tests {
             "must use fuel_input_w"
         );
         assert!(
-            !names_no_chp.iter().any(|n| *n == "fuel_input_kw"),
+            !names_no_chp.contains(&"fuel_input_kw"),
             "old kW name must not appear"
         );
         assert!(
-            !names_no_chp.iter().any(|n| *n == "thermal_output_kw"),
+            !names_no_chp.contains(&"thermal_output_kw"),
             "old kW name must not appear"
         );
         assert!(
-            !names_no_chp.iter().any(|n| *n == "flue_loss_kw"),
+            !names_no_chp.contains(&"flue_loss_kw"),
             "old kW name must not appear"
         );
 

@@ -1397,7 +1397,7 @@ mod element_priority_tests {
     /// Build a config with both elements cold (initial_tank_temp_c well below setpoint).
     /// max_tank_temp_c is set high so the safety clamp never interferes.
     fn cold_config(mode: &str) -> EquipmentConfig {
-        let cfg = EquipmentConfig::from_typed(
+        EquipmentConfig::from_typed(
             "WH".to_string(),
             "Resistance Water Heater".to_string(),
             crate::ElectricResistanceWaterHeaterConfig {
@@ -1424,8 +1424,7 @@ mod element_priority_tests {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: Some(mode.to_string()),
             },
-        );
-        cfg
+        )
     }
 
     fn ports() -> PortSlots {

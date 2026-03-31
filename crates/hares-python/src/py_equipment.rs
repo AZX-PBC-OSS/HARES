@@ -498,18 +498,21 @@ pub struct PyPv {
     #[pyo3(get)]
     pub azimuth: f64,
     #[pyo3(get)]
+    pub sam_lut_path: Option<String>,
+    #[pyo3(get)]
     pub soiling: Option<PyPvSoilingConfig>,
 }
 
 #[pymethods]
 impl PyPv {
     #[new]
-    #[pyo3(signature = (name, capacity_kw, tilt, azimuth, soiling=None))]
+    #[pyo3(signature = (name, capacity_kw, tilt, azimuth, sam_lut_path=None, soiling=None))]
     fn new(
         name: String,
         capacity_kw: f64,
         tilt: f64,
         azimuth: f64,
+        sam_lut_path: Option<String>,
         soiling: Option<PyPvSoilingConfig>,
     ) -> Self {
         Self {
@@ -517,14 +520,15 @@ impl PyPv {
             capacity_kw,
             tilt,
             azimuth,
+            sam_lut_path,
             soiling,
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "PV(name={:?}, capacity_kw={}, tilt={}, azimuth={})",
-            self.name, self.capacity_kw, self.tilt, self.azimuth
+            "PV(name={:?}, capacity_kw={}, tilt={}, azimuth={}, sam_lut_path={:?})",
+            self.name, self.capacity_kw, self.tilt, self.azimuth, self.sam_lut_path
         )
     }
 }

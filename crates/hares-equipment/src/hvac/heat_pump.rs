@@ -42,8 +42,6 @@ mod tests {
 
     use crate::{EquipmentConfig, EquipmentRegistry};
 
-    use super::register_with_registry;
-
     fn config(name: &str, class: &str) -> EquipmentConfig {
         let mut raw = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());

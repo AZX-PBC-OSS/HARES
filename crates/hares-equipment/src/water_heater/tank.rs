@@ -1664,7 +1664,7 @@ mod tests {
     /// With equal node volumes V and draw = 1.5V, the shift map for node 0 is:
     ///   - Old node 1 shifted to [-0.5V, 0.5V]: overlap [0, 0.5V] with node 0 → 0.5V of T1=60°C
     ///   - Old node 2 shifted to [0.5V, 1.5V]:  overlap [0.5V, V] with node 0 → 0.5V of T2=58°C
-    ///   T_new_node0 = (0.5V×60 + 0.5V×58) / V = 59°C
+    ///     T_new_node0 = (0.5V×60 + 0.5V×58) / V = 59°C
     #[test]
     fn tank_fractional_draw_node_overlap() {
         let mut tank = test_tank(6, 60.0);

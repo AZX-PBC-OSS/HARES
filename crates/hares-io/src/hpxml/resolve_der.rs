@@ -55,6 +55,7 @@ pub(super) fn resolve_pv(
             inverter_capacity_kw: None,
             power_factor: None,
             surface_resolution_deg: None,
+            sam_lut_path: None,
         };
 
         specs.push(build_typed_spec(

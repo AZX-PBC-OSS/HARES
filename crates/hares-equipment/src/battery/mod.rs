@@ -36,46 +36,67 @@ pub use hares_types::BatteryLutType;
 // ---------------------------------------------------------------------------
 
 use crate::config::{KEY_EQUIPMENT_ID, KEY_ZONE_ID};
+#[cfg(test)]
 pub(crate) const KEY_CAPACITY_KWH: &str = "capacity_kwh";
+#[cfg(test)]
 pub(crate) const KEY_MAX_CHARGE_KW: &str = "max_charge_kw";
+#[cfg(test)]
 pub(crate) const KEY_MAX_DISCHARGE_KW: &str = "max_discharge_kw";
+#[cfg(test)]
 const KEY_N_SERIES: &str = "n_series";
+#[cfg(test)]
 const KEY_N_PARALLEL: &str = "n_parallel";
+#[cfg(test)]
 const KEY_CELL_RESISTANCE_OHM: &str = "cell_resistance_ohm";
+#[cfg(test)]
 pub(crate) const KEY_SELF_DISCHARGE_PCT_PER_DAY: &str = "self_discharge_pct_per_day";
+#[cfg(test)]
 pub(crate) const KEY_STANDBY_POWER_W: &str = "standby_power_w";
+#[cfg(test)]
 const KEY_INITIAL_SOC: &str = "initial_soc";
+#[cfg(test)]
 pub(crate) const KEY_MIN_SOC: &str = "min_soc";
+#[cfg(test)]
 pub(crate) const KEY_MAX_SOC: &str = "max_soc";
+#[cfg(test)]
 pub(crate) const KEY_HEATER_POWER_W: &str = "heater_power_w";
+#[cfg(test)]
 pub(crate) const KEY_HEATER_THRESHOLD_C: &str = "heater_threshold_c";
-const KEY_HEATER_ON_DISCHARGE: &str = "heater_on_discharge";
+#[cfg(test)]
 const KEY_CELL_THERMAL_MASS_J_PER_K: &str = "cell_thermal_mass_j_per_k";
+#[cfg(test)]
 const KEY_CELL_UA_W_PER_K: &str = "cell_ua_w_per_k";
+#[cfg(test)]
 const KEY_MIN_DISCHARGE_TEMP_C: &str = "min_discharge_temp_c";
+#[cfg(test)]
 pub(crate) const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";
+#[cfg(test)]
 pub(crate) const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
 /// Symmetric round-trip inverter efficiency: splits as sqrt(rte) per direction.
+#[cfg(test)]
 const KEY_INVERTER_EFFICIENCY: &str = "inverter_efficiency";
 /// Explicit charge-direction efficiency (AC→DC). Overrides sqrt split when set.
+#[cfg(test)]
 pub(crate) const KEY_CHARGE_EFFICIENCY: &str = "charge_efficiency";
 /// Explicit discharge-direction efficiency (DC→AC). Overrides sqrt split when set.
+#[cfg(test)]
 pub(crate) const KEY_DISCHARGE_EFFICIENCY: &str = "discharge_efficiency";
 /// Per-cell capacity (Ah). When provided with KEY_V_CELL, n_series/n_parallel
 /// are derived from capacity_kwh: n_series = V_pack/V_cell, n_parallel = Ah_pack/Ah_cell,
 /// where V_pack ≈ cell_ocv_nom * n_series and Ah_pack = capacity_kwh * 1000 / V_pack.
+#[cfg(test)]
 const KEY_AH_CELL: &str = "ah_cell";
 /// Per-cell nominal voltage (V). Used with KEY_AH_CELL to derive pack topology.
+#[cfg(test)]
 const KEY_V_CELL: &str = "v_cell";
 /// Maximum grid import power while battery is charging (W). None = unlimited.
 /// OCHRE: `import_limit` parameter on Generator (Battery inherits it).
+#[cfg(test)]
 const KEY_IMPORT_LIMIT_W: &str = "import_limit_w";
 /// Maximum grid export power while battery is discharging (W). None = unlimited.
 /// OCHRE: `export_limit` parameter on Generator (Battery inherits it).
+#[cfg(test)]
 const KEY_EXPORT_LIMIT_W: &str = "export_limit_w";
-pub(crate) const KEY_CHEMISTRY: &str = "chemistry";
-const KEY_BMS_MODE: &str = "bms_mode";
-const KEY_GRID_EXPORT_RULE: &str = "grid_export_rule";
 
 // ---------------------------------------------------------------------------
 // Physical defaults (Li-NMC, Tesla Powerwall-class)
@@ -1836,7 +1857,7 @@ mod tests {
             (bat2.rainflow.total_cycles() - cycles_saved).abs() < f64::EPSILON,
             "cycle count mismatch after round-trip"
         );
-        assert_eq!(bat2.self_consumption_enabled, false);
+        assert!(!bat2.self_consumption_enabled);
         assert_eq!(bat2.power_setpoint_kw, Some(2.0));
     }
 

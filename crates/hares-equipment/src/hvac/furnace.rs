@@ -750,7 +750,7 @@ mod tests {
         );
 
         let mut eq = GasFurnace::new(cfg.clone());
-        eq.init(&cfg, &env(18.0));
+        eq.init(&cfg, &env(18.0)).expect("gas furnace init");
 
         let expected_airflow_m3_s = eq.hvac.airflow_m3_s_per_w * capacity_w;
         let expected = eq.hvac.fan_power_w(expected_airflow_m3_s);
@@ -773,7 +773,7 @@ mod tests {
         );
 
         let mut eq = GasFurnace::new(cfg.clone());
-        eq.init(&cfg, &env(18.0));
+        eq.init(&cfg, &env(18.0)).expect("gas furnace init");
 
         assert!((eq.fan_power_w - 500.0).abs() < 1e-9);
     }
@@ -800,7 +800,7 @@ mod tests {
 
         let mut eq = GasFurnace::new(cfg.clone());
         let env = env(18.0);
-        eq.init(&cfg, &env);
+        eq.init(&cfg, &env).expect("gas furnace init");
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

@@ -1115,10 +1115,6 @@ fn default_condenser_weights(n_nodes: usize) -> Vec<f64> {
     hpwh_compressor::default_condenser_weights(n_nodes)
 }
 
-fn parse_curve_coeffs(config: &EquipmentConfig, key: &str) -> crate::Result<Option<[f64; 6]>> {
-    hpwh_compressor::parse_curve_coeffs(config, key)
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1730,7 +1726,7 @@ mod tests {
         );
         // Timer is Some(60.0) — well below 600s.
         assert!(
-            eq.compressor_on_since_s.map_or(false, |t| t < 600.0),
+            eq.compressor_on_since_s.is_some_and(|t| t < 600.0),
             "timer must be below min_on_time_s"
         );
 

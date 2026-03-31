@@ -64,6 +64,7 @@ pub enum HvacEquipmentType {
 ///   and OpenStudio-HPXML residential defaults.
 /// - MSHP cooling baseline follows ductless split assumptions used in OCHRE.
 /// - Heating-side baseline follows OCHRE/ResStock residential conventions.
+///
 /// Stored in SI only for internal physics/state updates.
 pub const AIRFLOW_HEATING_M3_S_PER_W: f64 = 4.696_858_666_481_194_7e-5;
 pub const AIRFLOW_CENTRAL_AC_M3_S_PER_W: f64 = 5.367_838_475_978_508_5e-5;

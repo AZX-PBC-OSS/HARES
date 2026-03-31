@@ -23,11 +23,17 @@ pub(super) const KEY_POWER_LIMIT_KW: &str = "power_limit_kw";
 pub(super) const KEY_L1_CURRENT_A: &str = "l1_current_a";
 pub(super) const KEY_L1_VOLTAGE_V: &str = "l1_voltage_v";
 pub(super) const KEY_BATTERY_TEMP_C: &str = "battery_temp_c";
+#[cfg(test)]
 pub(super) const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
+#[cfg(test)]
 pub(super) const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";
+#[cfg(test)]
 pub(super) const KEY_HEATER_POWER_W: &str = "heater_power_w";
+#[cfg(test)]
 pub(super) const KEY_HEATER_THRESHOLD_C: &str = "heater_threshold_c";
+#[cfg(test)]
 pub(super) const KEY_THERMAL_MASS_J_PER_K: &str = "thermal_mass_j_per_k";
+#[cfg(test)]
 pub(super) const KEY_UA_W_PER_K: &str = "ua_w_per_k";
 pub(super) const KEY_V2L_ENABLED: &str = "v2l_enabled";
 pub(super) const KEY_V2L_SOC_RESERVE: &str = "v2l_soc_reserve";
@@ -38,6 +44,7 @@ pub(super) const KEY_V2G_MAX_DISCHARGE_KW: &str = "v2g_max_discharge_kw";
 pub(crate) const KEY_READY_SOC: &str = "ready_soc";
 pub(crate) const KEY_FUEL_ECONOMY_KWH_PER_MI: &str = "fuel_economy_kwh_per_mi";
 pub(crate) const KEY_CHEMISTRY: &str = "chemistry";
+#[cfg(test)]
 pub(super) const KEY_CHARGING_STRATEGY: &str = "charging_strategy";
 pub(super) const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
 

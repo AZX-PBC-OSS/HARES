@@ -650,7 +650,6 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -660,8 +659,7 @@ mod tests {
         ZoneId, ZoneState,
     };
 
-    use super::{IdealHvac, register_with_registry};
-    use crate::config::ConfigPayload;
+    use super::IdealHvac;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64, time_res_s: i64, second: i64) -> EnvironmentState {

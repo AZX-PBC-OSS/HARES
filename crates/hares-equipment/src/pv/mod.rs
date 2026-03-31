@@ -6,13 +6,14 @@ mod lut;
 pub mod shading;
 pub mod soiling;
 
+use array_config::parse_u32_from_f64;
 pub use array_config::{ModuleType, PvArray, surface_id_for_orientation};
-use array_config::{parse_arrays_from_config, parse_u32_from_f64};
 pub use config::PvConfig;
 use lut::PvLut;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
@@ -36,22 +37,7 @@ const KEY_ARRAY_AZIMUTH_DEG: &str = "ArrayAzimuth";
 const KEY_MODULE_TYPE: &str = "ModuleType";
 const KEY_ARRAY_COUNT: &str = "array_count";
 const KEY_NOCT_C: &str = "noct_c";
-const KEY_INVERTER_EFFICIENCY: &str = "inverter_efficiency";
-const KEY_INVERTER_CAPACITY_KW: &str = "inverter_capacity_kw";
-const KEY_INVERTER_CAPACITY_KW_ALT: &str = "InverterCapacity";
-const KEY_POWER_FACTOR: &str = "power_factor";
-const KEY_SURFACE_RESOLUTION_DEG: &str = "surface_resolution_deg";
 const KEY_SAM_LUT_PATH: &str = "sam_lut_path";
-const KEY_SYSTEM_LOSSES_FRACTION: &str = "system_losses_fraction";
-const KEY_SYSTEM_LOSSES_FRACTION_ALT: &str = "SystemLossesFraction";
-
-const KEY_SOILING_ENABLED: &str = "soiling_enabled";
-const KEY_SOILING_CLEANING_THRESHOLD_MM: &str = "soiling_cleaning_threshold_mm";
-const KEY_SOILING_LOSS_RATE_PER_DAY: &str = "soiling_loss_rate_per_day";
-const KEY_SOILING_GRACE_PERIOD_DAYS: &str = "soiling_grace_period_days";
-const KEY_SOILING_MAX_LOSS: &str = "soiling_max_loss";
-const KEY_SOILING_INITIAL_LOSS: &str = "soiling_initial_loss";
-const KEY_SOILING_RAIN_ACCUM_HOURS: &str = "soiling_rain_accum_hours";
 
 const DEFAULT_NOCT_C: f64 = 47.0;
 const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.96;
@@ -150,14 +136,14 @@ impl PV {
     pub fn new(config: EquipmentConfig) -> Self {
         let id = parse_u32_from_f64(config.get_f64(KEY_EQUIPMENT_ID)).unwrap_or(0);
         let (arrays, init_error) = if config.is_typed() {
-            // Typed PV configs rebuild their arrays in `init_typed()`, so the
-            // constructor must not force the raw-array parser on typed payloads.
             (vec![], None)
         } else {
-            match parse_arrays_from_config(&config) {
-                Ok(a) => (a, None),
-                Err(e) => (vec![], Some(e)),
-            }
+            (
+                vec![],
+                Some(HaresError::Equipment(
+                    "PV requires typed config; raw config is unsupported".to_string(),
+                )),
+            )
         };
         let shading_model = shading::parse_shading_config(&config);
 
@@ -386,7 +372,7 @@ impl PV {
             noct_c,
             module_type,
             surface_id: None,
-            sam_lut_path: None,
+            sam_lut_path: c.sam_lut_path.clone(),
             attached_boundary_id: None,
         }];
 
@@ -432,6 +418,10 @@ impl PV {
                     array.tilt_deg, array.azimuth_deg, surface_id
                 )));
             };
+            if let Some(path) = array.sam_lut_path.as_deref() {
+                let lut = PvLut::from_path(Path::new(path))?;
+                self.luts_by_surface.insert(surface_id, lut);
+            }
         }
 
         self.soiling_config = None;
@@ -775,13 +765,18 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, InverterPriority, PortSlots, SurfaceIrradiance,
         WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
+    use parquet::arrow::ArrowWriter;
 
     use super::lut::PvLut;
     use super::{
@@ -858,6 +853,7 @@ mod tests {
             inverter_capacity_kw: None,
             power_factor: Some(DEFAULT_POWER_FACTOR),
             surface_resolution_deg: Some(5.0),
+            sam_lut_path: None,
         }
     }
 
@@ -877,6 +873,55 @@ mod tests {
 
     fn approx_eq(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "left={a}, right={b}");
+    }
+
+    fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}.{}",
+            std::process::id(),
+            nanos,
+            ext
+        ))
+    }
+
+    fn write_pv_lut_csv(path: &Path, ac_power_kw: f64) {
+        let contents = format!(
+            "month,hour,ghi,dni,dhi,temp_c,ac_power_kw\n6,12,0,0,0,25,{ac_power_kw}\n"
+        );
+        std::fs::write(path, contents).expect("write pv csv lut");
+    }
+
+    fn write_pv_lut_parquet(path: &Path, ac_power_kw: f64) {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("month", DataType::Float64, false),
+            Field::new("hour", DataType::Float64, false),
+            Field::new("ghi", DataType::Float64, false),
+            Field::new("dni", DataType::Float64, false),
+            Field::new("dhi", DataType::Float64, false),
+            Field::new("temp_c", DataType::Float64, false),
+            Field::new("ac_power_kw", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                std::sync::Arc::new(Float64Array::from(vec![6.0])),
+                std::sync::Arc::new(Float64Array::from(vec![12.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![0.0])),
+                std::sync::Arc::new(Float64Array::from(vec![25.0])),
+                std::sync::Arc::new(Float64Array::from(vec![ac_power_kw])),
+            ],
+        )
+        .expect("record batch");
+        let file = std::fs::File::create(path).expect("create pv parquet lut");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("arrow writer");
+        writer.write(&batch).expect("write parquet batch");
+        writer.close().expect("close parquet writer");
     }
 
     #[test]
@@ -1348,10 +1393,9 @@ mod tests {
         approx_eq(dc_thinfilm, 5.0 * (1.0 + (-0.0020_f64) * 40.0));
     }
 
-    /// An invalid config (negative capacity) must cause init() to return an error,
-    /// not silently produce empty arrays.
+    /// Raw configs are not supported for PV; typed config is required.
     #[test]
-    fn invalid_config_surfaces_error_in_init() {
+    fn raw_config_rejected_in_init() {
         let mut raw = HashMap::new();
         raw.insert("equipment_id".to_string(), 4.0.into());
         raw.insert("capacity_kw".to_string(), (-1.0_f64).into());
@@ -1366,9 +1410,65 @@ mod tests {
         let env = env_with_surfaces(vec![], 25.0);
         let err = pv.init(&cfg, &env).unwrap_err();
         assert!(
-            err.to_string().contains("capacity_kw"),
-            "expected capacity_kw error, got: {err}"
+            err.to_string().contains("typed config"),
+            "expected typed-only error, got: {err}"
         );
+    }
+
+    #[test]
+    fn typed_sam_lut_csv_drives_ac_output() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let path = unique_temp_path("pv_lut", "csv");
+        write_pv_lut_csv(&path, 2.75);
+
+        let mut typed = base_pv_typed_config();
+        typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        typed.inverter_efficiency = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).expect("init pv csv lut");
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step pv csv lut");
+        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0), 2.75);
+    }
+
+    #[test]
+    fn typed_sam_lut_parquet_drives_ac_output() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            25.0,
+        );
+        let path = unique_temp_path("pv_lut", "parquet");
+        write_pv_lut_parquet(&path, 3.10);
+
+        let mut typed = base_pv_typed_config();
+        typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
+        typed.inverter_efficiency = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).expect("init pv parquet lut");
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("step pv parquet lut");
+        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0), 3.10);
     }
 
     // --- System losses fraction tests ---

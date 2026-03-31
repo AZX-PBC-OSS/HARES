@@ -526,7 +526,7 @@ fn gas_furnace_typed_config_uses_afue_during_init() {
 }
 
 #[test]
-fn central_ac_typed_config_uses_seer_during_init() {
+fn central_ac_typed_config_uses_eir_during_init() {
     let xml = minimal_xml(
         r#"<Systems><HVAC><CoolingSystem>
             <CoolingSystemType>central air conditioner</CoolingSystemType>
@@ -547,7 +547,8 @@ fn central_ac_typed_config_uses_seer_during_init() {
         .expect("typed air conditioner config")
         .typed()
         .expect("air conditioner typed config");
-    assert!((typed_cfg.seer - 16.0).abs() < 1e-12);
+    let expected_eir = 3.412_141_633_f64 / 16.0_f64;
+    assert!((typed_cfg.eir - expected_eir).abs() < 1e-12);
     let env = make_env(26.0, 35.0);
     let mut eq = init_equipment(&spec, &env);
 

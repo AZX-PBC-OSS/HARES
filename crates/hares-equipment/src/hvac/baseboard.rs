@@ -256,7 +256,7 @@ mod tests {
         ZoneId, ZoneState,
     };
 
-    use super::{ElectricBaseboard, register_with_registry};
+    use super::ElectricBaseboard;
 
     use crate::hvac::heating_config::ElectricBaseboardConfig;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};

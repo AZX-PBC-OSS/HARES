@@ -1,9 +1,6 @@
 //! HPWH compressor control logic, COP/capacity curve evaluation, and condenser heat distribution.
 
-use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
-
-use crate::EquipmentConfig;
 
 /// Mutual exclusion mode between compressor and backup resistance elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -41,10 +38,6 @@ pub(super) const DEFAULT_TANK_TEMP_BOUNDS_C: (f64, f64) = (20.0, 70.0);
 /// 45°F = (45-32)×5/9 = 7.2̄°C; 110°F = (110-32)×5/9 = 43.3̄°C.
 pub(super) const DEFAULT_MIN_AMBIENT_TEMP_C: f64 = 5.0 * (45.0 - 32.0) / 9.0; // 7.2222...
 pub(super) const DEFAULT_MAX_AMBIENT_TEMP_C: f64 = 5.0 * (110.0 - 32.0) / 9.0; // 43.3333...
-/// Low-power HPWH ambient lockout bounds (°C).
-/// 37°F = 2.7̄°C; 145°F = 62.7̄°C.
-pub(super) const LOW_POWER_MIN_AMBIENT_TEMP_C: f64 = 5.0 * (37.0 - 32.0) / 9.0; // 2.7777...
-pub(super) const LOW_POWER_MAX_AMBIENT_TEMP_C: f64 = 5.0 * (145.0 - 32.0) / 9.0; // 62.7777...
 /// Sensible heat ratio of zone-air cooling from evaporator (OCHRE WH.py:671-674).
 pub(super) const DEFAULT_SHR: f64 = 0.88;
 /// Fraction of compressor waste heat that exits the building envelope.
@@ -53,7 +46,6 @@ pub(super) const DEFAULT_LOST_HEAT_FRACTION: f64 = 0.0;
 pub(super) const DEFAULT_FAN_POWER_W: f64 = 35.0;
 /// Standby parasitic power (W); drawn when compressor is off.
 /// OCHRE WaterHeater.py:457: `HPWH Parasitics (W)` default 1 W.
-#[allow(dead_code)] // Reserved for future parasitic standby loss implementation
 pub(super) const DEFAULT_PARASITIC_POWER_W: f64 = 1.0;
 /// Resistance backup element efficiency (fraction). Default 1.0 = 100% electric→heat.
 pub(super) const DEFAULT_BACKUP_EFFICIENCY: f64 = 1.0;
@@ -106,35 +98,4 @@ pub(super) fn default_condenser_weights(n_nodes: usize) -> Vec<f64> {
         weights[n_nodes / 2] = 1.0;
     }
     weights
-}
-
-pub(super) fn parse_curve_coeffs(
-    config: &EquipmentConfig,
-    key: &str,
-) -> crate::Result<Option<[f64; 6]>> {
-    let Some(raw) = config.get_str(key) else {
-        return Ok(None);
-    };
-    let parts: Vec<&str> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect();
-    if parts.len() != 6 {
-        return Err(HaresError::Equipment(format!(
-            "expected 6 coefficients in '{key}', got {}",
-            parts.len()
-        )));
-    }
-
-    let mut coeffs = [0.0_f64; 6];
-    for (idx, part) in parts.into_iter().enumerate() {
-        coeffs[idx] = part.parse::<f64>().map_err(|error| {
-            HaresError::Equipment(format!(
-                "failed to parse coefficient {idx} ('{part}') in '{key}': {error}"
-            ))
-        })?;
-    }
-
-    Ok(Some(coeffs))
 }

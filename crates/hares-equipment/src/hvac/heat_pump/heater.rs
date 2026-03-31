@@ -27,8 +27,8 @@ use super::constants::{
     DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR, DEFAULT_EQUIPMENT_ID,
     DEFAULT_ER_HARD_LOCKOUT_TIME_S, DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
     DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
-    DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S, DEFAULT_MSHP_SPEED_MAP,
-    DEFAULT_ZONE_ID, MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
+    DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S, DEFAULT_ZONE_ID,
+    MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
 use super::defrost::{DefrostConfig, evaluate_defrost};
 use super::heater_config::{
@@ -69,7 +69,6 @@ struct HeatPumpHeaterCore {
     pan_heater_kw: f64,
     pan_heater_temp_c: f64,
     pan_heater_on: bool,
-    mshp_speed_map: [u8; 4],
     variant: HeaterVariant,
     run_time_s: f64,
     cycle_on_steps: u64,
@@ -334,7 +333,6 @@ impl HeatPumpHeaterCore {
             pan_heater_kw: 0.0,
             pan_heater_temp_c: MSHP_PAN_HEATER_DEFAULT_TEMP_C,
             pan_heater_on: false,
-            mshp_speed_map: DEFAULT_MSHP_SPEED_MAP,
             variant,
             run_time_s: 0.0,
             cycle_on_steps: 0,
@@ -471,7 +469,16 @@ impl HeatPumpHeaterCore {
                 dse
             } else {
                 super::super::helpers::resolve_duct_dse(
-                    config, true, rated_cap, fan_flow, n_speeds, cap_low, flow_low, true,
+                    config,
+                    &super::super::helpers::DuctDseContext {
+                        is_heating: true,
+                        capacity_w: rated_cap,
+                        fan_flow_m3_s: fan_flow,
+                        n_speeds,
+                        capacity_low_w: cap_low,
+                        fan_flow_low_m3_s: flow_low,
+                        is_heat_pump: true,
+                    },
                 )
             };
         }
@@ -2401,7 +2408,7 @@ mod tests {
 
         let environment = env(18.0, 0.0, 0.003);
         let mut eq = MinisplitHeater::new(ec.clone());
-        eq.init(&ec, &environment);
+        eq.init(&ec, &environment).unwrap();
 
         let n_stages = eq.core.hvac.heating_capacities_w.len();
         assert_eq!(

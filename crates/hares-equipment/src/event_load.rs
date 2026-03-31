@@ -223,13 +223,11 @@ impl EventBasedLoad {
     pub fn new(config: EquipmentConfig) -> Self {
         let equipment_name = config.name.clone();
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(
-                parse_u32(config.raw_data_or_empty(), KEY_EQUIPMENT_ID).unwrap_or_default(),
-            ),
+            id: EquipmentId(parse_u32(&config, KEY_EQUIPMENT_ID).unwrap_or_default()),
             name: equipment_name,
             end_use: EndUse::OTHER,
             equipment_type: Cow::Borrowed("EventBasedLoad"),
-            zone: parse_zone_id(config.raw_data_or_empty()),
+            zone: parse_zone_id(&config),
             fuel: FuelType::Electric,
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::LOAD_FRACTION
@@ -690,13 +688,11 @@ impl WetAppliance {
     pub fn new(config: EquipmentConfig, name: &'static str) -> Self {
         let equipment_name = config.name.clone();
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(
-                parse_u32(config.raw_data_or_empty(), KEY_EQUIPMENT_ID).unwrap_or_default(),
-            ),
+            id: EquipmentId(parse_u32(&config, KEY_EQUIPMENT_ID).unwrap_or_default()),
             name: equipment_name,
             end_use: EndUse::OTHER,
             equipment_type: Cow::Borrowed(name),
-            zone: parse_zone_id(config.raw_data_or_empty()),
+            zone: parse_zone_id(&config),
             fuel: FuelType::Electric,
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::LOAD_FRACTION
@@ -1243,8 +1239,7 @@ pub fn map_ochre_pdf_to_cycle_schedule(
 fn parse_event_schedule_sources(
     config: &EquipmentConfig,
 ) -> crate::Result<(ScheduleSource, ScheduleSource)> {
-    let raw = config.raw_data_or_empty();
-    let window_source = if let Some(col_idx) = parse_usize(raw, KEY_EVENT_WINDOW_SCHEDULE_COL)? {
+    let window_source = if let Some(col_idx) = parse_usize(config, KEY_EVENT_WINDOW_SCHEDULE_COL)? {
         ScheduleSource::ColumnRef {
             col_idx,
             boundary: BoundaryPolicy::Wrap,
@@ -1283,8 +1278,7 @@ fn parse_event_schedule_sources(
 fn parse_event_probability_source(
     config: &EquipmentConfig,
 ) -> crate::Result<Option<ScheduleSource>> {
-    let raw = config.raw_data_or_empty();
-    if let Some(col_idx) = parse_usize(raw, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? {
+    if let Some(col_idx) = parse_usize(config, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? {
         return Ok(Some(ScheduleSource::ColumnRef {
             col_idx,
             boundary: BoundaryPolicy::Wrap,
@@ -1302,7 +1296,7 @@ fn parse_event_probability_source(
                 .unwrap_or(1.0),
         ))),
         "column" => {
-            let Some(col_idx) = parse_usize(raw, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? else {
+            let Some(col_idx) = parse_usize(config, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? else {
                 return Err(HaresError::Equipment(format!(
                     "missing required key `{KEY_EVENT_PROBABILITY_SCHEDULE_COL}` for column event probability schedule"
                 )));
@@ -1319,8 +1313,7 @@ fn parse_event_probability_source(
 }
 
 fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>> {
-    let raw = config.raw_data_or_empty();
-    let count = parse_usize(raw, KEY_PHASE_LEN)?.unwrap_or(0);
+    let count = parse_usize(config, KEY_PHASE_LEN)?.unwrap_or(0);
     if count == 0 {
         return Ok(vec![CyclePhase {
             power_kw: parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0),

@@ -913,6 +913,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 inverter_capacity_kw: Some(5.0),
                 power_factor: Some(1.0),
                 surface_resolution_deg: Some(360.0),
+                sam_lut_path: None,
             },
         ),
         "EV" | "Electric Vehicle" => typed_alias_config(

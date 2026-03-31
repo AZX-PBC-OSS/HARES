@@ -45,6 +45,23 @@ pub(crate) struct PvLut {
 }
 
 impl PvLut {
+    pub(crate) fn from_path(path: &Path) -> Result<Self, HaresError> {
+        let ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        match ext.as_str() {
+            "parquet" => Self::from_parquet(path),
+            "csv" => Self::from_csv(path),
+            _ => Err(HaresError::Equipment(format!(
+                "unsupported PV SAM LUT format '{}'; expected .csv or .parquet: {}",
+                ext,
+                path.display()
+            ))),
+        }
+    }
+
     pub(crate) fn from_parquet(path: &Path) -> Result<Self, HaresError> {
         let file = std::fs::File::open(path).map_err(|e| {
             HaresError::Equipment(format!(
@@ -112,6 +129,66 @@ impl PvLut {
             }
         }
 
+        Self::from_rows(path, rows)
+    }
+
+    fn from_csv(path: &Path) -> Result<Self, HaresError> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            HaresError::Equipment(format!(
+                "failed to read PV SAM LUT CSV '{}': {e}",
+                path.display()
+            ))
+        })?;
+        let mut lines = text.lines();
+        let Some(header) = lines.next() else {
+            return Err(HaresError::Equipment(format!(
+                "PV SAM LUT CSV '{}' is empty",
+                path.display()
+            )));
+        };
+        let headers: Vec<&str> = header.split(',').map(str::trim).collect();
+        let month_idx = csv_column_index(&headers, &["month"])?;
+        let hour_idx = csv_column_index(&headers, &["hour"])?;
+        let ghi_idx = csv_column_index(&headers, &["ghi", "ghi_w_m2"])?;
+        let dni_idx = csv_column_index(&headers, &["dni", "dni_w_m2"])?;
+        let dhi_idx = csv_column_index(&headers, &["dhi", "dhi_w_m2"])?;
+        let temp_idx = csv_column_index(&headers, &["temp_c", "temperature_c"])?;
+        let ac_idx = csv_column_index(&headers, &["ac_power_kw", "ac_kw"])?;
+
+        let mut rows = Vec::new();
+        for line in lines {
+            let cols: Vec<&str> = line.split(',').map(str::trim).collect();
+            let Some(month) = parse_csv_f64(cols.get(month_idx).copied()) else {
+                continue;
+            };
+            let Some(hour) = parse_csv_f64(cols.get(hour_idx).copied()) else {
+                continue;
+            };
+            let Some(ghi) = parse_csv_f64(cols.get(ghi_idx).copied()) else {
+                continue;
+            };
+            let Some(dni) = parse_csv_f64(cols.get(dni_idx).copied()) else {
+                continue;
+            };
+            let Some(dhi) = parse_csv_f64(cols.get(dhi_idx).copied()) else {
+                continue;
+            };
+            let Some(temp) = parse_csv_f64(cols.get(temp_idx).copied()) else {
+                continue;
+            };
+            let Some(ac) = parse_csv_f64(cols.get(ac_idx).copied()) else {
+                continue;
+            };
+            rows.push((month, hour, ghi, dni, dhi, temp, ac));
+        }
+
+        Self::from_rows(path, rows)
+    }
+
+    fn from_rows(
+        path: &Path,
+        rows: Vec<(f64, f64, f64, f64, f64, f64, f64)>,
+    ) -> Result<Self, HaresError> {
         if rows.is_empty() {
             return Err(HaresError::Equipment(format!(
                 "PV SAM LUT '{}' contains no valid rows",
@@ -301,6 +378,27 @@ impl PvLut {
         }
         best_val
     }
+}
+
+fn csv_column_index(headers: &[&str], candidates: &[&str]) -> Result<usize, HaresError> {
+    candidates
+        .iter()
+        .find_map(|candidate| {
+            headers
+                .iter()
+                .position(|h| h.eq_ignore_ascii_case(candidate))
+        })
+        .ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "PV SAM LUT CSV missing required column; expected one of {}",
+                candidates.join("|")
+            ))
+        })
+}
+
+fn parse_csv_f64(raw: Option<&str>) -> Option<f64> {
+    let value = raw?.parse::<f64>().ok()?;
+    if value.is_finite() { Some(value) } else { None }
 }
 
 #[cfg(test)]
