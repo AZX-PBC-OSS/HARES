@@ -677,6 +677,12 @@ impl HeatPumpHeaterCore {
         self.telemetry.set(tk::COMPRESSOR_KW, step.compressor_kw);
         self.telemetry
             .set(tk::DEFROST_TIME_FRACTION, step.defrost_time_fraction);
+        let sp = self.hvac.effective_setpoints();
+        self.telemetry.set(
+            tk::HEATING_SETPOINT_C,
+            sp.heating_c + self.dr_setpoint_offset_c,
+        );
+        self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(step.electric_kw.max(0.0))),
@@ -962,20 +968,11 @@ impl HeatPumpHeaterCore {
         let er_allowed_by_cycle = self.er_cycle_ready(env.current_time);
         let er_allowed_by_lockout = er_allowed_by_hard_lockout && !self.er_soft_lockout;
 
-        // OCHRE parity: ER thermostat uses separate turn-on and turn-off thresholds.
-        // Turn on below (setpoint - offset), stay on until above
-        // (setpoint - offset + deadband) to avoid rapid ER chatter.
+        // ER thermostat threshold relative to the active heating setpoint.
+        // Engage supplemental ER only when the zone falls below (setpoint - offset).
+        // Lockout and cycle constraints provide anti-chatter behavior.
         let er_turn_on_c = setpoint - self.er_setpoint_offset_c;
-        let er_turn_off_c = er_turn_on_c + deadband;
-        let er_was_on = matches!(
-            self.operating_mode,
-            OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
-        );
-        let er_thermostat_call = if er_was_on {
-            zone.temperature_c <= er_turn_off_c
-        } else {
-            zone.temperature_c <= er_turn_on_c
-        };
+        let er_thermostat_call = zone.temperature_c <= er_turn_on_c;
 
         let hp_on = hp_available && speed.part_load_ratio > 0.0;
         let er_on = self.backup_capacity_w > 0.0

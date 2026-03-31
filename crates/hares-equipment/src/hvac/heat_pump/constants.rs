@@ -55,4 +55,4 @@ pub const DEFAULT_BACKUP_CAPACITY_W: f64 = 5_000.0;
 pub const DEFAULT_BACKUP_EIR: f64 = 1.0;
 pub const MSHP_PAN_HEATER_DEFAULT_TEMP_C: f64 = 0.0;
 
-pub const HEATER_TELEMETRY_CAPACITY: usize = 9;
+pub const HEATER_TELEMETRY_CAPACITY: usize = 11;

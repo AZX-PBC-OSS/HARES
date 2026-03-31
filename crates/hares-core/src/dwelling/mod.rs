@@ -134,6 +134,10 @@ struct EquipmentColumns {
     electric_power: Option<usize>,
     gas_power: Option<usize>,
     mode: Option<usize>,
+    setpoint: Option<usize>,
+    soc: Option<usize>,
+    capacity: Option<usize>,
+    cop: Option<usize>,
     reactive_power: Option<usize>,
     power_factor: Option<usize>,
 }
@@ -168,6 +172,10 @@ fn build_equipment_column_map(
                     .get(&format!("{name} Gas Power (therms/hour)"))
                     .copied(),
                 mode: column_index.get(&format!("{name} Mode (-)")).copied(),
+                setpoint: column_index.get(&format!("{name} Setpoint (C)")).copied(),
+                soc: column_index.get(&format!("{name} SOC (-)")).copied(),
+                capacity: column_index.get(&format!("{name} Capacity (W)")).copied(),
+                cop: column_index.get(&format!("{name} COP (-)")).copied(),
                 reactive_power: column_index
                     .get(&format!("{name} Reactive Power (kVAR)"))
                     .copied(),
@@ -2329,6 +2337,29 @@ impl Dwelling {
             }
             if let Some(idx) = cols.mode {
                 row[idx] = co.state.operating_mode.map_or(0.0, |m| m.as_code());
+            }
+            if let Some(idx) = cols.setpoint {
+                let telemetry = eq.telemetry();
+                let setpoint = telemetry
+                    .get(tk::HEATING_SETPOINT_C)
+                    .or_else(|| telemetry.get(tk::COOLING_SETPOINT_C))
+                    .unwrap_or(0.0);
+                row[idx] = setpoint;
+            }
+            if let Some(idx) = cols.soc {
+                row[idx] = co.state.soc.map_or(0.0, |soc| soc.get());
+            }
+            if let Some(idx) = cols.capacity {
+                let telemetry = eq.telemetry();
+                let capacity_w = telemetry
+                    .get(tk::THERMAL_OUTPUT_W)
+                    .or_else(|| telemetry.get(tk::IDEAL_CAPACITY_W))
+                    .or_else(|| telemetry.get(tk::SENSIBLE_COOLING_W).map(f64::abs))
+                    .unwrap_or(0.0);
+                row[idx] = capacity_w;
+            }
+            if let Some(idx) = cols.cop {
+                row[idx] = eq.telemetry().get(tk::COP).unwrap_or(0.0);
             }
             if let Some(idx) = cols.reactive_power {
                 let q = co.flows.reactive_power_kvar.unwrap_or(0.0);

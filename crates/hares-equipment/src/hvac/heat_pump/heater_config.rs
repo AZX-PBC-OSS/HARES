@@ -20,6 +20,8 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::COMPRESSOR_KW, 0.0);
     telemetry.insert(tk::DEFROST_TIME_FRACTION, 0.0);
+    telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
     telemetry
 }
 
@@ -71,6 +73,16 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::DEFROST_TIME_FRACTION.to_string(),
             unit: "-".to_string(),
             description: "Fraction of timestep in defrost mode [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active heating setpoint used by the heater control logic".to_string(),
+        },
+        TelemetryField {
+            name: tk::COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active cooling setpoint from shared thermostat state".to_string(),
         },
     ]
 }

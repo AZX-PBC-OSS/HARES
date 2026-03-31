@@ -119,10 +119,75 @@ fn ochre_ashp_fixture_peak_hvac_power_aligns() {
 }
 
 #[test]
+fn ochre_ashp_fixture_runtime_state_columns_are_populated() {
+    let fixture = ParityFixture::new("cz4a_ashp_hpwh");
+    let actual = run_fixture_to_columns(&fixture);
+
+    let heater_kw = actual
+        .get("ASHP Heater Electric Power (kW)")
+        .expect("ASHP heater electric column must exist");
+    let setpoint = actual
+        .get("ASHP Heater Setpoint (C)")
+        .expect("ASHP heater setpoint column must exist");
+    let capacity = actual
+        .get("ASHP Heater Capacity (W)")
+        .expect("ASHP heater capacity column must exist");
+    let cop = actual
+        .get("ASHP Heater COP (-)")
+        .expect("ASHP heater COP column must exist");
+
+    let mut saw_runtime_row = false;
+    let mut saw_nonzero_setpoint = false;
+    let mut saw_nonzero_capacity = false;
+    let mut saw_nonzero_cop = false;
+    for i in 0..heater_kw.len() {
+        if heater_kw[i] > 1e-6 {
+            saw_runtime_row = true;
+            saw_nonzero_setpoint |= setpoint.get(i).copied().unwrap_or(0.0).abs() > 1e-6;
+            saw_nonzero_capacity |= capacity.get(i).copied().unwrap_or(0.0).abs() > 1e-6;
+            saw_nonzero_cop |= cop.get(i).copied().unwrap_or(0.0).abs() > 1e-6;
+        }
+    }
+
+    assert!(
+        saw_runtime_row,
+        "fixture must include at least one runtime heater row"
+    );
+    assert!(
+        saw_nonzero_setpoint,
+        "ASHP Heater Setpoint (C) must be populated on runtime rows"
+    );
+    assert!(
+        saw_nonzero_capacity,
+        "ASHP Heater Capacity (W) must be populated on runtime rows"
+    );
+    assert!(
+        saw_nonzero_cop,
+        "ASHP Heater COP (-) must be populated on runtime rows"
+    );
+}
+
+#[test]
 #[ignore = "debug helper"]
 fn debug_ashp_peak_columns_observe() {
     let fixture = ParityFixture::new("cz4a_ashp_hpwh");
-    let actual = run_fixture_to_columns(&fixture);
+    let mut dwelling_config = build_dwelling_config(&fixture);
+    dwelling_config.sim_config.output_verbosity = 8;
+    let output_path = unique_temp_path(fixture.id, "parquet");
+    dwelling_config.sim_config.output_format = OutputFormat::Parquet;
+    dwelling_config.sim_config.output_path = Some(output_path.clone());
+    let engine = SimulationEngine::new();
+    let outcome = engine
+        .run(dwelling_config)
+        .expect("parity fixture simulation must succeed");
+    let actual = read_parquet_columns(
+        outcome
+            .timeseries_path
+            .as_deref()
+            .unwrap_or(output_path.as_path()),
+    )
+    .expect("actual parquet output must be readable");
+    let _ = fs::remove_file(output_path);
     let reference = read_parquet_columns(&fixture.reference_output_parquet())
         .expect("reference parquet must be readable");
 
