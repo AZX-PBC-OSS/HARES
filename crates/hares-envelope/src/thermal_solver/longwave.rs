@@ -179,9 +179,13 @@ impl ThermalSolver {
                 "interior LWR: starting calculation"
             );
 
-            // Reuse pre-allocated buffer for surface temperatures.
+            // Reuse pre-allocated buffers for iterative interior surface temperatures.
             let buf = &mut self.interior_surf_temps_buf;
+            let base_buf = &mut self.interior_surf_base_buf;
+            let prev_buf = &mut self.interior_surf_prev_buf;
             buf.clear();
+            base_buf.clear();
+            prev_buf.clear();
             for s in &zone_cfg.surfaces {
                 let t_node = if let Some(dt) = s.driving_temp {
                     // Window/fallback boundary: use environmental driving temp
@@ -198,12 +202,48 @@ impl ThermalSolver {
                 let t_surf = s.radiation_frac * t_node + (1.0 - s.radiation_frac) * t_zone_c;
                 buf.push(t_surf);
             }
-            let t_surfaces = &*buf;
+            base_buf.extend_from_slice(buf);
+            prev_buf.extend_from_slice(buf);
 
-            // Use ScriptF (exact T⁴ radiosity) when pre-computed at init,
-            // linearized h_r approximation as fallback.
+            let n_iter = (self.dt_s / 300.0_f64).floor() as u32 + 3;
+            for _ in 0..n_iter {
+                // Use ScriptF (exact T⁴ radiosity) when pre-computed at init,
+                // linearized h_r approximation as fallback.
+                if let Some(ref scriptf) = zone_cfg.scriptf {
+                    scriptf.net_flux_w_into(buf, &mut self.lwr_net_flux_buf);
+                } else {
+                    self.lwr_surfaces_buf.clear();
+                    self.lwr_surfaces_buf
+                        .extend(zone_cfg.surfaces.iter().map(|s| InteriorSurface {
+                            area_m2: s.area_m2,
+                            emissivity: s.emissivity,
+                        }));
+                    interior_longwave_linearised_w_into(
+                        &self.lwr_surfaces_buf,
+                        buf,
+                        t_zone_c,
+                        &mut self.lwr_net_flux_buf,
+                    );
+                };
+
+                let mut converged = true;
+                for (j, info) in zone_cfg.surfaces.iter().enumerate() {
+                    let t_new = base_buf[j] + self.lwr_net_flux_buf[j] * info.rad_res_k_w;
+                    let t_next = buf[j] + 0.5 * (t_new - buf[j]) + 0.1 * (buf[j] - prev_buf[j]);
+                    prev_buf[j] = buf[j];
+                    buf[j] = t_next;
+                    if (buf[j] - prev_buf[j]).abs() >= 0.01 {
+                        converged = false;
+                    }
+                }
+                if converged {
+                    break;
+                }
+            }
+
+            // Final net flux at converged interior surface temperatures.
             if let Some(ref scriptf) = zone_cfg.scriptf {
-                scriptf.net_flux_w_into(t_surfaces, &mut self.lwr_net_flux_buf);
+                scriptf.net_flux_w_into(buf, &mut self.lwr_net_flux_buf);
             } else {
                 self.lwr_surfaces_buf.clear();
                 self.lwr_surfaces_buf
@@ -213,7 +253,7 @@ impl ThermalSolver {
                     }));
                 interior_longwave_linearised_w_into(
                     &self.lwr_surfaces_buf,
-                    t_surfaces,
+                    buf,
                     t_zone_c,
                     &mut self.lwr_net_flux_buf,
                 );
@@ -233,7 +273,7 @@ impl ThermalSolver {
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                 self.int_surface_diag_buf
                     .push(super::config::IntSurfaceDiag {
-                        surface_temp_c: t_surfaces[_j],
+                        surface_temp_c: buf[_j],
                         lwr_flux_w: q,
                     });
             }

@@ -64,6 +64,10 @@ pub struct ThermalSolver {
     /// Reusable buffer for interior surface temperatures in LWR calculation.
     /// Avoids per-zone per-timestep allocation in apply_interior_longwave_inputs.
     interior_surf_temps_buf: Vec<f64>,
+    /// Base interior surface temperatures before iterative LWR correction.
+    interior_surf_base_buf: Vec<f64>,
+    /// Previous-iteration interior surface temperatures for damping.
+    interior_surf_prev_buf: Vec<f64>,
     /// Pre-allocated buffer for infiltration couplings returned by build_input_vector.
     infiltration_buf: Vec<InfiltrationCoupling>,
     /// Pre-allocated scratch buffer for per-zone infiltration gains; swapped into component_gains.
@@ -184,6 +188,8 @@ impl ThermalSolver {
             exterior_surface_temps,
             component_gains: EnvelopeComponentGains::default(),
             interior_surf_temps_buf: Vec::with_capacity(max_interior_surfaces),
+            interior_surf_base_buf: Vec::with_capacity(max_interior_surfaces),
+            interior_surf_prev_buf: Vec::with_capacity(max_interior_surfaces),
             infiltration_buf: Vec::with_capacity(env.zones.len()),
             infiltration_by_zone_buf: Vec::with_capacity(env.zones.len()),
             solar_absorbed_buf: Vec::new(),
@@ -535,8 +541,9 @@ mod tests {
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
-        ExteriorSurfaceInfo, InfiltrationMethod, InteriorSurfaceInfo, NaturalVentilationConfig,
-        StateSpaceWiring, ThermalSolver, ThermalSolverConfig, VentilationConfig,
+        DrivingTemp, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
+        InteriorSurfaceInfo, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
+        ThermalSolverConfig, VentilationConfig,
         WindowSolarProperties,
     };
 
@@ -3105,6 +3112,7 @@ mod tests {
                 area_m2: 40.0,
                 emissivity: 0.90,
                 radiation_frac: 0.7, // lightweight wall
+                rad_res_k_w: 0.003,
                 solar_absorptance: 0.5,
                 is_floor: false,
                 driving_temp: None,
@@ -3115,6 +3123,7 @@ mod tests {
                 area_m2: 40.0,
                 emissivity: 0.90,
                 radiation_frac: 1.0, // massive floor (node ≈ surface)
+                rad_res_k_w: 0.003,
                 solar_absorptance: 0.6,
                 is_floor: true,
                 driving_temp: None,
@@ -3125,6 +3134,7 @@ mod tests {
                 area_m2: 60.0,
                 emissivity: 0.90,
                 radiation_frac: 0.85,
+                rad_res_k_w: 0.003,
                 solar_absorptance: 0.5,
                 is_floor: false,
                 driving_temp: None,
@@ -3150,6 +3160,95 @@ mod tests {
         assert!(
             total.abs() < 1e-8,
             "LWR with radiation_frac must conserve energy: sum={total:.10} W"
+        );
+    }
+
+    #[test]
+    fn interior_lwr_iteration_updates_fluxes_from_one_pass_baseline() {
+        let env = env_for_temp(22.0, 10.0);
+
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (2.0 * 50_000.0)]);
+        let b_c = DMatrix::from_row_slice(1, 3, &[1.0 / (2.0 * 50_000.0), 1.0 / 50_000.0, 0.0]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 300.0, &mapping).unwrap();
+
+        let mut lwr_zone = InteriorLwrZoneConfig {
+            zone_id: ZoneId(1),
+            surfaces: vec![
+                InteriorSurfaceInfo {
+                    state_index: 0,
+                    input_index: 1,
+                    area_m2: 25.0,
+                    emissivity: 0.9,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 0.02,
+                    solar_absorptance: 0.5,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+                InteriorSurfaceInfo {
+                    state_index: 0,
+                    input_index: 2,
+                    area_m2: 25.0,
+                    emissivity: 0.9,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 0.02,
+                    solar_absorptance: 0.5,
+                    is_floor: false,
+                    driving_temp: Some(DrivingTemp::Outdoor),
+                },
+            ],
+            scriptf: None,
+        };
+        lwr_zone.compute_scriptf();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 2)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![lwr_zone.clone()],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: VentilationConfig::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
+        };
+        let mut solver = ThermalSolver::new(model, wiring, config, 300.0, &env, 22.0).unwrap();
+        solver.x[0] = 30.0;
+
+        let base_t = vec![30.0, env.weather.outdoor_temp_c];
+        let mut one_pass_flux: Vec<f64> = Vec::new();
+        lwr_zone
+            .scriptf
+            .as_ref()
+            .expect("scriptf")
+            .net_flux_w_into(&base_t, &mut one_pass_flux);
+
+        let mut u = DVector::zeros(solver.model.input_dim());
+        solver.apply_interior_longwave_inputs(&mut u, &env);
+
+        let iter_flux_1 = u[1];
+        let iter_flux_2 = u[2];
+        assert!(
+            (iter_flux_1 - one_pass_flux[0]).abs() > 1e-9
+                || (iter_flux_2 - one_pass_flux[1]).abs() > 1e-9,
+            "interior LWR iteration should perturb one-pass fluxes when rad_res_k_w > 0"
         );
     }
 

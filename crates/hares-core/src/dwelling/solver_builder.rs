@@ -680,7 +680,8 @@ pub(crate) fn build_default_solvers(
 
             let is_floor = sb.boundary_category == Some(BoundaryCategory::Floor);
 
-            let (emissivity, solar_absorptance, radiation_frac, driving_temp) = if is_window {
+            let (emissivity, solar_absorptance, radiation_frac, rad_res_k_w, driving_temp) =
+                if is_window {
                 // Window LWR: emissivity=0.84 (EnergyPlus default).
                 // Surface temp driven by outdoor conduction.
                 // radiation_frac from EnergyPlus interior film decomposition:
@@ -693,12 +694,19 @@ pub(crate) fn build_default_solvers(
                 let u_window = if r_total > 1e-9 { 1.0 / r_total } else { 2.0 };
                 let res_int = 1.0 / (0.359073 * u_window.ln() + 6.949915);
                 let rad_frac = (res_int / r_total).clamp(0.0, 1.0);
-                (WINDOW_EMISSIVITY, 0.0, rad_frac, Some(DrivingTemp::Outdoor))
+                (
+                    WINDOW_EMISSIVITY,
+                    0.0,
+                    rad_frac,
+                    res_int / sb.area_m2.max(1e-9),
+                    Some(DrivingTemp::Outdoor),
+                )
             } else {
                 (
                     sb.attic_emissivity,
                     if is_floor { 0.6 } else { 0.5 },
                     sb.interior_rad_frac,
+                    sb.r_film_int_m2_k_w / sb.area_m2.max(1e-9),
                     None,
                 )
             };
@@ -710,6 +718,7 @@ pub(crate) fn build_default_solvers(
                     area_m2: sb.area_m2,
                     emissivity,
                     radiation_frac,
+                    rad_res_k_w,
                     solar_absorptance,
                     is_floor,
                     driving_temp,

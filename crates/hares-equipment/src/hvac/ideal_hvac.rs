@@ -1179,31 +1179,6 @@ mod tests {
     }
 
     #[test]
-    fn column_ref_setpoint_source_reads_schedule_domain() {
-        let mut cfg = config("IH");
-        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
-        cfg.test_extras_mut()
-            .insert("heating_setpoint_schedule_col".into(), 0.0.into());
-        cfg.test_extras_mut()
-            .insert("cooling_setpoint_schedule_col".into(), 1.0.into());
-
-        let mut eq = IdealHvac::new(cfg.clone());
-        let mut env = env(18.0, 60, 0);
-        env.custom_domains = vec![DomainUpdate {
-            domain_id: SCHEDULE_DOMAIN_ID,
-            zone_temperatures_c: vec![],
-            custom_payload: Some(vec![19.5, 26.0]),
-        }];
-
-        eq.init(&cfg, &env).unwrap();
-        eq.update_control(&env);
-
-        let setpoints = eq.effective_setpoints();
-        assert!((setpoints.heating_c - 19.5).abs() < 1e-9);
-        assert!((setpoints.cooling_c - 26.0).abs() < 1e-9);
-    }
-
-    #[test]
     fn typed_column_ref_setpoint_source_reads_schedule_domain() {
         let typed = crate::IdealHvacConfig {
             zone_id: Some(1),

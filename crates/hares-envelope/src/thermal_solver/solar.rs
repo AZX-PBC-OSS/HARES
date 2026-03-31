@@ -267,6 +267,7 @@ mod tests {
             area_m2: area,
             emissivity: 0.9,
             radiation_frac: 1.0,
+            rad_res_k_w: 0.0,
             solar_absorptance: absorptance,
             is_floor,
             driving_temp: None,

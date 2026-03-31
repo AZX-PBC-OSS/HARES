@@ -206,6 +206,12 @@ pub struct InteriorSurfaceInfo {
     ///
     /// Range: `[0, 1]`.  Default: `1.0`.
     pub radiation_frac: f64,
+    /// Interior radiative film resistance converted to K/W.
+    ///
+    /// Used by the iterative interior LWR solver to convert net radiative
+    /// surface flux [W] into a surface-temperature perturbation:
+    /// `T_surf,new = T_surf,base + Q_lwr * rad_res_k_w`.
+    pub rad_res_k_w: f64,
     /// Solar absorptance [-] for interior solar distribution.
     ///
     /// Fraction of incident solar radiation absorbed by this surface.

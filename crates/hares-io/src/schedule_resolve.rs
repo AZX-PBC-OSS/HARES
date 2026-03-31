@@ -443,19 +443,11 @@ fn inject_setpoint_schedules(
         if HEATING_EQUIPMENT.contains(&spec.name.as_str())
             && let Some(col_idx) = heating_col
         {
-            spec.parameters.insert(
-                "heating_setpoint_schedule_col".to_string(),
-                Value::from(col_idx as u64),
-            );
             set_typed_setpoint_source(spec, "heating", col_idx);
         }
         if COOLING_EQUIPMENT.contains(&spec.name.as_str())
             && let Some(col_idx) = cooling_col
         {
-            spec.parameters.insert(
-                "cooling_setpoint_schedule_col".to_string(),
-                Value::from(col_idx as u64),
-            );
             set_typed_setpoint_source(spec, "cooling", col_idx);
         }
     }

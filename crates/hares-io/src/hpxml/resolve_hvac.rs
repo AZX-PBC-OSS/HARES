@@ -2590,28 +2590,30 @@ mod tests {
     #[test]
     fn parse_hvac_setpoint_params_reads_realistic_control_xml() {
         let xml = r#"
-            <Building>
-              <BuildingDetails>
-                <HVACPlant>
-                  <HVACControl>
-                    <extension>
-                      <WeekdaySetpointTempsHeatingSeason>
-                        68,68,68,68,68,68,70,72,72,72,72,72,72,72,72,72,72,70,68,68,68,68,68,68
-                      </WeekdaySetpointTempsHeatingSeason>
-                      <WeekendSetpointTempsHeatingSeason>
-                        68,68,68,68,68,68,69,69,70,70,70,70,70,70,70,70,70,70,68,68,68,68,68,68
-                      </WeekendSetpointTempsHeatingSeason>
-                      <WeekdaySetpointTempsCoolingSeason>
-                        78,78,78,78,78,78,76,74,74,74,74,74,74,74,74,74,74,74,76,78,78,78,78,78
-                      </WeekdaySetpointTempsCoolingSeason>
-                      <WeekendSetpointTempsCoolingSeason>
-                        78,78,78,78,78,78,77,77,76,76,76,76,76,76,76,76,76,76,78,78,78,78,78,78
-                      </WeekendSetpointTempsCoolingSeason>
-                    </extension>
-                  </HVACControl>
-                </HVACPlant>
-              </BuildingDetails>
-            </Building>
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <HVACPlant>
+                    <HVACControl>
+                      <extension>
+                        <WeekdaySetpointTempsHeatingSeason>
+                          68,68,68,68,68,68,70,72,72,72,72,72,72,72,72,72,72,70,68,68,68,68,68,68
+                        </WeekdaySetpointTempsHeatingSeason>
+                        <WeekendSetpointTempsHeatingSeason>
+                          68,68,68,68,68,68,69,69,70,70,70,70,70,70,70,70,70,70,68,68,68,68,68,68
+                        </WeekendSetpointTempsHeatingSeason>
+                        <WeekdaySetpointTempsCoolingSeason>
+                          78,78,78,78,78,78,76,74,74,74,74,74,74,74,74,74,74,74,76,78,78,78,78,78
+                        </WeekdaySetpointTempsCoolingSeason>
+                        <WeekendSetpointTempsCoolingSeason>
+                          78,78,78,78,78,78,77,77,76,76,76,76,76,76,76,76,76,76,78,78,78,78,78,78
+                        </WeekendSetpointTempsCoolingSeason>
+                      </extension>
+                    </HVACControl>
+                  </HVACPlant>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
         "#;
         let root = parse_xml_document(xml).expect("XML must parse");
         let details = root

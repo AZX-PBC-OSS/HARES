@@ -1,7 +1,9 @@
 //! Config parsing helpers for HVAC equipment initialization.
 
+#[cfg(test)]
+use hares_types::BoundaryPolicy;
 use hares_types::normalize_ascii;
-use hares_types::{BoundaryPolicy, HaresError, ScheduleSource, ScheduleSourceConfig};
+use hares_types::{HaresError, ScheduleSource, ScheduleSourceConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::EquipmentConfig;
@@ -53,21 +55,6 @@ fn typed_value<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a serde_j
     }
 }
 
-fn extract_f64_array(config: &EquipmentConfig, key: &str) -> Option<Vec<f64>> {
-    if let Some(raw) = config.get_f64_array(key) {
-        return Some(raw.to_vec());
-    }
-    typed_value(config, key)
-        .and_then(serde_json::Value::as_array)
-        .and_then(|arr| {
-            let mut out = Vec::with_capacity(arr.len());
-            for value in arr {
-                out.push(value.as_f64()?);
-            }
-            Some(out)
-        })
-}
-
 fn extract_schedule_source(config: &EquipmentConfig, key: &str) -> Option<ScheduleSource> {
     typed_value(config, key)
         .and_then(|value| serde_json::from_value::<ScheduleSourceConfig>(value.clone()).ok())
@@ -113,12 +100,20 @@ pub(super) fn extract_bool(config: &EquipmentConfig, key: &str) -> Option<bool> 
         .or_else(|| extract_numeric(config, key).map(|v| v > 0.0))
 }
 
-/// Build a `ScheduleSource` from config params for the given prefix ("heating" or "cooling").
+/// Build a `ScheduleSource` from typed config params for the given prefix ("heating" or "cooling").
 ///
-/// Priority:
-///   1. `{prefix}_setpoint_schedule_col` → `ColumnRef` (per-timestep CSV column)
-///   2. `{prefix}_weekday_setpoints_c` + `{prefix}_weekend_setpoints_c` → `DailyProfile`
-///   3. None — static setpoints will be used
+/// Runtime direction is typed-only: callers should populate `{prefix}_setpoint_source`
+/// with a serialized `ScheduleSourceConfig`.
+#[cfg(not(test))]
+pub(super) fn build_setpoint_source(
+    config: &EquipmentConfig,
+    prefix: &str,
+) -> Option<ScheduleSource> {
+    let source_key = format!("{prefix}_setpoint_source");
+    extract_schedule_source(config, &source_key)
+}
+
+#[cfg(test)]
 pub(super) fn build_setpoint_source(
     config: &EquipmentConfig,
     prefix: &str,
@@ -128,25 +123,24 @@ pub(super) fn build_setpoint_source(
         return Some(source);
     }
 
-    // Priority 1: per-timestep CSV column index
+    // Test-only compatibility shim for legacy fixtures that still populate raw keys.
     let col_key = format!("{prefix}_setpoint_schedule_col");
-    if let Some(col) = extract_numeric(config, &col_key) {
+    if let Some(col) = config.get_f64(&col_key) {
         return Some(ScheduleSource::ColumnRef {
             col_idx: col as usize,
             boundary: BoundaryPolicy::Clamp,
         });
     }
 
-    // Priority 2: 24-hour weekday/weekend profiles
     let wd_key = format!("{prefix}_weekday_setpoints_c");
     let we_key = format!("{prefix}_weekend_setpoints_c");
-    let weekday = extract_f64_array(config, &wd_key);
-    let weekend = extract_f64_array(config, &we_key);
+    let weekday = config.get_f64_array(&wd_key);
+    let weekend = config.get_f64_array(&we_key);
     if let Some(wd) = weekday {
-        let we = weekend.unwrap_or_else(|| wd.clone());
+        let we = weekend.unwrap_or(wd);
         return Some(ScheduleSource::DailyProfile {
-            weekday: slice_to_24(&wd),
-            weekend: slice_to_24(&we),
+            weekday: slice_to_24(wd),
+            weekend: slice_to_24(we),
             month_multipliers: [1.0; 12],
             max_value: 1.0,
         });
@@ -155,6 +149,7 @@ pub(super) fn build_setpoint_source(
     None
 }
 
+#[cfg(test)]
 pub(super) fn slice_to_24(src: &[f64]) -> [f64; 24] {
     let mut arr = [0.0; 24];
     let n = src.len().min(24);
