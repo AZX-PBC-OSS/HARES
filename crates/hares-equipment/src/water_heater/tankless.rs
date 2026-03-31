@@ -444,6 +444,10 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         "Tankless Water Heater",
         Box::new(|config| Box::new(TanklessWH::new(config))),
     );
+    registry.register(
+        "Gas Tankless Water Heater",
+        Box::new(|config| Box::new(TanklessWH::new(config))),
+    );
 }
 
 fn parse_tankless_fuel_type(raw: Option<&str>) -> FuelType {

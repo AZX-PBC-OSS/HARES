@@ -12,6 +12,7 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::EquipmentSpec;
+use crate::draw_profile::normalize_draw_profile;
 use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};
 
 /// Maps HPXML/ResStock schedule CSV column names (lowercase, normalized) to
@@ -424,14 +425,14 @@ const COOLING_EQUIPMENT: &[&str] = &["ASHP Cooler", "MSHP Cooler", "Air Conditio
 fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
-    _schedule: &ScheduleTimeSeries,
+    schedule: &mut ScheduleTimeSeries,
 ) {
     // Store only the column index — the equipment resolves the value each
     // timestep from the environment's schedule domain payload. No materialization.
     let heating_col = csv_col_map.get("heating_setpoint").copied();
     let cooling_col = csv_col_map.get("cooling_setpoint").copied();
 
-    inject_water_heater_schedule_columns(specs, csv_col_map);
+    inject_water_heater_schedule_columns(specs, csv_col_map, schedule);
 
     if heating_col.is_none() && cooling_col.is_none() {
         return;
@@ -467,6 +468,7 @@ const STORAGE_WATER_HEATER_EQUIPMENT: &[&str] = &[
 fn inject_water_heater_schedule_columns(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
+    schedule: &mut ScheduleTimeSeries,
 ) {
     // ResStock/OCHRE commonly provide fixture draw fractions in `hot_water_fixtures`.
     // Alternate names are accepted for compatibility with pre-scaled schedules.
@@ -498,10 +500,43 @@ fn inject_water_heater_schedule_columns(
             continue;
         }
         if let Some(col_idx) = draw_col {
-            spec.parameters.insert(
-                "draw_flow_rate_schedule_col".to_string(),
-                Value::from(col_idx as u64),
+            // The raw schedule column contains dimensionless fractions.
+            // Scale them to kg/s using the spec's avg_water_draw_l_per_day
+            // via normalize_draw_profile(), then append the scaled column.
+            let avg_daily_l = spec
+                .parameters
+                .get("avg_water_draw_l_per_day")
+                .and_then(|v| v.as_f64())
+                .expect(
+                    "water heater spec missing avg_water_draw_l_per_day; \
+                     cannot normalize draw schedule fractions",
+                );
+
+            let raw_fractions = schedule.columns[col_idx].clone();
+            let kg_s_series = normalize_draw_profile(&raw_fractions, avg_daily_l);
+
+            let col_name = format!(
+                "hot_water_fixtures_kg_s_{}",
+                normalize_schedule_col_name(&spec.name)
             );
+            match schedule.append_derived_column(
+                &col_name,
+                kg_s_series,
+                ColumnAggregation::Mean,
+            ) {
+                Ok(derived_col_idx) => {
+                    spec.parameters.insert(
+                        "draw_flow_rate_schedule_col".to_string(),
+                        Value::from(derived_col_idx as u64),
+                    );
+                }
+                Err(err) => {
+                    panic!(
+                        "failed to append normalized draw column for {}: {err}",
+                        spec.name
+                    );
+                }
+            }
         }
         if let Some(col_idx) = mains_col {
             spec.parameters.insert(
@@ -1251,13 +1286,28 @@ mod tests {
         assert!(!specs[0].parameters.contains_key("event_window_len"));
     }
 
+    fn make_water_heater_spec(name: &str, avg_water_draw_l_per_day: f64) -> EquipmentSpec {
+        let mut parameters = Map::new();
+        parameters.insert("annual_electric_kwh".to_string(), Value::from(0.0));
+        parameters.insert(
+            "avg_water_draw_l_per_day".to_string(),
+            Value::from(avg_water_draw_l_per_day),
+        );
+        EquipmentSpec {
+            name: name.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters,
+            zip_params: None,
+        }
+    }
+
     #[test]
     fn storage_water_heaters_receive_draw_and_mains_schedule_columns() {
         let mut schedule = make_schedule_with_water_heater_columns(&[0.2, 0.0], &[11.0, 12.0]);
         let mut specs = vec![
-            make_spec("Electric Resistance Water Heater", 0.0),
-            make_spec("Gas Water Heater", 0.0),
-            make_spec("Heat Pump Water Heater", 0.0),
+            make_water_heater_spec("Electric Resistance Water Heater", 200.0),
+            make_water_heater_spec("Gas Water Heater", 200.0),
+            make_water_heater_spec("Heat Pump Water Heater", 200.0),
             make_spec("Tankless Water Heater", 0.0),
         ];
 
@@ -1272,11 +1322,17 @@ mod tests {
                 .parameters
                 .get("mains_temp_schedule_col")
                 .and_then(Value::as_u64);
-            assert_eq!(
-                draw_col,
-                Some(0),
-                "{} should receive draw_flow_rate_schedule_col=0",
+            assert!(
+                draw_col.is_some(),
+                "{} should receive draw_flow_rate_schedule_col",
                 spec.name
+            );
+            // The draw column should point to a derived column, not the raw fraction column (0).
+            assert!(
+                draw_col.unwrap() >= 2,
+                "{} draw_flow_rate_schedule_col should point to a derived column, got {}",
+                spec.name,
+                draw_col.unwrap()
             );
             assert_eq!(
                 mains_col,
@@ -1295,6 +1351,53 @@ mod tests {
         assert!(
             !specs[3].parameters.contains_key("mains_temp_schedule_col"),
             "tankless should not receive storage mains schedule columns"
+        );
+    }
+
+    #[test]
+    fn water_heater_draw_fractions_normalized_to_kg_s() {
+        // Known fractions and avg_water_draw_l_per_day = 200.
+        // normalize_draw_profile formula:
+        //   mean_fraction = mean(fractions)
+        //   scale = (avg_daily_l / 1440) / mean_fraction
+        //   result_kg_s = fraction * scale / 60
+        let fractions = vec![0.04, 0.08, 0.02, 0.06];
+        let avg_daily_l = 200.0;
+        let mean_frac: f64 = fractions.iter().sum::<f64>() / fractions.len() as f64; // 0.05
+        let scale = (avg_daily_l / 1440.0) / mean_frac;
+
+        let mains = vec![12.0; 4];
+        let mut schedule = make_schedule_with_water_heater_columns(&fractions, &mains);
+        let mut specs = vec![make_water_heater_spec(
+            "Electric Resistance Water Heater",
+            avg_daily_l,
+        )];
+
+        inject_schedule_into_specs(&mut specs, &mut schedule, None);
+
+        let draw_col_idx = specs[0]
+            .parameters
+            .get("draw_flow_rate_schedule_col")
+            .and_then(Value::as_u64)
+            .expect("draw_flow_rate_schedule_col must be present") as usize;
+
+        let resolved = &schedule.columns[draw_col_idx];
+        assert_eq!(resolved.len(), fractions.len());
+
+        for (i, &frac) in fractions.iter().enumerate() {
+            let expected_kg_s = frac * scale / 60.0;
+            assert!(
+                (resolved[i] - expected_kg_s).abs() < 1e-10,
+                "timestep {i}: expected {expected_kg_s:.8e}, got {:.8e}",
+                resolved[i]
+            );
+        }
+
+        // Sanity: the 0.04 fraction should produce ~0.00185 kg/s, not ~0.00067.
+        let expected_for_004 = 0.04 * scale / 60.0;
+        assert!(
+            expected_for_004 > 0.001,
+            "expected meaningful flow rate, got {expected_for_004:.6e}"
         );
     }
 }

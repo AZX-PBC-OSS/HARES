@@ -556,6 +556,14 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
         "Ideal HVAC",
         Box::new(|config| Box::new(IdealHvac::new(config))),
     );
+    registry.register(
+        "Generic Heater",
+        Box::new(|config| Box::new(IdealHvac::new(config))),
+    );
+    registry.register(
+        "Generic Cooler",
+        Box::new(|config| Box::new(IdealHvac::new(config))),
+    );
 }
 
 fn ideal_hvac_default_telemetry() -> Telemetry {

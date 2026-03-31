@@ -44,6 +44,15 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     gas::register_with_registry(registry);
     heat_pump_wh::register_with_registry(registry);
     tankless::register_with_registry(registry);
+
+    // "Water Heating" is ambiguous — the resolver must specify the fuel type.
+    registry.register_error(
+        "Water Heating",
+        "ambiguous water heater class 'Water Heating': \
+         the HPXML resolver must emit a fuel-specific class name \
+         (e.g. 'Gas Water Heater', 'Electric Resistance Water Heater', \
+         'Heat Pump Water Heater')",
+    );
 }
 
 /// Domain ID used by `hares-core::EnvironmentManager` to publish per-step mains

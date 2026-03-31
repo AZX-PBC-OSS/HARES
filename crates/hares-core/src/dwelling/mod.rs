@@ -852,6 +852,30 @@ impl Dwelling {
             .clone()
             .unwrap_or_else(|| Value::Object(Map::new()));
 
+        // Read number_of_occupants from the Occupancy spec to scale the raw
+        // schedule fraction (0–1) into a person count for internal heat gains.
+        // If no Occupancy spec exists, 1.0 is fine (gains won't be applied).
+        // If an Occupancy spec exists, number_of_occupants is required.
+        let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
+            Some(spec) => {
+                let val = spec
+                    .parameters
+                    .get("number_of_occupants")
+                    .ok_or_else(|| {
+                        HaresError::Equipment(
+                            "Occupancy spec is missing required key 'number_of_occupants'"
+                                .into(),
+                        )
+                    })?;
+                val.as_f64().ok_or_else(|| {
+                    HaresError::Equipment(format!(
+                        "Occupancy 'number_of_occupants' must be a valid number, got: {val}"
+                    ))
+                })?
+            }
+            None => 1.0,
+        };
+
         // Equipment names whose loads are handled outside the registry (e.g. directly in the
         // simulation loop) — silently skip them rather than emitting a warning.
         const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
@@ -863,19 +887,14 @@ impl Dwelling {
                 continue;
             }
             let base_cfg = equipment_config_from_spec(spec);
-            let mut eq = match registry.create(&base_cfg.ochre_class, base_cfg.clone()) {
-                Ok(eq) => eq,
-                Err(err) => {
-                    // Equipment class not yet implemented in registry; skip with warning.
-                    let msg = format!(
-                        "equipment '{}' (class '{}') not available, skipping: {err}",
-                        base_cfg.name, base_cfg.ochre_class
-                    );
-                    tracing::warn!("{msg}");
-                    warnings.push(msg);
-                    continue;
-                }
-            };
+            let mut eq = registry
+                .create(&base_cfg.ochre_class, base_cfg.clone())
+                .map_err(|err| {
+                    HaresError::Equipment(format!(
+                        "equipment '{}' (class '{}'): {err}",
+                        base_cfg.name, base_cfg.ochre_class,
+                    ))
+                })?;
 
             let merged_cfg = merged_equipment_config(spec, &override_root);
             match eq.init(&merged_cfg, &initial_env) {
@@ -998,6 +1017,7 @@ impl Dwelling {
             zone_env_indices: zone_caches.zone_env_indices,
             zone_temp_col_indices: zone_caches.zone_temp_col_indices,
             occupancy_column_idx,
+            occupancy_scale,
             zone_capacitances_j_k: solvers.zone_capacitances_j_k,
             #[cfg(any(debug_assertions, feature = "check_invariants"))]
             prev_humidity_ratios: init_humidity_ratios,
@@ -1730,7 +1750,8 @@ impl Dwelling {
             .and_then(|u| u.custom_payload.as_ref())
             .and_then(|p| p.get(col_idx))
             .copied()
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            * self.occupancy_scale;
 
         if n_occupants <= 0.0 {
             return;
@@ -4260,5 +4281,51 @@ master_seed = 0
         let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
+    }
+
+    #[test]
+    fn occupancy_gains_scaled_by_number_of_occupants() {
+        use hares_types::DomainUpdate;
+
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        // Configure: occupancy column at index 0, scale = 4 occupants.
+        dwelling.occupancy_column_idx = Some(0);
+        dwelling.occupancy_scale = 4.0;
+
+        // Inject a schedule domain update with occupancy fraction = 0.5.
+        dwelling.latest_env.upsert_domain(DomainUpdate {
+            domain_id: SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: vec![],
+            custom_payload: Some(vec![0.5]),
+        });
+
+        // Zero thermal ports so we can measure the contribution.
+        for thermal in &mut dwelling.ports.thermal {
+            thermal.zero();
+        }
+
+        dwelling.apply_occupancy_gains();
+
+        // Expected n_occupants = 0.5 * 4.0 = 2.0
+        let expected_sensible =
+            2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
+        let expected_latent = 2.0 * OCCUPANT_LATENT_GAIN_W;
+
+        for thermal in &dwelling.ports.thermal {
+            assert!(
+                (thermal.sensible_gain_w - expected_sensible).abs() < 1e-9,
+                "sensible gain: expected {expected_sensible}, got {}",
+                thermal.sensible_gain_w
+            );
+            assert!(
+                (thermal.latent_gain_w - expected_latent).abs() < 1e-9,
+                "latent gain: expected {expected_latent}, got {}",
+                thermal.latent_gain_w
+            );
+        }
     }
 }

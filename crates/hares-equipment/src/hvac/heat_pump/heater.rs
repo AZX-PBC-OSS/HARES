@@ -812,9 +812,10 @@ impl HeatPumpHeaterCore {
             0.0
         };
 
-        // Gross output; zone_heat_fractions (set from duct_dse during init) distributes
+        // Gross output including fan waste heat (OCHRE HVAC.py line 543).
+        // zone_heat_fractions (set from duct_dse during init) distributes
         // this to conditioned and duct zones in write_zone_thermal_contributions.
-        let mut thermal_output_w = hp_capacity_w + er_capacity_w;
+        let mut thermal_output_w = hp_capacity_w + er_capacity_w + fan_power_w;
         let mut electric_kw = (hp_electric_w + er_power_w + fan_power_w + pan_heater_w) / 1000.0;
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Track compressor-only kW separately so scaling stays consistent with electric_kw.

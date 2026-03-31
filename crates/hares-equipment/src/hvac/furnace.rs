@@ -37,6 +37,7 @@ pub struct ElectricFurnace {
     hvac: HvacEquipment,
     rated_capacity_w: f64,
     eir: f64,
+    fan_power_w: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
 }
@@ -95,6 +96,7 @@ impl ElectricFurnace {
             hvac: HvacEquipment::new(HvacEquipmentType::ElectricFurnace, zone),
             rated_capacity_w: 0.0,
             eir: 1.0,
+            fan_power_w: 0.0,
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
         }
@@ -117,8 +119,14 @@ impl Equipment for ElectricFurnace {
             .unwrap_or(10_000.0)
             .max(0.0);
         self.eir = first_f64(config, &["eir", "heating_eir", "EIR"]).unwrap_or(1.0);
+        let airflow_m3_s = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
+        self.fan_power_w = first_f64(
+            config,
+            &["fan_power_w", "fan_only_power_w", "auxiliary_power_w"],
+        )
+        .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
 
-        let fan_flow = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
+        let fan_flow = airflow_m3_s;
         self.hvac.duct_dse = super::helpers::resolve_duct_dse(
             config,
             true,
@@ -152,7 +160,10 @@ impl Equipment for ElectricFurnace {
         let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.space_fraction;
         let gross_capacity_w = self.rated_capacity_w * duty;
-        let electric_kw = (self.rated_capacity_w * self.eir * duty) / 1_000.0 * sf;
+        let fan_kw = (self.fan_power_w * duty) / 1_000.0 * sf;
+        // Heating element power + fan power
+        let electric_kw =
+            (self.rated_capacity_w * self.eir * duty) / 1_000.0 * sf + fan_kw;
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -161,10 +172,14 @@ impl Equipment for ElectricFurnace {
             })?;
         }
 
-        if gross_capacity_w > 0.0 {
+        // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
+        let fan_heat_w = fan_kw * 1000.0;
+        let total_sensible_w = gross_capacity_w + fan_heat_w;
+
+        if total_sensible_w > 0.0 {
             self.hvac.write_zone_thermal_contributions(
                 ports,
-                gross_capacity_w,
+                total_sensible_w,
                 0.0,
                 ThermalCategory::HvacHeating,
             )?;
@@ -174,10 +189,9 @@ impl Equipment for ElectricFurnace {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        // Telemetry reports delivered capacity (post-DSE) for the conditioned zone,
-        // consistent with OCHRE's "thermal_output_w" reporting.
-        let thermal_output_w = gross_capacity_w * self.hvac.duct_dse.clamp(0.0, 1.0);
+        let thermal_output_w = total_sensible_w * self.hvac.duct_dse.clamp(0.0, 1.0);
         let sp = self.hvac.effective_setpoints();
+        self.telemetry.set(tk::FAN_KW, fan_kw);
         self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry

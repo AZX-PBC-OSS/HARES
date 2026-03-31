@@ -634,9 +634,13 @@ impl CoolingCore {
             sensible_cooling_w *= thermal_ratio * effective_load;
             latent_cooling_w *= thermal_ratio * effective_load;
 
+            // Fan waste heat partially offsets cooling capacity delivered to
+            // the zone (OCHRE HVAC.py line 543: delivered_heat = heat_gain * shr + fan_power).
+            // For cooling: heat_gain is negative, fan_power is positive.
+            let fan_heat_w = fan_kw * 1000.0;
             self.hvac.write_zone_thermal_contributions(
                 ports,
-                -sensible_cooling_w,
+                -sensible_cooling_w + fan_heat_w,
                 -latent_cooling_w,
                 ThermalCategory::HvacCooling,
             )?;

@@ -125,14 +125,17 @@ pub fn relative_humidity_typed(t_db: Temperature, w: f64, p: Pressure) -> f64 {
 /// Solves by bisection between dew-point and dry-bulb.
 pub fn wet_bulb_from_humidity_ratio(t_db_c: f64, w: f64, p_pa: f64) -> f64 {
     let w_eff = w.max(MIN_HUMIDITY_RATIO);
+    let w_sat = humidity_ratio_from_tdp(t_db_c, p_pa);
+    if w_eff >= w_sat {
+        return t_db_c;
+    }
     let t_dp = dew_point(w_eff, p_pa);
 
-    let low = t_dp.min(t_db_c);
-    let high = t_db_c.max(t_dp);
-
+    // The saturation guard above guarantees w_eff < w_sat, so t_dp < t_db_c
+    // and the bracket [t_dp, t_db_c] is always well-ordered.
     bisect(
-        low,
-        high,
+        t_dp,
+        t_db_c,
         |mid| humidity_ratio_from_twb(t_db_c, mid, p_pa) - w_eff,
         PSYCHRO_TOLERANCE_C,
         WET_BULB_HUMIDITY_TOLERANCE,
@@ -412,6 +415,24 @@ mod tests {
         for t_db_c in [0.0, 10.0, 20.0, 30.0, 40.0] {
             let w_sat = humidity_ratio_from_tdp(t_db_c, p);
             let t_wb = wet_bulb_from_humidity_ratio(t_db_c, w_sat, p);
+            approx_eq(t_wb, t_db_c, 0.01);
+        }
+    }
+
+    #[test]
+    fn wet_bulb_clamps_to_dry_bulb_on_supersaturated_input() {
+        let p = 101_325.0;
+        // (t_db_c, w_multiplier) — multiplier applied to w_sat at that dry-bulb
+        let cases: &[(f64, f64)] = &[
+            (20.0, 2.0),    // moderate above-freezing, 2× saturation
+            (-5.0, 2.0),    // sub-zero dry-bulb, different code path at freezing
+            (-5.0, 100.0),  // sub-zero with extreme multiplier, no overflow/panic
+            (20.0, 100.0),  // above-freezing with extreme multiplier
+            (35.0, 50.0),   // hot day, large supersaturation
+        ];
+        for &(t_db_c, mult) in cases {
+            let w_sat = humidity_ratio_from_tdp(t_db_c, p);
+            let t_wb = wet_bulb_from_humidity_ratio(t_db_c, w_sat * mult, p);
             approx_eq(t_wb, t_db_c, 0.01);
         }
     }

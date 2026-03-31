@@ -456,14 +456,20 @@ fn air_conditioner_sign_convention_and_shr_split() {
         "AC must draw positive electricity when cooling; got {electric_kw:.4} kW"
     );
 
-    // COP for a cooling unit: |thermal| / electric
-    let cooling_cop = thermal_w.abs() / (electric_kw * 1_000.0);
+    // COP for a cooling unit: coil_cooling / compressor_electric.
+    // Port sensible includes fan heat offset, so use telemetry coil output.
+    let coil_cooling_w = eq
+        .telemetry()
+        .get("sensible_cooling_w")
+        .unwrap_or(0.0)
+        + eq.telemetry().get("latent_cooling_w").unwrap_or(0.0);
+    let compressor_kw = eq.telemetry().get("compressor_kw").unwrap_or(0.0);
+    let cooling_cop = coil_cooling_w / (compressor_kw * 1_000.0).max(f64::MIN_POSITIVE);
     // EER ≥ 10 BTU/(Wh) corresponds to COP ≥ 2.93; SEER 14 minimum corresponds to COP ≈ 4.1.
-    // Typical residential unit: COP 3.0–5.0 at rated conditions.
     assert!(
         cooling_cop > 2.0 && cooling_cop < 8.0,
         "AC cooling COP must be in [2.0, 8.0] at rated conditions; got {cooling_cop:.3} \
-         (thermal={thermal_w:.1} W, electric={electric_kw:.4} kW)"
+         (coil={coil_cooling_w:.1} W, compressor={compressor_kw:.4} kW)"
     );
 }
 
@@ -900,9 +906,13 @@ fn ac_sensible_plus_latent_equals_total() {
         "latent_gain_w must be <= 0 (moisture removed); got {latent_port_w:.3} W"
     );
 
+    // Fan heat partially offsets cooling at the port level:
+    // port_sensible = -(sensible_cooling - fan_heat)
+    let fan_kw = eq.telemetry().get("fan_kw").unwrap_or(0.0);
+    let fan_heat_w = fan_kw * 1000.0;
     let total_port_w = sensible_port_w.abs() + latent_port_w.abs();
 
-    // Telemetry reports post-DSE delivered values (DSE=1.0 by default).
+    // Telemetry reports pre-fan-offset cooling (coil output only).
     let sens_tel = eq
         .telemetry()
         .get("sensible_cooling_w")
@@ -911,13 +921,14 @@ fn ac_sensible_plus_latent_equals_total() {
         .telemetry()
         .get("latent_cooling_w")
         .expect("latent_cooling_w");
-    let total_tel = sens_tel + lat_tel;
 
-    // First law: telemetry total must equal port total within floating-point error.
+    // First law: coil cooling - fan heat = net port cooling
+    let net_cooling_tel = sens_tel + lat_tel - fan_heat_w;
     assert!(
-        (total_tel - total_port_w).abs() < 1.0,
-        "sensible_cooling_w ({sens_tel:.3} W) + latent_cooling_w ({lat_tel:.3} W) \
-         = {total_tel:.3} W must equal port total {total_port_w:.3} W (tolerance 1.0 W)"
+        (net_cooling_tel - total_port_w).abs() < 1.0,
+        "coil_total ({:.3} W) - fan_heat ({fan_heat_w:.3} W) = net {net_cooling_tel:.3} W \
+         must equal port total {total_port_w:.3} W (tolerance 1.0 W)",
+        sens_tel + lat_tel,
     );
 }
 

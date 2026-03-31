@@ -332,12 +332,11 @@ impl Equipment for Ventilation {
 
         // Sensible ventilation load to zone [W]:
         // Positive = heating the zone (supply warmer than outdoor but still cooler than indoor).
-        // The load the zone experiences is the difference between supply air and indoor air.
-        let q_sensible_w = m_dot_kg_s * CP_DRY_AIR_J_KG_K * (t_supply_c - t_indoor_c);
-
-        // Latent ventilation load to zone [W]:
-        // Uses latent heat of vaporization (~2,450,000 J/kg).
-        let q_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_J_KG * (w_supply - w_indoor);
+        // Sensible/latent ventilation loads are computed for diagnostic telemetry
+        // but NOT pushed to thermal ports — the envelope solver handles ventilation
+        // heat exchange via apply_infiltration_and_ventilation() (CC-009).
+        let _q_sensible_w = m_dot_kg_s * CP_DRY_AIR_J_KG_K * (t_supply_c - t_indoor_c);
+        let _q_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_J_KG * (w_supply - w_indoor);
 
         // Sensible recovery [W] — how much the HRV/ERV saved vs raw ventilation
         let q_recovery_sensible_w =
@@ -354,12 +353,9 @@ impl Equipment for Ventilation {
             reactive_power_kvar: 0.0,
         })?;
 
-        ports.accumulate(&PortContribution::Thermal {
-            zone: self.zone_id,
-            sensible_gain_w: q_sensible_w,
-            latent_gain_w: q_latent_w,
-            category: ThermalCategory::InternalGain,
-        })?;
+        // Ventilation thermal load is handled by the envelope solver's
+        // apply_infiltration_and_ventilation() — do NOT add it here to avoid
+        // double-counting (CC-009). Equipment reports fan power and telemetry only.
 
         // Telemetry
         self.telemetry.set(tk::ELECTRIC_KW, fan_kw);

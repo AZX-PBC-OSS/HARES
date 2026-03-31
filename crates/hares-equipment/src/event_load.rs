@@ -1743,8 +1743,7 @@ mod tests {
 
     #[test]
     fn registry_contains_wet_appliance_ochre_names() {
-        let mut registry = EquipmentRegistry::default();
-        register_with_registry(&mut registry);
+        let registry = EquipmentRegistry::new();
         assert!(registry.get("Clothes Washer").is_some());
         assert!(registry.get("Dishwasher").is_some());
         assert!(registry.get("Clothes Dryer").is_some());
