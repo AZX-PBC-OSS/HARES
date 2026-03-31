@@ -17,7 +17,7 @@ use hares_physics::constants::{CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_J_KG}
 use hares_types::{
     ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 

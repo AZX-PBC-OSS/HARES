@@ -1175,7 +1175,7 @@ mod tests {
 
     use super::{ASHPHeater, MinisplitHeater};
     use crate::{Equipment, EquipmentConfig};
-    use crate::config::ConfigPayload;
+    
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
@@ -1296,7 +1296,7 @@ mod tests {
 
     #[test]
     fn hspf_to_eir_conversion() {
-        use crate::config::{ConfigPayload, ConfigValue};
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config_mut().unwrap().remove("eir");
         cfg.raw_config_mut().unwrap()
@@ -1316,7 +1316,7 @@ mod tests {
 
     #[test]
     fn cop_to_eir_no_conversion() {
-        use crate::config::{ConfigPayload, ConfigValue};
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config_mut().unwrap().remove("eir");
         cfg.raw_config_mut().unwrap()
@@ -1336,7 +1336,7 @@ mod tests {
 
     #[test]
     fn eer_to_eir_conversion() {
-        use crate::config::{ConfigPayload, ConfigValue};
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config_mut().unwrap().remove("eir");
         cfg.raw_config_mut().unwrap()
@@ -1353,7 +1353,7 @@ mod tests {
 
     #[test]
     fn seer_to_eir_conversion() {
-        use crate::config::{ConfigPayload, ConfigValue};
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config_mut().unwrap().remove("eir");
         cfg.raw_config_mut().unwrap()
@@ -1370,7 +1370,7 @@ mod tests {
 
     #[test]
     fn afue_to_eir_no_conversion() {
-        use crate::config::{ConfigPayload, ConfigValue};
+        use crate::config::ConfigValue;
         let mut cfg = heater_config();
         cfg.raw_config_mut().unwrap().remove("eir");
         cfg.raw_config_mut().unwrap()
@@ -2440,7 +2440,7 @@ mod ideal_capacity_tests {
 
     use super::ASHPHeater;
     use crate::{Equipment, EquipmentConfig};
-    use crate::config::ConfigPayload;
+    
 
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     /// OAT is held above the HP lockout (default -17.78°C) and above the ER lockout

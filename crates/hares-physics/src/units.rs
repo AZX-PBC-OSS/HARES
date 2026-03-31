@@ -107,6 +107,15 @@ pub fn power_btu_h_to_kbtu_h(btu_h: f64) -> f64 {
     btu_h * 0.001
 }
 
+// --- Energy: therms → kWh ---
+// 1 therm = 100,000 BTU (IT). uom converts BTU → joule → kWh.
+use uom::si::energy::{btu_it, kilowatt_hour};
+
+/// Convert therms to kilowatt-hours. 1 therm = 100,000 BTU(IT) ≈ 29.3001 kWh.
+pub fn energy_therms_to_kwh(therms: f64) -> f64 {
+    UomEnergy::new::<btu_it>(therms * 100_000.0).get::<kilowatt_hour>()
+}
+
 // --- Thermal resistance (R-value) and transmittance (U-value) ---
 // R: hr·ft²·°F/BTU → m²·K/W
 // U: BTU/(hr·ft²·°F) → W/(m²·K)

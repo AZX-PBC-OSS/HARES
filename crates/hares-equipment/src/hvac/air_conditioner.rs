@@ -1145,7 +1145,7 @@ mod tests {
     };
 
     use super::{AirConditioner, RoomAC, register_with_registry};
-    use crate::config::ConfigPayload;
+    
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(

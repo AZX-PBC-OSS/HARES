@@ -169,7 +169,7 @@ mod tests {
     };
 
     use super::{super::super::super::Equipment, super::super::super::EquipmentConfig, HpCooler};
-    use crate::config::ConfigPayload;
+    
 
     fn cooling_env(zone_temp_c: f64, outdoor_c: f64) -> EnvironmentState {
         EnvironmentState {

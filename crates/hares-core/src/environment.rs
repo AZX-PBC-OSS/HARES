@@ -199,7 +199,17 @@ impl EnvironmentManager {
             .copied()
             .unwrap_or(DEFAULT_SETPOINT_C);
         let start_hour = start_time.hour() as usize;
-        let zones = initial_zones(building, initial_outdoor_temp_c, start_hour);
+        let initial_ground_temp_c = weather
+            .ground_temp_c
+            .get(init_offset)
+            .copied()
+            .unwrap_or(initial_outdoor_temp_c);
+        let zones = initial_zones(
+            building,
+            initial_outdoor_temp_c,
+            initial_ground_temp_c,
+            start_hour,
+        );
 
         let num_surfaces = surfaces.len();
         let num_schedule_cols = schedule.columns.len();
@@ -713,7 +723,12 @@ fn build_surface_geometry(building: &Building) -> Vec<SurfaceGeometry> {
 const OUTDOOR_HEATING_COOLING_THRESHOLD_C: f64 = 12.0;
 const DEFAULT_SETPOINT_C: f64 = 21.0;
 
-fn initial_zones(building: &Building, outdoor_temp_c: f64, start_hour: usize) -> Vec<ZoneState> {
+fn initial_zones(
+    building: &Building,
+    outdoor_temp_c: f64,
+    ground_temp_c: f64,
+    start_hour: usize,
+) -> Vec<ZoneState> {
     let default_temp = determine_initial_indoor_temp_c(building, outdoor_temp_c, start_hour);
     if building.zones.is_empty() {
         return vec![ZoneState {
@@ -733,10 +748,11 @@ fn initial_zones(building: &Building, outdoor_temp_c: f64, start_hour: usize) ->
         .map(|(idx, zone)| {
             use hares_io::hpxml::ZoneType;
             // Conditioned zones start at the HVAC setpoint.
-            // Unconditioned zones (attic, garage, foundation) start near outdoor temp.
-            // Matches OCHRE Envelope.initialize_state() behavior.
+            // Foundation zones start at ground temperature (TS-001 F2).
+            // Other unconditioned zones (attic, garage) start at outdoor temp.
             let temp = match zone.zone_type {
                 ZoneType::Conditioned => default_temp,
+                ZoneType::Foundation => ground_temp_c,
                 _ => outdoor_temp_c,
             };
             ZoneState {

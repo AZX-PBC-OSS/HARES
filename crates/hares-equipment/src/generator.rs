@@ -925,7 +925,7 @@ mod tests {
         telemetry_keys as tk,
     };
 
-    use crate::config::{ConfigPayload, ConfigValue};
+    use crate::config::ConfigValue;
 
     use super::*;
     use crate::{Equipment, EquipmentConfig};

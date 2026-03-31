@@ -1038,7 +1038,7 @@ mod tests {
         KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, KEY_ZIP_I, KEY_ZIP_P, KEY_ZIP_V0,
         KEY_ZIP_Z, ScheduledLoad, register_with_registry,
     };
-    use crate::config::ConfigPayload;
+    
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 

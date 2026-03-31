@@ -584,7 +584,7 @@ mod tests {
     };
 
     use super::{ElectricFurnace, FURNACE_FAN_CFM_PER_TON, GasFurnace, register_with_registry};
-    use crate::config::ConfigPayload;
+    
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {

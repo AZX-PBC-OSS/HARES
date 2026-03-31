@@ -779,7 +779,7 @@ mod tests {
         DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, ElectricBoiler,
         GasBoiler, register_with_registry,
     };
-    use crate::config::ConfigPayload;
+    
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {

@@ -691,7 +691,8 @@ fn resolve_hpxml_profile(spec: &EquipmentSpec) -> Option<DefaultScheduleProfile>
     None
 }
 
-/// OCHRE precedence: use max_electric_power_w first; if absent, derive from annual_electric_kwh.
+/// Derive peak power from annual energy. For gas appliances, the total includes
+/// both electric parasitic and gas combustion energy (EA-004 F1 fix).
 fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
     if let Some(max_w) = spec
         .parameters
@@ -701,11 +702,22 @@ fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
         return Some(max_w / 1000.0);
     }
 
-    let annual_kwh = spec
+    let annual_electric_kwh = spec
         .parameters
         .get("annual_electric_kwh")
-        .and_then(|v| v.as_f64())?;
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
 
+    // Gas appliances (dryers, cooking ranges) have combustion energy in addition
+    // to electric parasitic.
+    let annual_gas_kwh = hares_physics::units::energy_therms_to_kwh(
+        spec.parameters
+            .get("annual_gas_therms")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    );
+
+    let annual_kwh = annual_electric_kwh + annual_gas_kwh;
     if annual_kwh <= 0.0 || mean_fraction <= 0.0 {
         return None;
     }

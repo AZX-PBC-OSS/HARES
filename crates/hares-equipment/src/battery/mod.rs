@@ -928,7 +928,7 @@ impl Equipment for Battery {
         self.capacity_kwh = self.capacity_kwh_nominal * capacity_derate;
 
         // -- Compute electrical model --
-        let (power_kw, ohmic_loss_w, terminal_v, current_a) =
+        let (power_kw, _ohmic_loss_w, terminal_v, current_a) =
             self.compute_electrical(target_power_kw);
 
         // -- Apply self-discharge --
@@ -1397,7 +1397,7 @@ mod tests {
         ControlSignal, EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
     };
 
-    use crate::config::{ConfigPayload, ConfigValue};
+    use crate::config::ConfigValue;
 
     use super::*;
     use crate::{Equipment, EquipmentConfig};

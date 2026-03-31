@@ -1496,9 +1496,9 @@ mod tests {
     };
 
     use super::{
-        EventBasedLoad, WetAppliance, map_ochre_pdf_to_cycle_schedule, register_with_registry,
+        EventBasedLoad, WetAppliance, map_ochre_pdf_to_cycle_schedule,
     };
-    use crate::config::ConfigPayload;
+    
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn base_env() -> EnvironmentState {
