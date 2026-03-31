@@ -178,11 +178,11 @@ mod tests {
             ConfigValue::FloatArray(cooling_setpoints_c.to_vec()),
         );
 
-        EquipmentConfig {
-            name: "Ideal HVAC".to_string(),
-            ochre_class: "Ideal HVAC".to_string(),
+        EquipmentConfig::raw(
+            "Ideal HVAC".to_string(),
+            "Ideal HVAC".to_string(),
             raw_config,
-        }
+        )
     }
 
     struct Check {

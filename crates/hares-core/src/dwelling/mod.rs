@@ -1817,11 +1817,11 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         let alloc_before = hot_path_alloc_counter();
         #[cfg(feature = "profiling")]
-        let mut step_schedule: Option<StdDuration> = None;
+        let step_schedule: Option<StdDuration>;
         #[cfg(feature = "profiling")]
-        let mut step_hvac: Option<StdDuration> = None;
+        let step_hvac: Option<StdDuration>;
         #[cfg(feature = "profiling")]
-        let mut step_envelope: Option<StdDuration> = None;
+        let step_envelope: Option<StdDuration>;
         #[cfg(feature = "profiling")]
         let mut step_io: Option<StdDuration> = None;
 

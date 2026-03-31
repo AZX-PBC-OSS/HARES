@@ -1999,12 +1999,11 @@ mod dr_tests {
                 plf_max: None,
             },
         );
-        cfg.raw_config_mut().unwrap().insert(
+        cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         cfg
     }
@@ -2396,12 +2395,11 @@ mod crankcase_tests {
                 plf_max: None,
             },
         );
-        cfg.raw_config_mut().unwrap().insert(
+        cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         cfg
     }
@@ -2485,12 +2483,11 @@ mod crankcase_tests {
                 plf_max: None,
             },
         );
-        cfg.raw_config_mut().unwrap().insert(
+        cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         cfg
     }
@@ -2502,12 +2499,11 @@ mod crankcase_tests {
         mutator(&mut typed);
         let mut cfg =
             EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);
-        cfg.raw_config_mut().unwrap().insert(
+        cfg.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         cfg
     }

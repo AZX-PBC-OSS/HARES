@@ -2223,16 +2223,14 @@ mod tests {
 
     fn gas_event_config(name: &str) -> EquipmentConfig {
         let mut cfg = event_config(name, "Cooking Range");
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("fuel_type".to_string(), "Gas".into());
         cfg
     }
 
     fn gas_wet_config(name: &str) -> EquipmentConfig {
         let mut cfg = wet_config(name, "Clothes Dryer", 1.0);
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("fuel_type".to_string(), "Gas".into());
         cfg
     }
@@ -2344,8 +2342,7 @@ mod tests {
     fn event_config_with_month_multiplier(month: usize, multiplier: f64) -> EquipmentConfig {
         let mut config = event_config("TestLoad", "EventBasedLoad");
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert(format!("month_multiplier_{month}"), multiplier.into());
         config
     }
@@ -2417,8 +2414,7 @@ mod tests {
     fn wet_appliance_month_multiplier_zero_suppresses_output() {
         let mut config = wet_config("Washer", "Clothes Washer", 1.0);
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("month_multiplier_2".to_string(), 0.0.into());
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         let mut env = base_env();
@@ -2488,8 +2484,7 @@ mod tests {
         // time advance_phase_timer runs; 3600 s keeps it Active).
         let mut config = event_config("delay_active_test", "EventBasedLoad");
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("active_duration_s".to_string(), 3600.0.into());
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, FixedOffset, Utc};
 use hares_core::{DwellingConfig, SimulationConfig};
 use hares_io::OutputFormat;
 
@@ -116,11 +116,12 @@ pub fn build_dwelling_config(
         schedule_path,
         weather_path,
         sim_config: SimulationConfig {
-            start_time: Utc::now(),
+            start_time: Utc::now().with_timezone(&FixedOffset::east_opt(0).expect("UTC offset")),
             duration,
             time_res: Duration::minutes(1),
             output_verbosity: 0,
             output_path: Some(unique_temp_path("hares-bench-output", "csv")),
+            write_output: true,
             output_format: OutputFormat::Csv,
             output_chunk_size: 1024,
             setpoint_deadband_c: None,
@@ -131,6 +132,7 @@ pub fn build_dwelling_config(
         overrides: None,
         bldg_id,
         initialization_duration: None,
+        resample_overrides: None,
     }
 }
 

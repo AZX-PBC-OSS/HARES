@@ -816,7 +816,9 @@ impl HeatPumpHeaterCore {
         } else {
             hp_capacity_w = 0.0;
             hp_electric_w = 0.0;
-            fan_power_w = 0.0;
+            if !er_on {
+                fan_power_w = 0.0;
+            }
         }
 
         let er_capacity_w = if er_on {
@@ -1287,7 +1289,7 @@ mod tests {
     }
 
     fn add_identity_biquadratic_curves(cfg: &mut EquipmentConfig) {
-        cfg.raw_config_mut().unwrap().insert(
+        cfg.test_extras_mut().insert(
             "biquadratic_coeffs".to_string(),
             "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
         );
@@ -2525,7 +2527,7 @@ mod ideal_capacity_tests {
                 plf_max: None,
             },
         );
-        cfg.raw_config_mut().unwrap().insert(
+        cfg.test_extras_mut().insert(
             "biquadratic_coeffs".to_string(),
             "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
         );

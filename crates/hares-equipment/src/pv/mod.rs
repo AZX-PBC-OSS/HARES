@@ -28,16 +28,6 @@ use serde::{Deserialize, Serialize};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use crate::config::KEY_EQUIPMENT_ID;
-const KEY_CAPACITY_KW: &str = "capacity_kw";
-const KEY_SYSTEM_SIZE_KW: &str = "SystemSize";
-const KEY_TILT_DEG: &str = "tilt_deg";
-const KEY_ARRAY_TILT_DEG: &str = "ArrayTilt";
-const KEY_AZIMUTH_DEG: &str = "azimuth_deg";
-const KEY_ARRAY_AZIMUTH_DEG: &str = "ArrayAzimuth";
-const KEY_MODULE_TYPE: &str = "ModuleType";
-const KEY_ARRAY_COUNT: &str = "array_count";
-const KEY_NOCT_C: &str = "noct_c";
-const KEY_SAM_LUT_PATH: &str = "sam_lut_path";
 
 const DEFAULT_NOCT_C: f64 = 47.0;
 const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.96;
@@ -880,18 +870,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "{prefix}_{}_{}.{}",
-            std::process::id(),
-            nanos,
-            ext
-        ))
+        std::env::temp_dir().join(format!("{prefix}_{}_{}.{}", std::process::id(), nanos, ext))
     }
 
     fn write_pv_lut_csv(path: &Path, ac_power_kw: f64) {
-        let contents = format!(
-            "month,hour,ghi,dni,dhi,temp_c,ac_power_kw\n6,12,0,0,0,25,{ac_power_kw}\n"
-        );
+        let contents =
+            format!("month,hour,ghi,dni,dhi,temp_c,ac_power_kw\n6,12,0,0,0,25,{ac_power_kw}\n");
         std::fs::write(path, contents).expect("write pv csv lut");
     }
 
@@ -1126,13 +1110,38 @@ mod tests {
 
     #[test]
     fn hpxml_keys_and_module_type_parse_into_array() {
-        let mut raw = HashMap::new();
-        raw.insert("SystemSize".to_string(), 4.2.into());
-        raw.insert("ArrayTilt".to_string(), 27.0.into());
-        raw.insert("ArrayAzimuth".to_string(), 200.0.into());
-        raw.insert("ModuleType".to_string(), "ThinFilm".into());
-        let cfg = EquipmentConfig::raw("PV HPXML".to_string(), "PV".to_string(), raw);
-        let pv = PV::new(cfg);
+        let cfg = EquipmentConfig::from_typed(
+            "PV HPXML".to_string(),
+            "PV".to_string(),
+            PvConfig {
+                equipment_id: None,
+                zone_id: None,
+                capacity_kw: 4.2,
+                tilt_deg: Some(27.0),
+                azimuth_deg: Some(200.0),
+                module_type: Some("ThinFilm".to_string()),
+                noct_c: Some(DEFAULT_NOCT_C),
+                system_losses_fraction: Some(DEFAULT_SYSTEM_LOSSES_FRACTION),
+                inverter_efficiency: Some(0.96),
+                inverter_capacity_kw: None,
+                power_factor: Some(DEFAULT_POWER_FACTOR),
+                surface_resolution_deg: Some(5.0),
+                sam_lut_path: None,
+            },
+        );
+        let sid = surface_id_for_orientation(27.0, 200.0, 5.0).unwrap();
+        let env = env_with_surfaces(
+            vec![SurfaceIrradiance {
+                surface_id: sid,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
+            20.0,
+        );
+        let mut pv = PV::new(cfg.clone());
+        pv.init(&cfg, &env).unwrap();
         assert_eq!(pv.arrays.len(), 1);
         assert_eq!(pv.arrays[0].module_type, ModuleType::ThinFilm);
         assert_eq!(pv.arrays[0].capacity_kw, 4.2);

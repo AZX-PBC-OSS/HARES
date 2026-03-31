@@ -207,20 +207,12 @@ impl EquipmentConfig {
             .and_then(|data| data.get(key).and_then(ConfigValue::as_f64_array))
     }
 
-    /// Test-only shim for legacy fixture mutation.
-    ///
-    /// Built-in runtime code should not use this. It remains available only to
-    /// keep existing test fixtures compiling while CFG-015 removes the raw
-    /// path from built-in equipment.
+    /// Test-only mutable extras for fixture tweaks.
     #[cfg(test)]
-    pub fn raw_config_mut(&mut self) -> Option<&mut HashMap<String, ConfigValue>> {
-        #[cfg(test)]
-        if let ConfigPayload::Typed { .. } = &self.payload {
-            return Some(&mut self.test_extras);
-        }
+    pub fn test_extras_mut(&mut self) -> &mut HashMap<String, ConfigValue> {
         match &mut self.payload {
-            ConfigPayload::Raw { data } => Some(data),
-            ConfigPayload::Typed { .. } => None,
+            ConfigPayload::Raw { data } => data,
+            ConfigPayload::Typed { .. } => &mut self.test_extras,
         }
     }
 

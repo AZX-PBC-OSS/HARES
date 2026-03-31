@@ -463,8 +463,7 @@ mod tests {
         let jacket_r_m2_k_w = 1.761_101_84_f64; // 10 hr·ft²·°F/BTU
 
         let mut cfg = base_config();
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("jacket_r_value_m2_k_w".to_string(), jacket_r_m2_k_w.into());
 
         let ua_adjusted = apply_jacket_r_value(ua_base, height_m, diameter_m, &cfg);
@@ -497,8 +496,7 @@ mod tests {
         // Non-positive jacket R-value: no adjustment.
         let mut cfg_zero = base_config();
         cfg_zero
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("jacket_r_value_m2_k_w".to_string(), 0.0.into());
         assert_eq!(
             apply_jacket_r_value(ua_base, height_m, diameter_m, &cfg_zero),
@@ -555,11 +553,9 @@ mod tests {
     #[test]
     fn schedule_sources_parse_supported_aliases() {
         let mut cfg = base_config();
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("draw_flow_rate_schedule_col".to_string(), 7.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("mains_temp_schedule_col".to_string(), 2.0.into());
 
         assert_eq!(
@@ -581,14 +577,11 @@ mod tests {
     #[test]
     fn zip_invalid_coefficients_produce_error() {
         let mut cfg = base_config();
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_z".to_string(), 0.5.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_i".to_string(), 0.3.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_p".to_string(), 0.3.into()); // sum = 1.1, exceeds tolerance
         let result = WaterHeaterZip::from_config(&cfg);
         assert!(
@@ -605,14 +598,11 @@ mod tests {
     #[test]
     fn zip_valid_coefficients_parse_ok() {
         let mut cfg = base_config();
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_z".to_string(), 0.3.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_i".to_string(), 0.3.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_p".to_string(), 0.4.into()); // sum = 1.0
         let zip = WaterHeaterZip::from_config(&cfg).expect("valid ZIP must parse");
         assert!((zip.z - 0.3).abs() < 1e-12);
@@ -624,24 +614,18 @@ mod tests {
     fn zip_invalid_reactive_coefficients_produce_error() {
         let mut cfg = base_config();
         // Valid real-power coefficients
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_z".to_string(), 0.5.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_i".to_string(), 0.3.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_p".to_string(), 0.2.into());
         // Invalid reactive coefficients (sum = 1.1)
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_zq".to_string(), 0.5.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_iq".to_string(), 0.3.into());
-        cfg.raw_config_mut()
-            .unwrap()
+        cfg.test_extras_mut()
             .insert("zip_pq".to_string(), 0.3.into());
         let result = WaterHeaterZip::from_config(&cfg);
         assert!(result.is_err(), "ZIP zq+iq+pq=1.1 must be rejected");

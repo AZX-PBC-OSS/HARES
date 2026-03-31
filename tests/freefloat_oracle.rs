@@ -314,11 +314,11 @@ mod tests {
             .get("Infiltration Heat Gain - Indoor (W)")
             .cloned()
             .unwrap_or_default();
-        let o_vent = ochre_data
+        let _o_vent = ochre_data
             .get("Forced Ventilation Heat Gain - Indoor (W)")
             .cloned()
             .unwrap_or_default();
-        let o_inf_atc = ochre_data
+        let _o_inf_atc = ochre_data
             .get("Infiltration Heat Gain - Attic (W)")
             .cloned()
             .unwrap_or_default();
@@ -339,8 +339,8 @@ mod tests {
             let oo = o_out.get(step).copied().unwrap_or(f64::NAN);
             let hw = hares_window_solar.get(step).copied().unwrap_or(0.0);
             let ow = o_wsol.get(step).copied().unwrap_or(0.0);
-            let h_inf = hares_infiltration.get(step).copied().unwrap_or(0.0);
-            let o_i = o_inf_in.get(step).copied().unwrap_or(0.0);
+            let _h_inf = hares_infiltration.get(step).copied().unwrap_or(0.0);
+            let _o_i = o_inf_in.get(step).copied().unwrap_or(0.0);
             eprintln!(
                 "  {:>4} {:>8.2} {:>8.2} {:>+8.2} {:>8.2} {:>8.2} {:>+8.2} {:>8.1} {:>8.1} {:>8.0} {:>8.0}",
                 hour,

@@ -449,7 +449,6 @@ fn try_build_gas_furnace_config(
         number_of_speeds: n_speeds,
         fan_power_w,
         ducts,
-        ..GasFurnaceConfig::default()
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -478,7 +477,6 @@ fn try_build_electric_furnace_config(
         number_of_speeds: n_speeds,
         fan_power_w,
         ducts,
-        ..ElectricFurnaceConfig::default()
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -515,7 +513,6 @@ fn try_build_gas_boiler_config(name: &str, params: &Map<String, Value>) -> Optio
         flow_rate_kg_s,
         return_temp_c,
         fluid_type: hares_types::FluidType::Water,
-        ..GasBoilerConfig::default()
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -554,7 +551,6 @@ fn try_build_electric_boiler_config(
         flow_rate_kg_s,
         return_temp_c,
         fluid_type: hares_types::FluidType::Water,
-        ..ElectricBoilerConfig::default()
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -575,7 +571,6 @@ fn try_build_electric_baseboard_config(
         zone_id: None,
         capacity_w,
         eir: 1.0,
-        ..ElectricBaseboardConfig::default()
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),

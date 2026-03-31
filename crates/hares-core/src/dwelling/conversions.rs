@@ -389,82 +389,6 @@ fn apply_equipment_overrides(base: &mut Map<String, Value>, overrides: &Value, n
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use hares_equipment::hvac::heating_config::{DuctConfig, GasFurnaceConfig};
-    use hares_types::FuelType;
-
-    use super::merged_equipment_config;
-
-    fn gas_furnace_spec() -> hares_io::EquipmentSpec {
-        let typed_cfg = GasFurnaceConfig {
-            equipment_id: Some(7),
-            zone_id: Some(1),
-            capacity_w: 12_000.0,
-            afue: 0.82,
-            fan_power_w: Some(350.0),
-            number_of_speeds: 1,
-            ducts: DuctConfig::default(),
-        };
-        let parameters = serde_json::to_value(&typed_cfg)
-            .expect("serializable furnace config")
-            .as_object()
-            .cloned()
-            .expect("furnace config object");
-        hares_io::EquipmentSpec {
-            name: "Gas Furnace".to_string(),
-            fuel_type: FuelType::Gas,
-            parameters,
-            zip_params: None,
-            typed_config: Some(hares_equipment::EquipmentConfig::from_typed(
-                "Gas Furnace".to_string(),
-                "Gas Furnace".to_string(),
-                typed_cfg,
-            )),
-        }
-    }
-
-    #[test]
-    fn typed_equipment_override_rejects_unknown_keys() {
-        let spec = gas_furnace_spec();
-        let overrides = json!({
-            "Gas Furnace": {
-                "afuee": 0.96
-            }
-        });
-
-        let merged = merged_equipment_config(&spec, &overrides);
-        let err = merged
-            .require_typed::<GasFurnaceConfig>("Gas Furnace")
-            .expect_err("unknown override keys must fail");
-        let msg = err.to_string();
-
-        assert!(msg.contains("Gas Furnace"), "missing equipment name: {msg}");
-        assert!(msg.contains("afuee"), "missing unknown key: {msg}");
-        assert!(msg.contains("unknown field"), "missing serde error: {msg}");
-    }
-
-    #[test]
-    fn typed_equipment_override_applies_known_keys() {
-        let spec = gas_furnace_spec();
-        let overrides = json!({
-            "Gas Furnace": {
-                "afue": 0.96
-            }
-        });
-
-        let merged = merged_equipment_config(&spec, &overrides);
-        let cfg = merged
-            .require_typed::<GasFurnaceConfig>("Gas Furnace")
-            .expect("known override keys must deserialize");
-
-        assert!((cfg.afue - 0.96).abs() < 1e-12);
-        assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
-    }
-}
-
 pub(crate) fn boundary_zone_index(
     building: &Building,
     zone_type: Option<&hares_io::hpxml::ZoneType>,
@@ -620,5 +544,80 @@ pub(crate) fn json_value_to_config_value(value: &serde_json::Value) -> Option<Co
             }
         }
         _ => None,
+    }
+}
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use hares_equipment::hvac::heating_config::{DuctConfig, GasFurnaceConfig};
+    use hares_types::FuelType;
+
+    use super::merged_equipment_config;
+
+    fn gas_furnace_spec() -> hares_io::EquipmentSpec {
+        let typed_cfg = GasFurnaceConfig {
+            equipment_id: Some(7),
+            zone_id: Some(1),
+            capacity_w: 12_000.0,
+            afue: 0.82,
+            fan_power_w: Some(350.0),
+            number_of_speeds: 1,
+            ducts: DuctConfig::default(),
+        };
+        let parameters = serde_json::to_value(&typed_cfg)
+            .expect("serializable furnace config")
+            .as_object()
+            .cloned()
+            .expect("furnace config object");
+        hares_io::EquipmentSpec {
+            name: "Gas Furnace".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters,
+            zip_params: None,
+            typed_config: Some(hares_equipment::EquipmentConfig::from_typed(
+                "Gas Furnace".to_string(),
+                "Gas Furnace".to_string(),
+                typed_cfg,
+            )),
+        }
+    }
+
+    #[test]
+    fn typed_equipment_override_rejects_unknown_keys() {
+        let spec = gas_furnace_spec();
+        let overrides = json!({
+            "Gas Furnace": {
+                "afuee": 0.96
+            }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides);
+        let err = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect_err("unknown override keys must fail");
+        let msg = err.to_string();
+
+        assert!(msg.contains("Gas Furnace"), "missing equipment name: {msg}");
+        assert!(msg.contains("afuee"), "missing unknown key: {msg}");
+        assert!(msg.contains("unknown field"), "missing serde error: {msg}");
+    }
+
+    #[test]
+    fn typed_equipment_override_applies_known_keys() {
+        let spec = gas_furnace_spec();
+        let overrides = json!({
+            "Gas Furnace": {
+                "afue": 0.96
+            }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides);
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("known override keys must deserialize");
+
+        assert!((cfg.afue - 0.96).abs() < 1e-12);
+        assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
     }
 }

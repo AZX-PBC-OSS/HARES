@@ -846,8 +846,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("cutout_ratio".to_string(), 1.2.into());
         let err = hvac
             .init(&config, &env(20.0, 60, 0))
@@ -876,8 +875,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("cutout_ratio".to_string(), 0.1.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!((hvac.thermostat.cutout_ratio - 0.1).abs() < 1e-12);
@@ -908,16 +906,13 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("hysteresis_c".to_string(), 1.0.into());
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("cooling_setpoint_c".to_string(), 22.0.into());
         let err = hvac
             .init(&config, &env(20.0, 60, 0))
@@ -1059,8 +1054,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("AirflowDefectRatio".to_string(), 0.8.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         let expected = AIRFLOW_HEATING_M3_S_PER_W * 0.8;
@@ -1072,8 +1066,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("AirflowDefectRatio".to_string(), 0.8.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         let expected = AIRFLOW_CENTRAL_AC_M3_S_PER_W * 0.8;
@@ -1443,8 +1436,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("rated_seer".to_string(), 10.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
@@ -1465,8 +1457,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("rated_seer".to_string(), 15.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
@@ -1487,8 +1478,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("rated_hspf".to_string(), 6.5.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
@@ -1504,8 +1494,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("rated_hspf".to_string(), 8.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
@@ -1525,8 +1514,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("speed_control_mode".to_string(), "two_speed".into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
@@ -1546,8 +1534,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("speed_control_mode".to_string(), "variable".into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert_eq!(
@@ -1562,12 +1549,10 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("cooling_cd".to_string(), 0.15.into());
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("rated_seer".to_string(), 10.0.into()); // would give 0.20 if derived
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
@@ -1587,20 +1572,16 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("biquadratic_x1_min".to_string(), 12.0.into());
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("biquadratic_x1_max".to_string(), 30.0.into());
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("biquadratic_x2_min".to_string(), (-15.0).into());
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("biquadratic_x2_max".to_string(), 55.0.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
 
@@ -1996,12 +1977,10 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("basement_zone_id".to_string(), 4.0.into());
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("basement_airflow_ratio".to_string(), 0.2.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert_eq!(hvac.basement_zone_id, Some(ZoneId(4)));
@@ -2077,16 +2056,14 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("speed_control_mode".to_string(), "time".into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert_eq!(hvac.speed_control_mode, SpeedControlMode::TwoSpeedTime);
 
         let mut config2 = EquipmentConfig::default();
         config2
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("speed_control_mode".to_string(), "time2".into());
         hvac.init(&config2, &env(20.0, 60, 0)).expect("init ok");
         assert_eq!(
@@ -2244,8 +2221,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("deadband_offset".to_string(), 0.3.into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         assert!(
@@ -2361,8 +2337,7 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
-            .raw_config_mut()
-            .unwrap()
+            .test_extras_mut()
             .insert("deadband_offset".to_string(), 1.5.into());
         let err = hvac
             .init(&config, &env(20.0, 60, 0))
@@ -2382,11 +2357,11 @@ mod tests {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AshpHeatPumpOnly, ZoneId(1));
         let mut config = EquipmentConfig::default();
         // Provide only the split keys, not the combined key.
-        config.raw_config_mut().unwrap().insert(
+        config.test_extras_mut().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "2.0,0.0,0.0,0.0,0.0,0.0".into(),
         );
-        config.raw_config_mut().unwrap().insert(
+        config.test_extras_mut().insert(
             "eir_biquadratic_coeffs".to_string(),
             "3.0,0.0,0.0,0.0,0.0,0.0".into(),
         );

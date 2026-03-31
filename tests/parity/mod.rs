@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, Float64Array};
 use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
-use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationEngine};
+use hares_core::{DwellingConfig, SimStatus, SimulationEngine};
 use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
 use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

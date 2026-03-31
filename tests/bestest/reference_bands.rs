@@ -110,3 +110,17 @@ pub fn core_reference_bands(case_id: &str) -> Vec<ReferenceBand> {
         _ => Vec::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::core_reference_bands;
+
+    #[test]
+    fn reference_bands_have_case_ids_and_contains_is_exercised() {
+        for band in core_reference_bands("600") {
+            assert!(!band.case_id.is_empty());
+            let mid = (band.min + band.max) * 0.5;
+            assert!(band.contains(mid));
+        }
+    }
+}

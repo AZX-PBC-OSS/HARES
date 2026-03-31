@@ -104,3 +104,30 @@ pub fn extended_cases() -> Vec<BestestCase> {
 pub fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{BestestTier, core_cases, extended_cases};
+
+    #[test]
+    fn extended_cases_are_defined_and_tagged() {
+        let cases = extended_cases();
+        assert!(!cases.is_empty(), "extended BESTEST cases must be present");
+        assert!(
+            cases
+                .iter()
+                .all(|c| matches!(c.tier, BestestTier::Extended))
+        );
+        assert!(cases.iter().all(|c| !c.description.is_empty()));
+        assert!(cases.iter().all(|c| c.timestep_seconds > 0));
+    }
+
+    #[test]
+    fn core_cases_have_fixture_paths() {
+        for c in core_cases() {
+            let path = c.fixture_path();
+            assert!(!c.id.is_empty());
+            assert!(!path.as_os_str().is_empty());
+        }
+    }
+}

@@ -446,17 +446,17 @@ mod tests {
             let rh = 60.0;
             let wind = 3.0;
             let wind_dir = 180.0;
-            let ghi = if hour_of_day >= 7 && hour_of_day <= 18 {
+            let ghi = if (7..=18).contains(&hour_of_day) {
                 400.0
             } else {
                 0.0
             };
-            let dni = if hour_of_day >= 7 && hour_of_day <= 18 {
+            let dni = if (7..=18).contains(&hour_of_day) {
                 600.0
             } else {
                 0.0
             };
-            let dhi = if hour_of_day >= 7 && hour_of_day <= 18 {
+            let dhi = if (7..=18).contains(&hour_of_day) {
                 100.0
             } else {
                 0.0

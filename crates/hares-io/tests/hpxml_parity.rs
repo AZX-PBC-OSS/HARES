@@ -636,7 +636,7 @@ fn ac_has_startup_capacity_degradation_default() {
         .and_then(|v| v.as_f64())
         .expect("startup_cd should be present");
     assert!(
-        cd >= 0.0 && cd <= 1.0,
+        (0.0..=1.0).contains(&cd),
         "AC startup_cd should be in [0, 1], got {cd}"
     );
 }

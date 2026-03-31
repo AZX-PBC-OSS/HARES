@@ -1741,11 +1741,23 @@ fn py_to_config_value(value: &Bound<'_, PyAny>) -> PyResult<ConfigValue> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::fs;
     use std::sync::Mutex;
     use std::sync::MutexGuard;
     use std::thread;
+    use std::time::Duration as StdDuration;
+
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_equipment::pv::surface_id_for_orientation;
+    use hares_equipment::{EquipmentRegistry, PvConfig};
+    use hares_types::{
+        EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    };
 
     use super::default_start;
+    use super::pv_config_from_py;
+    use crate::py_equipment::PyPv;
     use crate::utils::parse_datetime_str;
 
     #[derive(Debug)]
@@ -1848,6 +1860,118 @@ mod tests {
         assert_eq!(
             result.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
             "2019-01-01T00:00:00+0000"
+        );
+    }
+
+    fn pv_env(tilt_deg: f64, azimuth_deg: f64) -> EnvironmentState {
+        let surface_id =
+            surface_id_for_orientation(tilt_deg, azimuth_deg, 5.0).expect("surface id");
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 24.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.5,
+                wet_bulb_c: 16.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 25.0,
+                outdoor_humidity_ratio: 0.008,
+                pressure_kpa: 101.325,
+                ghi_w_m2: 850.0,
+                dni_w_m2: 700.0,
+                dhi_w_m2: 150.0,
+                solar_irradiance: vec![SurfaceIrradiance {
+                    surface_id,
+                    direct_w_m2: 700.0,
+                    diffuse_w_m2: 120.0,
+                    reflected_w_m2: 30.0,
+                    angle_of_incidence_rad: 0.2,
+                }],
+                ..WeatherState::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: HashMap::new(),
+            equipment_core: HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .expect("UTC")
+                .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+                .single()
+                .expect("valid time"),
+            time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    #[test]
+    fn pypv_sam_lut_path_round_trips_into_typed_config() {
+        let pv = PyPv {
+            name: "PV LUT".to_string(),
+            capacity_kw: 5.0,
+            tilt: 30.0,
+            azimuth: 180.0,
+            sam_lut_path: Some("/tmp/example.parquet".to_string()),
+            soiling: None,
+        };
+        let config = pv_config_from_py(&pv);
+        let typed: PvConfig = config.typed().expect("typed PvConfig");
+        assert_eq!(typed.sam_lut_path.as_deref(), Some("/tmp/example.parquet"));
+    }
+
+    #[test]
+    fn pypv_without_sam_lut_path_initializes_normally() {
+        let pv = PyPv {
+            name: "PV No LUT".to_string(),
+            capacity_kw: 5.0,
+            tilt: 30.0,
+            azimuth: 180.0,
+            sam_lut_path: None,
+            soiling: None,
+        };
+        let config = pv_config_from_py(&pv);
+        let env = pv_env(30.0, 180.0);
+        let registry = EquipmentRegistry::new();
+        let mut eq = registry
+            .create("PV", config.clone())
+            .expect("PV should be registered");
+        eq.init(&config, &env).expect("PV init without LUT path");
+        eq.step(&env, StdDuration::from_secs(60), &mut PortSlots::default())
+            .expect("PV step should succeed");
+    }
+
+    #[test]
+    fn pypv_invalid_sam_lut_path_fails_init() {
+        let bad_lut_path = "/tmp/hares_bad_pv_lut.txt";
+        fs::write(bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
+        let pv = PyPv {
+            name: "PV Bad LUT".to_string(),
+            capacity_kw: 5.0,
+            tilt: 30.0,
+            azimuth: 180.0,
+            sam_lut_path: Some(bad_lut_path.to_string()),
+            soiling: None,
+        };
+        let config = pv_config_from_py(&pv);
+        let env = pv_env(30.0, 180.0);
+        let registry = EquipmentRegistry::new();
+        let mut eq = registry
+            .create("PV", config.clone())
+            .expect("PV should be registered");
+        let err = eq
+            .init(&config, &env)
+            .expect_err("init should fail for invalid LUT extension/content");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported PV SAM LUT format")
+                || msg.contains("failed to")
+                || msg.contains("missing one of required columns"),
+            "unexpected error: {msg}"
         );
     }
 }
