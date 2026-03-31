@@ -632,7 +632,8 @@ fn try_build_central_ac_config(
     let fraction_load_served = params.get("fraction_load_served").and_then(Value::as_f64);
     let duct = compute_duct_config(duct_params, capacity_w, false, n_speeds, false);
     let curve_bounds = extract_curve_bounds(params);
-    let airflow_m3_s_per_w = 400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
+    let airflow_m3_s_per_w =
+        400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
 
     let cfg = CentralAirConditionerConfig {
         equipment_id: None,
@@ -682,7 +683,8 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     let eer = eer_from_params(params)?;
 
     let curve_bounds = extract_curve_bounds(params);
-    let airflow_m3_s_per_w = 320.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
+    let airflow_m3_s_per_w =
+        320.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
     let cfg = RoomAcConfig {
         equipment_id: None,
         zone_id: None,
@@ -796,6 +798,7 @@ fn try_build_heat_pump_heater_config(
         backup_fuel,
         backup_capacity_w,
         backup_eir,
+        heating_efficiency: None,
         fraction_heating_load_served,
         cooling_capacity_w,
         seer,

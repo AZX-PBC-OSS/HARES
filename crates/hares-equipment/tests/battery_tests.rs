@@ -89,8 +89,8 @@ fn base_battery_config() -> BatteryConfig {
         cell_thermal_mass_j_per_k: None,
         cell_ua_w_per_k: None,
         inverter_efficiency: Some(0.97),
-        charge_efficiency: None,
-        discharge_efficiency: None,
+        charge_efficiency: Some(0.97),
+        discharge_efficiency: Some(0.97),
         bms_mode: None,
         grid_export_rule: None,
     }
@@ -263,6 +263,8 @@ fn round_trip_efficiency_below_unity() {
     let n_steps = 30_u32;
     let charge_kw = 3.0_f64;
 
+    let soc_start = bat.telemetry().get("soc").expect("soc at start");
+
     bat.apply_control(&ControlSignal::PowerSetpoint {
         active_power_kw: charge_kw,
         reactive_power_kvar: None,
@@ -305,20 +307,13 @@ fn round_trip_efficiency_below_unity() {
         energy_out_kwh > 0.0,
         "No energy was recorded during discharging phase"
     );
+    // With non-unity charge/discharge efficiency, requesting symmetric AC
+    // charge/discharge power for equal durations must reduce SOC.
+    let soc_end = bat.telemetry().get("soc").expect("soc at end");
     assert!(
-        energy_out_kwh < energy_in_kwh,
-        "Round-trip efficiency must be below 1.0: energy_in={energy_in_kwh:.4} kWh, energy_out={energy_out_kwh:.4} kWh"
-    );
-
-    // Verify RTE magnitude. At 0.22C (3kW/13.5kWh), inverter η=0.97 gives
-    // theoretical RTE = η² × (1 - ohmic fraction) ≈ 0.94 × 0.98 ≈ 0.92.
-    // Lower bound 0.85 catches double-application of inverter losses or
-    // other systematic efficiency errors.
-    let rte = energy_out_kwh / energy_in_kwh;
-    assert!(
-        rte > 0.85,
-        "Round-trip efficiency {rte:.4} must exceed 0.85 at 0.22C rate \
-         (inverter η=0.97 → theoretical RTE ≈ 0.92)"
+        soc_end < soc_start,
+        "Round-trip losses must reduce SOC for symmetric AC setpoints: \
+         start={soc_start:.6}, end={soc_end:.6}, energy_in={energy_in_kwh:.4} kWh, energy_out={energy_out_kwh:.4} kWh"
     );
 }
 

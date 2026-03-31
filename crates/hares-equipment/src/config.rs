@@ -207,11 +207,12 @@ impl EquipmentConfig {
             .and_then(|data| data.get(key).and_then(ConfigValue::as_f64_array))
     }
 
-    /// Get a mutable reference to raw config data, or None if the payload is typed.
+    /// Test-only shim for legacy fixture mutation.
     ///
-    /// Prefer building complete configs upfront. This accessor exists for
-    /// equipment types not yet migrated to typed config.
-    #[deprecated(note = "transitional — removed in CFG-015")]
+    /// Built-in runtime code should not use this. It remains available only to
+    /// keep existing test fixtures compiling while CFG-015 removes the raw
+    /// path from built-in equipment.
+    #[cfg(test)]
     pub fn raw_config_mut(&mut self) -> Option<&mut HashMap<String, ConfigValue>> {
         #[cfg(test)]
         if let ConfigPayload::Typed { .. } = &self.payload {

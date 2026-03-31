@@ -7,13 +7,12 @@
 //!
 //! Reference: vendors/OCHRE/ochre/Equipment/HVAC.py
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_equipment::{
-    DuctConfig, ElectricBaseboardConfig, EquipmentConfig, EquipmentRegistry, GasFurnaceConfig,
-    config::ConfigValue,
+    CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, EquipmentConfig,
+    EquipmentRegistry, GasFurnaceConfig, HeatPumpHeaterConfig,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
@@ -80,14 +79,92 @@ fn make_ports() -> PortSlots {
 }
 
 fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
-    let mut raw = HashMap::new();
-    for &(k, v) in pairs {
-        raw.insert(k.to_string(), ConfigValue::Float(v));
-    }
-    EquipmentConfig {
-        name: name.to_string(),
-        ochre_class: class.to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
+    let get = |key: &str| -> Option<f64> { pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v) };
+
+    match class {
+        "Air Conditioner" => EquipmentConfig::from_typed(
+            name.to_string(),
+            class.to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: get("zone_id").map(|v| v as u16),
+                capacity_w: get("capacity_w").unwrap_or(10_000.0),
+                seer: 3.412_141_633 / 0.33,
+                shr: Some(0.75),
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: get("cooling_setpoint_c"),
+                heating_setpoint_c: get("heating_setpoint_c"),
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: None,
+                fraction_load_served: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: get("startup_cd"),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        ),
+        "ASHP Heater" => EquipmentConfig::from_typed(
+            name.to_string(),
+            class.to_string(),
+            HeatPumpHeaterConfig {
+                equipment_id: None,
+                zone_id: get("zone_id").map(|v| v as u16),
+                heating_capacity_w: Some(8_000.0),
+                hspf: Some(9.0),
+                heating_efficiency: None,
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: get("backup_capacity_w"),
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                seer: Some(14.0),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                stage_shrs: None,
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.75),
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: get("heating_setpoint_c"),
+                cooling_setpoint_c: get("cooling_setpoint_c"),
+                hysteresis_c: Some(1.0),
+                hp_lockout_temp_c: None,
+                er_lockout_temp_c: None,
+                max_oat_supplemental_c: None,
+                er_setpoint_offset_c: None,
+                er_hard_lockout_time_s: None,
+                duct: DuctConfig::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        ),
+        _ => panic!("unsupported class in hvac_parity cfg helper: {class}"),
     }
 }
 

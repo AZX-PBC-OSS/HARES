@@ -47,6 +47,7 @@ pub struct GeneratorConfig {
     pub eta_electric: Option<f64>,
     pub eta_thermal: Option<f64>,
     pub efficiency_type: Option<String>,
+    pub efficiency_curve_points: Option<Vec<GeneratorEfficiencyCurvePoint>>,
     pub delta_kw_per_s: Option<f64>,
     pub capacity_min_kw: Option<f64>,
     pub grid_import_limit_kw: Option<f64>,
@@ -62,6 +63,17 @@ impl EquipmentTypedConfig for GeneratorConfig {
     fn equipment_type_name() -> &'static str {
         "Generator"
     }
+}
+
+/// Piecewise-linear generator efficiency curve point.
+///
+/// `capacity_ratio` is normalized electric output in `[0, 1]`.
+/// `efficiency_ratio` scales `eta_electric` at that operating point.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratorEfficiencyCurvePoint {
+    pub capacity_ratio: f64,
+    pub efficiency_ratio: f64,
 }
 
 impl GeneratorConfig {
@@ -98,6 +110,20 @@ impl GeneratorConfig {
                 ));
             }
         }
+        if let Some(efficiency_type) = self.efficiency_type.as_deref() {
+            match efficiency_type {
+                "constant" | "curve" | "quadratic" => {}
+                _ => {
+                    return Err(HaresError::Equipment(
+                        "generator efficiency_type must be one of: constant, curve, quadratic"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        if let Some(points) = self.efficiency_curve_points.as_deref() {
+            EfficiencyModel::validate_curve_points(points)?;
+        }
         if let Some(min_kw) = self.capacity_min_kw {
             if !min_kw.is_finite() || min_kw < 0.0 || min_kw > self.rated_power_kw {
                 return Err(HaresError::Equipment(
@@ -121,22 +147,32 @@ impl GeneratorConfig {
 // Config keys
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 use crate::config::{KEY_EQUIPMENT_ID, KEY_ZONE_ID};
+#[cfg(test)]
 const KEY_RATED_POWER_KW: &str = "rated_power_kw";
+#[cfg(test)]
 const KEY_CAPACITY_MIN_KW: &str = "capacity_min_kw";
+#[cfg(test)]
 const KEY_ETA_ELECTRIC: &str = "eta_electric";
+#[cfg(test)]
 const KEY_ETA_THERMAL: &str = "eta_thermal";
+#[cfg(test)]
 const KEY_EFFICIENCY_TYPE: &str = "efficiency_type";
+#[cfg(test)]
 const KEY_DELTA_KW_PER_S: &str = "delta_kw_per_s";
+#[cfg(test)]
 const KEY_GRID_IMPORT_LIMIT_KW: &str = "grid_import_limit_kw";
+#[cfg(test)]
 const KEY_EXPORT_LIMIT_KW: &str = "export_limit_kw";
+#[cfg(test)]
 const KEY_LOOP_ID: &str = "loop_id";
+#[cfg(test)]
 const KEY_FLOW_RATE_KG_S: &str = "flow_rate_kg_s";
+#[cfg(test)]
 const KEY_SUPPLY_TEMP_C: &str = "supply_temp_c";
+#[cfg(test)]
 const KEY_RETURN_TEMP_C: &str = "return_temp_c";
-
-// Efficiency curve config keys: up to 16 (capacity_ratio, efficiency_ratio) pairs.
-const KEY_CURVE_POINT_PREFIX: &str = "efficiency_curve_";
 
 // ---------------------------------------------------------------------------
 // Physical defaults
@@ -272,81 +308,93 @@ impl EfficiencyModel {
     /// Validate the model parameters.
     fn validate(&self) -> Result<(), HaresError> {
         let rated = self.rated();
-        if rated <= 0.0 || rated > 1.0 {
+        if !rated.is_finite() || rated <= 0.0 || rated > 1.0 {
             return Err(HaresError::Equipment(
                 "generator eta_electric must be in (0, 1]".to_string(),
             ));
         }
         if let Self::Curve { points, .. } = self {
-            if points.len() < 2 {
-                return Err(HaresError::Equipment(
-                    "generator efficiency curve requires at least 2 points".to_string(),
-                ));
-            }
-            for w in points.windows(2) {
-                if w[1].0 <= w[0].0 {
-                    return Err(HaresError::Equipment(
-                        "generator efficiency curve points must be sorted by capacity_ratio"
-                            .to_string(),
-                    ));
-                }
-            }
-            // efficiency_ratio values > 1.0 are not rejected here because some
-            // manufacturer curves have efficiency_ratio > 1.0 at peak output and
-            // the effective efficiency is rated * ratio, which is bounded separately
-            // by eta_electric + eta_thermal <= 1.0 in init(). Trust the caller.
+            Self::validate_curve_pairs(points)?;
         }
         Ok(())
     }
 
-    /// Parse from config. When no explicit `efficiency_type` key is present,
-    /// falls back to the kind-specific default from `GeneratorKind::default_efficiency_type`.
-    fn from_config(config: &EquipmentConfig, rated: f64, kind: GeneratorKind) -> Self {
-        let explicit = config.get_str(KEY_EFFICIENCY_TYPE);
-        // Resolve "constant" / "curve" / "quadratic" — explicit config wins;
-        // fall back to the kind default so FuelCell correctly gets "curve".
-        let eff_type = explicit.unwrap_or_else(|| kind.default_efficiency_type());
+    fn validate_curve_points(points: &[GeneratorEfficiencyCurvePoint]) -> Result<(), HaresError> {
+        if points.len() < 2 {
+            return Err(HaresError::Equipment(
+                "generator efficiency curve requires at least 2 points".to_string(),
+            ));
+        }
+        for point in points {
+            if !point.capacity_ratio.is_finite() || !(0.0..=1.0).contains(&point.capacity_ratio) {
+                return Err(HaresError::Equipment(
+                    "generator efficiency curve capacity_ratio must be finite and within [0, 1]"
+                        .to_string(),
+                ));
+            }
+            if !point.efficiency_ratio.is_finite() || point.efficiency_ratio < 0.0 {
+                return Err(HaresError::Equipment(
+                    "generator efficiency curve efficiency_ratio must be finite and >= 0"
+                        .to_string(),
+                ));
+            }
+        }
+        for window in points.windows(2) {
+            if window[1].capacity_ratio <= window[0].capacity_ratio {
+                return Err(HaresError::Equipment(
+                    "generator efficiency curve points must be strictly increasing by capacity_ratio"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_curve_pairs(points: &[(f64, f64)]) -> Result<(), HaresError> {
+        let typed_points = points
+            .iter()
+            .map(
+                |(capacity_ratio, efficiency_ratio)| GeneratorEfficiencyCurvePoint {
+                    capacity_ratio: *capacity_ratio,
+                    efficiency_ratio: *efficiency_ratio,
+                },
+            )
+            .collect::<Vec<_>>();
+        Self::validate_curve_points(&typed_points)
+    }
+
+    fn default_curve_points() -> Vec<(f64, f64)> {
+        // OCHRE default curve: (0,0), (0.5,1), (1,1)
+        vec![(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)]
+    }
+
+    fn curve_pairs(points: &[GeneratorEfficiencyCurvePoint]) -> Vec<(f64, f64)> {
+        points
+            .iter()
+            .map(|point| (point.capacity_ratio, point.efficiency_ratio))
+            .collect()
+    }
+
+    /// Build from the typed generator config.
+    fn from_typed_config(config: &GeneratorConfig, kind: GeneratorKind) -> Self {
+        let rated = config.eta_electric.unwrap_or(DEFAULT_ETA_ELECTRIC);
+        let eff_type = config
+            .efficiency_type
+            .as_deref()
+            .unwrap_or(kind.default_efficiency_type());
         match eff_type {
             "curve" => {
-                let points = parse_curve_points(config);
-                if points.len() >= 2 {
-                    Self::Curve { rated, points }
-                } else {
-                    // Fallback to OCHRE default curve: (0,0), (0.5,1), (1,1)
-                    Self::Curve {
-                        rated,
-                        points: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)],
-                    }
-                }
+                let points = config
+                    .efficiency_curve_points
+                    .as_deref()
+                    .map(Self::curve_pairs)
+                    .unwrap_or_else(Self::default_curve_points);
+                Self::Curve { rated, points }
             }
             "quadratic" => Self::Quadratic { rated },
             _ => Self::Constant { rated },
         }
     }
-}
-
-/// Parse efficiency curve points from config keys like
-/// `efficiency_curve_0_cr`, `efficiency_curve_0_er`, etc.
-///
-/// Stops at the first gap after at least one valid point has been found, matching
-/// OCHRE config loading behaviour. Any indices after the gap are ignored.
-fn parse_curve_points(config: &EquipmentConfig) -> Vec<(f64, f64)> {
-    let mut points = Vec::new();
-    let mut last_found = None;
-    for i in 0..16 {
-        let cr_key = format!("{KEY_CURVE_POINT_PREFIX}{i}_cr");
-        let er_key = format!("{KEY_CURVE_POINT_PREFIX}{i}_er");
-        if let (Some(cr), Some(er)) = (config.get_f64(&cr_key), config.get_f64(&er_key)) {
-            points.push((cr, er));
-            last_found = Some(i);
-        } else if last_found.is_some() {
-            // Gap after at least one valid point — stop here. Remaining indices
-            // after the gap are considered absent (OCHRE efficiency_curve behaviour).
-            break;
-        }
-    }
-    points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    points
 }
 
 // ---------------------------------------------------------------------------
@@ -433,15 +481,18 @@ pub struct Generator {
 impl Generator {
     #[must_use]
     pub fn new(config: EquipmentConfig, kind: GeneratorKind) -> Self {
-        let equipment_id = config
-            .get_f64(KEY_EQUIPMENT_ID)
-            .map(|v| v as u32)
-            .unwrap_or(0);
-        let zone = config.get_f64(KEY_ZONE_ID).map(|v| ZoneId(v as u16));
-        let eta_thermal = config
-            .get_f64(KEY_ETA_THERMAL)
+        let typed = config.typed::<GeneratorConfig>().ok();
+        let equipment_id = typed.as_ref().and_then(|c| c.equipment_id).unwrap_or(0);
+        let zone = typed.as_ref().and_then(|c| c.zone_id).map(ZoneId);
+        let fuel = typed
+            .as_ref()
+            .and_then(|c| c.fuel_type)
+            .unwrap_or(FuelType::Gas);
+        let eta_thermal = typed
+            .as_ref()
+            .and_then(|c| c.eta_thermal)
             .unwrap_or(DEFAULT_ETA_THERMAL);
-        let loop_raw = config.get_f64(KEY_LOOP_ID).map(|v| LoopId(v as u16));
+        let loop_raw = typed.as_ref().and_then(|c| c.loop_id).map(LoopId);
         let chp_loop_id = if eta_thermal > 0.0 {
             loop_raw.filter(|lid| lid.0 != 0)
         } else {
@@ -463,7 +514,7 @@ impl Generator {
             end_use: EndUse::GENERATOR,
             equipment_type: Cow::Borrowed(kind.equipment_type()),
             zone,
-            fuel: FuelType::Gas,
+            fuel,
             stage: ExecutionStage::Electrical,
             control_capabilities: ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::MODE_OVERRIDE
@@ -472,10 +523,12 @@ impl Generator {
             telemetry_fields: generator_telemetry_fields(has_chp),
         };
 
-        let rated = config
-            .get_f64(KEY_ETA_ELECTRIC)
-            .unwrap_or(DEFAULT_ETA_ELECTRIC);
-        let efficiency = EfficiencyModel::from_config(&config, rated, kind);
+        let efficiency = typed
+            .as_ref()
+            .map(|c| EfficiencyModel::from_typed_config(c, kind))
+            .unwrap_or_else(|| EfficiencyModel::Constant {
+                rated: DEFAULT_ETA_ELECTRIC,
+            });
 
         Self {
             descriptor,
@@ -483,30 +536,37 @@ impl Generator {
             telemetry: default_telemetry(has_chp),
             core_output: CoreOutput::default(),
             kind,
-            rated_power_kw: config
-                .get_f64(KEY_RATED_POWER_KW)
+            rated_power_kw: typed
+                .as_ref()
+                .map(|c| c.rated_power_kw)
                 .unwrap_or(DEFAULT_RATED_POWER_KW),
-            capacity_min_kw: config.get_f64(KEY_CAPACITY_MIN_KW),
+            capacity_min_kw: typed.as_ref().and_then(|c| c.capacity_min_kw),
             efficiency,
             eta_thermal,
-            delta_kw_per_s: config
-                .get_f64(KEY_DELTA_KW_PER_S)
+            delta_kw_per_s: typed
+                .as_ref()
+                .and_then(|c| c.delta_kw_per_s)
                 .unwrap_or(DEFAULT_DELTA_KW_PER_S),
-            grid_import_limit_kw: config
-                .get_f64(KEY_GRID_IMPORT_LIMIT_KW)
+            grid_import_limit_kw: typed
+                .as_ref()
+                .and_then(|c| c.grid_import_limit_kw)
                 .unwrap_or(DEFAULT_GRID_IMPORT_LIMIT_KW),
-            export_limit_kw: config
-                .get_f64(KEY_EXPORT_LIMIT_KW)
+            export_limit_kw: typed
+                .as_ref()
+                .and_then(|c| c.export_limit_kw)
                 .unwrap_or(DEFAULT_EXPORT_LIMIT_KW),
             chp_loop_id,
-            flow_rate_kg_s: config
-                .get_f64(KEY_FLOW_RATE_KG_S)
+            flow_rate_kg_s: typed
+                .as_ref()
+                .and_then(|c| c.flow_rate_kg_s)
                 .unwrap_or(DEFAULT_FLOW_RATE_KG_S),
-            supply_temp_c: config
-                .get_f64(KEY_SUPPLY_TEMP_C)
+            supply_temp_c: typed
+                .as_ref()
+                .and_then(|c| c.supply_temp_c)
                 .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
-            return_temp_c: config
-                .get_f64(KEY_RETURN_TEMP_C)
+            return_temp_c: typed
+                .as_ref()
+                .and_then(|c| c.return_temp_c)
                 .unwrap_or(DEFAULT_RETURN_TEMP_C),
             current_power_kw: 0.0,
             mode: OperatingMode::Off,
@@ -590,19 +650,7 @@ impl Generator {
         self.supply_temp_c = c.supply_temp_c.unwrap_or(self.supply_temp_c);
         self.return_temp_c = c.return_temp_c.unwrap_or(self.return_temp_c);
 
-        let rated = c.eta_electric.unwrap_or(DEFAULT_ETA_ELECTRIC);
-        let efficiency_type = c
-            .efficiency_type
-            .as_deref()
-            .unwrap_or(self.kind.default_efficiency_type());
-        self.efficiency = match efficiency_type {
-            "curve" => EfficiencyModel::Curve {
-                rated,
-                points: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)],
-            },
-            "quadratic" => EfficiencyModel::Quadratic { rated },
-            _ => EfficiencyModel::Constant { rated },
-        };
+        self.efficiency = EfficiencyModel::from_typed_config(&c, self.kind);
         self.efficiency.validate()?;
 
         if self.eta_thermal > 0.0 {
@@ -630,6 +678,7 @@ impl Generator {
         self.self_consumption_enabled = true;
 
         let has_chp = self.eta_thermal > 0.0;
+        self.descriptor.telemetry_fields = generator_telemetry_fields(has_chp);
         self.telemetry = default_telemetry(has_chp);
         self.telemetry
             .set(tk::ETA_ELECTRIC, self.efficiency.rated());
@@ -995,7 +1044,6 @@ fn generator_telemetry_fields(has_chp: bool) -> Vec<TelemetryField> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -1067,6 +1115,7 @@ mod tests {
             eta_electric: Some(0.30),
             eta_thermal: None,
             efficiency_type: None,
+            efficiency_curve_points: None,
             delta_kw_per_s: Some(1.0),
             capacity_min_kw: None,
             grid_import_limit_kw: None,
@@ -1102,8 +1151,8 @@ mod tests {
                 }
                 (KEY_SUPPLY_TEMP_C, ConfigValue::Float(value)) => cfg.supply_temp_c = Some(*value),
                 (KEY_RETURN_TEMP_C, ConfigValue::Float(value)) => cfg.return_temp_c = Some(*value),
-                ("zone_id", ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
-                ("equipment_id", ConfigValue::Float(value)) => {
+                (KEY_ZONE_ID, ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
+                (KEY_EQUIPMENT_ID, ConfigValue::Float(value)) => {
                     cfg.equipment_id = Some(*value as u32)
                 }
                 _ => panic!("unsupported generator test override key/value: {k}"),
@@ -1311,18 +1360,30 @@ mod tests {
     #[test]
     fn curve_efficiency_changes_fuel_consumption_at_partial_load() {
         // With curve efficiency, partial load uses more fuel per kW than rated.
-        let config = gen_config(&[
-            (KEY_ETA_ELECTRIC, 0.95.into()),
-            (KEY_EFFICIENCY_TYPE, ConfigValue::Text("curve".to_string())),
-            // OCHRE default curve: (0,0), (0.5,1), (1,1)
-            ("efficiency_curve_0_cr", 0.0.into()),
-            ("efficiency_curve_0_er", 0.0.into()),
-            ("efficiency_curve_1_cr", 0.5.into()),
-            ("efficiency_curve_1_er", 1.0.into()),
-            ("efficiency_curve_2_cr", 1.0.into()),
-            ("efficiency_curve_2_er", 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
-        ]);
+        let config = EquipmentConfig::from_typed(
+            "Test Generator".to_string(),
+            "Gas Generator".to_string(),
+            GeneratorConfig {
+                eta_electric: Some(0.95),
+                efficiency_type: Some("curve".to_string()),
+                efficiency_curve_points: Some(vec![
+                    GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 0.0,
+                        efficiency_ratio: 0.0,
+                    },
+                    GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 0.5,
+                        efficiency_ratio: 1.0,
+                    },
+                    GeneratorEfficiencyCurvePoint {
+                        capacity_ratio: 1.0,
+                        efficiency_ratio: 1.0,
+                    },
+                ]),
+                delta_kw_per_s: Some(100.0),
+                ..minimal_generator_config()
+            },
+        );
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
@@ -2408,6 +2469,7 @@ mod tests {
             eta_electric: None,
             eta_thermal: None,
             efficiency_type: None,
+            efficiency_curve_points: None,
             delta_kw_per_s: None,
             capacity_min_kw: None,
             grid_import_limit_kw: None,
@@ -2430,6 +2492,36 @@ mod tests {
         assert!(ec.is_typed());
         let recovered: GeneratorConfig = ec.typed().unwrap();
         assert_eq!(recovered.rated_power_kw, cfg.rated_power_kw);
+    }
+
+    #[test]
+    fn generator_config_round_trips_efficiency_curve_points() {
+        let mut cfg = minimal_generator_config();
+        cfg.efficiency_type = Some("curve".to_string());
+        cfg.efficiency_curve_points = Some(vec![
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.0,
+                efficiency_ratio: 0.0,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.5,
+                efficiency_ratio: 0.9,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 1.0,
+                efficiency_ratio: 1.0,
+            },
+        ]);
+        let ec = EquipmentConfig::from_typed(
+            "test_gen".to_string(),
+            "Gas Generator".to_string(),
+            cfg.clone(),
+        );
+        let recovered: GeneratorConfig = ec.typed().unwrap();
+        assert_eq!(
+            recovered.efficiency_curve_points,
+            cfg.efficiency_curve_points
+        );
     }
 
     #[test]
@@ -2465,6 +2557,55 @@ mod tests {
         let mut cfg = minimal_generator_config();
         cfg.eta_electric = Some(0.7);
         cfg.eta_thermal = Some(0.5);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn generator_config_validate_rejects_curve_with_too_few_points() {
+        let mut cfg = minimal_generator_config();
+        cfg.efficiency_type = Some("curve".to_string());
+        cfg.efficiency_curve_points = Some(vec![GeneratorEfficiencyCurvePoint {
+            capacity_ratio: 0.0,
+            efficiency_ratio: 0.0,
+        }]);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn generator_config_validate_rejects_curve_with_non_monotonic_capacity_ratio() {
+        let mut cfg = minimal_generator_config();
+        cfg.efficiency_type = Some("curve".to_string());
+        cfg.efficiency_curve_points = Some(vec![
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.0,
+                efficiency_ratio: 0.0,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.6,
+                efficiency_ratio: 0.8,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.5,
+                efficiency_ratio: 1.0,
+            },
+        ]);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn generator_config_validate_rejects_curve_capacity_ratio_out_of_range() {
+        let mut cfg = minimal_generator_config();
+        cfg.efficiency_type = Some("curve".to_string());
+        cfg.efficiency_curve_points = Some(vec![
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 0.0,
+                efficiency_ratio: 0.0,
+            },
+            GeneratorEfficiencyCurvePoint {
+                capacity_ratio: 1.1,
+                efficiency_ratio: 1.0,
+            },
+        ]);
         assert!(cfg.validate().is_err());
     }
 

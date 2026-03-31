@@ -44,3 +44,4 @@ dwelling_*.parquet
 
 # Compiled binaries
 conditioned_oracle
+.codex

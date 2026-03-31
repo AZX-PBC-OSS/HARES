@@ -335,27 +335,21 @@ impl Equipment for IdealHvac {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        #[cfg(test)]
-        let prefer_raw = !config.is_typed() || config.raw_data().is_some();
-        #[cfg(not(test))]
-        let prefer_raw = !config.is_typed();
-        if !prefer_raw {
-            let typed = config.require_typed::<IdealHvacConfig>("Ideal HVAC")?;
-            if let Some(v) = typed.heating_capacity_w {
-                self.rated_capacity_w = v.max(0.0);
-            }
-            if let Some(v) = typed.cooling_capacity_w {
-                self.cooling_capacity_w = v.max(0.0);
-            }
-            if let Some(shr) = typed.shr {
-                self.shr = shr.clamp(0.0, 1.0);
-            }
-            if let Some(fraction) = typed
-                .fraction_heating_load_served
-                .or(typed.fraction_cooling_load_served)
-            {
-                self.load_fraction = fraction.clamp(0.0, 1.0);
-            }
+        let typed = config.require_typed::<IdealHvacConfig>("Ideal HVAC")?;
+        if let Some(v) = typed.heating_capacity_w {
+            self.rated_capacity_w = v.max(0.0);
+        }
+        if let Some(v) = typed.cooling_capacity_w {
+            self.cooling_capacity_w = v.max(0.0);
+        }
+        if let Some(shr) = typed.shr {
+            self.shr = shr.clamp(0.0, 1.0);
+        }
+        if let Some(fraction) = typed
+            .fraction_heating_load_served
+            .or(typed.fraction_cooling_load_served)
+        {
+            self.load_fraction = fraction.clamp(0.0, 1.0);
         }
 
         if let Some(zone) = extract_numeric(config, "zone_id") {

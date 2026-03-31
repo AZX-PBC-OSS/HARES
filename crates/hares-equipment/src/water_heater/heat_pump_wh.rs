@@ -1063,12 +1063,6 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             description: "Backup resistance element power".to_string(),
         },
         TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electrical power draw (compressor + backup + fan + parasitic)"
-                .to_string(),
-        },
-        TelemetryField {
             name: tk::ZONE_HEAT_EXTRACTION_W.to_string(),
             unit: "W".to_string(),
             description: "Heat extracted from surrounding zone air".to_string(),

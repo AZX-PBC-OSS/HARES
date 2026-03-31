@@ -9,6 +9,46 @@ fn default_one() -> u8 {
     1
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HeatingEfficiencyUnit {
+    #[serde(rename = "HSPF")]
+    Hspf,
+    #[serde(rename = "COP")]
+    Cop,
+    #[serde(rename = "EER")]
+    Eer,
+    #[serde(rename = "SEER")]
+    Seer,
+    #[serde(rename = "AFUE")]
+    Afue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HeatingEfficiency {
+    pub value: f64,
+    pub unit: HeatingEfficiencyUnit,
+}
+
+impl HeatingEfficiency {
+    #[must_use]
+    pub fn to_eir(self) -> Option<f64> {
+        const BTU_PER_HR_PER_W: f64 = 3.412_141_633;
+
+        if !self.value.is_finite() || self.value <= 0.0 {
+            return None;
+        }
+
+        let cop = match self.unit {
+            HeatingEfficiencyUnit::Hspf
+            | HeatingEfficiencyUnit::Eer
+            | HeatingEfficiencyUnit::Seer => self.value / BTU_PER_HR_PER_W,
+            HeatingEfficiencyUnit::Cop | HeatingEfficiencyUnit::Afue => self.value,
+        };
+
+        (cop > 0.0).then_some(1.0 / cop)
+    }
+}
+
 /// Typed configuration for heat-pump heaters (ASHP and MSHP heating side).
 ///
 /// For mini-splits, `number_of_speeds` is forced to 4 in the equipment init path,
@@ -25,6 +65,9 @@ pub struct HeatPumpHeaterConfig {
     /// Heating Seasonal Performance Factor (BTU/Wh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hspf: Option<f64>,
+    /// Rated heating efficiency with an explicit unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_efficiency: Option<HeatingEfficiency>,
     /// Per-stage heating capacities [W].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_capacities_w: Option<Vec<f64>>,
@@ -143,6 +186,7 @@ impl Default for HeatPumpHeaterConfig {
             zone_id: None,
             heating_capacity_w: None,
             hspf: None,
+            heating_efficiency: None,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
             backup_fuel: None,
@@ -215,6 +259,9 @@ impl HeatPumpHeaterConfig {
         }
         if let Some(v) = self.hspf {
             check(v, "hspf")?;
+        }
+        if let Some(v) = self.heating_efficiency {
+            check(v.value, "heating_efficiency.value")?;
         }
         if let Some(v) = self.cooling_capacity_w {
             check(v, "cooling_capacity_w")?;
@@ -385,6 +432,10 @@ mod tests {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
             hspf: Some(9.0),
+            heating_efficiency: Some(HeatingEfficiency {
+                value: 9.0,
+                unit: HeatingEfficiencyUnit::Hspf,
+            }),
             stage_heating_capacities_w: Some(vec![5_000.0, 10_000.0]),
             stage_heating_eirs: Some(vec![0.28, 0.25]),
             backup_fuel: Some("electric".to_string()),
@@ -425,6 +476,7 @@ mod tests {
         let recovered: HeatPumpHeaterConfig = ec.typed().unwrap();
         assert!((recovered.seer.unwrap() - cfg.seer.unwrap()).abs() < 1e-12);
         assert!(recovered.is_mini_split);
+        assert_eq!(recovered.heating_efficiency, cfg.heating_efficiency);
         assert_eq!(recovered.stage_shrs, cfg.stage_shrs);
         assert_eq!(recovered.biquadratic_x1_min, cfg.biquadratic_x1_min);
         assert_eq!(recovered.ff_min, cfg.ff_min);
@@ -521,5 +573,17 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn typed_heating_efficiency_converts_to_expected_eir() {
+        let eir = HeatingEfficiency {
+            value: 8.5,
+            unit: HeatingEfficiencyUnit::Hspf,
+        }
+        .to_eir()
+        .expect("positive HSPF must convert");
+        let expected = 3.412_141_633 / 8.5;
+        assert!((eir - expected).abs() < 1e-12);
     }
 }

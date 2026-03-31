@@ -467,54 +467,7 @@ impl Equipment for PV {
         if let Some(e) = self.init_error.take() {
             return Err(e);
         }
-
-        #[cfg(test)]
-        let prefer_raw = !config.is_typed() || config.raw_data().is_some();
-        #[cfg(not(test))]
-        let prefer_raw = !config.is_typed();
-
-        if !prefer_raw {
-            return self.init_typed(config, env);
-        }
-
-        self.luts_by_surface.clear();
-        for array in &mut self.arrays {
-            if array.surface_id.is_none() {
-                array.surface_id = Some(surface_id_for_orientation(
-                    array.tilt_deg,
-                    array.azimuth_deg,
-                    self.surface_resolution_deg,
-                )?);
-            }
-            let surface_id = array.surface_id.expect("surface_id set above");
-            let Some(_entry) = env
-                .weather
-                .solar_irradiance
-                .iter()
-                .find(|entry| entry.surface_id == surface_id)
-            else {
-                return Err(HaresError::Equipment(format!(
-                    "PV array tilt={} azimuth={} (surface_id={}) has no matching SurfaceIrradiance entry",
-                    array.tilt_deg, array.azimuth_deg, surface_id
-                )));
-            };
-        }
-
-        self.soiling_config = None;
-        self.soiling_state = None;
-        self.telemetry
-            .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
-        self.telemetry.set(tk::DC_POWER_KW, 0.0);
-        self.telemetry.set(tk::AC_POWER_KW, 0.0);
-        self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
-        self.telemetry
-            .set(tk::CELL_TEMP_C, env.weather.outdoor_temp_c);
-        self.telemetry.set(tk::IRRADIANCE_W_M2, 0.0);
-        self.telemetry.set(tk::CURTAILMENT_KW, 0.0);
-        self.telemetry.set(tk::INVERTER_CLIPPING_KW, 0.0);
-        self.telemetry.set(tk::SOILING_RATIO, 1.0);
-        self.core_output = CoreOutput::default();
-        Ok(())
+        self.init_typed(config, env)
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
@@ -832,9 +785,10 @@ mod tests {
 
     use super::lut::PvLut;
     use super::{
-        DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_SYSTEM_LOSSES_FRACTION, Equipment,
-        EquipmentConfig, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV,
-        PvConfig, cell_temperature_noct_wind, register_with_registry, surface_id_for_orientation,
+        DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION,
+        Equipment, EquipmentConfig, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2,
+        NOCT_REFERENCE_TEMP_C, PV, PvArray, PvConfig, cell_temperature_noct_wind,
+        register_with_registry, surface_id_for_orientation,
     };
 
     fn env_with_surfaces(
@@ -899,10 +853,10 @@ mod tests {
             azimuth_deg: Some(180.0),
             module_type: None,
             noct_c: Some(DEFAULT_NOCT_C),
-            system_losses_fraction: None,
+            system_losses_fraction: Some(DEFAULT_SYSTEM_LOSSES_FRACTION),
             inverter_efficiency: Some(0.96),
             inverter_capacity_kw: None,
-            power_factor: None,
+            power_factor: Some(DEFAULT_POWER_FACTOR),
             surface_resolution_deg: Some(5.0),
         }
     }
@@ -1013,18 +967,14 @@ mod tests {
 
     #[test]
     fn multi_array_sums_outputs() {
-        let mut raw = HashMap::new();
-        raw.insert("array_count".to_string(), 2.0.into());
-        raw.insert("array_0_capacity_kw".to_string(), 3.0.into());
-        raw.insert("array_0_tilt_deg".to_string(), 30.0.into());
-        raw.insert("array_0_azimuth_deg".to_string(), 180.0.into());
-        raw.insert("array_1_capacity_kw".to_string(), 2.0.into());
-        raw.insert("array_1_tilt_deg".to_string(), 20.0.into());
-        raw.insert("array_1_azimuth_deg".to_string(), 90.0.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("inverter_efficiency".to_string(), 0.96.into());
-
-        let cfg = EquipmentConfig::raw("PV Multi".to_string(), "PV".to_string(), raw);
+        let cfg = EquipmentConfig::from_typed(
+            "PV Multi".to_string(),
+            "PV".to_string(),
+            PvConfig {
+                capacity_kw: 5.0,
+                ..base_pv_typed_config()
+            },
+        );
 
         let sid0 = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let sid1 = surface_id_for_orientation(20.0, 90.0, 5.0).unwrap();
@@ -1050,6 +1000,28 @@ mod tests {
 
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
+        pv.arrays = vec![
+            PvArray {
+                tilt_deg: 30.0,
+                azimuth_deg: 180.0,
+                capacity_kw: 3.0,
+                noct_c: DEFAULT_NOCT_C,
+                module_type: ModuleType::Standard,
+                surface_id: Some(sid0),
+                sam_lut_path: None,
+                attached_boundary_id: None,
+            },
+            PvArray {
+                tilt_deg: 20.0,
+                azimuth_deg: 90.0,
+                capacity_kw: 2.0,
+                noct_c: DEFAULT_NOCT_C,
+                module_type: ModuleType::Standard,
+                surface_id: Some(sid1),
+                sam_lut_path: None,
+                attached_boundary_id: None,
+            },
+        ];
 
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -1437,14 +1409,11 @@ mod tests {
     }
 
     #[test]
-    fn system_losses_hpxml_key_accepted() {
-        let mut raw = HashMap::new();
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("SystemLossesFraction".to_string(), 0.10.into());
-        let cfg = EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
+    fn system_losses_fraction_typed_config_is_accepted() {
+        let mut typed = base_pv_typed_config();
+        typed.equipment_id = Some(41);
+        typed.system_losses_fraction = Some(0.10);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1463,13 +1432,10 @@ mod tests {
 
     #[test]
     fn system_losses_out_of_range_rejected() {
-        let mut raw = HashMap::new();
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("system_losses_fraction".to_string(), 1.0.into());
-        let cfg = EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
+        let mut typed = base_pv_typed_config();
+        typed.equipment_id = Some(42);
+        typed.system_losses_fraction = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1482,7 +1448,11 @@ mod tests {
             25.0,
         );
         let mut pv = PV::new(cfg.clone());
-        assert!(pv.init(&cfg, &env).is_err());
+        let err = pv.init(&cfg, &env).unwrap_err();
+        assert!(
+            err.to_string().contains("system_losses_fraction"),
+            "expected typed validation error, got: {err}"
+        );
     }
 
     // --- LUT nearest-neighbor normalization test ---
@@ -1528,15 +1498,13 @@ mod tests {
 
     fn make_inverter_pv(inv_cap_kw: f64) -> (PV, EnvironmentState) {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
-        let mut raw = HashMap::new();
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("inverter_efficiency".to_string(), 1.0.into());
-        raw.insert("system_losses_fraction".to_string(), 0.0.into());
-        raw.insert("inverter_capacity_kw".to_string(), inv_cap_kw.into());
-        let cfg = EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
+        let mut typed = base_pv_typed_config();
+        typed.equipment_id = Some(30);
+        typed.inverter_efficiency = Some(1.0);
+        typed.system_losses_fraction = Some(0.0);
+        typed.inverter_capacity_kw = Some(inv_cap_kw);
+        typed.power_factor = Some(1.0);
+        let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed);
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -1563,6 +1531,29 @@ mod tests {
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
+        let p_raw = {
+            let (mut pv_unlimited, env_unlimited) = make_inverter_pv(100.0);
+            pv_unlimited.inverter_priority = InverterPriority::Watt;
+            pv_unlimited.q_setpoint_kvar = 3.0;
+            let mut ports_unlimited = PortSlots::default();
+            pv_unlimited
+                .step(
+                    &env_unlimited,
+                    Duration::from_secs(60),
+                    &mut ports_unlimited,
+                )
+                .unwrap();
+            pv_unlimited.telemetry().get(tk::AC_POWER_KW).unwrap()
+        };
+        let p_expected = p_raw.min(4.0);
+        let q_max = (4.0_f64.powi(2) - p_expected.powi(2)).max(0.0).sqrt();
+        let q_expected = super::enforce_min_pf(
+            p_expected,
+            3.0_f64.clamp(-q_max, q_max),
+            pv.inverter_min_pf.unwrap(),
+        );
+        approx_eq(p, p_expected);
+        approx_eq(q, q_expected);
         assert!(p <= 4.0 + 1e-9);
         assert!(s <= 4.0 + 1e-9, "S={s} exceeds inverter cap 4.0");
         assert!(q < 3.0, "Q={q} should be reduced from requested 3.0");
@@ -1596,27 +1587,29 @@ mod tests {
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
         assert!(s <= 3.0 + 1e-9, "S={s} exceeds inverter cap 3.0");
-        // CPF preserves P/Q ratio: both scaled by same factor.
-        // The pre-limit P is the actual AC power (~4.2 kW) and Q=2.0.
-        // After CPF scaling, P/Q should equal pre-limit P/Q.
-        assert!(p > 0.0 && q > 0.0, "both P and Q should be positive");
-        // The key property: power factor is preserved.
-        let pf_out = p / s;
-        // Compute what the original PF was.
-        let original_s = {
-            // Run without inverter limits to get original values.
-            let (mut pv2, env2) = make_inverter_pv(100.0);
-            pv2.q_setpoint_kvar = 2.0;
-            let mut ports2 = PortSlots::default();
-            pv2.step(&env2, Duration::from_secs(60), &mut ports2)
-                .unwrap();
-            let p2 = pv2.telemetry().get(tk::AC_POWER_KW).unwrap();
-            let q2 = pv2.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
-            p2 / (p2 * p2 + q2 * q2).sqrt()
-        };
+        let (mut pv_unlimited, env_unlimited) = make_inverter_pv(100.0);
+        pv_unlimited.inverter_priority = InverterPriority::Cpf;
+        pv_unlimited.q_setpoint_kvar = 2.0;
+        let mut ports_unlimited = PortSlots::default();
+        pv_unlimited
+            .step(
+                &env_unlimited,
+                Duration::from_secs(60),
+                &mut ports_unlimited,
+            )
+            .unwrap();
+        let p_raw = pv_unlimited.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let q_raw = pv_unlimited
+            .telemetry()
+            .get(tk::REACTIVE_POWER_KVAR)
+            .unwrap();
+        let s_raw = (p_raw * p_raw + q_raw * q_raw).sqrt();
+        let scale = 3.0 / s_raw;
+        approx_eq(p, p_raw * scale);
+        approx_eq(q, q_raw * scale);
         assert!(
-            (pf_out - original_s).abs() < 0.01,
-            "CPF should preserve power factor: got {pf_out}, expected {original_s}"
+            (p_raw / s_raw - p / s).abs() < 1e-9,
+            "CPF should preserve power factor"
         );
     }
 
@@ -1769,9 +1762,6 @@ mod tests {
 
     #[test]
     fn var_priority_respects_absolute_kvar_ceiling() {
-        // With inv_cap=4.0 and min_pf=0.8:
-        // max_q_cap = sin(acos(0.8)) * 4.0 = 0.6 * 4.0 = 2.4
-        // Set Q=3.0 which exceeds 2.4 → must be clamped.
         let (mut pv, env) = make_inverter_pv(4.0);
         pv.inverter_priority = InverterPriority::Var;
         pv.inverter_min_pf = Some(0.8);
@@ -1784,6 +1774,7 @@ mod tests {
             q <= max_q_cap + 1e-9,
             "Q={q} should not exceed absolute ceiling {max_q_cap}"
         );
+        approx_eq(q, max_q_cap);
     }
 
     #[test]
@@ -1936,18 +1927,24 @@ mod tests {
             25.0,
         );
 
-        let mut raw = HashMap::new();
-        raw.insert("equipment_id".to_string(), 1.0.into());
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("shading_model".to_string(), "fixed".into());
-        raw.insert("shading_annual_fraction".to_string(), 0.20.into());
-        let cfg = EquipmentConfig::raw("PV Shading".to_string(), "PV".to_string(), raw);
+        let cfg = EquipmentConfig::from_typed(
+            "PV Shading".to_string(),
+            "PV".to_string(),
+            PvConfig {
+                equipment_id: Some(1),
+                capacity_kw: 5.0,
+                tilt_deg: Some(30.0),
+                azimuth_deg: Some(180.0),
+                surface_resolution_deg: Some(5.0),
+                ..base_pv_typed_config()
+            },
+        );
 
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
+        pv.shading_model = super::shading::ShadingModel::FixedLoss {
+            annual_fraction: 0.20,
+        };
 
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();

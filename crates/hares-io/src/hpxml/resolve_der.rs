@@ -202,6 +202,7 @@ pub(super) fn resolve_generators(
             eta_electric,
             eta_thermal: None,
             efficiency_type: None,
+            efficiency_curve_points: None,
             delta_kw_per_s: None,
             capacity_min_kw: None,
             grid_import_limit_kw: None,

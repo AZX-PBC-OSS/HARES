@@ -265,6 +265,7 @@ fn ashp_heating_cop_above_unity() {
             zone_id: Some(1),
             heating_capacity_w: Some(8_000.0),
             hspf: Some(9.0),
+            heating_efficiency: None,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
             backup_fuel: None,
