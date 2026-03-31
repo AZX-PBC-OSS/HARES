@@ -864,11 +864,11 @@ fn try_build_heat_pump_heater_config(
         hysteresis_c: None,
         heating_setpoint_source,
         cooling_setpoint_source,
-        hp_lockout_temp_c: None,
-        er_lockout_temp_c: None,
-        max_oat_supplemental_c: None,
-        er_setpoint_offset_c: None,
-        er_hard_lockout_time_s: None,
+        hp_lockout_temp_c: params.get("hp_lockout_temp_c").and_then(Value::as_f64),
+        er_lockout_temp_c: params.get("er_lockout_temp_c").and_then(Value::as_f64),
+        max_oat_supplemental_c: params.get("max_oat_supplemental_c").and_then(Value::as_f64),
+        er_setpoint_offset_c: params.get("er_setpoint_offset_c").and_then(Value::as_f64),
+        er_hard_lockout_time_s: params.get("er_hard_lockout_time_s").and_then(Value::as_f64),
         duct,
         biquadratic_x1_min: curve_bounds.x1_min,
         biquadratic_x1_max: curve_bounds.x1_max,
@@ -2770,6 +2770,34 @@ mod tests {
         let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
         assert_eq!(cfg.number_of_speeds, 2);
         assert_eq!(cfg.stage_shrs, Some(vec![0.81, 0.74]));
+    }
+
+    #[test]
+    fn heat_pump_heater_builder_propagates_lockout_fields() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(10_000.0));
+        params.insert("efficiency_hspf".to_string(), json!(8.5));
+        params.insert("hp_lockout_temp_c".to_string(), json!(-12.0));
+        params.insert("er_lockout_temp_c".to_string(), json!(2.0));
+        params.insert("max_oat_supplemental_c".to_string(), json!(18.0));
+        params.insert("er_setpoint_offset_c".to_string(), json!(1.4));
+        params.insert("er_hard_lockout_time_s".to_string(), json!(600.0));
+
+        let ec = try_build_heat_pump_heater_config(
+            "ASHP Heater",
+            &params,
+            &DuctDseParams::default(),
+            false,
+        )
+        .expect("ASHP heater typed config should be built");
+
+        use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
+        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
+        assert_eq!(cfg.hp_lockout_temp_c, Some(-12.0));
+        assert_eq!(cfg.er_lockout_temp_c, Some(2.0));
+        assert_eq!(cfg.max_oat_supplemental_c, Some(18.0));
+        assert_eq!(cfg.er_setpoint_offset_c, Some(1.4));
+        assert_eq!(cfg.er_hard_lockout_time_s, Some(600.0));
     }
 
     #[test]

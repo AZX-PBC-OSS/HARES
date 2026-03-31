@@ -33,7 +33,8 @@ pub const DEFROST_EIR_CURVE_TEMP_MIN_C: f64 = 15.555;
 
 pub const DEFAULT_HP_LOCKOUT_TEMP_C: f64 = -17.78;
 pub const DEFAULT_ER_LOCKOUT_TEMP_C: f64 = 4.44;
-pub const DEFAULT_MIN_ER_CYCLE_TIME_S: f64 = 300.0;
+/// OCHRE default has no minimum backup-strip off-time unless explicitly set.
+pub const DEFAULT_MIN_ER_CYCLE_TIME_S: f64 = 0.0;
 /// OCHRE-parity default for backup-strip hard lockout after setpoint raise.
 /// Vendored OCHRE HVAC.py uses 0 minutes when not configured.
 pub const DEFAULT_ER_HARD_LOCKOUT_TIME_S: f64 = 0.0;

@@ -947,9 +947,9 @@ impl HeatPumpHeaterCore {
             let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
             load_ratio_raw.clamp(0.0, 1.0)
         };
-        let speed = self
-            .hvac
-            .select_speed_with_zone_temp(load_ratio, Some(zone.temperature_c), true);
+        let speed =
+            self.hvac
+                .select_speed_with_zone_temp(load_ratio, Some(zone.temperature_c), true);
         self.hvac.update_prev_zone_temp(Some(zone.temperature_c));
 
         let hp_available = env.weather.outdoor_temp_c >= self.hp_lockout_temp_c;
@@ -962,12 +962,20 @@ impl HeatPumpHeaterCore {
         let er_allowed_by_cycle = self.er_cycle_ready(env.current_time);
         let er_allowed_by_lockout = er_allowed_by_hard_lockout && !self.er_soft_lockout;
 
-        // OCHRE: ER engages when zone temperature drops below a separate setpoint
-        // threshold (`setpoint - er_setpoint_offset_c`), not when the HP load ratio
-        // exceeds 1.0. The separate threshold (default 1.6°C below setpoint) ensures
-        // ER only fires when the HP alone cannot meet the load.
-        let er_call_threshold = setpoint - self.er_setpoint_offset_c;
-        let er_thermostat_call = zone.temperature_c <= er_call_threshold;
+        // OCHRE parity: ER thermostat uses separate turn-on and turn-off thresholds.
+        // Turn on below (setpoint - offset), stay on until above
+        // (setpoint - offset + deadband) to avoid rapid ER chatter.
+        let er_turn_on_c = setpoint - self.er_setpoint_offset_c;
+        let er_turn_off_c = er_turn_on_c + deadband;
+        let er_was_on = matches!(
+            self.operating_mode,
+            OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+        );
+        let er_thermostat_call = if er_was_on {
+            zone.temperature_c <= er_turn_off_c
+        } else {
+            zone.temperature_c <= er_turn_on_c
+        };
 
         let hp_on = hp_available && speed.part_load_ratio > 0.0;
         let er_on = self.backup_capacity_w > 0.0

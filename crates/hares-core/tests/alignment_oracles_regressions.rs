@@ -119,6 +119,93 @@ fn ochre_ashp_fixture_peak_hvac_power_aligns() {
 }
 
 #[test]
+#[ignore = "debug helper"]
+fn debug_ashp_peak_columns_observe() {
+    let fixture = ParityFixture::new("cz4a_ashp_hpwh");
+    let actual = run_fixture_to_columns(&fixture);
+    let reference = read_parquet_columns(&fixture.reference_output_parquet())
+        .expect("reference parquet must be readable");
+
+    fn hvac_peaks(columns: &BTreeMap<String, Vec<f64>>) -> Vec<(String, f64)> {
+        let mut out = Vec::new();
+        for (name, series) in columns {
+            let lowered = name.to_ascii_lowercase();
+            if !lowered.ends_with("electric power (kw)") {
+                continue;
+            }
+            if ![
+                "hvac",
+                "air conditioner",
+                "heat pump",
+                "furnace",
+                "ashp",
+                "mshp",
+                "baseboard",
+            ]
+            .iter()
+            .any(|needle| lowered.contains(needle))
+            {
+                continue;
+            }
+            if let Some(peak) = series.iter().copied().reduce(f64::max) {
+                out.push((name.clone(), peak));
+            }
+        }
+        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+
+    eprintln!("actual HVAC peaks:");
+    for (name, peak) in hvac_peaks(&actual).into_iter().take(12) {
+        eprintln!("  {name}: {peak:.6} kW");
+    }
+    eprintln!("reference HVAC peaks:");
+    for (name, peak) in hvac_peaks(&reference).into_iter().take(12) {
+        eprintln!("  {name}: {peak:.6} kW");
+    }
+
+    if let Some(series) = actual.get("ASHP Heater Electric Power (kW)")
+        && let Some((idx, peak_kw)) = series
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        eprintln!("actual ASHP heater peak idx={idx} kw={peak_kw:.6}");
+        for name in [
+            "ASHP Heater Mode (-)",
+            "ASHP Heater Setpoint (C)",
+            "ASHP Heater Delivered (W)",
+            "ASHP Heater COP (-)",
+            "ASHP Heater Capacity (W)",
+            "ASHP Heater Max Capacity (W)",
+            "Temperature - Indoor (C)",
+            "Temperature - Outdoor (C)",
+        ] {
+            if let Some(col) = actual.get(name)
+                && let Some(v) = col.get(idx)
+            {
+                eprintln!("  actual[{name}]={v:.6}");
+            }
+        }
+        for name in [
+            "HVAC Heating Electric Power (kW)",
+            "HVAC Heating Delivered (W)",
+            "HVAC Heating Setpoint (C)",
+            "HVAC Heating COP (-)",
+            "Temperature - Indoor (C)",
+            "Temperature - Outdoor (C)",
+        ] {
+            if let Some(col) = reference.get(name)
+                && let Some(v) = col.get(idx)
+            {
+                eprintln!("  reference[{name}]={v:.6}");
+            }
+        }
+    }
+}
+
+#[test]
 fn energyplus_bestest_core_cases_keep_fixture_and_reference_band_coverage() {
     for case in bestest_cases::core_cases() {
         let fixture_path = case.fixture_path();

@@ -12,6 +12,8 @@ use hares_types::{
     ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, ZoneId,
 };
 
+use super::speed_control::SpeedControlMode;
+
 use crate::{ConfigPayload, EquipmentConfig};
 
 // Re-exported from crate root; used by `apply_heating_control_unchecked`
@@ -128,10 +130,27 @@ pub fn operating_mode_code(mode: OperatingMode) -> f64 {
 /// when `use_ideal_capacity` is configured. All other modes set duty to 0.0 and
 /// return `Off`.
 pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) -> OperatingMode {
+    const MIN_LOAD_FRACTION_DEADBAND_C: f64 = 0.5;
+
     match hvac.update_mode(env) {
         Ok(super::thermostat::ThermostatMode::Heating) => {
             if !hvac.use_ideal_capacity(env) {
-                hvac.duty_cycle = 1.0;
+                let setpoint = hvac.effective_setpoints().heating_c;
+                let zone_temp = lookup_zone(env, hvac.zone_id)
+                    .map(|z| z.temperature_c)
+                    .unwrap_or(setpoint);
+                let deadband = hvac
+                    .thermostat
+                    .hysteresis_c
+                    .max(MIN_LOAD_FRACTION_DEADBAND_C);
+                let load_fraction = ((setpoint - zone_temp) / deadband).clamp(0.0, 1.0);
+                let selection =
+                    hvac.select_speed_with_zone_temp(load_fraction, Some(zone_temp), true);
+                hvac.update_prev_zone_temp(Some(zone_temp));
+                hvac.duty_cycle = match hvac.speed_control_mode {
+                    SpeedControlMode::VariableSpeedIdeal => selection.speed_frac.clamp(0.0, 1.0),
+                    _ => selection.part_load_ratio,
+                };
             } else {
                 hvac.duty_cycle = hvac.duty_cycle.clamp(0.0, 1.0);
             }
@@ -139,6 +158,7 @@ pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) 
         }
         _ => {
             hvac.duty_cycle = 0.0;
+            hvac.update_prev_zone_temp(None);
             OperatingMode::Off
         }
     }

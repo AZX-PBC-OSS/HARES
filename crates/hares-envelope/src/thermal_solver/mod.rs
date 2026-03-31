@@ -1044,9 +1044,15 @@ mod tests {
         solver.apply_interior_longwave_inputs(&mut u, &env);
 
         let surfaces = &solver.config.interior_lwr_zones[0].surfaces;
+        let state_temps = [21.0, 35.0, 5.0];
         let zone_temp_c = env.zones[0].temperature_c;
         let mut expected_buf = initial_temps;
-        let base_buf = expected_buf.clone();
+        let base_buf = [
+            surfaces[0].radiation_frac * state_temps[surfaces[0].state_index]
+                + (1.0 - surfaces[0].radiation_frac) * zone_temp_c,
+            surfaces[1].radiation_frac * state_temps[surfaces[1].state_index]
+                + (1.0 - surfaces[1].radiation_frac) * zone_temp_c,
+        ];
         let mut expected_prev = initial_prev_temps;
         let t_surf_min = base_buf.iter().copied().fold(f64::INFINITY, f64::min);
         let t_surf_max = base_buf.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1091,7 +1097,9 @@ mod tests {
         {
             assert!(
                 (actual - expected).abs() < 1e-9,
-                "interior surface temp drift"
+                "interior surface temp drift: actual={:?} expected={:?}",
+                solver.interior_surface_temps[0],
+                expected_buf
             );
         }
         for (actual, expected) in solver.interior_surface_prev_temps[0]
@@ -1100,7 +1108,9 @@ mod tests {
         {
             assert!(
                 (actual - expected).abs() < 1e-9,
-                "interior surface prev-temp drift"
+                "interior surface prev-temp drift: actual={:?} expected={:?}",
+                solver.interior_surface_prev_temps[0],
+                expected_prev
             );
         }
         assert!(

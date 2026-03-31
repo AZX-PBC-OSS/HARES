@@ -601,13 +601,7 @@ impl CoolingCore {
                         .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false);
                 self.hvac.update_prev_zone_temp(Some(zone_temp));
                 self.hvac.duty_cycle = match self.hvac.speed_control_mode {
-                    SpeedControlMode::VariableSpeedIdeal => {
-                        if selection.speed_frac > 0.0 {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    }
+                    SpeedControlMode::VariableSpeedIdeal => selection.speed_frac.clamp(0.0, 1.0),
                     _ => selection.part_load_ratio,
                 };
             }
@@ -1905,6 +1899,34 @@ mod tests {
         assert!(
             cool_full > cool_part,
             "full-load sensible cooling ({cool_full:.1} W) must exceed part-load ({cool_part:.1} W)"
+        );
+    }
+
+    #[test]
+    fn variable_speed_ideal_uses_fractional_duty_cycle() {
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 0;
+            typed.hysteresis_c = Some(0.0);
+        });
+        let env_part = env(24.25, 0.010, 18.0, 35.0); // load_fraction=(0.25/0.5)=0.5
+        let env_full = env(24.60, 0.010, 18.0, 35.0); // clamped to 1.0
+
+        let mut eq_part = AirConditioner::new(cfg.clone());
+        eq_part.init(&cfg, &env_part).unwrap();
+        eq_part.update_control(&env_part);
+        assert!(
+            (eq_part.core.hvac.duty_cycle - 0.5).abs() < 1e-9,
+            "variable-speed ideal should preserve fractional duty cycle; got {}",
+            eq_part.core.hvac.duty_cycle
+        );
+
+        let mut eq_full = AirConditioner::new(cfg.clone());
+        eq_full.init(&cfg, &env_full).unwrap();
+        eq_full.update_control(&env_full);
+        assert!(
+            (eq_full.core.hvac.duty_cycle - 1.0).abs() < 1e-9,
+            "high load should clamp to full duty cycle; got {}",
+            eq_full.core.hvac.duty_cycle
         );
     }
 }

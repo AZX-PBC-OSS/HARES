@@ -1162,6 +1162,11 @@ fn foundation_height_m(zone: &hares_io::hpxml::Zone) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        attic_infiltration_method, attic_interior_emissivity, attic_interior_solar_absorptance,
+        exterior_emissivity, exterior_solar_absorptance, foundation_height_m,
+        foundation_infiltration_method, include_interior_lwr, natural_ventilation_coefficients,
+    };
     use hares_envelope::InfiltrationMethod;
     use hares_envelope::ThermalSolverConfig;
     use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
@@ -1169,11 +1174,6 @@ mod tests {
         N_I_DEFAULT, SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
     };
     use hares_types::{HaresError, ZoneId};
-    use super::{
-        attic_infiltration_method, attic_interior_emissivity, attic_interior_solar_absorptance,
-        exterior_emissivity, exterior_solar_absorptance, foundation_height_m,
-        foundation_infiltration_method, include_interior_lwr, natural_ventilation_coefficients,
-    };
 
     #[test]
     fn n_iter_matches_ochre_formula() {

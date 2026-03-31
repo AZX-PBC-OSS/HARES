@@ -93,10 +93,19 @@ impl HvacEquipment {
                 if desired_index != self.last_speed_index {
                     self.time_at_current_speed_s = 0.0;
                 }
-                SpeedSelection {
-                    speed_index: desired_index,
-                    part_load_ratio: load_fraction,
-                    speed_frac: 1.0,
+                let low_cap = self.low_speed_capacity_fraction.clamp(0.01, 0.999);
+                if desired_index == 1 {
+                    SpeedSelection {
+                        speed_index: 1,
+                        part_load_ratio: load_fraction,
+                        speed_frac: 1.0,
+                    }
+                } else {
+                    SpeedSelection {
+                        speed_index: 0,
+                        part_load_ratio: (load_fraction / low_cap).clamp(0.0, 1.0),
+                        speed_frac: low_cap,
+                    }
                 }
             }
             SpeedControlMode::MultiSpeedInterpolated => self.select_multi_speed(load_fraction),
@@ -193,7 +202,17 @@ impl HvacEquipment {
     }
 
     fn select_multi_speed(&self, load_fraction: f64) -> SpeedSelection {
-        let cap_fracs = self.capacity_fractions();
+        let caps = match self.mode {
+            ThermostatMode::Heating if !self.heating_capacities_w.is_empty() => {
+                &self.heating_capacities_w
+            }
+            ThermostatMode::Cooling if !self.cooling_capacities_w.is_empty() => {
+                &self.cooling_capacities_w
+            }
+            _ if !self.heating_capacities_w.is_empty() => &self.heating_capacities_w,
+            _ => &self.cooling_capacities_w,
+        };
+        let cap_fracs = Self::capacity_fractions_for(caps);
         if cap_fracs.is_empty() || load_fraction <= 0.0 {
             return SpeedSelection {
                 speed_index: 0,
@@ -336,11 +355,22 @@ impl HvacEquipment {
 
     /// Normalized capacity fractions `cap[i] / cap[last]` for the populated capacities array.
     pub fn capacity_fractions(&self) -> Vec<f64> {
-        let caps = if self.heating_capacities_w.len() >= self.cooling_capacities_w.len() {
-            &self.heating_capacities_w
-        } else {
-            &self.cooling_capacities_w
+        let caps = match self.mode {
+            ThermostatMode::Heating if !self.heating_capacities_w.is_empty() => {
+                &self.heating_capacities_w
+            }
+            ThermostatMode::Cooling if !self.cooling_capacities_w.is_empty() => {
+                &self.cooling_capacities_w
+            }
+            _ if self.heating_capacities_w.len() >= self.cooling_capacities_w.len() => {
+                &self.heating_capacities_w
+            }
+            _ => &self.cooling_capacities_w,
         };
+        Self::capacity_fractions_for(caps)
+    }
+
+    fn capacity_fractions_for(caps: &[f64]) -> Vec<f64> {
         let max_cap = caps.last().copied().unwrap_or(0.0);
         if max_cap <= 0.0 {
             return vec![];
@@ -397,6 +427,7 @@ mod tests {
 
     use super::super::hvac_core::{HvacEquipment, HvacEquipmentType};
     use super::super::speed_control::SpeedControlMode;
+    use super::super::thermostat::ThermostatMode;
 
     fn make_single_speed() -> HvacEquipment {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
@@ -534,6 +565,7 @@ mod tests {
     fn capacity_fractions_two_speed() {
         let mut hvac = make_single_speed();
         hvac.heating_capacities_w = vec![5_000.0, 10_000.0];
+        hvac.mode = ThermostatMode::Heating;
         let fracs = hvac.capacity_fractions();
         assert_eq!(fracs.len(), 2, "two-speed must yield two fractions");
         assert!(
@@ -552,6 +584,34 @@ mod tests {
                 "fraction[{i}]={f} must be in [0, 1]"
             );
         }
+    }
+
+    #[test]
+    fn capacity_fractions_follow_active_mode() {
+        let mut hvac = make_single_speed();
+        hvac.heating_capacities_w = vec![4_000.0, 8_000.0];
+        hvac.cooling_capacities_w = vec![2_000.0, 4_000.0, 6_000.0, 12_000.0];
+
+        hvac.mode = ThermostatMode::Heating;
+        let heating_fracs = hvac.capacity_fractions();
+        assert_eq!(heating_fracs, vec![0.5, 1.0]);
+
+        hvac.mode = ThermostatMode::Cooling;
+        let cooling_fracs = hvac.capacity_fractions();
+        assert_eq!(cooling_fracs, vec![1.0 / 6.0, 1.0 / 3.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn two_speed_alternating_normalizes_low_stage_plr_when_high_disabled() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.speed_control_mode = SpeedControlMode::TwoSpeedAlternating;
+        hvac.low_speed_capacity_fraction = 0.5;
+        hvac.set_disabled_speeds(&[false, true]);
+
+        let sel = hvac.select_speed(0.3);
+        assert_eq!(sel.speed_index, 0);
+        assert!((sel.part_load_ratio - 0.6).abs() < 1e-9);
+        assert!((sel.speed_frac - 0.5).abs() < 1e-9);
     }
 
     fn make_two_speed_setpoint() -> HvacEquipment {

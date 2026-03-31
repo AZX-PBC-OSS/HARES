@@ -484,6 +484,10 @@ impl HvacEquipment {
             }
         }
 
+        // Initialize stage-disable state with all speeds enabled so
+        // max_enabled_speed is valid before any DR signal is applied.
+        self.set_disabled_speeds(&[]);
+
         Ok(())
     }
 

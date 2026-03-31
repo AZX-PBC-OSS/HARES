@@ -479,10 +479,7 @@ fn iterate(
             let b = (f1 - f0) / (x1 - x0) - (x1 + x0) * c;
             let a = f0 - (b + c * x0) * x0;
 
-            if c.abs() < small
-                || f1.abs() < small
-                || ((a + (b + c * x1) * x1 - f1) / f1).abs() > small
-            {
+            if c.abs() < small || ((a + (b + c * x1) * x1 - f1) / f1).abs() > small {
                 mode = 2;
             } else {
                 let d = b * b - 4.0 * a * c;
@@ -517,6 +514,8 @@ fn iterate(
 
     if mode == 2 {
         let denom = x1 - x0;
+        // Diverges from OCHRE's secant path: guard the degenerate x1==x0 case
+        // to avoid division by zero and fall back to perturbation mode.
         if denom.abs() < small {
             mode = 1;
         } else {
