@@ -158,11 +158,6 @@ impl TimeWindow {
 /// Canonical custom-domain id used for schedule payloads in `EnvironmentState.custom_domains`.
 pub const SCHEDULE_DOMAIN_ID: DomainId = DomainId(u16::MAX);
 
-/// Returns the canonical schedule custom-domain id.
-pub const fn schedule_domain_id() -> DomainId {
-    SCHEDULE_DOMAIN_ID
-}
-
 /// Out-of-range index behavior for schedule-backed sources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryPolicy {
@@ -318,6 +313,14 @@ pub enum ScheduleSource {
         boundary: BoundaryPolicy,
     },
     /// Solar-aware profile scaled by monthly multipliers and maximum value.
+    ///
+    /// Three-phase day model based on solar altitude:
+    /// - **Daytime**: solar altitude > `dusk_altitude_threshold_deg`
+    /// - **Evening/dusk**: solar altitude ≤ dusk threshold AND > `dawn_altitude_threshold_deg`
+    /// - **Overnight**: solar altitude ≤ `dawn_altitude_threshold_deg`
+    ///
+    /// Typical thresholds: dusk = 0.0° (geometric sunset), dawn = -6.0° (civil twilight).
+    /// Setting both to the same value collapses to a two-phase day/night model.
     SolarAware {
         daytime_fraction: f64,
         evening_fraction: f64,
@@ -325,6 +328,9 @@ pub enum ScheduleSource {
         month_multipliers: [f64; 12],
         max_value: f64,
         dusk_altitude_threshold_deg: f64,
+        /// Solar altitude threshold below which "evening" becomes "overnight".
+        /// Typically a negative value (e.g. -6.0 for civil twilight).
+        dawn_altitude_threshold_deg: f64,
     },
     /// Stateful pseudo-random source, deterministic by `seed` + call order.
     Stochastic {
@@ -394,6 +400,7 @@ impl PartialEq for ScheduleSource {
                     month_multipliers: a_mm,
                     max_value: a_max,
                     dusk_altitude_threshold_deg: a_dusk,
+                    dawn_altitude_threshold_deg: a_dawn,
                 },
                 Self::SolarAware {
                     daytime_fraction: b_day,
@@ -402,6 +409,7 @@ impl PartialEq for ScheduleSource {
                     month_multipliers: b_mm,
                     max_value: b_max,
                     dusk_altitude_threshold_deg: b_dusk,
+                    dawn_altitude_threshold_deg: b_dawn,
                 },
             ) => {
                 a_day == b_day
@@ -410,6 +418,7 @@ impl PartialEq for ScheduleSource {
                     && a_mm == b_mm
                     && a_max == b_max
                     && a_dusk == b_dusk
+                    && a_dawn == b_dawn
             }
             (
                 Self::Stochastic {
@@ -497,7 +506,7 @@ impl ScheduleSource {
                                 .to_string(),
                         )
                     })?;
-                let idx = resolve_index(*col_idx as i64, payload.len(), *boundary)?;
+                let idx = resolve_index(*col_idx, payload.len(), *boundary)?;
                 Ok(payload[idx])
             }
             Self::SolarAware {
@@ -507,14 +516,14 @@ impl ScheduleSource {
                 month_multipliers,
                 max_value,
                 dusk_altitude_threshold_deg,
+                dawn_altitude_threshold_deg,
             } => {
-                let hour = env.current_time.hour() as usize;
                 let month_idx = env.current_time.month0() as usize;
                 let sun_alt = env.weather.solar_altitude_deg;
 
                 let frac = if sun_alt > *dusk_altitude_threshold_deg {
                     *daytime_fraction
-                } else if hour >= 5 {
+                } else if sun_alt > *dawn_altitude_threshold_deg {
                     *evening_fraction
                 } else {
                     *overnight_fraction
@@ -541,7 +550,7 @@ impl ScheduleSource {
                 cursor,
                 boundary,
             } => {
-                let idx = resolve_index(*cursor as i64, data.len(), *boundary)?;
+                let idx = resolve_index(*cursor, data.len(), *boundary)?;
                 let value = data[idx];
                 *cursor = cursor.saturating_add(1);
                 Ok(value)
@@ -604,12 +613,15 @@ impl ScheduleSource {
 }
 
 impl ScheduleSource {
-    /// Statistical mean of this source, computed without mutation.
+    /// Approximate statistical mean of this source, computed without mutation.
     ///
-    /// Returns the exact mean for `Constant`, `Stochastic`, and `Shared`.
+    /// Returns the analytical mean for `Constant` and `Shared`.
+    /// For `Stochastic`, returns the analytical distribution mean clamped to
+    /// `[clamp_min, clamp_max]` — this is an approximation when clamping is
+    /// active (truncated distribution mean differs from clamped analytical mean).
     /// For time-varying sources (`DailyProfile`, `SolarAware`, `TimeWindows`),
-    /// returns a representative average. For `ColumnRef`, returns 0 (no data
-    /// available without environment state).
+    /// returns a representative average (not duration-weighted for `TimeWindows`).
+    /// For `ColumnRef`, returns 0 (no data available without environment state).
     pub fn mean(&self) -> f64 {
         match self {
             Self::Constant(v) => *v,
@@ -714,29 +726,24 @@ fn resolve_window_value(
     Ok(raw.clamp(lo, hi))
 }
 
-fn resolve_index(raw_idx: i64, len: usize, boundary: BoundaryPolicy) -> Result<usize, HaresError> {
+fn resolve_index(raw_idx: usize, len: usize, boundary: BoundaryPolicy) -> Result<usize, HaresError> {
     if len == 0 {
         return Err(HaresError::Equipment(
             "schedule source data is empty".to_string(),
         ));
     }
 
-    let len_i64 = len as i64;
-    let idx = match boundary {
-        BoundaryPolicy::Clamp => raw_idx.clamp(0, len_i64 - 1),
-        BoundaryPolicy::Wrap => raw_idx.rem_euclid(len_i64),
-        BoundaryPolicy::Error => {
-            if raw_idx < 0 || raw_idx >= len_i64 {
-                return Err(HaresError::Equipment(format!(
-                    "schedule index out of bounds: idx={} len={}",
-                    raw_idx, len
-                )));
-            }
-            raw_idx
-        }
-    };
+    if raw_idx < len {
+        return Ok(raw_idx);
+    }
 
-    Ok(idx as usize)
+    match boundary {
+        BoundaryPolicy::Clamp => Ok(len - 1),
+        BoundaryPolicy::Wrap => Ok(raw_idx % len),
+        BoundaryPolicy::Error => Err(HaresError::Equipment(format!(
+            "schedule index out of bounds: idx={raw_idx} len={len}"
+        ))),
+    }
 }
 
 /// Which season a tariff rate applies to.
@@ -931,6 +938,83 @@ mod tests {
             .single()
             .expect("valid timestamp");
         assert_eq!(source.value_at(&env).expect("month value"), 7.5);
+    }
+
+    // ── SolarAware tests ──────────────────────────────────────────
+
+    fn solar_aware_source() -> ScheduleSource {
+        ScheduleSource::SolarAware {
+            daytime_fraction: 1.0,
+            evening_fraction: 0.5,
+            overnight_fraction: 0.1,
+            month_multipliers: [1.0; 12],
+            max_value: 100.0,
+            dusk_altitude_threshold_deg: 0.0,
+            dawn_altitude_threshold_deg: -6.0,
+        }
+    }
+
+    #[test]
+    fn solar_aware_daytime_when_sun_above_dusk_threshold() {
+        let mut env = default_env();
+        env.weather.solar_altitude_deg = 30.0; // well above 0°
+        let mut source = solar_aware_source();
+        assert_eq!(source.value_at(&env).unwrap(), 100.0);
+    }
+
+    #[test]
+    fn solar_aware_evening_when_sun_between_thresholds() {
+        let mut env = default_env();
+        env.weather.solar_altitude_deg = -3.0; // below dusk (0°), above dawn (-6°)
+        let mut source = solar_aware_source();
+        assert_eq!(source.value_at(&env).unwrap(), 50.0);
+    }
+
+    #[test]
+    fn solar_aware_overnight_when_sun_below_dawn_threshold() {
+        let mut env = default_env();
+        env.weather.solar_altitude_deg = -10.0; // below dawn (-6°)
+        let mut source = solar_aware_source();
+        assert_eq!(source.value_at(&env).unwrap(), 10.0);
+    }
+
+    #[test]
+    fn solar_aware_monthly_scaling() {
+        let mut env = default_env();
+        env.weather.solar_altitude_deg = 30.0;
+        let utc = FixedOffset::east_opt(0).expect("offset");
+        // July (month index 6)
+        env.current_time = utc
+            .with_ymd_and_hms(2026, 7, 15, 12, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let mut month_mults = [1.0; 12];
+        month_mults[6] = 0.75; // July multiplier
+        let mut source = ScheduleSource::SolarAware {
+            daytime_fraction: 1.0,
+            evening_fraction: 0.5,
+            overnight_fraction: 0.1,
+            month_multipliers: month_mults,
+            max_value: 100.0,
+            dusk_altitude_threshold_deg: 0.0,
+            dawn_altitude_threshold_deg: -6.0,
+        };
+        assert_eq!(source.value_at(&env).unwrap(), 75.0);
+    }
+
+    #[test]
+    fn solar_aware_boundary_at_exact_thresholds() {
+        let mut env = default_env();
+        let mut source = solar_aware_source();
+
+        // Exactly at dusk threshold (0.0) → NOT daytime (strictly >)
+        env.weather.solar_altitude_deg = 0.0;
+        assert_eq!(source.value_at(&env).unwrap(), 50.0);
+
+        // Exactly at dawn threshold (-6.0) → NOT evening (strictly >)
+        env.weather.solar_altitude_deg = -6.0;
+        assert_eq!(source.value_at(&env).unwrap(), 10.0);
     }
 
     #[test]
@@ -2192,7 +2276,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(expected = "no window has noise")]
     fn noisy_time_windows_panics_without_any_noise() {
         ScheduleSource::noisy_time_windows(

@@ -4315,6 +4315,7 @@ master_seed = 0
             2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
         let expected_latent = 2.0 * OCCUPANT_LATENT_GAIN_W;
 
+        assert!(!dwelling.ports.thermal.is_empty(), "fixture must have at least one thermal port");
         for thermal in &dwelling.ports.thermal {
             assert!(
                 (thermal.sensible_gain_w - expected_sensible).abs() < 1e-9,

@@ -14,7 +14,7 @@ use hares_physics::{
 };
 use hares_types::{
     DomainId, EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
-    schedule_domain_id,
+    SCHEDULE_DOMAIN_ID,
 };
 use thiserror::Error;
 
@@ -359,7 +359,7 @@ impl EnvironmentManager {
     ///
     /// The returned index can be used to look up the occupancy value from the
     /// schedule payload in [`EnvironmentState::custom_domains`] at domain id
-    /// [`hares_types::schedule_domain_id`].
+    /// [`hares_types::SCHEDULE_DOMAIN_ID`].
     #[must_use]
     pub fn occupancy_column_idx(&self) -> Option<usize> {
         // Exact-match fast path for common lowercase keys.
@@ -505,7 +505,7 @@ impl EnvironmentManager {
 
         // Recover previously-swapped Vecs from the existing DomainUpdates.
         for du in state.custom_domains.drain(..) {
-            if du.domain_id == schedule_domain_id() {
+            if du.domain_id == SCHEDULE_DOMAIN_ID {
                 if let Some(v) = du.custom_payload {
                     self.schedule_payload_swap = v;
                 }
@@ -528,7 +528,7 @@ impl EnvironmentManager {
         let mains_payload = std::mem::take(&mut self.mains_payload_swap);
 
         state.custom_domains.push(hares_types::DomainUpdate {
-            domain_id: schedule_domain_id(),
+            domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: Vec::new(),
             custom_payload: Some(sched_payload),
         });
@@ -1701,7 +1701,7 @@ mod tests {
         fn schedule_val(env: &EnvironmentState) -> f64 {
             env.custom_domains
                 .iter()
-                .find(|d| d.domain_id == schedule_domain_id())
+                .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
                 .and_then(|d| d.custom_payload.as_ref())
                 .and_then(|p| p.first())
                 .copied()

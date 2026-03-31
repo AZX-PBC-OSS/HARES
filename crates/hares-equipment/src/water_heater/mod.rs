@@ -365,8 +365,8 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        BoundaryPolicy, DomainUpdate, EnvironmentState, GridState, ScheduleSource, WeatherState,
-        schedule_domain_id,
+        BoundaryPolicy, DomainUpdate, EnvironmentState, GridState, SCHEDULE_DOMAIN_ID,
+        ScheduleSource, WeatherState,
     };
 
     use super::{
@@ -420,7 +420,7 @@ mod tests {
         let mut custom_domains = Vec::new();
         if let Some(payload) = schedule_payload {
             custom_domains.push(DomainUpdate {
-                domain_id: schedule_domain_id(),
+                domain_id: SCHEDULE_DOMAIN_ID,
                 zone_temperatures_c: Vec::new(),
                 custom_payload: Some(payload),
             });
@@ -654,7 +654,7 @@ mod dhw_integration_tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         DomainUpdate, EnvironmentState, FluidType, GridState, PortContribution, PortSlots,
-        WeatherState, ZoneId, ZoneState, schedule_domain_id,
+        SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
     };
 
     use super::DHW_DEMAND_LOOP;
@@ -693,7 +693,7 @@ mod dhw_integration_tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![DomainUpdate {
-                domain_id: schedule_domain_id(),
+                domain_id: SCHEDULE_DOMAIN_ID,
                 zone_temperatures_c: Vec::new(),
                 custom_payload: Some(vec![1.0, 1.0]),
             }],

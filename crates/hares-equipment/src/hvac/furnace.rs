@@ -468,7 +468,8 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn electric_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(6);
+    let mut telemetry = Telemetry::with_capacity(7);
+    telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
@@ -648,6 +649,9 @@ fn config(name: &str, class: &str) -> EquipmentConfig {
         cfg.raw_config_mut()
             .unwrap()
             .insert("eir".to_string(), 0.5.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("fan_power_w".to_string(), 0.0.into());
         cfg.raw_config_mut()
             .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());

@@ -9,7 +9,7 @@ use hares_io::hpxml::building::parse_building;
 use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
 use hares_types::{
     DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, WeatherState, ZoneId,
-    ZoneState, schedule_domain_id,
+    ZoneState, SCHEDULE_DOMAIN_ID,
 };
 use serde_json::{Map, Value, json};
 use tempfile::tempdir;
@@ -109,7 +109,7 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
             frequency_hz: 60.0,
         },
         custom_domains: vec![DomainUpdate {
-            domain_id: schedule_domain_id(),
+            domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: Vec::new(),
             custom_payload: Some(payload),
         }],

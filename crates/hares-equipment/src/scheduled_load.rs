@@ -1023,8 +1023,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         BoundaryPolicy, ControlSignal, DomainUpdate, EnvironmentState, FuelType, GridState,
-        PortSlots, ScheduleSource, TelemetryField, WeatherState, ZoneId, ZoneState,
-        schedule_domain_id,
+        PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, TelemetryField, WeatherState, ZoneId,
+        ZoneState,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -1493,7 +1493,7 @@ mod tests {
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
         let mut env = base_env();
         env.custom_domains.push(DomainUpdate {
-            domain_id: schedule_domain_id(),
+            domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![],
             custom_payload: Some(vec![2.5, 7.25]),
         });

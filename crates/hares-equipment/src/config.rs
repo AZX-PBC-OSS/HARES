@@ -235,15 +235,18 @@ impl EquipmentConfig {
     }
 
     /// Construct from a typed config struct.
-    /// Panics on serialization failure (programming error, not runtime condition).
     pub fn from_typed<T: EquipmentTypedConfig>(
         name: String,
         ochre_class: String,
         config: T,
-    ) -> Self {
-        let data = serde_json::to_value(&config)
-            .expect("typed config serialization failed - this is a programming error");
-        Self {
+    ) -> crate::Result<Self> {
+        let data = serde_json::to_value(&config).map_err(|e| {
+            hares_types::HaresError::Equipment(format!(
+                "typed config serialization failed for {}: {e}",
+                T::equipment_type_name()
+            ))
+        })?;
+        Ok(Self {
             name,
             ochre_class,
             payload: ConfigPayload::Typed {
@@ -251,7 +254,7 @@ impl EquipmentConfig {
                 version: T::schema_version(),
                 data,
             },
-        }
+        })
     }
 
     /// Transitional accessor for migrating legacy code.
@@ -304,7 +307,8 @@ mod tests {
             "test_name".to_string(),
             "TestClass".to_string(),
             config.clone(),
-        );
+        )
+        .unwrap();
         assert!(ec.is_typed());
         let recovered: TestConfig = ec.typed().unwrap();
         assert_eq!(recovered, config);
@@ -357,7 +361,8 @@ mod tests {
             name: "test".to_string(),
         };
         let ec =
-            EquipmentConfig::from_typed("test_name".to_string(), "TestClass".to_string(), config);
+            EquipmentConfig::from_typed("test_name".to_string(), "TestClass".to_string(), config)
+                .unwrap();
         let result: Result<OtherConfig, _> = ec.typed();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -416,7 +421,8 @@ mod tests {
             value: 42.5,
             name: "test".to_string(),
         };
-        let ec = EquipmentConfig::from_typed("test".to_string(), "Test".to_string(), config);
+        let ec =
+            EquipmentConfig::from_typed("test".to_string(), "Test".to_string(), config).unwrap();
 
         assert!(ec.is_typed());
         assert_eq!(ec.get_f64("any"), None);

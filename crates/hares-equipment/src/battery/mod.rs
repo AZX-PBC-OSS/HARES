@@ -937,22 +937,17 @@ impl Equipment for Battery {
         self.soc = self.soc.clamp(0.0, 1.0);
 
         // -- Update SOC from charge/discharge --
-        // DC power is the power seen by the battery cells (after inverter conversion).
-        // Charging (power_kw > 0): DC = AC * charge_eta; cell stores DC - ohmic losses.
-        // Discharging (power_kw < 0): DC = AC / discharge_eta; cell provides DC + ohmic losses.
+        // DC power seen by the cells after inverter conversion.
+        // The terminal-voltage model in compute_electrical() already embeds ohmic
+        // losses in the power balance — do NOT subtract I²R again here (CC-009/EA-006 F1).
         let dc_power_kw = if power_kw > 0.0 {
             power_kw * self.charge_efficiency
         } else {
             power_kw / self.discharge_efficiency
         };
-        let effective_cell_power_kw = if dc_power_kw > 0.0 {
-            dc_power_kw - ohmic_loss_w / 1000.0
-        } else {
-            dc_power_kw + ohmic_loss_w / 1000.0
-        };
 
         let soc_before = self.soc;
-        let energy_delta_kwh = effective_cell_power_kw * dt_hours;
+        let energy_delta_kwh = dc_power_kw * dt_hours;
         self.soc += energy_delta_kwh / self.capacity_kwh;
         self.soc = self.soc.clamp(eff_min_soc, eff_max_soc);
 

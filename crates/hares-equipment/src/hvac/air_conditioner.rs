@@ -1359,9 +1359,18 @@ mod tests {
 
         let sens = eq.telemetry().get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0);
         let lat = eq.telemetry().get(tk::LATENT_COOLING_W).unwrap_or(0.0);
-        let sum = sens + lat;
-        let total = -(ports.thermal[0].sensible_gain_w + ports.thermal[0].latent_gain_w);
-        assert!((sum - total).abs() < 1e-6);
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
+        let fan_heat_w = fan_kw * 1000.0;
+
+        // Telemetry reports gross cooling (sensible + latent) before fan-heat offset.
+        // Port thermal sensible includes fan waste heat: gain = -sensible + fan_heat.
+        // So: telemetry_total = -(port_sensible + port_latent) + fan_heat.
+        let telemetry_total = sens + lat;
+        let port_total = -(ports.thermal[0].sensible_gain_w + ports.thermal[0].latent_gain_w);
+        assert!(
+            (telemetry_total - (port_total + fan_heat_w)).abs() < 1e-6,
+            "telemetry total {telemetry_total} != port total {port_total} + fan heat {fan_heat_w}",
+        );
     }
 
     #[test]

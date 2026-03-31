@@ -149,8 +149,12 @@ pub fn evaluate_defrost(
                 * (DEFROST_REFERENCE_TEMP_C - outdoor_db_c)
                 * (rated_capacity_w / DEFROST_CAPACITY_UNIT_FACTOR);
 
+            // Use post-defrost capacity for extra power calculation
+            // (OCHRE HVAC.py L1162: power_defrost uses capacity after defrost reduction).
+            let post_defrost_cap_w =
+                (current_capacity_w * capacity_multiplier - q_defrost_w).max(0.0);
             let extra_power_w = DEFROST_EIR_TEMP_MODIFIER
-                * (current_capacity_w / DEFROST_CAPACITY_UNIT_FACTOR)
+                * (post_defrost_cap_w / DEFROST_CAPACITY_UNIT_FACTOR)
                 * time_fraction
                 + config.defrost_power_w;
 

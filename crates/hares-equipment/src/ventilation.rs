@@ -604,10 +604,15 @@ mod tests {
         hrv.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let sensible = ports.thermal[0].sensible_gain_w;
+        // CC-009: thermal port is no longer written by ventilation equipment;
+        // the envelope solver handles ventilation heat exchange. Verify via telemetry instead.
+        let supply_temp = hrv
+            .telemetry()
+            .get(tk::SUPPLY_TEMP_C)
+            .expect("supply_temp_c");
         assert!(
-            sensible < 0.0,
-            "ventilation should cool the zone (outdoor colder)"
+            supply_temp < 20.0,
+            "supply air should be cooler than indoor (outdoor is 0°C), got {supply_temp}"
         );
 
         let recovery = hrv
@@ -837,13 +842,19 @@ mod tests {
             power_full * 0.5
         );
 
-        // Thermal port sensible gain should also be halved
-        let sensible_half = ports_half.thermal[0].sensible_gain_w;
-        let sensible_full = ports_full.thermal[0].sensible_gain_w;
+        // CC-009: thermal port no longer written; verify recovery telemetry scales instead
+        let recovery_half = hrv
+            .telemetry()
+            .get(tk::SENSIBLE_RECOVERY_W)
+            .expect("recovery half");
+        let recovery_full = hrv_full
+            .telemetry()
+            .get(tk::SENSIBLE_RECOVERY_W)
+            .expect("recovery full");
         assert!(
-            (sensible_half - sensible_full * 0.5).abs() < 0.1,
-            "half-schedule should halve thermal gain: got {sensible_half}, expected {}",
-            sensible_full * 0.5
+            (recovery_half - recovery_full * 0.5).abs() < 0.1,
+            "half-schedule should halve sensible recovery: got {recovery_half}, expected {}",
+            recovery_full * 0.5
         );
 
         // Electrical port should also be halved

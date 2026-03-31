@@ -495,33 +495,41 @@ fn inject_water_heater_schedule_columns(
         return;
     }
 
-    for spec in specs.iter_mut() {
+    for (i, spec) in specs.iter_mut().enumerate() {
         if !STORAGE_WATER_HEATER_EQUIPMENT.contains(&spec.name.as_str()) {
             continue;
         }
         if let Some(col_idx) = draw_col {
             // The raw schedule column contains dimensionless fractions.
-            // Scale them to kg/s using the spec's avg_water_draw_l_per_day
-            // via normalize_draw_profile(), then append the scaled column.
+            // Scale them to L/min using the spec's avg_water_draw_l_per_day
+            // via normalize_draw_profile() (which returns kg/s ≈ L/s), then
+            // multiply by 60 to store L/min for the runtime consumer.
             let avg_daily_l = spec
                 .parameters
                 .get("avg_water_draw_l_per_day")
                 .and_then(|v| v.as_f64())
-                .expect(
-                    "water heater spec missing avg_water_draw_l_per_day; \
-                     cannot normalize draw schedule fractions",
-                );
+                .unwrap_or_else(|| {
+                    panic!(
+                        "water heater spec '{}' missing or invalid avg_water_draw_l_per_day; \
+                         cannot normalize draw schedule fractions",
+                        spec.name
+                    )
+                });
 
             let raw_fractions = schedule.columns[col_idx].clone();
             let kg_s_series = normalize_draw_profile(&raw_fractions, avg_daily_l);
+            // Convert kg/s → L/min (density ≈ 1 kg/L, so kg/s × 60 = L/min).
+            // The runtime consumer divides by 60 to get kg/s.
+            let l_min_series: Vec<f64> = kg_s_series.iter().map(|&v| v * 60.0).collect();
 
             let col_name = format!(
-                "hot_water_fixtures_kg_s_{}",
-                normalize_schedule_col_name(&spec.name)
+                "hot_water_fixtures_l_min_{}_{}",
+                normalize_schedule_col_name(&spec.name),
+                i
             );
             match schedule.append_derived_column(
                 &col_name,
-                kg_s_series,
+                l_min_series,
                 ColumnAggregation::Mean,
             ) {
                 Ok(derived_col_idx) => {
@@ -1355,12 +1363,14 @@ mod tests {
     }
 
     #[test]
-    fn water_heater_draw_fractions_normalized_to_kg_s() {
+    fn water_heater_draw_fractions_normalized_to_l_min() {
         // Known fractions and avg_water_draw_l_per_day = 200.
-        // normalize_draw_profile formula:
+        // normalize_draw_profile formula (returns kg/s):
         //   mean_fraction = mean(fractions)
         //   scale = (avg_daily_l / 1440) / mean_fraction
         //   result_kg_s = fraction * scale / 60
+        // schedule_resolve multiplies by 60 to store L/min:
+        //   result_l_min = fraction * scale
         let fractions = vec![0.04, 0.08, 0.02, 0.06];
         let avg_daily_l = 200.0;
         let mean_frac: f64 = fractions.iter().sum::<f64>() / fractions.len() as f64; // 0.05
@@ -1385,19 +1395,19 @@ mod tests {
         assert_eq!(resolved.len(), fractions.len());
 
         for (i, &frac) in fractions.iter().enumerate() {
-            let expected_kg_s = frac * scale / 60.0;
+            let expected_l_min = frac * scale;
             assert!(
-                (resolved[i] - expected_kg_s).abs() < 1e-10,
-                "timestep {i}: expected {expected_kg_s:.8e}, got {:.8e}",
+                (resolved[i] - expected_l_min).abs() < 1e-10,
+                "timestep {i}: expected {expected_l_min:.8e} L/min, got {:.8e}",
                 resolved[i]
             );
         }
 
-        // Sanity: the 0.04 fraction should produce ~0.00185 kg/s, not ~0.00067.
-        let expected_for_004 = 0.04 * scale / 60.0;
+        // Sanity: the 0.04 fraction should produce ~0.111 L/min.
+        let expected_for_004 = 0.04 * scale;
         assert!(
-            expected_for_004 > 0.001,
-            "expected meaningful flow rate, got {expected_for_004:.6e}"
+            expected_for_004 > 0.05,
+            "expected meaningful flow rate, got {expected_for_004:.6e} L/min"
         );
     }
 }

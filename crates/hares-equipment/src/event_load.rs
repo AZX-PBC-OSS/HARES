@@ -1491,7 +1491,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DomainUpdate, EnvironmentState, ExecutionStage, FuelType, GridState,
-        PortSlots, PortType, WeatherState, ZoneId, ZoneState, schedule_domain_id,
+        PortSlots, PortType, WeatherState, ZoneId, ZoneState, SCHEDULE_DOMAIN_ID,
         telemetry_keys as tk,
     };
 
@@ -1531,7 +1531,7 @@ mod tests {
                 frequency_hz: 60.0,
             },
             custom_domains: vec![DomainUpdate {
-                domain_id: schedule_domain_id(),
+                domain_id: SCHEDULE_DOMAIN_ID,
                 zone_temperatures_c: Vec::new(),
                 custom_payload: Some(vec![0.0, 0.0]),
             }],
@@ -1592,7 +1592,7 @@ mod tests {
         let slot = env
             .custom_domains
             .iter_mut()
-            .find(|d| d.domain_id == schedule_domain_id())
+            .find(|d| d.domain_id == SCHEDULE_DOMAIN_ID)
             .expect("schedule domain must exist");
         slot.custom_payload = Some(values);
     }

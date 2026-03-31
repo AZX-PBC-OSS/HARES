@@ -19,7 +19,9 @@ pub const DEFROST_CAPACITY_UNIT_FACTOR: f64 = 1.01667;
 /// the result is in watts: `(eir * capacity_W * mult + power_defrost) / capacity_W`.
 pub const DEFROST_EIR_TEMP_MODIFIER: f64 = 0.1528;
 
-pub const DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR: f64 = 0.75;
+/// No secondary capacity scaling beyond the physics-derived defrost cap_mult.
+/// OCHRE and EnergyPlus OnDemand defrost have no equivalent factor.
+pub const DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR: f64 = 1.0;
 pub const DEFAULT_DEFROST_POWER_W: f64 = 0.0;
 
 // Timed defrost mode constants (EnergyPlus / DOE-2)
