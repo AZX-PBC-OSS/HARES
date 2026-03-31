@@ -595,7 +595,14 @@ impl CoolingCore {
                     .thermostat
                     .hysteresis_c
                     .max(MIN_LOAD_FRACTION_DEADBAND_C);
-                let load_fraction = ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0);
+                let load_fraction = if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed
+                {
+                    // Single-speed compressor physics: thermostat call means
+                    // full-stage runtime for the step (on/off cycling only).
+                    1.0
+                } else {
+                    ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
+                };
                 let selection =
                     self.hvac
                         .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false);
@@ -1839,66 +1846,34 @@ mod tests {
         );
     }
 
-    /// AHRI 210/240 PLF degradation: at part load (duty_cycle < 1) a single-speed
-    /// AC must draw less total power and deliver less cooling than at full load.
-    /// With `hysteresis_c=0` and the single-step thermostat logic, load fraction
-    /// = (zone - setpoint) / MIN_LOAD_FRACTION_DEADBAND, making it possible to
-    /// produce duty < 1 at zones just above setpoint.
-    ///   zone 24.4°C → load_fraction = 0.8 → duty_cycle = 0.8 (part load)
-    ///   zone 24.6°C → load_fraction = 1.0 (clamped) → duty_cycle = 1.0 (full load)
-    /// Electrical draw and cooling delivered must both be strictly greater at full
-    /// load than at part load.
+    /// Single-speed AC must run binary on/off at the thermostat timestep.
+    /// When cooling is called, duty is 1.0 regardless of setpoint error magnitude.
     #[test]
-    fn part_load_operation_draws_less_power_than_full_load() {
+    fn single_speed_cooling_call_uses_full_duty_cycle() {
         // Zero hysteresis so thermostat activates right at setpoint (24°C).
         let cfg = ac_config_with(|typed| typed.hysteresis_c = Some(0.0));
 
-        // Full load: load_fraction = (24.6-24)/0.5 = 1.2 → clamped to 1.0
+        // Both environments are above setpoint so cooling is On in both cases.
         let env_full = env(24.6, 0.010, 18.0, 35.0);
-        // Part load: load_fraction = (24.2-24)/0.5 = 0.4 → duty_cycle = 0.4
         let env_part = env(24.2, 0.010, 18.0, 35.0);
 
         let mut eq_full = AirConditioner::new(cfg.clone());
         eq_full.init(&cfg, &env_full).unwrap();
-        let mut ports_full = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
         eq_full.update_control(&env_full);
-        eq_full
-            .step(&env_full, Duration::from_secs(60), &mut ports_full)
-            .unwrap();
-        let kw_full = eq_full.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        let cool_full = eq_full
-            .telemetry()
-            .get(tk::SENSIBLE_COOLING_W)
-            .unwrap_or(0.0);
+        let duty_full = eq_full.core.hvac.duty_cycle;
 
         let mut eq_part = AirConditioner::new(cfg.clone());
         eq_part.init(&cfg, &env_part).unwrap();
-        let mut ports_part = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
         eq_part.update_control(&env_part);
-        eq_part
-            .step(&env_part, Duration::from_secs(60), &mut ports_part)
-            .unwrap();
-        let kw_part = eq_part.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        let cool_part = eq_part
-            .telemetry()
-            .get(tk::SENSIBLE_COOLING_W)
-            .unwrap_or(0.0);
+        let duty_part = eq_part.core.hvac.duty_cycle;
 
-        assert!(kw_full > 0.0, "full-load AC must draw power, got {kw_full}");
-        assert!(kw_part > 0.0, "part-load AC must draw power, got {kw_part}");
         assert!(
-            kw_full > kw_part,
-            "full-load draw ({kw_full:.4} kW) must exceed part-load draw ({kw_part:.4} kW)"
+            (duty_full - 1.0).abs() < 1e-9,
+            "single-speed cooling call must use duty=1.0, got {duty_full}"
         );
         assert!(
-            cool_full > cool_part,
-            "full-load sensible cooling ({cool_full:.1} W) must exceed part-load ({cool_part:.1} W)"
+            (duty_part - 1.0).abs() < 1e-9,
+            "single-speed cooling call must use duty=1.0 even near setpoint, got {duty_part}"
         );
     }
 

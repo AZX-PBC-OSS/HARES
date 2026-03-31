@@ -630,4 +630,38 @@ mod tests {
 
         assert_eq!(eq.inner.core.stage_shrs, vec![0.81]);
     }
+
+    #[test]
+    fn minisplit_cooling_retains_fractional_runtime_near_setpoint() {
+        let cfg = typed_config(
+            serde_json::json!({
+                "zone_id": 1,
+                "cooling_capacity_w": 8000.0,
+                "cooling_eir": 16.0,
+                "number_of_speeds": 1,
+                "is_mini_split": true,
+                "hysteresis_c": 0.0
+            }),
+            "MSHP Cooler",
+        );
+        let mut eq = HpCooler::mshp_cooler(cfg.clone());
+        // Slightly above setpoint (24.0 C) so load_fraction=0.2.
+        // For 4-stage MSHP (fractions 0.25,0.5,0.75,1.0), this is below
+        // lowest-stage fraction, so duty should be fractional (<1).
+        let env = cooling_env(24.1, 35.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: Some(24.0),
+            deadband_c: Some(0.0),
+        })
+        .unwrap();
+
+        eq.update_control(&env);
+        let duty = eq.inner.core.hvac.duty_cycle;
+        assert!(
+            duty > 0.0 && duty < 1.0,
+            "mini-split multi-speed cooling should preserve fractional runtime near setpoint, got duty={duty}"
+        );
+    }
 }

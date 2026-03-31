@@ -949,6 +949,11 @@ impl HeatPumpHeaterCore {
             // Set load_ratio=1.0 as placeholder; actual PLR derived from
             // biquadratic-corrected capacity in compute_step.
             1.0
+        } else if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed {
+            // Single-speed compressor physics: when thermostat calls for heat,
+            // the compressor runs at full stage and cycles on/off across steps.
+            // Do not synthesize intra-step modulation from setpoint error.
+            1.0
         } else {
             let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
             load_ratio_raw.clamp(0.0, 1.0)
@@ -979,7 +984,7 @@ impl HeatPumpHeaterCore {
             && er_allowed_by_temp
             && er_allowed_by_cycle
             && er_allowed_by_lockout
-            && (er_thermostat_call || !hp_on);
+            && er_thermostat_call;
 
         Ok(HeaterControl {
             hp_on,
@@ -1447,24 +1452,22 @@ mod tests {
     }
 
     // Regression: ER capacity was always 100% due to `plr.max(1.0)` bug.
-    // The fix changed it to just `plr`, so ER output must scale proportionally
-    // with load when the system is running below full capacity.
+    // ER output must scale with PLR when the ideal-capacity controller requests
+    // part-load operation.
     #[test]
     fn er_backup_capacity_modulated_by_plr() {
         // Lock HP out so only ER runs; this isolates ER draw in electric_kw.
-        // The thermostat FSM requires a prior heating step to be in Heating mode
-        // before PLR < 1.0 is observable. Step 1 engages heating at full load
-        // (zone far below setpoint). Step 2 runs with the zone temp inside the
-        // hysteresis band so load_ratio = 0.5 → PLR = 0.5.
-        let cfg = heater_config_with(|typed| {
+        // Use ideal-capacity control to request PLR=0.5 on ER:
+        // ideal_capacity_w / backup_capacity_w = 2000 / 4000 = 0.5.
+        let mut cfg = heater_config_with(|typed| {
             typed.hp_lockout_temp_c = Some(10.0);
             typed.er_setpoint_offset_c = Some(0.0);
         });
+        cfg.test_extras_mut()
+            .insert("use_ideal_capacity".to_string(), true.into());
         let backup_capacity_w = 4_000.0_f64;
         // OAT=0°C is below ER lockout (4.44°C) so ER is temperature-permitted
         let env_cold = env(18.0, 0.0, 0.003);
-        // Zone within hysteresis band: load_ratio = (21 - 20.5) / 1.0 = 0.5
-        let env_partial = env(20.5, 0.0, 0.003);
 
         let mut eq = ASHPHeater::new(cfg.clone());
         let mut ports = PortSlots {
@@ -1473,29 +1476,23 @@ mod tests {
         };
         eq.init(&cfg, &env_cold).unwrap();
 
-        // Step 1: trigger thermostat into Heating mode at full load
-        eq.update_control(&env_cold);
-        eq.step(&env_cold, Duration::from_secs(60), &mut ports)
-            .unwrap();
-
-        // Step 2: thermostat stays in Heating; zone at 20.5°C yields PLR = 0.5
-        ports = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
-        let mode = eq.update_control(&env_partial);
+        // Trigger thermostat into Heating mode, then request part-load ER.
+        let mode = eq.update_control(&env_cold);
         assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out");
-        eq.step(&env_partial, Duration::from_secs(60), &mut ports)
-            .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: backup_capacity_w * 0.5,
+        })
+        .expect("ideal-capacity control accepted");
+        eq.step(&env_cold, Duration::from_secs(60), &mut ports).unwrap();
 
         let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        // With PLR=0.5: ER draws backup_capacity_w * 0.5 * backup_eir = 2 kW.
-        // The old bug used plr.max(1.0) = 1.0, giving the full 4 kW always.
+        // With PLR=0.5: ER strip should be half backup capacity. Fan power may
+        // add on top, but total must still be below full-strip + fan.
+        let full_strip_plus_fan_kw = (backup_capacity_w / 1000.0) + 0.365 * 1200.0 / 1000.0;
         assert!(
-            electric_kw < backup_capacity_w / 1000.0,
-            "ER draw {electric_kw:.3} kW should be < full backup capacity \
-             {:.3} kW when PLR=0.5",
-            backup_capacity_w / 1000.0,
+            electric_kw < full_strip_plus_fan_kw,
+            "ER draw {electric_kw:.3} kW should be below full-strip+fan {:.3} kW when PLR=0.5",
+            full_strip_plus_fan_kw,
         );
         assert!(electric_kw > 0.0, "ER must draw some power");
     }
@@ -1880,6 +1877,34 @@ mod tests {
             "ER must be allowed when OAT ({:.1}°C) is at or below max_oat_supplemental_c (21°C), \
              got {mode:?}",
             env_below.weather.outdoor_temp_c,
+        );
+    }
+
+    // OCHRE parity: HP lockout does not force ER immediately.
+    // ER must still wait for its own thermostat threshold
+    // (setpoint - er_setpoint_offset_c).
+    #[test]
+    fn hp_lockout_does_not_force_er_above_er_threshold() {
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0); // disable HP at OAT=0°C
+            typed.er_lockout_temp_c = Some(5.0); // allow ER at OAT=0°C
+            // Default er_setpoint_offset tracks OCHRE formula:
+            // deadband * (1.8 - deadband_offset) = 1.0 * (1.8 - 0.2) = 1.6°C.
+            typed.er_setpoint_offset_c = None;
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // Base setpoint=21°C (from helper config), so:
+        // HP turn-on threshold ~20.2°C, ER turn-on threshold ~19.4°C.
+        // Zone=19.8°C is between them: thermostat requests heating, but ER call is false.
+        let env_midband = env(19.8, 0.0, 0.005);
+        eq.init(&cfg, &env_midband).unwrap();
+
+        let mode = eq.update_control(&env_midband);
+        assert_eq!(
+            mode,
+            OperatingMode::Off,
+            "HP lockout must not force ER above ER threshold; expected Off, got {mode:?}"
         );
     }
 
