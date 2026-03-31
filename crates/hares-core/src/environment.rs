@@ -1660,7 +1660,6 @@ mod tests {
                 columns: vec![values],
                 column_index: index,
                 source_step_secs: 3600,
-                midpoint_offset_secs: 0,
                 column_aggregations: vec![],
             }
         }

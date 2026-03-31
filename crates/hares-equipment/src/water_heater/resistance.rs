@@ -801,6 +801,7 @@ mod tests {
     };
 
     use super::ResistanceWH;
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -854,7 +855,7 @@ mod tests {
         EquipmentConfig {
             name: "WH".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -895,7 +896,8 @@ mod tests {
         // Set max_tank_temp_c high so safety clamp does not interfere with
         // the thermostat logic being tested here.
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
         eq.init(&cfg, &env(21.0)).unwrap();
 
@@ -938,8 +940,9 @@ mod tests {
     #[test]
     fn default_deadband_matches_ochre_when_not_configured() {
         let mut cfg = config();
-        cfg.raw_config.remove("deadband_c");
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().remove("deadband_c");
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let mut eq = ResistanceWH::new(cfg.clone());
@@ -955,8 +958,11 @@ mod tests {
     #[test]
     fn explicit_deadband_override_is_applied() {
         let mut cfg = config();
-        cfg.raw_config.insert("deadband_c".to_string(), 3.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("deadband_c".to_string(), 3.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let mut eq = ResistanceWH::new(cfg.clone());
@@ -981,7 +987,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "WH12".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: cfg_map,
+            payload: ConfigPayload::Raw { data: cfg_map },
         };
 
         let mut eq = ResistanceWH::new(cfg.clone());
@@ -1022,7 +1028,7 @@ mod tests {
         let cfg2 = crate::EquipmentConfig {
             name: "WH2".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: cfg_small,
+            payload: ConfigPayload::Raw { data: cfg_small },
         };
         let mut eq2 = ResistanceWH::new(cfg2.clone());
         eq2.init(&cfg2, &env(21.0)).unwrap();
@@ -1042,9 +1048,11 @@ mod tests {
     fn wh_dr_moderate_reduces_setpoint() {
         // Start with tank just below setpoint so there is a call for heat.
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 50.0.into()); // setpoint=52, deadband=2
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let e = env(21.0);
@@ -1083,9 +1091,11 @@ mod tests {
         // 40 < 42-2=40 is the hysteresis boundary — tank at 40°C is at the deadband edge.
         // Use 38°C so it is clearly below 42-2=40 to ensure heating still fires.
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 38.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let e = env(21.0);
@@ -1137,7 +1147,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "WH".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: cfg_map,
+            payload: ConfigPayload::Raw { data: cfg_map },
         };
 
         let mut eq = ResistanceWH::new(cfg.clone());
@@ -1165,7 +1175,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "WH".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: cfg_map,
+            payload: ConfigPayload::Raw { data: cfg_map },
         };
 
         let mut eq = ResistanceWH::new(cfg.clone());
@@ -1197,7 +1207,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "WH".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: cfg_map,
+            payload: ConfigPayload::Raw { data: cfg_map },
         };
 
         let mut eq = ResistanceWH::new(cfg.clone());
@@ -1237,7 +1247,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "WH".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: cfg_map,
+            payload: ConfigPayload::Raw { data: cfg_map },
         };
 
         let zone_temp_c = 20.0;
@@ -1282,9 +1292,11 @@ mod tests {
         use hares_types::{ControlSignal, DRLevel};
 
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 38.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
         let e = env(21.0);
 
@@ -1349,6 +1361,7 @@ mod element_priority_tests {
     };
 
     use super::{ElementPriorityMode, ResistanceWH};
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env_state() -> EnvironmentState {
@@ -1407,7 +1420,7 @@ mod element_priority_tests {
         EquipmentConfig {
             name: "WH".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 

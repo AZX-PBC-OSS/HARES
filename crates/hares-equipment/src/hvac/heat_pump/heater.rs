@@ -1174,6 +1174,7 @@ mod tests {
 
     use super::{ASHPHeater, MinisplitHeater};
     use crate::{Equipment, EquipmentConfig};
+    use crate::config::ConfigPayload;
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
@@ -1234,7 +1235,7 @@ mod tests {
         EquipmentConfig {
             name: "HP Heater".to_string(),
             ochre_class: "ASHP Heater".to_string(),
-            raw_config,
+            payload: crate::config::ConfigPayload::Raw { data: raw_config },
         }
     }
 
@@ -1251,7 +1252,7 @@ mod tests {
     #[test]
     fn er_hard_lockout_uses_explicit_config_value() {
         let mut cfg = heater_config();
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_hard_lockout_time_s".to_string(), 300.0.into());
         let mut eq = ASHPHeater::new(cfg.clone());
         let environment = env(18.0, 0.0, 0.003);
@@ -1294,12 +1295,12 @@ mod tests {
 
     #[test]
     fn hspf_to_eir_conversion() {
-        use crate::config::ConfigValue;
+        use crate::config::{ConfigPayload, ConfigValue};
         let mut cfg = heater_config();
-        cfg.raw_config.remove("eir");
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().remove("eir");
+        cfg.raw_config_mut().unwrap()
             .insert("heating_efficiency".to_string(), ConfigValue::Float(8.5));
-        cfg.raw_config.insert(
+        cfg.raw_config_mut().unwrap().insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("HSPF".to_string()),
         );
@@ -1314,12 +1315,12 @@ mod tests {
 
     #[test]
     fn cop_to_eir_no_conversion() {
-        use crate::config::ConfigValue;
+        use crate::config::{ConfigPayload, ConfigValue};
         let mut cfg = heater_config();
-        cfg.raw_config.remove("eir");
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().remove("eir");
+        cfg.raw_config_mut().unwrap()
             .insert("heating_efficiency".to_string(), ConfigValue::Float(3.0));
-        cfg.raw_config.insert(
+        cfg.raw_config_mut().unwrap().insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("COP".to_string()),
         );
@@ -1334,12 +1335,12 @@ mod tests {
 
     #[test]
     fn eer_to_eir_conversion() {
-        use crate::config::ConfigValue;
+        use crate::config::{ConfigPayload, ConfigValue};
         let mut cfg = heater_config();
-        cfg.raw_config.remove("eir");
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().remove("eir");
+        cfg.raw_config_mut().unwrap()
             .insert("heating_efficiency".to_string(), ConfigValue::Float(12.0));
-        cfg.raw_config.insert(
+        cfg.raw_config_mut().unwrap().insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("EER".to_string()),
         );
@@ -1351,12 +1352,12 @@ mod tests {
 
     #[test]
     fn seer_to_eir_conversion() {
-        use crate::config::ConfigValue;
+        use crate::config::{ConfigPayload, ConfigValue};
         let mut cfg = heater_config();
-        cfg.raw_config.remove("eir");
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().remove("eir");
+        cfg.raw_config_mut().unwrap()
             .insert("heating_efficiency".to_string(), ConfigValue::Float(14.0));
-        cfg.raw_config.insert(
+        cfg.raw_config_mut().unwrap().insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("SEER".to_string()),
         );
@@ -1368,12 +1369,12 @@ mod tests {
 
     #[test]
     fn afue_to_eir_no_conversion() {
-        use crate::config::ConfigValue;
+        use crate::config::{ConfigPayload, ConfigValue};
         let mut cfg = heater_config();
-        cfg.raw_config.remove("eir");
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().remove("eir");
+        cfg.raw_config_mut().unwrap()
             .insert("heating_efficiency".to_string(), ConfigValue::Float(95.0));
-        cfg.raw_config.insert(
+        cfg.raw_config_mut().unwrap().insert(
             "heating_efficiency_units".to_string(),
             ConfigValue::Text("AFUE".to_string()),
         );
@@ -1441,10 +1442,10 @@ mod tests {
         // hysteresis band so load_ratio = 0.5 → PLR = 0.5.
         let mut cfg = heater_config();
         // hp_lockout_temp_c above OAT forces HP locked out; ER fires via !hp_on
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("hp_lockout_temp_c".to_string(), 10.0.into());
         // er_setpoint_offset_c = 0 ensures ER stays on while heating is active
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_setpoint_offset_c".to_string(), 0.0.into());
         let backup_capacity_w = 4_000.0_f64;
         // OAT=0°C is below ER lockout (4.44°C) so ER is temperature-permitted
@@ -1556,7 +1557,7 @@ mod tests {
     #[test]
     fn ashp_without_backup_uses_oat_dependent_supply_temp() {
         let mut cfg = heater_config();
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("backup_capacity_w".to_string(), 0.0.into());
 
         // Use OATs above the ER lockout threshold (default 4.44°C) so that
@@ -1660,20 +1661,20 @@ mod tests {
         // OCHRE HVAC.py: ER hard lockout prevents strip heat on setpoint increase.
         // With lockout = 600 s and dt = 60 s, ER must be blocked for 10 steps.
         let mut cfg = heater_config();
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_hard_lockout_time_s".to_string(), 600.0.into());
         // Force OAT below ER temperature lockout so ER is temp-permitted.
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_lockout_temp_c".to_string(), 100.0.into());
         // Disable HP so only ER runs (easier to isolate).
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("hp_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_setpoint_offset_c".to_string(), 0.0.into());
 
         let mut eq = ASHPHeater::new(cfg.clone());
         // Low setpoint initially — no setpoint raise yet.
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 18.0.into());
         let initial_env = make_env(16.0, 0.0, 0);
         eq.init(&cfg, &initial_env).unwrap();
@@ -1717,17 +1718,17 @@ mod tests {
         // OCHRE HVAC.py: two-stage lockout — after hard lockout expires, ER stays
         // off while zone temp is still rising (heat pump is winning the load).
         let mut cfg = heater_config();
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_hard_lockout_time_s".to_string(), 60.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("hp_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_setpoint_offset_c".to_string(), 0.0.into());
 
         // Init with a low setpoint so a raise to 21°C is a genuine increase.
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 18.0.into());
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &make_env(16.0, 0.0, 0)).unwrap();
@@ -1798,15 +1799,15 @@ mod tests {
     fn er_blocked_above_max_oat_supplemental() {
         let mut cfg = heater_config();
         // Set OCHRE aggressive lockout very high so it doesn't block ER at 22°C.
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_lockout_temp_c".to_string(), 50.0.into());
         // Disable HP so only ER isolation is tested.
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("hp_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_setpoint_offset_c".to_string(), 0.0.into());
         // Explicitly set max_oat_supplemental_c to default (21°C).
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("max_oat_supplemental_c".to_string(), 21.0.into());
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -1830,13 +1831,13 @@ mod tests {
     #[test]
     fn er_allowed_below_max_oat_supplemental() {
         let mut cfg = heater_config();
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_lockout_temp_c".to_string(), 50.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("hp_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_setpoint_offset_c".to_string(), 0.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("max_oat_supplemental_c".to_string(), 21.0.into());
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -1859,14 +1860,14 @@ mod tests {
     #[test]
     fn max_oat_supplemental_clamped_to_hard_limit() {
         let mut cfg = heater_config();
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_lockout_temp_c".to_string(), 50.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("hp_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_setpoint_offset_c".to_string(), 0.0.into());
         // Request 30°C — must be clamped to 21°C.
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("max_oat_supplemental_c".to_string(), 30.0.into());
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -2025,7 +2026,7 @@ mod tests {
     #[test]
     fn state_round_trip_preserves_max_oat_supplemental_c() {
         let mut cfg = heater_config();
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("max_oat_supplemental_c".to_string(), 15.0.into());
         let environment = env(18.0, 0.0, 0.005);
 
@@ -2189,14 +2190,14 @@ mod tests {
     #[test]
     fn dr_expiry_does_not_trigger_er_lockout() {
         let mut cfg = heater_config(); // base heating setpoint = 21°C
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_hard_lockout_time_s".to_string(), 600.0.into());
         // Permit ER by OAT and HP lockout settings.
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("hp_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_setpoint_offset_c".to_string(), 0.0.into());
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -2249,13 +2250,13 @@ mod tests {
     #[test]
     fn actual_setpoint_raise_triggers_er_lockout() {
         let mut cfg = heater_config(); // base heating setpoint = 21°C
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_hard_lockout_time_s".to_string(), 600.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("hp_lockout_temp_c".to_string(), 100.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("er_setpoint_offset_c".to_string(), 0.0.into());
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -2340,7 +2341,7 @@ mod tests {
         // Identity biquadratic curves (ratio=1), OAT above all lockouts.
         let mut cfg = heater_config();
         // Zero fan power so we can get a baseline COP = thermal / compressor exactly.
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("fan_power_w_per_cfm".to_string(), 0.0.into());
         // OAT=5°C: above ER lockout (4.44°C) so only HP runs, no ER.
         let e = env(18.0, 5.0, 0.003);
@@ -2377,7 +2378,7 @@ mod tests {
         // (only compressor, not compressor+fan).
         let mut cfg_fan = heater_config();
         cfg_fan
-            .raw_config
+            .raw_config_mut().unwrap()
             .insert("fan_power_w_per_cfm".to_string(), 0.5.into());
         let mut eq_fan = ASHPHeater::new(cfg_fan.clone());
         let mut ports_fan = PortSlots {
@@ -2438,6 +2439,7 @@ mod ideal_capacity_tests {
 
     use super::ASHPHeater;
     use crate::{Equipment, EquipmentConfig};
+    use crate::config::ConfigPayload;
 
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     /// OAT is held above the HP lockout (default -17.78°C) and above the ER lockout
@@ -2503,7 +2505,7 @@ mod ideal_capacity_tests {
         EquipmentConfig {
             name: "HP Heater".to_string(),
             ochre_class: "ASHP Heater".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 

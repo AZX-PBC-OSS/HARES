@@ -476,6 +476,7 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigPayload;
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneState};
 
@@ -521,7 +522,7 @@ mod tests {
         EquipmentConfig {
             name: "HRV".to_string(),
             ochre_class: "HRV".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -536,7 +537,7 @@ mod tests {
         EquipmentConfig {
             name: "ERV".to_string(),
             ochre_class: "ERV".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -745,7 +746,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Exhaust".to_string(),
             ochre_class: "Ventilation Fan".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
         let mut fan = Ventilation::new(cfg.clone());
         let e = env(-10.0, 20.0);
@@ -789,7 +790,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "HRV-half".to_string(),
             ochre_class: "HRV".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let e = env(0.0, 20.0);
@@ -806,7 +807,7 @@ mod tests {
         let cfg_full = EquipmentConfig {
             name: "HRV-full".to_string(),
             ochre_class: "HRV".to_string(),
-            raw_config: raw_full,
+            payload: ConfigPayload::Raw { data: raw_full },
         };
         let mut hrv_full = Ventilation::new(cfg_full.clone());
         hrv_full.init(&cfg_full, &e).expect("init full");

@@ -747,8 +747,7 @@ impl Equipment for Generator {
 
         self.telemetry
             .set(tk::ELECTRIC_OUTPUT_KW, self.current_power_kw);
-        self.telemetry
-            .set(tk::ELECTRIC_KW, self.current_power_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, self.current_power_kw);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
         self.telemetry.set(tk::ETA_ELECTRIC, eta);
 
@@ -926,7 +925,7 @@ mod tests {
         telemetry_keys as tk,
     };
 
-    use crate::config::ConfigValue;
+    use crate::config::{ConfigPayload, ConfigValue};
 
     use super::*;
     use crate::{Equipment, EquipmentConfig};
@@ -989,7 +988,7 @@ mod tests {
         EquipmentConfig {
             name: "Test Generator".to_string(),
             ochre_class: "Gas Generator".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 

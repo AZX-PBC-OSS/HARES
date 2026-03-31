@@ -46,7 +46,7 @@ pub enum ActorSeed {
 }
 
 pub use battery::{BatteryLutType, OcvTable, UNegTable};
-pub use config::EquipmentConfig;
+pub use config::{ConfigPayload, EquipmentConfig, EquipmentTypedConfig};
 pub use ev::ChargingCurveLut;
 pub use hares_types::Telemetry;
 pub use hvac::{EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride};
@@ -242,6 +242,7 @@ mod tests {
     };
     use serde::{Deserialize, Serialize};
 
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
     #[derive(Clone)]
@@ -419,7 +420,7 @@ mod tests {
             &EquipmentConfig {
                 name: "Mock".to_string(),
                 ochre_class: "Mock".to_string(),
-                raw_config: Default::default(),
+                payload: ConfigPayload::default(),
             },
             &sample_env(),
         )
@@ -440,7 +441,7 @@ mod tests {
             EquipmentConfig {
                 name: "x".to_string(),
                 ochre_class: "x".to_string(),
-                raw_config: Default::default(),
+                payload: ConfigPayload::default(),
             },
         );
         assert!(result.is_err());
@@ -463,7 +464,7 @@ mod tests {
                 EquipmentConfig {
                     name: "x".to_string(),
                     ochre_class: "Mock".to_string(),
-                    raw_config: Default::default(),
+                    payload: ConfigPayload::default(),
                 },
             )
             .unwrap();

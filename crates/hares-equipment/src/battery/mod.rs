@@ -1402,7 +1402,7 @@ mod tests {
         ControlSignal, EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
     };
 
-    use crate::config::ConfigValue;
+    use crate::config::{ConfigPayload, ConfigValue};
 
     use super::*;
     use crate::{Equipment, EquipmentConfig};
@@ -1467,7 +1467,7 @@ mod tests {
         EquipmentConfig {
             name: "Test Battery".to_string(),
             ochre_class: "Battery".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -2017,7 +2017,7 @@ mod tests {
         let config = EquipmentConfig {
             name: "Test Battery".to_string(),
             ochre_class: "Battery".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let mut bat = Battery::new(config.clone());
         let env = base_env();
@@ -2283,7 +2283,7 @@ mod tests {
             EquipmentConfig {
                 name: "TestBat".to_string(),
                 ochre_class: "Battery".to_string(),
-                raw_config: raw,
+                payload: crate::config::ConfigPayload::Raw { data: raw },
             }
         };
 
@@ -2380,7 +2380,7 @@ mod tests {
             EquipmentConfig {
                 name: "TestBat".to_string(),
                 ochre_class: "Battery".to_string(),
-                raw_config: raw,
+                payload: crate::config::ConfigPayload::Raw { data: raw },
             }
         };
 
@@ -2577,7 +2577,7 @@ mod tests {
         let config = EquipmentConfig {
             name: "Test Battery".to_string(),
             ochre_class: "Battery".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let mut bat = Battery::new(config.clone());
         let env = base_env();
@@ -3593,7 +3593,7 @@ mod tests {
     #[test]
     fn lfp_chemistry_selects_lfp_ocv_on_init() {
         let mut config = battery_config(&[]);
-        config.raw_config.insert(
+        config.raw_config_mut().unwrap().insert(
             KEY_CHEMISTRY.to_string(),
             ConfigValue::Text("lfp".to_string()),
         );
@@ -3611,7 +3611,7 @@ mod tests {
     #[test]
     fn reset_ocv_on_lfp_battery_restores_lfp_default() {
         let mut config = battery_config(&[]);
-        config.raw_config.insert(
+        config.raw_config_mut().unwrap().insert(
             KEY_CHEMISTRY.to_string(),
             ConfigValue::Text("lfp".to_string()),
         );
@@ -3633,7 +3633,7 @@ mod tests {
     #[test]
     fn custom_ocv_not_overwritten_by_chemistry_on_init() {
         let mut config = battery_config(&[]);
-        config.raw_config.insert(
+        config.raw_config_mut().unwrap().insert(
             KEY_CHEMISTRY.to_string(),
             ConfigValue::Text("lfp".to_string()),
         );
@@ -3745,7 +3745,7 @@ mod tests {
         })
         .unwrap();
         config
-            .raw_config
+            .raw_config_mut().unwrap()
             .insert(KEY_BMS_MODE.to_string(), ConfigValue::Text(json));
 
         let mut bat = Battery::new(config.clone());
@@ -3788,7 +3788,7 @@ mod tests {
         })
         .unwrap();
         config
-            .raw_config
+            .raw_config_mut().unwrap()
             .insert(KEY_BMS_MODE.to_string(), ConfigValue::Text(json));
 
         let mut bat = Battery::new(config.clone());

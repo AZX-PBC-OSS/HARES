@@ -1,14 +1,14 @@
 //! Equipment configuration and parameter types.
 
-/// Common config key for equipment ID, shared across all equipment types.
-pub(crate) const KEY_EQUIPMENT_ID: &str = "equipment_id";
-/// Common config key for zone ID, shared across equipment types that are zone-attached.
-pub(crate) const KEY_ZONE_ID: &str = "zone_id";
-
 use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+/// Common config key for equipment ID, shared across all equipment types.
+pub const KEY_EQUIPMENT_ID: &str = "equipment_id";
+/// Common config key for zone ID, shared across equipment types that are zone-attached.
+pub const KEY_ZONE_ID: &str = "zone_id";
 
 /// Flexible config value supporting numeric, string, and boolean parameters.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,32 +98,330 @@ impl ConfigValue {
     }
 }
 
+/// Marker trait for per-equipment typed config structs.
+/// All structs that implement this must derive Serialize + Deserialize
+/// and use #[serde(deny_unknown_fields)].
+pub trait EquipmentTypedConfig: Serialize + for<'de> Deserialize<'de> + Clone + fmt::Debug {
+    /// Equipment canonical name this config belongs to.
+    /// Must match the string registered in EquipmentRegistry.
+    fn equipment_type_name() -> &'static str;
+
+    /// Schema version for forward compatibility. Default 1.
+    fn schema_version() -> u32 {
+        1
+    }
+}
+
+/// Config payload for one equipment instance.
+/// Typed variant is used by built-in equipment after migration.
+/// Raw variant is used by custom Python equipment and unmigrated built-ins.
+///
+/// Uses explicit tagging (not #[serde(untagged)]) to avoid ambiguous
+/// deserialization between Raw and Typed variants.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ConfigPayload {
+    #[serde(rename = "raw")]
+    Raw { data: HashMap<String, ConfigValue> },
+    #[serde(rename = "typed")]
+    Typed {
+        /// Canonical equipment type name — must match EquipmentTypedConfig::equipment_type_name().
+        type_name: String,
+        /// Schema version — must match EquipmentTypedConfig::schema_version().
+        version: u32,
+        /// The typed config data as a JSON object.
+        data: serde_json::Value,
+    },
+}
+
+impl Default for ConfigPayload {
+    fn default() -> Self {
+        Self::Raw {
+            data: HashMap::new(),
+        }
+    }
+}
+
 /// Initialization parameters for one equipment instance.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EquipmentConfig {
     pub name: String,
     pub ochre_class: String,
-    pub raw_config: HashMap<String, ConfigValue>,
+    pub payload: ConfigPayload,
 }
 
 impl EquipmentConfig {
     /// Extract a numeric value from raw_config.
     pub fn get_f64(&self, key: &str) -> Option<f64> {
-        self.raw_config.get(key).and_then(ConfigValue::as_f64)
+        self.raw_data()
+            .and_then(|data| data.get(key).and_then(ConfigValue::as_f64))
     }
 
     /// Extract a string value from raw_config.
     pub fn get_str(&self, key: &str) -> Option<&str> {
-        self.raw_config.get(key).and_then(ConfigValue::as_str)
+        self.raw_data()
+            .and_then(|data| data.get(key).and_then(ConfigValue::as_str))
     }
 
     /// Extract a boolean value from raw_config.
     pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.raw_config.get(key).and_then(ConfigValue::as_bool)
+        self.raw_data()
+            .and_then(|data| data.get(key).and_then(ConfigValue::as_bool))
     }
 
     /// Extract a float array value from raw_config.
     pub fn get_f64_array(&self, key: &str) -> Option<&[f64]> {
-        self.raw_config.get(key).and_then(ConfigValue::as_f64_array)
+        self.raw_data()
+            .and_then(|data| data.get(key).and_then(ConfigValue::as_f64_array))
+    }
+
+    /// Get the raw config data, or None if typed.
+    pub fn raw_data(&self) -> Option<&HashMap<String, ConfigValue>> {
+        match &self.payload {
+            ConfigPayload::Raw { data } => Some(data),
+            ConfigPayload::Typed { .. } => None,
+        }
+    }
+
+    /// Get the raw config data, or an empty HashMap reference if typed.
+    pub fn raw_data_or_empty(&self) -> &HashMap<String, ConfigValue> {
+        match &self.payload {
+            ConfigPayload::Raw { data } => data,
+            ConfigPayload::Typed { .. } => {
+                static EMPTY: std::sync::LazyLock<HashMap<String, ConfigValue>> =
+                    std::sync::LazyLock::new(HashMap::new);
+                &EMPTY
+            }
+        }
+    }
+
+    /// Whether the payload is already in typed (JSON object) form.
+    pub fn is_typed(&self) -> bool {
+        matches!(self.payload, ConfigPayload::Typed { .. })
+    }
+
+    /// Deserialize the payload as a typed config struct T.
+    /// Returns Err if the payload does not match T's schema.
+    pub fn typed<T: EquipmentTypedConfig>(&self) -> crate::Result<T> {
+        match &self.payload {
+            ConfigPayload::Typed {
+                type_name,
+                version,
+                data,
+            } => {
+                let expected_type = T::equipment_type_name();
+                if type_name != expected_type {
+                    return Err(hares_types::HaresError::Equipment(format!(
+                        "config type mismatch: expected {expected_type}, got {type_name}"
+                    )));
+                }
+                let expected_version = T::schema_version();
+                if *version != expected_version {
+                    return Err(hares_types::HaresError::Equipment(format!(
+                        "config schema version mismatch: expected {expected_version}, got {version}"
+                    )));
+                }
+                serde_json::from_value(data.clone()).map_err(|e| {
+                    hares_types::HaresError::Equipment(format!(
+                        "typed config deserialization failed: {e}"
+                    ))
+                })
+            }
+            ConfigPayload::Raw { .. } => Err(hares_types::HaresError::Equipment(format!(
+                "equipment {} was not initialized with typed config",
+                self.name
+            ))),
+        }
+    }
+
+    /// Construct from a typed config struct.
+    /// Panics on serialization failure (programming error, not runtime condition).
+    pub fn from_typed<T: EquipmentTypedConfig>(
+        name: String,
+        ochre_class: String,
+        config: T,
+    ) -> Self {
+        let data = serde_json::to_value(&config)
+            .expect("typed config serialization failed - this is a programming error");
+        Self {
+            name,
+            ochre_class,
+            payload: ConfigPayload::Typed {
+                type_name: T::equipment_type_name().to_string(),
+                version: T::schema_version(),
+                data,
+            },
+        }
+    }
+
+    /// Transitional accessor for migrating legacy code.
+    /// Returns None if the payload is Typed.
+    #[deprecated(note = "transitional — removed in CFG-015")]
+    pub fn raw_config_mut(&mut self) -> Option<&mut HashMap<String, ConfigValue>> {
+        match &mut self.payload {
+            ConfigPayload::Raw { data } => Some(data),
+            ConfigPayload::Typed { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct TestConfig {
+        value: f64,
+        name: String,
+    }
+
+    impl EquipmentTypedConfig for TestConfig {
+        fn equipment_type_name() -> &'static str {
+            "TestEquipment"
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct OtherConfig {
+        count: u32,
+    }
+
+    impl EquipmentTypedConfig for OtherConfig {
+        fn equipment_type_name() -> &'static str {
+            "OtherEquipment"
+        }
+    }
+
+    #[test]
+    fn from_typed_round_trips_correctly() {
+        let config = TestConfig {
+            value: 42.5,
+            name: "test".to_string(),
+        };
+        let ec = EquipmentConfig::from_typed(
+            "test_name".to_string(),
+            "TestClass".to_string(),
+            config.clone(),
+        );
+        assert!(ec.is_typed());
+        let recovered: TestConfig = ec.typed().unwrap();
+        assert_eq!(recovered, config);
+    }
+
+    #[test]
+    fn typed_on_raw_payload_returns_err() {
+        let ec = EquipmentConfig {
+            name: "test".to_string(),
+            ochre_class: "Test".to_string(),
+            payload: crate::config::ConfigPayload::Raw {
+                data: HashMap::new(),
+            },
+        };
+        let result: Result<TestConfig, _> = ec.typed();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not initialized with typed config")
+        );
+    }
+
+    #[test]
+    fn typed_with_unknown_field_returns_err() {
+        let json = serde_json::json!({
+            "value": 10.0,
+            "name": "test",
+            "unknown_field": "should_fail"
+        });
+        let ec = EquipmentConfig {
+            name: "test".to_string(),
+            ochre_class: "Test".to_string(),
+            payload: ConfigPayload::Typed {
+                type_name: "TestEquipment".to_string(),
+                version: 1,
+                data: json,
+            },
+        };
+        let result: Result<TestConfig, _> = ec.typed();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn typed_with_wrong_type_name_returns_err() {
+        let config = TestConfig {
+            value: 42.5,
+            name: "test".to_string(),
+        };
+        let ec =
+            EquipmentConfig::from_typed("test_name".to_string(), "TestClass".to_string(), config);
+        let result: Result<OtherConfig, _> = ec.typed();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("config type mismatch"));
+    }
+
+    #[test]
+    fn typed_with_wrong_version_returns_err() {
+        let config = TestConfig {
+            value: 42.5,
+            name: "test".to_string(),
+        };
+        let ec = EquipmentConfig {
+            name: "test".to_string(),
+            ochre_class: "TestClass".to_string(),
+            payload: ConfigPayload::Typed {
+                type_name: "TestEquipment".to_string(),
+                version: 99,
+                data: serde_json::to_value(&config).unwrap(),
+            },
+        };
+        let result: Result<TestConfig, _> = ec.typed();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("schema version mismatch"));
+    }
+
+    #[test]
+    fn raw_accessors_work_on_raw_payload() {
+        let mut data = HashMap::new();
+        data.insert("num".to_string(), ConfigValue::Float(3.14));
+        data.insert("text".to_string(), ConfigValue::Text("hello".to_string()));
+        data.insert("flag".to_string(), ConfigValue::Bool(true));
+        data.insert(
+            "arr".to_string(),
+            ConfigValue::FloatArray(vec![1.0, 2.0, 3.0]),
+        );
+
+        let ec = EquipmentConfig {
+            name: "test".to_string(),
+            ochre_class: "Test".to_string(),
+            payload: crate::config::ConfigPayload::Raw { data },
+        };
+
+        assert_eq!(ec.get_f64("num"), Some(3.14));
+        assert_eq!(ec.get_str("text"), Some("hello"));
+        assert_eq!(ec.get_bool("flag"), Some(true));
+        assert_eq!(ec.get_f64_array("arr"), Some(&[1.0, 2.0, 3.0][..]));
+        assert_eq!(ec.get_f64("missing"), None);
+        assert!(!ec.is_typed());
+    }
+
+    #[test]
+    fn raw_accessors_return_none_on_typed_payload() {
+        let config = TestConfig {
+            value: 42.5,
+            name: "test".to_string(),
+        };
+        let ec = EquipmentConfig::from_typed("test".to_string(), "Test".to_string(), config);
+
+        assert!(ec.is_typed());
+        assert_eq!(ec.get_f64("any"), None);
+        assert_eq!(ec.get_str("any"), None);
+        assert_eq!(ec.get_bool("any"), None);
+        assert_eq!(ec.get_f64_array("any"), None);
     }
 }

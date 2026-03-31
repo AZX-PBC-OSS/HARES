@@ -612,8 +612,7 @@ impl Ev {
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry
             .set(tk::ACTIVE_POWER_KW, self.active_power_kw);
-        self.telemetry
-            .set(tk::ELECTRIC_KW, self.active_power_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, self.active_power_kw);
         self.telemetry.set(
             tk::CONNECTION_STATE,
             match self.connection_state {

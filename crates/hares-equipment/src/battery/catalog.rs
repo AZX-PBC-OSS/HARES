@@ -1,5 +1,6 @@
 //! Battery product catalog with factory methods for commercial products.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use hares_types::BatteryChemistry;
@@ -128,9 +129,12 @@ impl BatterySpec {
         let mut cfg = EquipmentConfig {
             name: self.label.to_string(),
             ochre_class: "Battery".to_string(),
-            raw_config: Default::default(),
+            payload: crate::ConfigPayload::Raw {
+                data: HashMap::new(),
+            },
         };
-        let rc = &mut cfg.raw_config;
+        #[allow(deprecated)]
+        let rc = cfg.raw_config_mut().unwrap();
         rc.insert(
             KEY_CAPACITY_KWH.into(),
             ConfigValue::Float(self.capacity_kwh),

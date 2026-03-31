@@ -75,7 +75,7 @@ fn heating_config(name: &str, class: &str) -> EquipmentConfig {
     EquipmentConfig {
         name: name.to_string(),
         ochre_class: class.to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 
@@ -153,7 +153,7 @@ fn gas_furnace_consumes_gas_fuel() {
     let cfg = EquipmentConfig {
         name: "GF".to_string(),
         ochre_class: "Gas Furnace".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let registry = EquipmentRegistry::new();
@@ -240,7 +240,7 @@ fn ashp_heating_cop_above_unity() {
     let cfg = EquipmentConfig {
         name: "ashp".to_string(),
         ochre_class: "ASHP Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let registry = EquipmentRegistry::new();
@@ -317,7 +317,7 @@ fn hvac_port_contributions_are_correct_sign() {
     let cool_cfg = EquipmentConfig {
         name: "ac".to_string(),
         ochre_class: "Air Conditioner".to_string(),
-        raw_config: cool_raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: cool_raw },
     };
     let mut cooler = registry
         .create("Air Conditioner", cool_cfg.clone())
@@ -357,7 +357,7 @@ fn baseboard_electric_resistance_cop_unity() {
     let cfg = EquipmentConfig {
         name: "bb".to_string(),
         ochre_class: "Electric Baseboard".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let registry = EquipmentRegistry::new();
@@ -406,7 +406,7 @@ fn setpoint_override_shifts_thermostat() {
     let cfg = EquipmentConfig {
         name: "furnace".to_string(),
         ochre_class: "Gas Furnace".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let registry = EquipmentRegistry::new();

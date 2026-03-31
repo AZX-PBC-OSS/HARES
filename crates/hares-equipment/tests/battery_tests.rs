@@ -72,7 +72,7 @@ fn battery_config() -> EquipmentConfig {
     EquipmentConfig {
         name: "Battery".to_string(),
         ochre_class: "Battery".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 
@@ -176,7 +176,7 @@ fn soc_clamped_at_min_max() {
         let config = EquipmentConfig {
             name: "Battery".to_string(),
             ochre_class: "Battery".to_string(),
-            raw_config: raw,
+            payload: hares_equipment::ConfigPayload::Raw { data: raw },
         };
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");
@@ -212,7 +212,7 @@ fn soc_clamped_at_min_max() {
         let config = EquipmentConfig {
             name: "Battery".to_string(),
             ochre_class: "Battery".to_string(),
-            raw_config: raw,
+            payload: hares_equipment::ConfigPayload::Raw { data: raw },
         };
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");

@@ -69,7 +69,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
     EquipmentConfig {
         name: "EV #1".to_string(),
         ochre_class: "EV".to_string(),
-        raw_config: raw,
+        payload: crate::config::ConfigPayload::Raw { data: raw },
     }
 }
 

@@ -19,6 +19,11 @@ pub enum ElementHpControlMode {
 
 pub(super) const DEFAULT_DEADBAND_C: f64 = 8.166_666_667; // 14.7°F (OCHRE HPWH-specific default)
 pub(super) const DEFAULT_COMPRESSOR_POWER_W: f64 = 1_200.0;
+/// Default nominal HPWH COP used to scale the biquadratic COP curve when no
+/// explicit COP/UEF is provided in config.
+///
+/// This matches the standard OCHRE HPWH default class used in parity tests.
+pub(super) const DEFAULT_RATED_COP: f64 = 3.45;
 pub(super) const DEFAULT_BACKUP_ELEMENT_POWER_W: f64 = 4_500.0;
 pub(super) const DEFAULT_BACKUP_ENABLE_OFFSET_C: f64 = 8.0;
 /// Standard EnergyPlus/OCHRE HPWH COP biquadratic curve (GE GeoSpring class).

@@ -79,7 +79,7 @@ fn equipment_config_from_spec(spec: &EquipmentSpec) -> EquipmentConfig {
     EquipmentConfig {
         name: spec.name.clone(),
         ochre_class: spec.name.clone(),
-        raw_config,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw_config },
     }
 }
 
@@ -284,15 +284,11 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
     assert_eq!(injected_col, 2);
 
     let mut config = equipment_config_from_spec(&specs[0]);
-    config
-        .raw_config
-        .insert("active_power_kw".to_string(), 1.5.into());
-    config
-        .raw_config
-        .insert("active_duration_s".to_string(), 60.0.into());
-    config
-        .raw_config
-        .insert("cooldown_duration_s".to_string(), 0.0.into());
+    #[allow(deprecated)]
+    let raw = config.raw_config_mut().unwrap();
+    raw.insert("active_power_kw".to_string(), 1.5.into());
+    raw.insert("active_duration_s".to_string(), 60.0.into());
+    raw.insert("cooldown_duration_s".to_string(), 0.0.into());
 
     let mut eq = EventBasedLoad::new(config.clone());
     // payload len=2 while injected column index is 2. BoundaryPolicy::Wrap should map idx 2 -> 0.
@@ -313,10 +309,10 @@ fn missing_column_index_errors_at_init_not_step() {
     inject_schedule_into_specs(&mut specs, &mut schedule, None);
 
     let mut config = equipment_config_from_spec(&specs[0]);
-    config
-        .raw_config
-        .insert("power_schedule_source".to_string(), "column".into());
-    config.raw_config.remove("power_schedule_col");
+    #[allow(deprecated)]
+    let raw = config.raw_config_mut().unwrap();
+    raw.insert("power_schedule_source".to_string(), "column".into());
+    raw.remove("power_schedule_col");
 
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
     let env = base_env(payload_for_row(&schedule, 0));

@@ -52,7 +52,7 @@ mod tests {
         EquipmentConfig {
             name: name.to_string(),
             ochre_class: class.to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 

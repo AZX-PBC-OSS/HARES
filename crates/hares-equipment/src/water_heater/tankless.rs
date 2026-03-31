@@ -525,6 +525,7 @@ mod tests {
     };
 
     use super::{DEFAULT_GAS_PARASITIC_POWER_W, TanklessWH, WATER_SPECIFIC_HEAT_J_PER_KG_K};
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env() -> EnvironmentState {
@@ -581,7 +582,7 @@ mod tests {
         EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -600,7 +601,7 @@ mod tests {
         EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -852,7 +853,7 @@ mod tests {
         let cap = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cap.clone());
@@ -905,7 +906,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -943,7 +944,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -974,7 +975,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -1008,7 +1009,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -1047,7 +1048,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -1097,7 +1098,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -1202,7 +1203,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -1239,7 +1240,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -1284,7 +1285,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -1325,7 +1326,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "Tankless".to_string(),
             ochre_class: "Tankless Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let mut eq = TanklessWH::new(cfg.clone());
@@ -1401,7 +1402,7 @@ mod tests {
             EquipmentConfig {
                 name: "TanklessTest".to_string(),
                 ochre_class: "Tankless Water Heater".to_string(),
-                raw_config: raw,
+                payload: ConfigPayload::Raw { data: raw },
             }
         };
 

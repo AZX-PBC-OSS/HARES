@@ -22,7 +22,7 @@ use super::hpwh_compressor::{
     DEFAULT_COP_CURVE, DEFAULT_DEADBAND_C, DEFAULT_FAN_POWER_W, DEFAULT_LOST_HEAT_FRACTION,
     DEFAULT_MAX_AMBIENT_TEMP_C, DEFAULT_MIN_AMBIENT_TEMP_C, DEFAULT_MIN_ON_TIME_S,
     DEFAULT_PARASITIC_POWER_W, DEFAULT_SHR, DEFAULT_TANK_TEMP_BOUNDS_C, DEFAULT_ZONE_TEMP_BOUNDS_C,
-    LOW_POWER_MAX_AMBIENT_TEMP_C, LOW_POWER_MIN_AMBIENT_TEMP_C,
+    DEFAULT_RATED_COP, LOW_POWER_MAX_AMBIENT_TEMP_C, LOW_POWER_MIN_AMBIENT_TEMP_C,
 };
 use super::tank::{StratifiedTank, StratifiedTankConfig};
 use super::{
@@ -445,21 +445,22 @@ impl Equipment for HeatPumpWH {
                 first_f64(config, &["cop_tank_temp_max_c"]).unwrap_or(DEFAULT_TANK_TEMP_BOUNDS_C.1),
             ),
         };
-        // If HPXML provides a UEF-derived COP, scale the curve so that it passes through
-        // the rated value at the curve's reference conditions (midpoint of bounds).
-        self.cop_scale = if let Some(cop_rated) =
-            first_f64(config, &["cop", "rated_cop", "UniformEnergyFactor"])
-        {
-            let ref_zone_temp = (self.cop_curve.x1_bounds.0 + self.cop_curve.x1_bounds.1) * 0.5;
-            let ref_tank_temp = (self.cop_curve.x2_bounds.0 + self.cop_curve.x2_bounds.1) * 0.5;
-            let cop_at_ref = self
-                .cop_curve
-                .evaluate(ref_zone_temp, ref_tank_temp)
-                .max(1e-6);
-            (cop_rated / cop_at_ref).max(0.1)
-        } else {
-            1.0
-        };
+        // Scale the normalized COP curve to an absolute COP target.
+        // `cop`/`rated_cop` are already absolute COP values.
+        // UEF keys are converted to COP with the same coefficient used by resolver.
+        let cop_rated = first_f64(config, &["cop", "rated_cop"])
+            .or_else(|| {
+                first_f64(config, &["uniform_energy_factor", "UniformEnergyFactor"])
+                    .map(|uef| 1.174_536_058 * uef)
+            })
+            .unwrap_or(DEFAULT_RATED_COP);
+        let ref_zone_temp = (self.cop_curve.x1_bounds.0 + self.cop_curve.x1_bounds.1) * 0.5;
+        let ref_tank_temp = (self.cop_curve.x2_bounds.0 + self.cop_curve.x2_bounds.1) * 0.5;
+        let cop_at_ref = self
+            .cop_curve
+            .evaluate(ref_zone_temp, ref_tank_temp)
+            .max(1e-6);
+        self.cop_scale = (cop_rated / cop_at_ref).max(0.1);
         self.tempering_valve_setpoint_c =
             first_f64(config, &["tempering_valve_setpoint_c"]).filter(|&t| t > 0.0);
         self.capacity_curve = BiquadraticCurve {
@@ -1163,6 +1164,7 @@ mod tests {
     };
 
     use super::HeatPumpWH;
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -1217,7 +1219,7 @@ mod tests {
         EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -1362,7 +1364,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "HPWH12".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: cfg_map,
+            payload: ConfigPayload::Raw { data: cfg_map },
         };
 
         let mut eq = HeatPumpWH::new(cfg.clone());
@@ -1433,7 +1435,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: cfg_map,
+            payload: ConfigPayload::Raw { data: cfg_map },
         };
 
         let mut eq = HeatPumpWH::new(cfg.clone());
@@ -1461,16 +1463,19 @@ mod tests {
         let mut cfg_composite = config();
         // tank_nodes=6, thermostat_node defaults to 5 (bottom), thermostat_upper_node=0 (top)
         cfg_composite
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("min_on_time_s".to_string(), 0.0.into()); // disable min-on for this test
 
         let mut cfg_single = config();
         // Force upper == lower so composite collapses to single-node.
         cfg_single
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("thermostat_upper_node".to_string(), 5.0.into());
         cfg_single
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("min_on_time_s".to_string(), 0.0.into());
 
         let e = env(24.0);
@@ -1534,9 +1539,11 @@ mod tests {
     #[test]
     fn fan_and_parasitic_appear_in_electrical() {
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("fan_power_w".to_string(), 35.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("parasitic_power_w".to_string(), 2.0.into());
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env(24.0)).unwrap();
@@ -1562,8 +1569,11 @@ mod tests {
     #[test]
     fn shr_produces_latent_gain_when_humidity_gap_exists() {
         let mut cfg = config();
-        cfg.raw_config.insert("shr".to_string(), 0.88.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("shr".to_string(), 0.88.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("lost_heat_fraction".to_string(), 0.0.into());
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env(24.0)).unwrap();
@@ -1589,10 +1599,12 @@ mod tests {
     #[test]
     fn hpwh_min_on_time_prevents_early_shutdown() {
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("min_on_time_s".to_string(), 120.0.into());
         // Raise max_tank_temp_c high enough that the safety cutout won't interfere.
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let e = env(24.0);
@@ -1641,9 +1653,11 @@ mod tests {
     fn hpwh_min_on_time_timer_lifecycle() {
         let mut cfg = config();
         // Set min_on_time_s well above test duration so the compressor never self-stops.
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("min_on_time_s".to_string(), 9999.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let e = env(24.0);
@@ -1693,11 +1707,13 @@ mod tests {
     fn hpwh_safety_override_bypasses_min_on_time() {
         let mut cfg = config();
         // Long min-on-time so normal logic would keep the compressor running.
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("min_on_time_s".to_string(), 600.0.into());
         // Set max_tank_temp_c just above initial tank temp (40°C) so the safety
         // cutout triggers as soon as we raise the tank a little.
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let e = env(24.0);
@@ -1752,18 +1768,22 @@ mod tests {
 
         let mut cfg_low = config();
         cfg_low
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("capacity_curve_coeffs".to_string(), low_curve_str.into());
         cfg_low
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let mut cfg_unit = config();
         cfg_unit
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("capacity_curve_coeffs".to_string(), unit_curve_str.into());
         cfg_unit
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
 
         let e = env(24.0);
@@ -1829,7 +1849,8 @@ mod tests {
         let e = env_with_wet_bulb(24.0, 14.0);
 
         let mut cfg0 = config();
-        cfg0.raw_config
+        cfg0.raw_config_mut()
+            .unwrap()
             .insert("lost_heat_fraction".to_string(), 0.0.into());
         let mut eq0 = HeatPumpWH::new(cfg0.clone());
         eq0.init(&cfg0, &e).unwrap();
@@ -1838,7 +1859,8 @@ mod tests {
 
         let mut cfg50 = config();
         cfg50
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("lost_heat_fraction".to_string(), 0.5.into());
         let mut eq50 = HeatPumpWH::new(cfg50.clone());
         eq50.init(&cfg50, &e).unwrap();
@@ -1879,7 +1901,7 @@ mod tests {
             EquipmentConfig {
                 name: "HPWH".to_string(),
                 ochre_class: "Heat Pump Water Heater".to_string(),
-                raw_config: raw,
+                payload: ConfigPayload::Raw { data: raw },
             }
         };
 
@@ -1939,6 +1961,7 @@ mod mutual_exclusion_tests {
     };
 
     use super::{ElementHpControlMode, HeatPumpWH};
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env_state() -> EnvironmentState {
@@ -2003,7 +2026,7 @@ mod mutual_exclusion_tests {
         EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -2027,7 +2050,7 @@ mod mutual_exclusion_tests {
         EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -2250,6 +2273,7 @@ mod dr_tests {
     };
 
     use super::HeatPumpWH;
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env_state() -> EnvironmentState {
@@ -2308,7 +2332,7 @@ mod dr_tests {
         EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -2326,7 +2350,7 @@ mod dr_tests {
         EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -2466,7 +2490,7 @@ mod dr_tests {
         let cfg = EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let e = env_state();
@@ -2540,7 +2564,7 @@ mod dr_tests {
         let cfg = EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let e = env_state();
@@ -2570,7 +2594,7 @@ mod dr_tests {
         let cfg = EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
 
         let e = env_state();
@@ -2600,6 +2624,7 @@ mod new_feature_tests {
     };
 
     use super::HeatPumpWH;
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env_at(zone_temp_c: f64) -> EnvironmentState {
@@ -2656,7 +2681,7 @@ mod new_feature_tests {
         EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -2694,12 +2719,12 @@ mod new_feature_tests {
 
     #[test]
     fn low_power_hpwh_lockout_bounds_are_wider() {
-        let mut raw = base_config().raw_config;
+        let mut raw = base_config().raw_data().unwrap().clone();
         raw.insert("low_power_hpwh".to_string(), "true".into());
         let cfg = EquipmentConfig {
             name: "HPWH_LP".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
@@ -2717,13 +2742,13 @@ mod new_feature_tests {
 
     #[test]
     fn explicit_lockout_config_overrides_low_power_default() {
-        let mut raw = base_config().raw_config;
+        let mut raw = base_config().raw_data().unwrap().clone();
         raw.insert("low_power_hpwh".to_string(), "true".into());
         raw.insert("min_ambient_temp_c".to_string(), 1.0.into());
         let cfg = EquipmentConfig {
             name: "HPWH_LP".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
@@ -2746,12 +2771,12 @@ mod new_feature_tests {
         eq0.step(&e, Duration::from_secs(60), &mut p0).unwrap();
         let sens0 = p0.thermal[0].sensible_gain_w;
 
-        let mut raw50 = base_config().raw_config;
+        let mut raw50 = base_config().raw_data().unwrap().clone();
         raw50.insert("wall_heat_fraction".to_string(), 0.5.into());
         let cfg50 = EquipmentConfig {
             name: "HPWH_WF".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw50,
+            payload: ConfigPayload::Raw { data: raw50 },
         };
         let mut eq50 = HeatPumpWH::new(cfg50.clone());
         eq50.init(&cfg50, &e).unwrap();
@@ -2786,7 +2811,7 @@ mod new_feature_tests {
 
     #[test]
     fn hp_only_mode_disables_backup_element() {
-        let mut raw = base_config().raw_config;
+        let mut raw = base_config().raw_data().unwrap().clone();
         raw.insert("hp_only_mode".to_string(), "true".into());
         raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
         raw.insert("backup_enable_offset_c".to_string(), 5.0.into());
@@ -2794,7 +2819,7 @@ mod new_feature_tests {
         let cfg = EquipmentConfig {
             name: "HPWH_HPOnly".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
@@ -2811,14 +2836,14 @@ mod new_feature_tests {
 
     #[test]
     fn without_hp_only_mode_backup_fires_when_tank_cold() {
-        let mut raw = base_config().raw_config;
+        let mut raw = base_config().raw_data().unwrap().clone();
         raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
         raw.insert("backup_enable_offset_c".to_string(), 5.0.into());
         raw.insert("element_hp_control_mode".to_string(), "Simultaneous".into());
         let cfg = EquipmentConfig {
             name: "HPWH_Normal".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
@@ -2834,12 +2859,12 @@ mod new_feature_tests {
 
     #[test]
     fn min_off_time_prevents_early_compressor_restart() {
-        let mut raw = base_config().raw_config;
+        let mut raw = base_config().raw_data().unwrap().clone();
         raw.insert("min_off_time_s".to_string(), 120.0.into());
         let cfg = EquipmentConfig {
             name: "HPWH_MinOff".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         };
         let e = env_at(24.0);
         let mut eq = HeatPumpWH::new(cfg.clone());
@@ -2909,7 +2934,7 @@ mod new_feature_tests {
             EquipmentConfig {
                 name: "HPWH".to_string(),
                 ochre_class: "HPWH".to_string(),
-                raw_config: raw,
+                payload: ConfigPayload::Raw { data: raw },
             }
         };
         let mut eq = HeatPumpWH::new(cfg.clone());
@@ -2943,7 +2968,7 @@ mod new_feature_tests {
             EquipmentConfig {
                 name: "HPWH".to_string(),
                 ochre_class: "HPWH".to_string(),
-                raw_config: raw,
+                payload: ConfigPayload::Raw { data: raw },
             }
         };
         let mut eq = HeatPumpWH::new(cfg.clone());
@@ -2977,7 +3002,7 @@ mod new_feature_tests {
             EquipmentConfig {
                 name: "HPWH".to_string(),
                 ochre_class: "HPWH".to_string(),
-                raw_config: raw,
+                payload: ConfigPayload::Raw { data: raw },
             }
         };
         let mut eq = HeatPumpWH::new(cfg.clone());

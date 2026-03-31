@@ -779,6 +779,7 @@ mod tests {
         DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, ElectricBoiler,
         GasBoiler, register_with_registry,
     };
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -827,23 +828,25 @@ mod tests {
         EquipmentConfig {
             name: name.to_string(),
             ochre_class: class.to_string(),
-            raw_config: HashMap::new(),
+            payload: crate::config::ConfigPayload::Raw {
+                data: HashMap::new(),
+            },
         }
     }
 
     #[test]
     fn electric_boiler_writes_electrical_and_fluid_ports() {
         let mut cfg = config("EB", "Electric Boiler");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config.insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert("loop_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("capacity_w".to_string(), 8_000.0.into());
-        cfg.raw_config.insert("efficiency".to_string(), 0.95.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("efficiency".to_string(), 0.95.into());
+        cfg.raw_config_mut().unwrap()
             .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = ElectricBoiler::new(cfg.clone());
@@ -867,15 +870,15 @@ mod tests {
     #[test]
     fn gas_boiler_condensing_curve_matches_expected_at_plr_half() {
         let mut cfg = config("GB", "Gas Boiler");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config.insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert("loop_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config.insert("eir_max".to_string(), 1.2.into());
-        cfg.raw_config.insert("condensing".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("eir_max".to_string(), 1.2.into());
+        cfg.raw_config_mut().unwrap().insert("condensing".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config.insert(
+        cfg.raw_config_mut().unwrap().insert(
             "condensing_eir_coeffs".to_string(),
             format!(
                 "[{},{},{},{},{},{}]",
@@ -888,9 +891,9 @@ mod tests {
             )
             .into(),
         );
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasBoiler::new(cfg.clone());
@@ -944,25 +947,25 @@ mod tests {
     #[test]
     fn condensing_is_more_efficient_than_non_condensing_at_partial_load() {
         let mut cond = config("GB Cond", "Gas Boiler");
-        cond.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cond.raw_config.insert("loop_id".to_string(), 1.0.into());
-        cond.raw_config
+        cond.raw_config_mut().unwrap().insert("zone_id".to_string(), 1.0.into());
+        cond.raw_config_mut().unwrap().insert("loop_id".to_string(), 1.0.into());
+        cond.raw_config_mut().unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cond.raw_config
+        cond.raw_config_mut().unwrap()
             .insert("fuel_efficiency".to_string(), 0.95.into());
-        cond.raw_config.insert("condensing".to_string(), 1.0.into());
-        cond.raw_config
+        cond.raw_config_mut().unwrap().insert("condensing".to_string(), 1.0.into());
+        cond.raw_config_mut().unwrap()
             .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cond.raw_config
+        cond.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cond.raw_config
+        cond.raw_config_mut().unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut non = cond.clone();
-        non.raw_config.insert("condensing".to_string(), 0.0.into());
-        non.raw_config
+        non.raw_config_mut().unwrap().insert("condensing".to_string(), 0.0.into());
+        non.raw_config_mut().unwrap()
             .insert("fuel_efficiency".to_string(), 0.8.into());
-        non.raw_config.insert(
+        non.raw_config_mut().unwrap().insert(
             "non_condensing_eir_coeffs".to_string(),
             format!(
                 "[{},{},{},{},{},{},{},{},{},{}]",
@@ -1016,15 +1019,15 @@ mod tests {
     #[test]
     fn gas_boiler_state_round_trip_preserves_outputs() {
         let mut cfg = config("GB", "Gas Boiler");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config.insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert("loop_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasBoiler::new(cfg.clone());
@@ -1056,18 +1059,18 @@ mod tests {
     #[test]
     fn non_condensing_eir_at_plr_half_matches_ochre_reference() {
         let mut cfg = config("GB", "Gas Boiler");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config.insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert("loop_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config.insert("condensing".to_string(), 0.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("condensing".to_string(), 0.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasBoiler::new(cfg.clone());
@@ -1120,18 +1123,18 @@ mod tests {
     fn gas_boiler_jacket_loss_writes_to_thermal_port_and_conserves_energy() {
         // Non-condensing boiler at 80% AFUE: jacket loss = fuel_input - thermal_output.
         let mut cfg = config("GB", "Gas Boiler");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config.insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert("loop_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config.insert("condensing".to_string(), 0.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("condensing".to_string(), 0.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasBoiler::new(cfg.clone());
@@ -1189,17 +1192,17 @@ mod tests {
     #[test]
     fn gas_boiler_no_jacket_loss_when_off() {
         let mut cfg = config("GB off", "Gas Boiler");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config.insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert("loop_id".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasBoiler::new(cfg.clone());

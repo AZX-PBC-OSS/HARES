@@ -907,8 +907,8 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
     let area_m2 = parse_boundary_area(node, &boundary_type, &id)?;
     let r_value_layers_m2_k_w = parse_nominal_r_layers(node);
     let assembly_r_value_m2_k_w =
-        parse_value_with_units(node.child("AssemblyEffectiveRValue"), ValueKind::RValue)
-            .or_else(|| parse_value_with_units(node.child("RValue"), ValueKind::RValue));
+        parse_value_with_units(node.first_descendant("AssemblyEffectiveRValue"), ValueKind::RValue)
+            .or_else(|| parse_value_with_units(node.first_descendant("RValue"), ValueKind::RValue));
     let material_layers = parse_material_layers(node, area_m2);
 
     let has_radiant_barrier = node
@@ -3048,5 +3048,31 @@ mod tests {
     fn infiltration_ela_absent_when_not_present() {
         let building = parse_building(SAMPLE_XML).expect("parse should succeed");
         assert!(building.infiltration_ela_cm2.is_none());
+    }
+
+    #[test]
+    fn assembly_r_value_nested_under_insulation_is_parsed() {
+        // Standard HPXML nests <AssemblyEffectiveRValue> under <Insulation>, not as a
+        // direct child of the wall element.  The fix changed child() to first_descendant()
+        // at line 910 so this value is no longer silently dropped.
+        let xml = SAMPLE_XML.replace(
+            "<Insulation>\n              <Layer>\n                <Thickness units=\"in\">5.5</Thickness>\n                <NominalRValue>19</NominalRValue>\n                <Density units=\"lb/ft3\">0.5</Density>\n                <SpecificHeat units=\"Btu/lb-F\">0.2</SpecificHeat>\n              </Layer>\n            </Insulation>",
+            "<Insulation>\n              <AssemblyEffectiveRValue Units=\"hr-ft2-F/Btu\">13.0</AssemblyEffectiveRValue>\n              <Layer>\n                <Thickness units=\"in\">5.5</Thickness>\n                <NominalRValue>19</NominalRValue>\n                <Density units=\"lb/ft3\">0.5</Density>\n                <SpecificHeat units=\"Btu/lb-F\">0.2</SpecificHeat>\n              </Layer>\n            </Insulation>",
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        let wall = building
+            .boundaries
+            .iter()
+            .find(|b| matches!(b.boundary_type, BoundaryType::Wall))
+            .expect("wall boundary expected");
+        let r_si = wall
+            .assembly_r_value_m2_k_w
+            .expect("assembly_r_value_m2_k_w should be Some when nested under <Insulation>");
+        // 13.0 hr·ft²·°F/Btu × 0.176110 = 2.28943 m²·K/W
+        let expected = 13.0 * 0.176_110;
+        assert!(
+            (r_si - expected).abs() < 1e-3,
+            "expected ~{expected} m²·K/W, got {r_si}",
+        );
     }
 }

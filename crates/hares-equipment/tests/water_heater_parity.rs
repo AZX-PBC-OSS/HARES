@@ -91,7 +91,7 @@ fn resistance_cfg(
     EquipmentConfig {
         name: "RWH".to_string(),
         ochre_class: "Resistance Water Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 
@@ -201,7 +201,7 @@ fn element_cycling_deadband_matches_ochre_default() {
     let cfg = EquipmentConfig {
         name: "RWH".to_string(),
         ochre_class: "Resistance Water Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let mut wh = ResistanceWH::new(cfg.clone());
@@ -273,7 +273,7 @@ fn gas_wh_fuel_not_electricity() {
     let cfg = EquipmentConfig {
         name: "GWH".to_string(),
         ochre_class: "Gas Water Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let mut wh = GasWH::new(cfg.clone());
@@ -373,7 +373,7 @@ fn standby_loss_ua_magnitude() {
     let cfg = EquipmentConfig {
         name: "RWH".to_string(),
         ochre_class: "Resistance Water Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let mut wh = ResistanceWH::new(cfg.clone());
@@ -444,7 +444,7 @@ fn hpwh_cop_at_multiple_ambient_temps() {
         let cfg = EquipmentConfig {
             name: "HPWH".to_string(),
             ochre_class: "Heat Pump Water Heater".to_string(),
-            raw_config: raw,
+            payload: hares_equipment::ConfigPayload::Raw { data: raw },
         };
 
         let mut wh = HeatPumpWH::new(cfg.clone());

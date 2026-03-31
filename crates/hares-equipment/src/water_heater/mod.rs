@@ -365,6 +365,7 @@ mod tests {
         mains_temp_schedule_source, resolve_storage_step_inputs,
     };
     use crate::EquipmentConfig;
+    use crate::config::ConfigPayload;
 
     /// Document our `<=` vs `<` boundary choice: at exactly `setpoint - deadband`,
     /// an inactive heater should turn on (we use `<=`), whereas OCHRE uses `<`.
@@ -397,7 +398,9 @@ mod tests {
         EquipmentConfig {
             name: "WH".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: HashMap::new(),
+            payload: ConfigPayload::Raw {
+                data: HashMap::new(),
+            },
         }
     }
 
@@ -449,7 +452,8 @@ mod tests {
         let jacket_r_m2_k_w = 1.761_101_84_f64; // 10 hr·ft²·°F/BTU
 
         let mut cfg = base_config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("jacket_r_value_m2_k_w".to_string(), jacket_r_m2_k_w.into());
 
         let ua_adjusted = apply_jacket_r_value(ua_base, height_m, diameter_m, &cfg);
@@ -482,7 +486,8 @@ mod tests {
         // Non-positive jacket R-value: no adjustment.
         let mut cfg_zero = base_config();
         cfg_zero
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("jacket_r_value_m2_k_w".to_string(), 0.0.into());
         assert_eq!(
             apply_jacket_r_value(ua_base, height_m, diameter_m, &cfg_zero),
@@ -539,9 +544,11 @@ mod tests {
     #[test]
     fn schedule_sources_parse_supported_aliases() {
         let mut cfg = base_config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("draw_flow_rate_schedule_col".to_string(), 7.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("mains_temp_schedule_col".to_string(), 2.0.into());
 
         assert_eq!(
@@ -563,9 +570,15 @@ mod tests {
     #[test]
     fn zip_invalid_coefficients_produce_error() {
         let mut cfg = base_config();
-        cfg.raw_config.insert("zip_z".to_string(), 0.5.into());
-        cfg.raw_config.insert("zip_i".to_string(), 0.3.into());
-        cfg.raw_config.insert("zip_p".to_string(), 0.3.into()); // sum = 1.1, exceeds tolerance
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_z".to_string(), 0.5.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_i".to_string(), 0.3.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_p".to_string(), 0.3.into()); // sum = 1.1, exceeds tolerance
         let result = WaterHeaterZip::from_config(&cfg);
         assert!(
             result.is_err(),
@@ -581,9 +594,15 @@ mod tests {
     #[test]
     fn zip_valid_coefficients_parse_ok() {
         let mut cfg = base_config();
-        cfg.raw_config.insert("zip_z".to_string(), 0.3.into());
-        cfg.raw_config.insert("zip_i".to_string(), 0.3.into());
-        cfg.raw_config.insert("zip_p".to_string(), 0.4.into()); // sum = 1.0
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_z".to_string(), 0.3.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_i".to_string(), 0.3.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_p".to_string(), 0.4.into()); // sum = 1.0
         let zip = WaterHeaterZip::from_config(&cfg).expect("valid ZIP must parse");
         assert!((zip.z - 0.3).abs() < 1e-12);
         assert!((zip.i - 0.3).abs() < 1e-12);
@@ -594,13 +613,25 @@ mod tests {
     fn zip_invalid_reactive_coefficients_produce_error() {
         let mut cfg = base_config();
         // Valid real-power coefficients
-        cfg.raw_config.insert("zip_z".to_string(), 0.5.into());
-        cfg.raw_config.insert("zip_i".to_string(), 0.3.into());
-        cfg.raw_config.insert("zip_p".to_string(), 0.2.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_z".to_string(), 0.5.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_i".to_string(), 0.3.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_p".to_string(), 0.2.into());
         // Invalid reactive coefficients (sum = 1.1)
-        cfg.raw_config.insert("zip_zq".to_string(), 0.5.into());
-        cfg.raw_config.insert("zip_iq".to_string(), 0.3.into());
-        cfg.raw_config.insert("zip_pq".to_string(), 0.3.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_zq".to_string(), 0.5.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_iq".to_string(), 0.3.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zip_pq".to_string(), 0.3.into());
         let result = WaterHeaterZip::from_config(&cfg);
         assert!(result.is_err(), "ZIP zq+iq+pq=1.1 must be rejected");
     }
@@ -618,6 +649,7 @@ mod dhw_integration_tests {
     };
 
     use super::DHW_DEMAND_LOOP;
+    use crate::config::ConfigPayload;
     use crate::event_load::WetAppliance;
     use crate::water_heater::resistance::ResistanceWH;
     use crate::{Equipment, EquipmentConfig};
@@ -683,7 +715,7 @@ mod dhw_integration_tests {
         EquipmentConfig {
             name: "washer".to_string(),
             ochre_class: "Clothes Washer".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -697,7 +729,7 @@ mod dhw_integration_tests {
         EquipmentConfig {
             name: "WH".to_string(),
             ochre_class: "Resistance Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -918,7 +950,8 @@ mod dhw_integration_tests {
         // WH with schedule draw of 0.05 kg/s.
         let mut wh_cfg = wh_config();
         wh_cfg
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("draw_flow_rate_kg_s".to_string(), 0.05.into());
 
         let mut wh = ResistanceWH::new(wh_cfg.clone());

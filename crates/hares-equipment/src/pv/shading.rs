@@ -340,7 +340,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let model = parse_shading_config(&cfg);
         assert!((model.shading_factor(45.0, 180.0, 6) - 0.85).abs() < 1e-10);
@@ -359,7 +359,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let model = parse_shading_config(&cfg);
         assert!((model.shading_factor(45.0, 180.0, 1) - 0.5).abs() < 1e-10); // Jan: 50% shade
@@ -376,7 +376,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let model = parse_shading_config(&cfg);
         // Sun at east (90°), low altitude (10°) → blocked
@@ -391,7 +391,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let model = parse_shading_config(&cfg);
         assert_eq!(model.shading_factor(45.0, 180.0, 6), 1.0);
@@ -408,7 +408,7 @@ mod tests {
         let cfg = crate::EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let model = parse_shading_config(&cfg);
         // Sun at east (90°), altitude 15° → below 20° horizon → blocked

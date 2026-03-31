@@ -569,6 +569,7 @@ mod tests {
     };
 
     use super::{ElectricFurnace, FURNACE_FAN_CFM_PER_TON, GasFurnace, register_with_registry};
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -613,24 +614,31 @@ mod tests {
         }
     }
 
-    fn config(name: &str, class: &str) -> EquipmentConfig {
+fn config(name: &str, class: &str) -> EquipmentConfig {
         EquipmentConfig {
             name: name.to_string(),
             ochre_class: class.to_string(),
-            raw_config: HashMap::new(),
+            payload: crate::config::ConfigPayload::Raw { data: HashMap::new() },
         }
     }
 
     #[test]
     fn electric_furnace_power_matches_capacity_times_eir() {
         let mut cfg = config("EF", "Electric Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), 8_000.0.into());
-        cfg.raw_config.insert("eir".to_string(), 0.5.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("eir".to_string(), 0.5.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = ElectricFurnace::new(cfg.clone());
@@ -656,17 +664,31 @@ mod tests {
 
     #[test]
     fn gas_furnace_energy_balance_tracks_fuel_plus_fan() {
+        const RATED_CAPACITY_W: f64 = 10_000.0;
+        const FUEL_EFFICIENCY: f64 = 0.8;
+        const FAN_POWER_W: f64 = 400.0;
+        const EXPECTED_FUEL_INPUT_W: f64 = RATED_CAPACITY_W / FUEL_EFFICIENCY;
+        const EXPECTED_FAN_KW: f64 = FAN_POWER_W / 1_000.0;
+        const EXPECTED_SENSIBLE_GAIN_W: f64 = RATED_CAPACITY_W + FAN_POWER_W;
+
         let mut cfg = config("GF", "Gas Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
-            .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config
-            .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config
-            .insert("fan_power_w".to_string(), 400.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("capacity_w".to_string(), RATED_CAPACITY_W.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("fuel_efficiency".to_string(), FUEL_EFFICIENCY.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("fan_power_w".to_string(), FAN_POWER_W.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasFurnace::new(cfg.clone());
@@ -680,21 +702,28 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        assert!((ports.fuel.get(hares_types::FuelType::Gas) - 12_500.0).abs() < 1e-6);
-        assert!((ports.electrical.net_active_kw() - 0.4).abs() < 1e-9);
+        assert!((ports.fuel.get(hares_types::FuelType::Gas) - EXPECTED_FUEL_INPUT_W).abs() < 1e-6);
+        assert!((ports.electrical.net_active_kw() - EXPECTED_FAN_KW).abs() < 1e-9);
+        assert!((ports.thermal[0].sensible_gain_w - EXPECTED_SENSIBLE_GAIN_W).abs() < 1e-6);
     }
 
     #[test]
     fn gas_furnace_init_derives_fan_power_from_w_per_cfm() {
         let mut cfg = config("GF", "Gas Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), (3.0 * W_PER_TON).into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("fan_power_w_per_cfm".to_string(), 0.58.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasFurnace::new(cfg.clone());
@@ -706,16 +735,23 @@ mod tests {
     #[test]
     fn gas_furnace_init_explicit_fan_power_takes_precedence() {
         let mut cfg = config("GF", "Gas Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), (3.0 * W_PER_TON).into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("fan_power_w_per_cfm".to_string(), 0.58.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("fan_power_w".to_string(), 500.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasFurnace::new(cfg.clone());
@@ -727,12 +763,17 @@ mod tests {
     #[test]
     fn gas_furnace_init_without_fan_power_uses_default_w_per_cfm() {
         let mut cfg = config("GF", "Gas Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), (3.0 * W_PER_TON).into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasFurnace::new(cfg.clone());
@@ -748,16 +789,26 @@ mod tests {
     #[test]
     fn gas_furnace_fuel_is_independent_of_duct_dse() {
         let mut cfg = config("GF", "Gas Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config.insert("fan_power_w".to_string(), 0.0.into());
-        cfg.raw_config.insert("duct_dse".to_string(), 0.8.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("fan_power_w".to_string(), 0.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("duct_dse".to_string(), 0.8.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasFurnace::new(cfg.clone());
@@ -786,17 +837,22 @@ mod tests {
     #[test]
     fn supply_air_temp_defaults_and_overrides_are_applied() {
         let mut cfg = config("EF", "Electric Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = ElectricFurnace::new(cfg.clone());
         eq.init(&cfg, &env(20.0)).unwrap();
         assert!((eq.hvac.supply_air_temp_c - 48.9).abs() < 1e-9);
 
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("supply_air_temp_c".to_string(), 51.0.into());
         let mut eq_override = ElectricFurnace::new(cfg.clone());
         eq_override.init(&cfg, &env(20.0)).unwrap();
@@ -806,13 +862,20 @@ mod tests {
     #[test]
     fn furnace_state_round_trip_preserves_mode_and_outputs() {
         let mut cfg = config("EF", "Electric Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), 8_000.0.into());
-        cfg.raw_config.insert("eir".to_string(), 0.5.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("eir".to_string(), 0.5.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = ElectricFurnace::new(cfg.clone());
@@ -842,16 +905,26 @@ mod tests {
         // capacity_w * DSE = delivered capacity.
         // At DSE=0.8, 10000W -> 8000W delivered.
         let mut cfg = config("GF", "Gas Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config.insert("fan_power_w".to_string(), 0.0.into());
-        cfg.raw_config.insert("duct_dse".to_string(), 0.8.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("fan_power_w".to_string(), 0.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("duct_dse".to_string(), 0.8.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasFurnace::new(cfg.clone());
@@ -873,7 +946,9 @@ mod tests {
         );
 
         // DSE=1.0 => no losses
-        cfg.raw_config.insert("duct_dse".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("duct_dse".to_string(), 1.0.into());
         let mut eq_perfect = GasFurnace::new(cfg.clone());
         eq_perfect.init(&cfg, &env).unwrap();
 
@@ -897,15 +972,23 @@ mod tests {
     #[test]
     fn gas_furnace_writes_fuel_input_w_telemetry_key() {
         let mut cfg = config("GF", "Gas Furnace");
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("fuel_efficiency".to_string(), 0.9.into());
-        cfg.raw_config.insert("fan_power_w".to_string(), 0.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("fan_power_w".to_string(), 0.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = GasFurnace::new(cfg.clone());

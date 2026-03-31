@@ -226,9 +226,10 @@ New test: `wet_bulb_from_humidity_ratio(20.0, w_sat * 2.0, 101325.0)` must retur
 
 ## Batch 0 summary verification
 
-After all five Batch 0 items are applied:
+After all six Batch 0 items are applied:
 
 ```bash
+cargo test -p hares-physics -- psychrometrics
 cargo test -p hares-io
 cargo test -p hares-equipment -- water_heater
 cargo test -p hares-core --features dst -- dst_tests
@@ -346,11 +347,13 @@ Envelope oracle MAE should tighten relative to pre-fix baseline.
 
 ## Batch 4 — Equipment Physics Fixes (Phase 2)
 
-**Ref:** FIX-STRATEGY Phase 2 (P2-A through P2-J)
+**Ref:** FIX-STRATEGY Phase 2 (P2-A through P2-J) + SU/DV review series
 **Complexity:** XL
 **Prerequisite:** Batch 3 complete (envelope must be correct before HVAC tuning)
 
 Items within this batch can parallelize by equipment category.
+
+### Original P2 items
 
 | Item | Ref | Kills | Complexity |
 |------|-----|-------|-----------|
@@ -365,14 +368,451 @@ Items within this batch can parallelize by equipment category.
 | P2-I | CW-017, CW-020, DC-006 | Gain fraction defaults: centralize table; fix 5+ wrong values | S |
 | P2-J | CW-009, CW-010 | Mini-split: force 4 speeds; propagate per-stage SHR | S |
 
+### P2-K — HVAC speed selection and interpolation (SU-002)
+
+**Ref:** SU-002 F-001 through F-005
+**Complexity:** L
+**Files:** `crates/hares-equipment/src/hvac/staging.rs`, `crates/hares-equipment/src/hvac/air_conditioner.rs`
+
+Four independent bugs compound to make multi-speed and variable-speed HVAC behaviour
+incorrect at every operating point.
+
+| Sub-item | File:Line | Defect | Fix |
+|----------|-----------|--------|-----|
+| K-1 (CRITICAL) | `staging.rs:339` | `capacity_fractions` picks the longer Vec regardless of active mode; heat pump with unequal heating/cooling stages picks wrong normalization | Pass `ThermostatMode` (or the correct capacities slice) into `select_multi_speed`; make `capacity_fractions` a free function taking `&[f64]` |
+| K-2 (HIGH) | `air_conditioner.rs:811–816` | Multi-speed biquadratic correction evaluates stage 0 for all intermediate speeds | Evaluate biquadratic at both `speed_index` and `speed_index+1`, then linear-blend correction ratios by `speed_frac` |
+| K-3 (HIGH) | `staging.rs:91–101` | `TwoSpeedAlternating` hardcodes `speed_frac=1.0` and uses raw `load_fraction` as PLR without normalising to stage capacity | Mirror `TwoSpeedSetpoint`'s per-stage PLR normalisation |
+| K-4 (HIGH) | `air_conditioner.rs:559–568` | `VariableSpeedIdeal` maps any non-zero `speed_frac` to `duty_cycle=1.0` — partial delivery at fine timesteps is broken | Set `duty_cycle = selection.speed_frac` |
+
+**Verify:**
+```
+cargo test -p hares-equipment -- hvac
+```
+New tests: `TwoSpeedAlternating` sub-unity load → PLR is stage-normalised;
+`VariableSpeedIdeal` at `load_fraction=0.5` → `duty_cycle=0.5`; heat pump with
+unequal-stage count → correct vector selected per mode.
+
+---
+
+### P2-L — Fan shaft heat DB correction before SHR calculation (SU-001 F-1)
+
+**Ref:** SU-001 F-1
+**Complexity:** M
+**File:** `crates/hares-equipment/src/hvac/air_conditioner.rs:781–877`
+
+Fan shaft heat ΔT is added to `zone.wet_bulb_c` directly for the biquadratic, but
+`calculate_shr` receives the uncorrected `zone.temperature_c`. Two compounding errors:
+
+1. Dry-bulb passed to `calculate_shr` is too low — ADP and SHR are biased.
+2. Adding ΔT to wet-bulb without psychrometric recalculation is physically wrong;
+   the correct procedure is `DB_corrected = DB + ΔT`, then re-derive WB from
+   `(DB_corrected, W_in, P)`.
+
+**Change:**
+```rust
+let coil_entering_db_c = zone.temperature_c + fan_shaft_heat_correction_c;
+let coil_entering_wb_c = if fan_shaft_heat_correction_c.abs() > f64::EPSILON {
+    wet_bulb_from_humidity_ratio(coil_entering_db_c, zone.humidity_ratio,
+                                 env.weather.pressure_kpa * 1000.0)
+} else {
+    zone.wet_bulb_c
+};
+// pass coil_entering_db_c to calculate_shr (not zone.temperature_c)
+```
+
+**Verify:**
+```
+cargo test -p hares-equipment -- hvac_parity
+```
+New test: at AHRI rated conditions with a non-zero fan shaft correction, assert that
+SHR changes relative to zero-correction baseline; assert `coil_entering_wb_c` is
+derived from the corrected DB, not `zone.wet_bulb_c + ΔT`.
+
+---
+
+### P2-M — Natural ventilation uses wrong ELA coefficients and wrong zone scope (SU-004)
+
+**Ref:** SU-004 F1, F5
+**Complexity:** M
+**Files:**
+- `crates/hares-core/src/dwelling/solver_builder.rs:959` (F1 — wrong coefficients)
+- `crates/hares-envelope/src/thermal_solver/infiltration.rs:130` (F5 — wrong zone scope)
+
+**F1 — Wrong ELA coefficients (HIGH):**
+`attic_ela_coefficients(1.5, bldg_h)` uses `hor_lk_frac=0.75` (ceiling-dominated,
+Walker-Wilson 1998 Table 2). Natural ventilation through windows uses the conditioned
+zone's own infiltration ELA coefficients. Error magnitude can be ~2× depending on
+geometry.
+
+Fix: look up the conditioned zone's ELA `stack_coeff` and `wind_coeff` from the
+already-computed infiltration config and use them for `NaturalVentilationConfig`.
+Do not call `attic_ela_coefficients` for this purpose.
+
+**F5 — Applied to all zones, not indoor-only (MEDIUM):**
+`apply_infiltration_and_ventilation()` iterates all zones. OCHRE (`Envelope.py:603`)
+explicitly restricts nat-vent to the Indoor zone. For multi-zone buildings, nat-vent
+is applied to attic zones using conditioned-zone parameters — physically incorrect.
+
+Fix: gate the nat-vent call on `zone.id == config.indoor_zone_id`.
+
+**Verify:**
+```
+cargo test -p hares-envelope
+cargo test -p hares-core -- freefloat_oracle
+```
+New test: two-zone solver with conditioned + attic — assert nat-vent flow is zero for
+the attic zone.
+
+---
+
+### P2-N — Tariff billing: tiered block rates never applied; net-metering minimum charge applied to wrong base (SU-005)
+
+**Ref:** SU-005 H1, H2
+**Complexity:** M
+**File:** `crates/hares-tariff/src/billing.rs`, `crates/hares-tariff/src/evaluator.rs`
+
+**H1 — Tiered block rates never applied (HIGH):**
+`billing.rs:175` accumulates energy cost using only the flat TOU `import_price`.
+`tier_multiplier` at `evaluator.rs:268` is a point-in-time rate lookup that is never
+called from the billing path. The URDB parser correctly builds `TieredBlock` entries
+which are then silently ignored. US residential tariffs with inclining blocks (PG&E
+E-1, E-TOU-C baseline, etc.) will always compute too-low energy bills.
+
+Fix: at billing period close in `BillingState::step()`, recompute the tiered energy
+charge by walking the `TieredBlock` with the final `cumulative_import_kwh` for the
+period. Rename `tier_multiplier` to `tier_rate_at` to clarify its limited role.
+
+**H2 — Minimum charge applied after export credit (HIGH):**
+`billing.rs:301–305` applies the floor to `(energy + demand + fixed) - export_credit`.
+Regulatory majority (CA CPUC NEM 3.0 and most state tariffs) apply the minimum to
+metered charges before netting export:
+
+```rust
+let metered = energy_charge_usd + demand_charge_usd + fixed_charge_usd;
+let floored = minimum_charge.map_or(metered, |min| metered.max(min));
+let net_bill_usd = floored - export_credit_usd;
+```
+
+Add a `minimum_charge_excludes_export: bool` field to `ElectricTariff` (default
+`true`) to control the convention explicitly.
+
+**Verify:**
+```
+cargo test -p hares-tariff
+```
+New tests: (a) full billing period crossing a tier boundary — assert blended cost
+matches hand-computed reference; (b) net-exporting customer with minimum charge —
+assert correct bill under both `minimum_charge_excludes_export` conventions.
+
+---
+
+### P2-O — Water heater TMV dead code and pre-step outlet temperature snapshot (SU-009)
+
+**Ref:** SU-009 F1, F2
+**Complexity:** M
+**Files:**
+- `crates/hares-equipment/src/water_heater/resistance.rs:506`
+- `crates/hares-equipment/src/water_heater/gas.rs:455`
+- `crates/hares-equipment/src/water_heater/tank.rs:320, 330, 361, 400`
+
+**F1 — `step_tempered` never called (MEDIUM):**
+`ResistanceWH`, `GasWH`, and `HeatPumpWH` all call `tank.step()` only;
+`step_tempered` is never invoked. The TMV volume-reduction ratio
+(`(tank_temp - mains_temp) / (fixture_setpoint - mains_temp)`) is never applied,
+overestimating volumetric draw by ~1.46× for a 52°C tank / 40.6°C fixture setpoint /
+15°C mains. `unmet_load_w` is always zero for ResistanceWH and GasWH.
+
+Fix: each storage WH `step()` must call `step_tempered()` with a `TemperedDrawConfig`
+when the draw rate is non-zero. `HeatPumpWH` similarly needs to use `step_tempered()`
+once F1 is resolved (see `heat_pump_wh.rs:809–811`).
+
+**F2 — Outlet temperature uses pre-step top-node snapshot (MEDIUM):**
+`DrawResult.outlet_temp_c` is overwritten at `tank.rs:330` and `tank.rs:400` with the
+pre-step top-node temperature. OCHRE computes a volume-weighted average across the
+drawn segment (`Water.py:54–61`). For draws exceeding the top-node volume (~1.6 L per
+node in a 12-node 19 L tank), HARES reports too-warm outlet and misreports
+unmet-load.
+
+Fix: in `apply_draw`, after the volume-displacement shift, compute the
+volume-weighted average of the drawn nodes and return it as `outlet_temp_c`.
+
+**Verify:**
+```
+cargo test -p hares-equipment -- water_heater
+```
+New tests: (a) TMV volume reduction — 55°C tank / 15°C mains / 40.6°C fixture target
+→ draw volume reduced by 0.64×; (b) outlet blending — 12-node tank with 55°C upper /
+20°C lower, draw > top-node volume → `outlet_temp_c` is blended, not pre-draw top;
+(c) ResistanceWH uses `step_tempered` — assert `unmet_load_w > 0` when draw temp
+below fixture setpoint.
+
+---
+
+### P2-P — Checkpoint: missing state fields cause post-restore physics drift (SU-003)
+
+**Ref:** SU-003 F1, F2
+**Complexity:** M
+**Files:**
+- `crates/hares-equipment/src/hvac/air_conditioner.rs:1048` and state struct at `:107`
+- `crates/hares-equipment/src/hvac/heat_pump/heater.rs:1098` and state struct at `:136`
+- `crates/hares-equipment/src/hvac/ideal_hvac.rs:496` and state struct
+- `crates/hares-equipment/src/hvac/hvac_core.rs:197`
+
+**F1 — `thermostat.hysteresis_c` not checkpointed (DEFECT):**
+`apply_control_unchecked` for `ThermalSetpoint` mutates `hvac.thermostat.hysteresis_c`
+(AC, HP heater) and `thermostat.hysteresis_c` (IdealHvac). None of the corresponding
+state structs save this field. After restore the thermostat reverts to init-configured
+deadband, permanently altering mode-switching thresholds for all simulations that use
+DR setpoint control.
+
+Fix: add `thermostat_hysteresis_c: f64` to `AirConditionerState`, `HeaterState`, and
+`IdealHvacState`; save and restore the field.
+
+**F2 — `time_at_current_speed_s` not checkpointed (DEFECT):**
+`HvacEquipment.time_at_current_speed_s` accumulates each step and gates speed changes
+against `min_time_per_speed_s` (default 300 s). After restore the field resets to 0,
+immediately allowing a speed-stage change even if the unit had been locked for 299 s.
+
+Fix: add `time_at_current_speed_s: f64` to `AirConditionerState` and `HeaterState`;
+save and restore.
+
+**Verify:**
+```
+cargo test -p hares-equipment -- checkpoint
+```
+New deterministic tests for each DEFECT: apply a control signal that mutates the
+missing field; `save_state` + `load_state`; assert restored value matches saved;
+run one step and assert mode/stage behavior matches pre-checkpoint baseline.
+
+---
+
+### P2-Q — Biquadratic input bounds and PLF clamps not wired from CSV to runtime (DV-003)
+
+**Ref:** DV-003 F3, F4
+**Complexity:** M
+**Files:**
+- `crates/hares-io/src/hpxml/resolve_hvac.rs:922–928`
+- `crates/hares-io/src/defaults.rs:54–61, 498+`
+- `crates/hares-equipment/src/hvac/hvac_core.rs:390–400, 755–763`
+
+**F3 — Input bounds dropped in resolver (HIGH):**
+`select_primary_curve_pair` at `resolve_hvac.rs:927–928` returns only coefficients;
+`cap_t.x1_bounds` / `.x2_bounds` / `eir_t.x1_bounds` / `.x2_bounds` are discarded.
+The equipment falls back to `DEFAULT_BIQUADRATIC_X1_BOUNDS=(-100, 100)` /
+`DEFAULT_BIQUADRATIC_X2_BOUNDS=(-100, 100)`. OCHRE cooling equipment uses
+`min_Twb=13.88, max_Twb=23.88, min_Tdb=18.33, max_Tdb=51.66`. At extreme conditions
+(very dry air, heat waves) HARES extrapolates where OCHRE clamps, potentially
+producing negative capacity or negative COP.
+
+Fix: return bounds alongside coefficients from `select_primary_curve_pair`; write
+`biquadratic_x1_min`, `biquadratic_x1_max`, `biquadratic_x2_min`, `biquadratic_x2_max`
+into the equipment config at the call site.
+
+Also fix the MSHP missing-row default: `load_hvac_csv_file`'s `get_row()` must default
+missing `min_Twb`/`min_Tdb` rows to `-100.0` and `max_Twb`/`max_Tdb` rows to `100.0`
+(not `0.0`).
+
+**F4 — `min_ff`/`max_ff`/`min_plf`/`max_plf` never parsed (MEDIUM):**
+`HvacCurveVariant` has no fields for these. The hardcoded PLF floor of 0.7
+(`hvac_core.rs:1625`) over-clamps MSHP at low part-load (OCHRE `min_plf=0.2195`
+for MSHP Single_1). Flow-fraction clamping is absent entirely.
+
+Fix: add `ff_bounds: (f64, f64)` and `plf_bounds: (f64, f64)` to `HvacCurveVariant`;
+parse from CSV; propagate through resolver; apply in `evaluate_biquadratic_with_flow`.
+
+**Verify:**
+```
+cargo test -p hares-io -- hpxml_parity
+cargo test -p hares-equipment -- hvac
+```
+New tests: (a) load AC HPXML fixture → assert `hvac.biquadratic_x1_bounds == (13.88,
+23.88)` after resolver; (b) MSHP PLF floor matches CSV `min_plf`, not 0.7; (c)
+`evaluate_biquadratic_with_flow` with `ff < min_ff` clamps to `min_ff`.
+
+---
+
+### P2-R — Battery pack topology hardcoded 350 V target; default resistance 49× too high (DV-004)
+
+**Ref:** DV-004 F-002, F-003
+**Complexity:** M
+**File:** `crates/hares-equipment/src/battery/mod.rs:87–91, 664–676`
+
+**F-002 — Pack topology hardcodes 350 V target (HIGH):**
+`n_series = round(350.0 / v_cell)` at `mod.rs:664`. OCHRE derives `n_series` from
+an `initial_voltage` config key (default 50.4 V). Passing OCHRE-style `ah_cell=70,
+v_cell=3.6` to HARES produces `n_series=97` vs OCHRE's `n_series=14` — completely
+different pack resistance and ohmic losses. Any adapter that passes OCHRE-compatible
+`ah_cell`/`v_cell` parameters gets silently wrong round-trip efficiency.
+
+Fix: replace the hardcoded `350.0` with an `initial_voltage` config key (default
+350.0 for modern packs); expose it in `BatterySpec::to_config()` and in Python
+`py_equipment.rs`.
+
+**F-003 — Default pack resistance 49× too high (HIGH):**
+`DEFAULT_N_SERIES=96, DEFAULT_N_PARALLEL=1, DEFAULT_CELL_RESISTANCE_OHM=0.005 Ω` →
+pack resistance = 0.480 Ω. OCHRE equivalent (14S, 2.83P, 0.002 Ω/cell) = 0.0099 Ω.
+At 5 kW / 352 V, HARES ohmic loss = 96.8 W vs OCHRE ~2 W. The efficiency model
+overstates losses for every catalog product that does not explicitly set topology.
+Catalog products in `catalog.rs` do not write `n_series`/`n_parallel`/
+`cell_resistance_ohm` and all inherit these defaults.
+
+Fix: for each catalog product in `catalog.rs`, derive and write explicit `n_series`,
+`n_parallel`, and `cell_resistance_ohm` values consistent with the product's rated
+voltage and documented RTE. Add a validation test: at rated power, ohmic efficiency
+must be within ±2% of `spec.round_trip_efficiency`.
+
+**Verify:**
+```
+cargo test -p hares-equipment -- battery
+```
+New tests: (a) `ah_cell=70, v_cell=3.6, initial_voltage=50.4` → `n_series=14 ± 1`;
+(b) each catalog product → computed RTE at rated power within ±2% of spec value.
+
+---
+
+### P2-S — Envelope LUT minimal clamping doesn't clear filters (DV-005 F3)
+
+**Ref:** DV-005 F3
+**Complexity:** S
+**File:** `crates/hares-io/src/envelope_lut.rs:192–194`
+
+When `r_val >= 17.6` SI (100 IP), HARES clamps to 88.0 but retains any
+construction/finish/insulation filters. OCHRE clears all filters before the Minimal
+lookup. For a wall with `construction_type=Some("WoodStud")` and high R-value, the
+`Minimal` row (empty construction type) is excluded after WoodStud filtering, causing
+a wrong assembly selection.
+
+**Change:**
+```rust
+if r_val >= 17.6 {
+    filtered = candidates.iter().collect();  // clear all type filters
+    r_val = 88.0;
+}
+```
+
+**Verify:**
+```
+cargo test -p hares-io -- envelope_lut
+```
+New test: `lut.lookup("Exterior Wall", Some("WoodStud"), None, None, Some(20.0))`
+must match the `Minimal` variant, not a WoodStud variant.
+
+---
+
 **Batch 4 final verification:**
 ```bash
 cargo test -p hares-equipment
+cargo test -p hares-tariff
 cargo test -p hares-core -- conditioned_oracle
 uv run pytest tests/python/test_ochre_parity.py
 ```
 Per-equipment energy balance: electrical_in = thermal_out + losses within ε.
 At-rated-conditions biquadratic = 1.0 within ε.
+
+---
+
+## Batch 4.5 — Hot-Path Allocation Fixes
+
+**Ref:** SU-007
+**Complexity:** M (total; items parallelize)
+**Prerequisite:** Batch 4 complete (do not introduce new allocations while fixing physics)
+
+Five genuine violations of the `feedback_hot_loop_minimal.md` policy. Each can be
+implemented independently and verified in isolation.
+
+---
+
+### HP-1 — `check_invariants` three `Vec::new()` + N `format!` per step
+**Ref:** SU-007 Hotspot 1
+**Severity:** HIGH (fires every step in debug builds and all CI runs)
+**File:** `crates/hares-core/src/dwelling/mod.rs:2378–2468`
+
+Three fresh Vecs (`conditioned_temps`, `unconditioned_temps`, `tank_temps_c`,
+`infiltration_latent_by_zone`) allocated from scratch every timestep under
+`cfg(any(debug_assertions, feature = "check_invariants"))`. Additionally,
+`format!("tank_node_{i}_c")` fires N times per step (N ≈ 12 for HPWH), allocating a
+new `String` per call solely for a HashMap lookup.
+
+**Fix:** Move the four Vecs to pre-allocated scratch fields on `Dwelling` (cleared and
+refilled each step). Replace the `format!` key with a pre-built `Vec<String>` of node
+keys sized at init from the water heater descriptor's node count.
+
+---
+
+### HP-2 — `StepResult::zone_temperatures_c` double-clone every step
+**Ref:** SU-007 Hotspot 2
+**Severity:** HIGH (two `Vec<(ZoneId, f64)>` clones per step)
+**File:** `crates/hares-core/src/dwelling/mod.rs:2131, 2152`
+
+`zone_temp_scratch` is cloned once to build `StepResult` (line 2131), then the entire
+`StepResult` is cloned again to push into `simulation_results.steps` (line 2152). For
+an 8760-step annual simulation with 3 zones this is ~17,520 small Vec allocations for
+temperatures alone.
+
+**Fix:** Either eliminate `simulation_results.steps` entirely (fleet runner already
+accumulates externally) or construct `StepResult` once and move it into
+`simulation_results.steps`, returning only a reference or index to the caller. The
+secondary clone at line 2152 also doubles allocation cost for every other `StepResult`
+field; eliminating it is the highest-leverage single change.
+
+---
+
+### HP-3 — `equipment_telemetry` fill: `HashMap::clear()` makes fast path unreachable
+**Ref:** SU-007 Hotspot 3
+**Severity:** MEDIUM (N `String` key + N `Telemetry` clone per step when actors active)
+**File:** `crates/hares-core/src/environment.rs:561`, `crates/hares-core/src/dwelling/mod.rs:1830–1841`
+
+`EnvironmentManager::update_in_place` calls `state.equipment_telemetry.clear()` before
+the fill loop. `HashMap::clear()` drops all owned `String` keys. On the next step every
+entry is re-inserted via `desc.name.clone()`, making the `clone_from` fast path at
+`mod.rs:1826` unreachable every step.
+
+**Fix:** Remove the `state.equipment_telemetry.clear()` call. The equipment set is
+fixed; stale keys cannot accumulate. `clone_from` then handles all updates in-place
+with no allocations. If a clean-slate guarantee is required, clear only on
+`add_equipment` / `remove_equipment`.
+
+---
+
+### HP-4 — Solver `DomainUpdate` returns: four `Vec` allocations per step
+**Ref:** SU-007 Hotspot 4
+**Severity:** MEDIUM (four fresh `Vec`-bearing `DomainUpdate` structs per step)
+**File:** `crates/hares-core/src/dwelling/mod.rs:2032–2084`, `crates/hares-types/src/domain_solver.rs:15`
+
+Each `resolve()` call constructs a new `DomainUpdate` with a freshly allocated
+`zone_temperatures_c` Vec. `upsert_domain` drops the old Vec and takes ownership of
+the new one; no capacity recovery occurs (unlike the swap-based pattern already used
+for schedule/mains payloads at `environment.rs:507–528`).
+
+**Fix:** Extend the swap pattern to solver domains: have `upsert_domain` return the
+replaced `DomainUpdate` so its inner Vecs can be handed back to solvers as scratch
+buffers. Alternatively, change `DomainSolver::resolve` signature to accept
+`&mut DomainUpdate` to fill in-place.
+
+---
+
+### HP-5 — `per_actor_timing` `to_string()` per actor per step under `actor_profiling`
+**Ref:** SU-007 Hotspot 5a
+**Severity:** LOW (profiling feature only)
+**File:** `crates/hares-core/src/dwelling/mod.rs:1859–1860`
+
+`actor.name().to_string()` allocates a `String` per actor per step when the
+`actor_profiling` feature is enabled. For a 3-actor dwelling at 5-minute steps over a
+year: 105,120 String allocations solely for actor names.
+
+**Fix:** Pre-allocate actor name strings into a `Vec<String>` on `Dwelling` at init;
+`per_actor_timing` stores `(usize, StdDuration)` and resolves the name from the
+pre-built slice at reporting time only.
+
+---
+
+**Batch 4.5 verification:**
+```bash
+cargo test --workspace
+cargo test --workspace --features check_invariants
+```
+HP-1 through HP-4 must reduce the allocation count in `check_invariants`-enabled
+builds to zero per step for the affected paths. No test regressions.
 
 ---
 
@@ -439,5 +879,214 @@ Batch 0 (critical input fixes)
                                         │
                                     Batch 4 (equipment physics)
                                         │
+                                    Batch 4.5 (hot-path allocations)
+                                        │
                                     Batch 5 (HPXML, output, Python API)
 ```
+
+---
+
+## Appendix: Complete Ticket Resolution Map
+
+144 review tickets: 129 resolved by work order batches, 14 no action needed (correct/acceptable), 1 deferred.
+
+### AR series (10 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| AR-001 | Batch 2 (CO typed telemetry) |
+| AR-002 | Batch 1 (CFG typed config) |
+| AR-003 | Batch 4 P2-E (duct/port accounting) |
+| AR-004 | Batch 1 (typed config eliminates raw f64 boundary issues) |
+| AR-005 | B0-5 (registry name fixes) |
+| AR-006 | Batch 4 P2-A (fan heat) + P2-E (duct) |
+| AR-007 | Batch 2 (CO EndUse) |
+| AR-008 | Batch 5 P5-A (output columns) |
+| AR-009 | B0-1 (DST test compile) + deferred (test audit) |
+| AR-010 | Batch 4 (dispatch layer) |
+
+### TS series (11 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| TS-001 | Batch 3 P1-A (foundation init) |
+| TS-002 | No action (correct/low) |
+| TS-003 | Batch 3 (ground temp wiring) |
+| TS-004 | Batch 3 P1-A (foundation geometry) |
+| TS-005 | No action (correct) |
+| TS-006 | Batch 3 P1-E (infiltration h_limit) |
+| TS-007 | Batch 3 P1-C (b_coeff fix) |
+| TS-008 | Batch 3 P1-D (solar conservation) |
+| TS-009 | Batch 3 P1-C (LWR iteration) |
+| TS-010 | Batch 3 P1-E (humidity latent constant) |
+| TS-011 | Batch 3 P1-B (attic zone) |
+
+### UC series (10 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| UC-001 | No action (correct) |
+| UC-002 | Batch 1 (typed config fixes key mismatch) |
+| UC-003 | Batch 5 P3-A (XML duct leakage path) |
+| UC-004 | Batch 1 (typed config) |
+| UC-005 | B0-2 (AssemblyEffectiveRValue descendant lookup) |
+| UC-006 | No action (correct) |
+| UC-007 | Batch 5 P3-B (exterior shading parsing) |
+| UC-008 | No action (correct) |
+| UC-009 | Batch 5 P3-B (ModuleType case-insensitive) |
+| UC-010 | No action (correct, low-risk passthrough) |
+
+### CW series (22 tickets)
+
+| Tickets | Resolution |
+|---------|------------|
+| CW-001 through CW-022 | Batch 1 (CFG-007→016: typed config migration eliminates all key mismatches) |
+
+### IC series (7 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| IC-001 | Batch 4 P2-A (HvacEquipment auto-select consistency) |
+| IC-002 | Batch 4 P2-A (latent cooling, EndUse) |
+| IC-003 | Batch 4 P2-A (capacity clip, unmet-load column) |
+| IC-004 | Batch 4 P2-F (HPWH backup element capacity key) |
+| IC-005 | Batch 4 P2-F (simultaneous element mode) |
+| IC-006 | Batch 4 P2-F (water heater fixes) |
+| IC-007 | No action (low severity) |
+
+### DT series (12 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| DT-001 | CC-007 local-time policy (UTC paths removed) |
+| DT-002 | CC-007 local-time policy (TimezoneMismatch variant superseded) |
+| DT-003 | CC-007 local-time policy |
+| DT-004 | CC-007 local-time policy |
+| DT-005 | CC-007 local-time policy (DST FixedOffset base path is correct by policy) |
+| DT-006 | CC-007 local-time policy |
+| DT-007 | CC-007 local-time policy (invariant: start_time is local) |
+| DT-008 | CC-007 local-time policy |
+| DT-009 | CC-007 local-time policy (EPW rebase behavior is intended design) |
+| DT-010 | Batch 3 (solar override offset) |
+| DT-011 | B0-1 (DST test compile) + Batch 3 |
+| DT-012 | No action (correct) |
+
+### WO series (4 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| WO-001 | No action (medium, documented by CC-007 policy) |
+| WO-002 | B0-4 (water draw fraction → L/min scaling) |
+| WO-003 | Batch 4 P2-H (capacity curves) + P2-Q (biquadratic bounds) |
+| WO-004 | No action (correct, HARES is better than OCHRE here) |
+
+### DL/FP series (7 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| DL-001 | Batch 4 P2-E (duct loss accounting) |
+| DL-002 | Batch 4 P2-E (DSE=1 in conditioned zone) |
+| DL-003 | Batch 4 P2-E (duct zone contributions) |
+| DL-004 | Batch 4 P2-E (basement airflow ratio) |
+| FP-001 | Batch 4 P2-A (ElectricFurnace fan heat — CRITICAL) |
+| FP-002 | Batch 4 P2-A (IdealHvac fan power) |
+| FP-003 | Batch 4 P2-A (HeatPumpHeater + AirConditioner fan heat) |
+
+### EG series (7 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| EG-001 | Batch 3 P1-A (foundation zone geometry) |
+| EG-002 | Batch 3 P1-B (attic LWR, gable selection) |
+| EG-003 | Batch 3 P1-A (foundation wall height) |
+| EG-004 | Batch 3 P1-A (conditioned floor area) |
+| EG-005 | Batch 3 P1-A (foundation area subtraction) |
+| EG-006 | Batch 3 P1-B (attic volume formula) |
+| EG-007 | No action (correct) |
+
+### DC series (8 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| DC-001 | Batch 4 P2-K (HVAC speed selection) |
+| DC-002 | Batch 4 P2-K (multi-speed interpolation) |
+| DC-003 | Batch 4 P2-F (simultaneous element mode) |
+| DC-004 | Batch 3 P1-E (ventilation double-accounting) |
+| DC-005 | Batch 4 (dehumidifier typed config via CFG-010) |
+| DC-006 | Batch 4 P2-I (gain fraction defaults) |
+| DC-007 | Batch 4 P2-G (EventBasedLoad checkpoint mid-event) |
+| DC-008 | No action (correct, comment fix only) |
+
+### TP series (9 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| TP-001 | Batch 2 (CO typed telemetry) |
+| TP-002 | Batch 2 (CO typed telemetry) |
+| TP-003 | Batch 2 (CO telemetry) + Batch 5 P5-D (checkpoint completeness) |
+| TP-004 | Batch 4 P2-B (battery SOH applied to nominal capacity) |
+| TP-005 | Batch 2 (CO typed telemetry) |
+| TP-006 | Batch 2 (CO typed telemetry) |
+| TP-007 | Batch 2 (CO telemetry) + Batch 5 P5-D (checkpoint completeness) |
+| TP-008 | Batch 5 P5-E (remaining telemetry field coverage) |
+| TP-009 | Batch 4 P2-E (DuctLoss telemetry category) |
+
+### EA series (7 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| EA-001 | Batch 3 P1-E (ventilation double-accounting) |
+| EA-002 | Batch 1 (fuel type via typed config) |
+| EA-003 | No action (correct) |
+| EA-004 | Batch 4 P2-G (gas appliance combustion watts) |
+| EA-005 | Batch 4 (EV fixes) |
+| EA-006 | Batch 4 P2-B (battery: double ohmic loss, BOL transient, SOC/OCV timing) |
+| EA-007 | Batch 4 P2-C (defrost: post-defrost capacity, remove 0.75 factor) |
+
+### PS series (6 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| PS-001 | Batch 5 P5-B (overrides wiring + unknown-key detection + construction path unification) |
+| PS-002 | Batch 5 P5-B (ControlSignal.event_delay() constructor) |
+| PS-003 | Batch 5 P5-B (Actor.decide() typed EnvironmentView) |
+| PS-004 | Batch 5 P5-B (complete _hares.pyi type stubs) |
+| PS-005 | Batch 5 P5-B (equipment construction parameter validation) |
+| PS-006 | Batch 5 P5-B (catch_unwind + typed Python exceptions + Mutex scope) |
+
+### PA series (8 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| PA-001 | Batch 5 P5-C (telemetry timestep_index/current_time) |
+| PA-002 | Batch 5 P5-C (Battery/EV LUT getters) |
+| PA-003 | Batch 5 P5-C (Dwelling.envelope_diagnostics() exposure) |
+| PA-004 | Batch 5 P5-C (Dwelling.profiling_summary() exposure) |
+| PA-005 | No action (correct, Arrow output format already selectable) |
+| PA-006 | Batch 5 P5-C (from_hpxml() kwarg equipment config audit) |
+| PA-007 | Batch 5 P5-C (step() return dict keys vs OCHRE) |
+| PA-008 | Batch 5 P5-C (DispatchRequest EV signal constructors) |
+
+### SU series (9 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| SU-001 | Batch 4 P2-L (fan shaft heat DB correction before SHR calculation) |
+| SU-002 | Batch 4 P2-K (HVAC speed selection and interpolation) |
+| SU-003 | Batch 4 P2-P (checkpoint: thermostat hysteresis and speed timer) |
+| SU-004 | Batch 4 P2-M (natural ventilation ELA coefficients and zone scope) |
+| SU-005 | Batch 4 P2-N (tariff: tiered block rates + minimum charge base) |
+| SU-006 | Batch 5 (fleet aggregation) |
+| SU-007 | Batch 4.5 (hot-path allocation fixes HP-1 through HP-5) |
+| SU-008 | B0-3 (occupancy scale) + B0-4 (water draw scale) |
+| SU-009 | Batch 4 P2-O (TMV dead code + outlet temperature blending) |
+
+### DV series (5 tickets)
+
+| Ticket | Resolution |
+|--------|------------|
+| DV-001 | B0-6 (psychrometric wet-bulb supersaturated input clamp) |
+| DV-002 | No action (HARES correct, OCHRE has the bug) |
+| DV-003 | Batch 4 P2-Q (biquadratic input bounds + PLF clamps wired from CSV) |
+| DV-004 | Batch 4 P2-R (battery pack topology + default resistance) |
+| DV-005 | Batch 4 P2-S (envelope LUT filter clear on minimal clamping) |

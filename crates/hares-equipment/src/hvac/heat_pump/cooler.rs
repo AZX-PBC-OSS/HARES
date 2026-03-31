@@ -169,6 +169,7 @@ mod tests {
     };
 
     use super::{super::super::super::Equipment, super::super::super::EquipmentConfig, HpCooler};
+    use crate::config::ConfigPayload;
 
     fn cooling_env(zone_temp_c: f64, outdoor_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -227,7 +228,7 @@ mod tests {
         EquipmentConfig {
             name: "HP Cooler".to_string(),
             ochre_class: "ASHP Cooler".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -370,7 +371,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "ASHP Cooler".to_string(),
             ochre_class: "ASHP Cooler".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         // Zone at exactly the cooling setpoint (24.4°C).

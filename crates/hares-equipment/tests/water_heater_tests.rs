@@ -86,7 +86,7 @@ fn resistance_config(
     EquipmentConfig {
         name: "RWH".to_string(),
         ochre_class: "Resistance Water Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 
@@ -113,7 +113,7 @@ fn gas_config(
     EquipmentConfig {
         name: "GWH".to_string(),
         ochre_class: "Gas Water Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 
@@ -329,7 +329,7 @@ fn energy_conservation_over_draw_cycle() {
     let cfg = EquipmentConfig {
         name: "RWH".to_string(),
         ochre_class: "Resistance Water Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let mut wh = ResistanceWH::new(cfg.clone());
@@ -465,7 +465,7 @@ fn max_tank_temp_safety_limit() {
     let cfg = EquipmentConfig {
         name: "RWH".to_string(),
         ochre_class: "Resistance Water Heater".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let mut wh = ResistanceWH::new(cfg.clone());
@@ -651,7 +651,7 @@ fn resistance_config_with_ramp(
     ramp_rate_c_per_min: f64,
 ) -> EquipmentConfig {
     let mut cfg = resistance_config(setpoint_c, deadband_c, initial_temp_c, 0.0);
-    cfg.raw_config.insert(
+    cfg.raw_config_mut().unwrap().insert(
         "max_setpoint_ramp_rate_c_per_min".to_string(),
         ramp_rate_c_per_min.into(),
     );

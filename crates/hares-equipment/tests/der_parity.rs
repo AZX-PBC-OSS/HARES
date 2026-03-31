@@ -99,7 +99,7 @@ fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> Equipm
     EquipmentConfig {
         name: "Battery".to_string(),
         ochre_class: "Battery".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 
@@ -348,7 +348,7 @@ fn pv_cell_temperature_noct_model() {
     let cfg = EquipmentConfig {
         name: "PV".to_string(),
         ochre_class: "PV".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let mut env = base_env();
@@ -440,7 +440,7 @@ fn pv_power_temperature_derating() {
         let cfg = EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: hares_equipment::ConfigPayload::Raw { data: raw },
         };
         let mut env = base_env();
         env.weather.outdoor_temp_c = outdoor_temp_c;
@@ -519,7 +519,7 @@ fn generator_fuel_efficiency_at_half_load() {
     let cfg = EquipmentConfig {
         name: "Gen".to_string(),
         ochre_class: "Gas Generator".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let registry = EquipmentRegistry::new();
@@ -595,7 +595,7 @@ fn generator_ramp_rate_is_kw_per_second() {
     let cfg = EquipmentConfig {
         name: "Gen".to_string(),
         ochre_class: "Gas Generator".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let registry = EquipmentRegistry::new();
@@ -651,7 +651,7 @@ fn generator_capacity_min_enforced() {
     let cfg = EquipmentConfig {
         name: "Gen".to_string(),
         ochre_class: "Gas Generator".to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     };
 
     let registry = EquipmentRegistry::new();

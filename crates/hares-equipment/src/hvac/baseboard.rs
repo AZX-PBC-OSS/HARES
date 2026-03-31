@@ -225,6 +225,7 @@ mod tests {
     };
 
     use super::{ElectricBaseboard, register_with_registry};
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -273,20 +274,29 @@ mod tests {
         EquipmentConfig {
             name: "Baseboard".to_string(),
             ochre_class: "Electric Baseboard".to_string(),
-            raw_config: HashMap::new(),
+            payload: crate::config::ConfigPayload::Raw {
+                data: HashMap::new(),
+            },
         }
     }
 
     #[test]
     fn baseboard_forces_dse_to_one_and_writes_direct_zone_heat() {
         let mut cfg = config();
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), 3_000.0.into());
-        cfg.raw_config.insert("duct_dse".to_string(), 0.2.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("duct_dse".to_string(), 0.2.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = ElectricBaseboard::new(cfg.clone());
@@ -307,12 +317,17 @@ mod tests {
     #[test]
     fn state_round_trip_preserves_mode() {
         let mut cfg = config();
-        cfg.raw_config.insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("zone_id".to_string(), 1.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("capacity_w".to_string(), 3_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_setpoint_c".to_string(), 27.0.into());
 
         let mut eq = ElectricBaseboard::new(cfg.clone());

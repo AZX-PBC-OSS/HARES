@@ -809,7 +809,7 @@ mod tests {
         EquipmentConfig {
             name: "Test Dehumidifier".to_string(),
             ochre_class: "Dehumidifier".to_string(),
-            raw_config,
+            payload: crate::config::ConfigPayload::Raw { data: raw_config },
         }
     }
 

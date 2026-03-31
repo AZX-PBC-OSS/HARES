@@ -1141,6 +1141,7 @@ mod tests {
     };
 
     use super::{AirConditioner, RoomAC, register_with_registry};
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(
@@ -1207,7 +1208,7 @@ mod tests {
         EquipmentConfig {
             name: "AC".to_string(),
             ochre_class: "Air Conditioner".to_string(),
-            raw_config,
+            payload: crate::config::ConfigPayload::Raw { data: raw_config },
         }
     }
 
@@ -1239,7 +1240,8 @@ mod tests {
     fn room_ac_forces_single_speed_and_duct_dse_one() {
         let mut cfg = ac_config();
         cfg.ochre_class = "Room AC".to_string();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("speed_control_mode".to_string(), "two_speed".into());
 
         let mut eq = RoomAC::new(cfg.clone());
@@ -1363,7 +1365,9 @@ mod tests {
         // This test exercises SHR coil physics; disable the startup ramp (c_d=0)
         // so it does not obscure the result on the first step.
         let mut cfg = ac_config();
-        cfg.raw_config.insert("startup_cd".to_string(), 0.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("startup_cd".to_string(), 0.0.into());
 
         let mut eq_low = AirConditioner::new(cfg.clone());
         let mut eq_high = AirConditioner::new(cfg.clone());
@@ -1491,7 +1495,8 @@ mod tests {
     fn room_ac_step_produces_cooling() {
         let mut cfg = ac_config();
         cfg.ochre_class = "Room AC".to_string();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("hysteresis_c".to_string(), 0.0.into());
         let mut eq = RoomAC::new(cfg.clone());
         let mut ports = PortSlots {
@@ -1544,16 +1549,19 @@ mod tests {
     fn room_ac_vs_central_different_dse() {
         let mut central_cfg = ac_config();
         central_cfg
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("hysteresis_c".to_string(), 0.0.into());
         central_cfg
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("duct_dse".to_string(), 0.80.into());
 
         let mut room_cfg = ac_config();
         room_cfg.ochre_class = "Room AC".to_string();
         room_cfg
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("hysteresis_c".to_string(), 0.0.into());
 
         let environment = env(28.0, 0.012, 20.0, 35.0);
@@ -1635,18 +1643,24 @@ mod tests {
     #[test]
     fn two_speed_ac_draws_more_power_at_high_load_than_moderate_load() {
         let mut cfg = ac_config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("speed_control_mode".to_string(), "two_speed".into());
         // Zero hysteresis so activation threshold equals setpoint, not setpoint+1.
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("hysteresis_c".to_string(), 0.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_capacity_w_stage_0".to_string(), 4_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_capacity_w_stage_1".to_string(), 8_000.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_eir_stage_0".to_string(), 0.33.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("cooling_eir_stage_1".to_string(), 0.33.into());
 
         // load_fraction = (zone - 24) / 0.5; 24.4 → 0.8 > 0.5 → high stage
@@ -1705,7 +1719,8 @@ mod tests {
     fn part_load_operation_draws_less_power_than_full_load() {
         let mut cfg = ac_config();
         // Zero hysteresis so thermostat activates right at setpoint (24°C).
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("hysteresis_c".to_string(), 0.0.into());
 
         // Full load: load_fraction = (24.6-24)/0.5 = 1.2 → clamped to 1.0
@@ -1843,7 +1858,7 @@ mod dr_tests {
         EquipmentConfig {
             name: "AC".to_string(),
             ochre_class: "Air Conditioner".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -2205,7 +2220,7 @@ mod crankcase_tests {
         EquipmentConfig {
             name: "AC".to_string(),
             ochre_class: "Air Conditioner".to_string(),
-            raw_config,
+            payload: crate::config::ConfigPayload::Raw { data: raw_config },
         }
     }
 
@@ -2268,7 +2283,7 @@ mod crankcase_tests {
         EquipmentConfig {
             name: "AC".to_string(),
             ochre_class: "Air Conditioner".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -2369,7 +2384,7 @@ mod crankcase_tests {
     fn crankcase_capacity_curve_scales_rated_power() {
         let mut cfg = base_config();
         // Curve: effective = rated * (1.0 + 0.1*T + 0.0*T^2); at T=5C: multiplier=1.5
-        cfg.raw_config.insert(
+        cfg.raw_config_mut().unwrap().insert(
             "crankcase_capacity_curve_coeffs".to_string(),
             "[1.0, 0.1, 0.0]".into(),
         );
@@ -2530,7 +2545,7 @@ mod ideal_capacity_tests {
         EquipmentConfig {
             name: "AC".to_string(),
             ochre_class: "Air Conditioner".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 

@@ -862,7 +862,7 @@ mod tests {
         EquipmentConfig {
             name: "PV South".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -928,7 +928,8 @@ mod tests {
     #[test]
     fn temperature_derating_matches_expected_fraction() {
         let mut cfg = config_single();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("system_losses_fraction".to_string(), 0.0.into());
         let mut pv = PV::new(cfg.clone());
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
@@ -974,7 +975,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV Multi".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         let sid0 = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
@@ -1068,7 +1069,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV HPXML".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let pv = PV::new(cfg);
         assert_eq!(pv.arrays.len(), 1);
@@ -1146,7 +1147,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV Wind".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         // Calm day (0.5 m/s)
@@ -1216,7 +1217,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV Clip".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         let env = env_with_surfaces(
@@ -1266,7 +1267,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV Q".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         // At 25°C cell temp, 1000 W/m² → DC = 5 kW, AC = 5 kW (eff=1.0, T_derate at T_ref).
@@ -1321,7 +1322,7 @@ mod tests {
             EquipmentConfig {
                 name: format!("PV {module_type}"),
                 ochre_class: "PV".to_string(),
-                raw_config: raw,
+                payload: crate::config::ConfigPayload::Raw { data: raw },
             }
         };
 
@@ -1382,7 +1383,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV Bad".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         // new() must not panic; the error is deferred.
@@ -1412,7 +1413,8 @@ mod tests {
         // Zero losses config.
         let mut cfg_zero = config_single();
         cfg_zero
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("system_losses_fraction".to_string(), 0.0.into());
         let env = env_with_surfaces_full(surfaces.clone(), 25.0, 1.0);
         let mut pv_zero = PV::new(cfg_zero.clone());
@@ -1447,7 +1449,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
@@ -1476,7 +1478,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
@@ -1547,7 +1549,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
@@ -1816,7 +1818,8 @@ mod tests {
         }];
 
         let mut cfg = config_single();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("system_losses_fraction".to_string(), 0.05.into());
         let env = env_with_surfaces_full(surfaces.clone(), 25.0, 1.0);
         let mut pv = PV::new(cfg.clone());
@@ -1829,7 +1832,8 @@ mod tests {
 
         // Compare with 20% losses.
         let mut cfg2 = config_single();
-        cfg2.raw_config
+        cfg2.raw_config_mut()
+            .unwrap()
             .insert("system_losses_fraction".to_string(), 0.20.into());
         let mut pv2 = PV::new(cfg2.clone());
         pv2.init(&cfg2, &env).unwrap();
@@ -1864,7 +1868,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV Setpoint".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         // Use wind=1.0 and T_amb=25°C so T_cell = 25 + 1000*(47-20)/800 = 58.75°C.
@@ -1971,7 +1975,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV Shading".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         let mut pv = PV::new(cfg.clone());
@@ -2017,7 +2021,7 @@ mod tests {
         let cfg = EquipmentConfig {
             name: "PV 5kW/4kW inverter".to_string(),
             ochre_class: "PV".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         // Cold ambient (-10 °C) keeps cell temp well below 25 °C, giving positive

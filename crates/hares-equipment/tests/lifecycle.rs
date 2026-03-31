@@ -177,7 +177,7 @@ fn config_with_floats(name: &str, class: &str, entries: &[(&str, f64)]) -> Equip
     EquipmentConfig {
         name: name.to_string(),
         ochre_class: class.to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 
@@ -197,7 +197,7 @@ fn config_mixed(
     EquipmentConfig {
         name: name.to_string(),
         ochre_class: class.to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 

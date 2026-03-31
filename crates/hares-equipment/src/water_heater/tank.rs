@@ -179,7 +179,7 @@ impl StratifiedTank {
             element_nodes: config.element_nodes,
             ua_per_node,
             last_skin_loss_w: 0.0,
-            telemetry_keys: (0..config.n_nodes).map(|i| tk::tank_node_key(i)).collect(),
+            telemetry_keys: (0..config.n_nodes).map(tk::tank_node_key).collect(),
             scratch_old_temps: vec![0.0; config.n_nodes],
             scratch_delta_energy: vec![0.0; config.n_nodes],
             scratch_new_temps: vec![0.0; config.n_nodes],

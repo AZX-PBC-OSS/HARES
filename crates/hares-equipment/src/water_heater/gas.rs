@@ -819,6 +819,7 @@ mod tests {
     };
 
     use super::GasWH;
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -873,7 +874,7 @@ mod tests {
         EquipmentConfig {
             name: "GWH".to_string(),
             ochre_class: "Gas Water Heater".to_string(),
-            raw_config: raw,
+            payload: ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -916,9 +917,11 @@ mod tests {
     #[test]
     fn skin_loss_is_positive_when_tank_is_hot() {
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 60.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("skin_loss_fraction".to_string(), 0.5.into());
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(20.0)).unwrap();
@@ -936,9 +939,11 @@ mod tests {
     #[test]
     fn max_tank_temp_safety_forces_off_for_gas_wh() {
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 40.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 35.0.into());
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -958,9 +963,11 @@ mod tests {
     #[test]
     fn max_tank_temp_safety_triggers_on_stratified_hot_bottom() {
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 30.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 55.0.into());
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -985,9 +992,11 @@ mod tests {
     #[test]
     fn safety_cutout_does_not_fire_when_all_nodes_below_limit() {
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 30.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 55.0.into());
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -1073,9 +1082,11 @@ mod tests {
     fn gas_wh_dr_moderate_reduces_setpoint() {
         let mut cfg = config();
         // Tank at 50°C: within the 2°C deadband below setpoint 52°C → normally heating.
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 50.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("max_tank_temp_c".to_string(), 300.0.into());
         let e = env(21.0);
 
@@ -1150,7 +1161,7 @@ mod tests {
     #[test]
     fn pilot_defaults_to_five_w_without_pilot_or_ignition_type() {
         let mut cfg = config();
-        cfg.raw_config.remove("pilot_power_w");
+        cfg.raw_config_mut().unwrap().remove("pilot_power_w");
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
         assert_eq!(
@@ -1163,8 +1174,9 @@ mod tests {
     #[test]
     fn pilot_defaults_to_zero_for_electronic_ignition() {
         let mut cfg = config();
-        cfg.raw_config.remove("pilot_power_w");
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().remove("pilot_power_w");
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("ignition_type".to_string(), "electronic".into());
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -1177,9 +1189,11 @@ mod tests {
     #[test]
     fn explicit_pilot_power_overrides_ignition_type() {
         let mut cfg = config();
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("ignition_type".to_string(), "electronic".into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("pilot_power_w".to_string(), 7.0.into());
         let mut eq = GasWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -1192,11 +1206,15 @@ mod tests {
     #[test]
     fn standby_step_at_setpoint_still_consumes_gas_from_pilot() {
         let mut cfg = config();
-        cfg.raw_config.remove("pilot_power_w");
-        cfg.raw_config.insert("setpoint_c".to_string(), 52.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut().unwrap().remove("pilot_power_w");
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("setpoint_c".to_string(), 52.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("initial_tank_temp_c".to_string(), 52.0.into());
-        cfg.raw_config
+        cfg.raw_config_mut()
+            .unwrap()
             .insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
         let e = env(21.0);
 

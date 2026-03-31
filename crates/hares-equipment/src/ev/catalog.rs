@@ -1,6 +1,7 @@
 //! EV vehicle catalog with factory methods for real-world vehicles,
 //! plus behavioral archetype presets for EvDriverActor configuration.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use hares_types::DayFilter;
@@ -126,9 +127,12 @@ impl VehicleSpec {
         let mut cfg = EquipmentConfig {
             name: self.label.to_string(),
             ochre_class: "EV".to_string(),
-            raw_config: Default::default(),
+            payload: crate::ConfigPayload::Raw {
+                data: HashMap::new(),
+            },
         };
-        let rc = &mut cfg.raw_config;
+        #[allow(deprecated)]
+        let rc = cfg.raw_config_mut().unwrap();
         rc.insert(
             KEY_BATTERY_CAPACITY_KWH.into(),
             ConfigValue::Float(self.capacity_kwh),

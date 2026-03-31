@@ -220,11 +220,13 @@ impl EventBasedLoad {
     pub fn new(config: EquipmentConfig) -> Self {
         let equipment_name = config.name.clone();
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(parse_u32(&config.raw_config, KEY_EQUIPMENT_ID).unwrap_or_default()),
+            id: EquipmentId(
+                parse_u32(config.raw_data_or_empty(), KEY_EQUIPMENT_ID).unwrap_or_default(),
+            ),
             name: equipment_name,
             end_use: EndUse::OTHER,
             equipment_type: Cow::Borrowed("EventBasedLoad"),
-            zone: parse_zone_id(&config.raw_config),
+            zone: parse_zone_id(config.raw_data_or_empty()),
             fuel: FuelType::Electric,
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::LOAD_FRACTION
@@ -653,11 +655,13 @@ impl WetAppliance {
     pub fn new(config: EquipmentConfig, name: &'static str) -> Self {
         let equipment_name = config.name.clone();
         let descriptor = EquipmentDescriptor {
-            id: EquipmentId(parse_u32(&config.raw_config, KEY_EQUIPMENT_ID).unwrap_or_default()),
+            id: EquipmentId(
+                parse_u32(config.raw_data_or_empty(), KEY_EQUIPMENT_ID).unwrap_or_default(),
+            ),
             name: equipment_name,
             end_use: EndUse::OTHER,
             equipment_type: Cow::Borrowed(name),
-            zone: parse_zone_id(&config.raw_config),
+            zone: parse_zone_id(config.raw_data_or_empty()),
             fuel: FuelType::Electric,
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::LOAD_FRACTION
@@ -1179,9 +1183,8 @@ pub fn map_ochre_pdf_to_cycle_schedule(
 fn parse_event_schedule_sources(
     config: &EquipmentConfig,
 ) -> crate::Result<(ScheduleSource, ScheduleSource)> {
-    let window_source = if let Some(col_idx) =
-        parse_usize(&config.raw_config, KEY_EVENT_WINDOW_SCHEDULE_COL)?
-    {
+    let raw = config.raw_data_or_empty();
+    let window_source = if let Some(col_idx) = parse_usize(raw, KEY_EVENT_WINDOW_SCHEDULE_COL)? {
         ScheduleSource::ColumnRef {
             col_idx,
             boundary: BoundaryPolicy::Wrap,
@@ -1220,7 +1223,8 @@ fn parse_event_schedule_sources(
 fn parse_event_probability_source(
     config: &EquipmentConfig,
 ) -> crate::Result<Option<ScheduleSource>> {
-    if let Some(col_idx) = parse_usize(&config.raw_config, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? {
+    let raw = config.raw_data_or_empty();
+    if let Some(col_idx) = parse_usize(raw, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? {
         return Ok(Some(ScheduleSource::ColumnRef {
             col_idx,
             boundary: BoundaryPolicy::Wrap,
@@ -1238,9 +1242,7 @@ fn parse_event_probability_source(
                 .unwrap_or(1.0),
         ))),
         "column" => {
-            let Some(col_idx) =
-                parse_usize(&config.raw_config, KEY_EVENT_PROBABILITY_SCHEDULE_COL)?
-            else {
+            let Some(col_idx) = parse_usize(raw, KEY_EVENT_PROBABILITY_SCHEDULE_COL)? else {
                 return Err(HaresError::Equipment(format!(
                     "missing required key `{KEY_EVENT_PROBABILITY_SCHEDULE_COL}` for column event probability schedule"
                 )));
@@ -1257,7 +1259,8 @@ fn parse_event_probability_source(
 }
 
 fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>> {
-    let count = parse_usize(&config.raw_config, KEY_PHASE_LEN)?.unwrap_or(0);
+    let raw = config.raw_data_or_empty();
+    let count = parse_usize(raw, KEY_PHASE_LEN)?.unwrap_or(0);
     if count == 0 {
         return Ok(vec![CyclePhase {
             power_kw: parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0),
@@ -1495,6 +1498,7 @@ mod tests {
     use super::{
         EventBasedLoad, WetAppliance, map_ochre_pdf_to_cycle_schedule, register_with_registry,
     };
+    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn base_env() -> EnvironmentState {
@@ -1558,7 +1562,7 @@ mod tests {
         EquipmentConfig {
             name: name.to_string(),
             ochre_class: class_name.to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -1580,7 +1584,7 @@ mod tests {
         EquipmentConfig {
             name: name.to_string(),
             ochre_class: class_name.to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         }
     }
 
@@ -1886,7 +1890,7 @@ mod tests {
         let config = EquipmentConfig {
             name: "wrap_test".to_string(),
             ochre_class: "EventBasedLoad".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         let mut env = base_env();
@@ -1911,7 +1915,7 @@ mod tests {
         let config = EquipmentConfig {
             name: "empty".to_string(),
             ochre_class: "EventBasedLoad".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
         let mut eq = EventBasedLoad::new(config.clone());
         let err = eq.init(&config, &env);
@@ -2102,7 +2106,7 @@ mod tests {
         let config = EquipmentConfig {
             name: "setpoint_test".to_string(),
             ochre_class: "EventBasedLoad".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         let mut env = base_env();
@@ -2191,13 +2195,17 @@ mod tests {
 
     fn gas_event_config(name: &str) -> EquipmentConfig {
         let mut cfg = event_config(name, "Cooking Range");
-        cfg.raw_config.insert("fuel_type".to_string(), "Gas".into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("fuel_type".to_string(), "Gas".into());
         cfg
     }
 
     fn gas_wet_config(name: &str) -> EquipmentConfig {
         let mut cfg = wet_config(name, "Clothes Dryer", 1.0);
-        cfg.raw_config.insert("fuel_type".to_string(), "Gas".into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("fuel_type".to_string(), "Gas".into());
         cfg
     }
 
@@ -2308,7 +2316,8 @@ mod tests {
     fn event_config_with_month_multiplier(month: usize, multiplier: f64) -> EquipmentConfig {
         let mut config = event_config("TestLoad", "EventBasedLoad");
         config
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert(format!("month_multiplier_{month}"), multiplier.into());
         config
     }
@@ -2380,7 +2389,8 @@ mod tests {
     fn wet_appliance_month_multiplier_zero_suppresses_output() {
         let mut config = wet_config("Washer", "Clothes Washer", 1.0);
         config
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("month_multiplier_2".to_string(), 0.0.into());
         let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
         let mut env = base_env();
@@ -2450,7 +2460,8 @@ mod tests {
         // time advance_phase_timer runs; 3600 s keeps it Active).
         let mut config = event_config("delay_active_test", "EventBasedLoad");
         config
-            .raw_config
+            .raw_config_mut()
+            .unwrap()
             .insert("active_duration_s".to_string(), 3600.0.into());
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();
@@ -2728,7 +2739,7 @@ mod tests {
         let config = crate::EquipmentConfig {
             name: "replay_test".to_string(),
             ochre_class: "EventBasedLoad".to_string(),
-            raw_config: raw,
+            payload: crate::config::ConfigPayload::Raw { data: raw },
         };
 
         let mut env = base_env();

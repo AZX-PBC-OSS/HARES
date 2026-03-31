@@ -572,6 +572,10 @@ pub struct Dwelling {
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
+    /// Scale factor applied to the raw occupancy schedule fraction (0–1) to
+    /// convert it to a person count.  Equals `number_of_occupants` from the
+    /// Occupancy equipment spec (defaults to 1.0 when unspecified).
+    occupancy_scale: f64,
     #[expect(
         dead_code,
         reason = "reserved for thermal balance invariant (see RV-014)"

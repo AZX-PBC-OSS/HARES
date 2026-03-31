@@ -83,7 +83,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
     EquipmentConfig {
         name: name.to_string(),
         ochre_class: class.to_string(),
-        raw_config: raw,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
     }
 }
 
@@ -97,20 +97,25 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
 //
 // Setup: capacity=15000 W, AFUE=0.80, fan=400 W, zone=19°C, setpoint=21°C.
 // Expect: element runs at full duty → fuel_input=18750 W, fan=0.4 kW,
-//         thermal_output=15000 W.
+//         thermal_output=15400 W (gross heat + fan heat, DSE=1.0).
 // ---------------------------------------------------------------------------
 #[test]
 fn gas_furnace_energy_balance() {
+    const RATED_CAPACITY_W: f64 = 15_000.0;
+    const FUEL_EFFICIENCY: f64 = 0.80;
+    const FAN_POWER_W: f64 = 400.0;
+    const EXPECTED_FAN_KW: f64 = FAN_POWER_W / 1_000.0;
+
     let cfg = cfg(
         "furnace",
         "Gas Furnace",
         &[
             ("zone_id", 1.0),
-            ("capacity_w", 15_000.0),
+            ("capacity_w", RATED_CAPACITY_W),
             ("heating_setpoint_c", 21.0),
             ("cooling_setpoint_c", 27.0),
-            ("fuel_efficiency", 0.80),
-            ("fan_power_w", 400.0),
+            ("fuel_efficiency", FUEL_EFFICIENCY),
+            ("fan_power_w", FAN_POWER_W),
         ],
     );
     let registry = EquipmentRegistry::new();
@@ -127,7 +132,7 @@ fn gas_furnace_energy_balance() {
     let thermal_w = ports.thermal[0].sensible_gain_w;
 
     // AFUE relationship: fuel = capacity / AFUE = 15000 / 0.80 = 18750 W
-    let expected_fuel_w = 15_000.0 / 0.80;
+    let expected_fuel_w = RATED_CAPACITY_W / FUEL_EFFICIENCY;
     assert!(
         (fuel_w - expected_fuel_w).abs() < expected_fuel_w * 0.01,
         "fuel_input must equal capacity/AFUE={expected_fuel_w:.0} W ±1%; got {fuel_w:.1} W"
@@ -135,27 +140,32 @@ fn gas_furnace_energy_balance() {
 
     // Fan is electric-only: 400 W = 0.4 kW
     assert!(
-        (fan_kw - 0.4).abs() < 0.01,
-        "fan electric must be 0.4 kW ±10 W; got {fan_kw:.4} kW"
+        (fan_kw - EXPECTED_FAN_KW).abs() < 0.01,
+        "fan electric must be {EXPECTED_FAN_KW:.1} kW ±10 W; got {fan_kw:.4} kW"
     );
 
-    // Thermal output equals rated capacity (no duct losses configured)
+    // Thermal output includes gross heating + fan heat (no duct losses configured).
+    let expected_thermal_w = RATED_CAPACITY_W + FAN_POWER_W;
     assert!(
-        (thermal_w - 15_000.0).abs() < 150.0,
-        "thermal_output must be ~15000 W; got {thermal_w:.1} W"
+        (thermal_w - expected_thermal_w).abs() < 150.0,
+        "thermal_output must be ~{expected_thermal_w:.0} W; got {thermal_w:.1} W"
     );
 
-    // COP for a gas furnace in OCHRE is reported as thermal / fuel.
-    // HARES telemetry reports this via fuel_input_w and thermal_output_w.
+    // Effective COP here is delivered thermal (gross + fan heat) / fuel.
     let tel = eq.telemetry();
     let fuel_input_w = tel.get("fuel_input_w").expect("fuel_input_w must exist");
     let thermal_output_w = tel
         .get("thermal_output_w")
         .expect("thermal_output_w must exist");
-    let gas_cop = thermal_output_w / fuel_input_w;
     assert!(
-        (gas_cop - 0.80).abs() < 0.01,
-        "furnace COP = AFUE = 0.80; got {gas_cop:.4} \
+        (thermal_output_w - thermal_w).abs() < 1.0,
+        "telemetry thermal_output_w ({thermal_output_w:.1} W) must match thermal port ({thermal_w:.1} W)"
+    );
+    let gas_cop = thermal_output_w / fuel_input_w;
+    let expected_effective_cop = expected_thermal_w / expected_fuel_w;
+    assert!(
+        (gas_cop - expected_effective_cop).abs() < 0.01,
+        "effective furnace COP must be ~{expected_effective_cop:.4}; got {gas_cop:.4} \
          (thermal={thermal_output_w:.1} W, fuel={fuel_input_w:.1} W)"
     );
 }

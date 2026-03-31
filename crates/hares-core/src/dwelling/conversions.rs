@@ -336,7 +336,7 @@ pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> Equi
     EquipmentConfig {
         name: spec.name.clone(),
         ochre_class: spec.name.clone(),
-        raw_config,
+        payload: hares_equipment::ConfigPayload::Raw { data: raw_config },
     }
 }
 
