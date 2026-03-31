@@ -17,7 +17,9 @@ use hares_equipment::{
     BatteryConfig, DuctConfig, EquipmentConfig, EquipmentRegistry, EquipmentTypedConfig, EvConfig,
     GeneratorConfig, PvConfig, VentilationConfig,
 };
-use hares_types::{EnvironmentState, FuelType, GridState, WeatherState, ZoneId, ZoneState};
+use hares_types::{
+    EnvironmentState, FuelType, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+};
 
 fn sample_duct_config() -> DuctConfig {
     DuctConfig {
@@ -313,8 +315,8 @@ fn sample_battery_config() -> BatteryConfig {
         inverter_efficiency: Some(0.92),
         charge_efficiency: Some(0.95),
         discharge_efficiency: Some(0.94),
-        bms_mode: Some("auto".to_string()),
-        grid_export_rule: Some("limit".to_string()),
+        bms_mode: None,
+        grid_export_rule: None,
     }
 }
 
@@ -345,10 +347,10 @@ fn sample_ev_config() -> EvConfig {
         chemistry: Some("NMC".to_string()),
         fuel_economy_kwh_per_mi: Some(0.325),
         ready_soc: Some(0.8),
-        charging_strategy: Some("default".to_string()),
-        plug_in_policy: Some("always".to_string()),
+        charging_strategy: None,
+        plug_in_policy: None,
         power_limit_kw: Some(11.5),
-        initial_connection_state: Some("plugged_in".to_string()),
+        initial_connection_state: None,
     }
 }
 
@@ -376,7 +378,7 @@ fn sample_generator_config() -> GeneratorConfig {
         rated_power_kw: 10.0,
         eta_electric: Some(0.32),
         eta_thermal: Some(0.45),
-        efficiency_type: Some("constant".to_string()),
+        efficiency_type: None,
         delta_kw_per_s: Some(1.0),
         capacity_min_kw: Some(2.0),
         grid_import_limit_kw: Some(0.0),
@@ -426,7 +428,13 @@ fn sample_env() -> EnvironmentState {
             ground_temp_c: 12.0,
             sky_temp_c: 8.0,
             pressure_kpa: 101.325,
-            solar_irradiance: vec![],
+            solar_irradiance: vec![SurfaceIrradiance {
+                surface_id: 300_018_000,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 0.0,
+                reflected_w_m2: 0.0,
+                angle_of_incidence_rad: 0.0,
+            }],
             ghi_w_m2: 0.0,
             dni_w_m2: 0.0,
             dhi_w_m2: 0.0,
@@ -472,11 +480,10 @@ where
     assert!(serde_json::from_value::<T>(value).is_err());
 }
 
-fn smoke_case<T>(registry: &EquipmentRegistry, cfg: T, env: &EnvironmentState)
+fn smoke_case<T>(registry: &EquipmentRegistry, name: &str, cfg: T, env: &EnvironmentState)
 where
     T: EquipmentTypedConfig,
 {
-    let name = T::equipment_type_name();
     let ec = EquipmentConfig::from_typed(name.to_string(), name.to_string(), cfg);
     let mut equipment = registry.create(name, ec.clone()).unwrap();
     equipment.init(&ec, env).unwrap();
@@ -616,27 +623,43 @@ fn all_equipment_types_init_without_error() {
     let registry = EquipmentRegistry::new();
     let env = sample_env();
 
-    smoke_case(&registry, sample_gas_furnace_config(), &env);
-    smoke_case(&registry, sample_electric_furnace_config(), &env);
-    smoke_case(&registry, sample_gas_boiler_config(), &env);
-    smoke_case(&registry, sample_electric_boiler_config(), &env);
-    smoke_case(&registry, sample_electric_baseboard_config(), &env);
-    smoke_case(&registry, sample_ideal_hvac_config(), &env);
-    smoke_case(&registry, sample_central_ac_config(), &env);
-    smoke_case(&registry, sample_room_ac_config(), &env);
-    smoke_case(&registry, sample_heat_pump_config(), &env);
-    smoke_case(&registry, sample_dehumidifier_config(), &env);
-    smoke_case(&registry, sample_gas_water_heater_config(), &env);
+    smoke_case(&registry, "Gas Furnace", sample_gas_furnace_config(), &env);
+    smoke_case(&registry, "Electric Furnace", sample_electric_furnace_config(), &env);
+    smoke_case(&registry, "Gas Boiler", sample_gas_boiler_config(), &env);
+    smoke_case(&registry, "Electric Boiler", sample_electric_boiler_config(), &env);
     smoke_case(
         &registry,
+        "Electric Baseboard",
+        sample_electric_baseboard_config(),
+        &env,
+    );
+    smoke_case(&registry, "Ideal HVAC", sample_ideal_hvac_config(), &env);
+    smoke_case(&registry, "Air Conditioner", sample_central_ac_config(), &env);
+    smoke_case(&registry, "Room AC", sample_room_ac_config(), &env);
+    smoke_case(&registry, "ASHP Heater", sample_heat_pump_config(), &env);
+    smoke_case(&registry, "Dehumidifier", sample_dehumidifier_config(), &env);
+    smoke_case(&registry, "Gas Water Heater", sample_gas_water_heater_config(), &env);
+    smoke_case(
+        &registry,
+        "Electric Resistance Water Heater",
         sample_electric_resistance_water_heater_config(),
         &env,
     );
-    smoke_case(&registry, sample_tankless_water_heater_config(), &env);
-    smoke_case(&registry, sample_heat_pump_water_heater_config(), &env);
-    smoke_case(&registry, sample_battery_config(), &env);
-    smoke_case(&registry, sample_ev_config(), &env);
-    smoke_case(&registry, sample_pv_config(), &env);
-    smoke_case(&registry, sample_generator_config(), &env);
-    smoke_case(&registry, sample_ventilation_config(), &env);
+    smoke_case(
+        &registry,
+        "Gas Tankless Water Heater",
+        sample_tankless_water_heater_config(),
+        &env,
+    );
+    smoke_case(
+        &registry,
+        "Heat Pump Water Heater",
+        sample_heat_pump_water_heater_config(),
+        &env,
+    );
+    smoke_case(&registry, "Battery", sample_battery_config(), &env);
+    smoke_case(&registry, "EV", sample_ev_config(), &env);
+    smoke_case(&registry, "PV", sample_pv_config(), &env);
+    smoke_case(&registry, "Gas Generator", sample_generator_config(), &env);
+    smoke_case(&registry, "HRV", sample_ventilation_config(), &env);
 }

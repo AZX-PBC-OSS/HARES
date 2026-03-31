@@ -150,9 +150,15 @@ impl PV {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let id = parse_u32_from_f64(config.get_f64(KEY_EQUIPMENT_ID)).unwrap_or(0);
-        let (arrays, init_error) = match parse_arrays_from_config(&config) {
-            Ok(a) => (a, None),
-            Err(e) => (vec![], Some(e)),
+        let (arrays, init_error) = if config.is_typed() {
+            // Typed PV configs rebuild their arrays in `init_typed()`, so the
+            // constructor must not force the raw-array parser on typed payloads.
+            (vec![], None)
+        } else {
+            match parse_arrays_from_config(&config) {
+                Ok(a) => (a, None),
+                Err(e) => (vec![], Some(e)),
+            }
         };
         let shading_model = shading::parse_shading_config(&config);
 

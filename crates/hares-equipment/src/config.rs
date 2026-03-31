@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn raw_accessors_work_on_raw_payload() {
         let mut data = HashMap::new();
-        data.insert("num".to_string(), ConfigValue::Float(3.14));
+        data.insert("num".to_string(), ConfigValue::Float(3.125));
         data.insert("text".to_string(), ConfigValue::Text("hello".to_string()));
         data.insert("flag".to_string(), ConfigValue::Bool(true));
         data.insert(
@@ -417,7 +417,7 @@ mod tests {
             payload: crate::config::ConfigPayload::Raw { data },
         };
 
-        assert_eq!(ec.get_f64("num"), Some(3.14));
+        assert_eq!(ec.get_f64("num"), Some(3.125));
         assert_eq!(ec.get_str("text"), Some("hello"));
         assert_eq!(ec.get_bool("flag"), Some(true));
         assert_eq!(ec.get_f64_array("arr"), Some(&[1.0, 2.0, 3.0][..]));
