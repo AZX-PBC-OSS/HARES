@@ -1333,15 +1333,12 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
     };
-
-    use crate::config::ConfigValue;
 
     use super::*;
     use crate::{Equipment, EquipmentConfig};

@@ -620,6 +620,7 @@ fn try_build_central_ac_config(
     duct_params: &DuctDseParams,
 ) -> Option<EquipmentConfig> {
     let seer = seer_from_params(params)?;
+    let eir = 3.412_141_633 / seer.max(1e-6);
     let capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64)?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
@@ -639,7 +640,7 @@ fn try_build_central_ac_config(
         equipment_id: None,
         zone_id: None,
         capacity_w,
-        seer,
+        eir,
         shr,
         number_of_speeds: n_speeds,
         stage_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
@@ -681,6 +682,7 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     // because the test conditions and cycling correction factors differ; treating
     // SEER as EER would overestimate efficiency by ~10–15%.
     let eer = eer_from_params(params)?;
+    let eir = 3.412_141_633 / eer.max(1e-6);
 
     let curve_bounds = extract_curve_bounds(params);
     let airflow_m3_s_per_w =
@@ -689,7 +691,7 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
         equipment_id: None,
         zone_id: None,
         capacity_w,
-        eer,
+        eir,
         cooling_setpoint_c: None,
         heating_setpoint_c: None,
         hysteresis_c: None,
@@ -752,8 +754,8 @@ fn try_build_heat_pump_heater_config(
     } else {
         n_speeds_from_params(params)
     };
-    let hspf = hspf_from_params(params);
-    let seer = seer_from_params(params);
+    let heating_eir = hspf_from_params(params).map(|hspf| 3.412_141_633 / hspf.max(1e-6));
+    let cooling_eir = seer_from_params(params).map(|seer| 3.412_141_633 / seer.max(1e-6));
     let shr = params.get("shr").and_then(Value::as_f64);
     let fan_power_w = fan_power_from_params(params);
     let backup_capacity_w = params.get("backup_capacity_w").and_then(Value::as_f64);
@@ -792,16 +794,15 @@ fn try_build_heat_pump_heater_config(
         equipment_id: None,
         zone_id: None,
         heating_capacity_w,
-        hspf,
+        heating_eir,
         stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
         stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
         backup_fuel,
         backup_capacity_w,
         backup_eir,
-        heating_efficiency: None,
         fraction_heating_load_served,
         cooling_capacity_w,
-        seer,
+        cooling_eir,
         stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
         stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
         stage_shrs: extract_stage_values(params, "shr"),
@@ -851,8 +852,8 @@ fn try_build_heat_pump_cooler_config(
     } else {
         n_speeds_from_params(params)
     };
-    let hspf = hspf_from_params(params);
-    let seer = seer_from_params(params);
+    let heating_eir = hspf_from_params(params).map(|hspf| 3.412_141_633 / hspf.max(1e-6));
+    let cooling_eir = seer_from_params(params).map(|seer| 3.412_141_633 / seer.max(1e-6));
     let shr = params.get("shr").and_then(Value::as_f64);
     let fan_power_w = fan_power_from_params(params);
     let backup_capacity_w = params.get("backup_capacity_w").and_then(Value::as_f64);
@@ -891,7 +892,7 @@ fn try_build_heat_pump_cooler_config(
         equipment_id: None,
         zone_id: None,
         heating_capacity_w,
-        hspf,
+        heating_eir,
         stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
         stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
         backup_fuel,
@@ -899,7 +900,7 @@ fn try_build_heat_pump_cooler_config(
         backup_eir,
         fraction_heating_load_served,
         cooling_capacity_w,
-        seer,
+        cooling_eir,
         stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
         stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
         stage_shrs: extract_stage_values(params, "shr"),

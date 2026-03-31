@@ -423,18 +423,18 @@ impl HeatPumpWH {
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
 
         self.shr = c.shr.unwrap_or(DEFAULT_SHR);
-        self.lost_heat_fraction =
-            c.lost_heat_fraction
-                .unwrap_or(match c.zone_type.as_deref() {
-                    Some("conditioned") => 0.25,
-                    _ => DEFAULT_LOST_HEAT_FRACTION,
-                });
-        self.wall_heat_fraction =
-            c.wall_heat_fraction
-                .unwrap_or(match c.zone_type.as_deref() {
-                    Some("conditioned") => 0.5,
-                    _ => 0.0,
-                });
+        self.lost_heat_fraction = c
+            .lost_heat_fraction
+            .unwrap_or(match c.zone_type.as_deref() {
+                Some("conditioned") => 0.25,
+                _ => DEFAULT_LOST_HEAT_FRACTION,
+            });
+        self.wall_heat_fraction = c
+            .wall_heat_fraction
+            .unwrap_or(match c.zone_type.as_deref() {
+                Some("conditioned") => 0.5,
+                _ => 0.0,
+            });
         self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
         self.parasitic_power_w = c.parasitic_power_w.unwrap_or(DEFAULT_PARASITIC_POWER_W);
         self.backup_efficiency = c.backup_efficiency.unwrap_or(DEFAULT_BACKUP_EFFICIENCY);

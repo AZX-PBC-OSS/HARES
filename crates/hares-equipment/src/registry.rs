@@ -93,6 +93,12 @@ pub struct EquipmentRegistry {
     errors: HashMap<String, &'static str>,
 }
 
+impl Default for EquipmentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EquipmentRegistry {
     #[must_use]
     pub fn new() -> Self {

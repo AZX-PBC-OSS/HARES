@@ -56,31 +56,6 @@ pub fn loop_id_from_config(config: &EquipmentConfig, keys: &[&str]) -> Option<Lo
     Some(LoopId(raw as u16))
 }
 
-pub fn load_stage_values(
-    config: &EquipmentConfig,
-    scalar_keys: &[&str],
-    stage_prefix: &str,
-    default_value: f64,
-) -> Vec<f64> {
-    let mut stages = Vec::new();
-    let mut idx = 0usize;
-    loop {
-        let key = format!("{stage_prefix}_{idx}");
-        let Some(value) = config.get_f64(&key) else {
-            break;
-        };
-        stages.push(value.max(0.0));
-        idx += 1;
-    }
-
-    if stages.is_empty() {
-        let scalar = first_f64(config, scalar_keys).unwrap_or(default_value);
-        vec![scalar.max(0.0)]
-    } else {
-        stages
-    }
-}
-
 pub fn lookup_zone(
     env: &EnvironmentState,
     zone_id: ZoneId,
@@ -152,7 +127,6 @@ pub fn operating_mode_code(mode: OperatingMode) -> f64 {
 /// or preserved from an ideal-capacity solver for coarse timesteps (>=300 s) or
 /// when `use_ideal_capacity` is configured. All other modes set duty to 0.0 and
 /// return `Off`.
-#[allow(dead_code)]
 pub fn update_heating_control(hvac: &mut HvacEquipment, env: &EnvironmentState) -> OperatingMode {
     match hvac.update_mode(env) {
         Ok(super::thermostat::ThermostatMode::Heating) => {

@@ -18,7 +18,7 @@ pub struct CentralAirConditionerConfig {
     /// Required; resolver errors if absent.
     pub capacity_w: f64,
     /// Required; resolver errors if absent.
-    pub seer: f64,
+    pub eir: f64,
     /// Sensible heat ratio at rated conditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shr: Option<f64>,
@@ -115,10 +115,10 @@ impl CentralAirConditionerConfig {
                 self.capacity_w
             )));
         }
-        if !self.seer.is_finite() || self.seer <= 0.0 {
+        if !self.eir.is_finite() || self.eir <= 0.0 {
             return Err(HaresError::Equipment(format!(
-                "CentralAirConditionerConfig: seer must be finite and positive, got {}",
-                self.seer
+                "CentralAirConditionerConfig: eir must be finite and positive, got {}",
+                self.eir
             )));
         }
         for (name, value) in [
@@ -175,7 +175,7 @@ pub struct RoomAcConfig {
     /// Required; resolver errors if absent.
     pub capacity_w: f64,
     /// Required; resolver errors if absent.
-    pub eer: f64,
+    pub eir: f64,
     /// Cooling setpoint used by the HVAC thermostat FSM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooling_setpoint_c: Option<f64>,
@@ -239,10 +239,10 @@ impl RoomAcConfig {
                 self.capacity_w
             )));
         }
-        if !self.eer.is_finite() || self.eer <= 0.0 {
+        if !self.eir.is_finite() || self.eir <= 0.0 {
             return Err(HaresError::Equipment(format!(
-                "RoomAcConfig: eer must be finite and positive, got {}",
-                self.eer
+                "RoomAcConfig: eir must be finite and positive, got {}",
+                self.eir
             )));
         }
         for (name, value) in [
@@ -365,7 +365,7 @@ mod tests {
             equipment_id: Some(1),
             zone_id: Some(1),
             capacity_w: 12_000.0,
-            seer: 16.0,
+            eir: 16.0,
             shr: Some(0.75),
             number_of_speeds: 2,
             stage_capacities_w: Some(vec![6_000.0, 12_000.0]),
@@ -400,7 +400,7 @@ mod tests {
         let ec = typed_config(cfg.clone());
         assert!(ec.is_typed());
         let recovered: CentralAirConditionerConfig = ec.typed().unwrap();
-        assert!((recovered.seer - cfg.seer).abs() < 1e-12);
+        assert!((recovered.eir - cfg.eir).abs() < 1e-12);
         assert!((recovered.capacity_w - cfg.capacity_w).abs() < 1e-12);
         assert_eq!(recovered.stage_shrs, cfg.stage_shrs);
         assert_eq!(recovered.biquadratic_x1_min, cfg.biquadratic_x1_min);
@@ -412,7 +412,7 @@ mod tests {
     fn central_ac_rejects_unknown_fields() {
         let data = serde_json::json!({
             "capacity_w": 12000.0,
-            "seer": 16.0,
+            "eir": 16.0,
             "unknown_key": true,
         });
         let ec = EquipmentConfig::with_payload(
@@ -434,7 +434,7 @@ mod tests {
             equipment_id: None,
             zone_id: None,
             capacity_w: 0.0,
-            seer: 16.0,
+            eir: 16.0,
             shr: None,
             number_of_speeds: 1,
             stage_capacities_w: None,
@@ -471,7 +471,7 @@ mod tests {
             equipment_id: None,
             zone_id: None,
             capacity_w: 12_000.0,
-            seer: -1.0,
+            eir: -1.0,
             shr: None,
             number_of_speeds: 1,
             stage_capacities_w: None,
@@ -508,7 +508,7 @@ mod tests {
             equipment_id: Some(2),
             zone_id: Some(1),
             capacity_w: 3_500.0,
-            eer: 10.0,
+            eir: 10.0,
             cooling_setpoint_c: None,
             heating_setpoint_c: None,
             hysteresis_c: None,
@@ -527,7 +527,7 @@ mod tests {
         };
         let ec = typed_config(cfg.clone());
         let recovered: RoomAcConfig = ec.typed().unwrap();
-        assert!((recovered.eer - cfg.eer).abs() < 1e-12);
+        assert!((recovered.eir - cfg.eir).abs() < 1e-12);
         assert!((recovered.capacity_w - cfg.capacity_w).abs() < 1e-12);
         assert_eq!(recovered.biquadratic_x1_min, cfg.biquadratic_x1_min);
     }
@@ -538,7 +538,7 @@ mod tests {
             equipment_id: None,
             zone_id: None,
             capacity_w: 3_500.0,
-            eer: 0.0,
+            eir: 0.0,
             cooling_setpoint_c: None,
             heating_setpoint_c: None,
             hysteresis_c: None,
@@ -564,7 +564,7 @@ mod tests {
             equipment_id: None,
             zone_id: None,
             capacity_w: f64::NAN,
-            eer: 10.0,
+            eir: 10.0,
             cooling_setpoint_c: None,
             heating_setpoint_c: None,
             hysteresis_c: None,

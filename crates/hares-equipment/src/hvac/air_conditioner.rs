@@ -34,7 +34,6 @@ const MIN_LOAD_FRACTION_DEADBAND_C: f64 = 0.5;
 const DEFAULT_CENTRAL_AC_CAPACITY_W: f64 = 12_000.0;
 const DEFAULT_ROOM_AC_CAPACITY_W: f64 = 3_500.0;
 const DEFAULT_EIR_FALLBACK: f64 = 0.35;
-const BTU_PER_HR_PER_W: f64 = 3.412_141_633;
 
 pub struct AirConditioner {
     pub(super) core: CoolingCore,
@@ -423,12 +422,7 @@ impl CoolingCore {
 
             self.hvac.cooling_capacities_w = vec![cfg.capacity_w];
 
-            let eir = if cfg.eer > 0.0 {
-                BTU_PER_HR_PER_W / cfg.eer
-            } else {
-                DEFAULT_EIR_FALLBACK
-            };
-            self.hvac.eir_by_stage = vec![eir];
+            self.hvac.eir_by_stage = vec![cfg.eir];
 
             self.hvac.airflow_m3_s_per_w = cfg
                 .airflow_m3_s_per_w
@@ -445,11 +439,7 @@ impl CoolingCore {
                 vec![cfg.capacity_w]
             };
 
-            let default_eir = if cfg.seer > 0.0 {
-                BTU_PER_HR_PER_W / cfg.seer
-            } else {
-                DEFAULT_EIR_FALLBACK
-            };
+            let default_eir = cfg.eir;
 
             self.hvac.eir_by_stage = if let Some(stages) = &cfg.stage_eirs {
                 stages.clone()
@@ -1192,7 +1182,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 #[cfg(test)]
-fn typed_ac_test_config(seer: f64) -> EquipmentConfig {
+fn typed_ac_test_config(eir: f64) -> EquipmentConfig {
     EquipmentConfig::from_typed(
         "AC".to_string(),
         "Air Conditioner".to_string(),
@@ -1200,7 +1190,7 @@ fn typed_ac_test_config(seer: f64) -> EquipmentConfig {
             equipment_id: None,
             zone_id: Some(1),
             capacity_w: 8_000.0,
-            seer,
+            eir,
             shr: Some(0.75),
             number_of_speeds: 1,
             stage_capacities_w: None,
@@ -1295,7 +1285,7 @@ mod tests {
     }
 
     fn ac_config() -> EquipmentConfig {
-        super::typed_ac_test_config(3.412_141_633 / 0.33)
+        super::typed_ac_test_config(0.33)
     }
 
     fn room_ac_config() -> EquipmentConfig {
@@ -1306,7 +1296,7 @@ mod tests {
                 equipment_id: None,
                 zone_id: Some(1),
                 capacity_w: 3_500.0,
-                eer: 10.0,
+                eir: 10.0,
                 cooling_setpoint_c: Some(24.0),
                 heating_setpoint_c: Some(18.0),
                 hysteresis_c: Some(1.0),
@@ -1654,27 +1644,27 @@ mod tests {
     }
 
     #[test]
-    fn typed_ac_seer_sets_expected_eir() {
-        let cfg = super::typed_ac_test_config(16.0);
+    fn typed_ac_eir_sets_expected_eir() {
+        let cfg = super::typed_ac_test_config(0.25);
         let mut eq = AirConditioner::new(cfg.clone());
         let environment = env(27.0, 0.010, 19.0, 35.0);
         eq.init(&cfg, &environment).unwrap();
 
-        let expected = super::BTU_PER_HR_PER_W / 16.0;
+        let expected = 0.25;
         let actual = eq.core.hvac.eir_by_stage[0];
         assert!(
             (actual - expected).abs() < 1e-9,
-            "typed seer=16 must produce EIR≈{expected}, got {actual}"
+            "typed eir=0.25 must be preserved, got {actual}"
         );
     }
 
     #[test]
-    fn typed_stage_eir_overrides_seer_conversion_path() {
-        let mut typed = super::typed_ac_test_config(16.0)
+    fn typed_stage_eir_overrides_base_eir() {
+        let mut typed = super::typed_ac_test_config(0.25)
             .typed::<CentralAirConditionerConfig>()
             .expect("typed central AC config");
         // Intentionally contradictory legacy efficiency; SI-native stage EIR must win.
-        typed.seer = 8.0;
+        typed.eir = 0.8;
         typed.stage_eirs = Some(vec![0.30]);
         typed.stage_capacities_w = Some(vec![typed.capacity_w]);
 
@@ -1687,7 +1677,7 @@ mod tests {
         assert_eq!(
             eq.core.hvac.eir_by_stage,
             vec![0.30],
-            "SI stage_eirs must override seer-derived EIR"
+            "SI stage_eirs must override eir-derived EIR"
         );
     }
 
@@ -1974,7 +1964,7 @@ mod dr_tests {
                 equipment_id: None,
                 zone_id: Some(1),
                 capacity_w: 8_000.0,
-                seer: 3.412_141_633 / 0.33,
+                eir: 3.412_141_633 / 0.33,
                 shr: Some(0.75),
                 number_of_speeds: 1,
                 stage_capacities_w: None,
@@ -2371,7 +2361,7 @@ mod crankcase_tests {
                 equipment_id: None,
                 zone_id: Some(1),
                 capacity_w: 8_000.0,
-                seer: 3.412_141_633 / 0.33,
+                eir: 3.412_141_633 / 0.33,
                 shr: Some(0.75),
                 number_of_speeds: 1,
                 stage_capacities_w: None,
@@ -2460,7 +2450,7 @@ mod crankcase_tests {
                 equipment_id: None,
                 zone_id: Some(1),
                 capacity_w: 8_000.0,
-                seer: 3.412_141_633 / 0.33,
+                eir: 3.412_141_633 / 0.33,
                 shr: Some(0.75),
                 number_of_speeds: 1,
                 stage_capacities_w: None,
@@ -2758,7 +2748,7 @@ mod ideal_capacity_tests {
 
     /// AC with setpoint=24°C, hysteresis=1°C, single-speed, flat biquadratic curves.
     fn ac_config() -> EquipmentConfig {
-        super::typed_ac_test_config(3.412_141_633 / 0.33)
+        super::typed_ac_test_config(0.33)
     }
 
     fn make_ports() -> PortSlots {

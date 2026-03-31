@@ -21,9 +21,7 @@ use super::{
     WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
     weighted_average_tank_temp,
 };
-use crate::hvac::helpers::{
-    equipment_id_from_config, loop_id_from_config, zone_id_from_config,
-};
+use crate::hvac::helpers::{equipment_id_from_config, loop_id_from_config, zone_id_from_config};
 
 use super::wh_config::GasWaterHeaterConfig;
 use super::{
@@ -813,7 +811,7 @@ fn ignition_uses_standing_pilot(raw: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -822,7 +820,6 @@ mod tests {
     };
 
     use super::GasWH;
-    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {

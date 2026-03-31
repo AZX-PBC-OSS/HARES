@@ -3,7 +3,9 @@
 /// Provides factory functions for EnvironmentState, EquipmentConfig, and PortSlots
 /// with sensible defaults and chainable setters.
 use chrono::{FixedOffset, TimeZone};
-use hares_types::{EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState};
+use hares_types::{
+    EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+};
 
 /// Build an EnvironmentState with one zone at the given temperature.
 pub fn env_with_zone_temp(zone_temp_c: f64) -> EnvironmentState {

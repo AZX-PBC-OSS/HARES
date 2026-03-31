@@ -598,7 +598,7 @@ mod tests {
         ZoneId, ZoneState, telemetry_keys as tk,
     };
 
-    use super::{ElectricFurnace, GasFurnace, register_with_registry};
+    use super::{ElectricFurnace, GasFurnace};
 
     use crate::hvac::heating_config::{DuctConfig, ElectricFurnaceConfig, GasFurnaceConfig};
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};

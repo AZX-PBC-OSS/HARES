@@ -788,7 +788,7 @@ mod tests {
         DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_POWER_FACTOR, DEFAULT_SYSTEM_LOSSES_FRACTION,
         Equipment, EquipmentConfig, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2,
         NOCT_REFERENCE_TEMP_C, PV, PvArray, PvConfig, cell_temperature_noct_wind,
-        register_with_registry, surface_id_for_orientation,
+        surface_id_for_orientation,
     };
 
     fn env_with_surfaces(

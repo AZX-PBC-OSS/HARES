@@ -415,17 +415,14 @@ impl HeatPumpHeaterCore {
             vec![DEFAULT_HEATING_CAPACITY_W]
         };
 
-        let default_eir = if let Some(efficiency) = cfg.heating_efficiency {
-            efficiency.to_eir().unwrap_or(DEFAULT_HEATING_EIR)
-        } else if let Some(hspf) = cfg.hspf {
-            if hspf > 0.0 {
-                1.0 / (hspf / 3.412_141_633)
-            } else {
-                DEFAULT_HEATING_EIR
-            }
-        } else {
-            DEFAULT_HEATING_EIR
-        };
+        let default_eir = cfg
+            .heating_eir
+            .or_else(|| {
+                cfg.stage_heating_eirs
+                    .as_ref()
+                    .and_then(|eirs| eirs.first().copied())
+            })
+            .unwrap_or(DEFAULT_HEATING_EIR);
         self.hvac.eir_by_stage = if let Some(stages) = &cfg.stage_heating_eirs {
             stages.clone()
         } else {
@@ -1193,10 +1190,7 @@ mod tests {
     };
 
     use super::{ASHPHeater, MinisplitHeater};
-    use crate::{
-        Equipment, EquipmentConfig, HeatPumpHeaterConfig,
-        hvac::heat_pump_config::{HeatingEfficiency, HeatingEfficiencyUnit},
-    };
+    use crate::{Equipment, EquipmentConfig, HeatPumpHeaterConfig};
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
@@ -1246,8 +1240,7 @@ mod tests {
             equipment_id: None,
             zone_id: Some(1),
             heating_capacity_w: Some(8_000.0),
-            hspf: Some(3.412_141_633 / 0.33),
-            heating_efficiency: None,
+            heating_eir: Some(0.33),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
             backup_fuel: None,
@@ -1255,7 +1248,7 @@ mod tests {
             backup_eir: None,
             fraction_heating_load_served: None,
             cooling_capacity_w: None,
-            seer: None,
+            cooling_eir: None,
             stage_cooling_capacities_w: None,
             stage_cooling_eirs: None,
             stage_shrs: None,
@@ -1359,86 +1352,31 @@ mod tests {
     }
 
     #[test]
-    fn hspf_to_eir_conversion() {
+    fn typed_heating_eir_is_used() {
         let cfg = heater_config_with(|typed| {
-            typed.hspf = None;
-            typed.heating_efficiency = Some(HeatingEfficiency {
-                value: 8.5,
-                unit: HeatingEfficiencyUnit::Hspf,
-            });
+            typed.heating_eir = Some(0.401);
         });
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
         let eir = eq.core.hvac.eir_by_stage[0];
         assert!(
             (eir - 0.401).abs() < 0.01,
-            "HSPF=8.5 → EIR≈0.401, got {eir}"
+            "typed heating_eir=0.401 must be used directly, got {eir}"
         );
     }
 
     #[test]
-    fn cop_to_eir_no_conversion() {
+    fn stage_heating_eirs_override_rated_heating_eir() {
         let cfg = heater_config_with(|typed| {
-            typed.hspf = None;
-            typed.heating_efficiency = Some(HeatingEfficiency {
-                value: 3.0,
-                unit: HeatingEfficiencyUnit::Cop,
-            });
+            typed.heating_eir = Some(0.401);
+            typed.stage_heating_eirs = Some(vec![0.25]);
         });
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
-        let eir = eq.core.hvac.eir_by_stage[0];
-        assert!(
-            (eir - 0.333).abs() < 0.01,
-            "COP=3.0 → EIR≈0.333 (no conversion), got {eir}"
-        );
-    }
-
-    #[test]
-    fn eer_to_eir_conversion() {
-        let cfg = heater_config_with(|typed| {
-            typed.hspf = None;
-            typed.heating_efficiency = Some(HeatingEfficiency {
-                value: 12.0,
-                unit: HeatingEfficiencyUnit::Eer,
-            });
-        });
-        let mut eq = ASHPHeater::new(cfg.clone());
-        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
-        let eir = eq.core.hvac.eir_by_stage[0];
-        assert!((eir - 0.284).abs() < 0.01, "EER=12 → EIR≈0.284, got {eir}");
-    }
-
-    #[test]
-    fn seer_to_eir_conversion() {
-        let cfg = heater_config_with(|typed| {
-            typed.hspf = None;
-            typed.heating_efficiency = Some(HeatingEfficiency {
-                value: 14.0,
-                unit: HeatingEfficiencyUnit::Seer,
-            });
-        });
-        let mut eq = ASHPHeater::new(cfg.clone());
-        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
-        let eir = eq.core.hvac.eir_by_stage[0];
-        assert!((eir - 0.244).abs() < 0.01, "SEER=14 → EIR≈0.244, got {eir}");
-    }
-
-    #[test]
-    fn afue_to_eir_no_conversion() {
-        let cfg = heater_config_with(|typed| {
-            typed.hspf = None;
-            typed.heating_efficiency = Some(HeatingEfficiency {
-                value: 95.0,
-                unit: HeatingEfficiencyUnit::Afue,
-            });
-        });
-        let mut eq = ASHPHeater::new(cfg.clone());
-        eq.init(&cfg, &env(18.0, 0.0, 0.003)).unwrap();
-        let eir = eq.core.hvac.eir_by_stage[0];
-        assert!(
-            (eir - 1.0 / 95.0).abs() < 0.001,
-            "AFUE=95 → EIR≈0.01053 (no unit conversion), got {eir}"
+        assert_eq!(
+            eq.core.hvac.eir_by_stage,
+            vec![0.25],
+            "per-stage heating EIRs must override rated heating_eir"
         );
     }
 
@@ -2445,8 +2383,7 @@ mod tests {
         let cfg = HeatPumpHeaterConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
-            hspf: Some(10.0),
-            heating_efficiency: None,
+            heating_eir: Some(1.0 / 3.0),
             is_mini_split: true,
             ..Default::default()
         };
@@ -2543,8 +2480,7 @@ mod ideal_capacity_tests {
                 equipment_id: None,
                 zone_id: Some(1),
                 heating_capacity_w: Some(8_000.0),
-                hspf: Some(3.412_141_633 / 0.33),
-                heating_efficiency: None,
+                heating_eir: Some(0.33),
                 stage_heating_capacities_w: None,
                 stage_heating_eirs: None,
                 backup_fuel: None,
@@ -2552,7 +2488,7 @@ mod ideal_capacity_tests {
                 backup_eir: None,
                 fraction_heating_load_served: None,
                 cooling_capacity_w: None,
-                seer: None,
+                cooling_eir: None,
                 stage_cooling_capacities_w: None,
                 stage_cooling_eirs: None,
                 stage_shrs: None,

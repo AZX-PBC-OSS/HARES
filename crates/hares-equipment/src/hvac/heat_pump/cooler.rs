@@ -100,18 +100,20 @@ impl HpCooler {
     fn typed_hp_to_central_ac_config(
         source: &EquipmentConfig,
         hp_cfg: &HeatPumpCoolerConfig,
-    ) -> EquipmentConfig {
-        let seer = hp_cfg
-            .seer
+    ) -> crate::Result<EquipmentConfig> {
+        let eir = hp_cfg
+            .cooling_eir
             .or_else(|| {
                 hp_cfg
                     .stage_cooling_eirs
                     .as_ref()
                     .and_then(|eirs| eirs.first().copied())
-                    .filter(|eir| eir.is_finite() && *eir > 0.0)
-                    .map(|eir| 3.412_141_633 / eir)
             })
-            .unwrap_or(13.0);
+            .ok_or_else(|| {
+                HaresError::Equipment(
+                    "HeatPumpCoolerConfig requires cooling_eir or stage_cooling_eirs".to_string(),
+                )
+            })?;
 
         let capacity_w = hp_cfg
             .cooling_capacity_w
@@ -127,7 +129,7 @@ impl HpCooler {
             equipment_id: hp_cfg.equipment_id,
             zone_id: hp_cfg.zone_id,
             capacity_w,
-            seer,
+            eir,
             shr: hp_cfg.shr,
             number_of_speeds: hp_cfg.number_of_speeds,
             stage_capacities_w: hp_cfg.stage_cooling_capacities_w.clone(),
@@ -156,7 +158,11 @@ impl HpCooler {
             plf_max: hp_cfg.plf_max,
         };
 
-        EquipmentConfig::from_typed(source.name.clone(), "Air Conditioner".to_string(), mapped)
+        Ok(EquipmentConfig::from_typed(
+            source.name.clone(),
+            "Air Conditioner".to_string(),
+            mapped,
+        ))
     }
 }
 
@@ -171,7 +177,7 @@ impl Equipment for HpCooler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed_hp_cfg = config.require_typed::<HeatPumpCoolerConfig>("Heat Pump Cooler")?;
-        let mapped = Self::typed_hp_to_central_ac_config(config, &typed_hp_cfg);
+        let mapped = Self::typed_hp_to_central_ac_config(config, &typed_hp_cfg)?;
         self.inner.init(&mapped, env)?;
 
         if typed_hp_cfg.is_mini_split {
@@ -317,7 +323,7 @@ mod tests {
                 equipment_id: None,
                 zone_id: Some(1),
                 heating_capacity_w: None,
-                hspf: None,
+                heating_eir: None,
                 stage_heating_capacities_w: None,
                 stage_heating_eirs: None,
                 backup_fuel: None,
@@ -325,7 +331,7 @@ mod tests {
                 backup_eir: None,
                 fraction_heating_load_served: None,
                 cooling_capacity_w: Some(8_000.0),
-                seer: Some(3.412_141_633 / 0.33),
+                cooling_eir: Some(0.33),
                 stage_cooling_capacities_w: None,
                 stage_cooling_eirs: None,
                 stage_shrs: None,
@@ -501,7 +507,7 @@ mod tests {
             serde_json::json!({
                 "zone_id": 1,
                 "cooling_capacity_w": 8_000.0,
-                "seer": 3.412_141_633 / 0.33,
+                "cooling_eir": 0.33,
                 "number_of_speeds": 1,
                 "is_mini_split": false
             }),
@@ -579,7 +585,7 @@ mod tests {
             serde_json::json!({
                 "zone_id": 1,
                 "cooling_capacity_w": 8000.0,
-                "seer": 16.0,
+                "cooling_eir": 16.0,
                 "number_of_speeds": 1,
                 "is_mini_split": true
             }),
@@ -606,7 +612,7 @@ mod tests {
             serde_json::json!({
                 "zone_id": 1,
                 "cooling_capacity_w": 8000.0,
-                "seer": 16.0,
+                "cooling_eir": 16.0,
                 "stage_shrs": [0.81]
             }),
             "ASHP Cooler",

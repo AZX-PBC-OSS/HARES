@@ -672,7 +672,7 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -680,11 +680,8 @@ mod tests {
         ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
-    use super::{
-        Dehumidifier, KEY_DEHUMIDISTAT_SETPOINT, KEY_ENERGY_FACTOR, KEY_RATED_CAPACITY_PINTS_DAY,
-        LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY, WATTS_PER_KILOWATT, register_with_registry,
-    };
-    use crate::{Equipment, EquipmentConfig, EquipmentRegistry, config::KEY_EQUIPMENT_ID};
+    use super::{Dehumidifier, LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY, WATTS_PER_KILOWATT};
+    use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     const TOLERANCE_REL: f64 = 1e-9;
 

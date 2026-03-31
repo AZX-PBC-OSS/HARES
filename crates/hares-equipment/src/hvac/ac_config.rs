@@ -1,6 +1,6 @@
 //! Air conditioner curve helpers and telemetry — typed config structs live in cooling_config.
 
-use hares_types::{HaresError, Telemetry, TelemetryField, parse_trimmed_f64, telemetry_keys as tk};
+use hares_types::{HaresError, Telemetry, TelemetryField, telemetry_keys as tk};
 
 use super::core_config::parse_biquadratic_list;
 use crate::EquipmentConfig;
@@ -161,28 +161,4 @@ fn parse_single_coeff_array(raw: Option<&str>) -> crate::Result<Option<[f64; 6]>
             n * 6
         ))),
     }
-}
-
-/// Parse optional crankcase heater capacity curve coefficients `[c0, c1, c2]`
-/// from a config string such as `"[1.0, -0.02, 0.0]"`.
-/// effective_capacity = rated * (c0 + c1*T + c2*T^2), clamped to >= 0.
-pub(super) fn parse_crankcase_capacity_curve(raw: Option<&str>) -> crate::Result<Option<[f64; 3]>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let values: Vec<f64> = raw
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(',')
-        .filter_map(parse_trimmed_f64)
-        .collect();
-    if values.len() != 3 {
-        return Err(HaresError::Equipment(format!(
-            "crankcase_capacity_curve_coeffs must contain exactly 3 values [c0, c1, c2], \
-             got {}",
-            values.len()
-        )));
-    }
-    Ok(Some([values[0], values[1], values[2]]))
 }

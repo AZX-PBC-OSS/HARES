@@ -53,18 +53,38 @@ fn typed_value<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a serde_j
     }
 }
 
+#[cfg(not(test))]
+pub(super) fn extract_numeric(config: &EquipmentConfig, key: &str) -> Option<f64> {
+    typed_value(config, key).and_then(serde_json::Value::as_f64)
+}
+
+#[cfg(test)]
 pub(super) fn extract_numeric(config: &EquipmentConfig, key: &str) -> Option<f64> {
     config
         .get_f64(key)
         .or_else(|| typed_value(config, key).and_then(serde_json::Value::as_f64))
 }
 
+#[cfg(not(test))]
+pub(super) fn extract_text<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a str> {
+    typed_value(config, key).and_then(serde_json::Value::as_str)
+}
+
+#[cfg(test)]
 pub(super) fn extract_text<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a str> {
     config
         .get_str(key)
         .or_else(|| typed_value(config, key).and_then(serde_json::Value::as_str))
 }
 
+#[cfg(not(test))]
+pub(super) fn extract_bool(config: &EquipmentConfig, key: &str) -> Option<bool> {
+    typed_value(config, key)
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| extract_numeric(config, key).map(|v| v > 0.0))
+}
+
+#[cfg(test)]
 pub(super) fn extract_bool(config: &EquipmentConfig, key: &str) -> Option<bool> {
     config
         .get_bool(key)

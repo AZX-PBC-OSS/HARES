@@ -373,8 +373,6 @@ fn validate_zip_terms(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         BoundaryPolicy, DomainUpdate, EnvironmentState, GridState, SCHEDULE_DOMAIN_ID,
@@ -386,7 +384,6 @@ mod tests {
         mains_temp_schedule_source, resolve_storage_step_inputs,
     };
     use crate::EquipmentConfig;
-    use crate::config::ConfigPayload;
 
     /// Document our `<=` vs `<` boundary choice: at exactly `setpoint - deadband`,
     /// an inactive heater should turn on (we use `<=`), whereas OCHRE uses `<`.
@@ -692,7 +689,6 @@ mod dhw_integration_tests {
     };
 
     use super::DHW_DEMAND_LOOP;
-    use crate::config::ConfigPayload;
     use crate::event_load::WetAppliance;
     use crate::water_heater::resistance::ResistanceWH;
     use crate::{Equipment, EquipmentConfig};
@@ -760,7 +756,7 @@ mod dhw_integration_tests {
     }
 
     fn wh_config() -> EquipmentConfig {
-        let mut cfg = EquipmentConfig::from_typed(
+        let cfg = EquipmentConfig::from_typed(
             "WH".to_string(),
             "Resistance Water Heater".to_string(),
             crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
