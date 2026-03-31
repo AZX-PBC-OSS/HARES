@@ -12,9 +12,17 @@ pub enum ModuleType {
 
 impl ModuleType {
     pub(crate) fn from_str(s: &str) -> Self {
-        match s.trim() {
-            "Premium" => Self::Premium,
-            "ThinFilm" => Self::ThinFilm,
+        let normalized: String = s
+            .trim()
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace() && *c != '_')
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+
+        match normalized.as_str() {
+            "premium" => Self::Premium,
+            "thinfilm" => Self::ThinFilm,
+            "standard" => Self::Standard,
             _ => Self::Standard,
         }
     }
@@ -89,4 +97,35 @@ pub fn surface_id_for_orientation(
     let az_centideg = (rounded_az * 100.0).round() as u32;
 
     Ok(tilt_centideg * 100_000 + az_centideg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModuleType;
+
+    #[test]
+    fn module_type_parsing_is_case_insensitive_and_accepts_aliases() {
+        assert_eq!(ModuleType::from_str("Premium"), ModuleType::Premium);
+        assert_eq!(ModuleType::from_str("premium"), ModuleType::Premium);
+        assert_eq!(ModuleType::from_str("PREMIUM"), ModuleType::Premium);
+
+        assert_eq!(ModuleType::from_str("ThinFilm"), ModuleType::ThinFilm);
+        assert_eq!(ModuleType::from_str("thin film"), ModuleType::ThinFilm);
+        assert_eq!(ModuleType::from_str("thin_film"), ModuleType::ThinFilm);
+        assert_eq!(ModuleType::from_str("thinfilm"), ModuleType::ThinFilm);
+
+        assert_eq!(ModuleType::from_str("Standard"), ModuleType::Standard);
+        assert_eq!(ModuleType::from_str("standard"), ModuleType::Standard);
+        assert_eq!(ModuleType::from_str("unknown"), ModuleType::Standard);
+    }
+
+    #[test]
+    fn module_type_gamma_matches_pvwatts_defaults() {
+        assert_eq!(
+            ModuleType::Standard.gamma_per_c(),
+            crate::pv::DEFAULT_GAMMA_PER_C
+        );
+        assert_eq!(ModuleType::Premium.gamma_per_c(), -0.0035);
+        assert_eq!(ModuleType::ThinFilm.gamma_per_c(), -0.0020);
+    }
 }

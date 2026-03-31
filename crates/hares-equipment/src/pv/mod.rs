@@ -1119,7 +1119,7 @@ mod tests {
                 capacity_kw: 4.2,
                 tilt_deg: Some(27.0),
                 azimuth_deg: Some(200.0),
-                module_type: Some("ThinFilm".to_string()),
+                module_type: Some("thin_film".to_string()),
                 noct_c: Some(DEFAULT_NOCT_C),
                 system_losses_fraction: Some(DEFAULT_SYSTEM_LOSSES_FRACTION),
                 inverter_efficiency: Some(0.96),
@@ -1372,8 +1372,8 @@ mod tests {
             1.0,
         );
 
-        let mut pv_std = PV::new(make_cfg("Standard"));
-        let cfg_std = make_cfg("Standard");
+        let mut pv_std = PV::new(make_cfg("standard"));
+        let cfg_std = make_cfg("standard");
         pv_std.init(&cfg_std, &env).unwrap();
         let mut ports = PortSlots::default();
         pv_std
@@ -1381,8 +1381,8 @@ mod tests {
             .unwrap();
         let dc_standard = pv_std.telemetry().get(tk::DC_POWER_KW).unwrap_or(0.0);
 
-        let mut pv_tf = PV::new(make_cfg("ThinFilm"));
-        let cfg_tf = make_cfg("ThinFilm");
+        let mut pv_tf = PV::new(make_cfg("thin film"));
+        let cfg_tf = make_cfg("thin film");
         pv_tf.init(&cfg_tf, &env).unwrap();
         let mut ports2 = PortSlots::default();
         pv_tf

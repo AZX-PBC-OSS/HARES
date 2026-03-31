@@ -835,9 +835,7 @@ impl CoolingCore {
         };
 
         // Fan shaft heat raises entering dry-bulb temperature seen by the coil.
-        // OCHRE: coil_input_db += fan_power_per_flow_rate / 1000 / rho_air / cp_air
-        // Applied as a first-order correction to the indoor wet-bulb temperature
-        // used as the biquadratic x1 input (same ΔT in °C).
+        // Apply ΔT to dry-bulb first, then re-derive wet-bulb from (DB, w, p).
         let flow_m3_s_for_fan = stage_cap_w.max(0.0) * self.hvac.airflow_m3_s_per_w;
         let fan_shaft_heat_correction_c = if flow_m3_s_for_fan > 0.0 {
             use hares_physics::{
@@ -859,7 +857,16 @@ impl CoolingCore {
         } else {
             0.0
         };
-        let coil_entering_wb_c = zone.wet_bulb_c + fan_shaft_heat_correction_c;
+        let coil_entering_db_c = zone.temperature_c + fan_shaft_heat_correction_c;
+        let coil_entering_wb_c = if fan_shaft_heat_correction_c.abs() > f64::EPSILON {
+            hares_physics::psychrometrics::wet_bulb_from_humidity_ratio(
+                coil_entering_db_c,
+                zone.humidity_ratio.max(0.0),
+                env.weather.pressure_kpa * 1000.0,
+            )
+        } else {
+            zone.wet_bulb_c
+        };
 
         let outdoor_c = env.weather.outdoor_temp_c;
         // Capacity biquadratic: evaluate first — needed to derive PLR from
@@ -924,7 +931,7 @@ impl CoolingCore {
             adp_temp_c,
             bypass_factor,
         } = calculate_shr(
-            zone.temperature_c,
+            coil_entering_db_c,
             zone.humidity_ratio,
             env.weather.pressure_kpa,
             (total_capacity_w / 1000.0).max(0.0),
@@ -1207,6 +1214,8 @@ fn typed_ac_test_config(eir: f64) -> EquipmentConfig {
             cooling_setpoint_c: Some(24.0),
             heating_setpoint_c: Some(18.0),
             hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
             airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
             fraction_load_served: None,
             crankcase_heater_kw: None,
@@ -1306,6 +1315,8 @@ mod tests {
                 cooling_setpoint_c: Some(24.0),
                 heating_setpoint_c: Some(18.0),
                 hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -1981,6 +1992,8 @@ mod dr_tests {
                 cooling_setpoint_c: Some(24.0),
                 heating_setpoint_c: Some(18.0),
                 hysteresis_c: Some(0.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: Some(0.10),
@@ -2377,6 +2390,8 @@ mod crankcase_tests {
                 cooling_setpoint_c: Some(24.0),
                 heating_setpoint_c: Some(18.0),
                 hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: None,
@@ -2465,6 +2480,8 @@ mod crankcase_tests {
                 cooling_setpoint_c: Some(26.0),
                 heating_setpoint_c: Some(18.0),
                 hysteresis_c: Some(0.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
                 airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
                 crankcase_heater_kw: Some(0.10),

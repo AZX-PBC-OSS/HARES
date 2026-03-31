@@ -1,6 +1,6 @@
 //! Typed configuration structs for heating equipment.
 
-use hares_types::FluidType;
+use hares_types::{FluidType, ScheduleSourceConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::config::EquipmentTypedConfig;
@@ -205,6 +205,20 @@ pub struct IdealHvacConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadband_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_speeds: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ideal_capacity_mode: Option<IdealCapacityModeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_source: Option<ScheduleSourceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heating_capacity_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooling_capacity_w: Option<f64>,
@@ -218,6 +232,14 @@ pub struct IdealHvacConfig {
     pub fraction_heating_load_served: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_cooling_load_served: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IdealCapacityModeConfig {
+    Auto,
+    On,
+    Off,
 }
 
 impl EquipmentTypedConfig for IdealHvacConfig {

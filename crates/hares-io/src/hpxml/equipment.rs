@@ -36,7 +36,7 @@ pub fn resolve_equipment(
 
     resolve_hvac(building, defaults, &mut specs)?;
     resolve_water_heaters(details, defaults, &mut specs)?;
-    resolve_pv(details, defaults, &mut specs);
+    resolve_pv(details, defaults, &mut specs)?;
     resolve_batteries(details, defaults, &mut specs);
     resolve_ev(details, defaults, &mut specs);
     resolve_generators(details, defaults, &mut specs);
@@ -158,7 +158,7 @@ mod tests {
     use hares_physics::units as conv;
     use hares_types::FuelType;
 
-    use super::{nested_update, resolve_equipment};
+    use super::{HpxmlError, nested_update, resolve_equipment};
     use crate::defaults::DefaultsStore;
     use crate::hpxml::building::parse_building;
 
@@ -720,6 +720,7 @@ mod tests {
         let xml = minimal_wh_xml(
             r#"<Photovoltaics>
           <PVSystem>
+            <Tracking>fixed</Tracking>
             <MaxPowerOutput>5000</MaxPowerOutput>
             <ArrayTilt>30</ArrayTilt>
             <ArrayAzimuth>180</ArrayAzimuth>
@@ -748,6 +749,34 @@ mod tests {
         assert_eq!(typed.azimuth_deg, Some(180.0));
         assert_eq!(typed.module_type.as_deref(), Some("standard"));
         assert_eq!(typed.system_losses_fraction, Some(0.14));
+    }
+
+    #[test]
+    fn hpxml_pv_non_fixed_tracking_is_rejected() {
+        let xml = minimal_wh_xml(
+            r#"<Photovoltaics>
+          <PVSystem>
+            <Tracking>1-axis</Tracking>
+            <MaxPowerOutput>5000</MaxPowerOutput>
+            <ArrayTilt>30</ArrayTilt>
+            <ArrayAzimuth>180</ArrayAzimuth>
+            <ModuleType>standard</ModuleType>
+            <SystemLossesFraction>0.14</SystemLossesFraction>
+          </PVSystem>
+        </Photovoltaics>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let err = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect_err("non-fixed tracking should be rejected");
+
+        let msg = match err {
+            HpxmlError::Parse(msg) => msg,
+            other => panic!("expected parse error, got {other:?}"),
+        };
+        assert!(
+            msg.contains("unsupported tracking mode") && msg.contains("1-axis"),
+            "unexpected error message: {msg}"
+        );
     }
 
     #[test]

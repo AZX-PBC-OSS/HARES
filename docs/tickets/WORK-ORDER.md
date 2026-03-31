@@ -13,6 +13,15 @@
 - Each batch is independently testable and mergeable
 - Do not start Batch N until Batch N-1 passes its verification tests
 
+### Deviation Gate (Required)
+
+For every implementation detail that differs from OCHRE or prior HARES behavior:
+
+- If the current behavior is **worse than OCHRE** or **physically weak**, **fix it**.
+- If the current behavior is **more physical / better than OCHRE**, **keep it** and
+  document the intentional deviation with explicit tests (and brief ticket notes)
+  so the improvement is preserved.
+
 ---
 
 ## Batch 0 — Critical Input Fixes (unblock everything)

@@ -13,7 +13,7 @@ use hares_equipment::hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
 };
-use hares_types::FuelType;
+use hares_types::{BoundaryPolicy, FuelType, ScheduleSourceConfig};
 
 use super::HpxmlError;
 use super::building::{Boundary, BoundaryType, Building, DuctLocation, XmlNode, Zone, ZoneType};
@@ -385,6 +385,69 @@ fn n_speeds_from_params(params: &Map<String, Value>) -> u8 {
         .unwrap_or(1) as u8
 }
 
+fn array24_from_params(params: &Map<String, Value>, key: &str) -> Option<[f64; 24]> {
+    let values = params.get(key)?.as_array()?;
+    if values.is_empty() {
+        return None;
+    }
+    let mut out = [0.0; 24];
+    let mut count = 0usize;
+    for (idx, value) in values.iter().take(24).enumerate() {
+        out[idx] = value.as_f64()?;
+        count = idx + 1;
+    }
+    let fill = *out.get(count.saturating_sub(1))?;
+    for slot in out.iter_mut().skip(count) {
+        *slot = fill;
+    }
+    Some(out)
+}
+
+fn schedule_source_from_params(
+    params: &Map<String, Value>,
+    prefix: &str,
+) -> Option<ScheduleSourceConfig> {
+    let source_key = format!("{prefix}_setpoint_source");
+    if let Some(source) = params.get(&source_key) {
+        return serde_json::from_value::<ScheduleSourceConfig>(source.clone()).ok();
+    }
+
+    let col_key = format!("{prefix}_setpoint_schedule_col");
+    if let Some(col) = params.get(&col_key).and_then(Value::as_u64) {
+        return Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: col as usize,
+            boundary: BoundaryPolicy::Clamp,
+        });
+    }
+
+    let weekday_key = format!("{prefix}_weekday_setpoints_c");
+    let weekend_key = format!("{prefix}_weekend_setpoints_c");
+    let weekday = array24_from_params(params, &weekday_key);
+    let weekend = array24_from_params(params, &weekend_key);
+    if let Some(wd) = weekday {
+        return Some(ScheduleSourceConfig::DailyProfile {
+            weekday: wd,
+            weekend: weekend.unwrap_or(wd),
+            month_multipliers: [1.0; 12],
+            max_value: 1.0,
+        });
+    }
+
+    let setpoint_key = format!("{prefix}_setpoint_c");
+    params
+        .get(&setpoint_key)
+        .and_then(Value::as_f64)
+        .map(ScheduleSourceConfig::Constant)
+}
+
+fn static_setpoint_from_source(source: &Option<ScheduleSourceConfig>) -> Option<f64> {
+    match source {
+        Some(ScheduleSourceConfig::Constant(v)) => Some(*v),
+        Some(ScheduleSourceConfig::DailyProfile { weekday, .. }) => Some(weekday[0]),
+        _ => None,
+    }
+}
+
 fn extract_stage_values(params: &Map<String, Value>, prefix: &str) -> Option<Vec<f64>> {
     let mut out = Vec::new();
     for i in 0..32 {
@@ -589,10 +652,19 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
         .map(|v| 1.0 / v.max(1e-6));
     let cooling_eir = seer_from_params(params).map(|seer| 3.412_141_633_f64 / seer.max(1e-6));
     let fraction = params.get("fraction_load_served").and_then(Value::as_f64);
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
     let cfg = IdealHvacConfig {
         equipment_id: None,
         zone_id: None,
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+        deadband_c: None,
+        n_speeds: Some(n_speeds_from_params(params)),
+        ideal_capacity_mode: None,
+        heating_setpoint_source,
+        cooling_setpoint_source,
         heating_capacity_w,
         cooling_capacity_w,
         heating_eir,
@@ -630,6 +702,8 @@ fn try_build_central_ac_config(
     let curve_bounds = extract_curve_bounds(params);
     let airflow_m3_s_per_w =
         400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
     let cfg = CentralAirConditionerConfig {
         equipment_id: None,
@@ -643,9 +717,11 @@ fn try_build_central_ac_config(
         stage_shrs: extract_stage_values(params, "shr"),
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
-        cooling_setpoint_c: None,
-        heating_setpoint_c: None,
+        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         hysteresis_c: None,
+        heating_setpoint_source,
+        cooling_setpoint_source,
         airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         fraction_load_served,
         crankcase_heater_kw: None,
@@ -682,14 +758,18 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     let curve_bounds = extract_curve_bounds(params);
     let airflow_m3_s_per_w =
         320.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let cfg = RoomAcConfig {
         equipment_id: None,
         zone_id: None,
         capacity_w,
         eir,
-        cooling_setpoint_c: None,
-        heating_setpoint_c: None,
+        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         hysteresis_c: None,
+        heating_setpoint_source,
+        cooling_setpoint_source,
         airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         biquadratic_x1_min: curve_bounds.x1_min,
         biquadratic_x1_max: curve_bounds.x1_max,
@@ -771,6 +851,8 @@ fn try_build_heat_pump_heater_config(
     } else {
         400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
     };
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
     let ref_cap = heating_capacity_w.or(cooling_capacity_w).unwrap_or(0.0);
     let duct = if is_mini_split {
@@ -808,9 +890,11 @@ fn try_build_heat_pump_heater_config(
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
         airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
-        heating_setpoint_c: None,
-        cooling_setpoint_c: None,
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
         hysteresis_c: None,
+        heating_setpoint_source,
+        cooling_setpoint_source,
         hp_lockout_temp_c: None,
         er_lockout_temp_c: None,
         max_oat_supplemental_c: None,
@@ -869,6 +953,8 @@ fn try_build_heat_pump_cooler_config(
     } else {
         400.0_f64 * CFM_TO_M3_S / W_PER_TON
     } * airflow_defect_multiplier(params);
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
+    let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
     let ref_cap = cooling_capacity_w.or(heating_capacity_w).unwrap_or(0.0);
     let duct = if is_mini_split {
@@ -906,6 +992,11 @@ fn try_build_heat_pump_cooler_config(
         fan_power_w,
         fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
         airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
+        hysteresis_c: None,
+        heating_setpoint_source,
+        cooling_setpoint_source,
         duct,
         biquadratic_x1_min: curve_bounds.x1_min,
         biquadratic_x1_max: curve_bounds.x1_max,
@@ -1097,6 +1188,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
+        apply_building_setpoint_profiles(building, &mut params, true, name == "Ideal HVAC");
         duct_params.insert_into_map(&mut params);
         for (k, v) in &basement_params {
             params.insert(k.clone(), v.clone());
@@ -1166,6 +1258,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
+        apply_building_setpoint_profiles(building, &mut params, false, true);
         if name != "Room AC" {
             duct_params.insert_into_map(&mut params);
         }
@@ -1291,6 +1384,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
+        apply_building_setpoint_profiles(building, &mut params, true, true);
         if heat_pump_type != "mini-split" {
             duct_params.insert_into_map(&mut params);
         }
@@ -1373,55 +1467,7 @@ pub(super) fn resolve_hvac(
         specs.push(spec);
     }
 
-    inject_setpoint_profiles(building, specs);
     Ok(())
-}
-
-fn is_heating_equipment(name: &str) -> bool {
-    matches!(
-        name,
-        "ASHP Heater"
-            | "MSHP Heater"
-            | "Gas Furnace"
-            | "Electric Furnace"
-            | "Electric Baseboard"
-            | "Gas Boiler"
-            | "Electric Boiler"
-    )
-}
-
-fn is_cooling_equipment(name: &str) -> bool {
-    matches!(
-        name,
-        "ASHP Cooler" | "MSHP Cooler" | "Air Conditioner" | "Room AC"
-    )
-}
-
-/// Inject weekday/weekend setpoint profiles from the Building into HVAC
-/// equipment specs so each equipment owns its setpoint schedule.
-fn inject_setpoint_profiles(building: &Building, specs: &mut [EquipmentSpec]) {
-    for spec in specs.iter_mut() {
-        if is_heating_equipment(&spec.name) {
-            if let Some(ref wd) = building.heating_weekday_setpoints_c {
-                spec.parameters
-                    .insert("heating_weekday_setpoints_c".to_string(), json!(wd));
-            }
-            if let Some(ref we) = building.heating_weekend_setpoints_c {
-                spec.parameters
-                    .insert("heating_weekend_setpoints_c".to_string(), json!(we));
-            }
-        }
-        if is_cooling_equipment(&spec.name) {
-            if let Some(ref wd) = building.cooling_weekday_setpoints_c {
-                spec.parameters
-                    .insert("cooling_weekday_setpoints_c".to_string(), json!(wd));
-            }
-            if let Some(ref we) = building.cooling_weekend_setpoints_c {
-                spec.parameters
-                    .insert("cooling_weekend_setpoints_c".to_string(), json!(we));
-            }
-        }
-    }
 }
 
 fn parse_named_type(node: &XmlNode, tag: &str) -> Option<String> {
@@ -1895,6 +1941,30 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
     }
 
     out
+}
+
+fn apply_building_setpoint_profiles(
+    building: &Building,
+    params: &mut Map<String, Value>,
+    include_heating: bool,
+    include_cooling: bool,
+) {
+    if include_heating {
+        if let Some(ref wd) = building.heating_weekday_setpoints_c {
+            params.insert("heating_weekday_setpoints_c".to_string(), json!(wd));
+        }
+        if let Some(ref we) = building.heating_weekend_setpoints_c {
+            params.insert("heating_weekend_setpoints_c".to_string(), json!(we));
+        }
+    }
+    if include_cooling {
+        if let Some(ref wd) = building.cooling_weekday_setpoints_c {
+            params.insert("cooling_weekday_setpoints_c".to_string(), json!(wd));
+        }
+        if let Some(ref we) = building.cooling_weekend_setpoints_c {
+            params.insert("cooling_weekend_setpoints_c".to_string(), json!(we));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2587,6 +2657,63 @@ mod tests {
         assert_eq!(cfg.cooling_capacity_w, Some(8_000.0));
         assert_eq!(cfg.fraction_heating_load_served, Some(0.9));
         assert_eq!(cfg.fraction_cooling_load_served, Some(0.9));
+    }
+
+    #[test]
+    fn ideal_hvac_builder_parses_daily_profile_setpoint_source() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(9_000.0));
+        params.insert(
+            "heating_weekday_setpoints_c".to_string(),
+            json!(vec![20.0; 24]),
+        );
+        params.insert(
+            "heating_weekend_setpoints_c".to_string(),
+            json!(vec![19.0; 24]),
+        );
+        let ec = try_build_ideal_hvac_config("Ideal HVAC", &params)
+            .expect("Ideal HVAC typed config should be built");
+
+        use hares_equipment::hvac::heating_config::IdealHvacConfig;
+        let cfg: IdealHvacConfig = ec.typed().expect("typed ideal config");
+        match cfg.heating_setpoint_source {
+            Some(ScheduleSourceConfig::DailyProfile {
+                weekday, weekend, ..
+            }) => {
+                assert_eq!(weekday[0], 20.0);
+                assert_eq!(weekend[0], 19.0);
+            }
+            other => panic!("expected DailyProfile setpoint source, got {other:?}"),
+        }
+        assert_eq!(cfg.heating_setpoint_c, Some(20.0));
+    }
+
+    #[test]
+    fn central_ac_builder_parses_column_ref_setpoint_source() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
+        params.insert("efficiency_seer".to_string(), json!(16.0));
+        params.insert("heating_setpoint_schedule_col".to_string(), json!(3));
+        params.insert("cooling_setpoint_schedule_col".to_string(), json!(4));
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
+            .expect("AC typed config should be built");
+
+        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+        let cfg: CentralAirConditionerConfig = ec.typed().expect("typed AC config");
+        assert_eq!(
+            cfg.heating_setpoint_source,
+            Some(ScheduleSourceConfig::ColumnRef {
+                col_idx: 3,
+                boundary: BoundaryPolicy::Clamp
+            })
+        );
+        assert_eq!(
+            cfg.cooling_setpoint_source,
+            Some(ScheduleSourceConfig::ColumnRef {
+                col_idx: 4,
+                boundary: BoundaryPolicy::Clamp
+            })
+        );
     }
 
     #[test]

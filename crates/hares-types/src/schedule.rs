@@ -159,9 +159,10 @@ impl TimeWindow {
 pub const SCHEDULE_DOMAIN_ID: DomainId = DomainId(u16::MAX);
 
 /// Out-of-range index behavior for schedule-backed sources.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryPolicy {
     /// Clamp indices to the first/last valid sample.
+    #[default]
     Clamp,
     /// Wrap indices modulo the source length.
     Wrap,
@@ -362,6 +363,112 @@ pub enum ScheduleSource {
         /// deterministic (zero-cost — no RNG allocated).
         rng_state: Option<Box<StochasticState>>,
     },
+}
+
+/// Serde-friendly schedule config representation for typed equipment configs.
+///
+/// This is the canonical persisted form used in config payloads; runtime code
+/// converts it into [`ScheduleSource`] via [`ScheduleSourceConfig::into_runtime`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum ScheduleSourceConfig {
+    Constant(f64),
+    DailyProfile {
+        weekday: [f64; 24],
+        weekend: [f64; 24],
+        #[serde(default = "default_month_multipliers")]
+        month_multipliers: [f64; 12],
+        #[serde(default = "default_max_value")]
+        max_value: f64,
+    },
+    ColumnRef {
+        col_idx: usize,
+        #[serde(default)]
+        boundary: BoundaryPolicy,
+    },
+    SolarAware {
+        daytime_fraction: f64,
+        evening_fraction: f64,
+        overnight_fraction: f64,
+        #[serde(default = "default_month_multipliers")]
+        month_multipliers: [f64; 12],
+        #[serde(default = "default_max_value")]
+        max_value: f64,
+        dusk_altitude_threshold_deg: f64,
+        dawn_altitude_threshold_deg: f64,
+    },
+    TimeWindows {
+        windows: Vec<TimeWindow>,
+        default: Option<f64>,
+        #[serde(default)]
+        seed: Option<[u8; 32]>,
+    },
+}
+
+impl ScheduleSourceConfig {
+    #[must_use]
+    pub fn into_runtime(self) -> ScheduleSource {
+        match self {
+            Self::Constant(v) => ScheduleSource::Constant(v),
+            Self::DailyProfile {
+                weekday,
+                weekend,
+                month_multipliers,
+                max_value,
+            } => ScheduleSource::DailyProfile {
+                weekday,
+                weekend,
+                month_multipliers,
+                max_value,
+            },
+            Self::ColumnRef { col_idx, boundary } => {
+                ScheduleSource::ColumnRef { col_idx, boundary }
+            }
+            Self::SolarAware {
+                daytime_fraction,
+                evening_fraction,
+                overnight_fraction,
+                month_multipliers,
+                max_value,
+                dusk_altitude_threshold_deg,
+                dawn_altitude_threshold_deg,
+            } => ScheduleSource::SolarAware {
+                daytime_fraction,
+                evening_fraction,
+                overnight_fraction,
+                month_multipliers,
+                max_value,
+                dusk_altitude_threshold_deg,
+                dawn_altitude_threshold_deg,
+            },
+            Self::TimeWindows {
+                windows,
+                default,
+                seed,
+            } => {
+                let has_noise = windows.iter().any(|w| w.noise.is_some());
+                if has_noise {
+                    let seed = seed.unwrap_or([0_u8; 32]);
+                    ScheduleSource::noisy_time_windows(windows, default, seed)
+                } else {
+                    ScheduleSource::TimeWindows {
+                        windows,
+                        default,
+                        rng_state: None,
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn default_month_multipliers() -> [f64; 12] {
+    [1.0; 12]
+}
+
+fn default_max_value() -> f64 {
+    1.0
 }
 
 impl PartialEq for ScheduleSource {

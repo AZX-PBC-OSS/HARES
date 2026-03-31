@@ -487,6 +487,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                 _ => None,
             }
         });
+    let foundation_floor_area_m2 = details
+        .path(&["Enclosure", "Foundations"])
+        .and_then(|group| group.children_named("Foundation").next())
+        .and_then(|foundation| {
+            parse_value_with_units(foundation.child("FloorArea"), ValueKind::Area)
+        });
 
     let mut boundaries = parse_boundaries(details)?;
     let windows = parse_windows(details, &mut boundaries)?;
@@ -537,13 +543,18 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // Post-process foundation wall boundaries: override construction_type with
     // foundation_name, apply insulation details and area scaling.
     // OCHRE hpxml.py:408-410: boundaries["Foundation Wall"]["Construction Type"] = foundation_name
-    if let Some(ref fnd_name) = foundation_name {
-        for bd in &mut boundaries {
-            if bd.boundary_type == BoundaryType::FoundationWall {
+    let mut foundation_height_m: Option<f64> = None;
+    for bd in &mut boundaries {
+        if bd.boundary_type == BoundaryType::FoundationWall {
+            if let Some(ref fnd_name) = foundation_name {
                 bd.construction_type = Some(fnd_name.clone());
-                let (insulation, area_scale) = extract_foundation_wall_insulation(details, &bd.id);
-                bd.insulation_details = insulation;
-                bd.area_m2 *= area_scale;
+            }
+            let (insulation, area_scale, height_m) =
+                extract_foundation_wall_insulation(details, &bd.id);
+            bd.insulation_details = insulation;
+            bd.area_m2 *= area_scale;
+            if foundation_height_m.is_none() {
+                foundation_height_m = height_m;
             }
         }
     }
@@ -565,15 +576,23 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
-    // The conditioned zone should reflect only above-grade floor area when a basement
-    // is present. OCHRE: indoor_floor_area = conditioned_floor_area * indoor_floors / total_floors.
+    // The conditioned zone should exclude below-grade foundation area when a basement
+    // is present. OCHRE: indoor_floor_area = conditioned_floor_area - first_floor_area * below_grade_floors.
+    // If foundation floor area is missing, fall back to the floor-count ratio split.
     let indoor_floor_area_m2 = match (
         conditioned_floor_area_m2,
         total_conditioned_floors,
         floors_above_grade,
+        foundation_floor_area_m2,
     ) {
-        (Some(total), Some(n_total), Some(n_above))
-            if n_total > 0.0 && n_above > 0.0 && n_above < n_total =>
+        (Some(total), Some(n_total), Some(n_above), Some(foundation_area))
+            if n_total > 0.0 && n_above >= 0.0 && n_above < n_total =>
+        {
+            let below_grade_floors = (n_total - n_above).max(0.0);
+            Some((total - foundation_area * below_grade_floors).max(0.0))
+        }
+        (Some(total), Some(n_total), Some(n_above), None)
+            if n_total > 0.0 && n_above >= 0.0 && n_above < n_total =>
         {
             Some(total * n_above / n_total)
         }
@@ -690,9 +709,11 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         zone.volume_m3 = match zone.zone_type {
             ZoneType::Conditioned => zone.floor_area_m2.map(|a| a * default_height_m),
             ZoneType::Attic => compute_attic_volume(&boundaries, zone.floor_area_m2),
-            ZoneType::Garage | ZoneType::Foundation => {
-                zone.floor_area_m2.map(|a| a * default_height_m)
-            }
+            ZoneType::Garage => zone.floor_area_m2.map(|a| a * default_height_m),
+            ZoneType::Foundation => zone
+                .floor_area_m2
+                .zip(foundation_height_m)
+                .map(|(a, h)| a * h),
             // Outdoor, Ground, Adjacent are filtered above; Other has no volume model.
             ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent | ZoneType::Other(_) => None,
         };
@@ -1087,14 +1108,17 @@ fn infer_exterior_zone(boundary_type: &BoundaryType) -> Option<ZoneType> {
     }
 }
 
-/// Extract foundation wall insulation details and area scale factor.
+/// Extract foundation wall insulation details, area scale factor, and height.
 ///
 /// Mirrors OCHRE `get_fnd_wall_insulation` (envelope.py:434-459):
 /// - Area scaled by `DepthBelowGrade / Height` when they differ.
 /// - Insulation details: "Half R{n}", "R{n}", or "Uninsulated".
 ///
 /// `details` is the BuildingDetails node; `wall_id` identifies which FoundationWall.
-fn extract_foundation_wall_insulation(details: &XmlNode, wall_id: &str) -> (Option<String>, f64) {
+fn extract_foundation_wall_insulation(
+    details: &XmlNode,
+    wall_id: &str,
+) -> (Option<String>, f64, Option<f64>) {
     // Find the FoundationWall element matching this boundary's ID.
     let wall_node = details
         .path(&["Enclosure", "FoundationWalls"])
@@ -1107,18 +1131,25 @@ fn extract_foundation_wall_insulation(details: &XmlNode, wall_id: &str) -> (Opti
             })
         });
     let Some(node) = wall_node else {
-        return (Some("Uninsulated".to_string()), 1.0);
+        return (Some("Uninsulated".to_string()), 1.0, None);
     };
 
     // Area scaling: depth_below_grade / height.
-    let height = parse_value_with_units(node.child("Height"), ValueKind::Length).unwrap_or(1.0);
+    let height = parse_value_with_units(node.child("Height"), ValueKind::Length);
+    let height_for_scale = height.unwrap_or(1.0);
     let depth_below_grade =
-        parse_value_with_units(node.child("DepthBelowGrade"), ValueKind::Length).unwrap_or(height);
-    let area_scale = if height > 0.0 && (depth_below_grade - height).abs() > 0.01 {
-        (depth_below_grade / height).clamp(0.0, 1.0)
+        parse_value_with_units(node.child("DepthBelowGrade"), ValueKind::Length)
+            .unwrap_or(height_for_scale);
+    let area_scale = if let Some(height_m) = height {
+        if height_m > 0.0 && (depth_below_grade - height_m).abs() > 0.01 {
+            (depth_below_grade / height_m).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
     } else {
         1.0
     };
+    let height_m = height.filter(|h| *h > 0.0);
 
     // Sum nominal R-values from insulation layers.
     // Read raw IP values (no unit conversion) for the LUT insulation details string,
@@ -1142,7 +1173,7 @@ fn extract_foundation_wall_insulation(details: &XmlNode, wall_id: &str) -> (Opti
                     layer.child("DistanceToBottomOfInsulation"),
                     ValueKind::Length,
                 )
-                .unwrap_or(height);
+                .unwrap_or(height_for_scale);
                 let dist_top = parse_value_with_units(
                     layer.child("DistanceToTopOfInsulation"),
                     ValueKind::Length,
@@ -1151,10 +1182,10 @@ fn extract_foundation_wall_insulation(details: &XmlNode, wall_id: &str) -> (Opti
                 dist_bottom - dist_top
             })
             .reduce(f64::min)
-            .unwrap_or(height);
+            .unwrap_or(height_for_scale);
 
         let r_int = r_ip.round() as i32;
-        if insulation_height > 0.0 && insulation_height <= height / 2.0 {
+        if insulation_height > 0.0 && height_m.is_some_and(|h| insulation_height <= h / 2.0) {
             format!("Half R{r_int}")
         } else {
             format!("R{r_int}")
@@ -1163,7 +1194,7 @@ fn extract_foundation_wall_insulation(details: &XmlNode, wall_id: &str) -> (Opti
         "Uninsulated".to_string()
     };
 
-    (Some(insulation_details), area_scale)
+    (Some(insulation_details), area_scale, height_m)
 }
 
 /// Extract slab insulation details for LUT matching.
@@ -2493,6 +2524,114 @@ mod tests {
             fnd_wall.insulation_details.as_deref(),
             Some("Half R10"),
             "half-height R-10 insulation expected"
+        );
+    }
+
+    #[test]
+    fn foundation_zone_volume_uses_foundation_wall_height() {
+        let xml = SAMPLE_XML
+            .replace(
+                "<FloorArea units=\"ft2\">800</FloorArea>",
+                "<FloorArea units=\"ft2\">100</FloorArea>",
+            )
+            .replace(
+                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n          </FoundationWall>",
+                "<FoundationWall>\n            <SystemIdentifier id=\"FoundationWall1\"/>\n            <InteriorAdjacentTo>basement - conditioned</InteriorAdjacentTo>\n            <ExteriorAdjacentTo>ground</ExteriorAdjacentTo>\n            <Area units=\"ft2\">60</Area>\n            <Height units=\"ft\">3</Height>\n          </FoundationWall>",
+            );
+
+        let building = parse_building(&xml).expect("parse should succeed");
+        let foundation = building
+            .zones
+            .iter()
+            .find(|z| matches!(z.zone_type, ZoneType::Foundation))
+            .expect("foundation zone expected");
+
+        let floor_area_m2 = foundation
+            .floor_area_m2
+            .expect("foundation floor area expected");
+        let expected_volume_m3 = floor_area_m2 * 3.0 * 0.3048;
+        let actual_volume_m3 = foundation.volume_m3.expect("foundation volume expected");
+
+        assert!(
+            (actual_volume_m3 - expected_volume_m3).abs() < 1e-6,
+            "foundation volume: got {}, expected {}",
+            actual_volume_m3,
+            expected_volume_m3
+        );
+    }
+
+    #[test]
+    fn conditioned_zone_area_excludes_foundation_area_when_basement_present() {
+        let xml = SAMPLE_XML
+            .replace(
+                "</BuildingConstruction>",
+                "<NumberofConditionedFloors>2</NumberofConditionedFloors>\n          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>\n        </BuildingConstruction>",
+            );
+
+        let building = parse_building(&xml).expect("parse should succeed");
+        let conditioned = building
+            .zones
+            .iter()
+            .find(|zone| matches!(zone.zone_type, ZoneType::Conditioned))
+            .expect("conditioned zone expected");
+        let foundation = building
+            .zones
+            .iter()
+            .find(|zone| matches!(zone.zone_type, ZoneType::Foundation))
+            .expect("foundation zone expected");
+
+        let conditioned_area_m2 = conditioned
+            .floor_area_m2
+            .expect("conditioned area expected");
+        let foundation_area_m2 = foundation.floor_area_m2.expect("foundation area expected");
+        let expected_conditioned_area_m2 = (2152.0 - 800.0) * 0.092_903_04;
+        let expected_foundation_area_m2 = 800.0 * 0.092_903_04;
+
+        assert!(
+            (conditioned_area_m2 - expected_conditioned_area_m2).abs() < 1e-6,
+            "conditioned area: got {}, expected {}",
+            conditioned_area_m2,
+            expected_conditioned_area_m2
+        );
+        assert!(
+            (foundation_area_m2 - expected_foundation_area_m2).abs() < 1e-6,
+            "foundation area: got {}, expected {}",
+            foundation_area_m2,
+            expected_foundation_area_m2
+        );
+
+        let ceiling_height_m = building.ceiling_height_m.expect("ceiling height expected");
+        let conditioned_volume_m3 = conditioned.volume_m3.expect("conditioned volume expected");
+        assert!(
+            (conditioned_volume_m3 - conditioned_area_m2 * ceiling_height_m).abs() < 1e-6,
+            "conditioned volume should follow updated area * ceiling height"
+        );
+    }
+
+    #[test]
+    fn conditioned_zone_area_passthrough_for_slab_without_below_grade_levels() {
+        let xml = SAMPLE_XML.replace(
+            "<Foundation>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+            "<Foundation>\n            <FoundationType><SlabOnGrade/></FoundationType>\n            <FloorArea units=\"ft2\">800</FloorArea>\n          </Foundation>",
+        );
+
+        let building = parse_building(&xml).expect("parse should succeed");
+        let conditioned = building
+            .zones
+            .iter()
+            .find(|zone| matches!(zone.zone_type, ZoneType::Conditioned))
+            .expect("conditioned zone expected");
+
+        let conditioned_area_m2 = conditioned
+            .floor_area_m2
+            .expect("conditioned area expected");
+        let expected_conditioned_area_m2 = 2152.0 * 0.092_903_04;
+
+        assert!(
+            (conditioned_area_m2 - expected_conditioned_area_m2).abs() < 1e-6,
+            "conditioned area: got {}, expected {}",
+            conditioned_area_m2,
+            expected_conditioned_area_m2
         );
     }
 

@@ -211,10 +211,21 @@ pub(crate) fn compute_solar_distribution_into(
         .sum();
     let total_area: f64 = surfaces.iter().map(|s| s.area_m2).sum();
 
-    // Beam: 60% to floors by area, 40% to walls by area, then absorb once.
+    // Beam: split 60%/40% when both floor and non-floor surfaces exist.
+    // If one class is absent, redirect the full beam budget to the remaining class.
     if beam_w > 0.0 {
-        let beam_to_floors = beam_w * BEAM_FLOOR_FRACTION;
-        let beam_to_walls = beam_w * (1.0 - BEAM_FLOOR_FRACTION);
+        let (beam_to_floors, beam_to_walls) = if floor_area > 0.0 && nonfloor_area > 0.0 {
+            (
+                beam_w * BEAM_FLOOR_FRACTION,
+                beam_w * (1.0 - BEAM_FLOOR_FRACTION),
+            )
+        } else if floor_area > 0.0 {
+            (beam_w, 0.0)
+        } else if nonfloor_area > 0.0 {
+            (0.0, beam_w)
+        } else {
+            (0.0, 0.0)
+        };
         for (i, s) in surfaces.iter().enumerate() {
             let incident = if s.is_floor && floor_area > 0.0 {
                 beam_to_floors * (s.area_m2 / floor_area)
@@ -367,23 +378,22 @@ mod tests {
     }
 
     #[test]
-    fn beam_with_no_floors_distributes_to_walls() {
+    fn beam_with_no_floors_redirects_to_walls() {
         let surfaces = vec![
             make_surface(20.0, 0.5, false),
             make_surface(20.0, 0.5, false),
         ];
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, 1000.0, 0.0);
         let total: f64 = absorbed.iter().sum();
-        // No floors: floor portion (60%) has nowhere to go... actually floor_area=0
-        // so beam_to_floors × (area/0) = 0. Only wall portion distributes.
-        // beam_to_walls = 400, each wall gets 200, absorbed = 200×0.5 = 100 each
+        // No floors: redirect the full beam budget to walls by area.
+        // Each wall gets 500 W, absorbed = 500 × 0.5 = 250 W each.
         assert!(
-            (total - 200.0).abs() < 1e-6,
-            "walls absorb 40% × 0.5 = 200 W total, got {total}"
+            (total - 500.0).abs() < 1e-6,
+            "walls absorb the full beam budget, got {total}"
         );
         assert!(
-            (reflected - 800.0).abs() < 1e-6,
-            "60% beam to floors lost (no floors) + 40% wall reflection = 800 W, got {reflected}"
+            (reflected - 500.0).abs() < 1e-6,
+            "beam should be conserved with full wall redistribution, got {reflected}"
         );
     }
 
@@ -402,33 +412,40 @@ mod tests {
     fn single_surface_receives_solar() {
         let surfaces = vec![make_surface(20.0, 0.7, true)];
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, 500.0, 200.0);
-        // Single floor: gets 60% beam = 300, plus all diffuse = 200.
-        // Absorbed = 500 × 0.7 = 350. But 40% beam (200) has no wall target.
-        // Total incident on floor: 300 (beam floor) + 200 (diffuse) = 500.
-        // Absorbed: 500 × 0.7 = 350. Reflected: 700 - 350 = 350.
+        // Single floor: receives the full beam budget plus diffuse.
+        // Total incident on floor: 500 (beam) + 200 (diffuse) = 700.
+        // Absorbed: 700 × 0.7 = 490. Reflected: 210.
         let total = absorbed[0] + reflected;
         assert!(
             (total - 700.0).abs() < 1e-6,
             "energy conservation: {total} != 700"
         );
+        assert!(
+            (absorbed[0] - 490.0).abs() < 1e-6,
+            "single floor should absorb the full beam budget, got {}",
+            absorbed[0]
+        );
+        assert!(
+            (reflected - 210.0).abs() < 1e-6,
+            "single floor reflection should be 210, got {reflected}"
+        );
     }
 
     #[test]
-    fn only_floors_loses_wall_beam_fraction() {
+    fn only_floors_receive_full_beam_budget() {
         let surfaces = vec![make_surface(30.0, 0.6, true), make_surface(20.0, 0.6, true)];
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, 1000.0, 0.0);
-        // All surfaces are floors. 60% beam (600) goes to floors.
-        // 40% beam (400) goes to nonfloor_area=0 → incident=0 for walls.
-        // Floor absorbed: 600 × 0.6 = 360.
-        // Reflected: 1000 - 360 = 640 (includes lost 40% wall beam + floor reflection).
+        // All surfaces are floors. Redirect the full beam budget to floors by area.
+        // Floor absorbed: 1000 × 0.6 = 600.
+        // Reflected: 400.
         let total_absorbed: f64 = absorbed.iter().sum();
         assert!(
-            (total_absorbed - 360.0).abs() < 1e-6,
-            "only-floors: expected 360 absorbed, got {total_absorbed}"
+            (total_absorbed - 600.0).abs() < 1e-6,
+            "only-floors: expected 600 absorbed, got {total_absorbed}"
         );
         assert!(
-            (reflected - 640.0).abs() < 1e-6,
-            "only-floors: expected 640 reflected, got {reflected}"
+            (reflected - 400.0).abs() < 1e-6,
+            "only-floors: expected 400 reflected, got {reflected}"
         );
     }
 }

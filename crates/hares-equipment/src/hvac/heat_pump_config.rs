@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::heating_config::DuctConfig;
 use crate::config::EquipmentTypedConfig;
+use hares_types::ScheduleSourceConfig;
 
 fn default_one() -> u8 {
     1
@@ -92,6 +93,10 @@ pub struct HeatPumpHeaterConfig {
     /// Thermostat hysteresis around the setpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hysteresis_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_source: Option<ScheduleSourceConfig>,
     /// Heat-pump lockout below this outdoor temperature [C].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hp_lockout_temp_c: Option<f64>,
@@ -164,6 +169,8 @@ impl Default for HeatPumpHeaterConfig {
             heating_setpoint_c: None,
             cooling_setpoint_c: None,
             hysteresis_c: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
             hp_lockout_temp_c: None,
             er_lockout_temp_c: None,
             max_oat_supplemental_c: None,
@@ -328,6 +335,16 @@ pub struct HeatPumpCoolerConfig {
     /// Rated airflow in SI units [m^3/s/W].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub airflow_m3_s_per_w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hysteresis_c: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_source: Option<ScheduleSourceConfig>,
     #[serde(flatten)]
     pub duct: DuctConfig,
     /// Biquadratic curve x1 (wet-bulb) lower bound [C].
@@ -406,6 +423,8 @@ mod tests {
             heating_setpoint_c: Some(21.0),
             cooling_setpoint_c: Some(26.0),
             hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
             hp_lockout_temp_c: Some(-17.8),
             er_lockout_temp_c: Some(4.4),
             max_oat_supplemental_c: Some(21.0),
@@ -455,6 +474,11 @@ mod tests {
             fan_power_w: Some(300.0),
             fan_power_w_per_cfm: None,
             airflow_m3_s_per_w: Some(4.0e-5),
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
             duct: DuctConfig::default(),
             biquadratic_x1_min: Some(12.0),
             biquadratic_x1_max: Some(24.0),

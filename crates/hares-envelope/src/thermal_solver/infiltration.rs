@@ -126,25 +126,29 @@ pub(crate) fn apply_infiltration_and_ventilation(
             );
         }
 
-        // Natural ventilation flow (operable windows).
-        let q_nat_m3_s = config
-            .natural_ventilation
-            .as_ref()
-            .map(|nv| {
-                natural_ventilation_flow_m3_s(
-                    nv.open_area_m2,
-                    zone.temperature_c,
-                    t_out,
-                    nv.t_base_c,
-                    w_out,
-                    nv.max_outdoor_humidity_ratio,
-                    env.weather.wind_speed_m_s,
-                    nv.stack_coeff,
-                    nv.wind_coeff,
-                    zone.volume_m3,
-                )
-            })
-            .unwrap_or(0.0);
+        // Natural ventilation is only applied to the indoor/conditioned zone.
+        let q_nat_m3_s = if zone.id == config.indoor_zone_id {
+            config
+                .natural_ventilation
+                .as_ref()
+                .map(|nv| {
+                    natural_ventilation_flow_m3_s(
+                        nv.open_area_m2,
+                        zone.temperature_c,
+                        t_out,
+                        nv.t_base_c,
+                        w_out,
+                        nv.max_outdoor_humidity_ratio,
+                        env.weather.wind_speed_m_s,
+                        nv.stack_coeff,
+                        nv.wind_coeff,
+                        zone.volume_m3,
+                    )
+                })
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         // Forced mechanical ventilation flow — only for zones with explicit flow
         // or the indoor zone (which gets the global ventilation rate).
@@ -307,6 +311,26 @@ mod tests {
             price_signal: PriceSignal::default(),
             electrical: ElectricalSummary::default(),
         }
+    }
+
+    fn make_two_zone_env(
+        t_out_c: f64,
+        wind_m_s: f64,
+        indoor_temp_c: f64,
+        other_temp_c: f64,
+        volume_m3: f64,
+        other_volume_m3: f64,
+    ) -> EnvironmentState {
+        let mut env = make_env(t_out_c, wind_m_s, indoor_temp_c, volume_m3);
+        env.zones.push(ZoneState {
+            id: ZoneId(2),
+            temperature_c: other_temp_c,
+            humidity_ratio: 0.007,
+            relative_humidity: 0.45,
+            wet_bulb_c: other_temp_c - 3.0,
+            volume_m3: other_volume_m3,
+        });
+        env
     }
 
     #[test]
@@ -654,6 +678,55 @@ mod tests {
         assert!(
             nat_flow.abs() < 1e-12,
             "natural ventilation must be zero when zone ≤ outdoor, got {nat_flow}"
+        );
+    }
+
+    /// Natural ventilation is scoped to the indoor zone only.
+    #[test]
+    fn infiltration_natural_ventilation_indoor_only() {
+        use crate::thermal_solver::config::NaturalVentilationConfig;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![
+                (ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 }),
+                (ZoneId(2), InfiltrationMethod::Ach { ach: 0.0 }),
+            ],
+            natural_ventilation: Some(NaturalVentilationConfig {
+                open_area_m2: 0.5,
+                stack_coeff: 0.000_290,
+                wind_coeff: 0.000_150,
+                t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
+                max_outdoor_humidity_ratio:
+                    NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+            }),
+            ..ThermalSolverConfig::default()
+        };
+        let env = make_two_zone_env(15.0, 2.0, 26.0, 26.0, 300.0, 250.0);
+
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings);
+
+        assert_eq!(couplings.len(), 2);
+        assert!(
+            couplings
+                .iter()
+                .find(|c| c.zone == ZoneId(1))
+                .expect("indoor coupling expected")
+                .nat_flow_m3_s
+                > 0.0,
+            "indoor zone should receive natural ventilation"
+        );
+        assert_eq!(
+            couplings
+                .iter()
+                .find(|c| c.zone == ZoneId(2))
+                .expect("other zone coupling expected")
+                .nat_flow_m3_s,
+            0.0,
+            "non-indoor zone must not receive natural ventilation"
         );
     }
 

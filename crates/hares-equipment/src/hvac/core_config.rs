@@ -1,7 +1,7 @@
 //! Config parsing helpers for HVAC equipment initialization.
 
 use hares_types::normalize_ascii;
-use hares_types::{BoundaryPolicy, HaresError, ScheduleSource};
+use hares_types::{BoundaryPolicy, HaresError, ScheduleSource, ScheduleSourceConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::EquipmentConfig;
@@ -53,6 +53,27 @@ fn typed_value<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a serde_j
     }
 }
 
+fn extract_f64_array(config: &EquipmentConfig, key: &str) -> Option<Vec<f64>> {
+    if let Some(raw) = config.get_f64_array(key) {
+        return Some(raw.to_vec());
+    }
+    typed_value(config, key)
+        .and_then(serde_json::Value::as_array)
+        .and_then(|arr| {
+            let mut out = Vec::with_capacity(arr.len());
+            for value in arr {
+                out.push(value.as_f64()?);
+            }
+            Some(out)
+        })
+}
+
+fn extract_schedule_source(config: &EquipmentConfig, key: &str) -> Option<ScheduleSource> {
+    typed_value(config, key)
+        .and_then(|value| serde_json::from_value::<ScheduleSourceConfig>(value.clone()).ok())
+        .map(ScheduleSourceConfig::into_runtime)
+}
+
 #[cfg(not(test))]
 pub(super) fn extract_numeric(config: &EquipmentConfig, key: &str) -> Option<f64> {
     typed_value(config, key).and_then(serde_json::Value::as_f64)
@@ -102,6 +123,11 @@ pub(super) fn build_setpoint_source(
     config: &EquipmentConfig,
     prefix: &str,
 ) -> Option<ScheduleSource> {
+    let source_key = format!("{prefix}_setpoint_source");
+    if let Some(source) = extract_schedule_source(config, &source_key) {
+        return Some(source);
+    }
+
     // Priority 1: per-timestep CSV column index
     let col_key = format!("{prefix}_setpoint_schedule_col");
     if let Some(col) = extract_numeric(config, &col_key) {
@@ -114,13 +140,13 @@ pub(super) fn build_setpoint_source(
     // Priority 2: 24-hour weekday/weekend profiles
     let wd_key = format!("{prefix}_weekday_setpoints_c");
     let we_key = format!("{prefix}_weekend_setpoints_c");
-    let weekday = config.get_f64_array(&wd_key);
-    let weekend = config.get_f64_array(&we_key);
+    let weekday = extract_f64_array(config, &wd_key);
+    let weekend = extract_f64_array(config, &we_key);
     if let Some(wd) = weekday {
-        let we = weekend.unwrap_or(wd);
+        let we = weekend.unwrap_or_else(|| wd.clone());
         return Some(ScheduleSource::DailyProfile {
-            weekday: slice_to_24(wd),
-            weekend: slice_to_24(we),
+            weekday: slice_to_24(&wd),
+            weekend: slice_to_24(&we),
             month_multipliers: [1.0; 12],
             max_value: 1.0,
         });

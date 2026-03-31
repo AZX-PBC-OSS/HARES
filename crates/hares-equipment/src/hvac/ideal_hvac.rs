@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
-use crate::hvac::heating_config::IdealHvacConfig;
+use crate::hvac::heating_config::{IdealCapacityModeConfig, IdealHvacConfig};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::hvac_core::IDEAL_CAPACITY_TIME_RES_THRESHOLD_S;
@@ -168,6 +168,17 @@ impl IdealHvac {
             .with_control_override(self.runtime_setpoints)
     }
 
+    fn validate_runtime_override(
+        &self,
+        candidate: RuntimeSetpointOverride,
+    ) -> crate::Result<RuntimeSetpointOverride> {
+        self.static_setpoints
+            .with_schedule_override(self.schedule_setpoints)
+            .with_control_override(Some(candidate))
+            .validate_for_deadband(self.thermostat.hysteresis_c)?;
+        Ok(candidate)
+    }
+
     fn resolve_schedule_setpoints(&mut self, env: &EnvironmentState) {
         if self.heating_setpoint_source.is_none() && self.cooling_setpoint_source.is_none() {
             return;
@@ -240,7 +251,9 @@ impl IdealHvac {
         match self.mode {
             ThermostatMode::Heating => self.current_target_c = setpoints.heating_c,
             ThermostatMode::Cooling => self.current_target_c = setpoints.cooling_c,
-            ThermostatMode::Deadband => {}
+            ThermostatMode::Deadband => {
+                self.current_target_c = 0.5 * (setpoints.heating_c + setpoints.cooling_c);
+            }
         }
 
         if !is_cycle_change_allowed(&self.thermostat, self.last_mode_switch_at, env.current_time) {
@@ -318,7 +331,9 @@ impl IdealHvac {
         match self.mode {
             ThermostatMode::Heating => self.current_target_c = setpoints.heating_c,
             ThermostatMode::Cooling => self.current_target_c = setpoints.cooling_c,
-            ThermostatMode::Deadband => {}
+            ThermostatMode::Deadband => {
+                self.current_target_c = 0.5 * (setpoints.heating_c + setpoints.cooling_c);
+            }
         }
 
         Ok(self.mode)
@@ -344,6 +359,32 @@ impl Equipment for IdealHvac {
         }
         if let Some(shr) = typed.shr {
             self.shr = shr.clamp(0.0, 1.0);
+        }
+        if let Some(heating_sp) = typed.heating_setpoint_c {
+            self.static_setpoints.heating_c = heating_sp;
+        }
+        if let Some(cooling_sp) = typed.cooling_setpoint_c {
+            self.static_setpoints.cooling_c = cooling_sp;
+        }
+        if let Some(deadband) = typed.deadband_c {
+            self.thermostat.hysteresis_c = deadband.max(0.0);
+        }
+        if let Some(n_speeds) = typed.n_speeds {
+            // OCHRE parity: auto-ideal variable-speed threshold is 4+ speeds.
+            self.is_variable_speed = n_speeds >= 4;
+        }
+        if let Some(mode) = typed.ideal_capacity_mode {
+            self.ideal_capacity_mode = match mode {
+                IdealCapacityModeConfig::On => IdealCapacityMode::On,
+                IdealCapacityModeConfig::Off => IdealCapacityMode::Off,
+                IdealCapacityModeConfig::Auto => IdealCapacityMode::Auto,
+            };
+        }
+        if let Some(source) = &typed.heating_setpoint_source {
+            self.heating_setpoint_source = Some(source.clone().into_runtime());
+        }
+        if let Some(source) = &typed.cooling_setpoint_source {
+            self.cooling_setpoint_source = Some(source.clone().into_runtime());
         }
         if let Some(fraction) = typed
             .fraction_heating_load_served
@@ -377,7 +418,8 @@ impl Equipment for IdealHvac {
             self.thermostat.hysteresis_c = deadband.max(0.0);
         }
         if let Some(n_speeds) = extract_numeric(config, "n_speeds") {
-            self.is_variable_speed = n_speeds >= 2.0;
+            // OCHRE parity: auto-ideal variable-speed threshold is 4+ speeds.
+            self.is_variable_speed = n_speeds >= 4.0;
         }
         if let Some(mode) = extract_text(config, "ideal_capacity_mode") {
             self.ideal_capacity_mode = match mode.trim().to_ascii_lowercase().as_str() {
@@ -386,10 +428,14 @@ impl Equipment for IdealHvac {
                 _ => IdealCapacityMode::Auto,
             };
         }
-        if let Some(source) = build_setpoint_source(config, "heating") {
+        if self.heating_setpoint_source.is_none()
+            && let Some(source) = build_setpoint_source(config, "heating")
+        {
             self.heating_setpoint_source = Some(source);
         }
-        if let Some(source) = build_setpoint_source(config, "cooling") {
+        if self.cooling_setpoint_source.is_none()
+            && let Some(source) = build_setpoint_source(config, "cooling")
+        {
             self.cooling_setpoint_source = Some(source);
         }
 
@@ -541,10 +587,11 @@ impl Equipment for IdealHvac {
                 cooling_setpoint_c,
                 deadband_c,
             } => {
-                self.runtime_setpoints = Some(RuntimeSetpointOverride {
+                let candidate = RuntimeSetpointOverride {
                     heating_c: *heating_setpoint_c,
                     cooling_c: *cooling_setpoint_c,
-                });
+                };
+                self.runtime_setpoints = Some(self.validate_runtime_override(candidate)?);
                 if let Some(db) = deadband_c {
                     if db.is_finite() && *db >= 0.0 {
                         self.thermostat.hysteresis_c = *db;
@@ -569,14 +616,15 @@ impl Equipment for IdealHvac {
                     .static_setpoints
                     .with_schedule_override(self.schedule_setpoints);
                 let prior = self.runtime_setpoints.unwrap_or_default();
-                self.runtime_setpoints = Some(RuntimeSetpointOverride {
+                let candidate = RuntimeSetpointOverride {
                     heating_c: heating_delta_c
                         .map(|d| base.heating_c + d)
                         .or(prior.heating_c),
                     cooling_c: cooling_delta_c
                         .map(|d| base.cooling_c + d)
                         .or(prior.cooling_c),
-                });
+                };
+                self.runtime_setpoints = Some(self.validate_runtime_override(candidate)?);
             }
             ControlSignal::IdealCapacityModeOverride { mode } => {
                 self.ideal_capacity_mode = *mode;
@@ -824,6 +872,38 @@ mod tests {
         let sp = eq.runtime_setpoints.unwrap();
         assert_eq!(sp.heating_c, Some(19.0));
         assert_eq!(sp.cooling_c, Some(25.0));
+    }
+
+    #[test]
+    fn ideal_hvac_rejects_invalid_runtime_thermal_setpoint_override() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.test_extras_mut()
+            .insert("deadband_c".into(), 1.0.into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(20.0, 60, 0);
+        eq.init(&cfg, &env).unwrap();
+        let before = eq.runtime_setpoints;
+
+        let signal = hares_types::ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(24.0),
+            cooling_setpoint_c: Some(25.0),
+            deadband_c: None,
+        };
+        let result = eq.apply_control(&signal);
+        assert!(
+            result.is_err(),
+            "invalid runtime override must return an error"
+        );
+        assert_eq!(
+            eq.runtime_setpoints, before,
+            "invalid runtime override must not mutate state"
+        );
     }
 
     #[test]
@@ -1124,6 +1204,38 @@ mod tests {
     }
 
     #[test]
+    fn typed_column_ref_setpoint_source_reads_schedule_domain() {
+        let typed = crate::IdealHvacConfig {
+            zone_id: Some(1),
+            heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::ColumnRef {
+                col_idx: 0,
+                boundary: hares_types::BoundaryPolicy::Clamp,
+            }),
+            cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::ColumnRef {
+                col_idx: 1,
+                boundary: hares_types::BoundaryPolicy::Clamp,
+            }),
+            ..crate::IdealHvacConfig::default()
+        };
+        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let mut env = env(18.0, 60, 0);
+        env.custom_domains = vec![DomainUpdate {
+            domain_id: SCHEDULE_DOMAIN_ID,
+            zone_temperatures_c: vec![],
+            custom_payload: Some(vec![19.5, 26.0]),
+        }];
+
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+
+        let setpoints = eq.effective_setpoints();
+        assert!((setpoints.heating_c - 19.5).abs() < 1e-9);
+        assert!((setpoints.cooling_c - 26.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn with_setpoint_source_builder_method() {
         let cfg = config("IH");
         let eq = IdealHvac::new(cfg)
@@ -1343,6 +1455,88 @@ mod tests {
         assert!(
             (eq.current_target_c - 18.33).abs() < 1e-6,
             "current_target_c should update to new schedule setpoint, got {}",
+            eq.current_target_c
+        );
+    }
+
+    #[test]
+    fn typed_daily_profile_setpoint_source_updates_targets_by_hour() {
+        let mut heating_weekday = [21.67f64; 24];
+        heating_weekday[8] = 18.33;
+        let cooling_weekday = [26.0f64; 24];
+        let typed = crate::IdealHvacConfig {
+            zone_id: Some(1),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                weekday: heating_weekday,
+                weekend: heating_weekday,
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            }),
+            cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                weekday: cooling_weekday,
+                weekend: cooling_weekday,
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            }),
+            ..crate::IdealHvacConfig::default()
+        };
+        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
+
+        let env_h0 = env(15.0, 60, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_h0).unwrap();
+        eq.update_control(&env_h0);
+        assert_eq!(eq.mode, super::ThermostatMode::Heating);
+        assert!((eq.current_target_c - 21.67).abs() < 1e-6);
+
+        let env_h8 = env(15.0, 60, 8 * 3600);
+        eq.update_control(&env_h8);
+        assert_eq!(eq.mode, super::ThermostatMode::Heating);
+        assert!((eq.current_target_c - 18.33).abs() < 1e-6);
+    }
+
+    #[test]
+    fn current_target_c_updates_in_deadband_after_schedule_shift() {
+        let mut heating_weekday = [20.0f64; 24];
+        let mut cooling_weekday = [24.0f64; 24];
+        heating_weekday[8] = 18.0;
+        cooling_weekday[8] = 22.0;
+
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert(
+            "heating_weekday_setpoints_c".into(),
+            heating_weekday.to_vec().into(),
+        );
+        cfg.test_extras_mut().insert(
+            "heating_weekend_setpoints_c".into(),
+            heating_weekday.to_vec().into(),
+        );
+        cfg.test_extras_mut().insert(
+            "cooling_weekday_setpoints_c".into(),
+            cooling_weekday.to_vec().into(),
+        );
+        cfg.test_extras_mut().insert(
+            "cooling_weekend_setpoints_c".into(),
+            cooling_weekday.to_vec().into(),
+        );
+
+        // Midpoint = 22.0 at hour 0
+        let env_h0 = env(22.0, 60, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_h0).unwrap();
+        eq.update_control(&env_h0);
+        assert_eq!(eq.mode, super::ThermostatMode::Deadband);
+        assert!((eq.current_target_c - 22.0).abs() < 1e-6);
+
+        // Midpoint = 20.0 after schedule shift at hour 8
+        let env_h8 = env(20.0, 60, 8 * 3600);
+        eq.update_control(&env_h8);
+        assert_eq!(eq.mode, super::ThermostatMode::Deadband);
+        assert!(
+            (eq.current_target_c - 20.0).abs() < 1e-6,
+            "deadband target must track schedule midpoint, got {}",
             eq.current_target_c
         );
     }

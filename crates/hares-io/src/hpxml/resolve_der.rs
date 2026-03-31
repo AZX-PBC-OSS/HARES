@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use hares_equipment::{BatteryConfig, EvConfig, GeneratorConfig, PvConfig};
 use hares_types::FuelType;
 
+use super::HpxmlError;
 use super::building::XmlNode;
 use super::equipment::{EquipmentSpec, build_typed_spec};
 use super::xml_helpers::{child_energy_kwh, child_f64, child_text, element_id, parse_fuel};
@@ -18,9 +19,9 @@ pub(super) fn resolve_pv(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
-) {
+) -> std::result::Result<(), HpxmlError> {
     let Some(photovoltaics) = details.path(&["Systems", "Photovoltaics"]) else {
-        return;
+        return Ok(());
     };
 
     let mut inverter_eff_by_id: HashMap<String, f64> = HashMap::new();
@@ -34,6 +35,16 @@ pub(super) fn resolve_pv(
     }
 
     for pv in photovoltaics.children_named("PVSystem") {
+        if let Some(tracking) = child_text(pv, "Tracking") {
+            if !tracking.trim().eq_ignore_ascii_case("fixed") {
+                let id = element_id(pv).unwrap_or_else(|| "PVSystem".to_string());
+                return Err(HpxmlError::Parse(format!(
+                    "PV system `{id}` uses unsupported tracking mode `{}`; only `fixed` is supported",
+                    tracking.trim()
+                )));
+            }
+        }
+
         let inverter_eff = pv
             .child("AttachedToInverter")
             .and_then(|n| n.attrs.get("idref"))
@@ -65,6 +76,8 @@ pub(super) fn resolve_pv(
             defaults,
         ));
     }
+
+    Ok(())
 }
 
 pub(super) fn resolve_batteries(

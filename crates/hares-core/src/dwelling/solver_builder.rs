@@ -54,8 +54,12 @@ struct SolverBoundary {
     zone_idx: usize,
     is_exterior: bool,
     is_conditioned_interior: bool,
-    emissivity: f64,
-    solar_absorptance: f64,
+    is_attic_interior: bool,
+    exterior_emissivity: f64,
+    exterior_solar_absorptance: f64,
+    attic_emissivity: f64,
+    #[allow(dead_code)]
+    attic_solar_absorptance: f64,
     outer_wiring: Option<NodeWiring>,
     inner_wiring: Option<NodeWiring>,
     exterior_rad_frac: f64,
@@ -125,6 +129,11 @@ fn build_solver_boundaries(
             .interior_zone
             .as_ref()
             .map(|z| *z == hares_io::hpxml::ZoneType::Conditioned)
+            .unwrap_or(false);
+        let is_attic_interior = boundary
+            .interior_zone
+            .as_ref()
+            .map(|z| *z == hares_io::hpxml::ZoneType::Attic)
             .unwrap_or(false);
 
         let zone_idx = boundary_zone_index(building, boundary.interior_zone.as_ref(), rc.n_zones);
@@ -199,21 +208,12 @@ fn build_solver_boundaries(
             _ => 90.0,
         });
 
-        // Emissivity / absorptance (radiant barrier logic).
-        let is_attic_radiant_barrier = boundary.has_radiant_barrier
-            && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic);
-        let emissivity = boundary.emittance.unwrap_or(if is_attic_radiant_barrier {
-            EMISSIVITY_RADIANT_BARRIER
-        } else {
-            EMISSIVITY_DEFAULT
-        });
-        let solar_absorptance = boundary
-            .solar_absorptance
-            .unwrap_or(if is_attic_radiant_barrier {
-                SOLAR_ABSORPTANCE_RADIANT_BARRIER
-            } else {
-                SOLAR_ABSORPTANCE_DEFAULT
-            });
+        // Keep radiant-barrier properties on the attic-interior side only.
+        // Exterior solar/thermal properties remain physical or explicitly set by HPXML.
+        let exterior_emissivity = exterior_emissivity(boundary);
+        let exterior_solar_absorptance = exterior_solar_absorptance(boundary);
+        let attic_emissivity = attic_interior_emissivity(boundary);
+        let attic_solar_absorptance = attic_interior_solar_absorptance(boundary);
 
         let bd_input = &boundary_inputs[surface_idx];
         let r_film_ext = bd_input.r_film_exterior_m2_k_w;
@@ -346,8 +346,11 @@ fn build_solver_boundaries(
             zone_idx,
             is_exterior,
             is_conditioned_interior,
-            emissivity,
-            solar_absorptance,
+            is_attic_interior,
+            exterior_emissivity,
+            exterior_solar_absorptance,
+            attic_emissivity,
+            attic_solar_absorptance,
             outer_wiring,
             inner_wiring,
             exterior_rad_frac,
@@ -360,6 +363,52 @@ fn build_solver_boundaries(
     }
 
     (solver_boundaries, n_ext_surface_inputs, int_col_counter)
+}
+
+fn exterior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
+    boundary.emittance.unwrap_or(EMISSIVITY_DEFAULT)
+}
+
+fn attic_interior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
+    if boundary.has_radiant_barrier
+        && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic)
+    {
+        EMISSIVITY_RADIANT_BARRIER
+    } else {
+        exterior_emissivity(boundary)
+    }
+}
+
+fn exterior_solar_absorptance(boundary: &hares_io::hpxml::Boundary) -> f64 {
+    boundary
+        .solar_absorptance
+        .unwrap_or(SOLAR_ABSORPTANCE_DEFAULT)
+}
+
+fn attic_interior_solar_absorptance(boundary: &hares_io::hpxml::Boundary) -> f64 {
+    if boundary.has_radiant_barrier
+        && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic)
+    {
+        SOLAR_ABSORPTANCE_RADIANT_BARRIER
+    } else {
+        exterior_solar_absorptance(boundary)
+    }
+}
+
+fn include_interior_lwr(
+    is_window: bool,
+    is_exterior: bool,
+    is_conditioned_interior: bool,
+    is_attic_interior: bool,
+    area_m2: f64,
+) -> bool {
+    if area_m2 <= 0.0 {
+        return false;
+    }
+    if is_window {
+        return is_exterior;
+    }
+    is_conditioned_interior || is_attic_interior
 }
 
 /// Annual weather averages needed for film coefficient computation.
@@ -564,12 +613,12 @@ pub(crate) fn build_default_solvers(
                 state_index,
                 input_index,
                 area_m2: sb.area_m2,
-                emissivity: sb.emissivity,
+                emissivity: sb.exterior_emissivity,
                 tilt_deg: sb.tilt_deg,
                 rad_frac: sb.exterior_rad_frac,
                 rad_res_k_w: sb.exterior_rad_res_k_w,
                 n_iter,
-                absorptance: sb.solar_absorptance,
+                absorptance: sb.exterior_solar_absorptance,
                 boundary_category: sb.boundary_category,
             });
             wiring
@@ -609,11 +658,13 @@ pub(crate) fn build_default_solvers(
         // This matches OCHRE's approach where windows have t_idx=None and all
         // LWR goes to zone.radiation_heat.
         let is_window = sb.boundary_category == Some(BoundaryCategory::Window);
-        let include_in_lwr = if is_window {
-            sb.is_exterior && sb.area_m2 > 0.0
-        } else {
-            sb.is_conditioned_interior && sb.area_m2 > 0.0
-        };
+        let include_in_lwr = include_interior_lwr(
+            is_window,
+            sb.is_exterior,
+            sb.is_conditioned_interior,
+            sb.is_attic_interior,
+            sb.area_m2,
+        );
         if include_in_lwr {
             let (state_idx, input_idx) = if let Some(ref iw) = sb.inner_wiring {
                 (iw.state_row, iw.b_col)
@@ -644,7 +695,7 @@ pub(crate) fn build_default_solvers(
                 (WINDOW_EMISSIVITY, 0.0, rad_frac, Some(DrivingTemp::Outdoor))
             } else {
                 (
-                    sb.emissivity,
+                    sb.attic_emissivity,
                     if is_floor { 0.6 } else { 0.5 },
                     sb.interior_rad_frac,
                     None,
@@ -842,14 +893,13 @@ pub(crate) fn build_default_solvers(
                     InfiltrationMethod::Ach { ach: garage_ach }
                 }
                 ZoneType::Foundation => {
-                    if bz.vented {
-                        // Vented crawlspace: high air exchange.
-                        let ach = bz.ventilation_ach.unwrap_or(2.0);
-                        InfiltrationMethod::Ach { ach }
-                    } else {
-                        // Unvented crawlspace/basement: conduction only.
-                        InfiltrationMethod::Ach { ach: 0.0 }
-                    }
+                    let conditioned_area = building
+                        .zones
+                        .iter()
+                        .find(|z| z.zone_type == ZoneType::Conditioned)
+                        .and_then(|z| z.floor_area_m2);
+                    let foundation_height_m = foundation_height_m(bz);
+                    foundation_infiltration_method(bz, conditioned_area, foundation_height_m)
                 }
                 ZoneType::Outdoor | ZoneType::Ground | ZoneType::Adjacent | ZoneType::Other(_) => {
                     continue;
@@ -928,8 +978,10 @@ pub(crate) fn build_default_solvers(
     // Compute effective open window area from per-window FractionOperable.
     // Formula: Σ(window_area × fraction_operable) × 0.5 (open fraction) × 0.2 (flow fraction).
     {
-        use hares_envelope::NaturalVentilationConfig;
-        use hares_physics::infiltration::attic_ela_coefficients;
+        use hares_envelope::{InfiltrationMethod, NaturalVentilationConfig};
+        use hares_physics::infiltration::{
+            SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
+        };
 
         let total_operable_area: f64 = building
             .windows
@@ -948,14 +1000,32 @@ pub(crate) fn build_default_solvers(
         if total_operable_area > 0.0 {
             let open_area = total_operable_area * 0.5 * 0.2;
             let ceiling_h = building.ceiling_height_m.unwrap_or(2.5);
-            let bldg_h = ceiling_h
-                * building
-                    .zones
-                    .iter()
-                    .filter(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
-                    .count()
-                    .max(1) as f64;
-            let (stack, wind) = attic_ela_coefficients(1.5, bldg_h);
+            // Natural ventilation should use conditioned-zone ELA coefficients.
+            // Prefer explicit indoor ELA coefficients when available; otherwise
+            // derive conditioned defaults (hor_lk_frac=0.0), not attic values.
+            let (stack, wind) = thermal_cfg
+                .infiltration
+                .iter()
+                .find_map(|(zone_id, method)| {
+                    (*zone_id == thermal_cfg.indoor_zone_id).then_some(*method)
+                })
+                .and_then(|method| match method {
+                    InfiltrationMethod::Ela {
+                        stack_coeff,
+                        wind_coeff,
+                        ..
+                    } => Some((stack_coeff, wind_coeff)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    calculate_ela_coefficients(
+                        0.0,
+                        ceiling_h,
+                        0.0,
+                        TerrainClass::Suburban,
+                        SHIELDING_NORMAL,
+                    )
+                });
             thermal_cfg.natural_ventilation = Some(NaturalVentilationConfig {
                 open_area_m2: open_area,
                 stack_coeff: stack,
@@ -1004,9 +1074,70 @@ pub(crate) fn build_default_solvers(
     })
 }
 
+fn foundation_infiltration_method(
+    zone: &hares_io::hpxml::Zone,
+    conditioned_floor_area_m2: Option<f64>,
+    foundation_height_m: Option<f64>,
+) -> hares_envelope::InfiltrationMethod {
+    use hares_envelope::InfiltrationMethod;
+    use hares_physics::infiltration::{SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients};
+
+    if let Some(ach) = zone.ventilation_ach {
+        return InfiltrationMethod::Ach { ach };
+    }
+
+    if let Some(sla) = zone.ventilation_sla {
+        if let (Some(floor_area_m2), Some(height_m)) = (
+            zone.floor_area_m2.or(conditioned_floor_area_m2),
+            foundation_height_m,
+        ) {
+            let ela_m2 = sla * floor_area_m2;
+            let (stack_coeff, wind_coeff) = calculate_ela_coefficients(
+                0.0,
+                height_m,
+                0.0,
+                TerrainClass::Suburban,
+                SHIELDING_NORMAL,
+            );
+            return InfiltrationMethod::Ela {
+                ela_m2,
+                stack_coeff,
+                wind_coeff,
+            };
+        }
+    }
+
+    if zone.vented {
+        // Vented crawlspace: high air exchange.
+        let ach = zone.ventilation_ach.unwrap_or(2.0);
+        InfiltrationMethod::Ach { ach }
+    } else {
+        // Unvented crawlspace/basement: conduction only.
+        InfiltrationMethod::Ach { ach: 0.0 }
+    }
+}
+
+fn foundation_height_m(zone: &hares_io::hpxml::Zone) -> Option<f64> {
+    zone.volume_m3
+        .zip(zone.floor_area_m2)
+        .and_then(|(volume_m3, floor_area_m2)| {
+            (floor_area_m2 > 0.0).then_some(volume_m3 / floor_area_m2)
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use hares_physics::infiltration::N_I_DEFAULT;
+    use hares_envelope::InfiltrationMethod;
+    use hares_io::hpxml::{Boundary, BoundaryType, Zone, ZoneType};
+    use hares_physics::infiltration::{
+        N_I_DEFAULT, SHIELDING_NORMAL, TerrainClass, calculate_ela_coefficients,
+    };
+
+    use super::{
+        attic_interior_emissivity, attic_interior_solar_absorptance, exterior_emissivity,
+        exterior_solar_absorptance, foundation_height_m, foundation_infiltration_method,
+        include_interior_lwr,
+    };
 
     #[test]
     fn n_iter_matches_ceil_formula() {
@@ -1116,6 +1247,159 @@ mod tests {
         assert!(
             (resolved_ela.unwrap() - expected_from_ela).abs() < 1e-9,
             "ELA-only path mismatch"
+        );
+    }
+
+    fn attic_roof_boundary(
+        solar_absorptance: Option<f64>,
+        emittance: Option<f64>,
+        has_radiant_barrier: bool,
+    ) -> Boundary {
+        Boundary {
+            id: "Roof1".to_string(),
+            boundary_type: BoundaryType::Roof,
+            area_m2: 100.0,
+            azimuth_deg: Some(180.0),
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Attic),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: Vec::new(),
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier,
+            solar_absorptance,
+            emittance,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            tilt_deg: Some(15.0),
+            framing_factor: None,
+        }
+    }
+
+    #[test]
+    fn attic_radiant_barrier_keeps_exterior_roof_physics() {
+        let boundary = attic_roof_boundary(None, None, true);
+
+        assert_eq!(exterior_solar_absorptance(&boundary), 0.60);
+        assert_eq!(attic_interior_solar_absorptance(&boundary), 0.05);
+        assert_eq!(exterior_emissivity(&boundary), 0.90);
+        assert_eq!(attic_interior_emissivity(&boundary), 0.05);
+    }
+
+    #[test]
+    fn explicit_roof_optics_are_preserved_for_exterior_path() {
+        let boundary = attic_roof_boundary(Some(0.72), Some(0.88), true);
+
+        assert_eq!(exterior_solar_absorptance(&boundary), 0.72);
+        assert_eq!(attic_interior_solar_absorptance(&boundary), 0.05);
+        assert_eq!(exterior_emissivity(&boundary), 0.88);
+        assert_eq!(attic_interior_emissivity(&boundary), 0.05);
+    }
+
+    #[test]
+    fn attic_interior_surfaces_participate_in_lwr() {
+        assert!(include_interior_lwr(false, false, false, true, 12.0));
+    }
+
+    #[test]
+    fn conditioned_interior_behavior_is_unchanged() {
+        assert!(include_interior_lwr(false, false, true, false, 12.0));
+        assert!(!include_interior_lwr(false, false, true, false, 0.0));
+    }
+
+    #[test]
+    fn window_behavior_is_unchanged() {
+        assert!(include_interior_lwr(true, true, false, false, 8.0));
+        assert!(!include_interior_lwr(true, false, false, false, 8.0));
+    }
+
+    fn foundation_zone(
+        floor_area_m2: Option<f64>,
+        volume_m3: Option<f64>,
+        vented: bool,
+        ventilation_ach: Option<f64>,
+        ventilation_sla: Option<f64>,
+    ) -> Zone {
+        Zone {
+            zone_type: ZoneType::Foundation,
+            floor_area_m2,
+            volume_m3,
+            attached_wall_ids: Vec::new(),
+            duct_systems: Vec::new(),
+            vented,
+            ventilation_ach,
+            ventilation_sla,
+        }
+    }
+
+    #[test]
+    fn foundation_height_comes_from_zone_geometry() {
+        let zone = foundation_zone(Some(50.0), Some(75.0), false, None, None);
+        let height = foundation_height_m(&zone).expect("height expected");
+        assert!((height - 1.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn foundation_sla_resolves_to_ela() {
+        let zone = foundation_zone(Some(50.0), Some(75.0), false, None, Some(0.0002));
+        let method = foundation_infiltration_method(&zone, Some(100.0), Some(1.5));
+        match method {
+            InfiltrationMethod::Ela {
+                ela_m2,
+                stack_coeff,
+                wind_coeff,
+            } => {
+                assert!((ela_m2 - 0.01).abs() < 1e-12);
+                let (expected_stack, expected_wind) = calculate_ela_coefficients(
+                    0.0,
+                    1.5,
+                    0.0,
+                    TerrainClass::Suburban,
+                    SHIELDING_NORMAL,
+                );
+                assert!((stack_coeff - expected_stack).abs() < 1e-12);
+                assert!((wind_coeff - expected_wind).abs() < 1e-12);
+            }
+            other => panic!("expected ELA, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn foundation_ach_takes_precedence_over_sla() {
+        let zone = foundation_zone(Some(50.0), Some(75.0), true, Some(3.0), Some(0.0002));
+        let method = foundation_infiltration_method(&zone, Some(100.0), Some(1.5));
+        assert_eq!(method, InfiltrationMethod::Ach { ach: 3.0 });
+    }
+
+    #[test]
+    fn foundation_default_fallbacks_remain_ach() {
+        let vented = foundation_zone(Some(50.0), Some(75.0), true, None, None);
+        let unvented = foundation_zone(Some(50.0), Some(75.0), false, None, None);
+
+        assert_eq!(
+            foundation_infiltration_method(&vented, Some(100.0), Some(1.5)),
+            InfiltrationMethod::Ach { ach: 2.0 }
+        );
+        assert_eq!(
+            foundation_infiltration_method(&unvented, Some(100.0), Some(1.5)),
+            InfiltrationMethod::Ach { ach: 0.0 }
+        );
+    }
+
+    #[test]
+    fn foundation_sla_without_geometry_falls_back_to_ach_defaults() {
+        let vented = foundation_zone(None, None, true, None, Some(0.0002));
+        let unvented = foundation_zone(None, None, false, None, Some(0.0002));
+
+        assert_eq!(
+            foundation_infiltration_method(&vented, None, None),
+            InfiltrationMethod::Ach { ach: 2.0 }
+        );
+        assert_eq!(
+            foundation_infiltration_method(&unvented, None, None),
+            InfiltrationMethod::Ach { ach: 0.0 }
         );
     }
 }
