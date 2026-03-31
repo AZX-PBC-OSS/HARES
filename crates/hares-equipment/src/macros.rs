@@ -50,6 +50,10 @@ macro_rules! delegate_equipment {
                 self.$inner.telemetry()
             }
 
+            fn core_output(&self) -> &hares_types::CoreOutput {
+                self.$inner.core_output()
+            }
+
             fn save_state(&self) -> Vec<u8> {
                 self.$inner.save_state()
             }

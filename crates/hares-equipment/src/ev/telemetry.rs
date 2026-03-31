@@ -8,7 +8,6 @@ pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     let mut t = Telemetry::with_capacity(14);
     t.insert(tk::SOC, DEFAULT_SOC);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
-    t.insert(tk::ELECTRIC_KW, 0.0);
     t.insert(tk::CONNECTION_STATE, 0.0);
     t.insert(tk::CHARGING_LEVEL, telemetry_code(charging_level));
     t.insert(tk::BATTERY_TEMP_C, 20.0);
@@ -34,11 +33,6 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ACTIVE_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Residential grid-side EV charging power (positive = load)".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Grid-boundary electrical power".to_string(),
         },
         TelemetryField {
             name: tk::CONNECTION_STATE.to_string(),

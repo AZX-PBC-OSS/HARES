@@ -21,10 +21,11 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId, telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
+    FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratorConfig {
+    pub equipment_id: Option<u32>,
+    pub fuel_type: Option<FuelType>,
     pub rated_power_kw: f64,
     pub eta_electric: Option<f64>,
     pub eta_thermal: Option<f64>,
@@ -56,7 +59,7 @@ pub struct GeneratorConfig {
 
 impl EquipmentTypedConfig for GeneratorConfig {
     fn equipment_type_name() -> &'static str {
-        "GasGenerator"
+        "Gas Generator"
     }
 }
 
@@ -387,6 +390,7 @@ pub struct Generator {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     kind: GeneratorKind,
 
     // Static config
@@ -456,7 +460,7 @@ impl Generator {
             control_capabilities: ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::SELF_CONSUMPTION,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::FUEL,
             telemetry_fields: generator_telemetry_fields(has_chp),
         };
 
@@ -469,6 +473,7 @@ impl Generator {
             descriptor,
             ports,
             telemetry: default_telemetry(has_chp),
+            core_output: CoreOutput::default(),
             kind,
             rated_power_kw: config
                 .get_f64(KEY_RATED_POWER_KW)
@@ -560,14 +565,13 @@ impl Generator {
 
     fn init_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         let c: GeneratorConfig = config.typed()?;
+        c.validate()?;
 
         self.rated_power_kw = c.rated_power_kw;
         self.capacity_min_kw = c.capacity_min_kw;
         self.eta_thermal = c.eta_thermal.unwrap_or(self.eta_thermal);
         self.delta_kw_per_s = c.delta_kw_per_s.unwrap_or(self.delta_kw_per_s);
-        self.grid_import_limit_kw = c
-            .grid_import_limit_kw
-            .unwrap_or(self.grid_import_limit_kw);
+        self.grid_import_limit_kw = c.grid_import_limit_kw.unwrap_or(self.grid_import_limit_kw);
         self.export_limit_kw = c.export_limit_kw.unwrap_or(self.export_limit_kw);
         self.flow_rate_kg_s = c.flow_rate_kg_s.unwrap_or(self.flow_rate_kg_s);
         self.supply_temp_c = c.supply_temp_c.unwrap_or(self.supply_temp_c);
@@ -582,37 +586,7 @@ impl Generator {
             Some("quadratic") => EfficiencyModel::Quadratic { rated },
             _ => EfficiencyModel::Constant { rated },
         };
-
-        if self.rated_power_kw <= 0.0 {
-            return Err(HaresError::Equipment(
-                "generator rated_power_kw must be positive".to_string(),
-            ));
-        }
         self.efficiency.validate()?;
-        if !(0.0..=1.0).contains(&self.eta_thermal) {
-            return Err(HaresError::Equipment(
-                "generator eta_thermal must be in [0, 1]".to_string(),
-            ));
-        }
-        if self.efficiency.rated() + self.eta_thermal > 1.0 {
-            return Err(HaresError::Equipment(format!(
-                "generator eta_electric ({}) + eta_thermal ({}) exceeds 1.0; flue loss would be negative",
-                self.efficiency.rated(),
-                self.eta_thermal
-            )));
-        }
-        if self.delta_kw_per_s <= 0.0 {
-            return Err(HaresError::Equipment(
-                "generator delta_kw_per_s must be positive".to_string(),
-            ));
-        }
-        if let Some(min_kw) = self.capacity_min_kw {
-            if min_kw < 0.0 || min_kw > self.rated_power_kw {
-                return Err(HaresError::Equipment(format!(
-                    "generator capacity_min_kw ({min_kw}) must be in [0, rated_power_kw]"
-                )));
-            }
-        }
 
         if self.eta_thermal > 0.0 {
             if let Some(lid) = c.loop_id {
@@ -634,6 +608,7 @@ impl Generator {
         self.telemetry = default_telemetry(has_chp);
         self.telemetry
             .set(tk::ETA_ELECTRIC, self.efficiency.rated());
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -739,6 +714,7 @@ impl Equipment for Generator {
         self.telemetry = default_telemetry(has_chp);
         self.telemetry
             .set(tk::ETA_ELECTRIC, self.efficiency.rated());
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -861,7 +837,6 @@ impl Equipment for Generator {
         };
 
         self.telemetry.set(tk::ELECTRIC_OUTPUT_KW, output_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, output_kw);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
         self.telemetry.set(tk::ETA_ELECTRIC, eta);
         self.telemetry
@@ -871,12 +846,30 @@ impl Equipment for Generator {
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
             self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
         }
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Generation(output_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: Some(FuelPower {
+                    fuel_type: FuelType::Gas,
+                    consumption_w: fuel_w.max(0.0),
+                }),
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+            },
+        };
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -907,7 +900,6 @@ impl Equipment for Generator {
 
         self.telemetry
             .set(tk::ELECTRIC_OUTPUT_KW, self.current_power_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, self.current_power_kw);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
         self.telemetry.set(tk::ETA_ELECTRIC, eta);
 
@@ -917,6 +909,7 @@ impl Equipment for Generator {
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
             self.telemetry.set(tk::FLUE_LOSS_W, q_flue_w);
         }
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -1014,7 +1007,6 @@ fn default_telemetry(has_chp: bool) -> Telemetry {
     let capacity = if has_chp { 6 } else { 4 };
     let mut t = Telemetry::with_capacity(capacity);
     t.insert(tk::ELECTRIC_OUTPUT_KW, 0.0);
-    t.insert(tk::ELECTRIC_KW, 0.0);
     t.insert(tk::FUEL_INPUT_W, 0.0);
     t.insert(tk::ETA_ELECTRIC, 0.0);
     t.insert(tk::RAMP_LIMITED, 0.0);
@@ -1031,11 +1023,6 @@ fn generator_telemetry_fields(has_chp: bool) -> Vec<TelemetryField> {
             name: tk::ELECTRIC_OUTPUT_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electrical generation output".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Grid-boundary electrical power".to_string(),
         },
         TelemetryField {
             name: tk::FUEL_INPUT_W.to_string(),
@@ -1126,6 +1113,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
@@ -2438,6 +2426,8 @@ mod tests {
 
     fn minimal_generator_config() -> GeneratorConfig {
         GeneratorConfig {
+            equipment_id: None,
+            fuel_type: None,
             rated_power_kw: 10.0,
             eta_electric: None,
             eta_thermal: None,
@@ -2458,10 +2448,9 @@ mod tests {
         let cfg = minimal_generator_config();
         let ec = EquipmentConfig::from_typed(
             "test_gen".to_string(),
-            "GasGenerator".to_string(),
+            "Gas Generator".to_string(),
             cfg.clone(),
-        )
-        .unwrap();
+        );
         assert!(ec.is_typed());
         let recovered: GeneratorConfig = ec.typed().unwrap();
         assert_eq!(recovered.rated_power_kw, cfg.rated_power_kw);
@@ -2476,9 +2465,9 @@ mod tests {
         });
         let ec = EquipmentConfig {
             name: "gen".to_string(),
-            ochre_class: "GasGenerator".to_string(),
+            ochre_class: "Gas Generator".to_string(),
             payload: ConfigPayload::Typed {
-                type_name: "GasGenerator".to_string(),
+                type_name: "Gas Generator".to_string(),
                 version: 1,
                 data: json,
             },

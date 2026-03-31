@@ -11,7 +11,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
-use hares_equipment::{EquipmentConfig, EquipmentRegistry, config::ConfigValue};
+use hares_equipment::{
+    DuctConfig, ElectricBaseboardConfig, EquipmentConfig, EquipmentRegistry, GasFurnaceConfig,
+    config::ConfigValue,
+};
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
     ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -57,6 +60,7 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, zone_wb_c: f64) -> Environmen
         },
         custom_domains: vec![],
         equipment_telemetry: std::collections::HashMap::new(),
+        equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
             .with_ymd_and_hms(2026, 7, 15, 14, 0, 0)
@@ -106,17 +110,19 @@ fn gas_furnace_energy_balance() {
     const FAN_POWER_W: f64 = 400.0;
     const EXPECTED_FAN_KW: f64 = FAN_POWER_W / 1_000.0;
 
-    let cfg = cfg(
-        "furnace",
-        "Gas Furnace",
-        &[
-            ("zone_id", 1.0),
-            ("capacity_w", RATED_CAPACITY_W),
-            ("heating_setpoint_c", 21.0),
-            ("cooling_setpoint_c", 27.0),
-            ("fuel_efficiency", FUEL_EFFICIENCY),
-            ("fan_power_w", FAN_POWER_W),
-        ],
+    let cfg = EquipmentConfig::from_typed(
+        "furnace".to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            afue: FUEL_EFFICIENCY,
+            capacity_w: RATED_CAPACITY_W,
+            number_of_speeds: 1,
+            fan_power_w: Some(FAN_POWER_W),
+            ducts: DuctConfig::default(),
+            ..GasFurnaceConfig::default()
+        },
     );
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -179,18 +185,22 @@ fn gas_furnace_energy_balance() {
 #[test]
 fn gas_furnace_fuel_independent_of_duct_dse() {
     let make = |dse: f64| {
-        let c = cfg(
-            "furnace",
-            "Gas Furnace",
-            &[
-                ("zone_id", 1.0),
-                ("capacity_w", 10_000.0),
-                ("heating_setpoint_c", 21.0),
-                ("cooling_setpoint_c", 27.0),
-                ("fuel_efficiency", 0.80),
-                ("fan_power_w", 0.0),
-                ("duct_dse", dse),
-            ],
+        let c = EquipmentConfig::from_typed(
+            "furnace".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                afue: 0.80,
+                capacity_w: 10_000.0,
+                number_of_speeds: 1,
+                fan_power_w: Some(0.0),
+                ducts: DuctConfig {
+                    dse_heat: Some(dse),
+                    ..DuctConfig::default()
+                },
+                ..GasFurnaceConfig::default()
+            },
         );
         let registry = EquipmentRegistry::new();
         let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
@@ -235,15 +245,15 @@ fn gas_furnace_fuel_independent_of_duct_dse() {
 // ---------------------------------------------------------------------------
 #[test]
 fn electric_baseboard_cop_is_unity() {
-    let c = cfg(
-        "bb",
-        "Electric Baseboard",
-        &[
-            ("zone_id", 1.0),
-            ("capacity_w", 3_000.0),
-            ("heating_setpoint_c", 21.0),
-            ("cooling_setpoint_c", 27.0),
-        ],
+    let c = EquipmentConfig::from_typed(
+        "bb".to_string(),
+        "Electric Baseboard".to_string(),
+        ElectricBaseboardConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 3_000.0,
+            eir: 1.0,
+        },
     );
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Baseboard", c.clone()).unwrap();
@@ -458,10 +468,7 @@ fn air_conditioner_sign_convention_and_shr_split() {
 
     // COP for a cooling unit: coil_cooling / compressor_electric.
     // Port sensible includes fan heat offset, so use telemetry coil output.
-    let coil_cooling_w = eq
-        .telemetry()
-        .get("sensible_cooling_w")
-        .unwrap_or(0.0)
+    let coil_cooling_w = eq.telemetry().get("sensible_cooling_w").unwrap_or(0.0)
         + eq.telemetry().get("latent_cooling_w").unwrap_or(0.0);
     let compressor_kw = eq.telemetry().get("compressor_kw").unwrap_or(0.0);
     let cooling_cop = coil_cooling_w / (compressor_kw * 1_000.0).max(f64::MIN_POSITIVE);
@@ -618,17 +625,19 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
 // ---------------------------------------------------------------------------
 #[test]
 fn furnace_thermostat_off_above_setpoint() {
-    let c = cfg(
-        "furnace",
-        "Gas Furnace",
-        &[
-            ("zone_id", 1.0),
-            ("capacity_w", 10_000.0),
-            ("heating_setpoint_c", 21.0),
-            ("cooling_setpoint_c", 27.0),
-            ("fuel_efficiency", 0.80),
-            ("fan_power_w", 0.0),
-        ],
+    let c = EquipmentConfig::from_typed(
+        "furnace".to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            afue: 0.80,
+            capacity_w: 10_000.0,
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            ducts: DuctConfig::default(),
+            ..GasFurnaceConfig::default()
+        },
     );
     let registry = EquipmentRegistry::new();
 
@@ -946,17 +955,19 @@ fn ac_sensible_plus_latent_equals_total() {
 // ---------------------------------------------------------------------------
 #[test]
 fn gas_furnace_first_law_thermal_less_than_fuel() {
-    let c = cfg(
-        "furnace",
-        "Gas Furnace",
-        &[
-            ("zone_id", 1.0),
-            ("capacity_w", 15_000.0),
-            ("heating_setpoint_c", 21.0),
-            ("cooling_setpoint_c", 27.0),
-            ("fuel_efficiency", 0.80),
-            ("fan_power_w", 0.0),
-        ],
+    let c = EquipmentConfig::from_typed(
+        "furnace".to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            afue: 0.80,
+            capacity_w: 15_000.0,
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            ducts: DuctConfig::default(),
+            ..GasFurnaceConfig::default()
+        },
     );
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();
@@ -1009,19 +1020,23 @@ fn gas_furnace_first_law_thermal_less_than_fuel() {
 // ---------------------------------------------------------------------------
 #[test]
 fn gas_furnace_dse_multi_zone_energy_conservation() {
-    let c = cfg(
-        "furnace",
-        "Gas Furnace",
-        &[
-            ("zone_id", 1.0),
-            ("capacity_w", 10_000.0),
-            ("heating_setpoint_c", 21.0),
-            ("cooling_setpoint_c", 27.0),
-            ("fuel_efficiency", 0.80),
-            ("fan_power_w", 0.0),
-            ("duct_dse", 0.80),
-            ("duct_zone_id", 2.0),
-        ],
+    let c = EquipmentConfig::from_typed(
+        "furnace".to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            afue: 0.80,
+            capacity_w: 10_000.0,
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            ducts: DuctConfig {
+                dse_heat: Some(0.80),
+                duct_zone_id: Some(2),
+                ..DuctConfig::default()
+            },
+            ..GasFurnaceConfig::default()
+        },
     );
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", c.clone()).unwrap();

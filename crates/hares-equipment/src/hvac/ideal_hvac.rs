@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, IdealCapacityMode,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
+    FuelType, HaresError, IdealCapacityMode, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,7 @@ pub struct IdealHvac {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     zone_id: ZoneId,
     thermostat: ThermostatConfig,
     static_setpoints: ThermalSetpoints,
@@ -90,7 +91,7 @@ impl IdealHvac {
                 | ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::MODE_OVERRIDE,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
             telemetry_fields: ideal_hvac_telemetry_fields(),
         };
 
@@ -98,6 +99,7 @@ impl IdealHvac {
             descriptor,
             ports: vec![PortDeclaration::thermal(zone)],
             telemetry: ideal_hvac_default_telemetry(),
+            core_output: CoreOutput::default(),
             zone_id: zone,
             thermostat: ThermostatConfig::default(),
             static_setpoints: ThermalSetpoints {
@@ -338,12 +340,26 @@ impl Equipment for IdealHvac {
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         if config.is_typed() {
             let typed = config.typed::<IdealHvacConfig>()?;
-            self.rated_capacity_w = typed.heating_capacity_w.max(0.0);
-            self.cooling_capacity_w = typed.cooling_capacity_w.max(0.0);
+            if let Some(v) = typed.heating_capacity_w {
+                self.rated_capacity_w = v.max(0.0);
+            }
+            if let Some(v) = typed.cooling_capacity_w {
+                self.cooling_capacity_w = v.max(0.0);
+            }
+            if let Some(shr) = typed.shr {
+                self.shr = shr.clamp(0.0, 1.0);
+            }
+            if let Some(fraction) = typed
+                .fraction_heating_load_served
+                .or(typed.fraction_cooling_load_served)
+            {
+                self.load_fraction = fraction.clamp(0.0, 1.0);
+            }
             self.effective_setpoints()
                 .validate_for_deadband(self.thermostat.hysteresis_c)?;
             self.thermostat.validate(env)?;
             self.telemetry = ideal_hvac_default_telemetry();
+            self.core_output = CoreOutput::default();
             return Ok(());
         }
 
@@ -408,6 +424,7 @@ impl Equipment for IdealHvac {
         self.thermostat.validate(env)?;
 
         self.telemetry = ideal_hvac_default_telemetry();
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -486,12 +503,32 @@ impl Equipment for IdealHvac {
             .set(tk::IDEAL_CAPACITY_W, self.ideal_capacity_w);
         self.telemetry
             .set(tk::CURRENT_TARGET_C, self.current_target_c);
+        let operating_mode = match self.mode {
+            ThermostatMode::Heating => OperatingMode::Heating,
+            ThermostatMode::Cooling => OperatingMode::Cooling,
+            ThermostatMode::Deadband => OperatingMode::Off,
+        };
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(operating_mode),
+                soc: None,
+            },
+        };
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -517,6 +554,7 @@ impl Equipment for IdealHvac {
         self.mode_start_at = decoded.mode_start_at;
         self.load_fraction = decoded.load_fraction;
         self.last_sim_time = decoded.last_sim_time;
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -597,14 +635,6 @@ impl Equipment for IdealHvac {
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     registry.register(
         "Ideal HVAC",
-        Box::new(|config| Box::new(IdealHvac::new(config))),
-    );
-    registry.register(
-        "Generic Heater",
-        Box::new(|config| Box::new(IdealHvac::new(config))),
-    );
-    registry.register(
-        "Generic Cooler",
         Box::new(|config| Box::new(IdealHvac::new(config))),
     );
 }
@@ -698,6 +728,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -964,8 +995,7 @@ mod tests {
 
     #[test]
     fn registry_includes_ideal_hvac() {
-        let mut registry = EquipmentRegistry::new();
-        register_with_registry(&mut registry);
+        let registry = EquipmentRegistry::new();
         assert!(registry.get("Ideal HVAC").is_some());
     }
 

@@ -7,9 +7,9 @@ use chrono::{DateTime, FixedOffset, Timelike};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal,
-    CoreCapabilities, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    EvConnectionState, ExecutionStage, FuelType, HaresError, OperatingMode, PlugInPolicy,
-    PortContribution, PortDeclaration, PortSlots, Telemetry,
+    CoreCapabilities, CoreFlows, CoreOutput, CoreState, ElectricPower, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage, FuelType, HaresError,
+    OperatingMode, PlugInPolicy, PortContribution, PortDeclaration, PortSlots, Soc, Telemetry,
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
@@ -59,6 +59,7 @@ pub struct Ev {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
 
     battery_capacity_kwh: f64,
     charging_level: ChargingLevel,
@@ -136,7 +137,9 @@ impl Ev {
                 | ControlCapabilities::EV_DRIVE
                 | ControlCapabilities::EV_AWAY_CHARGE
                 | ControlCapabilities::EV_SET_READY_BY,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::HAS_SOC
+                | CoreCapabilities::HAS_MODE,
             telemetry_fields: telemetry_fields(),
         };
 
@@ -164,6 +167,7 @@ impl Ev {
             descriptor,
             ports: vec![PortDeclaration::electrical()],
             telemetry: default_telemetry(charging_level),
+            core_output: CoreOutput::default(),
             battery_capacity_kwh,
             charging_level,
             rated_power_kw,
@@ -415,6 +419,7 @@ impl Ev {
         self.soc_target_min = None;
         self.soc_target_max = None;
         self.telemetry = default_telemetry(self.charging_level);
+        self.core_output = CoreOutput::default();
         self.write_telemetry();
 
         Ok(())
@@ -614,7 +619,6 @@ impl Ev {
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry
             .set(tk::ACTIVE_POWER_KW, self.active_power_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, self.active_power_kw);
         self.telemetry.set(
             tk::CONNECTION_STATE,
             match self.connection_state {
@@ -735,14 +739,23 @@ impl Ev {
 }
 
 impl Ev {
-    fn init_typed(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+    fn init_typed(
+        &mut self,
+        config: &EquipmentConfig,
+        env: &EnvironmentState,
+    ) -> crate::Result<()> {
         let c: EvConfig = config.typed()?;
         c.validate()?;
 
-        self.battery_capacity_kwh = c.battery_capacity_kwh;
+        self.battery_capacity_kwh = c.capacity_kwh;
 
         let level_str = c.charging_level.as_deref().unwrap_or("L2");
-        self.charging_level = match level_str.trim().replace(' ', "").to_ascii_lowercase().as_str() {
+        self.charging_level = match level_str
+            .trim()
+            .replace(' ', "")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "l1" | "level1" => ChargingLevel::L1,
             _ => ChargingLevel::L2,
         };
@@ -752,32 +765,34 @@ impl Ev {
         self.l1_voltage_v = c.l1_voltage_v.unwrap_or(DEFAULT_L1_VOLTAGE_V);
         self.soc_max = c.soc_max.unwrap_or(DEFAULT_SOC_MAX);
 
-        // Derive rated power from explicit max_charging_power_kw or level defaults.
-        self.rated_power_kw = if let Some(power_kw) = c.max_charging_power_kw {
-            match self.charging_level {
-                ChargingLevel::L1 => power_kw.clamp(L1_MIN_POWER_KW, L1_MAX_POWER_KW),
-                ChargingLevel::L2 => power_kw.clamp(L2_MIN_POWER_KW, L2_MAX_POWER_KW),
-            }
-        } else {
-            match self.charging_level {
-                ChargingLevel::L1 => L1_CHARGING_POWER_KW,
-                ChargingLevel::L2 => L2_MAX_POWER_KW,
-            }
+        self.rated_power_kw = match self.charging_level {
+            ChargingLevel::L1 => c
+                .max_charging_power_kw
+                .clamp(L1_MIN_POWER_KW, L1_MAX_POWER_KW),
+            ChargingLevel::L2 => c
+                .max_charging_power_kw
+                .clamp(L2_MIN_POWER_KW, L2_MAX_POWER_KW),
         };
 
         self.min_charge_temp_c = c.min_charge_temp_c.unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
         self.full_power_temp_c = c.full_power_temp_c.unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
         self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
         self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
-        self.thermal_mass_j_per_k = c.thermal_mass_j_per_k.unwrap_or(DEFAULT_THERMAL_MASS_J_PER_K);
+        self.thermal_mass_j_per_k = c
+            .thermal_mass_j_per_k
+            .unwrap_or(DEFAULT_THERMAL_MASS_J_PER_K);
         self.ua_w_per_k = c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K);
 
         self.v2l_enabled = c.v2l_enabled.unwrap_or(false);
         self.v2l_soc_reserve = c.v2l_soc_reserve.unwrap_or(DEFAULT_V2L_SOC_RESERVE);
-        self.v2l_max_discharge_kw = c.v2l_max_discharge_kw.unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW);
+        self.v2l_max_discharge_kw = c
+            .v2l_max_discharge_kw
+            .unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW);
         self.v2g_enabled = c.v2g_enabled.unwrap_or(false);
         self.v2g_soc_reserve = c.v2g_soc_reserve.unwrap_or(DEFAULT_V2G_SOC_RESERVE);
-        self.v2g_max_discharge_kw = c.v2g_max_discharge_kw.unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW);
+        self.v2g_max_discharge_kw = c
+            .v2g_max_discharge_kw
+            .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW);
 
         self.chemistry = c
             .chemistry
@@ -806,9 +821,7 @@ impl Ev {
         let initial_soc = c.initial_soc.unwrap_or(DEFAULT_SOC);
         self.soc = initial_soc.clamp(0.0, 1.0);
 
-        self.battery_temp_c = c
-            .battery_temp_c
-            .unwrap_or(env.weather.outdoor_temp_c);
+        self.battery_temp_c = c.battery_temp_c.unwrap_or(env.weather.outdoor_temp_c);
 
         if let Some(strat_str) = c.charging_strategy.as_deref() {
             self.charging_strategy = serde_json::from_str(strat_str)
@@ -839,6 +852,7 @@ impl Ev {
         self.soc_target_min = None;
         self.soc_target_max = None;
         self.telemetry = default_telemetry(self.charging_level);
+        self.core_output = CoreOutput::default();
         self.write_telemetry();
 
         Ok(())
@@ -948,11 +962,33 @@ impl Equipment for Ev {
 
         self.update_degradation(env, dt.as_secs_f64());
         self.write_telemetry();
+        let mode = if self.active_power_kw > 1e-9 {
+            OperatingMode::Charging
+        } else if self.active_power_kw < -1e-9 {
+            OperatingMode::Discharging
+        } else {
+            OperatingMode::Off
+        };
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Bidirectional(self.active_power_kw)),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(mode),
+                soc: Soc::try_from(self.soc).ok(),
+            },
+        };
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn actor_seed(&self) -> Option<crate::ActorSeed> {
@@ -1026,6 +1062,7 @@ impl Equipment for Ev {
         self.v2l_power_kw = 0.0;
 
         self.write_telemetry();
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 

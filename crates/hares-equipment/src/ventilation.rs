@@ -15,10 +15,10 @@ use std::time::Duration;
 
 use hares_physics::constants::{CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
-    ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VentilationConfig {
+    pub equipment_id: Option<u32>,
+    pub zone_id: Option<u16>,
     pub flow_rate_m3_s: f64,
     pub fan_power_w: Option<f64>,
     pub sensible_effectiveness: Option<f64>,
@@ -51,6 +53,10 @@ pub struct VentilationConfig {
     pub defrost_effectiveness_fraction: Option<f64>,
     /// Ventilation type: "exhaust_fan", "hrv", or "erv"
     pub ventilation_type: Option<String>,
+    /// Whether the system is balanced (HRV/ERV) or one-directional (exhaust/supply)
+    pub balanced: Option<bool>,
+    /// Daily hours of operation (0–24). Used by the EA-001 energy audit model.
+    pub hours_in_operation: Option<f64>,
     /// Schedule source: only "constant" is supported; defaults to 1.0
     pub schedule_source: Option<String>,
     pub schedule_constant: Option<f64>,
@@ -80,7 +86,10 @@ impl VentilationConfig {
         for (name, val) in [
             ("sensible_effectiveness", self.sensible_effectiveness),
             ("latent_effectiveness", self.latent_effectiveness),
-            ("defrost_effectiveness_fraction", self.defrost_effectiveness_fraction),
+            (
+                "defrost_effectiveness_fraction",
+                self.defrost_effectiveness_fraction,
+            ),
         ] {
             if let Some(v) = val {
                 if !v.is_finite() || !(0.0..=1.0).contains(&v) {
@@ -142,6 +151,7 @@ pub struct Ventilation {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
 
     ventilation_type: VentilationType,
     zone_id: ZoneId,
@@ -183,10 +193,7 @@ impl Ventilation {
             _ => VentilationType::Hrv,
         };
 
-        let end_use = match ventilation_type {
-            VentilationType::ExhaustFan => EndUse::VENTILATION,
-            VentilationType::Hrv | VentilationType::Erv => EndUse::VENTILATION,
-        };
+        let end_use = EndUse::VENTILATION;
 
         let descriptor = EquipmentDescriptor {
             id: EquipmentId(equipment_id),
@@ -203,7 +210,7 @@ impl Ventilation {
             control_capabilities: ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::DEMAND_RESPONSE
                 | ControlCapabilities::LOAD_FRACTION,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
             telemetry_fields: telemetry_fields(),
         };
 
@@ -216,6 +223,7 @@ impl Ventilation {
             descriptor,
             ports,
             telemetry: default_telemetry(),
+            core_output: CoreOutput::default(),
             ventilation_type,
             zone_id,
             fan_power_w: DEFAULT_FAN_POWER_W,
@@ -271,19 +279,10 @@ impl Ventilation {
 impl Ventilation {
     fn init_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         let c: VentilationConfig = config.typed()?;
+        c.validate()?;
 
         self.flow_rate_m3_s = c.flow_rate_m3_s;
-        if self.flow_rate_m3_s < 0.0 || !self.flow_rate_m3_s.is_finite() {
-            return Err(HaresError::Equipment(
-                "ventilation flow_rate_m3_s must be finite and >= 0".to_string(),
-            ));
-        }
         self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
-        if self.fan_power_w < 0.0 || !self.fan_power_w.is_finite() {
-            return Err(HaresError::Equipment(
-                "ventilation fan_power_w must be finite and >= 0".to_string(),
-            ));
-        }
         self.sensible_effectiveness = c
             .sensible_effectiveness
             .unwrap_or(DEFAULT_SENSIBLE_EFFECTIVENESS)
@@ -292,12 +291,8 @@ impl Ventilation {
             .latent_effectiveness
             .unwrap_or(DEFAULT_LATENT_EFFECTIVENESS)
             .clamp(0.0, 1.0);
-        self.bypass_temp_min_c = c
-            .bypass_temp_min_c
-            .unwrap_or(DEFAULT_BYPASS_TEMP_MIN_C);
-        self.bypass_temp_max_c = c
-            .bypass_temp_max_c
-            .unwrap_or(DEFAULT_BYPASS_TEMP_MAX_C);
+        self.bypass_temp_min_c = c.bypass_temp_min_c.unwrap_or(DEFAULT_BYPASS_TEMP_MIN_C);
+        self.bypass_temp_max_c = c.bypass_temp_max_c.unwrap_or(DEFAULT_BYPASS_TEMP_MAX_C);
         self.defrost_temp_c = c.defrost_temp_c.unwrap_or(DEFAULT_DEFROST_TEMP_C);
         self.defrost_effectiveness_fraction = c
             .defrost_effectiveness_fraction
@@ -317,6 +312,7 @@ impl Ventilation {
         };
 
         self.mode = OperatingMode::Standby;
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 }
@@ -386,6 +382,7 @@ impl Equipment for Ventilation {
         };
 
         self.mode = OperatingMode::Standby;
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -416,6 +413,17 @@ impl Equipment for Ventilation {
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
+            self.core_output = CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_kvar: None,
+                    fuel_w: None,
+                },
+                state: CoreState {
+                    operating_mode: Some(self.mode),
+                    soc: None,
+                },
+            };
             return Ok(());
         }
 
@@ -431,6 +439,17 @@ impl Equipment for Ventilation {
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
+            self.core_output = CoreOutput {
+                flows: CoreFlows {
+                    electric_kw: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_kvar: None,
+                    fuel_w: None,
+                },
+                state: CoreState {
+                    operating_mode: Some(self.mode),
+                    soc: None,
+                },
+            };
             return Ok(());
         }
 
@@ -457,7 +476,7 @@ impl Equipment for Ventilation {
         // Positive = heating the zone (supply warmer than outdoor but still cooler than indoor).
         // Sensible/latent ventilation loads are computed for diagnostic telemetry
         // but NOT pushed to thermal ports — the envelope solver handles ventilation
-        // heat exchange via apply_infiltration_and_ventilation() (CC-009).
+        // heat exchange via apply_infiltration_and_ventilation().
         let _q_sensible_w = m_dot_kg_s * CP_DRY_AIR_J_KG_K * (t_supply_c - t_indoor_c);
         let _q_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG * (w_supply - w_indoor);
 
@@ -478,7 +497,7 @@ impl Equipment for Ventilation {
 
         // Ventilation thermal load is handled by the envelope solver's
         // apply_infiltration_and_ventilation() — do NOT add it here to avoid
-        // double-counting (CC-009). Equipment reports fan power and telemetry only.
+        // double-counting. Equipment reports fan power and telemetry only.
 
         // Telemetry
         self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
@@ -490,12 +509,27 @@ impl Equipment for Ventilation {
         self.telemetry.set(tk::SUPPLY_TEMP_C, t_supply_c);
         self.telemetry
             .set(tk::BYPASS_ACTIVE, if bypass_active { 1.0 } else { 0.0 });
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.mode),
+                soc: None,
+            },
+        };
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -513,6 +547,7 @@ impl Equipment for Ventilation {
         self.dr_level = cp.dr_level;
         self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
         restore_schedule_source_state(&mut self.schedule_source, &cp.schedule_source_state)?;
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -620,6 +655,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC")
                 .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
@@ -727,7 +763,7 @@ mod tests {
         hrv.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        // CC-009: thermal port is no longer written by ventilation equipment;
+        // Thermal port is no longer written by ventilation equipment;
         // the envelope solver handles ventilation heat exchange. Verify via telemetry instead.
         let supply_temp = hrv
             .telemetry()
@@ -965,7 +1001,7 @@ mod tests {
             power_full * 0.5
         );
 
-        // CC-009: thermal port no longer written; verify recovery telemetry scales instead
+        // Thermal port no longer written; verify recovery telemetry scales instead
         let recovery_half = hrv
             .telemetry()
             .get(tk::SENSIBLE_RECOVERY_W)
@@ -994,6 +1030,8 @@ mod tests {
 
     fn minimal_ventilation_config() -> VentilationConfig {
         VentilationConfig {
+            equipment_id: None,
+            zone_id: None,
             flow_rate_m3_s: 0.035,
             fan_power_w: None,
             sensible_effectiveness: None,
@@ -1003,6 +1041,8 @@ mod tests {
             defrost_temp_c: None,
             defrost_effectiveness_fraction: None,
             ventilation_type: None,
+            balanced: None,
+            hours_in_operation: None,
             schedule_source: None,
             schedule_constant: None,
         }
@@ -1015,8 +1055,7 @@ mod tests {
             "test_vent".to_string(),
             "VentilationFan".to_string(),
             cfg.clone(),
-        )
-        .unwrap();
+        );
         assert!(ec.is_typed());
         let recovered: VentilationConfig = ec.typed().unwrap();
         assert_eq!(recovered.flow_rate_m3_s, cfg.flow_rate_m3_s);

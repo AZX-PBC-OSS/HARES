@@ -4,15 +4,16 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
-    telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
+use super::water_heater_config::TanklessWaterHeaterConfig;
 use super::{WaterHeaterZip, resolve_draw_rate_kg_s, resolve_mains_temp_c};
 use crate::hvac::helpers::{
     equipment_id_from_config, first_f64, parse_fuel_type, zone_id_from_config,
@@ -48,6 +49,7 @@ pub struct TanklessWH {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     fuel_type: FuelType,
     setpoint_c: f64,
     efficiency_factor: f64,
@@ -97,11 +99,12 @@ impl TanklessWH {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
-                core_capabilities: CoreCapabilities::empty(),
+                core_capabilities: core_capabilities_for_fuel(fuel_type),
                 telemetry_fields: telemetry_fields(),
             },
             ports,
             telemetry: default_telemetry(),
+            core_output: CoreOutput::default(),
             fuel_type,
             setpoint_c: DEFAULT_SETPOINT_C,
             efficiency_factor: DEFAULT_EF,
@@ -160,18 +163,11 @@ impl TanklessWH {
     }
 }
 
-impl Equipment for TanklessWH {
-    fn descriptor(&self) -> &EquipmentDescriptor {
-        &self.descriptor
-    }
-
-    fn ports(&self) -> &[PortDeclaration] {
-        &self.ports
-    }
-
-    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+impl TanklessWH {
+    fn init_raw(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         self.fuel_type = parse_tankless_fuel_type(config.get_str("FuelType"));
         self.descriptor.fuel = self.fuel_type;
+        self.descriptor.core_capabilities = core_capabilities_for_fuel(self.fuel_type);
         self.ports = build_ports(self.fuel_type);
 
         self.setpoint_c = first_f64(
@@ -220,7 +216,102 @@ impl Equipment for TanklessWH {
         self.dr_level = DRLevel::Normal;
         self.ctrl_load_fraction = 1.0;
         self.telemetry = default_telemetry();
+        self.core_output = CoreOutput::default();
         Ok(())
+    }
+
+    fn init_typed(
+        &mut self,
+        config: &EquipmentConfig,
+        _env: &EnvironmentState,
+    ) -> crate::Result<()> {
+        let c: TanklessWaterHeaterConfig = config.typed()?;
+        c.validate()?;
+
+        self.fuel_type = c
+            .fuel_type
+            .as_deref()
+            .and_then(|s| parse_fuel_type(Some(s)))
+            .unwrap_or(FuelType::Electric);
+        self.descriptor.fuel = self.fuel_type;
+        self.descriptor.core_capabilities = core_capabilities_for_fuel(self.fuel_type);
+        self.ports = build_ports(self.fuel_type);
+
+        self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
+        self.efficiency_factor = c.efficiency_factor.unwrap_or(DEFAULT_EF).max(1e-6);
+        if let Some(perf_adj) = c.performance_adjustment {
+            self.efficiency_factor = (self.efficiency_factor * perf_adj.clamp(0.0, 1.0)).max(1e-6);
+        }
+        self.rated_thermal_power_w = c
+            .max_thermal_power_w
+            .unwrap_or(DEFAULT_MAX_THERMAL_POWER_W)
+            .max(0.0);
+        self.power_limit_w = None;
+        self.parasitic_power_w = c
+            .parasitic_power_w
+            .unwrap_or(if self.fuel_type == FuelType::Gas {
+                DEFAULT_GAS_PARASITIC_POWER_W
+            } else {
+                0.0
+            })
+            .max(0.0);
+        self.duty_cycle = 1.0;
+        self.mode_override = None;
+        self.inlet_temp_c = c.inlet_temp_c.unwrap_or(self.inlet_temp_c);
+        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or_else(|| {
+            // L/day ÷ 86400 s/day = L/s; water density ≈ 1.0 kg/L at domestic temperatures.
+            c.avg_water_draw_l_per_day
+                .map(|l| l / 86_400.0 * 1.0)
+                .unwrap_or(0.0)
+        });
+
+        let zip_z = c.zip_z.unwrap_or(0.0);
+        let zip_i = c.zip_i.unwrap_or(0.0);
+        let zip_p = c.zip_p.unwrap_or(1.0);
+        let zip_zq = c.zip_zq.unwrap_or(0.0);
+        let zip_iq = c.zip_iq.unwrap_or(0.0);
+        let zip_pq = c.zip_pq.unwrap_or(1.0);
+        if (zip_z + zip_i + zip_p - 1.0).abs() >= 0.01 {
+            return Err(hares_types::HaresError::Equipment(format!(
+                "ZIP z+i+p must sum to 1.0, got z={zip_z} i={zip_i} p={zip_p}"
+            )));
+        }
+        self.zip = WaterHeaterZip {
+            z: zip_z,
+            i: zip_i,
+            p: zip_p,
+            v0: c.zip_v0.unwrap_or(1.0),
+            zq: zip_zq,
+            iq: zip_iq,
+            pq: zip_pq,
+            pf: c.zip_pf.unwrap_or(0.0),
+        };
+
+        self.dr_setpoint_offset_c = 0.0;
+        self.dr_load_fraction = 1.0;
+        self.dr_duration_remaining_s = None;
+        self.dr_level = DRLevel::Normal;
+        self.ctrl_load_fraction = 1.0;
+        self.telemetry = default_telemetry();
+        self.core_output = CoreOutput::default();
+        Ok(())
+    }
+}
+
+impl Equipment for TanklessWH {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            return self.init_typed(config, env);
+        }
+        self.init_raw(config)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -295,8 +386,8 @@ impl Equipment for TanklessWH {
             };
 
         let fuel_input_w = thermal_output_w / self.efficiency_factor;
-
-        if self.fuel_type == FuelType::Electric {
+        let mut fuel_w_for_core = None;
+        let electric_kw_for_core = if self.fuel_type == FuelType::Electric {
             let (electric_w, reactive_kvar) = self.zip.apply(fuel_input_w, env.grid.voltage_pu);
             if electric_w > 0.0 || reactive_kvar != 0.0 {
                 ports.accumulate(&PortContribution::Electrical {
@@ -304,6 +395,7 @@ impl Equipment for TanklessWH {
                     reactive_power_kvar: reactive_kvar,
                 })?;
             }
+            (electric_w / 1_000.0).max(0.0)
         } else {
             if fuel_input_w > 0.0 {
                 ports.accumulate(&PortContribution::Fuel {
@@ -311,6 +403,10 @@ impl Equipment for TanklessWH {
                     consumption_w: fuel_input_w,
                 })?;
             }
+            fuel_w_for_core = Some(FuelPower {
+                fuel_type: self.fuel_type,
+                consumption_w: fuel_input_w.max(0.0),
+            });
             // Gas ignition controller draws electricity continuously regardless of
             // burner state (OCHRE/ANSI RESNET 301 standby parasitic).
             let (parasitic_w, parasitic_kvar) =
@@ -319,7 +415,8 @@ impl Equipment for TanklessWH {
                 active_power_kw: parasitic_w / 1_000.0,
                 reactive_power_kvar: parasitic_kvar,
             })?;
-        }
+            (parasitic_w / 1_000.0).max(0.0)
+        };
 
         self.telemetry.set(tk::OUTLET_TEMP_C, outlet_temp_c);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
@@ -335,17 +432,33 @@ impl Equipment for TanklessWH {
                 0.0
             },
         );
+        let core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_kw_for_core)),
+                reactive_power_kvar: None,
+                fuel_w: fuel_w_for_core,
+            },
+            state: CoreState {
+                operating_mode: Some(mode),
+                soc: None,
+            },
+        };
 
         // Reset transient signals after this step so they do not carry over
         // unless reapplied by the controller.
         self.ctrl_load_fraction = 1.0;
         self.power_limit_w = None;
+        self.core_output = core_output;
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -393,6 +506,7 @@ impl Equipment for TanklessWH {
                 0.0
             },
         );
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -474,6 +588,14 @@ fn build_ports(fuel_type: FuelType) -> Vec<PortDeclaration> {
             dhw_port,
         ]
     }
+}
+
+fn core_capabilities_for_fuel(fuel_type: FuelType) -> CoreCapabilities {
+    let mut capabilities = CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE;
+    if fuel_type != FuelType::Electric {
+        capabilities |= CoreCapabilities::FUEL;
+    }
+    capabilities
 }
 
 fn default_telemetry() -> Telemetry {
@@ -568,6 +690,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -1388,6 +1511,7 @@ mod tests {
                     custom_payload: Some(vec![mains_c]),
                 }],
                 equipment_telemetry: std::collections::HashMap::new(),
+                equipment_core: std::collections::HashMap::new(),
                 current_time: FixedOffset::east_opt(0)
                     .expect("UTC offset")
                     .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)

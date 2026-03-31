@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +57,7 @@ struct HeatPumpHeaterCore {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     hvac: HvacEquipment,
     operating_mode: OperatingMode,
     defrost_config: DefrostConfig,
@@ -253,6 +255,10 @@ impl Equipment for HeatPumpHeaterCore {
         &self.telemetry
     }
 
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
+    }
+
     fn save_state(&self) -> Vec<u8> {
         self.save_state()
     }
@@ -307,7 +313,7 @@ impl HeatPumpHeaterCore {
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY,
-                core_capabilities: CoreCapabilities::empty(),
+                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
                 telemetry_fields: heater_telemetry_fields(),
             },
             ports: vec![
@@ -315,6 +321,7 @@ impl HeatPumpHeaterCore {
                 PortDeclaration::thermal(zone),
             ],
             telemetry: default_heater_telemetry(),
+            core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(hvac_type, zone),
             operating_mode: OperatingMode::Off,
             defrost_config: DefrostConfig::on_demand(1.0, 0.0),
@@ -393,6 +400,7 @@ impl HeatPumpHeaterCore {
         self.dr_duration_remaining_s = None;
         self.dr_level = DRLevel::Normal;
         self.telemetry = default_heater_telemetry();
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -455,8 +463,12 @@ impl HeatPumpHeaterCore {
                 .unwrap_or(0.0);
             let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
             let n_speeds = self.hvac.heating_capacities_w.len().min(255) as u8;
+            let cap_low = (n_speeds > 1)
+                .then(|| self.hvac.heating_capacities_w.first().copied())
+                .flatten();
+            let flow_low = cap_low.map(|c| self.hvac.airflow_m3_s_per_w * c);
             self.hvac.duct_dse = super::super::helpers::resolve_duct_dse(
-                config, true, rated_cap, fan_flow, n_speeds, true,
+                config, true, rated_cap, fan_flow, n_speeds, cap_low, flow_low, true,
             );
         }
         self.hvac.update_zone_heat_fractions();
@@ -572,11 +584,15 @@ impl HeatPumpHeaterCore {
                 .unwrap_or(0.0);
             let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
             let n_speeds = self.hvac.heating_capacities_w.len().min(255) as u8;
+            let cap_low = (n_speeds > 1)
+                .then(|| self.hvac.heating_capacities_w.first().copied())
+                .flatten();
+            let flow_low = cap_low.map(|c| self.hvac.airflow_m3_s_per_w * c);
             self.hvac.duct_dse = if let Some(dse) = cfg.duct.dse_heat {
                 dse
             } else {
                 super::super::helpers::resolve_duct_dse(
-                    config, true, rated_cap, fan_flow, n_speeds, true,
+                    config, true, rated_cap, fan_flow, n_speeds, cap_low, flow_low, true,
                 )
             };
         }
@@ -759,6 +775,17 @@ impl HeatPumpHeaterCore {
         self.telemetry.set(tk::COMPRESSOR_KW, step.compressor_kw);
         self.telemetry
             .set(tk::DEFROST_TIME_FRACTION, step.defrost_time_fraction);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(step.electric_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.operating_mode),
+                soc: None,
+            },
+        };
 
         // Clear solver-provided capacity so next step starts fresh.
         self.ideal_capacity_w = 0.0;
@@ -1174,6 +1201,7 @@ impl HeatPumpHeaterCore {
         self.er_lockout_remaining_s = decoded.er_lockout_remaining_s;
         self.prev_zone_temp_c = decoded.prev_zone_temp_c;
         self.er_soft_lockout = decoded.er_soft_lockout;
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -1304,6 +1332,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -1750,6 +1779,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -2564,6 +2594,42 @@ mod tests {
         let cop = eq.telemetry().get(tk::COP).unwrap_or(-1.0);
         assert_eq!(cop, 0.0, "heater off must give COP=0, got {cop}");
     }
+
+    #[test]
+    fn mshp_typed_init_produces_four_speed_stages() {
+        use crate::Equipment;
+        use crate::HeatPumpHeaterConfig;
+        use crate::config::EquipmentTypedConfig;
+
+        let cfg = HeatPumpHeaterConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            hspf: Some(10.0),
+            is_mini_split: true,
+            ..Default::default()
+        };
+
+        let ec = crate::config::EquipmentConfig::from_typed(
+            "MSHP Heater".to_string(),
+            HeatPumpHeaterConfig::equipment_type_name().to_string(),
+            cfg,
+        );
+        let ec = crate::config::EquipmentConfig {
+            name: "MSHP Heater".to_string(),
+            ochre_class: "MSHP Heater".to_string(),
+            ..ec
+        };
+
+        let environment = env(18.0, 0.0, 0.003);
+        let mut eq = MinisplitHeater::new(ec.clone());
+        eq.init(&ec, &environment);
+
+        let n_stages = eq.core.hvac.heating_capacities_w.len();
+        assert_eq!(
+            n_stages, 4,
+            "MSHP typed init with single capacity must produce 4 speed stages, got {n_stages}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2613,6 +2679,7 @@ mod ideal_capacity_tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)

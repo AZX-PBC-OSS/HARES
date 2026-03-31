@@ -52,6 +52,30 @@ pub struct CentralAirConditionerConfig {
     /// Startup capacity degradation coefficient (Cd).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_cd: Option<f64>,
+    /// Biquadratic curve x1 (wet-bulb) lower bound [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biquadratic_x1_min: Option<f64>,
+    /// Biquadratic curve x1 (wet-bulb) upper bound [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biquadratic_x1_max: Option<f64>,
+    /// Biquadratic curve x2 (outdoor dry-bulb) lower bound [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biquadratic_x2_min: Option<f64>,
+    /// Biquadratic curve x2 (outdoor dry-bulb) upper bound [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biquadratic_x2_max: Option<f64>,
+    /// Flow-fraction lower clamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ff_min: Option<f64>,
+    /// Flow-fraction upper clamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ff_max: Option<f64>,
+    /// Part-load fraction (PLF) lower clamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plf_min: Option<f64>,
+    /// Part-load fraction (PLF) upper clamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plf_max: Option<f64>,
 }
 
 impl EquipmentTypedConfig for CentralAirConditionerConfig {
@@ -90,6 +114,30 @@ pub struct RoomAcConfig {
     pub capacity_w: f64,
     /// Energy Efficiency Ratio (BTU/Wh). EIR = 3.412 / EER.
     pub eer: f64,
+    /// Biquadratic curve x1 (wet-bulb) lower bound [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biquadratic_x1_min: Option<f64>,
+    /// Biquadratic curve x1 (wet-bulb) upper bound [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biquadratic_x1_max: Option<f64>,
+    /// Biquadratic curve x2 (outdoor dry-bulb) lower bound [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biquadratic_x2_min: Option<f64>,
+    /// Biquadratic curve x2 (outdoor dry-bulb) upper bound [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub biquadratic_x2_max: Option<f64>,
+    /// Flow-fraction lower clamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ff_min: Option<f64>,
+    /// Flow-fraction upper clamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ff_max: Option<f64>,
+    /// Part-load fraction (PLF) lower clamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plf_min: Option<f64>,
+    /// Part-load fraction (PLF) upper clamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plf_max: Option<f64>,
 }
 
 impl EquipmentTypedConfig for RoomAcConfig {
@@ -187,7 +235,6 @@ mod tests {
             T::equipment_type_name().to_string(),
             config,
         )
-        .unwrap()
     }
 
     #[test]
@@ -205,9 +252,21 @@ mod tests {
             fan_power_w: Some(300.0),
             fan_power_w_per_cfm: None,
             fraction_load_served: Some(1.0),
-            duct: DuctConfig { dse_heat: Some(0.8), dse_cool: Some(0.85) },
+            duct: DuctConfig {
+                dse_heat: Some(0.8),
+                dse_cool: Some(0.85),
+                ..DuctConfig::default()
+            },
             system_type: Some("split".to_string()),
             startup_cd: None,
+            biquadratic_x1_min: Some(12.0),
+            biquadratic_x1_max: Some(24.0),
+            biquadratic_x2_min: Some(18.0),
+            biquadratic_x2_max: Some(46.0),
+            ff_min: Some(0.6),
+            ff_max: Some(1.2),
+            plf_min: Some(0.7),
+            plf_max: Some(1.0),
         };
         let ec = typed_config(cfg.clone());
         assert!(ec.is_typed());
@@ -215,6 +274,9 @@ mod tests {
         assert!((recovered.seer - cfg.seer).abs() < 1e-12);
         assert!((recovered.capacity_w - cfg.capacity_w).abs() < 1e-12);
         assert_eq!(recovered.stage_shrs, cfg.stage_shrs);
+        assert_eq!(recovered.biquadratic_x1_min, cfg.biquadratic_x1_min);
+        assert_eq!(recovered.ff_min, cfg.ff_min);
+        assert_eq!(recovered.plf_max, cfg.plf_max);
     }
 
     #[test]
@@ -255,6 +317,14 @@ mod tests {
             duct: DuctConfig::default(),
             system_type: None,
             startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -277,6 +347,14 @@ mod tests {
             duct: DuctConfig::default(),
             system_type: None,
             startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -288,11 +366,20 @@ mod tests {
             zone_id: Some(1),
             capacity_w: 3_500.0,
             eer: 10.0,
+            biquadratic_x1_min: Some(10.0),
+            biquadratic_x1_max: Some(25.0),
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
         };
         let ec = typed_config(cfg.clone());
         let recovered: RoomAcConfig = ec.typed().unwrap();
         assert!((recovered.eer - cfg.eer).abs() < 1e-12);
         assert!((recovered.capacity_w - cfg.capacity_w).abs() < 1e-12);
+        assert_eq!(recovered.biquadratic_x1_min, cfg.biquadratic_x1_min);
     }
 
     #[test]
@@ -302,6 +389,14 @@ mod tests {
             zone_id: None,
             capacity_w: 3_500.0,
             eer: 0.0,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -313,6 +408,14 @@ mod tests {
             zone_id: None,
             capacity_w: f64::NAN,
             eer: 10.0,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
         };
         assert!(cfg.validate().is_err());
     }

@@ -365,6 +365,7 @@ mod tests {
             fuel_type: fuel,
             parameters: Map::new(),
             zip_params: None,
+            typed_config: None,
         }
     }
 

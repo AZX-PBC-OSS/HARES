@@ -126,60 +126,56 @@ impl BatterySpec {
     /// where inverter losses dominate and are symmetric.
     pub fn to_config(&self) -> EquipmentConfig {
         let eta = self.round_trip_efficiency.sqrt();
-        let mut cfg = EquipmentConfig {
-            name: self.label.to_string(),
-            ochre_class: "Battery".to_string(),
-            payload: crate::ConfigPayload::Raw {
-                data: HashMap::new(),
-            },
-        };
-        #[allow(deprecated)]
-        let rc = cfg.raw_config_mut().unwrap();
-        rc.insert(
+        let mut data = HashMap::new();
+        data.insert(
             KEY_CAPACITY_KWH.into(),
             ConfigValue::Float(self.capacity_kwh),
         );
-        rc.insert(
+        data.insert(
             KEY_MAX_CHARGE_KW.into(),
             ConfigValue::Float(self.max_charge_kw),
         );
-        rc.insert(
+        data.insert(
             KEY_MAX_DISCHARGE_KW.into(),
             ConfigValue::Float(self.max_discharge_kw),
         );
-        rc.insert(KEY_CHARGE_EFFICIENCY.into(), ConfigValue::Float(eta));
-        rc.insert(KEY_DISCHARGE_EFFICIENCY.into(), ConfigValue::Float(eta));
-        rc.insert(
+        data.insert(KEY_CHARGE_EFFICIENCY.into(), ConfigValue::Float(eta));
+        data.insert(KEY_DISCHARGE_EFFICIENCY.into(), ConfigValue::Float(eta));
+        data.insert(
             KEY_CHEMISTRY.into(),
             ConfigValue::Text(self.chemistry.as_config_str().to_string()),
         );
-        rc.insert(
+        data.insert(
             KEY_STANDBY_POWER_W.into(),
             ConfigValue::Float(self.standby_power_w),
         );
-        rc.insert(
+        data.insert(
             KEY_SELF_DISCHARGE_PCT_PER_DAY.into(),
             ConfigValue::Float(self.self_discharge_pct_per_day),
         );
-        rc.insert(KEY_MIN_SOC.into(), ConfigValue::Float(self.min_soc));
-        rc.insert(KEY_MAX_SOC.into(), ConfigValue::Float(self.max_soc));
-        rc.insert(
+        data.insert(KEY_MIN_SOC.into(), ConfigValue::Float(self.min_soc));
+        data.insert(KEY_MAX_SOC.into(), ConfigValue::Float(self.max_soc));
+        data.insert(
             KEY_HEATER_POWER_W.into(),
             ConfigValue::Float(self.heater_power_w),
         );
-        rc.insert(
+        data.insert(
             KEY_HEATER_THRESHOLD_C.into(),
             ConfigValue::Float(self.heater_threshold_c),
         );
-        rc.insert(
+        data.insert(
             KEY_MIN_CHARGE_TEMP_C.into(),
             ConfigValue::Float(self.min_charge_temp_c),
         );
-        rc.insert(
+        data.insert(
             KEY_FULL_POWER_TEMP_C.into(),
             ConfigValue::Float(self.full_power_temp_c),
         );
-        cfg
+        EquipmentConfig {
+            name: self.label.to_string(),
+            ochre_class: "Battery".to_string(),
+            payload: crate::ConfigPayload::Raw { data },
+        }
     }
 }
 

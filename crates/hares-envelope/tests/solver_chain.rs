@@ -77,6 +77,7 @@ fn env_with_zone(zone_temp_c: f64, outdoor_temp_c: f64, humidity_ratio: f64) -> 
         time_res: chrono::Duration::seconds(60),
         price_signal: Default::default(),
         electrical: Default::default(),
+        equipment_core: Default::default(),
     }
 }
 

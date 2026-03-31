@@ -83,6 +83,52 @@ class TestTelemetry:
                 f"temperature_c out of reasonable range [-50, 80] C: {temp}"
             )
 
+    def test_equipment_core_output_matches_telemetry_vectors(self):
+        from ochre_next import Dwelling
+
+        dw = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            start_time="2019-01-01T00:00:00",
+            duration_s=3600,
+            time_res_s=60,
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=42,
+            master_seed=0,
+        )
+        dw.initialize()
+        dw.step()
+
+        equipment_diag = dw.telemetry().equipment()
+        names = equipment_diag["names"]
+        power_kw = equipment_diag["power_kw"]
+        soc = equipment_diag["soc"]
+        by_name = {name: idx for idx, name in enumerate(names)}
+
+        equipment = dw.equipment()
+        assert len(equipment) > 0, "dw.equipment() should return active equipment"
+
+        for eq in equipment:
+            assert eq.name in by_name, f"missing telemetry index for equipment {eq.name!r}"
+            idx = by_name[eq.name]
+            co = eq.core_output
+
+            assert co.electric_convention in {"consumption", "generation", "bidirectional"}
+            assert co.reactive_power_kvar is None or math.isfinite(co.reactive_power_kvar)
+            assert co.fuel_w is None or math.isfinite(co.fuel_w)
+            assert co.operating_mode is None or isinstance(co.operating_mode, str)
+
+            if co.electric_kw is None:
+                assert power_kw[idx] == 0.0
+            else:
+                assert math.isclose(co.electric_kw, power_kw[idx], rel_tol=0.0, abs_tol=1e-9)
+
+            if co.soc is None:
+                assert soc[idx] == 0.0
+            else:
+                assert math.isclose(co.soc, soc[idx], rel_tol=0.0, abs_tol=1e-9)
+
 
 class TestStepError:
     def test_step_past_end_raises_runtime_error(self):

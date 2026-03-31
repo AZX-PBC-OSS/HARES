@@ -50,6 +50,7 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
         },
         custom_domains: vec![],
         equipment_telemetry: std::collections::HashMap::new(),
+        equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -650,12 +651,21 @@ fn resistance_config_with_ramp(
     initial_temp_c: f64,
     ramp_rate_c_per_min: f64,
 ) -> EquipmentConfig {
-    let mut cfg = resistance_config(setpoint_c, deadband_c, initial_temp_c, 0.0);
-    cfg.raw_config_mut().unwrap().insert(
+    let mut raw: HashMap<String, hares_equipment::config::ConfigValue> = HashMap::new();
+    raw.insert("setpoint_c".to_string(), setpoint_c.into());
+    raw.insert("deadband_c".to_string(), deadband_c.into());
+    raw.insert("initial_tank_temp_c".to_string(), initial_temp_c.into());
+    raw.insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
+    raw.insert("max_tank_temp_c".to_string(), 300.0.into());
+    raw.insert(
         "max_setpoint_ramp_rate_c_per_min".to_string(),
         ramp_rate_c_per_min.into(),
     );
-    cfg
+    EquipmentConfig {
+        name: "RWH".to_string(),
+        ochre_class: "Resistance Water Heater".to_string(),
+        payload: hares_equipment::ConfigPayload::Raw { data: raw },
+    }
 }
 
 #[test]

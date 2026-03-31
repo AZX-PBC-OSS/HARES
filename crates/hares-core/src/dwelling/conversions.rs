@@ -317,6 +317,10 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
 }
 
 pub(crate) fn equipment_config_from_spec(spec: &hares_io::EquipmentSpec) -> EquipmentConfig {
+    if let Some(typed) = &spec.typed_config {
+        return typed.clone();
+    }
+
     let mut raw_config: HashMap<String, ConfigValue> = spec
         .parameters
         .iter()
@@ -351,6 +355,7 @@ pub(crate) fn merged_equipment_config(
         fuel_type: spec.fuel_type,
         parameters: merged,
         zip_params: spec.zip_params.clone(),
+        typed_config: spec.typed_config.clone(),
     };
     equipment_config_from_spec(&merged_spec)
 }

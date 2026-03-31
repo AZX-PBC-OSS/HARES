@@ -94,7 +94,7 @@ pub(super) fn resolve_batteries(
             // Battery::init reads this key and applies sqrt() per direction,
             // so the final per-direction efficiency is sqrt(rte) each way.
             // Do NOT pre-apply sqrt() here — that would cause a double-sqrt,
-            // making the effective RTE = rte^0.5 instead of rte (CW-016 F-1).
+            // making the effective RTE = rte^0.5 instead of rte.
             params.insert("inverter_efficiency".to_string(), json!(rte));
         }
         specs.push(build_spec(

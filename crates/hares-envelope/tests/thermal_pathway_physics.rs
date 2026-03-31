@@ -68,6 +68,7 @@ fn make_env(zone_temp: f64, outdoor_temp: f64, ground_temp: f64) -> EnvironmentS
         time_res: chrono::Duration::seconds(DT_S as i64),
         price_signal: Default::default(),
         electrical: Default::default(),
+        equipment_core: Default::default(),
     }
 }
 

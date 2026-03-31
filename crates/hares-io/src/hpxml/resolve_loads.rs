@@ -141,11 +141,9 @@ pub(super) fn resolve_scheduled_loads(
                             const GAS_H20: f64 = 0.3914;
                             const ELEC_H20: f64 = 0.0178;
                             // Read per-appliance label rates from HPXML, fall back
-                            // to OCHRE defaults when absent (CW-020 F2).
-                            let gas_rate =
-                                child_f64(node, "LabelGasRate").unwrap_or(1.09);
-                            let gas_cost =
-                                child_f64(node, "LabelAnnualGasCost").unwrap_or(27.0);
+                            // to OCHRE defaults when absent.
+                            let gas_rate = child_f64(node, "LabelGasRate").unwrap_or(1.09);
+                            let gas_cost = child_f64(node, "LabelAnnualGasCost").unwrap_or(27.0);
                             let electric_rate =
                                 child_f64(node, "LabelElectricRate").unwrap_or(0.12);
 
@@ -256,10 +254,8 @@ pub(super) fn resolve_scheduled_loads(
                                 .and_then(|e| child_f64(e, "UsageMultiplier"))
                                 .unwrap_or(1.0);
 
-                            let gas_rate =
-                                child_f64(node, "LabelGasRate").unwrap_or(1.09);
-                            let gas_cost =
-                                child_f64(node, "LabelAnnualGasCost").unwrap_or(33.12);
+                            let gas_rate = child_f64(node, "LabelGasRate").unwrap_or(1.09);
+                            let gas_cost = child_f64(node, "LabelAnnualGasCost").unwrap_or(33.12);
                             let electric_rate =
                                 child_f64(node, "LabelElectricRate").unwrap_or(0.12);
 
@@ -558,7 +554,7 @@ pub(super) fn resolve_ventilation(
     };
 
     for fan in vent_fans.children_named("VentilationFan") {
-        // Only include whole-building ventilation fans, matching OCHRE's filter logic
+        // Only include fans used for whole-building or seasonal cooling ventilation.
         let is_whole_building = child_text(fan, "UsedForWholeBuildingVentilation")
             .is_some_and(|v| v.eq_ignore_ascii_case("true"));
         let is_seasonal_cooling = child_text(fan, "UsedForSeasonalCoolingLoadReduction")
@@ -568,31 +564,38 @@ pub(super) fn resolve_ventilation(
         }
 
         let mut params = Map::new();
-        if let Some(flow_cfm) = child_f64(fan, "RatedFlowRate") {
+        let flow_cfm = child_f64(fan, "RatedFlowRate");
+        if let Some(cfm) = flow_cfm {
             // Convert CFM → m³/s at the parse boundary (SI internally).
-            let flow_m3_s = flow_cfm * hares_physics::constants::CFM_TO_M3_S;
+            let flow_m3_s = cfm * hares_physics::constants::CFM_TO_M3_S;
             params.insert("flow_rate_m3_s".to_string(), json!(flow_m3_s));
-            // Also store CFM for solver_builder which reads this key for
-            // the infiltration path.
-            params.insert("ventilation_rate_cfm".to_string(), json!(flow_cfm));
         }
+        let fan_type_str = child_text(fan, "FanType");
+        let fan_type_lower = fan_type_str.as_deref().unwrap_or("").to_ascii_lowercase();
         if let Some(power_w) = child_f64(fan, "FanPower") {
             params.insert("fan_power_w".to_string(), json!(power_w));
             params.insert("power_w".to_string(), json!(power_w));
+        } else if let Some(cfm) = flow_cfm {
+            // OCHRE default W/CFM by fan type when FanPower is absent.
+            let w_per_cfm = match fan_type_lower.as_str() {
+                "energy recovery ventilator" | "heat recovery ventilator" | "balanced" => 1.0,
+                "exhaust only" | "supply only" => 0.35,
+                "whole house fan" => 0.1,
+                _ => 0.35,
+            };
+            let power_w = cfm * w_per_cfm;
+            params.insert("fan_power_w".to_string(), json!(power_w));
+            params.insert("power_w".to_string(), json!(power_w));
         }
-        if let Some(fan_type) = child_text(fan, "FanType") {
-            let ft_lower = fan_type.to_ascii_lowercase();
+        if let Some(fan_type) = fan_type_str {
             let balanced = matches!(
-                ft_lower.as_str(),
+                fan_type_lower.as_str(),
                 "energy recovery ventilator" | "heat recovery ventilator" | "balanced"
             );
-            // Map HPXML FanType to the equipment's ventilation_type key.
-            let ventilation_type = match ft_lower.as_str() {
-                "exhaust only" => "exhaust_fan",
+            let ventilation_type = match fan_type_lower.as_str() {
+                "exhaust only" | "supply only" => "exhaust_fan",
                 "energy recovery ventilator" => "erv",
-                "heat recovery ventilator" => "hrv",
-                "balanced" => "hrv",
-                "supply only" => "exhaust_fan",
+                "heat recovery ventilator" | "balanced" => "hrv",
                 _ => "hrv",
             };
             params.insert(
@@ -608,7 +611,10 @@ pub(super) fn resolve_ventilation(
             // Equipment reads "sensible_effectiveness" in init().
             params.insert("sensible_effectiveness".to_string(), json!(sensible_re));
             // Solver builder reads "sensible_recovery_efficiency" for infiltration path.
-            params.insert("sensible_recovery_efficiency".to_string(), json!(sensible_re));
+            params.insert(
+                "sensible_recovery_efficiency".to_string(),
+                json!(sensible_re),
+            );
         }
         let latent_re = (total_re - sensible_re).max(0.0);
         if latent_re > 0.0 {
@@ -626,10 +632,7 @@ pub(super) fn resolve_ventilation(
     }
 }
 
-/// Default sensible and latent gain fractions per equipment name, matching OCHRE defaults.
-/// Returns `(sensible, latent)`.
 /// Default sensible and latent gain fractions per equipment name.
-/// Source: OCHRE `hpxml.py:1416-1472` `parse_mel()` and per-equipment parse functions.
 /// Returns (sensible_fraction, latent_fraction) of equipment power entering the zone.
 pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<(f64, f64)> {
     match name {
@@ -655,7 +658,7 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
         | "Lighting" => Some((1.00, 0.00)),
         // OCHRE: gas lighting and outdoor equipment → 0 zone gain.
         "Gas Lighting" => Some((0.00, 0.00)),
-        // OCHRE: ceiling fan → 0 zone gain (CW-017: parse_mel default for non-"other").
+        // OCHRE: ceiling fan → 0 zone gain (parse_mel default for non-"other").
         "Ceiling Fan" => Some((0.00, 0.00)),
         "Ventilation Fan" => Some((1.00, 0.00)),
         // Outdoor equipment: well pump, grill, pool/hot tub.

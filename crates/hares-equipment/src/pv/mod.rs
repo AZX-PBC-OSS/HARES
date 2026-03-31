@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, InverterPriority,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry,
-    TelemetryField, telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
+    FuelType, HaresError, InverterPriority, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +125,7 @@ pub struct PV {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     arrays: Vec<PvArray>,
     surface_resolution_deg: f64,
     inverter_efficiency: f64,
@@ -169,14 +170,13 @@ impl PV {
                 | ControlCapabilities::REACTIVE_SETPOINT
                 | ControlCapabilities::POWER_FACTOR_SETPOINT
                 | ControlCapabilities::INVERTER_PRIORITY_MODE,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE,
             telemetry_fields: telemetry_fields(),
         };
 
         let mut telemetry = Telemetry::with_capacity(9);
         telemetry.insert(tk::DC_POWER_KW, 0.0);
         telemetry.insert(tk::AC_POWER_KW, 0.0);
-        telemetry.insert(tk::ELECTRIC_KW, 0.0);
         telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
         telemetry.insert(tk::CELL_TEMP_C, 0.0);
         telemetry.insert(tk::IRRADIANCE_W_M2, 0.0);
@@ -190,6 +190,7 @@ impl PV {
             descriptor,
             ports: vec![PortDeclaration::electrical()],
             telemetry,
+            core_output: CoreOutput::default(),
             arrays,
             surface_resolution_deg: DEFAULT_SURFACE_RESOLUTION_DEG,
             inverter_efficiency: DEFAULT_INVERTER_EFFICIENCY,
@@ -356,25 +357,11 @@ impl PV {
         env: &EnvironmentState,
     ) -> crate::Result<()> {
         let c: PvConfig = config.typed()?;
+        c.validate()?;
 
-        if !c.capacity_kw.is_finite() || c.capacity_kw <= 0.0 {
-            return Err(HaresError::Equipment(
-                "PV capacity_kw must be finite and > 0".to_string(),
-            ));
-        }
         let tilt_deg = c.tilt_deg.unwrap_or(30.0);
         let azimuth_deg = c.azimuth_deg.unwrap_or(180.0);
         let noct_c = c.noct_c.unwrap_or(DEFAULT_NOCT_C);
-        if !tilt_deg.is_finite() || !(0.0..=180.0).contains(&tilt_deg) {
-            return Err(HaresError::Equipment(
-                "PV tilt_deg must be finite and within [0, 180]".to_string(),
-            ));
-        }
-        if !azimuth_deg.is_finite() {
-            return Err(HaresError::Equipment(
-                "PV azimuth_deg must be finite".to_string(),
-            ));
-        }
         if !noct_c.is_finite() {
             return Err(HaresError::Equipment(
                 "PV noct_c must be finite".to_string(),
@@ -413,28 +400,13 @@ impl PV {
             .clamp(0.0, 1.0);
 
         self.inverter_capacity_kw = c.inverter_capacity_kw;
-        if let Some(cap) = self.inverter_capacity_kw {
-            if !cap.is_finite() || cap < 0.0 {
-                return Err(HaresError::Equipment(
-                    "PV inverter_capacity_kw must be finite and >= 0".to_string(),
-                ));
-            }
-        }
-
         self.power_factor = c
             .power_factor
             .unwrap_or(DEFAULT_POWER_FACTOR)
             .clamp(0.0, 1.0);
-
-        let losses = c
+        self.system_losses_fraction = c
             .system_losses_fraction
             .unwrap_or(DEFAULT_SYSTEM_LOSSES_FRACTION);
-        if !losses.is_finite() || !(0.0..1.0).contains(&losses) {
-            return Err(HaresError::Equipment(
-                "PV system_losses_fraction must be in [0.0, 1.0)".to_string(),
-            ));
-        }
-        self.system_losses_fraction = losses;
 
         self.luts_by_surface.clear();
         for array in &mut self.arrays {
@@ -464,7 +436,6 @@ impl PV {
             .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
         self.telemetry.set(tk::DC_POWER_KW, 0.0);
         self.telemetry.set(tk::AC_POWER_KW, 0.0);
-        self.telemetry.set(tk::ELECTRIC_KW, 0.0);
         self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
         self.telemetry
             .set(tk::CELL_TEMP_C, env.weather.outdoor_temp_c);
@@ -472,6 +443,7 @@ impl PV {
         self.telemetry.set(tk::CURTAILMENT_KW, 0.0);
         self.telemetry.set(tk::INVERTER_CLIPPING_KW, 0.0);
         self.telemetry.set(tk::SOILING_RATIO, 1.0);
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 }
@@ -612,7 +584,6 @@ impl Equipment for PV {
             .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
         self.telemetry.set(tk::DC_POWER_KW, 0.0);
         self.telemetry.set(tk::AC_POWER_KW, 0.0);
-        self.telemetry.set(tk::ELECTRIC_KW, 0.0);
         self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
         self.telemetry
             .set(tk::CELL_TEMP_C, env.weather.outdoor_temp_c);
@@ -726,7 +697,6 @@ impl Equipment for PV {
         self.last_ac_power_kw = final_p_kw;
         self.telemetry.set(tk::DC_POWER_KW, total_dc_power_kw);
         self.telemetry.set(tk::AC_POWER_KW, final_p_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, final_p_kw);
         self.telemetry.set(tk::REACTIVE_POWER_KVAR, final_q_kvar);
         self.telemetry.set(tk::CELL_TEMP_C, mean_cell_temp_c);
         self.telemetry
@@ -738,12 +708,27 @@ impl Equipment for PV {
             .set(tk::INVERTER_CLIPPING_KW, inverter_clipping_kw);
         self.telemetry.set(tk::SOILING_RATIO, soiling_ratio);
         self.telemetry.set(tk::SHADING_FACTOR, shading_factor);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Generation(final_p_kw.max(0.0))),
+                reactive_power_kvar: Some(final_q_kvar),
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+            },
+        };
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -769,6 +754,7 @@ impl Equipment for PV {
         self.soiling_config = decoded.soiling_config;
         self.soiling_state = decoded.soiling_state;
         self.shading_model = decoded.shading_model;
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -863,11 +849,6 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             unit: "kW".to_string(),
             description: "Total PV AC output power after inverter efficiency and curtailment"
                 .to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Grid-boundary electrical power".to_string(),
         },
         TelemetryField {
             name: tk::REACTIVE_POWER_KVAR.to_string(),
@@ -974,6 +955,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
@@ -994,6 +976,26 @@ mod tests {
         raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
         raw.insert("inverter_efficiency".to_string(), 0.96.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
+        EquipmentConfig {
+            name: "PV South".to_string(),
+            ochre_class: "PV".to_string(),
+            payload: crate::config::ConfigPayload::Raw { data: raw },
+        }
+    }
+
+    fn config_single_with_losses(system_losses_fraction: f64) -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("equipment_id".to_string(), 29.0.into());
+        raw.insert("capacity_kw".to_string(), 5.0.into());
+        raw.insert("tilt_deg".to_string(), 30.0.into());
+        raw.insert("azimuth_deg".to_string(), 180.0.into());
+        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
+        raw.insert("inverter_efficiency".to_string(), 0.96.into());
+        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
+        raw.insert(
+            "system_losses_fraction".to_string(),
+            system_losses_fraction.into(),
+        );
         EquipmentConfig {
             name: "PV South".to_string(),
             ochre_class: "PV".to_string(),
@@ -1062,10 +1064,7 @@ mod tests {
 
     #[test]
     fn temperature_derating_matches_expected_fraction() {
-        let mut cfg = config_single();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("system_losses_fraction".to_string(), 0.0.into());
+        let cfg = config_single_with_losses(0.0);
         let mut pv = PV::new(cfg.clone());
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
 
@@ -1221,8 +1220,7 @@ mod tests {
 
     #[test]
     fn registry_registers_pv() {
-        let mut registry = crate::EquipmentRegistry::new();
-        register_with_registry(&mut registry);
+        let registry = crate::EquipmentRegistry::new();
         assert!(registry.get("PV").is_some());
     }
 
@@ -1546,11 +1544,7 @@ mod tests {
         }];
 
         // Zero losses config.
-        let mut cfg_zero = config_single();
-        cfg_zero
-            .raw_config_mut()
-            .unwrap()
-            .insert("system_losses_fraction".to_string(), 0.0.into());
+        let cfg_zero = config_single_with_losses(0.0);
         let env = env_with_surfaces_full(surfaces.clone(), 25.0, 1.0);
         let mut pv_zero = PV::new(cfg_zero.clone());
         pv_zero.init(&cfg_zero, &env).unwrap();
@@ -1952,10 +1946,7 @@ mod tests {
             angle_of_incidence_rad: 0.0,
         }];
 
-        let mut cfg = config_single();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("system_losses_fraction".to_string(), 0.05.into());
+        let cfg = config_single_with_losses(0.05);
         let env = env_with_surfaces_full(surfaces.clone(), 25.0, 1.0);
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
@@ -1966,10 +1957,7 @@ mod tests {
         let dc_5pct = pv.telemetry().get(tk::DC_POWER_KW).unwrap();
 
         // Compare with 20% losses.
-        let mut cfg2 = config_single();
-        cfg2.raw_config_mut()
-            .unwrap()
-            .insert("system_losses_fraction".to_string(), 0.20.into());
+        let cfg2 = config_single_with_losses(0.20);
         let mut pv2 = PV::new(cfg2.clone());
         pv2.init(&cfg2, &env).unwrap();
         let mut ports2 = PortSlots::default();

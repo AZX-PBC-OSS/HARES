@@ -56,6 +56,7 @@ fn make_spec(name: &str, fuel: FuelType) -> hares_io::EquipmentSpec {
         fuel_type: fuel,
         parameters: serde_json::Map::new(),
         zip_params: None,
+        typed_config: None,
     }
 }
 

@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
     PortDeclaration, PortSlots,
 };
@@ -12,7 +12,7 @@ use hares_types::{
 use crate::{Equipment, EquipmentConfig, Telemetry};
 
 use super::super::SpeedControlMode;
-use super::super::ac_config::HeatPumpCoolerConfig;
+use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
 use super::super::air_conditioner::AirConditioner;
 use super::super::helpers::{equipment_id_from_config, zone_id_from_config};
 use super::constants::{DEFAULT_EQUIPMENT_ID, DEFAULT_ZONE_ID};
@@ -64,7 +64,7 @@ impl HpCooler {
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                     | ControlCapabilities::THERMAL_SETPOINT_DELTA
                     | ControlCapabilities::IDEAL_CAPACITY,
-                core_capabilities: CoreCapabilities::empty(),
+                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
             },
             ports: inner.ports().to_vec(),
@@ -99,6 +99,61 @@ impl HpCooler {
     pub fn last_cooling_rtf(&self) -> f64 {
         self.inner.core.last_cooling_rtf
     }
+
+    fn typed_hp_to_central_ac_config(
+        source: &EquipmentConfig,
+        hp_cfg: &HeatPumpCoolerConfig,
+    ) -> EquipmentConfig {
+        let seer = hp_cfg
+            .seer
+            .or_else(|| {
+                hp_cfg
+                    .stage_cooling_eirs
+                    .as_ref()
+                    .and_then(|eirs| eirs.first().copied())
+                    .filter(|eir| eir.is_finite() && *eir > 0.0)
+                    .map(|eir| 3.412_141_633 / eir)
+            })
+            .unwrap_or(13.0);
+
+        let capacity_w = hp_cfg
+            .cooling_capacity_w
+            .or_else(|| {
+                hp_cfg
+                    .stage_cooling_capacities_w
+                    .as_ref()
+                    .and_then(|caps| caps.last().copied())
+            })
+            .unwrap_or(8_000.0);
+
+        let mapped = CentralAirConditionerConfig {
+            equipment_id: hp_cfg.equipment_id,
+            zone_id: hp_cfg.zone_id,
+            capacity_w,
+            seer,
+            shr: hp_cfg.shr,
+            number_of_speeds: hp_cfg.number_of_speeds,
+            stage_capacities_w: hp_cfg.stage_cooling_capacities_w.clone(),
+            stage_eirs: hp_cfg.stage_cooling_eirs.clone(),
+            stage_shrs: hp_cfg.stage_shrs.clone(),
+            fan_power_w: hp_cfg.fan_power_w,
+            fan_power_w_per_cfm: hp_cfg.fan_power_w_per_cfm,
+            fraction_load_served: hp_cfg.fraction_cooling_load_served,
+            duct: hp_cfg.duct.clone(),
+            system_type: hp_cfg.is_mini_split.then(|| "mini-split".to_string()),
+            startup_cd: None,
+            biquadratic_x1_min: hp_cfg.biquadratic_x1_min,
+            biquadratic_x1_max: hp_cfg.biquadratic_x1_max,
+            biquadratic_x2_min: hp_cfg.biquadratic_x2_min,
+            biquadratic_x2_max: hp_cfg.biquadratic_x2_max,
+            ff_min: hp_cfg.ff_min,
+            ff_max: hp_cfg.ff_max,
+            plf_min: hp_cfg.plf_min,
+            plf_max: hp_cfg.plf_max,
+        };
+
+        EquipmentConfig::from_typed(source.name.clone(), "Air Conditioner".to_string(), mapped)
+    }
 }
 
 impl Equipment for HpCooler {
@@ -111,34 +166,42 @@ impl Equipment for HpCooler {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        self.inner.init(config, env)?;
+        let typed_hp_cfg = if config.is_typed() {
+            config.typed::<HeatPumpCoolerConfig>().ok()
+        } else {
+            None
+        };
 
-        if config.is_typed() {
-            if let Ok(hp_cfg) = config.typed::<HeatPumpCoolerConfig>() {
-                if hp_cfg.is_mini_split {
-                    self.inner.core.hvac.speed_control_mode =
-                        SpeedControlMode::MultiSpeedInterpolated;
-                    let cap = self.inner.core.hvac.cooling_capacities_w.clone();
-                    let eir = self.inner.core.hvac.eir_by_stage.clone();
-                    if cap.len() == 1 {
-                        let base_cap = cap[0];
-                        let base_eir = eir[0];
-                        self.inner.core.hvac.cooling_capacities_w =
-                            vec![base_cap * 0.25, base_cap * 0.5, base_cap * 0.75, base_cap];
-                        self.inner.core.hvac.eir_by_stage = vec![base_eir; 4];
-                    }
-                    let n_speeds = self.inner.core.hvac.cooling_capacities_w.len();
-                    if let Some(shrs) = &hp_cfg.stage_shrs {
-                        if !shrs.is_empty() && shrs.len() != n_speeds {
-                            return Err(HaresError::Equipment(format!(
-                                "stage_shrs length {} does not match speed stage count {}",
-                                shrs.len(),
-                                n_speeds
-                            )));
-                        }
-                        self.inner.core.stage_shrs = shrs.clone();
-                    }
+        if let Some(hp_cfg) = typed_hp_cfg.as_ref() {
+            let mapped = Self::typed_hp_to_central_ac_config(config, hp_cfg);
+            self.inner.init(&mapped, env)?;
+        } else {
+            self.inner.init(config, env)?;
+        }
+
+        if let Some(hp_cfg) = typed_hp_cfg {
+            if hp_cfg.is_mini_split {
+                self.inner.core.hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+                let cap = self.inner.core.hvac.cooling_capacities_w.clone();
+                let eir = self.inner.core.hvac.eir_by_stage.clone();
+                if cap.len() == 1 {
+                    let base_cap = cap[0];
+                    let base_eir = eir[0];
+                    self.inner.core.hvac.cooling_capacities_w =
+                        vec![base_cap * 0.25, base_cap * 0.5, base_cap * 0.75, base_cap];
+                    self.inner.core.hvac.eir_by_stage = vec![base_eir; 4];
                 }
+            }
+            let n_speeds = self.inner.core.hvac.cooling_capacities_w.len();
+            if let Some(shrs) = &hp_cfg.stage_shrs {
+                if !shrs.is_empty() && shrs.len() != n_speeds {
+                    return Err(HaresError::Equipment(format!(
+                        "stage_shrs length {} does not match speed stage count {}",
+                        shrs.len(),
+                        n_speeds
+                    )));
+                }
+                self.inner.core.stage_shrs = shrs.clone();
             }
         }
 
@@ -175,6 +238,10 @@ impl Equipment for HpCooler {
         self.inner.telemetry()
     }
 
+    fn core_output(&self) -> &CoreOutput {
+        self.inner.core_output()
+    }
+
     fn save_state(&self) -> Vec<u8> {
         self.inner.save_state()
     }
@@ -203,6 +270,8 @@ mod tests {
     };
 
     use super::{super::super::super::Equipment, super::super::super::EquipmentConfig, HpCooler};
+    use crate::config::ConfigPayload;
+    use crate::hvac::SpeedControlMode;
 
     fn cooling_env(zone_temp_c: f64, outdoor_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -235,6 +304,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 7, 15, 14, 0, 0)
@@ -262,6 +332,18 @@ mod tests {
             name: "HP Cooler".to_string(),
             ochre_class: "ASHP Cooler".to_string(),
             payload: crate::config::ConfigPayload::Raw { data: raw },
+        }
+    }
+
+    fn typed_config(data: serde_json::Value, ochre_class: &str) -> EquipmentConfig {
+        EquipmentConfig {
+            name: "HP Cooler".to_string(),
+            ochre_class: ochre_class.to_string(),
+            payload: ConfigPayload::Typed {
+                type_name: "ASHP Cooler".to_string(),
+                version: 1,
+                data,
+            },
         }
     }
 
@@ -464,5 +546,50 @@ mod tests {
              central-AC default (12.8 °C) would produce 0.05 kW — got {}",
             ports.electrical.net_active_kw()
         );
+    }
+
+    #[test]
+    fn typed_minisplit_overrides_to_four_speeds() {
+        let cfg = typed_config(
+            serde_json::json!({
+                "zone_id": 1,
+                "cooling_capacity_w": 8000.0,
+                "seer": 16.0,
+                "number_of_speeds": 1,
+                "is_mini_split": true
+            }),
+            "MSHP Cooler",
+        );
+        let mut eq = HpCooler::mshp_cooler(cfg.clone());
+        let env = cooling_env(28.0, 35.0);
+        eq.init(&cfg, &env).unwrap();
+
+        assert_eq!(
+            eq.inner.core.hvac.cooling_capacities_w.len(),
+            4,
+            "typed mini-split must initialize with 4 cooling speeds"
+        );
+        assert_eq!(
+            eq.inner.core.hvac.speed_control_mode,
+            SpeedControlMode::MultiSpeedInterpolated
+        );
+    }
+
+    #[test]
+    fn typed_stage_shrs_are_propagated_for_heat_pump_cooling() {
+        let cfg = typed_config(
+            serde_json::json!({
+                "zone_id": 1,
+                "cooling_capacity_w": 8000.0,
+                "seer": 16.0,
+                "stage_shrs": [0.81]
+            }),
+            "ASHP Cooler",
+        );
+        let mut eq = HpCooler::ashp_cooler(cfg.clone());
+        let env = cooling_env(28.0, 35.0);
+        eq.init(&cfg, &env).unwrap();
+
+        assert_eq!(eq.inner.core.stage_shrs, vec![0.81]);
     }
 }

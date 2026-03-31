@@ -8,8 +8,8 @@ use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::{EquipmentSpec, ScheduleTimeSeries, inject_schedule_into_specs, resolve_equipment};
 use hares_types::{
-    DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, WeatherState, ZoneId,
-    ZoneState, SCHEDULE_DOMAIN_ID,
+    DomainUpdate, EndUse, EnvironmentState, FuelType, GridState, PortSlots, SCHEDULE_DOMAIN_ID,
+    WeatherState, ZoneId, ZoneState,
 };
 use serde_json::{Map, Value, json};
 use tempfile::tempdir;
@@ -53,6 +53,7 @@ fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         fuel_type: FuelType::Electric,
         parameters,
         zip_params: None,
+        typed_config: None,
     }
 }
 
@@ -76,6 +77,29 @@ fn equipment_config_from_spec(spec: &EquipmentSpec) -> EquipmentConfig {
         .filter_map(|(k, v)| json_value_to_config_value(v).map(|cv| (k.clone(), cv)))
         .collect();
 
+    EquipmentConfig {
+        name: spec.name.clone(),
+        ochre_class: spec.name.clone(),
+        payload: hares_equipment::ConfigPayload::Raw { data: raw_config },
+    }
+}
+
+fn equipment_config_from_spec_with_extras(
+    spec: &EquipmentSpec,
+    insert: &[(&str, ConfigValue)],
+    remove: &[&str],
+) -> EquipmentConfig {
+    let mut raw_config: HashMap<String, ConfigValue> = spec
+        .parameters
+        .iter()
+        .filter_map(|(k, v)| json_value_to_config_value(v).map(|cv| (k.clone(), cv)))
+        .collect();
+    for key in remove {
+        raw_config.remove(*key);
+    }
+    for (k, v) in insert {
+        raw_config.insert(k.to_string(), v.clone());
+    }
     EquipmentConfig {
         name: spec.name.clone(),
         ochre_class: spec.name.clone(),
@@ -114,6 +138,7 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
             custom_payload: Some(payload),
         }],
         equipment_telemetry: std::collections::HashMap::new(),
+        equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
             .unwrap()
             .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -283,12 +308,15 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
         .expect("event_window_schedule_col should be injected") as usize;
     assert_eq!(injected_col, 2);
 
-    let mut config = equipment_config_from_spec(&specs[0]);
-    #[allow(deprecated)]
-    let raw = config.raw_config_mut().unwrap();
-    raw.insert("active_power_kw".to_string(), 1.5.into());
-    raw.insert("active_duration_s".to_string(), 60.0.into());
-    raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+    let config = equipment_config_from_spec_with_extras(
+        &specs[0],
+        &[
+            ("active_power_kw", 1.5.into()),
+            ("active_duration_s", 60.0.into()),
+            ("cooldown_duration_s", 0.0.into()),
+        ],
+        &[],
+    );
 
     let mut eq = EventBasedLoad::new(config.clone());
     // payload len=2 while injected column index is 2. BoundaryPolicy::Wrap should map idx 2 -> 0.
@@ -308,11 +336,11 @@ fn missing_column_index_errors_at_init_not_step() {
     let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
     inject_schedule_into_specs(&mut specs, &mut schedule, None);
 
-    let mut config = equipment_config_from_spec(&specs[0]);
-    #[allow(deprecated)]
-    let raw = config.raw_config_mut().unwrap();
-    raw.insert("power_schedule_source".to_string(), "column".into());
-    raw.remove("power_schedule_col");
+    let config = equipment_config_from_spec_with_extras(
+        &specs[0],
+        &[("power_schedule_source", "column".into())],
+        &["power_schedule_col"],
+    );
 
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Indoor Lighting");
     let env = base_env(payload_for_row(&schedule, 0));

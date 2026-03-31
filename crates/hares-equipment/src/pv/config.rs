@@ -11,6 +11,10 @@ use crate::config::EquipmentTypedConfig;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PvConfig {
+    // Identity
+    pub equipment_id: Option<u32>,
+    pub zone_id: Option<u16>,
+
     // DC capacity of the array
     pub capacity_kw: f64,
 
@@ -100,6 +104,8 @@ mod tests {
 
     fn minimal_pv_config() -> PvConfig {
         PvConfig {
+            equipment_id: None,
+            zone_id: None,
             capacity_kw: 5.0,
             tilt_deg: None,
             azimuth_deg: None,
@@ -116,12 +122,7 @@ mod tests {
     #[test]
     fn pv_config_round_trips_via_equipment_config() {
         let cfg = minimal_pv_config();
-        let ec = EquipmentConfig::from_typed(
-            "test_pv".to_string(),
-            "PV".to_string(),
-            cfg.clone(),
-        )
-        .unwrap();
+        let ec = EquipmentConfig::from_typed("test_pv".to_string(), "PV".to_string(), cfg.clone());
         assert!(ec.is_typed());
         let recovered: PvConfig = ec.typed().unwrap();
         assert_eq!(recovered.capacity_kw, cfg.capacity_kw);

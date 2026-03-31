@@ -36,8 +36,9 @@ use hares_physics::pv_sizing::RoofInfo;
 use hares_tariff::{BillingPeriodSummary, ElectricTariff, TariffEvaluator};
 use hares_types::{
     BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary, EndUse,
-    EnvironmentState, ExecutionStage, GridState, HaresError, PortDeclaration, PortSlots,
-    SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId, telemetry_keys as tk,
+    EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, PortDeclaration,
+    PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource, ThermalCategory, ZoneId, telemetry_keys as tk,
+    validate_core_contract,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -71,6 +72,40 @@ use synthetic::{
 use synthetic::{current_process_hwm_kb, hot_path_alloc_counter};
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
+
+fn is_critical_class_name(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        // HVAC (heating/cooling)
+        "Gas Furnace"
+            | "Electric Furnace"
+            | "Electric Baseboard"
+            | "Gas Boiler"
+            | "Electric Boiler"
+            | "Air Conditioner"
+            | "Room AC"
+            | "Dehumidifier"
+            | "Ideal HVAC"
+            | "ASHP Heater"
+            | "MSHP Heater"
+            | "ASHP Cooler"
+            | "MSHP Cooler"
+            | "Heat Pump Heater"
+            // Water heating
+            | "Gas Water Heater"
+            | "Resistance Water Heater"
+            | "Electric Resistance Water Heater"
+            | "Tankless Water Heater"
+            | "Gas Tankless Water Heater"
+            | "Heat Pump Water Heater"
+            | "HPWH"
+            // Core DER
+            | "EV"
+            | "Electric Vehicle"
+            | "Battery"
+            | "PV"
+    )
+}
 
 /// Core result type for dwelling operations.
 pub type Result<T> = std::result::Result<T, HaresError>;
@@ -514,6 +549,7 @@ fn register_pv_roof_shading(
 pub struct Dwelling {
     pub bldg_id: i64,
     equipment: Vec<Box<dyn Equipment>>,
+    equipment_id_by_name: HashMap<String, EquipmentId>,
     pub thermal_solver: ThermalSolver,
     pub humidity_solver: HumiditySolver,
     pub electrical_solver: ElectricalSolver,
@@ -858,15 +894,11 @@ impl Dwelling {
         // If an Occupancy spec exists, number_of_occupants is required.
         let occupancy_scale = match equipment_specs.iter().find(|s| s.name == "Occupancy") {
             Some(spec) => {
-                let val = spec
-                    .parameters
-                    .get("number_of_occupants")
-                    .ok_or_else(|| {
-                        HaresError::Equipment(
-                            "Occupancy spec is missing required key 'number_of_occupants'"
-                                .into(),
-                        )
-                    })?;
+                let val = spec.parameters.get("number_of_occupants").ok_or_else(|| {
+                    HaresError::Equipment(
+                        "Occupancy spec is missing required key 'number_of_occupants'".into(),
+                    )
+                })?;
                 val.as_f64().ok_or_else(|| {
                     HaresError::Equipment(format!(
                         "Occupancy 'number_of_occupants' must be a valid number, got: {val}"
@@ -887,28 +919,59 @@ impl Dwelling {
                 continue;
             }
             let base_cfg = equipment_config_from_spec(spec);
-            let mut eq = registry
-                .create(&base_cfg.ochre_class, base_cfg.clone())
-                .map_err(|err| {
-                    HaresError::Equipment(format!(
-                        "equipment '{}' (class '{}'): {err}",
+            let mut eq = match registry.create(&base_cfg.ochre_class, base_cfg.clone()) {
+                Ok(eq) => eq,
+                Err(err) => {
+                    let msg = format!(
+                        "equipment '{}' (class '{}') create failed: {err}",
                         base_cfg.name, base_cfg.ochre_class,
-                    ))
-                })?;
+                    );
+                    if is_critical_class_name(&base_cfg.ochre_class) {
+                        return Err(HaresError::Equipment(msg));
+                    }
+                    tracing::error!("{msg}");
+                    warnings.push(msg);
+                    continue;
+                }
+            };
 
             let merged_cfg = merged_equipment_config(spec, &override_root);
             match eq.init(&merged_cfg, &initial_env) {
                 Ok(()) => equipment.push(eq),
                 Err(err) => {
-                    // Non-critical equipment (appliances, loads) may lack schedule data;
-                    // skip them with a warning rather than aborting the entire simulation.
+                    let end_use = eq.descriptor().end_use.clone();
+                    let is_critical = end_use == EndUse::HVAC_HEATING
+                        || end_use == EndUse::HVAC_COOLING
+                        || end_use == EndUse::WATER_HEATING
+                        || end_use == EndUse::EV
+                        || end_use == EndUse::BATTERY
+                        || end_use == EndUse::PV;
+                    if is_critical {
+                        return Err(HaresError::Equipment(format!(
+                            "equipment '{}' init failed: {err}",
+                            merged_cfg.name
+                        )));
+                    }
                     let msg = format!(
                         "equipment '{}' init failed, skipping: {err}",
                         merged_cfg.name
                     );
-                    tracing::warn!("{msg}");
+                    tracing::error!("{msg}");
                     warnings.push(msg);
                 }
+            }
+        }
+        let mut equipment_id_by_name = HashMap::with_capacity(equipment.len());
+        for eq in &equipment {
+            let desc = eq.descriptor();
+            if equipment_id_by_name
+                .insert(desc.name.clone(), desc.id)
+                .is_some()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "duplicate equipment name '{}' is not allowed",
+                    desc.name
+                )));
             }
         }
 
@@ -977,6 +1040,7 @@ impl Dwelling {
         let mut dwelling = Self {
             bldg_id: config.bldg_id,
             equipment,
+            equipment_id_by_name,
             thermal_solver: solvers.thermal,
             humidity_solver: solvers.humidity,
             electrical_solver: solvers.electrical,
@@ -1227,6 +1291,7 @@ impl Dwelling {
             has_tariff,
             price_schedule,
             steps_per_day,
+            &self.equipment_id_by_name,
         );
 
         if !built_in_actors.is_empty() {
@@ -1423,6 +1488,7 @@ impl Dwelling {
                         fuel_type: d.fuel,
                         parameters: Map::new(),
                         zip_params: None,
+                        typed_config: None,
                     }
                 })
                 .collect();
@@ -1549,32 +1615,26 @@ impl Dwelling {
         let mut setpoint_cool_c = zone_temperatures_c.clone();
         let mut equipment_names = Vec::with_capacity(self.equipment.len());
         let mut equipment_modes = Vec::with_capacity(self.equipment.len());
-        let mut equipment_states = Vec::with_capacity(self.equipment.len());
         let mut equipment_soc = Vec::with_capacity(self.equipment.len());
         let mut equipment_power_kw = Vec::with_capacity(self.equipment.len());
 
         for eq in &self.equipment {
+            let co = eq.core_output();
             let telemetry = eq.telemetry();
             equipment_names.push(eq.descriptor().name.clone());
-            equipment_modes.push(telemetry.get(tk::OPERATING_MODE).unwrap_or(0.0));
-            equipment_states.push(telemetry.get(tk::STATE).unwrap_or(0.0));
-            equipment_soc.push(telemetry.get(tk::SOC).unwrap_or(0.0));
-            equipment_power_kw.push(
-                telemetry
-                    .get(tk::ELECTRIC_KW)
-                    .or_else(|| telemetry.get(tk::AC_POWER_KW))
-                    .or_else(|| telemetry.get(tk::ACTIVE_POWER_KW))
-                    .or_else(|| telemetry.get(tk::ELECTRIC_OUTPUT_KW))
-                    .unwrap_or(0.0),
-            );
+            equipment_modes.push(co.state.operating_mode.map_or(0.0, |m| m.as_code()));
+            equipment_soc.push(co.state.soc.map_or(0.0, |s| s.get()));
+            equipment_power_kw.push(co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw()));
 
             if let Some(zone_id) = eq.descriptor().zone
                 && let Some(zone_idx) = zone_ids.iter().position(|z| *z == zone_id)
             {
                 if let Some(heat_sp) = telemetry.get(tk::HEATING_SETPOINT_C) {
+                    // allowed: thermal setpoints are telemetry-only until CoreOutput gains setpoint fields.
                     setpoint_heat_c[zone_idx] = heat_sp;
                 }
                 if let Some(cool_sp) = telemetry.get(tk::COOLING_SETPOINT_C) {
+                    // allowed: thermal setpoints are telemetry-only until CoreOutput gains setpoint fields.
                     setpoint_cool_c[zone_idx] = cool_sp;
                 }
             }
@@ -1587,7 +1647,6 @@ impl Dwelling {
             zone_temperatures_c,
             equipment_names,
             equipment_modes,
-            equipment_states,
             equipment_soc,
             equipment_power_kw,
             setpoint_heat_c,
@@ -1950,6 +2009,7 @@ impl Dwelling {
         } else {
             None
         };
+        let mut step_succeeded = vec![false; self.equipment.len()];
 
         for &idx in &self.equipment_execution_order {
             let stage = self.equipment[idx].descriptor().stage;
@@ -1965,6 +2025,12 @@ impl Dwelling {
                     "equipment step failed for '{}' : {err}",
                     self.equipment[idx].descriptor().name
                 ));
+            } else {
+                validate_core_contract(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                )?;
+                step_succeeded[idx] = true;
             }
 
             #[cfg(feature = "observe")]
@@ -2018,6 +2084,12 @@ impl Dwelling {
                     "equipment step failed for '{}' : {err}",
                     self.equipment[idx].descriptor().name
                 ));
+            } else {
+                validate_core_contract(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                )?;
+                step_succeeded[idx] = true;
             }
 
             #[cfg(feature = "observe")]
@@ -2132,6 +2204,35 @@ impl Dwelling {
         }
 
         self.check_invariants(dt)?;
+        let active_equipment_ids: HashSet<EquipmentId> = self
+            .equipment
+            .iter()
+            .map(|eq| {
+                let desc = eq.descriptor();
+                self.equipment_id_by_name
+                    .get(&desc.name)
+                    .copied()
+                    .unwrap_or(desc.id)
+            })
+            .collect();
+        self.latest_env
+            .equipment_core
+            .retain(|id, _| active_equipment_ids.contains(id));
+        self.latest_env.equipment_core.reserve(self.equipment.len());
+        for (idx, eq) in self.equipment.iter().enumerate() {
+            if !step_succeeded[idx] {
+                continue;
+            }
+            let desc = eq.descriptor();
+            let id = self
+                .equipment_id_by_name
+                .get(&desc.name)
+                .copied()
+                .unwrap_or(desc.id);
+            self.latest_env
+                .equipment_core
+                .insert(id, eq.core_output().clone());
+        }
 
         for (i, entry) in self.zone_temp_scratch.iter_mut().enumerate() {
             entry.1 = if let Some(env_idx) = self.zone_env_indices[i] {
@@ -2214,13 +2315,13 @@ impl Dwelling {
         let mut pv_kw = 0.0;
         for eq in &self.equipment {
             let end_use = &eq.descriptor().end_use;
-            let telem = eq.telemetry();
+            let co = eq.core_output();
             if *end_use == EndUse::BATTERY {
-                battery_kw += telem.get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+                battery_kw += co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
             } else if *end_use == EndUse::EV {
-                ev_kw += telem.get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+                ev_kw += co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
             } else if *end_use == EndUse::PV {
-                pv_kw += telem.get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+                pv_kw += co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
             }
         }
         let net_grid = self.electrical_solver.net_active_kw();
@@ -2260,38 +2361,22 @@ impl Dwelling {
 
         // Per-equipment columns via pre-resolved index map.
         for (eq, cols) in self.equipment.iter().zip(&self.equipment_column_map) {
-            let telem = eq.telemetry();
+            let co = eq.core_output();
             if let Some(idx) = cols.electric_power {
-                let raw_kw = telem
-                    .get(tk::ELECTRIC_KW)
-                    .or_else(|| telem.get(tk::ACTIVE_POWER_KW))
-                    .or_else(|| telem.get(tk::AC_POWER_KW))
-                    .or_else(|| telem.get(tk::ELECTRIC_OUTPUT_KW))
-                    .unwrap_or(0.0);
-                // PV/generator telemetry reports positive generation; output
-                // convention (OCHRE) is negative for generation equipment.
-                row[idx] = if eq.descriptor().end_use == EndUse::PV {
-                    -raw_kw
-                } else {
-                    raw_kw
-                };
+                row[idx] = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
             }
             if let Some(idx) = cols.gas_power {
-                row[idx] = telem.get(tk::FUEL_INPUT_W).unwrap_or(0.0) / GAS_THERMS_PER_HOUR_TO_W;
+                row[idx] =
+                    co.flows.fuel_w.map_or(0.0, |f| f.consumption_w) / GAS_THERMS_PER_HOUR_TO_W;
             }
             if let Some(idx) = cols.mode {
-                row[idx] = telem.get(tk::OPERATING_MODE).unwrap_or(0.0);
+                row[idx] = co.state.operating_mode.map_or(0.0, |m| m.as_code());
             }
             if let Some(idx) = cols.reactive_power {
-                let q = telem.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0);
+                let q = co.flows.reactive_power_kvar.unwrap_or(0.0);
                 row[idx] = q;
                 if let Some(pf_idx) = cols.power_factor {
-                    let p = telem
-                        .get(tk::ELECTRIC_KW)
-                        .or_else(|| telem.get(tk::ACTIVE_POWER_KW))
-                        .or_else(|| telem.get(tk::AC_POWER_KW))
-                        .or_else(|| telem.get(tk::ELECTRIC_OUTPUT_KW))
-                        .unwrap_or(0.0);
+                    let p = co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
                     let s = (p * p + q * q).sqrt();
                     row[pf_idx] = if s > 1e-9 { (p / s).abs() } else { 1.0 };
                 }
@@ -2424,8 +2509,9 @@ impl Dwelling {
                 let telem = eq.telemetry();
                 let mut i = 0usize;
                 loop {
-                    let key = format!("tank_node_{i}_c");
+                    let key = tk::tank_node_key(i);
                     match telem.get(&key) {
+                        // allowed: tank node channels are dynamic and not represented in CoreOutput.
                         Some(t) => {
                             tank_temps_c.push(t);
                             i += 1;
@@ -2442,7 +2528,7 @@ impl Dwelling {
                 if *end_use != EndUse::BATTERY && *end_use != EndUse::EV {
                     continue;
                 }
-                if let Some(soc) = eq.telemetry().get(tk::SOC) {
+                if let Some(soc) = eq.core_output().state.soc.map(|s| s.get()) {
                     checker.check_soc(soc, 0.0)?;
                 }
             }
@@ -2580,6 +2666,7 @@ fn build_actors_from_seeds(
     has_tariff: bool,
     price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
+    equipment_id_by_name: &HashMap<String, EquipmentId>,
 ) -> Vec<Box<dyn Actor>> {
     let seeds: Vec<(String, ActorSeed)> = equipment
         .iter()
@@ -2637,6 +2724,8 @@ fn build_actors_from_seeds(
                     price_schedule.clone(),
                     steps_per_day,
                 );
+                let mut actor = actor;
+                actor.resolve_equipment_id(equipment_id_by_name);
                 built_in_actors.push(Box::new(actor));
             }
             ActorSeed::Ev {
@@ -2701,6 +2790,7 @@ fn build_actors_from_seeds(
                 if let Some(ref prices) = price_schedule {
                     actor = actor.with_price_schedule(Arc::clone(prices), steps_per_day);
                 }
+                actor.resolve_equipment_id(equipment_id_by_name);
 
                 built_in_actors.push(Box::new(actor));
             }
@@ -2719,9 +2809,9 @@ mod tests {
     use hares_equipment::{Equipment, EquipmentConfig};
     use hares_types::ports::{PortContribution, PortSlots};
     use hares_types::{
-        ControlCapabilities, CoreCapabilities, ControlSignal, EndUse, EquipmentDescriptor,
-        EquipmentId, ExecutionStage, FuelType, OperatingMode, PortDeclaration, Telemetry,
-        TelemetryField, ZoneId,
+        ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse,
+        EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, OperatingMode, PortDeclaration,
+        Telemetry, TelemetryField, ZoneId,
     };
     use std::borrow::Cow;
     use std::fs;
@@ -2729,8 +2819,381 @@ mod tests {
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn strip_strings_and_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let bytes = src.as_bytes();
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            match bytes[i] {
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        out.push(' ');
+                        i += 1;
+                    }
+                }
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    let mut depth = 1usize;
+                    while i < bytes.len() && depth > 0 {
+                        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                            out.push(' ');
+                            out.push(' ');
+                            i += 2;
+                            depth += 1;
+                            continue;
+                        }
+                        if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                            out.push(' ');
+                            out.push(' ');
+                            i += 2;
+                            depth = depth.saturating_sub(1);
+                            continue;
+                        }
+                        if bytes[i] == b'\n' {
+                            out.push('\n');
+                        } else {
+                            out.push(' ');
+                        }
+                        i += 1;
+                    }
+                }
+                b'r' => {
+                    let mut j = i + 1;
+                    while j < bytes.len() && bytes[j] == b'#' {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b'"' {
+                        let hashes = j - (i + 1);
+                        for _ in i..=j {
+                            out.push(' ');
+                        }
+                        i = j + 1;
+                        loop {
+                            if i >= bytes.len() {
+                                break;
+                            }
+                            if bytes[i] == b'"' {
+                                let mut matches_hashes = true;
+                                for h in 0..hashes {
+                                    if i + 1 + h >= bytes.len() || bytes[i + 1 + h] != b'#' {
+                                        matches_hashes = false;
+                                        break;
+                                    }
+                                }
+                                if matches_hashes {
+                                    out.push(' ');
+                                    for _ in 0..hashes {
+                                        out.push(' ');
+                                    }
+                                    i += 1 + hashes;
+                                    break;
+                                }
+                            }
+                            if bytes[i] == b'\n' {
+                                out.push('\n');
+                            } else {
+                                out.push(' ');
+                            }
+                            i += 1;
+                        }
+                    } else {
+                        out.push('r');
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    out.push(' ');
+                    i += 1;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'\\' if i + 1 < bytes.len() => {
+                                out.push(' ');
+                                out.push(' ');
+                                i += 2;
+                            }
+                            b'"' => {
+                                out.push(' ');
+                                i += 1;
+                                break;
+                            }
+                            b'\n' => {
+                                out.push('\n');
+                                i += 1;
+                            }
+                            _ => {
+                                out.push(' ');
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+                b'\'' => {
+                    out.push(' ');
+                    i += 1;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'\\' if i + 1 < bytes.len() => {
+                                out.push(' ');
+                                out.push(' ');
+                                i += 2;
+                            }
+                            b'\'' => {
+                                out.push(' ');
+                                i += 1;
+                                break;
+                            }
+                            b'\n' => {
+                                out.push('\n');
+                                i += 1;
+                            }
+                            _ => {
+                                out.push(' ');
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+                c => {
+                    if c.is_ascii() {
+                        out.push(c as char);
+                    } else {
+                        out.push(' ');
+                    }
+                    i += 1;
+                }
+            }
+        }
+
+        out
+    }
+
+    fn find_matching_brace(src: &str, open_brace: usize) -> Option<usize> {
+        let bytes = src.as_bytes();
+        let mut depth = 1usize;
+        let mut i = open_brace + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn find_excluded_test_module_spans(sanitized: &str) -> Vec<(usize, usize)> {
+        let bytes = sanitized.as_bytes();
+        let mut spans = Vec::new();
+        let mut i = 0usize;
+        let mut pending_cfg_test_attr = false;
+
+        while i < bytes.len() {
+            if bytes[i].is_ascii_whitespace() {
+                i += 1;
+                continue;
+            }
+
+            if i + 1 < bytes.len() && bytes[i] == b'#' && bytes[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < bytes.len() && bytes[j] != b']' {
+                    j += 1;
+                }
+                if j < bytes.len() {
+                    let attr = &sanitized[i + 2..j];
+                    let compact: String = attr.chars().filter(|c| !c.is_whitespace()).collect();
+                    if compact.contains("cfg(test)")
+                        || compact.contains("cfg(any(test,")
+                        || compact.contains("cfg(all(test,")
+                    {
+                        pending_cfg_test_attr = true;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+
+            if i + 2 < bytes.len()
+                && &sanitized[i..i + 3] == "mod"
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
+                && (i + 3 == bytes.len()
+                    || !bytes[i + 3].is_ascii_alphanumeric() && bytes[i + 3] != b'_')
+            {
+                let mut j = i + 3;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let name_start = j;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                if name_start == j {
+                    pending_cfg_test_attr = false;
+                    i += 3;
+                    continue;
+                }
+                let module_name = &sanitized[name_start..j];
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'{' {
+                    if (module_name == "tests" || pending_cfg_test_attr)
+                        && let Some(end) = find_matching_brace(sanitized, j)
+                    {
+                        spans.push((i, end));
+                        i = end;
+                        pending_cfg_test_attr = false;
+                        continue;
+                    }
+                    pending_cfg_test_attr = false;
+                } else if j < bytes.len() && bytes[j] == b';' {
+                    pending_cfg_test_attr = false;
+                }
+            } else {
+                pending_cfg_test_attr = false;
+            }
+
+            i += 1;
+        }
+
+        spans.sort_unstable_by_key(|(start, _)| *start);
+        spans
+    }
+
+    fn collect_rs_files(root: &PathBuf, out: &mut Vec<PathBuf>) {
+        let read_dir = fs::read_dir(root)
+            .unwrap_or_else(|e| panic!("failed to read directory {}: {e}", root.display()));
+        for entry in read_dir {
+            let entry = entry.unwrap_or_else(|e| {
+                panic!(
+                    "failed to read directory entry under {}: {e}",
+                    root.display()
+                )
+            });
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn offset_to_line_col(src: &str, offset: usize) -> (usize, usize) {
+        let mut line = 1usize;
+        let mut col = 1usize;
+        for (idx, ch) in src.char_indices() {
+            if idx >= offset {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
+    }
+
+    fn is_in_span(offset: usize, spans: &[(usize, usize)]) -> bool {
+        spans
+            .iter()
+            .any(|(start, end)| offset >= *start && offset < *end)
+    }
+
+    fn has_allowlist_comment(raw: &str, line_start: usize, line_end: usize) -> bool {
+        let line_text = &raw[line_start..line_end];
+        if line_text.contains("// allowed:") {
+            return true;
+        }
+
+        if line_end >= raw.len() {
+            return false;
+        }
+        let next_start = line_end + 1;
+        if next_start >= raw.len() {
+            return false;
+        }
+        let next_end = raw[next_start..]
+            .find('\n')
+            .map_or(raw.len(), |p| next_start + p);
+        raw[next_start..next_end].contains("// allowed:")
+    }
+
+    #[test]
+    fn no_string_telemetry_reads_in_core() {
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        files.sort();
+
+        let banned_patterns = [
+            "telemetry().get(",
+            "telemetry.get(",
+            "telem.get(",
+            ".0.get(",
+        ];
+        let mut hits = Vec::new();
+
+        for path in files {
+            let raw = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed reading {}: {e}", path.display()));
+            let sanitized = strip_strings_and_comments(&raw);
+            let excluded_spans = find_excluded_test_module_spans(&sanitized);
+
+            for pattern in banned_patterns {
+                for (idx, _) in sanitized.match_indices(pattern) {
+                    if is_in_span(idx, &excluded_spans) {
+                        continue;
+                    }
+                    let line_start = raw[..idx].rfind('\n').map_or(0, |p| p + 1);
+                    let line_end = raw[idx..].find('\n').map_or(raw.len(), |p| idx + p);
+                    let line_text = &raw[line_start..line_end];
+                    if has_allowlist_comment(&raw, line_start, line_end) {
+                        continue;
+                    }
+                    let (line, col) = offset_to_line_col(&raw, idx);
+                    let rel = path
+                        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string();
+                    hits.push(format!(
+                        "{rel}:{line}:{col}: found `{pattern}` in `{}`",
+                        line_text.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            hits.is_empty(),
+            "found disallowed telemetry string reads in core:\n{}",
+            hits.join("\n")
+        );
+    }
+
     fn replace_equipment_for_test(dwelling: &mut Dwelling, equipment: Vec<Box<dyn Equipment>>) {
         dwelling.equipment = equipment;
+        dwelling.equipment_id_by_name = dwelling
+            .equipment
+            .iter()
+            .map(|eq| (eq.descriptor().name.clone(), eq.descriptor().id))
+            .collect();
         dwelling.equipment_execution_order = compute_equipment_execution_order(&dwelling.equipment);
         dwelling.equipment_column_map =
             build_equipment_column_map(&dwelling.equipment, &dwelling.output_column_index);
@@ -2742,6 +3205,12 @@ mod tests {
                 .equipment
                 .iter()
                 .any(|eq| eq.descriptor().name == *name)
+        });
+        dwelling.latest_env.equipment_core.retain(|id, _| {
+            dwelling
+                .equipment
+                .iter()
+                .any(|eq| eq.descriptor().id == *id)
         });
 
         let mut declarations: Vec<PortDeclaration> = Vec::new();
@@ -2758,6 +3227,7 @@ mod tests {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
         last_power_kw: f64,
+        core_output: CoreOutput,
     }
 
     impl TestEquipment {
@@ -2781,6 +3251,7 @@ mod tests {
                 },
                 telemetry: Telemetry::with_capacity(1),
                 last_power_kw: 0.0,
+                core_output: CoreOutput::default(),
             }
         }
     }
@@ -2820,6 +3291,10 @@ mod tests {
             &self.telemetry
         }
 
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
         fn save_state(&self) -> Vec<u8> {
             vec![]
         }
@@ -2852,6 +3327,7 @@ mod tests {
         active_power_kw: f64,
         reactive_power_kvar: f64,
         ports: Vec<PortDeclaration>,
+        core_output: CoreOutput,
     }
 
     impl TestReactiveEquipment {
@@ -2884,6 +3360,7 @@ mod tests {
                 active_power_kw,
                 reactive_power_kvar,
                 ports: vec![PortDeclaration::electrical()],
+                core_output: CoreOutput::default(),
             }
         }
     }
@@ -2928,6 +3405,10 @@ mod tests {
 
         fn telemetry(&self) -> &Telemetry {
             &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
         }
 
         fn save_state(&self) -> Vec<u8> {
@@ -3040,6 +3521,66 @@ master_seed = 0
         assert!(
             dwelling.flushed_batches().is_empty(),
             "write_output=false must not produce recorder batches"
+        );
+    }
+
+    #[test]
+    fn unregistered_critical_equipment_returns_err_with_equipment_name() {
+        let toml_path = {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before UNIX_EPOCH")
+                .as_nanos();
+            path.push(format!("hares-unregistered-critical-{nanos}.toml"));
+            path
+        };
+
+        fs::write(
+            &toml_path,
+            r#"building_id = 424243
+
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res_s = 60
+duration_s = 600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 145.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "MysteryBoiler9000"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = -10.0
+dew_point_c = -5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[schedule]
+occupancy = 1.0
+"#,
+        )
+        .expect("write synthetic TOML");
+
+        let result = Dwelling::from_toml_config(&toml_path);
+        let _ = fs::remove_file(&toml_path);
+
+        let err = match result {
+            Ok(_) => panic!("unknown HVAC class must fail dwelling construction"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MysteryBoiler9000"),
+            "error must name missing equipment, got: {msg}"
         );
     }
 
@@ -3382,6 +3923,7 @@ master_seed = 0
         ideal_capacity_w: f64,
         ideal_zone: ZoneId,
         ideal_target_c: f64,
+        core_output: CoreOutput,
     }
 
     impl TestIdealEquipment {
@@ -3408,6 +3950,7 @@ master_seed = 0
                 ideal_capacity_w: 0.0,
                 ideal_zone: zone,
                 ideal_target_c: target_c,
+                core_output: CoreOutput::default(),
             }
         }
     }
@@ -3446,6 +3989,10 @@ master_seed = 0
 
         fn telemetry(&self) -> &Telemetry {
             &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
         }
 
         fn save_state(&self) -> Vec<u8> {
@@ -3990,6 +4537,9 @@ master_seed = 0
         fn telemetry(&self) -> &Telemetry {
             self.inner.telemetry()
         }
+        fn core_output(&self) -> &CoreOutput {
+            self.inner.core_output()
+        }
         fn save_state(&self) -> Vec<u8> {
             self.inner.save_state()
         }
@@ -4043,7 +4593,14 @@ master_seed = 0
             }),
         ));
 
-        let actors = build_actors_from_seeds(&[eq], &[], true, Some(Arc::from(vec![0.10; 24])), 24);
+        let actors = build_actors_from_seeds(
+            &[eq],
+            &[],
+            true,
+            Some(Arc::from(vec![0.10; 24])),
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "BatteryManagementActor:Battery1");
     }
@@ -4065,7 +4622,14 @@ master_seed = 0
             }),
         ));
 
-        let actors = build_actors_from_seeds(&[eq], &[], true, Some(Arc::from(vec![0.10; 24])), 24);
+        let actors = build_actors_from_seeds(
+            &[eq],
+            &[],
+            true,
+            Some(Arc::from(vec![0.10; 24])),
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
     }
@@ -4075,7 +4639,14 @@ master_seed = 0
         // Equipment with no ActorSeed (simulates BmsMode::Manual)
         let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("Battery1", None));
 
-        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        let actors = build_actors_from_seeds(
+            &[eq],
+            &[],
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert!(actors.is_empty());
     }
 
@@ -4084,7 +4655,14 @@ master_seed = 0
         // Equipment with no ActorSeed (simulates ChargingStrategy::Immediate)
         let eq: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("EV1", None));
 
-        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        let actors = build_actors_from_seeds(
+            &[eq],
+            &[],
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert!(actors.is_empty());
     }
 
@@ -4106,7 +4684,14 @@ master_seed = 0
         ));
 
         // No tariff: has_tariff=false, price_schedule=None
-        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        let actors = build_actors_from_seeds(
+            &[eq],
+            &[],
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         // Should still register an actor (with fallback to SelfConsumption)
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "BatteryManagementActor:Battery1");
@@ -4130,7 +4715,14 @@ master_seed = 0
         ));
 
         // No tariff: falls back to Immediate
-        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        let actors = build_actors_from_seeds(
+            &[eq],
+            &[],
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
     }
@@ -4156,7 +4748,14 @@ master_seed = 0
         });
         let existing: Vec<Box<dyn crate::Actor>> = vec![user_actor];
 
-        let built_in = build_actors_from_seeds(&[eq], &existing, false, None, 24);
+        let built_in = build_actors_from_seeds(
+            &[eq],
+            &existing,
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(built_in.len(), 1);
         assert_eq!(built_in[0].name(), "BatteryManagementActor:Battery1");
         // Caller (auto_register_actors) prepends built_in before existing.
@@ -4186,7 +4785,14 @@ master_seed = 0
         });
         let existing: Vec<Box<dyn crate::Actor>> = vec![existing_actor];
 
-        let built_in = build_actors_from_seeds(&[eq], &existing, false, None, 24);
+        let built_in = build_actors_from_seeds(
+            &[eq],
+            &existing,
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert!(
             built_in.is_empty(),
             "duplicate actor should not be registered"
@@ -4222,7 +4828,14 @@ master_seed = 0
             }),
         ));
 
-        let actors = build_actors_from_seeds(&[eq1, eq2], &[], false, None, 24);
+        let actors = build_actors_from_seeds(
+            &[eq1, eq2],
+            &[],
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(actors.len(), 2);
         assert_eq!(actors[0].name(), "BatteryManagementActor:Battery1");
         assert_eq!(actors[1].name(), "BatteryManagementActor:Battery2");
@@ -4258,7 +4871,14 @@ master_seed = 0
             }),
         ));
 
-        let actors = build_actors_from_seeds(&[eq1, eq2], &[], false, None, 24);
+        let actors = build_actors_from_seeds(
+            &[eq1, eq2],
+            &[],
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(actors.len(), 2);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
         assert_eq!(actors[1].name(), "EvDriver:EV2");
@@ -4281,7 +4901,14 @@ master_seed = 0
             }),
         ));
 
-        let actors = build_actors_from_seeds(&[eq], &[], false, None, 24);
+        let actors = build_actors_from_seeds(
+            &[eq],
+            &[],
+            false,
+            None,
+            24,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(actors.len(), 1);
         assert_eq!(actors[0].name(), "EvDriver:EV1");
     }
@@ -4314,11 +4941,13 @@ master_seed = 0
         dwelling.apply_occupancy_gains();
 
         // Expected n_occupants = 0.5 * 4.0 = 2.0
-        let expected_sensible =
-            2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
+        let expected_sensible = 2.0 * OCCUPANT_SENSIBLE_GAIN_W * OCCUPANT_CONVECTIVE_FRACTION;
         let expected_latent = 2.0 * OCCUPANT_LATENT_GAIN_W;
 
-        assert!(!dwelling.ports.thermal.is_empty(), "fixture must have at least one thermal port");
+        assert!(
+            !dwelling.ports.thermal.is_empty(),
+            "fixture must have at least one thermal port"
+        );
         for thermal in &dwelling.ports.thermal {
             assert!(
                 (thermal.sensible_gain_w - expected_sensible).abs() < 1e-9,

@@ -66,6 +66,7 @@ fn env() -> EnvironmentState {
         time_res: chrono::Duration::seconds(60),
         price_signal: Default::default(),
         electrical: Default::default(),
+        equipment_core: Default::default(),
     }
 }
 

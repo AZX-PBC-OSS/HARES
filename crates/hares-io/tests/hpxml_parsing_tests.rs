@@ -389,7 +389,15 @@ fn whole_building_ventilation_fan_is_emitted() {
         .iter()
         .find(|s| s.name == "Ventilation Fan")
         .expect("whole-building ventilation fan should be emitted");
-    assert_eq!(fan.parameters["ventilation_rate_cfm"], 72.0);
+    let flow_m3_s = fan.parameters["flow_rate_m3_s"]
+        .as_f64()
+        .expect("flow_rate_m3_s should be a float");
+    // 72 CFM × CFM_TO_M3_S
+    assert!(
+        (flow_m3_s - 72.0 * hares_physics::constants::CFM_TO_M3_S).abs() < 1e-9,
+        "expected ~{:.6} m³/s, got {flow_m3_s}",
+        72.0 * hares_physics::constants::CFM_TO_M3_S
+    );
     assert_eq!(fan.parameters["power_w"], 30.0);
 }
 

@@ -1178,6 +1178,7 @@ mod tests {
             fuel_type: hares_types::FuelType::Electric,
             parameters: serde_json::Map::new(),
             zip_params: None,
+            typed_config: None,
         }];
         let schema = crate::output::build_schema(&specs, 1);
         let result = MetricsCalculator::new(&schema, 3600, &test_config(None));

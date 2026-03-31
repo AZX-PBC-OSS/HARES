@@ -726,7 +726,11 @@ fn resolve_window_value(
     Ok(raw.clamp(lo, hi))
 }
 
-fn resolve_index(raw_idx: usize, len: usize, boundary: BoundaryPolicy) -> Result<usize, HaresError> {
+fn resolve_index(
+    raw_idx: usize,
+    len: usize,
+    boundary: BoundaryPolicy,
+) -> Result<usize, HaresError> {
     if len == 0 {
         return Err(HaresError::Equipment(
             "schedule source data is empty".to_string(),

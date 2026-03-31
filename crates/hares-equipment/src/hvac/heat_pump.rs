@@ -58,8 +58,7 @@ mod tests {
 
     #[test]
     fn registry_has_all_ochre_heat_pump_names() {
-        let mut registry = EquipmentRegistry::new();
-        register_with_registry(&mut registry);
+        let registry = EquipmentRegistry::new();
 
         for class in [
             "Heat Pump Heater",

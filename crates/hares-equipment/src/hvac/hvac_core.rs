@@ -824,6 +824,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -1935,8 +1936,9 @@ mod tests {
 
     #[test]
     fn write_zone_thermal_contributions_duct_zone_same_as_conditioned_merges() {
-        // OCHRE HVAC.py line 175-178: if duct_zone == zone, DSE is ignored.
-        // update_zone_heat_fractions skips adding duct zone when it equals zone_id.
+        // When duct_zone == zone_id the ducts are inside the conditioned space.
+        // Duct losses loop back into the same zone, so effective DSE = 1.0 and
+        // all gross capacity is delivered to the conditioned zone.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         hvac.duct_dse = 0.7;
         hvac.duct_zone_id = Some(ZoneId(1)); // same as conditioned zone
@@ -1944,8 +1946,8 @@ mod tests {
         // Only one entry since duct_zone == zone_id.
         assert_eq!(hvac.zone_heat_fractions.len(), 1);
         assert!(
-            (hvac.zone_heat_fractions[0].1 - 0.7).abs() < 1e-12,
-            "conditioned-zone fraction must still equal duct_dse"
+            (hvac.zone_heat_fractions[0].1 - 1.0).abs() < 1e-12,
+            "conditioned-zone fraction must be 1.0 when ducts are inside the conditioned space"
         );
     }
 

@@ -172,16 +172,16 @@ fn zone_temperatures_evolve_across_multiple_steps() {
 #[test]
 fn net_electric_power_is_positive_with_active_electric_furnace() {
     let path = unique_temp_toml("elec-agg");
-    // -10 C outdoor: furnace almost certainly fires at step 1.
-    write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
+    // -10 C outdoor with 3600s (60 steps): furnace fires after ~32 steps as
+    // the zone cools from 21°C to below the 19.2°C heating threshold.
+    write_synthetic_toml(&path, -10.0, "electricity", 30.0, 3600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
     let _ = fs::remove_file(&path);
 
-    // Run enough steps that at least one furnace firing is guaranteed.
     let mut ever_positive = false;
-    for _ in 0..10 {
+    for _ in 0..60 {
         let result = dwelling.step().expect("step must succeed");
         assert!(
             result.net_electric_power_kw.is_finite(),
@@ -194,7 +194,7 @@ fn net_electric_power_is_positive_with_active_electric_furnace() {
 
     assert!(
         ever_positive,
-        "net_electric_power_kw must be positive in at least one of 10 steps when an \
+        "net_electric_power_kw must be positive in at least one of 60 steps when an \
          electric furnace is running at -10 C outdoor; this indicates the electrical solver \
          is not receiving furnace contributions"
     );
@@ -211,21 +211,21 @@ fn net_electric_power_is_positive_with_active_electric_furnace() {
 #[test]
 fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
     let path = unique_temp_toml("gas-agg");
-    // Cold day: natural gas furnace will heat.
-    write_synthetic_toml(&path, -10.0, "natural gas", 30.0, 600);
+    // Cold day: natural gas furnace will heat. Use 3600s (60 steps) because
+    // with 7× interior mass multiplier and τ ≈ 31,000s the zone takes ~32
+    // steps to cool from 21°C to below the 19.2°C heating threshold.
+    write_synthetic_toml(&path, -10.0, "natural gas", 30.0, 3600);
 
     let mut dwelling =
         Dwelling::from_toml_config(&path).expect("Dwelling::from_toml_config must succeed");
     let _ = fs::remove_file(&path);
 
-    // Run several steps to allow the thermostat to fire the furnace.
     // GasFurnace telemetry exposes "fuel_input_w" (watts of fuel consumed).
     let mut ever_nonzero_gas = false;
-    for _ in 0..10 {
+    for _ in 0..60 {
         dwelling.step().expect("step must succeed");
         for eq in dwelling.equipment() {
             let telem = eq.telemetry();
-            // "fuel_input_w" is the canonical gas consumption key for GasFurnace.
             if let Some(fuel_w) = telem.get("fuel_input_w") {
                 if fuel_w > 0.0 {
                     ever_nonzero_gas = true;
@@ -236,8 +236,8 @@ fn gas_furnace_reports_nonzero_gas_consumption_in_telemetry() {
 
     assert!(
         ever_nonzero_gas,
-        "gas furnace must report nonzero fuel_input_w in telemetry within 10 steps \
-         at -10 C outdoor; the gas fuel aggregation pipeline may be broken"
+        "gas furnace must report nonzero fuel_input_w in telemetry within 60 steps \
+         at -10 C outdoor"
     );
 }
 
@@ -551,11 +551,9 @@ fn hvac_heating_energy_reaches_thermal_solver() {
     let path_heated = unique_temp_toml("hvac-reach-heated");
     let path_unheated = unique_temp_toml("hvac-reach-unheated");
 
-    // Dwelling A: cold outdoor with furnace (should heat)
-    write_synthetic_toml(&path_heated, -10.0, "electricity", 30.0, 600);
-
-    // Dwelling B: same conditions but we'll clear equipment (no heating)
-    write_synthetic_toml(&path_unheated, -10.0, "electricity", 30.0, 600);
+    // 3600s (60 steps): furnace fires after ~32 steps once zone cools below threshold.
+    write_synthetic_toml(&path_heated, -10.0, "electricity", 30.0, 3600);
+    write_synthetic_toml(&path_unheated, -10.0, "electricity", 30.0, 3600);
 
     let mut dwelling_heated =
         Dwelling::from_toml_config(&path_heated).expect("heated dwelling must load");
@@ -567,7 +565,7 @@ fn hvac_heating_energy_reaches_thermal_solver() {
     // Remove all equipment from unheated dwelling to isolate the envelope
     dwelling_unheated.clear_equipment();
 
-    const STEPS: usize = 10;
+    const STEPS: usize = 60;
     let mut heated_final_temp = f64::NAN;
     let mut unheated_final_temp = f64::NAN;
 
@@ -601,13 +599,14 @@ fn hvac_heating_energy_reaches_thermal_solver() {
 #[test]
 fn step_result_hvac_heating_w_positive_when_furnace_fires() {
     let path = unique_temp_toml("hvac-heat-w");
-    write_synthetic_toml(&path, -10.0, "electricity", 30.0, 600);
+    // 3600s (60 steps): furnace fires after ~32 steps once zone cools below threshold.
+    write_synthetic_toml(&path, -10.0, "electricity", 30.0, 3600);
 
     let mut dwelling = Dwelling::from_toml_config(&path).expect("must load");
     let _ = fs::remove_file(&path);
 
     let mut ever_heating = false;
-    for _ in 0..10 {
+    for _ in 0..60 {
         let result = dwelling.step().expect("step");
         if result.hvac_heating_w > 0.0 {
             ever_heating = true;
@@ -616,7 +615,7 @@ fn step_result_hvac_heating_w_positive_when_furnace_fires() {
 
     assert!(
         ever_heating,
-        "hvac_heating_w must be positive at least once in 10 steps at -10°C outdoor; \
+        "hvac_heating_w must be positive at least once in 60 steps at -10°C outdoor; \
          this indicates furnace thermal contributions are not reaching the StepResult"
     );
 }

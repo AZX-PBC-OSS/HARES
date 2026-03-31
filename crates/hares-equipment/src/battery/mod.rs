@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use hares_types::telemetry_keys as tk;
 use hares_types::{
-    BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel,
-    EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType,
-    GridExportRule, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows,
+    CoreOutput, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentId, ExecutionStage, FuelType, GridExportRule, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Soc, Telemetry, TelemetryField, ThermalCategory,
+    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -259,6 +260,7 @@ pub struct Battery {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
 
     // Static config
     capacity_kwh: f64,
@@ -364,7 +366,7 @@ impl Battery {
                 | ControlCapabilities::SELF_CONSUMPTION
                 | ControlCapabilities::POWER_LIMIT
                 | ControlCapabilities::DEMAND_RESPONSE,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC,
             telemetry_fields: battery_telemetry_fields(),
         };
 
@@ -372,6 +374,7 @@ impl Battery {
             descriptor,
             ports,
             telemetry: default_telemetry(),
+            core_output: CoreOutput::default(),
             capacity_kwh: DEFAULT_CAPACITY_KWH,
             capacity_kwh_nominal: DEFAULT_CAPACITY_KWH,
             max_charge_kw: DEFAULT_MAX_CHARGE_KW,
@@ -515,7 +518,7 @@ impl Battery {
         if let Some(target) = self.soc_target {
             if dt_hours > 0.0 {
                 let error = target - self.soc;
-                // DC power needed to hit target in one step (EA-006 F6).
+                // DC power needed to hit target in one step.
                 let dc_power = error * self.capacity_kwh / dt_hours;
                 // Convert DC→AC: compute_electrical expects AC (grid-side) power.
                 // Charging (dc_power > 0): AC = DC / charge_eta
@@ -857,6 +860,7 @@ impl Battery {
 
         self.telemetry = default_telemetry();
         self.telemetry.set(tk::SOC, self.soc);
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -869,13 +873,9 @@ impl Battery {
         env: &EnvironmentState,
     ) -> crate::Result<()> {
         let c: BatteryConfig = config.typed()?;
+        c.validate()?;
 
         self.capacity_kwh = c.capacity_kwh;
-        if self.capacity_kwh <= 0.0 {
-            return Err(HaresError::Equipment(
-                "battery capacity_kwh must be positive".to_string(),
-            ));
-        }
         self.capacity_kwh_nominal = self.capacity_kwh;
         self.max_charge_kw = c.max_charge_kw;
         self.max_discharge_kw = c.max_discharge_kw;
@@ -885,7 +885,7 @@ impl Battery {
         self.n_parallel = c.n_parallel.unwrap_or(DEFAULT_N_PARALLEL);
         if let (Some(ah_cell), Some(v_cell)) = (c.ah_cell, c.v_cell) {
             if ah_cell > 0.0 && v_cell > 0.0 {
-                let target_pack_v = 350.0_f64;
+                let target_pack_v = c.pack_voltage_v.unwrap_or(350.0);
                 self.n_series = (target_pack_v / v_cell).round() as u32;
                 if self.n_series == 0 {
                     self.n_series = 1;
@@ -904,9 +904,7 @@ impl Battery {
             ));
         }
 
-        self.cell_resistance_ohm = c
-            .cell_resistance_ohm
-            .unwrap_or(DEFAULT_CELL_RESISTANCE_OHM);
+        self.cell_resistance_ohm = c.cell_resistance_ohm.unwrap_or(DEFAULT_CELL_RESISTANCE_OHM);
 
         self.chemistry = c
             .chemistry
@@ -923,31 +921,10 @@ impl Battery {
         self.standby_power_w = c.standby_power_w.unwrap_or(DEFAULT_STANDBY_POWER_W);
         self.min_soc = c.min_soc.unwrap_or(DEFAULT_MIN_SOC);
         self.max_soc = c.max_soc.unwrap_or(DEFAULT_MAX_SOC);
-        if self.min_soc >= self.max_soc {
-            return Err(HaresError::Equipment(
-                "battery min_soc must be less than max_soc".to_string(),
-            ));
-        }
         self.import_limit_kw = c.import_limit_w.map(|w| w / 1000.0);
-        if let Some(lim) = self.import_limit_kw {
-            if lim < 0.0 {
-                return Err(HaresError::Equipment(
-                    "battery import_limit_w must be non-negative".to_string(),
-                ));
-            }
-        }
         self.export_limit_kw = c.export_limit_w.map(|w| w / 1000.0);
-        if let Some(lim) = self.export_limit_kw {
-            if lim < 0.0 {
-                return Err(HaresError::Equipment(
-                    "battery export_limit_w must be non-negative".to_string(),
-                ));
-            }
-        }
         self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
-        self.heater_threshold_c = c
-            .heater_threshold_c
-            .unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
+        self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
         self.heater_on_discharge = c.heater_on_discharge.unwrap_or(false);
         self.min_discharge_temp_c = c
             .min_discharge_temp_c
@@ -1018,6 +995,7 @@ impl Battery {
 
         self.telemetry = default_telemetry();
         self.telemetry.set(tk::SOC, self.soc);
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -1123,7 +1101,7 @@ impl Equipment for Battery {
         // -- Update SOC from charge/discharge --
         // DC power seen by the cells after inverter conversion.
         // The terminal-voltage model in compute_electrical() already embeds ohmic
-        // losses in the power balance — do NOT subtract I²R again here (CC-009/EA-006 F1).
+        // losses in the power balance — do NOT subtract I²R again here.
         let dc_power_kw = if power_kw > 0.0 {
             power_kw * self.charge_efficiency
         } else {
@@ -1260,7 +1238,6 @@ impl Equipment for Battery {
         // -- Update telemetry --
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry.set(tk::ACTIVE_POWER_KW, port_power_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, port_power_kw);
         self.telemetry.set(tk::OHMIC_LOSS_W, ohmic_loss_w);
         self.telemetry
             .set(tk::STANDBY_POWER_W, self.standby_power_w);
@@ -1278,12 +1255,27 @@ impl Equipment for Battery {
             .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
         self.telemetry.set(tk::TERMINAL_VOLTAGE_V, terminal_v);
         self.telemetry.set(tk::CURRENT_A, current_a);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Bidirectional(port_power_kw)),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: Soc::try_from(self.soc).ok(),
+            },
+        };
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn actor_seed(&self) -> Option<crate::ActorSeed> {
@@ -1369,6 +1361,7 @@ impl Equipment for Battery {
         );
         self.telemetry
             .set(tk::STANDBY_POWER_W, self.standby_power_w);
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -1479,7 +1472,6 @@ fn default_telemetry() -> Telemetry {
     let mut t = Telemetry::with_capacity(12);
     t.insert(tk::SOC, 0.0);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
-    t.insert(tk::ELECTRIC_KW, 0.0);
     t.insert(tk::OHMIC_LOSS_W, 0.0);
     t.insert(tk::STANDBY_POWER_W, 0.0);
     t.insert(tk::CELL_TEMP_C, 25.0);
@@ -1505,11 +1497,6 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
             unit: "kW".to_string(),
             description: "Grid-side active power (positive=consuming, negative=generating)"
                 .to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Grid-boundary electrical power".to_string(),
         },
         TelemetryField {
             name: tk::OHMIC_LOSS_W.to_string(),
@@ -1616,6 +1603,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
@@ -1648,6 +1636,44 @@ mod tests {
             ochre_class: "Battery".to_string(),
             payload: crate::config::ConfigPayload::Raw { data: raw },
         }
+    }
+
+    fn typed_battery_config(chemistry: Option<&str>, bms_mode: Option<BmsMode>) -> EquipmentConfig {
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: chemistry.map(|s| s.to_string()),
+            standby_power_w: Some(10.0),
+            self_discharge_pct_per_day: None,
+            min_soc: None,
+            max_soc: None,
+            initial_soc: Some(0.5),
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: None,
+            charge_efficiency: None,
+            discharge_efficiency: None,
+            bms_mode: bms_mode.as_ref().map(|m| serde_json::to_string(m).unwrap()),
+            grid_export_rule: None,
+        };
+        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
     }
 
     fn default_ports() -> PortSlots {
@@ -3387,7 +3413,7 @@ mod tests {
 
         // b3_accum < 0 (B3_REF < 0), so q_li3 is strictly negative — the BOL transient
         // provides a transient capacity gain (negative lithium loss). Not zero as with the
-        // former broken `.max(0.0)` clamp (EA-006 F3).
+        // former broken `.max(0.0)` clamp.
         assert!(
             state_5.q_li3 < 0.0,
             "q_li3 must be negative after 5 days (BOL boost active): got {}",
@@ -3796,11 +3822,7 @@ mod tests {
 
     #[test]
     fn lfp_chemistry_selects_lfp_ocv_on_init() {
-        let mut config = battery_config(&[]);
-        config.raw_config_mut().unwrap().insert(
-            KEY_CHEMISTRY.to_string(),
-            ConfigValue::Text("lfp".to_string()),
-        );
+        let config = typed_battery_config(Some("lfp"), None);
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
 
@@ -3814,11 +3836,7 @@ mod tests {
 
     #[test]
     fn reset_ocv_on_lfp_battery_restores_lfp_default() {
-        let mut config = battery_config(&[]);
-        config.raw_config_mut().unwrap().insert(
-            KEY_CHEMISTRY.to_string(),
-            ConfigValue::Text("lfp".to_string()),
-        );
+        let config = typed_battery_config(Some("lfp"), None);
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
 
@@ -3836,11 +3854,7 @@ mod tests {
 
     #[test]
     fn custom_ocv_not_overwritten_by_chemistry_on_init() {
-        let mut config = battery_config(&[]);
-        config.raw_config_mut().unwrap().insert(
-            KEY_CHEMISTRY.to_string(),
-            ConfigValue::Text("lfp".to_string()),
-        );
+        let config = typed_battery_config(Some("lfp"), None);
         let mut bat = Battery::new(config.clone());
         let custom = OcvTable::new(vec![0.0, 1.0], vec![3.0, 5.0]).unwrap();
         bat.set_ocv_table(custom).unwrap();
@@ -3941,18 +3955,12 @@ mod tests {
 
     #[test]
     fn battery_bms_mode_from_config_json() {
-        let mut config = battery_config(&[]);
-        let json = serde_json::to_string(&BmsMode::SelfConsumption {
+        let bms = BmsMode::SelfConsumption {
             min_soc: 0.1,
             max_soc: 1.0,
             solar_only_charging: false,
-        })
-        .unwrap();
-        config
-            .raw_config_mut()
-            .unwrap()
-            .insert(KEY_BMS_MODE.to_string(), ConfigValue::Text(json));
-
+        };
+        let config = typed_battery_config(None, Some(bms));
         let mut bat = Battery::new(config.clone());
         let env = warm_env();
         bat.init(&config, &env).unwrap();
@@ -3985,18 +3993,12 @@ mod tests {
 
     #[test]
     fn actor_seed_self_consumption_returns_battery_seed() {
-        let mut config = battery_config(&[]);
-        let json = serde_json::to_string(&BmsMode::SelfConsumption {
+        let bms = BmsMode::SelfConsumption {
             min_soc: 0.15,
             max_soc: 0.95,
             solar_only_charging: false,
-        })
-        .unwrap();
-        config
-            .raw_config_mut()
-            .unwrap()
-            .insert(KEY_BMS_MODE.to_string(), ConfigValue::Text(json));
-
+        };
+        let config = typed_battery_config(None, Some(bms));
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &warm_env()).unwrap();
 

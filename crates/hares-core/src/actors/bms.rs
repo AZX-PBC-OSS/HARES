@@ -2,13 +2,14 @@
 //! signals based on the configured `BmsMode`, PV production, grid prices,
 //! and battery SOC.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
-    BmsAction, BmsMode, BmsScheduleWindow, ControlSignal, EnvironmentState, GridExportRule,
-    StormWatchTrigger, telemetry_keys as tk,
+    BmsAction, BmsMode, BmsScheduleWindow, ControlSignal, EnvironmentState, EquipmentId,
+    GridExportRule, StormWatchTrigger,
 };
 
 use crate::Actor;
@@ -16,6 +17,7 @@ use crate::Actor;
 pub struct BatteryManagementActor {
     name: String,
     dispatch_target: DispatchTarget,
+    equipment_id: Option<EquipmentId>,
     bms_mode: BmsMode,
     grid_export_rule: GridExportRule,
     charge_price_threshold: f64,
@@ -65,6 +67,7 @@ impl BatteryManagementActor {
         Self {
             name: name.to_string(),
             dispatch_target: DispatchTarget::ByName(Arc::from(battery_name)),
+            equipment_id: None,
             bms_mode,
             grid_export_rule,
             charge_price_threshold: 0.0,
@@ -87,14 +90,20 @@ impl BatteryManagementActor {
         &self.bms_mode
     }
 
-    fn read_soc(&self, env: &EnvironmentState) -> Option<f64> {
+    pub fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
         let battery_name = match &self.dispatch_target {
-            DispatchTarget::ByName(n) => &**n,
-            _ => return None,
+            DispatchTarget::ByName(n) => n.as_ref(),
+            DispatchTarget::ByEndUse(_) => return,
         };
-        env.equipment_telemetry
-            .get(battery_name)
-            .and_then(|t| t.0.get(tk::SOC).copied())
+        self.equipment_id = equipment_id_by_name.get(battery_name).copied();
+    }
+
+    fn read_soc(&self, env: &EnvironmentState) -> Option<f64> {
+        let id = self.equipment_id?;
+        env.equipment_core
+            .get(&id)
+            .and_then(|co| co.state.soc)
+            .map(|s| s.get())
     }
 
     fn emit(&self, signal: ControlSignal, out: &mut Vec<DispatchRequest>) {
@@ -503,17 +512,33 @@ fn compute_percentile(prices: &[f64], percentile: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use hares_types::{
-        BmsScheduleWindow, BmsTimeWindow, DayFilter, ElectricalSummary, PriceSignal, Telemetry,
-        WeatherState,
+        BmsScheduleWindow, BmsTimeWindow, CoreOutput, CoreState, DayFilter, ElectricalSummary,
+        EquipmentId, PriceSignal, Soc, WeatherState,
     };
 
     use super::*;
     use crate::actor::testing::TestEnvBuilder;
 
-    fn set_soc(env: &mut EnvironmentState, battery_name: &str, soc: f64) {
-        let mut t = Telemetry::default();
-        t.0.insert("soc".to_string(), soc);
-        env.equipment_telemetry.insert(battery_name.to_string(), t);
+    fn set_soc(
+        actor: &mut BatteryManagementActor,
+        env: &mut EnvironmentState,
+        battery_name: &str,
+        soc: f64,
+    ) {
+        let id = EquipmentId(1);
+        let mut id_by_name = std::collections::HashMap::new();
+        id_by_name.insert(battery_name.to_string(), id);
+        actor.resolve_equipment_id(&id_by_name);
+        env.equipment_core.insert(
+            id,
+            CoreOutput {
+                state: CoreState {
+                    soc: Some(Soc::try_from(soc).expect("valid test soc")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
     }
 
     #[test]
@@ -555,7 +580,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -590,7 +615,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -630,7 +655,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -667,7 +692,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -708,7 +733,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.8);
+        set_soc(&mut actor, &mut env, "bat1", 0.8);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -749,7 +774,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.15);
+        set_soc(&mut actor, &mut env, "bat1", 0.15);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -774,7 +799,7 @@ mod tests {
         );
 
         let mut env = TestEnvBuilder::new().build();
-        set_soc(&mut env, "bat1", 0.3);
+        set_soc(&mut actor, &mut env, "bat1", 0.3);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -820,7 +845,7 @@ mod tests {
         );
 
         let mut env = TestEnvBuilder::new().build();
-        set_soc(&mut env, "bat1", 0.9);
+        set_soc(&mut actor, &mut env, "bat1", 0.9);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -851,7 +876,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.6);
+        set_soc(&mut actor, &mut env, "bat1", 0.6);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -899,7 +924,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1069,7 +1094,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1106,7 +1131,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1147,7 +1172,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.2);
+        set_soc(&mut actor, &mut env, "bat1", 0.2);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1177,7 +1202,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.1);
+        set_soc(&mut actor, &mut env, "bat1", 0.1);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1202,7 +1227,7 @@ mod tests {
         );
 
         let mut env = TestEnvBuilder::new().build();
-        set_soc(&mut env, "bat1", 0.8);
+        set_soc(&mut actor, &mut env, "bat1", 0.8);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1269,7 +1294,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1335,7 +1360,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.8);
+        set_soc(&mut actor, &mut env, "bat1", 0.8);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1387,7 +1412,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.8);
+        set_soc(&mut actor, &mut env, "bat1", 0.8);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1439,7 +1464,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.8);
+        set_soc(&mut actor, &mut env, "bat1", 0.8);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1491,7 +1516,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.8);
+        set_soc(&mut actor, &mut env, "bat1", 0.8);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1537,7 +1562,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1583,7 +1608,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1627,7 +1652,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1667,7 +1692,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.5);
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1715,7 +1740,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.8);
+        set_soc(&mut actor, &mut env, "bat1", 0.8);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1761,7 +1786,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.3);
+        set_soc(&mut actor, &mut env, "bat1", 0.3);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);
@@ -1805,7 +1830,7 @@ mod tests {
                 ..Default::default()
             })
             .build();
-        set_soc(&mut env, "bat1", 0.3);
+        set_soc(&mut actor, &mut env, "bat1", 0.3);
 
         let mut out = Vec::new();
         actor.decide(&env, &mut out);

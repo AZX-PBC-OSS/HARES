@@ -319,7 +319,7 @@ impl DegradationState {
         // Mechanism 3: BOL transient — exponential relaxation of q_li3 toward b3_accum.
         // b3_accum < 0 (B3_REF < 0), so q_li3 decreases toward a negative equilibrium.
         // A negative q_li3 subtracts from the capacity loss sum, producing a transient
-        // capacity boost at beginning-of-life (Smith 2017, Eq.15; EA-006 F3).
+        // capacity boost at beginning-of-life (Smith 2017, Eq.15).
         // Use .min(0.0) so the step is always negative (moving toward negative b3_accum).
         let dq_li3 = (self.b3_accum - self.q_li3).min(0.0) / TAU_B3;
 

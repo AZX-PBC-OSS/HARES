@@ -2,6 +2,10 @@
 
 use serde_json::{Map, Value, json};
 
+use hares_equipment::{
+    ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
+    HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+};
 use hares_types::FuelType;
 
 use super::building::XmlNode;
@@ -19,14 +23,14 @@ pub(super) fn resolve_water_heaters(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
-) {
+) -> std::result::Result<(), super::HpxmlError> {
     // Shared draw parameters parsed once from the WaterHeating section.
     let avg_water_draw_l_per_day = parse_avg_water_draw_l_per_day(details);
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
         let fuel = parse_fuel(child_text(wh, "FuelType").as_deref());
         let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
-        let name = canonical_water_heater_name(&wh_type, fuel);
+        let name = canonical_water_heater_name(&wh_type, fuel)?;
 
         let energy_factor = child_f64(wh, "EnergyFactor");
         let uniform_energy_factor = child_f64(wh, "UniformEnergyFactor");
@@ -74,6 +78,7 @@ pub(super) fn resolve_water_heaters(
             "water_heater_type".to_string(),
             Value::String(wh_type.clone()),
         );
+        params.insert("fuel_type".to_string(), json!(format!("{fuel:?}")));
 
         // Average daily hot water draw: used to normalize fractional draw schedules.
         if let Some(avg_l) = avg_water_draw_l_per_day {
@@ -109,9 +114,10 @@ pub(super) fn resolve_water_heaters(
 
         // HPWH-specific parameters
         if wh_type.contains("heat pump") {
-            // COP from UEF; fall back to EF→UEF conversion when UEF is absent (CW-013 D2).
-            let uef = uniform_energy_factor
-                .or_else(|| energy_factor.map(|ef| (0.60522 + ef) / 1.2101));
+            // COP from UEF; fall back to EF→UEF conversion when UEF is absent.
+            // Conversion formula derived from DOE 10 CFR Part 430 test-procedure correlation.
+            let uef =
+                uniform_energy_factor.or_else(|| energy_factor.map(|ef| (0.60522 + ef) / 1.2101));
 
             let storage_setpoint_c = params
                 .get("setpoint_c")
@@ -119,30 +125,34 @@ pub(super) fn resolve_water_heaters(
                 .unwrap_or(51.67);
 
             if uef.is_some_and(|u| (u - 4.9).abs() < 1e-9) {
-                // Low-power HPWH (UEF == 4.9) — OCHRE override block (CW-013 D3).
+                // Low-power HPWH (UEF == 4.9): fixed COP and compressor power per OCHRE
+                // reference data; storage setpoint raised to 60°C (140°F) with tempering
+                // valve to deliver 51.67°C (125°F) at the fixture.
                 params.insert("cop".to_string(), json!(4.2));
                 params.insert("compressor_power_w".to_string(), json!(1499.4_f64));
-                params.insert("setpoint_c".to_string(), json!(60.0_f64)); // 140°F storage
+                params.insert("setpoint_c".to_string(), json!(60.0_f64));
                 params.insert("tempering_valve_setpoint_c".to_string(), json!(51.67_f64));
-                params.insert("hp_only_mode".to_string(), json!("true"));
-                params.insert("low_power_hpwh".to_string(), json!("true"));
+                params.insert("hp_only_mode".to_string(), json!(true));
+                params.insert("low_power_hpwh".to_string(), json!(true));
             } else {
                 if let Some(uef_val) = uef {
                     params.insert("cop".to_string(), json!(1.174_536_058 * uef_val));
                 }
-                // Tempering valve = storage setpoint unconditionally (CW-013 D1).
+                // Tempering valve setpoint matches the tank storage setpoint unless a
+                // separate delivery temperature is configured later.
                 params.insert(
                     "tempering_valve_setpoint_c".to_string(),
                     json!(storage_setpoint_c),
                 );
             }
 
-            // Backup element capacity from HPXML HeatingCapacity (CW-013 D4/D5).
+            // HPXML HeatingCapacity maps to the backup resistance element in a HPWH.
             if let Some(cap_w) = heating_capacity_w {
                 params.insert("backup_element_power_w".to_string(), json!(cap_w));
             }
 
-            // Zone-dependent heat interaction defaults (CW-013 D6).
+            // Conditioned-space HPWHs reject waste heat back into the zone; unconditioned
+            // locations lose the heat to the ambient without a zone-heat benefit.
             let location = child_text(wh, "Location").unwrap_or_default();
             let zone_type = super::building::parse_zone_label(&location);
             let zone_name = super::building::zone_key(&zone_type);
@@ -177,8 +187,23 @@ pub(super) fn resolve_water_heaters(
             params.insert("zone_type".to_string(), Value::String(zone_name));
         }
 
-        specs.push(build_spec(name, fuel, params, defaults));
+        let mut spec = build_spec(name.clone(), fuel, params.clone(), defaults);
+        spec.typed_config = match name.as_str() {
+            "Gas Water Heater" => try_build_gas_wh_config(&name, &params, avg_water_draw_l_per_day),
+            "Electric Resistance Water Heater" => {
+                try_build_resistance_wh_config(&name, &params, avg_water_draw_l_per_day)
+            }
+            "Tankless Water Heater" | "Gas Tankless Water Heater" => {
+                try_build_tankless_wh_config(&name, &params, fuel, avg_water_draw_l_per_day)
+            }
+            "Heat Pump Water Heater" => {
+                try_build_hpwh_config(&name, &params, avg_water_draw_l_per_day)
+            }
+            _ => None,
+        };
+        specs.push(spec);
     }
+    Ok(())
 }
 
 /// Parse the combined average daily hot water draw [L/day] from the `<BuildingDetails>` node.
@@ -350,6 +375,226 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
     }
 }
 
+fn try_build_gas_wh_config(
+    name: &str,
+    params: &Map<String, Value>,
+    avg_water_draw_l_per_day: Option<f64>,
+) -> Option<EquipmentConfig> {
+    let cfg = GasWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: None,
+        tank_volume_m3: params.get("tank_volume_m3").and_then(Value::as_f64),
+        tank_height_m: params.get("tank_height_m").and_then(Value::as_f64),
+        tank_diameter_m: None,
+        ua_w_per_k: params.get("ua_w_per_k").and_then(Value::as_f64),
+        jacket_r_value_m2_k_w: params.get("jacket_r_value_m2_k_w").and_then(Value::as_f64),
+        tank_nodes: None,
+        burner_node: None,
+        setpoint_c: params.get("setpoint_c").and_then(Value::as_f64),
+        deadband_c: None,
+        max_tank_temp_c: None,
+        heating_capacity_w: params.get("heating_capacity_w").and_then(Value::as_f64),
+        // EF/UEF are whole-appliance metrics, not burner thermal efficiency.
+        // Leave burner_efficiency as None; the model uses DEFAULT_BURNER_EFFICIENCY.
+        burner_efficiency: None,
+        flue_loss_fraction: None,
+        ignition_type: None,
+        pilot_power_w: None,
+        fan_power_w: None,
+        skin_loss_fraction: None,
+        fuel_type: params
+            .get("fuel_type")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        mains_temp_c: None,
+        avg_water_draw_l_per_day,
+        draw_flow_rate_kg_s: None,
+        draw_flow_rate_schedule_col: None,
+        mains_temp_schedule_col: None,
+        zip_z: None,
+        zip_i: None,
+        zip_p: None,
+        zip_zq: None,
+        zip_iq: None,
+        zip_pq: None,
+        zip_pf: None,
+        zip_v0: None,
+    };
+    cfg.validate().ok()?;
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Water Heater".to_string(),
+        cfg,
+    ))
+}
+
+fn try_build_resistance_wh_config(
+    name: &str,
+    params: &Map<String, Value>,
+    avg_water_draw_l_per_day: Option<f64>,
+) -> Option<EquipmentConfig> {
+    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
+    let cfg = ElectricResistanceWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: None,
+        tank_volume_m3: params.get("tank_volume_m3").and_then(Value::as_f64),
+        tank_height_m: params.get("tank_height_m").and_then(Value::as_f64),
+        tank_diameter_m: None,
+        ua_w_per_k: params.get("ua_w_per_k").and_then(Value::as_f64),
+        jacket_r_value_m2_k_w: params.get("jacket_r_value_m2_k_w").and_then(Value::as_f64),
+        tank_nodes: None,
+        upper_element_node: None,
+        lower_element_node: None,
+        setpoint_c: params.get("setpoint_c").and_then(Value::as_f64),
+        deadband_c: None,
+        max_tank_temp_c: None,
+        heating_capacity_w: capacity_w,
+        upper_element_power_w: None,
+        lower_element_power_w: None,
+        element_priority_mode: None,
+        max_setpoint_ramp_rate_c_per_min: None,
+        mains_temp_c: None,
+        avg_water_draw_l_per_day,
+        draw_flow_rate_kg_s: None,
+        draw_flow_rate_schedule_col: None,
+        mains_temp_schedule_col: None,
+        zip_z: None,
+        zip_i: None,
+        zip_p: None,
+        zip_zq: None,
+        zip_iq: None,
+        zip_pq: None,
+        zip_pf: None,
+        zip_v0: None,
+    };
+    cfg.validate().ok()?;
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Resistance Water Heater".to_string(),
+        cfg,
+    ))
+}
+
+fn try_build_tankless_wh_config(
+    name: &str,
+    params: &Map<String, Value>,
+    fuel: FuelType,
+    avg_water_draw_l_per_day: Option<f64>,
+) -> Option<EquipmentConfig> {
+    let fuel_str = format!("{fuel:?}");
+    let uef = params
+        .get("uniform_energy_factor")
+        .or_else(|| params.get("energy_factor"))
+        .and_then(Value::as_f64);
+    let perf_adj = params.get("performance_adjustment").and_then(Value::as_f64);
+    let ochre_class = if fuel == FuelType::Gas {
+        "Gas Tankless Water Heater"
+    } else {
+        "Tankless Water Heater"
+    };
+    let cfg = TanklessWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: None,
+        fuel_type: Some(fuel_str),
+        setpoint_c: params.get("setpoint_c").and_then(Value::as_f64),
+        efficiency_factor: uef,
+        performance_adjustment: perf_adj,
+        max_thermal_power_w: params.get("heating_capacity_w").and_then(Value::as_f64),
+        parasitic_power_w: None,
+        inlet_temp_c: None,
+        avg_water_draw_l_per_day,
+        draw_flow_rate_kg_s: None,
+        zip_z: None,
+        zip_i: None,
+        zip_p: None,
+        zip_zq: None,
+        zip_iq: None,
+        zip_pq: None,
+        zip_pf: None,
+        zip_v0: None,
+    };
+    cfg.validate().ok()?;
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        ochre_class.to_string(),
+        cfg,
+    ))
+}
+
+fn try_build_hpwh_config(
+    name: &str,
+    params: &Map<String, Value>,
+    avg_water_draw_l_per_day: Option<f64>,
+) -> Option<EquipmentConfig> {
+    let cop = params.get("cop").and_then(Value::as_f64);
+    let uef = params.get("uniform_energy_factor").and_then(Value::as_f64);
+    let hp_only_mode = params
+        .get("hp_only_mode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let low_power = params
+        .get("low_power_hpwh")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let cfg = HeatPumpWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: None,
+        tank_volume_m3: params.get("tank_volume_m3").and_then(Value::as_f64),
+        tank_height_m: params.get("tank_height_m").and_then(Value::as_f64),
+        tank_diameter_m: None,
+        ua_w_per_k: params.get("ua_w_per_k").and_then(Value::as_f64),
+        jacket_r_value_m2_k_w: params.get("jacket_r_value_m2_k_w").and_then(Value::as_f64),
+        tank_nodes: None,
+        thermostat_node: None,
+        thermostat_upper_node: None,
+        condenser_node: None,
+        setpoint_c: params.get("setpoint_c").and_then(Value::as_f64),
+        deadband_c: None,
+        max_tank_temp_c: None,
+        max_setpoint_ramp_rate_c_per_min: None,
+        compressor_power_w: params.get("compressor_power_w").and_then(Value::as_f64),
+        backup_element_power_w: params.get("backup_element_power_w").and_then(Value::as_f64),
+        backup_enable_offset_c: None,
+        backup_efficiency: None,
+        hp_only_mode: if hp_only_mode { Some(true) } else { None },
+        cop,
+        uniform_energy_factor: uef,
+        cop_curve_coeffs: None,
+        capacity_curve_coeffs: None,
+        min_ambient_temp_c: None,
+        max_ambient_temp_c: None,
+        low_power_hpwh: if low_power { Some(true) } else { None },
+        shr: None,
+        lost_heat_fraction: params.get("lost_heat_fraction").and_then(Value::as_f64),
+        wall_heat_fraction: params.get("wall_heat_fraction").and_then(Value::as_f64),
+        fan_power_w: None,
+        parasitic_power_w: None,
+        min_on_time_s: None,
+        min_off_time_s: None,
+        tempering_valve_setpoint_c: params
+            .get("tempering_valve_setpoint_c")
+            .and_then(Value::as_f64),
+        element_hp_control_mode: None,
+        mains_temp_c: None,
+        avg_water_draw_l_per_day,
+        draw_flow_rate_kg_s: None,
+        zip_z: None,
+        zip_i: None,
+        zip_p: None,
+        zip_zq: None,
+        zip_iq: None,
+        zip_pq: None,
+        zip_pf: None,
+        zip_v0: None,
+    };
+    cfg.validate().ok()?;
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Heat Pump Water Heater".to_string(),
+        cfg,
+    ))
+}
+
 fn wh_category(wh_type: &str, fuel: FuelType) -> WhCategory {
     match (wh_type.trim(), fuel) {
         ("heat pump water heater", FuelType::Electric) => WhCategory::HeatPump,
@@ -359,15 +604,135 @@ fn wh_category(wh_type: &str, fuel: FuelType) -> WhCategory {
     }
 }
 
-fn canonical_water_heater_name(wh_type: &str, fuel: FuelType) -> String {
-    match (wh_type.trim(), fuel) {
-        ("storage water heater", FuelType::Electric) => {
-            "Electric Resistance Water Heater".to_string()
+fn canonical_water_heater_name(
+    wh_type: &str,
+    fuel: FuelType,
+) -> std::result::Result<String, super::HpxmlError> {
+    let ty = wh_type.trim();
+    let name = match (ty, fuel) {
+        ("storage water heater", FuelType::Electric) => "Electric Resistance Water Heater",
+        ("instantaneous water heater", FuelType::Electric) => "Tankless Water Heater",
+        ("heat pump water heater", FuelType::Electric) => "Heat Pump Water Heater",
+        ("storage water heater", FuelType::Gas) => "Gas Water Heater",
+        ("instantaneous water heater", FuelType::Gas) => "Gas Tankless Water Heater",
+        _ => {
+            return Err(super::HpxmlError::Parse(format!(
+                "unsupported HPXML water heater type/fuel combination: \
+                 WaterHeaterType='{ty}', fuel='{fuel:?}'"
+            )));
         }
-        ("instantaneous water heater", FuelType::Electric) => "Tankless Water Heater".to_string(),
-        ("heat pump water heater", FuelType::Electric) => "Heat Pump Water Heater".to_string(),
-        ("storage water heater", FuelType::Gas) => "Gas Water Heater".to_string(),
-        ("instantaneous water heater", FuelType::Gas) => "Gas Tankless Water Heater".to_string(),
-        _ => "Water Heating".to_string(),
+    };
+    Ok(name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gas_wh_builder_produces_typed_config() {
+        let mut params = Map::new();
+        params.insert("tank_volume_m3".to_string(), json!(0.151));
+        params.insert("tank_height_m".to_string(), json!(1.2));
+        params.insert("ua_w_per_k".to_string(), json!(2.5));
+        params.insert("heating_capacity_w".to_string(), json!(11_000.0));
+        params.insert("setpoint_c".to_string(), json!(51.67));
+        params.insert("fuel_type".to_string(), json!("Gas"));
+
+        let result = try_build_gas_wh_config("Gas Water Heater", &params, Some(227.0));
+        assert!(result.is_some(), "gas WH builder must return Some");
+        let ec = result.unwrap();
+        assert!(ec.is_typed());
+        let cfg: GasWaterHeaterConfig = ec.typed().unwrap();
+        assert_eq!(cfg.tank_volume_m3, Some(0.151));
+        assert_eq!(cfg.heating_capacity_w, Some(11_000.0));
+        assert_eq!(cfg.avg_water_draw_l_per_day, Some(227.0));
+        // EF/UEF must not be aliased to burner_efficiency.
+        assert!(cfg.burner_efficiency.is_none());
+    }
+
+    #[test]
+    fn resistance_wh_builder_produces_typed_config() {
+        let mut params = Map::new();
+        params.insert("tank_volume_m3".to_string(), json!(0.151));
+        params.insert("tank_height_m".to_string(), json!(1.2));
+        params.insert("ua_w_per_k".to_string(), json!(2.0));
+        params.insert("heating_capacity_w".to_string(), json!(4_500.0));
+        params.insert("setpoint_c".to_string(), json!(51.67));
+
+        let result = try_build_resistance_wh_config(
+            "Electric Resistance Water Heater",
+            &params,
+            Some(200.0),
+        );
+        assert!(result.is_some(), "resistance WH builder must return Some");
+        let ec = result.unwrap();
+        assert!(ec.is_typed());
+        let cfg: ElectricResistanceWaterHeaterConfig = ec.typed().unwrap();
+        assert_eq!(cfg.heating_capacity_w, Some(4_500.0));
+        assert_eq!(cfg.avg_water_draw_l_per_day, Some(200.0));
+    }
+
+    #[test]
+    fn gas_tankless_builder_produces_typed_config() {
+        let mut params = Map::new();
+        params.insert("uniform_energy_factor".to_string(), json!(0.87));
+        params.insert("performance_adjustment".to_string(), json!(0.92));
+        params.insert("setpoint_c".to_string(), json!(51.67));
+
+        let result = try_build_tankless_wh_config(
+            "Gas Tankless Water Heater",
+            &params,
+            FuelType::Gas,
+            Some(180.0),
+        );
+        assert!(result.is_some(), "gas tankless WH builder must return Some");
+        let ec = result.unwrap();
+        assert!(ec.is_typed());
+        let cfg: TanklessWaterHeaterConfig = ec.typed().unwrap();
+        assert_eq!(cfg.efficiency_factor, Some(0.87));
+        assert_eq!(cfg.performance_adjustment, Some(0.92));
+        assert_eq!(cfg.avg_water_draw_l_per_day, Some(180.0));
+    }
+
+    #[test]
+    fn hpwh_builder_produces_typed_config() {
+        let mut params = Map::new();
+        params.insert("tank_volume_m3".to_string(), json!(0.189));
+        params.insert("tank_height_m".to_string(), json!(1.2));
+        params.insert("ua_w_per_k".to_string(), json!(2.0));
+        params.insert("cop".to_string(), json!(3.5));
+        params.insert("uniform_energy_factor".to_string(), json!(3.45));
+        params.insert("backup_element_power_w".to_string(), json!(4_500.0));
+        params.insert("setpoint_c".to_string(), json!(51.67));
+        params.insert("tempering_valve_setpoint_c".to_string(), json!(51.67));
+        params.insert("hp_only_mode".to_string(), json!(false));
+        params.insert("low_power_hpwh".to_string(), json!(false));
+
+        let result = try_build_hpwh_config("Heat Pump Water Heater", &params, Some(220.0));
+        assert!(result.is_some(), "HPWH builder must return Some");
+        let ec = result.unwrap();
+        assert!(ec.is_typed());
+        let cfg: HeatPumpWaterHeaterConfig = ec.typed().unwrap();
+        assert_eq!(cfg.cop, Some(3.5));
+        assert_eq!(cfg.uniform_energy_factor, Some(3.45));
+        assert_eq!(cfg.backup_element_power_w, Some(4_500.0));
+        assert_eq!(cfg.avg_water_draw_l_per_day, Some(220.0));
+    }
+
+    #[test]
+    fn hpwh_builder_reads_bool_flags_correctly() {
+        let mut params = Map::new();
+        params.insert("tank_volume_m3".to_string(), json!(0.189));
+        params.insert("ua_w_per_k".to_string(), json!(2.0));
+        params.insert("cop".to_string(), json!(4.2));
+        params.insert("hp_only_mode".to_string(), json!(true));
+        params.insert("low_power_hpwh".to_string(), json!(true));
+
+        let result = try_build_hpwh_config("Heat Pump Water Heater", &params, None);
+        assert!(result.is_some());
+        let cfg: HeatPumpWaterHeaterConfig = result.unwrap().typed().unwrap();
+        assert_eq!(cfg.hp_only_mode, Some(true));
+        assert_eq!(cfg.low_power_hpwh, Some(true));
     }
 }

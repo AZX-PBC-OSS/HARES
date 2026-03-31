@@ -5,7 +5,8 @@ use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId, VehicleSpec};
 use hares_equipment::ndinterp::RegularGridInterpolator;
 use hares_equipment::{OcvTable, UNegTable};
 use hares_types::{
-    EquipmentDescriptor as RustEquipmentDescriptor, TelemetryField as RustTelemetryField,
+    CoreOutput as RustCoreOutput, ElectricPower, EquipmentDescriptor as RustEquipmentDescriptor,
+    FuelType, OperatingMode, Telemetry as RustTelemetry, TelemetryField as RustTelemetryField,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -814,6 +815,148 @@ impl PyEquipmentDescriptor {
 impl From<RustEquipmentDescriptor> for PyEquipmentDescriptor {
     fn from(inner: RustEquipmentDescriptor) -> Self {
         Self::new(inner)
+    }
+}
+
+#[pyclass(name = "CoreOutput", frozen, from_py_object)]
+#[derive(Clone)]
+pub struct PyCoreOutput {
+    inner: RustCoreOutput,
+}
+
+impl PyCoreOutput {
+    pub(crate) fn new(inner: RustCoreOutput) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl PyCoreOutput {
+    #[getter]
+    fn electric_kw(&self) -> Option<f64> {
+        self.inner.flows.electric_kw.map(|e| e.net_consumption_kw())
+    }
+
+    #[getter]
+    fn electric_convention(&self) -> String {
+        match self.inner.flows.electric_kw {
+            Some(ElectricPower::Consumption(_)) => "consumption".to_string(),
+            Some(ElectricPower::Generation(_)) => "generation".to_string(),
+            Some(ElectricPower::Bidirectional(_)) => "bidirectional".to_string(),
+            None => "consumption".to_string(),
+        }
+    }
+
+    #[getter]
+    fn reactive_power_kvar(&self) -> Option<f64> {
+        self.inner.flows.reactive_power_kvar
+    }
+
+    #[getter]
+    fn fuel_w(&self) -> Option<f64> {
+        self.inner.flows.fuel_w.map(|f| f.consumption_w)
+    }
+
+    #[getter]
+    fn fuel_type(&self) -> Option<String> {
+        self.inner.flows.fuel_w.map(|f| match f.fuel_type {
+            FuelType::Electric => "Electric".to_string(),
+            FuelType::Gas => "Gas".to_string(),
+            FuelType::Propane => "Propane".to_string(),
+            FuelType::Oil => "Oil".to_string(),
+            FuelType::None => "NoFuel".to_string(),
+        })
+    }
+
+    #[getter]
+    fn operating_mode(&self) -> Option<String> {
+        self.inner.state.operating_mode.map(|mode| match mode {
+            OperatingMode::Off => "Off".to_string(),
+            OperatingMode::Heating => "Heating".to_string(),
+            OperatingMode::Cooling => "Cooling".to_string(),
+            OperatingMode::Defrost => "Defrost".to_string(),
+            OperatingMode::Standby => "Standby".to_string(),
+            OperatingMode::Charging => "Charging".to_string(),
+            OperatingMode::Discharging => "Discharging".to_string(),
+            OperatingMode::HeatingHP => "HeatingHP".to_string(),
+            OperatingMode::HeatingER => "HeatingER".to_string(),
+            OperatingMode::HeatingHPAndER => "HeatingHPAndER".to_string(),
+            OperatingMode::HeatPumpWH => "HeatPumpWH".to_string(),
+            OperatingMode::BackupElement => "BackupElement".to_string(),
+        })
+    }
+
+    #[getter]
+    fn soc(&self) -> Option<f64> {
+        self.inner.state.soc.map(|s| s.get())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CoreOutput(electric_kw={:?}, mode={:?}, soc={:?})",
+            self.electric_kw(),
+            self.operating_mode(),
+            self.soc()
+        )
+    }
+}
+
+#[pyclass(name = "Equipment", frozen, from_py_object)]
+#[derive(Clone)]
+pub struct PyEquipment {
+    descriptor: RustEquipmentDescriptor,
+    core_output: RustCoreOutput,
+    telemetry: RustTelemetry,
+}
+
+impl PyEquipment {
+    pub(crate) fn new(
+        descriptor: RustEquipmentDescriptor,
+        core_output: RustCoreOutput,
+        telemetry: RustTelemetry,
+    ) -> Self {
+        Self {
+            descriptor,
+            core_output,
+            telemetry,
+        }
+    }
+}
+
+#[pymethods]
+impl PyEquipment {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.descriptor.name
+    }
+
+    #[getter]
+    fn descriptor(&self) -> PyEquipmentDescriptor {
+        PyEquipmentDescriptor::new(self.descriptor.clone())
+    }
+
+    #[getter]
+    fn core_output(&self) -> PyCoreOutput {
+        PyCoreOutput::new(self.core_output.clone())
+    }
+
+    /// Non-authoritative diagnostic telemetry map for this equipment.
+    ///
+    /// For simulation-critical values (power, fuel, mode, SoC), use
+    /// `equipment.core_output` instead of this dictionary.
+    fn telemetry<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (k, v) in &self.telemetry {
+            out.set_item(k, v)?;
+        }
+        Ok(out)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Equipment(name={:?}, type={:?})",
+            self.descriptor.name, self.descriptor.equipment_type
+        )
     }
 }
 

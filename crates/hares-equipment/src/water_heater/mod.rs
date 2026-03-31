@@ -6,6 +6,7 @@ pub(crate) mod hpwh_compressor;
 pub mod resistance;
 pub mod tank;
 pub mod tankless;
+pub mod water_heater_config;
 
 pub use tank::{DrawResult, StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 
@@ -442,6 +443,7 @@ mod tests {
             },
             custom_domains,
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -698,6 +700,7 @@ mod dhw_integration_tests {
                 custom_payload: Some(vec![1.0, 1.0]),
             }],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)

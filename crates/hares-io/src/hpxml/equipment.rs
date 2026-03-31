@@ -20,6 +20,9 @@ pub struct EquipmentSpec {
     pub fuel_type: FuelType,
     pub parameters: Map<String, Value>,
     pub zip_params: Option<ZipParameters>,
+    /// Typed config, populated for HVAC equipment types that have been migrated.
+    /// When present, consumers should prefer this over raw `parameters`.
+    pub typed_config: Option<hares_equipment::EquipmentConfig>,
 }
 
 pub fn resolve_equipment(
@@ -31,7 +34,7 @@ pub fn resolve_equipment(
     let details = &building.details_xml;
 
     resolve_hvac(building, defaults, &mut specs)?;
-    resolve_water_heaters(details, defaults, &mut specs);
+    resolve_water_heaters(details, defaults, &mut specs)?;
     resolve_pv(details, defaults, &mut specs);
     resolve_batteries(details, defaults, &mut specs);
     resolve_ev(details, defaults, &mut specs);
@@ -109,6 +112,7 @@ pub(super) fn build_spec(
         fuel_type,
         parameters,
         zip_params,
+        typed_config: None,
     }
 }
 
@@ -1077,6 +1081,101 @@ mod tests {
         assert!(
             (bldg_cooling_wd[0] - expected_cool).abs() < 1e-6,
             "cooling setpoint should be 75F converted to C"
+        );
+    }
+
+    #[test]
+    fn gas_furnace_hpxml_parse_produces_typed_config_with_correct_afue() {
+        let xml = minimal_hvac_xml(
+            r#"<HeatingSystem>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <HeatingCapacity>60000</HeatingCapacity>
+              <AnnualHeatingEfficiency>
+                <Units>AFUE</Units>
+                <Value>0.96</Value>
+              </AnnualHeatingEfficiency>
+            </HeatingSystem>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Gas Furnace")
+            .expect("Gas Furnace spec must be present");
+
+        let typed = spec
+            .typed_config
+            .as_ref()
+            .expect("Gas Furnace must have a typed config after migration");
+
+        assert!(
+            typed.is_typed(),
+            "typed_config payload must be Typed variant"
+        );
+
+        let cfg: hares_equipment::hvac::heating_config::GasFurnaceConfig =
+            typed.typed().expect("must deserialize as GasFurnaceConfig");
+
+        assert!(
+            (cfg.afue - 0.96).abs() < 1e-12,
+            "afue must be 0.96, got {}",
+            cfg.afue
+        );
+        let expected_w = conv::power_btu_h_to_w(60_000.0);
+        assert!(
+            (cfg.capacity_w - expected_w).abs() < 1.0,
+            "capacity_w must be ~{expected_w:.1} W, got {}",
+            cfg.capacity_w
+        );
+    }
+
+    #[test]
+    fn central_ac_hpxml_parse_produces_typed_config_with_correct_seer() {
+        let xml = minimal_hvac_xml(
+            r#"<CoolingSystem>
+              <CoolingSystemFuel>electricity</CoolingSystemFuel>
+              <CoolingSystemType>central air conditioner</CoolingSystemType>
+              <CoolingCapacity>36000</CoolingCapacity>
+              <AnnualCoolingEfficiency>
+                <Units>SEER</Units>
+                <Value>16</Value>
+              </AnnualCoolingEfficiency>
+            </CoolingSystem>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Air Conditioner")
+            .expect("Air Conditioner spec must be present");
+
+        let typed = spec
+            .typed_config
+            .as_ref()
+            .expect("Air Conditioner must have a typed config after migration");
+
+        assert!(
+            typed.is_typed(),
+            "typed_config payload must be Typed variant"
+        );
+
+        let cfg: hares_equipment::hvac::cooling_config::CentralAirConditionerConfig = typed
+            .typed()
+            .expect("must deserialize as CentralAirConditionerConfig");
+
+        assert!(
+            (cfg.seer - 16.0).abs() < 1e-12,
+            "seer must be 16.0, got {}",
+            cfg.seer
+        );
+        let expected_w = conv::power_btu_h_to_w(36_000.0);
+        assert!(
+            (cfg.capacity_w - expected_w).abs() < 1.0,
+            "capacity_w must be ~{expected_w:.1} W, got {}",
+            cfg.capacity_w
         );
     }
 

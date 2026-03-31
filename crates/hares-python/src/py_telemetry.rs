@@ -38,11 +38,15 @@ impl PyTelemetry {
         Ok(out)
     }
 
+    /// Non-authoritative diagnostics only.
+    ///
+    /// This telemetry dict is intended for debugging/inspection. For
+    /// simulation-critical typed values, use `Dwelling.equipment()` and read
+    /// `Equipment.core_output`.
     pub fn equipment<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
         out.set_item("names", &self.inner.equipment_names)?;
         out.set_item("modes", &self.inner.equipment_modes)?;
-        out.set_item("states", &self.inner.equipment_states)?;
         out.set_item("soc", &self.inner.equipment_soc)?;
         out.set_item("power_kw", &self.inner.equipment_power_kw)?;
         Ok(out)

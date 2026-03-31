@@ -124,42 +124,38 @@ pub struct VehicleSpec {
 impl VehicleSpec {
     pub fn to_config(&self) -> EquipmentConfig {
         let fuel_economy = self.capacity_kwh / self.range_miles;
-        let mut cfg = EquipmentConfig {
-            name: self.label.to_string(),
-            ochre_class: "EV".to_string(),
-            payload: crate::ConfigPayload::Raw {
-                data: HashMap::new(),
-            },
-        };
-        #[allow(deprecated)]
-        let rc = cfg.raw_config_mut().unwrap();
-        rc.insert(
+        let mut data = HashMap::new();
+        data.insert(
             KEY_BATTERY_CAPACITY_KWH.into(),
             ConfigValue::Float(self.capacity_kwh),
         );
-        rc.insert(
+        data.insert(
             KEY_MAX_CHARGING_POWER_KW.into(),
             ConfigValue::Float(self.max_l2_power_kw),
         );
-        rc.insert(
+        data.insert(
             KEY_CHARGING_LEVEL.into(),
             ConfigValue::Text("L2".to_string()),
         );
-        rc.insert(KEY_RANGE_MILES.into(), ConfigValue::Float(self.range_miles));
-        rc.insert(
+        data.insert(KEY_RANGE_MILES.into(), ConfigValue::Float(self.range_miles));
+        data.insert(
             KEY_VEHICLE_TYPE.into(),
             ConfigValue::Text(self.vehicle_type.to_string()),
         );
-        rc.insert(
+        data.insert(
             KEY_CHEMISTRY.into(),
             ConfigValue::Text(self.chemistry.as_config_str().to_string()),
         );
-        rc.insert(
+        data.insert(
             KEY_FUEL_ECONOMY_KWH_PER_MI.into(),
             ConfigValue::Float(fuel_economy),
         );
-        rc.insert(KEY_READY_SOC.into(), ConfigValue::Float(1.0));
-        cfg
+        data.insert(KEY_READY_SOC.into(), ConfigValue::Float(1.0));
+        EquipmentConfig {
+            name: self.label.to_string(),
+            ochre_class: "EV".to_string(),
+            payload: crate::ConfigPayload::Raw { data },
+        }
     }
 }
 

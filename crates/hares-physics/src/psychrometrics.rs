@@ -424,11 +424,11 @@ mod tests {
         let p = 101_325.0;
         // (t_db_c, w_multiplier) — multiplier applied to w_sat at that dry-bulb
         let cases: &[(f64, f64)] = &[
-            (20.0, 2.0),    // moderate above-freezing, 2× saturation
-            (-5.0, 2.0),    // sub-zero dry-bulb, different code path at freezing
-            (-5.0, 100.0),  // sub-zero with extreme multiplier, no overflow/panic
-            (20.0, 100.0),  // above-freezing with extreme multiplier
-            (35.0, 50.0),   // hot day, large supersaturation
+            (20.0, 2.0),   // moderate above-freezing, 2× saturation
+            (-5.0, 2.0),   // sub-zero dry-bulb, different code path at freezing
+            (-5.0, 100.0), // sub-zero with extreme multiplier, no overflow/panic
+            (20.0, 100.0), // above-freezing with extreme multiplier
+            (35.0, 50.0),  // hot day, large supersaturation
         ];
         for &(t_db_c, mult) in cases {
             let w_sat = humidity_ratio_from_tdp(t_db_c, p);

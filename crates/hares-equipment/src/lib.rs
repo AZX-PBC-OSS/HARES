@@ -20,9 +20,9 @@ pub mod water_heater;
 use std::time::Duration;
 
 use hares_types::{
-    BmsMode, ChargingStrategy, ControlSignal, EnvironmentState, EquipmentDescriptor,
-    GridExportRule, HaresError, OperatingMode, PlugInPolicy, PortDeclaration, PortSlots,
-    ensure_signal_supported,
+    BmsMode, ChargingStrategy, ControlSignal, CoreCapabilities, EnvironmentState,
+    EquipmentDescriptor, GridExportRule, HaresError, OperatingMode, PlugInPolicy, PortDeclaration,
+    PortSlots, ensure_signal_supported,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -50,8 +50,6 @@ pub use config::{ConfigPayload, EquipmentConfig, EquipmentTypedConfig};
 pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;
 pub use generator::GeneratorConfig;
-pub use pv::PvConfig;
-pub use ventilation::VentilationConfig;
 pub use hares_types::Telemetry;
 pub use hares_types::{CoreFlows, CoreOutput, CoreState};
 pub use hvac::cooling_config::{CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig};
@@ -62,8 +60,14 @@ pub use hvac::heating_config::{
 };
 pub use hvac::{EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride};
 pub use ndinterp::RegularGridInterpolator;
-pub use registry::{EquipmentFactory, EquipmentRegistry};
+pub use pv::PvConfig;
+pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};
+pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
+pub use water_heater::water_heater_config::{
+    ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
+    TanklessWaterHeaterConfig,
+};
 
 /// Equipment-layer result type.
 pub type Result<T> = std::result::Result<T, HaresError>;
@@ -99,7 +103,6 @@ pub trait Equipment: Send + Sync {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError>;
     fn telemetry(&self) -> &Telemetry;
-
     fn core_output(&self) -> &CoreOutput {
         static DEFAULT: CoreOutput = CoreOutput {
             flows: CoreFlows {
@@ -138,6 +141,18 @@ pub trait Equipment: Send + Sync {
     /// preconditions (e.g. EV connection state) must override this method.
     fn validate_signal(&self, signal: &ControlSignal) -> Result<()> {
         ensure_signal_supported(self.descriptor().control_capabilities, signal)
+    }
+
+    /// Declares the core output capabilities this equipment type supports.
+    ///
+    /// Used to populate `EquipmentDescriptor::core_capabilities` at
+    /// construction time. The default returns an empty set; equipment types
+    /// that populate `CoreOutput` fields override this.
+    fn core_capabilities() -> CoreCapabilities
+    where
+        Self: Sized,
+    {
+        CoreCapabilities::empty()
     }
 
     /// Returns the zone and ideal heating/cooling capacity (watts) this
@@ -418,6 +433,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)

@@ -2,11 +2,48 @@
 
 use hares_types::normalize_ascii;
 use hares_types::{BoundaryPolicy, HaresError, ScheduleSource};
+use serde::{Deserialize, Serialize};
 
 use crate::EquipmentConfig;
 
 use super::hvac_core::DEFAULT_BIQUADRATIC_COEFFS;
 use super::speed_control::SpeedControlMode;
+
+/// Shared duct configuration fields for heating/cooling equipment.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DuctConfig {
+    /// Heating duct distribution system efficiency (DSE), [0, 1].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "duct_dse",
+        alias = "duct_distribution_efficiency"
+    )]
+    pub dse_heat: Option<f64>,
+    /// Cooling duct distribution system efficiency (DSE), [0, 1].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dse_cool: Option<f64>,
+    /// Zone where duct losses are deposited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_zone_id: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_house_volume_m3: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_supply_leakage_frac: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_supply_area_m2: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_supply_r_m2_k_w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_return_leakage_frac: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_return_area_m2: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_return_r_m2_k_w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duct_zone_type: Option<String>,
+}
 
 pub(super) fn extract_numeric(config: &EquipmentConfig, key: &str) -> Option<f64> {
     config.get_f64(key)

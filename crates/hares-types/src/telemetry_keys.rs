@@ -121,7 +121,6 @@ pub const MIN_RH: &str = "min_rh";
 pub const MAX_RH: &str = "max_rh";
 
 // ── Loads ───────────────────────────────────────────────────────────────────
-pub const WETTING_EVENT_KW: &str = "wetting_event_kw";
 
 // ── Dwelling-level / test equipment ─────────────────────────────────────────
 pub const LAST_POWER_KW: &str = "last_power_kw";

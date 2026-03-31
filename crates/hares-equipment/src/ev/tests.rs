@@ -58,6 +58,7 @@ fn sample_env() -> EnvironmentState {
         },
         custom_domains: vec![],
         equipment_telemetry: std::collections::HashMap::new(),
+        equipment_core: std::collections::HashMap::new(),
         current_time: dt(2026, 1, 1, 0, 0, 0),
         time_res: ChronoDuration::minutes(1),
         price_signal: Default::default(),
@@ -241,8 +242,7 @@ fn update_control_reports_charging_when_connected_and_drawing_power() {
 
 #[test]
 fn registry_registration_creates_ev() {
-    let mut registry = EquipmentRegistry::new();
-    register_with_registry(&mut registry);
+    let registry = EquipmentRegistry::new();
 
     let eq = registry
         .create("EV", ev_config(base_raw()))
@@ -1754,7 +1754,7 @@ fn actor_seed_nightly_returns_ev_seed() {
     }
 }
 
-// ── RV-013: Physics-grounded EV driver lifecycle tests ────────────
+// ── Physics-grounded EV driver lifecycle tests ────────────────────
 
 /// Physics reference: L2 7.2 kW charger, 90% efficiency, 60 kWh battery.
 /// DC energy per hour = 7.2 * 0.90 = 6.48 kWh/h
@@ -2060,7 +2060,7 @@ fn charging_waste_heat_matches_efficiency_loss() {
     );
 }
 
-// ── Full lifecycle tests (RV-013) ─────────────────────────────────
+// ── Full lifecycle tests ───────────────────────────────────────────
 
 #[test]
 fn ev_full_day_lifecycle() {
@@ -2520,9 +2520,10 @@ fn ev_departure_at_step_boundary() {
 
 fn minimal_ev_config() -> EvConfig {
     EvConfig {
-        battery_capacity_kwh: 75.0,
+        equipment_id: None,
+        capacity_kwh: 75.0,
         charging_level: None,
-        max_charging_power_kw: None,
+        max_charging_power_kw: 11.5,
         charging_efficiency: None,
         l1_current_a: None,
         l1_voltage_v: None,
@@ -2554,22 +2555,19 @@ fn minimal_ev_config() -> EvConfig {
 #[test]
 fn ev_config_round_trips_via_equipment_config() {
     let cfg = minimal_ev_config();
-    let ec = crate::EquipmentConfig::from_typed(
-        "test_ev".to_string(),
-        "EV".to_string(),
-        cfg.clone(),
-    )
-    .unwrap();
+    let ec =
+        crate::EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg.clone());
     assert!(ec.is_typed());
     let recovered: EvConfig = ec.typed().unwrap();
-    assert_eq!(recovered.battery_capacity_kwh, cfg.battery_capacity_kwh);
+    assert_eq!(recovered.capacity_kwh, cfg.capacity_kwh);
 }
 
 #[test]
 fn ev_config_rejects_unknown_fields() {
     use crate::config::ConfigPayload;
     let json = serde_json::json!({
-        "battery_capacity_kwh": 75.0,
+        "capacity_kwh": 75.0,
+        "max_charging_power_kw": 7.2,
         "unexpected_key": "bad"
     });
     let ec = crate::EquipmentConfig {
@@ -2589,7 +2587,7 @@ fn ev_config_rejects_unknown_fields() {
 #[test]
 fn ev_config_validate_rejects_zero_capacity() {
     let mut cfg = minimal_ev_config();
-    cfg.battery_capacity_kwh = 0.0;
+    cfg.capacity_kwh = 0.0;
     assert!(cfg.validate().is_err());
 }
 
@@ -2616,19 +2614,14 @@ fn ev_config_validate_passes_for_valid_config() {
 #[test]
 fn ev_init_typed_sets_fields_from_ev_config() {
     let cfg = EvConfig {
-        battery_capacity_kwh: 60.0,
+        capacity_kwh: 60.0,
         charging_level: Some("L2".to_string()),
-        max_charging_power_kw: Some(7.2),
+        max_charging_power_kw: 7.2,
         charging_efficiency: Some(0.92),
         initial_soc: Some(0.5),
         ..minimal_ev_config()
     };
-    let ec = crate::EquipmentConfig::from_typed(
-        "test_ev".to_string(),
-        "EV".to_string(),
-        cfg,
-    )
-    .unwrap();
+    let ec = crate::EquipmentConfig::from_typed("test_ev".to_string(), "EV".to_string(), cfg);
     let mut ev = Ev::new(ec.clone());
     let env = sample_env();
     ev.init(&ec, &env).unwrap();

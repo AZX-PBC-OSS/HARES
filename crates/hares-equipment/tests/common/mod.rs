@@ -117,6 +117,7 @@ impl EnvBuilder {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)

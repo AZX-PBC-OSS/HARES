@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
+    PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,7 @@ pub(super) struct CoolingCore {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     pub(super) hvac: HvacEquipment,
     operating_mode: OperatingMode,
     run_time_s: f64,
@@ -239,6 +241,10 @@ impl Equipment for AirConditioner {
         &self.core.telemetry
     }
 
+    fn core_output(&self) -> &CoreOutput {
+        &self.core.core_output
+    }
+
     fn save_state(&self) -> Vec<u8> {
         self.core.save_state()
     }
@@ -286,6 +292,10 @@ impl Equipment for RoomAC {
         &self.core.telemetry
     }
 
+    fn core_output(&self) -> &CoreOutput {
+        &self.core.core_output
+    }
+
     fn save_state(&self) -> Vec<u8> {
         self.core.save_state()
     }
@@ -325,7 +335,7 @@ impl CoolingCore {
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY,
-                core_capabilities: CoreCapabilities::empty(),
+                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
@@ -333,6 +343,7 @@ impl CoolingCore {
                 PortDeclaration::thermal(zone),
             ],
             telemetry: default_telemetry(),
+            core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::AcCooler, zone),
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
@@ -440,14 +451,16 @@ impl CoolingCore {
             ));
         }
 
-        let default_eir =
-            first_f64(config, &["seer", "SEER", "efficiency_seer"]).map_or(DEFAULT_EIR_FALLBACK, |seer| {
+        let default_eir = first_f64(config, &["seer", "SEER", "efficiency_seer"]).map_or(
+            DEFAULT_EIR_FALLBACK,
+            |seer| {
                 if seer.is_finite() && seer > 0.0 {
                     BTU_PER_HR_PER_W / seer
                 } else {
                     DEFAULT_EIR_FALLBACK
                 }
-            });
+            },
+        );
         self.hvac.eir_by_stage = load_stage_values(
             config,
             &["eir", "cooling_eir", "EIR", "HVAC Cooling EIR (-)"],
@@ -476,8 +489,12 @@ impl CoolingCore {
                 .unwrap_or(0.0);
             let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
             let n_speeds = self.hvac.cooling_capacities_w.len().min(255) as u8;
+            let cap_low = (n_speeds > 1)
+                .then(|| self.hvac.cooling_capacities_w.first().copied())
+                .flatten();
+            let flow_low = cap_low.map(|c| self.hvac.airflow_m3_s_per_w * c);
             self.hvac.duct_dse = super::helpers::resolve_duct_dse(
-                config, false, rated_cap, fan_flow, n_speeds, false,
+                config, false, rated_cap, fan_flow, n_speeds, cap_low, flow_low, false,
             );
         }
         self.hvac.update_zone_heat_fractions();
@@ -523,6 +540,7 @@ impl CoolingCore {
         self.crankcase_heater_kw = 0.0;
         self.last_cooling_rtf = 0.0;
         self.telemetry = default_telemetry();
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -590,11 +608,15 @@ impl CoolingCore {
                 .unwrap_or(0.0);
             let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
             let n_speeds = self.hvac.cooling_capacities_w.len().min(255) as u8;
+            let cap_low = (n_speeds > 1)
+                .then(|| self.hvac.cooling_capacities_w.first().copied())
+                .flatten();
+            let flow_low = cap_low.map(|c| self.hvac.airflow_m3_s_per_w * c);
             self.hvac.duct_dse = if let Some(dse) = cfg.duct.dse_cool {
                 dse
             } else {
                 super::helpers::resolve_duct_dse(
-                    config, false, rated_cap, fan_flow, n_speeds, false,
+                    config, false, rated_cap, fan_flow, n_speeds, cap_low, flow_low, false,
                 )
             };
 
@@ -634,6 +656,7 @@ impl CoolingCore {
         self.crankcase_heater_kw = 0.0;
         self.last_cooling_rtf = 0.0;
         self.telemetry = default_telemetry();
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -836,6 +859,17 @@ impl CoolingCore {
             .set(tk::APPARATUS_DEW_POINT_C, self.last_adp_c);
         self.telemetry
             .set(tk::BYPASS_FACTOR, self.last_bypass_factor);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.operating_mode),
+                soc: None,
+            },
+        };
 
         // Clear solver-provided capacity so next step starts fresh.
         self.ideal_capacity_w = 0.0;
@@ -1165,6 +1199,7 @@ impl CoolingCore {
         self.telemetry.insert(tk::SHR, decoded.shr);
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode_code);
+        self.core_output = CoreOutput::default();
 
         Ok(())
     }
@@ -1277,7 +1312,9 @@ mod tests {
 
     use super::{AirConditioner, RoomAC, register_with_registry};
 
-    use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
+    use crate::{
+        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, EquipmentRegistry,
+    };
 
     fn env(
         zone_temp_c: f64,
@@ -1314,6 +1351,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -1347,6 +1385,60 @@ mod tests {
         }
     }
 
+    fn ac_config_with_extras(extras: &[(&str, crate::config::ConfigValue)]) -> EquipmentConfig {
+        let mut raw_config = HashMap::new();
+        raw_config.insert("zone_id".to_string(), 1.0.into());
+        raw_config.insert("cooling_capacity_w".to_string(), 8_000.0.into());
+        raw_config.insert("eir".to_string(), 0.33.into());
+        raw_config.insert("cooling_setpoint_c".to_string(), 24.0.into());
+        raw_config.insert("heating_setpoint_c".to_string(), 18.0.into());
+        raw_config.insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[1,0,0,0,0,0]".into(),
+        );
+        raw_config.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        for (k, v) in extras {
+            raw_config.insert(k.to_string(), v.clone());
+        }
+        EquipmentConfig {
+            name: "AC".to_string(),
+            ochre_class: "Air Conditioner".to_string(),
+            payload: crate::config::ConfigPayload::Raw { data: raw_config },
+        }
+    }
+
+    fn typed_ac_config(seer: f64) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "AC".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                seer,
+                shr: Some(0.75),
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                fraction_load_served: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        )
+    }
+
     #[test]
     fn air_conditioner_descriptor_contracts() {
         let cfg = ac_config();
@@ -1373,11 +1465,8 @@ mod tests {
 
     #[test]
     fn room_ac_forces_single_speed_and_duct_dse_one() {
-        let mut cfg = ac_config();
+        let mut cfg = ac_config_with_extras(&[("speed_control_mode", "two_speed".into())]);
         cfg.ochre_class = "Room AC".to_string();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("speed_control_mode".to_string(), "two_speed".into());
 
         let mut eq = RoomAC::new(cfg.clone());
         let err = eq
@@ -1508,10 +1597,7 @@ mod tests {
     fn shr_drops_with_higher_humidity_ratio() {
         // This test exercises SHR coil physics; disable the startup ramp (c_d=0)
         // so it does not obscure the result on the first step.
-        let mut cfg = ac_config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("startup_cd".to_string(), 0.0.into());
+        let cfg = ac_config_with_extras(&[("startup_cd", 0.0.into())]);
 
         let mut eq_low = AirConditioner::new(cfg.clone());
         let mut eq_high = AirConditioner::new(cfg.clone());
@@ -1605,8 +1691,7 @@ mod tests {
 
     #[test]
     fn registry_registers_ochre_names_with_thermal_stage() {
-        let mut registry = EquipmentRegistry::new();
-        register_with_registry(&mut registry);
+        let registry = EquipmentRegistry::new();
 
         let ac = registry.create("Air Conditioner", ac_config()).unwrap();
         assert_eq!(ac.descriptor().stage, ExecutionStage::Thermal);
@@ -1637,11 +1722,8 @@ mod tests {
 
     #[test]
     fn room_ac_step_produces_cooling() {
-        let mut cfg = ac_config();
+        let mut cfg = ac_config_with_extras(&[("hysteresis_c", 0.0.into())]);
         cfg.ochre_class = "Room AC".to_string();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("hysteresis_c".to_string(), 0.0.into());
         let mut eq = RoomAC::new(cfg.clone());
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -1690,23 +1772,27 @@ mod tests {
     }
 
     #[test]
-    fn room_ac_vs_central_different_dse() {
-        let mut central_cfg = ac_config();
-        central_cfg
-            .raw_config_mut()
-            .unwrap()
-            .insert("hysteresis_c".to_string(), 0.0.into());
-        central_cfg
-            .raw_config_mut()
-            .unwrap()
-            .insert("duct_dse".to_string(), 0.80.into());
+    fn typed_ac_seer_sets_expected_eir() {
+        let cfg = typed_ac_config(16.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        let environment = env(27.0, 0.010, 19.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
 
-        let mut room_cfg = ac_config();
+        let expected = super::BTU_PER_HR_PER_W / 16.0;
+        let actual = eq.core.hvac.eir_by_stage[0];
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "typed seer=16 must produce EIR≈{expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn room_ac_vs_central_different_dse() {
+        let central_cfg =
+            ac_config_with_extras(&[("hysteresis_c", 0.0.into()), ("duct_dse", 0.80.into())]);
+
+        let mut room_cfg = ac_config_with_extras(&[("hysteresis_c", 0.0.into())]);
         room_cfg.ochre_class = "Room AC".to_string();
-        room_cfg
-            .raw_config_mut()
-            .unwrap()
-            .insert("hysteresis_c".to_string(), 0.0.into());
 
         let environment = env(28.0, 0.012, 20.0, 35.0);
 
@@ -1786,26 +1872,15 @@ mod tests {
     /// stages by observing the resulting electrical draw.
     #[test]
     fn two_speed_ac_draws_more_power_at_high_load_than_moderate_load() {
-        let mut cfg = ac_config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("speed_control_mode".to_string(), "two_speed".into());
         // Zero hysteresis so activation threshold equals setpoint, not setpoint+1.
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("hysteresis_c".to_string(), 0.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_capacity_w_stage_0".to_string(), 4_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_capacity_w_stage_1".to_string(), 8_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_eir_stage_0".to_string(), 0.33.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_eir_stage_1".to_string(), 0.33.into());
+        let cfg = ac_config_with_extras(&[
+            ("speed_control_mode", "two_speed".into()),
+            ("hysteresis_c", 0.0.into()),
+            ("cooling_capacity_w_stage_0", 4_000.0.into()),
+            ("cooling_capacity_w_stage_1", 8_000.0.into()),
+            ("cooling_eir_stage_0", 0.33.into()),
+            ("cooling_eir_stage_1", 0.33.into()),
+        ]);
 
         // load_fraction = (zone - 24) / 0.5; 24.4 → 0.8 > 0.5 → high stage
         let env_high_load = env(24.4, 0.010, 18.0, 35.0);
@@ -1861,11 +1936,8 @@ mod tests {
     /// load than at part load.
     #[test]
     fn part_load_operation_draws_less_power_than_full_load() {
-        let mut cfg = ac_config();
         // Zero hysteresis so thermostat activates right at setpoint (24°C).
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("hysteresis_c".to_string(), 0.0.into());
+        let cfg = ac_config_with_extras(&[("hysteresis_c", 0.0.into())]);
 
         // Full load: load_fraction = (24.6-24)/0.5 = 1.2 → clamped to 1.0
         let env_full = env(24.6, 0.010, 18.0, 35.0);
@@ -1961,6 +2033,7 @@ mod dr_tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -1975,6 +2048,7 @@ mod dr_tests {
     fn hot_env_at_time(zone_temp_c: f64, second: i64) -> EnvironmentState {
         EnvironmentState {
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -2338,6 +2412,7 @@ mod crankcase_tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -2398,6 +2473,7 @@ mod crankcase_tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
@@ -2424,6 +2500,31 @@ mod crankcase_tests {
         raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
         raw.insert("crankcase_heater_kw".to_string(), 0.10.into()); // 100 W rated
         raw.insert("crankcase_heater_threshold_c".to_string(), 12.8_f64.into());
+        EquipmentConfig {
+            name: "AC".to_string(),
+            ochre_class: "Air Conditioner".to_string(),
+            payload: crate::config::ConfigPayload::Raw { data: raw },
+        }
+    }
+
+    fn base_config_with_extras(extras: &[(&str, crate::config::ConfigValue)]) -> EquipmentConfig {
+        let mut raw = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
+        raw.insert("eir".to_string(), 0.33.into());
+        raw.insert("cooling_setpoint_c".to_string(), 26.0.into());
+        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
+        raw.insert("airflow_cfm_per_ton".to_string(), 375.0.into());
+        raw.insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[1,0,0,0,0,0]".into(),
+        );
+        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        raw.insert("crankcase_heater_kw".to_string(), 0.10.into());
+        raw.insert("crankcase_heater_threshold_c".to_string(), 12.8_f64.into());
+        for (k, v) in extras {
+            raw.insert(k.to_string(), v.clone());
+        }
         EquipmentConfig {
             name: "AC".to_string(),
             ochre_class: "Air Conditioner".to_string(),
@@ -2526,12 +2627,11 @@ mod crankcase_tests {
     // Test 8: Temperature curve modifies capacity correctly
     #[test]
     fn crankcase_capacity_curve_scales_rated_power() {
-        let mut cfg = base_config();
         // Curve: effective = rated * (1.0 + 0.1*T + 0.0*T^2); at T=5C: multiplier=1.5
-        cfg.raw_config_mut().unwrap().insert(
-            "crankcase_capacity_curve_coeffs".to_string(),
+        let cfg = base_config_with_extras(&[(
+            "crankcase_capacity_curve_coeffs",
             "[1.0, 0.1, 0.0]".into(),
-        );
+        )]);
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
@@ -2661,6 +2761,7 @@ mod ideal_capacity_tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)

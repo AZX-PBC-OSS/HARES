@@ -31,7 +31,8 @@ use py_enums::{
     PyVehicleType,
 };
 use py_equipment::{
-    PyBattery, PyEquipmentDescriptor, PyEv, PyPv, PyPvSoilingConfig, PyTelemetryField,
+    PyBattery, PyCoreOutput, PyEquipment, PyEquipmentDescriptor, PyEv, PyPv, PyPvSoilingConfig,
+    PyTelemetryField,
 };
 use py_fleet::{PyFleet, PyFleetResults, PySteppableFleet};
 use py_metrics::{
@@ -51,6 +52,8 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDwellingConfig>()?;
     m.add_class::<PyControlSignal>()?;
     m.add_class::<PyTelemetry>()?;
+    m.add_class::<PyCoreOutput>()?;
+    m.add_class::<PyEquipment>()?;
     m.add_class::<PyBattery>()?;
     m.add_class::<PyPv>()?;
     m.add_class::<PyPvSoilingConfig>()?;

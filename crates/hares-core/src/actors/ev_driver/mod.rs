@@ -20,13 +20,14 @@ mod time_window;
 mod v2g;
 mod v2h;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Datelike, Timelike};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
-    ChargingStrategy, ControlSignal, EnvironmentState, EvConnectionState, PlugInPolicy,
-    ScheduleSource, telemetry_keys as tk,
+    ChargingStrategy, ControlSignal, EnvironmentState, EquipmentId, EvConnectionState,
+    PlugInPolicy, ScheduleSource,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -205,6 +206,7 @@ fn build_preferences(
 pub struct EvDriverActor {
     name: Arc<str>,
     dispatch_target: DispatchTarget,
+    equipment_id: Option<EquipmentId>,
 
     // Behavioral config
     strategy: ChargingStrategy,
@@ -279,6 +281,7 @@ impl EvDriverActor {
         Self {
             name: Arc::from(name),
             dispatch_target: DispatchTarget::ByName(target.into()),
+            equipment_id: None,
             strategy,
             plug_in_policy,
             daily_drive_miles,
@@ -329,6 +332,10 @@ impl EvDriverActor {
             DispatchTarget::ByName(n) => n,
             DispatchTarget::ByEndUse(_) => unreachable!("EvDriverActor always targets by name"),
         }
+    }
+
+    pub fn resolve_equipment_id(&mut self, equipment_id_by_name: &HashMap<String, EquipmentId>) {
+        self.equipment_id = equipment_id_by_name.get(self.target_name()).copied();
     }
 
     /// Roll a daily event for a new day if needed.
@@ -384,15 +391,12 @@ impl EvDriverActor {
         current_minute >= target_minute && current_minute < target_minute.saturating_add(res)
     }
 
-    /// Read the actual SOC from equipment telemetry, falling back to estimated.
+    /// Read the actual SOC from typed equipment core output, falling back to estimated.
     fn current_soc(&self, env: &EnvironmentState) -> f64 {
-        let target_name = match &self.dispatch_target {
-            DispatchTarget::ByName(name) => name.as_ref(),
-            _ => return self.estimated_soc,
-        };
-        env.equipment_telemetry
-            .get(target_name)
-            .and_then(|tel| tel.get(tk::SOC))
+        self.equipment_id
+            .and_then(|id| env.equipment_core.get(&id))
+            .and_then(|co| co.state.soc)
+            .map(|soc| soc.get())
             .unwrap_or(self.estimated_soc)
     }
 
@@ -629,7 +633,7 @@ impl Actor for EvDriverActor {
 mod tests {
     use super::*;
     use crate::actor::testing::test_env;
-    use hares_types::{ElectricalSummary, PriceSignal};
+    use hares_types::{CoreOutput, CoreState, ElectricalSummary, EquipmentId, PriceSignal, Soc};
 
     fn make_actor(strategy: ChargingStrategy, policy: PlugInPolicy, seed: u64) -> EvDriverActor {
         EvDriverActor::new(
@@ -717,6 +721,28 @@ mod tests {
         env
     }
 
+    fn set_core_soc(
+        actor: &mut EvDriverActor,
+        env: &mut EnvironmentState,
+        equipment_name: &str,
+        equipment_id: EquipmentId,
+        soc: f64,
+    ) {
+        let mut by_name = std::collections::HashMap::new();
+        by_name.insert(equipment_name.to_string(), equipment_id);
+        actor.resolve_equipment_id(&by_name);
+        env.equipment_core.insert(
+            equipment_id,
+            CoreOutput {
+                state: CoreState {
+                    soc: Some(Soc::try_from(soc).expect("valid test soc")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+    }
+
     #[test]
     fn immediate_strategy_emits_soc_target_on_plugged_in_step() {
         let mut actor = make_actor(
@@ -774,6 +800,41 @@ mod tests {
             "expected SOCTarget with target_soc=0.9 from composer, got: {:?}",
             out
         );
+    }
+
+    #[test]
+    fn current_soc_reads_from_typed_core_output() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.estimated_soc = 0.2;
+        let mut env = env_at_minute(12 * 60);
+        set_core_soc(&mut actor, &mut env, "EV1", EquipmentId(7), 0.73);
+        assert!((actor.current_soc(&env) - 0.73).abs() < 1e-12);
+    }
+
+    #[test]
+    fn current_soc_handles_missing_equipment_id_gracefully() {
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 0.9 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.estimated_soc = 0.37;
+        let mut env = env_at_minute(12 * 60);
+        env.equipment_core.insert(
+            EquipmentId(99),
+            CoreOutput {
+                state: CoreState {
+                    soc: Some(Soc::try_from(0.9).expect("valid test soc")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        assert!((actor.current_soc(&env) - 0.37).abs() < 1e-12);
     }
 
     #[test]

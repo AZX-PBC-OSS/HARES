@@ -58,6 +58,7 @@ fn make_spec_annual_kwh(name: &str, annual_kwh: f64) -> EquipmentSpec {
         fuel_type: FuelType::Electric,
         parameters,
         zip_params: None,
+        typed_config: None,
     }
 }
 
@@ -70,6 +71,7 @@ fn make_spec_with_duty_cycle(name: &str, annual_kwh: f64, duty_cycle: f64) -> Eq
         fuel_type: FuelType::Electric,
         parameters,
         zip_params: None,
+        typed_config: None,
     }
 }
 

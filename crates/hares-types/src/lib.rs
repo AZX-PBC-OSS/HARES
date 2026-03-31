@@ -85,6 +85,7 @@ pub mod test_utils {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)

@@ -565,10 +565,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
-    // EG-005: subtract basement/crawlspace floor from conditioned zone.
-    // OCHRE: indoor_floor_area = conditioned_floor_area * indoor_floors / total_floors.
-    // Only apply when total > above (i.e. at least one below-grade conditioned floor).
-    let indoor_floor_area_m2 = match (conditioned_floor_area_m2, total_conditioned_floors, floors_above_grade) {
+    // The conditioned zone should reflect only above-grade floor area when a basement
+    // is present. OCHRE: indoor_floor_area = conditioned_floor_area * indoor_floors / total_floors.
+    let indoor_floor_area_m2 = match (
+        conditioned_floor_area_m2,
+        total_conditioned_floors,
+        floors_above_grade,
+    ) {
         (Some(total), Some(n_total), Some(n_above))
             if n_total > 0.0 && n_above > 0.0 && n_above < n_total =>
         {
@@ -918,9 +921,11 @@ fn parse_boundary(node: &XmlNode, boundary_type: BoundaryType) -> Result<Boundar
     let id = element_id(node).unwrap_or_else(|| "unknown".to_string());
     let area_m2 = parse_boundary_area(node, &boundary_type, &id)?;
     let r_value_layers_m2_k_w = parse_nominal_r_layers(node);
-    let assembly_r_value_m2_k_w =
-        parse_value_with_units(node.first_descendant("AssemblyEffectiveRValue"), ValueKind::RValue)
-            .or_else(|| parse_value_with_units(node.first_descendant("RValue"), ValueKind::RValue));
+    let assembly_r_value_m2_k_w = parse_value_with_units(
+        node.first_descendant("AssemblyEffectiveRValue"),
+        ValueKind::RValue,
+    )
+    .or_else(|| parse_value_with_units(node.first_descendant("RValue"), ValueKind::RValue));
     let material_layers = parse_material_layers(node, area_m2);
 
     let has_radiant_barrier = node

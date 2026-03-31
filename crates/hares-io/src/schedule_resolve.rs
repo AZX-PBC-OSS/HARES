@@ -527,11 +527,7 @@ fn inject_water_heater_schedule_columns(
                 normalize_schedule_col_name(&spec.name),
                 i
             );
-            match schedule.append_derived_column(
-                &col_name,
-                l_min_series,
-                ColumnAggregation::Mean,
-            ) {
+            match schedule.append_derived_column(&col_name, l_min_series, ColumnAggregation::Mean) {
                 Ok(derived_col_idx) => {
                     spec.parameters.insert(
                         "draw_flow_rate_schedule_col".to_string(),
@@ -1031,6 +1027,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_config: None,
         }
     }
 
@@ -1051,6 +1048,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_config: None,
         }
     }
 
@@ -1318,6 +1316,7 @@ mod tests {
             fuel_type: FuelType::Electric,
             parameters,
             zip_params: None,
+            typed_config: None,
         }
     }
 
@@ -1401,7 +1400,8 @@ mod tests {
             .parameters
             .get("draw_flow_rate_schedule_col")
             .and_then(Value::as_u64)
-            .expect("draw_flow_rate_schedule_col must be present") as usize;
+            .expect("draw_flow_rate_schedule_col must be present")
+            as usize;
 
         let resolved = &schedule.columns[draw_col_idx];
         assert_eq!(resolved.len(), fractions.len());

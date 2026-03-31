@@ -192,6 +192,7 @@ pub mod testing {
                     .single()
                     .expect("valid timestamp"),
                 equipment_telemetry: std::collections::HashMap::new(),
+                equipment_core: std::collections::HashMap::new(),
                 time_res: Duration::minutes(1),
                 price_signal: self.price_signal,
                 electrical: self.electrical,

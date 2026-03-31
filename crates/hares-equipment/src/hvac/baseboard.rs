@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
-    ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
+    FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +20,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked, equipment_id_from_config,
-        first_f64, operating_mode_code, update_heating_control, zone_id_from_config,
+        apply_heating_control_unchecked, equipment_id_from_config, operating_mode_code,
+        update_heating_control, zone_id_from_config,
     },
 };
 
@@ -29,8 +29,10 @@ pub struct ElectricBaseboard {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     hvac: HvacEquipment,
     rated_capacity_w: f64,
+    eir: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
 }
@@ -62,7 +64,7 @@ impl ElectricBaseboard {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
             telemetry_fields: telemetry_fields(),
         };
 
@@ -73,8 +75,10 @@ impl ElectricBaseboard {
                 PortDeclaration::thermal(zone),
             ],
             telemetry: default_telemetry(),
+            core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Baseboard, zone),
             rated_capacity_w: 0.0,
+            eir: 1.0,
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
         }
@@ -91,31 +95,30 @@ impl Equipment for ElectricBaseboard {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            let typed = config.typed::<ElectricBaseboardConfig>()?;
-            self.hvac.init(config, env)?;
-            self.hvac.duct_dse = 1.0;
-            self.hvac.duct_zone_id = None;
-            self.hvac.update_zone_heat_fractions();
-            self.rated_capacity_w = typed.heating_capacity_w.max(0.0);
-            self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
-            self.operating_mode = OperatingMode::Off;
-            self.run_time_s = 0.0;
-            self.telemetry = default_telemetry();
-            return Ok(());
-        }
-
         self.hvac.init(config, env)?;
         self.hvac.duct_dse = 1.0;
         self.hvac.duct_zone_id = None;
+        self.hvac.basement_heat_frac = 0.0;
+        self.hvac.basement_zone_id = None;
         self.hvac.update_zone_heat_fractions();
-        self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
-            .unwrap_or(6_000.0)
-            .max(0.0);
+        let typed = config.typed::<ElectricBaseboardConfig>().map_err(|e| {
+            HaresError::Equipment(format!(
+                "Electric Baseboard requires typed config (use EquipmentConfig::from_typed). Error: {e}"
+            ))
+        })?;
+        self.rated_capacity_w = typed.capacity_w.max(0.0);
+        self.eir = typed.eir;
+        if self.eir <= 0.0 || !self.eir.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "invalid Electric Baseboard eir: {}",
+                self.eir
+            )));
+        }
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = default_telemetry();
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -132,7 +135,7 @@ impl Equipment for ElectricBaseboard {
     ) -> std::result::Result<(), HaresError> {
         let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
         let thermal_output_w = self.rated_capacity_w * duty;
-        let electric_kw = thermal_output_w / 1_000.0 * self.hvac.space_fraction;
+        let electric_kw = thermal_output_w * self.eir / 1_000.0 * self.hvac.space_fraction;
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -152,12 +155,27 @@ impl Equipment for ElectricBaseboard {
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.operating_mode),
+                soc: None,
+            },
+        };
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -188,6 +206,7 @@ impl Equipment for ElectricBaseboard {
             tk::OPERATING_MODE,
             operating_mode_code(decoded.operating_mode),
         );
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -233,7 +252,7 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -243,6 +262,7 @@ mod tests {
 
     use super::{ElectricBaseboard, register_with_registry};
 
+    use crate::hvac::heating_config::ElectricBaseboardConfig;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -276,6 +296,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -287,35 +308,21 @@ mod tests {
         }
     }
 
-    fn config() -> EquipmentConfig {
-        EquipmentConfig {
-            name: "Baseboard".to_string(),
-            ochre_class: "Electric Baseboard".to_string(),
-            payload: crate::config::ConfigPayload::Raw {
-                data: HashMap::new(),
+    fn config(capacity_w: f64) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "Baseboard".to_string(),
+            "Electric Baseboard".to_string(),
+            ElectricBaseboardConfig {
+                zone_id: Some(1),
+                capacity_w,
+                ..ElectricBaseboardConfig::default()
             },
-        }
+        )
     }
 
     #[test]
     fn baseboard_forces_dse_to_one_and_writes_direct_zone_heat() {
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 3_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("duct_dse".to_string(), 0.2.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
-
+        let cfg = config(3_000.0);
         let mut eq = ElectricBaseboard::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -333,20 +340,7 @@ mod tests {
 
     #[test]
     fn state_round_trip_preserves_mode() {
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 3_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
-
+        let cfg = config(3_000.0);
         let mut eq = ElectricBaseboard::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -371,12 +365,33 @@ mod tests {
     }
 
     #[test]
+    fn raw_config_rejected() {
+        let cfg = EquipmentConfig {
+            name: "BB".to_string(),
+            ochre_class: "Electric Baseboard".to_string(),
+            payload: crate::config::ConfigPayload::Raw {
+                data: std::collections::HashMap::new(),
+            },
+        };
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let result = eq.init(&cfg, &env(18.0));
+        assert!(result.is_err(), "Electric Baseboard must reject raw config");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("requires typed config")
+        );
+    }
+
+    #[test]
     fn registry_includes_baseboard_alias_and_thermal_stage() {
-        let mut registry = EquipmentRegistry::new();
-        register_with_registry(&mut registry);
+        let registry = EquipmentRegistry::new();
         assert!(registry.get("Electric Baseboard").is_some());
 
-        let eq = registry.create("Electric Baseboard", config()).unwrap();
+        let eq = registry
+            .create("Electric Baseboard", config(5_000.0))
+            .unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
     }
 }

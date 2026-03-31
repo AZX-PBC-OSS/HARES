@@ -2,6 +2,13 @@
 
 use serde_json::{Map, Value, json};
 
+use hares_equipment::EquipmentConfig;
+use hares_equipment::hvac::cooling_config::{CentralAirConditionerConfig, RoomAcConfig};
+use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+use hares_equipment::hvac::heating_config::{
+    DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
+    GasBoilerConfig, GasFurnaceConfig,
+};
 use hares_types::FuelType;
 
 use super::HpxmlError;
@@ -138,6 +145,636 @@ fn compute_duct_dse_params(building: &Building) -> Map<String, Value> {
     params
 }
 
+/// Compute a `DuctConfig` from the duct parameter map produced by
+/// `compute_duct_dse_params`.
+///
+/// DSE is pre-computed here using ASHRAE 152 so that typed-config equipment
+/// init paths (which only see `DuctConfig.dse_heat/dse_cool`) apply duct
+/// losses correctly. Uses a default airflow based on equipment type conventions.
+///
+/// Returns `DuctConfig { dse_heat: None, dse_cool: None }` when no duct zone
+/// type was recorded (i.e., ducts are in conditioned space or absent).
+fn compute_duct_config(
+    duct_params: &Map<String, Value>,
+    capacity_w: f64,
+    is_heating: bool,
+    n_speeds: u8,
+    is_heat_pump: bool,
+) -> DuctConfig {
+    use hares_physics::ashrae152::{Ashrae152ZoneType, DuctDseInput, calculate_dse};
+    use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+
+    let Some(zone_type_str) = duct_params.get("duct_zone_type").and_then(Value::as_str) else {
+        return DuctConfig::default();
+    };
+
+    let zone_type = match zone_type_str {
+        "attic_vented" => Ashrae152ZoneType::AtticVented,
+        "attic_vented_radiant_barrier" => Ashrae152ZoneType::AtticVentedRadiantBarrier,
+        "attic_unvented" => Ashrae152ZoneType::AtticUnvented,
+        "attic_unvented_radiant_barrier" => Ashrae152ZoneType::AtticUnventedRadiantBarrier,
+        "garage" => Ashrae152ZoneType::Garage,
+        "unvent_unins_crawlspace" => Ashrae152ZoneType::UnventUninsulatedCrawlspace,
+        "unvent_crawlspace_ins_floor_wall" => Ashrae152ZoneType::UnventCrawlspaceInsFloorWall,
+        "unvent_crawlspace_ins_floor" => Ashrae152ZoneType::UnventCrawlspaceInsFloor,
+        "vent_unins_crawlspace" => Ashrae152ZoneType::VentUninsulatedCrawlspace,
+        "vent_crawlspace_ins_floor_wall" => Ashrae152ZoneType::VentCrawlspaceInsFloorWall,
+        "vent_crawlspace_ins_floor" => Ashrae152ZoneType::VentCrawlspaceInsFloor,
+        "unins_basement" => Ashrae152ZoneType::UninsulatedBasement,
+        "basement_ins_walls" => Ashrae152ZoneType::BasementInsWalls,
+        "basement_ins_ceiling" => Ashrae152ZoneType::BasementInsCeiling,
+        "under_slab" => Ashrae152ZoneType::UnderSlab,
+        "ext_walls" => Ashrae152ZoneType::ExteriorWalls,
+        _ => return DuctConfig::default(),
+    };
+
+    let lat = duct_params
+        .get("duct_latitude_deg")
+        .and_then(Value::as_f64)
+        .unwrap_or(40.0);
+    let lon = duct_params
+        .get("duct_longitude_deg")
+        .and_then(Value::as_f64)
+        .unwrap_or(-100.0);
+    let house_vol = duct_params
+        .get("duct_house_volume_m3")
+        .and_then(Value::as_f64)
+        .unwrap_or(400.0);
+    let supply_leak = duct_params
+        .get("duct_supply_leakage_frac")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let supply_area = duct_params
+        .get("duct_supply_area_m2")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let supply_r = duct_params
+        .get("duct_supply_r_m2_k_w")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let return_leak = duct_params
+        .get("duct_return_leakage_frac")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let return_area = duct_params
+        .get("duct_return_area_m2")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let return_r = duct_params
+        .get("duct_return_r_m2_k_w")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+
+    if capacity_w <= 0.0 {
+        return DuctConfig::default();
+    }
+
+    let cfm_per_ton = if is_heating { 350.0_f64 } else { 400.0_f64 };
+    let fan_flow_m3_s = capacity_w * (cfm_per_ton * CFM_TO_M3_S / W_PER_TON);
+
+    let input = DuctDseInput {
+        zone_type,
+        latitude_deg: lat,
+        longitude_deg: lon,
+        house_volume_m3: house_vol,
+        supply_leakage_frac: supply_leak,
+        supply_area_m2: supply_area,
+        supply_r_nominal_m2_k_w: supply_r,
+        return_leakage_frac: return_leak,
+        return_area_m2: return_area,
+        return_r_nominal_m2_k_w: return_r,
+        is_heating,
+        capacity_w,
+        fan_flow_m3_s,
+        n_speeds,
+        capacity_low_w: None,
+        fan_flow_low_m3_s: None,
+        is_heat_pump,
+    };
+
+    let dse = calculate_dse(&input).clamp(0.0, 1.0);
+
+    if is_heating {
+        DuctConfig {
+            dse_heat: Some(dse),
+            ..DuctConfig::default()
+        }
+    } else {
+        DuctConfig {
+            dse_cool: Some(dse),
+            ..DuctConfig::default()
+        }
+    }
+}
+
+/// Extract AFUE from the params map, trying both the bare AFUE tag path
+/// and the AnnualHeatingEfficiency path.
+fn afue_from_params(params: &Map<String, Value>) -> Option<f64> {
+    params
+        .get("efficiency_afue")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            let units = params
+                .get("heating_efficiency_units")
+                .and_then(Value::as_str)?;
+            if units.eq_ignore_ascii_case("AFUE") {
+                params.get("heating_efficiency").and_then(Value::as_f64)
+            } else {
+                None
+            }
+        })
+}
+
+/// Extract COP/efficiency for resistance heaters from the params map.
+fn resistance_efficiency_from_params(params: &Map<String, Value>) -> f64 {
+    params
+        .get("heating_efficiency")
+        .and_then(Value::as_f64)
+        .or_else(|| params.get("efficiency_cop").and_then(Value::as_f64))
+        .unwrap_or(1.0)
+}
+
+/// Extract SEER from the params map.
+fn seer_from_params(params: &Map<String, Value>) -> Option<f64> {
+    params
+        .get("efficiency_seer")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            let units = params
+                .get("cooling_efficiency_units")
+                .and_then(Value::as_str)?;
+            if units.eq_ignore_ascii_case("SEER") {
+                params.get("cooling_efficiency").and_then(Value::as_f64)
+            } else {
+                None
+            }
+        })
+}
+
+/// Extract EER from the params map.
+fn eer_from_params(params: &Map<String, Value>) -> Option<f64> {
+    params
+        .get("efficiency_eer")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            let units = params
+                .get("cooling_efficiency_units")
+                .and_then(Value::as_str)?;
+            if units.eq_ignore_ascii_case("EER") || units.eq_ignore_ascii_case("EER2") {
+                params.get("cooling_efficiency").and_then(Value::as_f64)
+            } else {
+                None
+            }
+        })
+}
+
+/// Extract HSPF from the params map.
+fn hspf_from_params(params: &Map<String, Value>) -> Option<f64> {
+    params
+        .get("efficiency_hspf")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            let units = params
+                .get("heating_efficiency_units")
+                .and_then(Value::as_str)?;
+            if units.eq_ignore_ascii_case("HSPF") {
+                params.get("heating_efficiency").and_then(Value::as_f64)
+            } else {
+                None
+            }
+        })
+}
+
+/// Extract number_of_speeds from params (defaults to 1).
+fn n_speeds_from_params(params: &Map<String, Value>) -> u8 {
+    params
+        .get("number_of_speeds")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as u8
+}
+
+fn extract_stage_values(params: &Map<String, Value>, prefix: &str) -> Option<Vec<f64>> {
+    let mut out = Vec::new();
+    for i in 0..32 {
+        let key = format!("{prefix}_{i}");
+        let Some(v) = params.get(&key).and_then(Value::as_f64) else {
+            break;
+        };
+        out.push(v);
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// Extract fan_power_w from params (optional).
+fn fan_power_from_params(params: &Map<String, Value>) -> Option<f64> {
+    params.get("fan_power_w").and_then(Value::as_f64)
+}
+
+/// Build a `GasFurnaceConfig` typed config from the resolved params map.
+/// Returns `None` when required fields are missing (capacity_w).
+/// AFUE defaults to 0.80 when not specified in the HPXML.
+fn try_build_gas_furnace_config(
+    name: &str,
+    params: &Map<String, Value>,
+    duct_params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let afue = afue_from_params(params).unwrap_or(0.80);
+    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+    let n_speeds = n_speeds_from_params(params);
+    let fan_power_w = fan_power_from_params(params);
+    let ducts = compute_duct_config(duct_params, capacity_w, true, n_speeds, false);
+
+    let cfg = GasFurnaceConfig {
+        equipment_id: None,
+        zone_id: None,
+        afue,
+        capacity_w,
+        number_of_speeds: n_speeds,
+        fan_power_w,
+        ducts,
+        ..GasFurnaceConfig::default()
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Furnace".to_string(),
+        cfg,
+    ))
+}
+
+/// Build an `ElectricFurnaceConfig` typed config.
+fn try_build_electric_furnace_config(
+    name: &str,
+    params: &Map<String, Value>,
+    duct_params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+    let heating_efficiency = resistance_efficiency_from_params(params);
+    let n_speeds = n_speeds_from_params(params);
+    let fan_power_w = fan_power_from_params(params);
+    let ducts = compute_duct_config(duct_params, capacity_w, true, n_speeds, false);
+
+    let cfg = ElectricFurnaceConfig {
+        equipment_id: None,
+        zone_id: None,
+        eir: heating_efficiency,
+        capacity_w,
+        number_of_speeds: n_speeds,
+        fan_power_w,
+        ducts,
+        ..ElectricFurnaceConfig::default()
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Furnace".to_string(),
+        cfg,
+    ))
+}
+
+/// Build a `GasBoilerConfig` typed config.
+/// AFUE defaults to 0.80 when not specified in the HPXML.
+fn try_build_gas_boiler_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+    let afue = afue_from_params(params).unwrap_or(0.80);
+    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+    let n_speeds = n_speeds_from_params(params);
+    let fan_power_w = fan_power_from_params(params);
+
+    let flow_rate_kg_s = params
+        .get("flow_rate_kg_s")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.5);
+    let return_temp_c = params
+        .get("return_temp_c")
+        .and_then(Value::as_f64)
+        .unwrap_or(40.0);
+
+    let cfg = GasBoilerConfig {
+        equipment_id: None,
+        zone_id: None,
+        loop_id: None,
+        afue,
+        capacity_w,
+        number_of_speeds: n_speeds,
+        fan_power_w,
+        flow_rate_kg_s,
+        return_temp_c,
+        fluid_type: hares_types::FluidType::Water,
+        ..GasBoilerConfig::default()
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Boiler".to_string(),
+        cfg,
+    ))
+}
+
+/// Build an `ElectricBoilerConfig` typed config.
+fn try_build_electric_boiler_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+    let heating_efficiency = resistance_efficiency_from_params(params);
+    let n_speeds = n_speeds_from_params(params);
+    let fan_power_w = fan_power_from_params(params);
+
+    let flow_rate_kg_s = params
+        .get("flow_rate_kg_s")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.5);
+    let return_temp_c = params
+        .get("return_temp_c")
+        .and_then(Value::as_f64)
+        .unwrap_or(40.0);
+
+    let cfg = ElectricBoilerConfig {
+        equipment_id: None,
+        zone_id: None,
+        loop_id: None,
+        eir: heating_efficiency,
+        capacity_w,
+        number_of_speeds: n_speeds,
+        fan_power_w,
+        flow_rate_kg_s,
+        return_temp_c,
+        fluid_type: hares_types::FluidType::Water,
+        ..ElectricBoilerConfig::default()
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Boiler".to_string(),
+        cfg,
+    ))
+}
+
+/// Build an `ElectricBaseboardConfig` typed config.
+fn try_build_electric_baseboard_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+
+    let cfg = ElectricBaseboardConfig {
+        equipment_id: None,
+        zone_id: None,
+        capacity_w,
+        eir: 1.0,
+        ..ElectricBaseboardConfig::default()
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Baseboard".to_string(),
+        cfg,
+    ))
+}
+
+/// Build a `CentralAirConditionerConfig` typed config.
+fn try_build_central_ac_config(
+    name: &str,
+    params: &Map<String, Value>,
+    duct_params: &Map<String, Value>,
+) -> Option<EquipmentConfig> {
+    let seer = seer_from_params(params)?;
+    let capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64)?;
+    let n_speeds = n_speeds_from_params(params);
+    let fan_power_w = fan_power_from_params(params);
+    let shr = params.get("shr").and_then(Value::as_f64);
+    let system_type = params
+        .get("system_type")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let startup_cd = params.get("startup_cd").and_then(Value::as_f64);
+    let fraction_load_served = params.get("fraction_load_served").and_then(Value::as_f64);
+    let duct = compute_duct_config(duct_params, capacity_w, false, n_speeds, false);
+
+    let cfg = CentralAirConditionerConfig {
+        equipment_id: None,
+        zone_id: None,
+        capacity_w,
+        seer,
+        shr,
+        number_of_speeds: n_speeds,
+        stage_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
+        stage_eirs: extract_stage_values(params, "cooling_eir_stage"),
+        stage_shrs: extract_stage_values(params, "shr"),
+        fan_power_w,
+        fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
+        fraction_load_served,
+        duct,
+        system_type,
+        startup_cd,
+        biquadratic_x1_min: None,
+        biquadratic_x1_max: None,
+        biquadratic_x2_min: None,
+        biquadratic_x2_max: None,
+        ff_min: None,
+        ff_max: None,
+        plf_min: None,
+        plf_max: None,
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Air Conditioner".to_string(),
+        cfg,
+    ))
+}
+
+/// Build a `RoomAcConfig` typed config.
+fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+    let capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64)?;
+    // Room ACs are rated with EER, not SEER. SEER cannot be substituted for EER
+    // because the test conditions and cycling correction factors differ; treating
+    // SEER as EER would overestimate efficiency by ~10–15%.
+    let eer = eer_from_params(params)?;
+
+    let cfg = RoomAcConfig {
+        equipment_id: None,
+        zone_id: None,
+        capacity_w,
+        eer,
+        biquadratic_x1_min: None,
+        biquadratic_x1_max: None,
+        biquadratic_x2_min: None,
+        biquadratic_x2_max: None,
+        ff_min: None,
+        ff_max: None,
+        plf_min: None,
+        plf_max: None,
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Room AC".to_string(),
+        cfg,
+    ))
+}
+
+/// Build a `HeatPumpHeaterConfig` typed config from combined heat-pump params.
+fn try_build_heat_pump_heater_config(
+    name: &str,
+    params: &Map<String, Value>,
+    duct_params: &Map<String, Value>,
+    is_mini_split: bool,
+) -> Option<EquipmentConfig> {
+    let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
+    let cooling_capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64);
+    let n_speeds = if is_mini_split {
+        4
+    } else {
+        n_speeds_from_params(params)
+    };
+    let hspf = hspf_from_params(params);
+    let seer = seer_from_params(params);
+    let shr = params.get("shr").and_then(Value::as_f64);
+    let fan_power_w = fan_power_from_params(params);
+    let backup_capacity_w = params.get("backup_capacity_w").and_then(Value::as_f64);
+    let backup_eir = params.get("backup_eir").and_then(Value::as_f64);
+    let backup_fuel = params
+        .get("backup_fuel")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let fraction_heating_load_served = params
+        .get("fraction_heating_load_served")
+        .and_then(Value::as_f64);
+    let fraction_cooling_load_served = params
+        .get("fraction_cooling_load_served")
+        .and_then(Value::as_f64);
+
+    let ref_cap = heating_capacity_w.or(cooling_capacity_w).unwrap_or(0.0);
+    let duct = if is_mini_split {
+        DuctConfig::default()
+    } else {
+        compute_duct_config(duct_params, ref_cap, true, n_speeds, true)
+    };
+
+    let ochre_class = if is_mini_split {
+        "MSHP Heater"
+    } else {
+        "ASHP Heater"
+    };
+
+    let cfg = HeatPumpHeaterConfig {
+        equipment_id: None,
+        zone_id: None,
+        heating_capacity_w,
+        hspf,
+        stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
+        stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
+        backup_fuel,
+        backup_capacity_w,
+        backup_eir,
+        fraction_heating_load_served,
+        cooling_capacity_w,
+        seer,
+        stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
+        stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
+        stage_shrs: extract_stage_values(params, "shr"),
+        fraction_cooling_load_served,
+        number_of_speeds: n_speeds,
+        is_mini_split,
+        shr,
+        fan_power_w,
+        fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
+        duct,
+        biquadratic_x1_min: None,
+        biquadratic_x1_max: None,
+        biquadratic_x2_min: None,
+        biquadratic_x2_max: None,
+        ff_min: None,
+        ff_max: None,
+        plf_min: None,
+        plf_max: None,
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        ochre_class.to_string(),
+        cfg,
+    ))
+}
+
+/// Build a `HeatPumpCoolerConfig` typed config from combined heat-pump params.
+fn try_build_heat_pump_cooler_config(
+    name: &str,
+    params: &Map<String, Value>,
+    duct_params: &Map<String, Value>,
+    is_mini_split: bool,
+) -> Option<EquipmentConfig> {
+    let heating_capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64);
+    let cooling_capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64);
+    let n_speeds = if is_mini_split {
+        4
+    } else {
+        n_speeds_from_params(params)
+    };
+    let hspf = hspf_from_params(params);
+    let seer = seer_from_params(params);
+    let shr = params.get("shr").and_then(Value::as_f64);
+    let fan_power_w = fan_power_from_params(params);
+    let backup_capacity_w = params.get("backup_capacity_w").and_then(Value::as_f64);
+    let backup_eir = params.get("backup_eir").and_then(Value::as_f64);
+    let backup_fuel = params
+        .get("backup_fuel")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let fraction_heating_load_served = params
+        .get("fraction_heating_load_served")
+        .and_then(Value::as_f64);
+    let fraction_cooling_load_served = params
+        .get("fraction_cooling_load_served")
+        .and_then(Value::as_f64);
+
+    let ref_cap = cooling_capacity_w.or(heating_capacity_w).unwrap_or(0.0);
+    let duct = if is_mini_split {
+        DuctConfig::default()
+    } else {
+        compute_duct_config(duct_params, ref_cap, false, n_speeds, true)
+    };
+
+    let ochre_class = if is_mini_split {
+        "MSHP Cooler"
+    } else {
+        "ASHP Cooler"
+    };
+
+    let cfg = HeatPumpCoolerConfig {
+        equipment_id: None,
+        zone_id: None,
+        heating_capacity_w,
+        hspf,
+        stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
+        stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
+        backup_fuel,
+        backup_capacity_w,
+        backup_eir,
+        fraction_heating_load_served,
+        cooling_capacity_w,
+        seer,
+        stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
+        stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
+        stage_shrs: extract_stage_values(params, "shr"),
+        fraction_cooling_load_served,
+        number_of_speeds: n_speeds,
+        is_mini_split,
+        shr,
+        fan_power_w,
+        fan_power_w_per_cfm: params.get("fan_power_w_per_cfm").and_then(Value::as_f64),
+        duct,
+        biquadratic_x1_min: None,
+        biquadratic_x1_max: None,
+        biquadratic_x2_min: None,
+        biquadratic_x2_max: None,
+        ff_min: None,
+        ff_max: None,
+        plf_min: None,
+        plf_max: None,
+    };
+    Some(EquipmentConfig::from_typed(
+        name.to_string(),
+        ochre_class.to_string(),
+        cfg,
+    ))
+}
+
 /// OCHRE `get_duct_info` threshold for "insulated floor" (IP R-value 5.3 → SI).
 ///
 /// OCHRE uses `fnd_ceil_ins > 5.3` (ft²·h·°F/Btu). Converting: 5.3 / 5.678 ≈ 0.934 m²·K/W.
@@ -256,8 +893,6 @@ pub(super) fn resolve_hvac(
         return Ok(());
     };
 
-    // Parse thermostat setpoints from HVACControl for injection into HVAC equipment configs.
-    // Each HVAC equipment self-manages its setpoint schedule using these 24h arrays.
     let setpoint_params = parse_hvac_setpoint_params(details);
     let duct_params = compute_duct_dse_params(building);
     let basement_params = compute_basement_params(building);
@@ -271,7 +906,7 @@ pub(super) fn resolve_hvac(
         let system_type = parse_named_type(heating, "HeatingSystemType").ok_or_else(|| {
             HpxmlError::Parse("HeatingSystem is missing required HeatingSystemType element".into())
         })?;
-        let name = canonical_hvac_heating_name(&system_type, fuel);
+        let name = canonical_hvac_heating_name(&system_type, fuel)?;
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, heating, "HeatingCapacity");
         insert_capacity_w(
@@ -312,13 +947,23 @@ pub(super) fn resolve_hvac(
             params.insert(k.clone(), v.clone());
         }
         // OCHRE only applies startup_cd for heat pump heaters (ASHP/MSHP),
-        // not for furnaces, boilers, or baseboard (CW-001 F1).
+        // not for furnaces, boilers, or baseboard.
         if matches!(name.as_str(), "ASHP Heater" | "MSHP Heater") {
             insert_startup_degradation(&mut params, &name, true);
         } else {
             params.insert("startup_cd".to_string(), json!(0.0));
         }
-        specs.push(build_spec(name, fuel, params, defaults));
+        let typed_config = match name.as_str() {
+            "Gas Furnace" => try_build_gas_furnace_config(&name, &params, &duct_params),
+            "Electric Furnace" => try_build_electric_furnace_config(&name, &params, &duct_params),
+            "Gas Boiler" => try_build_gas_boiler_config(&name, &params),
+            "Electric Boiler" => try_build_electric_boiler_config(&name, &params),
+            "Electric Baseboard" => try_build_electric_baseboard_config(&name, &params),
+            _ => None,
+        };
+        let mut spec = build_spec(name, fuel, params, defaults);
+        spec.typed_config = typed_config;
+        specs.push(spec);
     }
 
     for cooling in descendants_named(hvac, "CoolingSystem") {
@@ -330,7 +975,7 @@ pub(super) fn resolve_hvac(
         let system_type = child_text(cooling, "CoolingSystemType").ok_or_else(|| {
             HpxmlError::Parse("CoolingSystem is missing required CoolingSystemType element".into())
         })?;
-        let name = canonical_hvac_cooling_name(&system_type, fuel);
+        let name = canonical_hvac_cooling_name(&system_type, fuel)?;
         let mut params = Map::new();
         insert_capacity_kbtu_h(&mut params, cooling, "CoolingCapacity");
         insert_capacity_w(
@@ -372,7 +1017,14 @@ pub(super) fn resolve_hvac(
                 params.insert(k.clone(), v.clone());
             }
         }
-        specs.push(build_spec(name, fuel, params, defaults));
+        let typed_config = match name.as_str() {
+            "Air Conditioner" => try_build_central_ac_config(&name, &params, &duct_params),
+            "Room AC" => try_build_room_ac_config(&name, &params),
+            _ => None,
+        };
+        let mut spec = build_spec(name, fuel, params, defaults);
+        spec.typed_config = typed_config;
+        specs.push(spec);
     }
 
     for heat_pump in descendants_named(hvac, "HeatPump") {
@@ -460,6 +1112,13 @@ pub(super) fn resolve_hvac(
             child_text(heat_pump, "CompressorType").as_deref(),
         );
         apply_default_hvac_speed_fallback(&mut params);
+        if heat_pump_type == "mini-split" {
+            params.insert("number_of_speeds".to_string(), json!(4));
+            params.insert(
+                "speed_control_mode".to_string(),
+                Value::String("variable_speed".to_string()),
+            );
+        }
 
         if let Some(shr) = child_f64(heat_pump, "CoolingSensibleHeatFraction") {
             params.insert("shr".to_string(), json!(shr));
@@ -487,6 +1146,7 @@ pub(super) fn resolve_hvac(
         }
 
         if let Some((heater_name, cooler_name)) = split {
+            let is_mini_split = heat_pump_type == "mini-split";
             let mut heater_params = params.clone();
             let mut cooler_params = params;
             for (k, v) in &basement_params {
@@ -497,18 +1157,36 @@ pub(super) fn resolve_hvac(
             insert_startup_degradation(&mut heater_params, heater_name, true);
             insert_startup_degradation(&mut cooler_params, cooler_name, false);
 
-            specs.push(build_spec(
+            let heater_typed = try_build_heat_pump_heater_config(
+                heater_name,
+                &heater_params,
+                &duct_params,
+                is_mini_split,
+            );
+            let cooler_typed = try_build_heat_pump_cooler_config(
+                cooler_name,
+                &cooler_params,
+                &duct_params,
+                is_mini_split,
+            );
+
+            let mut heater_spec = build_spec(
                 heater_name.to_string(),
                 FuelType::Electric,
                 heater_params,
                 defaults,
-            ));
-            specs.push(build_spec(
+            );
+            heater_spec.typed_config = heater_typed;
+            specs.push(heater_spec);
+
+            let mut cooler_spec = build_spec(
                 cooler_name.to_string(),
                 FuelType::Electric,
                 cooler_params,
                 defaults,
-            ));
+            );
+            cooler_spec.typed_config = cooler_typed;
+            specs.push(cooler_spec);
         }
     }
 
@@ -523,11 +1201,9 @@ fn is_heating_equipment(name: &str) -> bool {
             | "MSHP Heater"
             | "Gas Furnace"
             | "Electric Furnace"
-            | "Oil Furnace"
             | "Electric Baseboard"
             | "Gas Boiler"
             | "Electric Boiler"
-            | "Oil Boiler"
     )
 }
 
@@ -576,31 +1252,49 @@ fn parse_named_type(node: &XmlNode, tag: &str) -> Option<String> {
         .map(|child| child.name.clone())
 }
 
-fn canonical_hvac_heating_name(system_type: &str, fuel: FuelType) -> String {
+fn canonical_hvac_heating_name(
+    system_type: &str,
+    fuel: FuelType,
+) -> std::result::Result<String, HpxmlError> {
     let ty = system_type.trim();
     if matches!(ty, "IdealHVAC" | "Ideal HVAC" | "IdealHvac") {
-        return "Ideal HVAC".to_string();
+        return Ok("Ideal HVAC".to_string());
     }
-    match (ty, fuel) {
-        ("ElectricResistance", FuelType::Electric) => "Electric Baseboard".to_string(),
+    let name = match (ty, fuel) {
+        ("ElectricResistance", FuelType::Electric) => "Electric Baseboard",
         ("Furnace", FuelType::Electric)
         | ("WallFurnace", FuelType::Electric)
-        | ("FloorFurnace", FuelType::Electric) => "Electric Furnace".to_string(),
-        ("Boiler", FuelType::Electric) => "Electric Boiler".to_string(),
+        | ("FloorFurnace", FuelType::Electric) => "Electric Furnace",
+        ("Boiler", FuelType::Electric) => "Electric Boiler",
         ("Furnace", FuelType::Gas)
         | ("WallFurnace", FuelType::Gas)
-        | ("FloorFurnace", FuelType::Gas) => "Gas Furnace".to_string(),
-        ("Boiler", FuelType::Gas) => "Gas Boiler".to_string(),
-        _ => "Generic Heater".to_string(),
-    }
+        | ("FloorFurnace", FuelType::Gas) => "Gas Furnace",
+        ("Boiler", FuelType::Gas) => "Gas Boiler",
+        _ => {
+            return Err(HpxmlError::Parse(format!(
+                "unsupported HPXML heating system type/fuel combination: \
+                 HeatingSystemType='{ty}', fuel='{fuel:?}'"
+            )));
+        }
+    };
+    Ok(name.to_string())
 }
 
-fn canonical_hvac_cooling_name(system_type: &str, _fuel: FuelType) -> String {
-    match system_type.trim() {
-        "central air conditioner" => "Air Conditioner".to_string(),
-        "room air conditioner" => "Room AC".to_string(),
-        _ => "Generic Cooler".to_string(),
-    }
+fn canonical_hvac_cooling_name(
+    system_type: &str,
+    _fuel: FuelType,
+) -> std::result::Result<String, HpxmlError> {
+    let ty = system_type.trim();
+    let name = match ty {
+        "central air conditioner" => "Air Conditioner",
+        "room air conditioner" => "Room AC",
+        _ => {
+            return Err(HpxmlError::Parse(format!(
+                "unsupported HPXML cooling system type: CoolingSystemType='{ty}'"
+            )));
+        }
+    };
+    Ok(name.to_string())
 }
 
 fn insert_capacity_kbtu_h(params: &mut Map<String, Value>, node: &XmlNode, tag: &str) {
@@ -887,6 +1581,9 @@ fn apply_multispeed_parameters(
         params.insert(format!("{stage_cap_prefix}_{i}"), json!(cap_w));
         let cop = multispeed.cops[i].max(1e-6);
         params.insert(format!("{stage_eir_prefix}_{i}"), json!(1.0 / cop));
+        if !is_heating && i < multispeed.shrs.len() {
+            params.insert(format!("shr_{i}"), json!(multispeed.shrs[i]));
+        }
     }
 
     if let Some(curve_set) = curves {
@@ -1478,6 +2175,122 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Builder function integration tests
+    // -----------------------------------------------------------------------
+
+    fn minimal_furnace_params(afue: f64, capacity_w: f64) -> Map<String, Value> {
+        let mut p = Map::new();
+        p.insert("efficiency_afue".to_string(), json!(afue));
+        p.insert("heating_capacity_w".to_string(), json!(capacity_w));
+        p
+    }
+
+    fn minimal_central_ac_params(seer: f64, capacity_w: f64) -> Map<String, Value> {
+        let mut p = Map::new();
+        p.insert("efficiency_seer".to_string(), json!(seer));
+        p.insert("cooling_capacity_w".to_string(), json!(capacity_w));
+        p
+    }
+
+    #[test]
+    fn gas_furnace_builder_produces_typed_config_with_correct_afue() {
+        let params = minimal_furnace_params(0.96, 10_000.0);
+        let duct_params = Map::new();
+        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
+            .expect("gas furnace builder must succeed with valid params");
+        assert!(ec.is_typed(), "EquipmentConfig must be typed");
+        use hares_equipment::hvac::heating_config::GasFurnaceConfig;
+        let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
+        assert!(
+            (cfg.afue - 0.96).abs() < 1e-12,
+            "afue must be 0.96, got {}",
+            cfg.afue
+        );
+        assert!((cfg.capacity_w - 10_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn central_ac_builder_produces_typed_config_with_correct_seer() {
+        let params = minimal_central_ac_params(16.0, 12_000.0);
+        let duct_params = Map::new();
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &duct_params)
+            .expect("central AC builder must succeed with valid params");
+        assert!(ec.is_typed(), "EquipmentConfig must be typed");
+        assert_eq!(
+            ec.ochre_class, "Air Conditioner",
+            "ochre_class must match registry key"
+        );
+        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+        let cfg: CentralAirConditionerConfig = ec
+            .typed()
+            .expect("must deserialize to CentralAirConditionerConfig");
+        assert!(
+            (cfg.seer - 16.0).abs() < 1e-12,
+            "seer must be 16.0, got {}",
+            cfg.seer
+        );
+        assert!((cfg.capacity_w - 12_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn room_ac_builder_returns_none_when_only_seer_available() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(3_500.0));
+        params.insert("efficiency_seer".to_string(), json!(12.0));
+        // No EER present — must return None rather than silently substituting SEER.
+        let result = try_build_room_ac_config("Room AC", &params);
+        assert!(
+            result.is_none(),
+            "room AC builder must not accept SEER as EER substitute"
+        );
+    }
+
+    #[test]
+    fn room_ac_builder_succeeds_with_eer() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(3_500.0));
+        params.insert("efficiency_eer".to_string(), json!(10.5));
+        let ec = try_build_room_ac_config("Room AC", &params)
+            .expect("room AC builder must succeed when EER is present");
+        assert!(ec.is_typed());
+        use hares_equipment::hvac::cooling_config::RoomAcConfig;
+        let cfg: RoomAcConfig = ec.typed().expect("must deserialize to RoomAcConfig");
+        assert!((cfg.eer - 10.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn heat_pump_cooler_builder_forces_four_speeds_for_minisplit() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
+        params.insert("efficiency_seer".to_string(), json!(18.0));
+        params.insert("number_of_speeds".to_string(), json!(1));
+        let ec = try_build_heat_pump_cooler_config("MSHP Cooler", &params, &Map::new(), true)
+            .expect("MSHP cooler typed config should be built");
+
+        use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
+        let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
+        assert!(cfg.is_mini_split);
+        assert_eq!(cfg.number_of_speeds, 4);
+    }
+
+    #[test]
+    fn heat_pump_cooler_builder_propagates_stage_shrs() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
+        params.insert("efficiency_seer".to_string(), json!(18.0));
+        params.insert("number_of_speeds".to_string(), json!(2));
+        params.insert("shr_0".to_string(), json!(0.81));
+        params.insert("shr_1".to_string(), json!(0.74));
+        let ec = try_build_heat_pump_cooler_config("ASHP Cooler", &params, &Map::new(), false)
+            .expect("ASHP cooler typed config should be built");
+
+        use hares_equipment::hvac::heat_pump_config::HeatPumpCoolerConfig;
+        let cfg: HeatPumpCoolerConfig = ec.typed().expect("typed cooler config");
+        assert_eq!(cfg.number_of_speeds, 2);
+        assert_eq!(cfg.stage_shrs, Some(vec![0.81, 0.74]));
+    }
+
     #[test]
     fn basement_params_returns_zone_id_and_ratio_for_finished_basement() {
         // Zones sorted: Conditioned(idx=0) → ZoneId(1), Foundation(idx=1) → ZoneId(2).
@@ -1496,6 +2309,202 @@ mod tests {
         assert!(
             (ratio - 0.2).abs() < 1e-12,
             "OCHRE default basement airflow ratio is 0.2, got {ratio}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end AFUE / SEER propagation tests
+    // -----------------------------------------------------------------------
+
+    fn make_env() -> hares_types::EnvironmentState {
+        use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+        use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
+        hares_types::EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 18.0,
+                humidity_ratio: 0.008,
+                relative_humidity: 0.45,
+                wet_bulb_c: 14.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 5.0,
+                outdoor_humidity_ratio: 0.003,
+                pressure_kpa: 101.325,
+                ..WeatherState::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    #[test]
+    fn gas_furnace_afue_propagates_end_to_end() {
+        use hares_equipment::Equipment;
+        use hares_equipment::GasFurnaceConfig;
+        use hares_equipment::hvac::furnace::GasFurnace;
+        use hares_types::{
+            ControlSignal, PortSlots, ThermalAccumulator, ZoneId, telemetry_keys as tk,
+        };
+
+        let mut params = Map::new();
+        params.insert("efficiency_afue".to_string(), json!(0.96));
+        params.insert("heating_capacity_w".to_string(), json!(12_000.0));
+        // Zero fan power so the fuel/thermal ratio equals exactly 1/AFUE.
+        params.insert("fan_power_w".to_string(), json!(0.0));
+
+        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &Map::new())
+            .expect("try_build_gas_furnace_config must succeed with AFUE and capacity");
+
+        let typed_cfg: GasFurnaceConfig = ec
+            .typed()
+            .expect("config must deserialize as GasFurnaceConfig");
+        assert!(
+            (typed_cfg.afue - 0.96).abs() < 1e-12,
+            "AFUE must round-trip: expected 0.96, got {}",
+            typed_cfg.afue
+        );
+
+        // Verify the equipment's step produces the correct fuel/thermal ratio.
+        let env = make_env();
+        let mut eq = GasFurnace::new(ec.clone());
+        eq.init(&ec, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let _ = eq.apply_control_unchecked(&ControlSignal::IdealCapacity {
+            capacity_w: f64::MAX,
+        });
+        eq.update_control(&env);
+        eq.step(&env, std::time::Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let thermal_w = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0);
+        let fuel_w = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(0.0);
+        assert!(thermal_w > 0.0, "thermal output must be positive");
+        assert!(fuel_w > 0.0, "fuel input must be positive");
+        let ratio = fuel_w / thermal_w;
+        assert!(
+            (ratio - 1.0 / 0.96).abs() < 0.01,
+            "fuel/thermal ratio must equal 1/AFUE=1/0.96≈{:.4}, got {ratio:.4}",
+            1.0 / 0.96
+        );
+    }
+
+    #[test]
+    fn central_ac_seer16_eir_propagates_end_to_end() {
+        use hares_equipment::Equipment;
+        use hares_equipment::hvac::air_conditioner::AirConditioner;
+        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+        use hares_types::{
+            ControlSignal, PortSlots, ThermalAccumulator, ZoneId, telemetry_keys as tk,
+        };
+
+        let mut params = Map::new();
+        params.insert("efficiency_seer".to_string(), json!(16.0));
+        params.insert("cooling_capacity_w".to_string(), json!(10_000.0));
+
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &Map::new())
+            .expect("try_build_central_ac_config must succeed with SEER and capacity");
+
+        let typed_cfg: CentralAirConditionerConfig = ec
+            .typed()
+            .expect("config must deserialize as CentralAirConditionerConfig");
+        assert!(
+            (typed_cfg.seer - 16.0).abs() < 1e-12,
+            "SEER must round-trip: expected 16.0, got {}",
+            typed_cfg.seer
+        );
+
+        // Build and init the equipment object.
+        let mut eq = AirConditioner::new(ec.clone());
+        // AHRI 210/240 A-test rated conditions: indoor DB=26.67°C WB=19.44°C,
+        // outdoor DB=35°C. At these conditions the EIR biquadratic ratio ≈ 1.0.
+        use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+        use hares_types::{GridState, WeatherState, ZoneState};
+        let env = hares_types::EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: 26.67,
+                humidity_ratio: 0.011_16,
+                relative_humidity: 0.50,
+                wet_bulb_c: 19.44,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 35.0,
+                outdoor_humidity_ratio: 0.010,
+                pressure_kpa: 101.325,
+                ..WeatherState::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 7, 1, 14, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        };
+        eq.init(&ec, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let _ = eq.apply_control_unchecked(&ControlSignal::IdealCapacity {
+            capacity_w: f64::MAX,
+        });
+        eq.update_control(&env);
+        eq.step(&env, std::time::Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let sensible_w = eq.telemetry().get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0);
+        let latent_w = eq.telemetry().get(tk::LATENT_COOLING_W).unwrap_or(0.0);
+        let total_cooling_w = sensible_w + latent_w;
+        // COP = total_cooling / compressor_only (AHRI convention: excludes fan).
+        // 1/COP = EIR_effective ≈ EIR_nominal * biquadratic_correction.
+        let cop = eq.telemetry().get(tk::COP).unwrap_or(0.0);
+        assert!(electric_kw > 0.0, "electric_kw must be positive");
+        assert!(
+            total_cooling_w > 0.0,
+            "total cooling (sensible+latent) must be positive"
+        );
+        assert!(cop > 0.0, "COP must be positive when cooling");
+
+        // EIR_nominal = 3.412141633 / SEER. The AHRI COP telemetry excludes fan power so
+        // 1/COP ≈ EIR. At AHRI rated conditions (WB=19.44, ODB=35) the biquadratic EIR
+        // correction evaluates to ≈ 1.02, so 1/COP ≈ EIR * 1.02 ≈ 0.217. A 10% tolerance
+        // confirms the SEER value round-tripped through the config and was applied by init.
+        let expected_eir = 3.412_141_633_f64 / 16.0;
+        let actual_eir = 1.0 / cop;
+        assert!(
+            (actual_eir - expected_eir).abs() / expected_eir < 0.10,
+            "1/COP at AHRI conditions must be within 10% of nominal EIR=3.412/SEER={expected_eir:.4}, got {actual_eir:.4}"
         );
     }
 }

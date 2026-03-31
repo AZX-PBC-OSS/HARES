@@ -162,16 +162,14 @@ pub(super) fn validate_optional_hour(field_name: &str, value: Option<f64>) -> cr
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvConfig {
-    /// Battery pack capacity (kWh).
-    pub battery_capacity_kwh: f64,
+    /// Equipment instance identifier.
+    pub equipment_id: Option<u32>,
+    /// Battery pack capacity (kWh). Resolvers map "battery_capacity_kwh" to this field.
+    pub capacity_kwh: f64,
     /// EVSE charging level: "L1" or "L2".
     pub charging_level: Option<String>,
     /// Maximum charging power (kW). Clamped to level-appropriate bounds.
-    ///
-    /// Callers should always set this field explicitly. The fallback default
-    /// (11.5 kW for L2) is not vehicle-size-aware and will overstate charging
-    /// capacity for most residential vehicles.
-    pub max_charging_power_kw: Option<f64>,
+    pub max_charging_power_kw: f64,
     /// AC→DC onboard charger efficiency [0, 1].
     pub charging_efficiency: Option<f64>,
     /// L1 circuit current (A). Only used when charging_level = "L1".
@@ -233,9 +231,14 @@ impl EquipmentTypedConfig for EvConfig {
 impl EvConfig {
     /// Validate all fields for physical plausibility.
     pub fn validate(&self) -> crate::Result<()> {
-        if !self.battery_capacity_kwh.is_finite() || self.battery_capacity_kwh <= 0.0 {
+        if !self.capacity_kwh.is_finite() || self.capacity_kwh <= 0.0 {
             return Err(HaresError::Equipment(
-                "EV battery_capacity_kwh must be finite and > 0".to_string(),
+                "EV capacity_kwh must be finite and > 0".to_string(),
+            ));
+        }
+        if !self.max_charging_power_kw.is_finite() || self.max_charging_power_kw <= 0.0 {
+            return Err(HaresError::Equipment(
+                "EV max_charging_power_kw must be finite and > 0".to_string(),
             ));
         }
         if let Some(eff) = self.charging_efficiency {

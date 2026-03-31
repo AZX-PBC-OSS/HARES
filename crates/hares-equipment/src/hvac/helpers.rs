@@ -1,8 +1,16 @@
 //! Shared helper utilities for HVAC equipment implementations.
+//!
+//! # Config access policy
+//!
+//! `get_f64`, `get_str`, `get_bool`, and `first_f64` must only be called from
+//! custom equipment or the Python adapter layer. Built-in equipment must use
+//! typed config structs (CFG-007 through CFG-015). CI enforces this via the
+//! `check-no-magic-config` Makefile target once all built-in equipment has been
+//! migrated.
 
 use hares_types::normalize_ascii;
 use hares_types::{
-    ControlSignal, EnvironmentState, FluidType, FuelType, HaresError, LoopId, OperatingMode, ZoneId,
+    ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, ZoneId,
 };
 
 use crate::EquipmentConfig;
@@ -115,15 +123,6 @@ pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
     }
 }
 
-pub fn parse_fluid_type(raw: Option<&str>) -> Option<FluidType> {
-    match normalize_ascii(raw?).as_str() {
-        "water" => Some(FluidType::Water),
-        "glycol" => Some(FluidType::Glycol),
-        "refrigerant" => Some(FluidType::Refrigerant),
-        _ => None,
-    }
-}
-
 pub fn operating_mode_code(mode: OperatingMode) -> f64 {
     match mode {
         OperatingMode::Off => 0.0,
@@ -193,12 +192,19 @@ pub fn apply_heating_control_unchecked(
 ///
 /// Checks for a direct `duct_dse` override first, then builds ASHRAE 152
 /// inputs from raw duct parameters and computes DSE dynamically.
+///
+/// `capacity_low_w` and `fan_flow_low_m3_s` must be `Some` for multi-speed
+/// systems so the ASHRAE 152 low-speed branch uses actual low-speed values.
+/// Passing `None` for a multi-speed system causes the low-speed branch to fall
+/// back to high-speed values, which underestimates duct losses.
 pub fn resolve_duct_dse(
     config: &EquipmentConfig,
     is_heating: bool,
     capacity_w: f64,
     fan_flow_m3_s: f64,
     n_speeds: u8,
+    capacity_low_w: Option<f64>,
+    fan_flow_low_m3_s: Option<f64>,
     is_heat_pump: bool,
 ) -> f64 {
     // Direct override takes priority.
@@ -250,8 +256,8 @@ pub fn resolve_duct_dse(
         capacity_w,
         fan_flow_m3_s,
         n_speeds,
-        capacity_low_w: None,
-        fan_flow_low_m3_s: None,
+        capacity_low_w,
+        fan_flow_low_m3_s,
         is_heat_pump,
     };
 

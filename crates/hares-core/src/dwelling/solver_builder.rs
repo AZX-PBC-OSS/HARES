@@ -863,8 +863,7 @@ pub(crate) fn build_default_solvers(
     // --- Mechanical ventilation from equipment specs ---
     if let Some(vent_spec) = equipment_specs.iter().find(|s| s.name == "Ventilation Fan") {
         let params = &vent_spec.parameters;
-        if let Some(cfm) = params.get("ventilation_rate_cfm").and_then(|v| v.as_f64()) {
-            let flow_m3_s = cfm * hares_physics::constants::CFM_TO_M3_S;
+        if let Some(flow_m3_s) = params.get("flow_rate_m3_s").and_then(|v| v.as_f64()) {
             thermal_cfg.ventilation_flow_m3_s = flow_m3_s;
         }
         if let Some(balanced) = params.get("balanced").and_then(|v| v.as_bool()) {

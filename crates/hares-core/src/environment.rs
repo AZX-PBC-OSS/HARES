@@ -13,8 +13,8 @@ use hares_physics::{
     water_mains::{Hemisphere, water_mains_temperature_c},
 };
 use hares_types::{
-    DomainId, EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
-    SCHEDULE_DOMAIN_ID,
+    DomainId, EnvironmentState, GridState, SCHEDULE_DOMAIN_ID, SurfaceIrradiance, WeatherState,
+    ZoneId, ZoneState,
 };
 use thiserror::Error;
 
@@ -589,6 +589,7 @@ impl EnvironmentManager {
             },
             custom_domains: Vec::new(),
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: clock.current_time(),
             time_res: clock.time_res,
             price_signal: Default::default(),
@@ -625,8 +626,9 @@ fn compute_annual_offset(
     let s = start_time.second() as u64;
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
 
-    // EPW files always have 8760 rows (365 × 24); use 365 days unconditionally
-    // to avoid an off-by-one-day offset in leap years (DT-010 F2).
+    // EPW files always have 8760 rows (365 × 24 hours); use 365 days unconditionally.
+    // Leap-year starts (ordinal0 ≥ 365) exceed 365*86400 and wrap via modulo,
+    // mapping Dec 31 to an equivalent position in the 365-row array.
     let year_secs = 365_u64 * 86400;
     let shifted = (seconds_into_year + year_secs - meta.midpoint_offset_secs as u64) % year_secs;
 
@@ -746,7 +748,7 @@ fn initial_zones(
         .map(|(idx, zone)| {
             use hares_io::hpxml::ZoneType;
             // Conditioned zones start at the HVAC setpoint.
-            // Foundation zones start at ground temperature (TS-001 F2).
+            // Foundation zones start at ground temperature.
             // Other unconditioned zones (attic, garage) start at outdoor temp.
             let temp = match zone.zone_type {
                 ZoneType::Conditioned => default_temp,
@@ -1316,9 +1318,8 @@ mod tests {
 
     /// compute_annual_offset: leap year Dec 31 23:00.
     /// With year_secs fixed at 365 days (EPW is non-leap), the Dec 31 ordinal0=365
-    /// overshoots year_secs and wraps around modulo 365*86400 = 23 (index 23).
-    /// This is expected post-fix (DT-010 F2): leap-year Dec dates wrap to earlier
-    /// in the year rather than going out-of-bounds.
+    /// overshoots year_secs and wraps around modulo 365*86400 to index 23.
+    /// Leap-year Dec dates wrap to an equivalent position in the 365-row array.
     #[test]
     fn annual_offset_leap_year_dec_31() {
         let meta = weather_series().meta;

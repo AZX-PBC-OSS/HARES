@@ -445,11 +445,27 @@ fn compare_metrics(
     if let (Some(a_hvac), Some(r_hvac)) = (
         annual_energy_for_prefixes(
             actual,
-            &["hvac", "air conditioner", "heat pump", "furnace", "ashp", "mshp", "baseboard"],
+            &[
+                "hvac",
+                "air conditioner",
+                "heat pump",
+                "furnace",
+                "ashp",
+                "mshp",
+                "baseboard",
+            ],
         ),
         annual_energy_for_prefixes(
             reference,
-            &["hvac", "air conditioner", "heat pump", "furnace", "ashp", "mshp", "baseboard"],
+            &[
+                "hvac",
+                "air conditioner",
+                "heat pump",
+                "furnace",
+                "ashp",
+                "mshp",
+                "baseboard",
+            ],
         ),
     ) {
         checks.push(check_relative_percent(
@@ -586,9 +602,17 @@ fn peak_hvac_power(columns: &BTreeMap<String, Vec<f64>>) -> Option<f64> {
         if !lowered.ends_with("electric power (kw)") {
             continue;
         }
-        if !["hvac", "air conditioner", "heat pump", "furnace", "ashp", "mshp", "baseboard"]
-            .iter()
-            .any(|needle| lowered.contains(needle))
+        if ![
+            "hvac",
+            "air conditioner",
+            "heat pump",
+            "furnace",
+            "ashp",
+            "mshp",
+            "baseboard",
+        ]
+        .iter()
+        .any(|needle| lowered.contains(needle))
         {
             continue;
         }

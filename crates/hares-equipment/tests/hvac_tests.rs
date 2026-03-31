@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
-use hares_equipment::{EquipmentConfig, EquipmentRegistry, config::ConfigValue};
+use hares_equipment::{
+    DuctConfig, ElectricBaseboardConfig, ElectricFurnaceConfig, EquipmentConfig, EquipmentRegistry,
+    GasFurnaceConfig, config::ConfigValue,
+};
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
     ThermalAccumulator, WeatherState, ZoneId, ZoneState,
@@ -48,6 +51,7 @@ fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
         },
         custom_domains: vec![],
         equipment_telemetry: std::collections::HashMap::new(),
+        equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
@@ -66,17 +70,38 @@ fn env_with_zone_temp_hot(temp_c: f64) -> EnvironmentState {
     e
 }
 
-fn heating_config(name: &str, class: &str) -> EquipmentConfig {
-    let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-    raw.insert("zone_id".to_string(), ConfigValue::Float(1.0));
-    raw.insert("capacity_w".to_string(), ConfigValue::Float(10_000.0));
-    raw.insert("heating_setpoint_c".to_string(), ConfigValue::Float(21.0));
-    raw.insert("cooling_setpoint_c".to_string(), ConfigValue::Float(27.0));
-    EquipmentConfig {
-        name: name.to_string(),
-        ochre_class: class.to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
+fn gas_furnace_config(name: &str) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            afue: 0.80,
+            capacity_w: 10_000.0,
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            ducts: DuctConfig::default(),
+            ..GasFurnaceConfig::default()
+        },
+    )
+}
+
+fn electric_furnace_config(name: &str) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Furnace".to_string(),
+        ElectricFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            eir: 1.0,
+            capacity_w: 10_000.0,
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            ducts: DuctConfig::default(),
+            ..ElectricFurnaceConfig::default()
+        },
+    )
 }
 
 fn ports_for_zone1() -> PortSlots {
@@ -93,7 +118,7 @@ fn ports_for_zone1() -> PortSlots {
 
 #[test]
 fn furnace_heats_when_below_setpoint() {
-    let cfg = heating_config("furnace", "Gas Furnace");
+    let cfg = gas_furnace_config("furnace");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
     let env = env_with_zone_temp(18.0);
@@ -105,7 +130,7 @@ fn furnace_heats_when_below_setpoint() {
 
     assert!(
         ports.thermal[0].sensible_gain_w > 1e-6,
-        "expected positive thermal gain when zone ({:.1}°C) is below heating setpoint (21°C), got {:.3} W",
+        "expected positive thermal gain when zone ({:.1}°C) is below heating setpoint (20°C), got {:.3} W",
         18.0,
         ports.thermal[0].sensible_gain_w,
     );
@@ -118,7 +143,7 @@ fn furnace_heats_when_below_setpoint() {
 
 #[test]
 fn furnace_off_when_above_setpoint() {
-    let cfg = heating_config("furnace", "Gas Furnace");
+    let cfg = gas_furnace_config("furnace");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
     let env = env_with_zone_temp(23.0);
@@ -130,7 +155,7 @@ fn furnace_off_when_above_setpoint() {
 
     assert!(
         ports.thermal[0].sensible_gain_w.abs() < 1e-6,
-        "expected zero thermal gain when zone ({:.1}°C) is above heating setpoint (21°C), got {:.3} W",
+        "expected zero thermal gain when zone ({:.1}°C) is above heating setpoint (20°C), got {:.3} W",
         23.0,
         ports.thermal[0].sensible_gain_w,
     );
@@ -143,18 +168,20 @@ fn furnace_off_when_above_setpoint() {
 
 #[test]
 fn gas_furnace_consumes_gas_fuel() {
-    let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-    raw.insert("zone_id".to_string(), ConfigValue::Float(1.0));
-    raw.insert("capacity_w".to_string(), ConfigValue::Float(10_000.0));
-    raw.insert("fuel_efficiency".to_string(), ConfigValue::Float(0.8));
-    raw.insert("fan_power_w".to_string(), ConfigValue::Float(400.0));
-    raw.insert("heating_setpoint_c".to_string(), ConfigValue::Float(21.0));
-    raw.insert("cooling_setpoint_c".to_string(), ConfigValue::Float(27.0));
-    let cfg = EquipmentConfig {
-        name: "GF".to_string(),
-        ochre_class: "Gas Furnace".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    let cfg = EquipmentConfig::from_typed(
+        "GF".to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            afue: 0.8,
+            capacity_w: 10_000.0,
+            number_of_speeds: 1,
+            fan_power_w: Some(400.0),
+            ducts: DuctConfig::default(),
+            ..GasFurnaceConfig::default()
+        },
+    );
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -201,7 +228,7 @@ fn gas_furnace_consumes_gas_fuel() {
 
 #[test]
 fn electric_furnace_consumes_electricity() {
-    let cfg = heating_config("ef", "Electric Furnace");
+    let cfg = electric_furnace_config("ef");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
     let env = env_with_zone_temp(18.0);
@@ -289,8 +316,8 @@ fn ashp_heating_cop_above_unity() {
 
 #[test]
 fn hvac_port_contributions_are_correct_sign() {
-    // Heating equipment: furnace at 18°C with setpoint 21°C.
-    let heat_cfg = heating_config("furnace", "Gas Furnace");
+    // Heating equipment: furnace at 18°C with setpoint 20°C (default).
+    let heat_cfg = gas_furnace_config("furnace");
     let registry = EquipmentRegistry::new();
     let mut heater = registry.create("Gas Furnace", heat_cfg.clone()).unwrap();
     let heat_env = env_with_zone_temp(18.0);
@@ -349,16 +376,16 @@ fn hvac_port_contributions_are_correct_sign() {
 
 #[test]
 fn baseboard_electric_resistance_cop_unity() {
-    let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-    raw.insert("zone_id".to_string(), ConfigValue::Float(1.0));
-    raw.insert("capacity_w".to_string(), ConfigValue::Float(3_000.0));
-    raw.insert("heating_setpoint_c".to_string(), ConfigValue::Float(21.0));
-    raw.insert("cooling_setpoint_c".to_string(), ConfigValue::Float(27.0));
-    let cfg = EquipmentConfig {
-        name: "bb".to_string(),
-        ochre_class: "Electric Baseboard".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    let cfg = EquipmentConfig::from_typed(
+        "bb".to_string(),
+        "Electric Baseboard".to_string(),
+        ElectricBaseboardConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 3_000.0,
+            eir: 1.0,
+        },
+    );
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Baseboard", cfg.clone()).unwrap();
@@ -397,17 +424,8 @@ fn baseboard_electric_resistance_cop_unity() {
 
 #[test]
 fn setpoint_override_shifts_thermostat() {
-    // Gas furnace with zone at 22°C. Original setpoint 21°C → unit is off.
-    let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-    raw.insert("zone_id".to_string(), ConfigValue::Float(1.0));
-    raw.insert("capacity_w".to_string(), ConfigValue::Float(10_000.0));
-    raw.insert("heating_setpoint_c".to_string(), ConfigValue::Float(21.0));
-    raw.insert("cooling_setpoint_c".to_string(), ConfigValue::Float(27.0));
-    let cfg = EquipmentConfig {
-        name: "furnace".to_string(),
-        ochre_class: "Gas Furnace".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    // Gas furnace with zone at 22°C. Default heating setpoint 20°C → unit is off.
+    let cfg = gas_furnace_config("furnace");
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
@@ -454,7 +472,7 @@ fn setpoint_override_shifts_thermostat() {
 
 #[test]
 fn checkpoint_round_trip_preserves_mode() {
-    let cfg = heating_config("furnace", "Gas Furnace");
+    let cfg = gas_furnace_config("furnace");
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
     let env = env_with_zone_temp(18.0);

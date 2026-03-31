@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FLUID, FluidDomainPayload, FluidType,
-    FuelType, HaresError, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
+    FLUID, FluidDomainPayload, FluidType, FuelPower, FuelType, HaresError, LoopId, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +22,8 @@ use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
         HEATING_CAPACITY_KEYS, apply_heating_control_unchecked, equipment_id_from_config,
-        first_f64, loop_id_from_config, operating_mode_code, parse_fluid_type, parse_fuel_type,
-        update_heating_control, zone_id_from_config,
+        first_f64, loop_id_from_config, operating_mode_code, update_heating_control,
+        zone_id_from_config,
     },
 };
 
@@ -66,6 +67,7 @@ pub struct ElectricBoiler {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     hvac: HvacEquipment,
     rated_capacity_w: f64,
     efficiency: f64,
@@ -81,6 +83,7 @@ pub struct GasBoiler {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     hvac: HvacEquipment,
     rated_capacity_w: f64,
     loop_id: LoopId,
@@ -131,7 +134,7 @@ impl ElectricBoiler {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
             telemetry_fields: electric_boiler_telemetry_fields(),
         };
 
@@ -142,6 +145,7 @@ impl ElectricBoiler {
                 PortDeclaration::fluid(loop_id, FluidType::Water),
             ],
             telemetry: electric_boiler_default_telemetry(),
+            core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
             rated_capacity_w: 0.0,
             efficiency: 1.0,
@@ -165,63 +169,42 @@ impl Equipment for ElectricBoiler {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        self.hvac.init(config, env)?;
         if config.is_typed() {
             let typed = config.typed::<ElectricBoilerConfig>()?;
-            self.hvac.init(config, env)?;
-            self.rated_capacity_w = typed.heating_capacity_w.max(0.0);
-            self.efficiency = typed.heating_efficiency;
-            if self.efficiency <= 0.0 || !self.efficiency.is_finite() {
-                return Err(HaresError::Equipment(format!(
-                    "invalid Electric Boiler efficiency: {}",
-                    self.efficiency
-                )));
-            }
+            self.rated_capacity_w = typed.capacity_w.max(0.0);
+            self.efficiency = typed.eir;
             if let Some(lid) = typed.loop_id {
                 self.loop_id = LoopId(lid);
             }
             self.fluid_type = typed.fluid_type;
             self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
             self.default_return_temp_c = typed.return_temp_c;
-            self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
-            self.ports[1].loop_id = Some(self.loop_id);
-            self.operating_mode = OperatingMode::Off;
-            self.run_time_s = 0.0;
-            self.telemetry = electric_boiler_default_telemetry();
-            return Ok(());
+        } else {
+            self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
+                .unwrap_or(0.0)
+                .max(0.0);
+            self.efficiency = first_f64(config, &["eir", "efficiency"]).unwrap_or(1.0);
+            if let Some(lid) = loop_id_from_config(config, &["loop_id", "hydronic_loop_id"]) {
+                self.loop_id = lid;
+            }
+            self.flow_rate_kg_s = first_f64(config, &["flow_rate_kg_s"])
+                .unwrap_or(0.5)
+                .max(0.0);
+            self.default_return_temp_c = first_f64(config, &["return_temp_c"]).unwrap_or(40.0);
         }
-
-        self.hvac.init(config, env)?;
-        self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
-            .unwrap_or(12_000.0)
-            .max(0.0);
-        self.efficiency = first_f64(
-            config,
-            &["efficiency", "boiler_efficiency", "heating_efficiency", "efficiency_afue"],
-        )
-        .unwrap_or(1.0);
         if self.efficiency <= 0.0 || !self.efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
-                "invalid Electric Boiler efficiency: {}",
+                "invalid Electric Boiler eir: {}",
                 self.efficiency
             )));
         }
-
-        self.loop_id =
-            loop_id_from_config(config, &["loop_id", "hydronic_loop_id"]).unwrap_or(self.loop_id);
-        self.fluid_type =
-            parse_fluid_type(config.get_str("fluid_type")).unwrap_or(FluidType::Water);
-        self.flow_rate_kg_s = first_f64(config, &["flow_rate_kg_s", "boiler_flow_rate_kg_s"])
-            .unwrap_or(0.5)
-            .max(0.0);
-        self.default_return_temp_c =
-            first_f64(config, &["return_temp_c", "inlet_temp_c"]).unwrap_or(DEFAULT_RETURN_TEMP_C);
-
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
         self.ports[1].loop_id = Some(self.loop_id);
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = electric_boiler_default_telemetry();
-
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -273,12 +256,27 @@ impl Equipment for ElectricBoiler {
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.operating_mode),
+                soc: None,
+            },
+        };
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -318,6 +316,7 @@ impl Equipment for ElectricBoiler {
             tk::OPERATING_MODE,
             operating_mode_code(decoded.operating_mode),
         );
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -343,7 +342,9 @@ impl GasBoiler {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::FUEL
+                | CoreCapabilities::HAS_MODE,
             telemetry_fields: gas_boiler_telemetry_fields(),
         };
 
@@ -356,6 +357,7 @@ impl GasBoiler {
                 PortDeclaration::fluid(loop_id, FluidType::Water),
             ],
             telemetry: gas_boiler_default_telemetry(),
+            core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
             rated_capacity_w: 0.0,
             loop_id,
@@ -414,100 +416,41 @@ impl Equipment for GasBoiler {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            let typed = config.typed::<GasBoilerConfig>()?;
-            self.hvac.init(config, env)?;
-            self.rated_capacity_w = typed.heating_capacity_w.max(0.0);
-            let fuel_efficiency = typed.afue;
-            if fuel_efficiency <= 0.0 || !fuel_efficiency.is_finite() {
-                return Err(HaresError::Equipment(format!(
-                    "invalid Gas Boiler efficiency: {fuel_efficiency}"
-                )));
-            }
-            if let Some(lid) = typed.loop_id {
-                self.loop_id = LoopId(lid);
-            }
-            self.fluid_type = typed.fluid_type;
-            self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
-            self.default_return_temp_c = typed.return_temp_c;
-            self.condensing = fuel_efficiency > 0.9;
-            self.outlet_temp_c = if self.condensing {
-                DEFAULT_CONDENSING_OUTLET_TEMP_C
-            } else {
-                DEFAULT_NON_CONDENSING_OUTLET_TEMP_C
-            };
-            self.eir_max = 1.0 / fuel_efficiency;
-            self.condensing_eir_coeffs = DEFAULT_CONDENSING_EIR_COEFFS;
-            self.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
-            self.pump_kw = typed.fan_power_w.unwrap_or(0.0) / 1_000.0;
-            self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
-            self.ports[3].loop_id = Some(self.loop_id);
-            self.operating_mode = OperatingMode::Off;
-            self.run_time_s = 0.0;
-            self.telemetry = gas_boiler_default_telemetry();
-            return Ok(());
-        }
-
+        let typed = config.typed::<GasBoilerConfig>().map_err(|e| {
+            HaresError::Equipment(format!(
+                "Gas Boiler requires typed config (use EquipmentConfig::from_typed). Error: {e}"
+            ))
+        })?;
         self.hvac.init(config, env)?;
-
-        self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
-            .unwrap_or(12_000.0)
-            .max(0.0);
-        let fuel_efficiency = first_f64(
-            config,
-            &["fuel_efficiency", "afue", "efficiency", "heating_efficiency", "efficiency_afue"],
-        )
-        .unwrap_or(DEFAULT_GAS_BOILER_AFUE);
+        self.rated_capacity_w = typed.capacity_w.max(0.0);
+        if let Some(lid) = typed.loop_id {
+            self.loop_id = LoopId(lid);
+        }
+        self.fluid_type = typed.fluid_type;
+        self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
+        self.default_return_temp_c = typed.return_temp_c;
+        self.pump_kw = typed.fan_power_w.unwrap_or(0.0) / 1_000.0;
+        let fuel_efficiency = typed.afue;
         if fuel_efficiency <= 0.0 || !fuel_efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Gas Boiler efficiency: {fuel_efficiency}"
             )));
         }
-
-        self.loop_id =
-            loop_id_from_config(config, &["loop_id", "hydronic_loop_id"]).unwrap_or(self.loop_id);
-        self.fluid_type =
-            parse_fluid_type(config.get_str("fluid_type")).unwrap_or(FluidType::Water);
-        self.flow_rate_kg_s = first_f64(config, &["flow_rate_kg_s", "boiler_flow_rate_kg_s"])
-            .unwrap_or(0.5)
-            .max(0.0);
-        self.default_return_temp_c =
-            first_f64(config, &["return_temp_c", "inlet_temp_c"]).unwrap_or(DEFAULT_RETURN_TEMP_C);
-        self.fuel_type = parse_fuel_type(config.get_str("fuel_type")).unwrap_or(FuelType::Gas);
-        self.descriptor.fuel = self.fuel_type;
-
-        self.condensing = config
-            .get_bool("condensing")
-            .or_else(|| config.get_f64("condensing").map(|v| v > 0.0))
-            .unwrap_or(fuel_efficiency > 0.9);
-        self.outlet_temp_c = first_f64(config, &["outlet_temp_c", "outlet_water_temp_c"])
-            .unwrap_or(if self.condensing {
-                DEFAULT_CONDENSING_OUTLET_TEMP_C
-            } else {
-                DEFAULT_NON_CONDENSING_OUTLET_TEMP_C
-            });
-
-        self.condensing_eir_coeffs = parse_coeff_array(
-            config,
-            "condensing_eir_coeffs",
-            DEFAULT_CONDENSING_EIR_COEFFS,
-        )?;
-        self.non_condensing_eir_coeffs = parse_coeff_array(
-            config,
-            "non_condensing_eir_coeffs",
-            DEFAULT_NON_CONDENSING_EIR_COEFFS,
-        )?;
-        self.eir_max = first_f64(config, &["eir_max"]).unwrap_or(1.0 / fuel_efficiency);
-        self.pump_kw = first_f64(config, &["pump_kw", "fan_kw", "parasitic_kw"])
-            .or_else(|| first_f64(config, &["auxiliary_power_w"]).map(|w| w / 1_000.0))
-            .unwrap_or(0.0);
-
+        self.condensing = fuel_efficiency > 0.9;
+        self.outlet_temp_c = if self.condensing {
+            DEFAULT_CONDENSING_OUTLET_TEMP_C
+        } else {
+            DEFAULT_NON_CONDENSING_OUTLET_TEMP_C
+        };
+        self.eir_max = 1.0 / fuel_efficiency;
+        self.condensing_eir_coeffs = DEFAULT_CONDENSING_EIR_COEFFS;
+        self.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
         self.ports[3].loop_id = Some(self.loop_id);
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = gas_boiler_default_telemetry();
-
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -604,12 +547,30 @@ impl Equipment for GasBoiler {
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: Some(FuelPower {
+                    fuel_type: self.fuel_type,
+                    consumption_w: fuel_input_w.max(0.0),
+                }),
+            },
+            state: CoreState {
+                operating_mode: Some(self.operating_mode),
+                soc: None,
+            },
+        };
 
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -652,6 +613,7 @@ impl Equipment for GasBoiler {
             tk::OPERATING_MODE,
             operating_mode_code(decoded.operating_mode),
         );
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -783,59 +745,9 @@ fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
     ]
 }
 
-fn parse_coeff_array<const N: usize>(
-    config: &EquipmentConfig,
-    key: &str,
-    default: [f64; N],
-) -> crate::Result<[f64; N]> {
-    if let Some(raw) = config.get_str(key) {
-        return parse_coeff_string(raw, key);
-    }
-
-    let mut values = [0.0; N];
-    let mut any_found = false;
-    for (i, slot) in values.iter_mut().enumerate() {
-        let indexed_key = format!("{key}_{i}");
-        if let Some(value) = config.get_f64(&indexed_key) {
-            any_found = true;
-            *slot = value;
-        } else if any_found {
-            return Err(HaresError::Equipment(format!(
-                "missing coefficient {indexed_key} while parsing {key}"
-            )));
-        } else {
-            return Ok(default);
-        }
-    }
-    Ok(values)
-}
-
-fn parse_coeff_string<const N: usize>(value: &str, key: &str) -> crate::Result<[f64; N]> {
-    let trimmed = value.trim().trim_start_matches('[').trim_end_matches(']');
-    let parts: Vec<&str> = trimmed
-        .split(',')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .collect();
-    if parts.len() != N {
-        return Err(HaresError::Equipment(format!(
-            "invalid coefficient count for {key}: expected {N}, got {}",
-            parts.len()
-        )));
-    }
-
-    let mut out = [0.0; N];
-    for (slot, token) in out.iter_mut().zip(parts) {
-        *slot = token.parse::<f64>().map_err(|err| {
-            HaresError::Equipment(format!("invalid coefficient in {key}: {token} ({err})"))
-        })?;
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -845,10 +757,10 @@ mod tests {
     };
 
     use super::{
-        DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, ElectricBoiler,
-        GasBoiler, register_with_registry,
+        DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, ElectricBoiler, GasBoiler,
     };
 
+    use crate::hvac::heating_config::{ElectricBoilerConfig, GasBoilerConfig};
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -882,6 +794,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)
@@ -893,41 +806,37 @@ mod tests {
         }
     }
 
-    fn config(name: &str, class: &str) -> EquipmentConfig {
-        EquipmentConfig {
-            name: name.to_string(),
-            ochre_class: class.to_string(),
-            payload: crate::config::ConfigPayload::Raw {
-                data: HashMap::new(),
+    fn eb_config(capacity_w: f64, efficiency: f64) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "EB".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                eir: efficiency,
+                capacity_w,
+                ..ElectricBoilerConfig::default()
             },
-        }
+        )
+    }
+
+    fn gb_config(capacity_w: f64, afue: f64) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "GB".to_string(),
+            "Gas Boiler".to_string(),
+            GasBoilerConfig {
+                zone_id: Some(1),
+                loop_id: Some(1),
+                afue,
+                capacity_w,
+                ..GasBoilerConfig::default()
+            },
+        )
     }
 
     #[test]
     fn electric_boiler_writes_electrical_and_fluid_ports() {
-        let mut cfg = config("EB", "Electric Boiler");
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 8_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("efficiency".to_string(), 0.95.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
-
+        let cfg = eb_config(8_000.0, 0.95);
         let mut eq = ElectricBoiler::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -947,49 +856,55 @@ mod tests {
     }
 
     #[test]
-    fn gas_boiler_condensing_curve_matches_expected_at_plr_half() {
-        let mut cfg = config("GB", "Gas Boiler");
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("eir_max".to_string(), 1.2.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("condensing".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config_mut().unwrap().insert(
-            "condensing_eir_coeffs".to_string(),
-            format!(
-                "[{},{},{},{},{},{}]",
-                DEFAULT_CONDENSING_EIR_COEFFS[0],
-                DEFAULT_CONDENSING_EIR_COEFFS[1],
-                DEFAULT_CONDENSING_EIR_COEFFS[2],
-                DEFAULT_CONDENSING_EIR_COEFFS[3],
-                DEFAULT_CONDENSING_EIR_COEFFS[4],
-                DEFAULT_CONDENSING_EIR_COEFFS[5]
-            )
-            .into(),
+    fn raw_config_accepted_for_electric_boiler_with_defaults() {
+        use crate::config::ConfigPayload;
+        let cfg = EquipmentConfig {
+            name: "EB".to_string(),
+            ochre_class: "Electric Boiler".to_string(),
+            payload: ConfigPayload::Raw {
+                data: std::collections::HashMap::new(),
+            },
+        };
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        let result = eq.init(&cfg, &env(18.0));
+        assert!(
+            result.is_ok(),
+            "Electric Boiler should accept raw config with defaults"
         );
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
+    }
 
+    #[test]
+    fn raw_config_rejected_for_gas_boiler() {
+        use crate::config::ConfigPayload;
+        let cfg = EquipmentConfig {
+            name: "GB".to_string(),
+            ochre_class: "Gas Boiler".to_string(),
+            payload: ConfigPayload::Raw {
+                data: std::collections::HashMap::new(),
+            },
+        };
+        let mut eq = GasBoiler::new(cfg.clone());
+        let result = eq.init(&cfg, &env(18.0));
+        assert!(result.is_err(), "Gas Boiler must reject raw config");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("requires typed config"),
+            "error must mention requires typed config"
+        );
+    }
+
+    #[test]
+    fn gas_boiler_condensing_curve_matches_expected_at_plr_half() {
+        // AFUE > 0.9 → condensing path is selected by init().
+        let cfg = gb_config(10_000.0, 0.95);
         let mut eq = GasBoiler::new(cfg.clone());
         let mut env = env(18.0);
         eq.init(&cfg, &env).unwrap();
+        // Override eir_max so the expected formula uses the same value.
+        eq.eir_max = 1.2;
+        eq.condensing_eir_coeffs = DEFAULT_CONDENSING_EIR_COEFFS;
 
         eq.hvac.duty_cycle = 0.5;
         eq.hvac.mode = super::ThermostatMode::Heating;
@@ -1037,62 +952,18 @@ mod tests {
 
     #[test]
     fn condensing_is_more_efficient_than_non_condensing_at_partial_load() {
-        let mut cond = config("GB Cond", "Gas Boiler");
-        cond.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cond.raw_config_mut()
-            .unwrap()
-            .insert("loop_id".to_string(), 1.0.into());
-        cond.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 10_000.0.into());
-        cond.raw_config_mut()
-            .unwrap()
-            .insert("fuel_efficiency".to_string(), 0.95.into());
-        cond.raw_config_mut()
-            .unwrap()
-            .insert("condensing".to_string(), 1.0.into());
-        cond.raw_config_mut()
-            .unwrap()
-            .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cond.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cond.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
+        // AFUE 0.95 → condensing; AFUE 0.8 → non-condensing.
+        let cond_cfg = gb_config(10_000.0, 0.95);
+        let non_cfg = gb_config(10_000.0, 0.80);
 
-        let mut non = cond.clone();
-        non.raw_config_mut()
-            .unwrap()
-            .insert("condensing".to_string(), 0.0.into());
-        non.raw_config_mut()
-            .unwrap()
-            .insert("fuel_efficiency".to_string(), 0.8.into());
-        non.raw_config_mut().unwrap().insert(
-            "non_condensing_eir_coeffs".to_string(),
-            format!(
-                "[{},{},{},{},{},{},{},{},{},{}]",
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[0],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[1],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[2],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[3],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[4],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[5],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[6],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[7],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[8],
-                DEFAULT_NON_CONDENSING_EIR_COEFFS[9]
-            )
-            .into(),
-        );
-
-        let mut cond_boiler = GasBoiler::new(cond.clone());
-        let mut non_boiler = GasBoiler::new(non.clone());
+        let mut cond_boiler = GasBoiler::new(cond_cfg.clone());
+        let mut non_boiler = GasBoiler::new(non_cfg.clone());
         let env = env(18.0);
-        cond_boiler.init(&cond, &env).unwrap();
-        non_boiler.init(&non, &env).unwrap();
+        cond_boiler.init(&cond_cfg, &env).unwrap();
+        non_boiler.init(&non_cfg, &env).unwrap();
+        // Force non-condensing path explicitly so the test intent is clear.
+        non_boiler.condensing = false;
+        non_boiler.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
 
         cond_boiler.hvac.duty_cycle = 0.5;
         cond_boiler.hvac.mode = super::ThermostatMode::Heating;
@@ -1123,26 +994,7 @@ mod tests {
 
     #[test]
     fn gas_boiler_state_round_trip_preserves_outputs() {
-        let mut cfg = config("GB", "Gas Boiler");
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
-
+        let cfg = gb_config(10_000.0, 0.80);
         let mut eq = GasBoiler::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -1171,32 +1023,8 @@ mod tests {
     /// reference. The 10-coefficient polynomial uses outlet water temperature.
     #[test]
     fn non_condensing_eir_at_plr_half_matches_ochre_reference() {
-        let mut cfg = config("GB", "Gas Boiler");
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("condensing".to_string(), 0.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
-
+        // AFUE 0.8 → non-condensing path.
+        let cfg = gb_config(10_000.0, 0.80);
         let mut eq = GasBoiler::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -1246,32 +1074,7 @@ mod tests {
     #[test]
     fn gas_boiler_jacket_loss_writes_to_thermal_port_and_conserves_energy() {
         // Non-condensing boiler at 80% AFUE: jacket loss = fuel_input - thermal_output.
-        let mut cfg = config("GB", "Gas Boiler");
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("condensing".to_string(), 0.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
-
+        let cfg = gb_config(10_000.0, 0.80);
         let mut eq = GasBoiler::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -1326,29 +1129,7 @@ mod tests {
 
     #[test]
     fn gas_boiler_no_jacket_loss_when_off() {
-        let mut cfg = config("GB off", "Gas Boiler");
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("zone_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("loop_id".to_string(), 1.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("capacity_w".to_string(), 10_000.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("fuel_efficiency".to_string(), 0.8.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("flow_rate_kg_s".to_string(), 0.5.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("heating_setpoint_c".to_string(), 21.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("cooling_setpoint_c".to_string(), 27.0.into());
-
+        let cfg = gb_config(10_000.0, 0.80);
         let mut eq = GasBoiler::new(cfg.clone());
         let env = env(22.0); // above setpoint — boiler should be off
         eq.init(&cfg, &env).unwrap();
@@ -1379,13 +1160,12 @@ mod tests {
 
     #[test]
     fn registry_includes_boiler_aliases_and_thermal_stage() {
-        let mut registry = EquipmentRegistry::new();
-        register_with_registry(&mut registry);
+        let registry = EquipmentRegistry::new();
         assert!(registry.get("Electric Boiler").is_some());
         assert!(registry.get("Gas Boiler").is_some());
 
         let eq = registry
-            .create("Gas Boiler", config("GB", "Gas Boiler"))
+            .create("Gas Boiler", gb_config(10_000.0, 0.80))
             .unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
     }

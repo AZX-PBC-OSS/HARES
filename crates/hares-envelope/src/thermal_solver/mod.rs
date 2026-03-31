@@ -582,6 +582,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: Default::default(),
             current_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
@@ -1593,6 +1594,7 @@ mod tests {
                 time_res: chrono::Duration::seconds(60),
                 price_signal: Default::default(),
                 electrical: Default::default(),
+                equipment_core: Default::default(),
             }
         };
 
@@ -1738,6 +1740,7 @@ mod tests {
             time_res: chrono::Duration::seconds(60),
             price_signal: Default::default(),
             electrical: Default::default(),
+            equipment_core: Default::default(),
         };
 
         let make_solver = |absorptance: f64| -> ThermalSolver {
@@ -1892,6 +1895,7 @@ mod tests {
             time_res: chrono::Duration::seconds(60),
             price_signal: Default::default(),
             electrical: Default::default(),
+            equipment_core: Default::default(),
         };
 
         let make_solver = |absorptance: f64| -> ThermalSolver {
@@ -2232,6 +2236,7 @@ mod tests {
                 time_res: chrono::Duration::seconds(60),
                 price_signal: Default::default(),
                 electrical: Default::default(),
+                equipment_core: Default::default(),
             }
         };
 
@@ -2668,6 +2673,7 @@ mod tests {
                 time_res: chrono::Duration::seconds(60),
                 price_signal: Default::default(),
                 electrical: Default::default(),
+                equipment_core: Default::default(),
             }
         };
 

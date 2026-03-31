@@ -5,9 +5,11 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Common config key for equipment ID, shared across all equipment types.
+/// Common config key for equipment ID in `ConfigPayload::Raw` payloads.
+/// Typed configs carry this as a struct field instead.
 pub const KEY_EQUIPMENT_ID: &str = "equipment_id";
-/// Common config key for zone ID, shared across equipment types that are zone-attached.
+/// Common config key for zone ID in `ConfigPayload::Raw` payloads.
+/// Typed configs carry this as a struct field instead.
 pub const KEY_ZONE_ID: &str = "zone_id";
 
 /// Flexible config value supporting numeric, string, and boolean parameters.
@@ -151,28 +153,40 @@ pub struct EquipmentConfig {
 }
 
 impl EquipmentConfig {
-    /// Extract a numeric value from raw_config.
+    /// Extract a numeric value from the `Raw` payload.
     pub fn get_f64(&self, key: &str) -> Option<f64> {
         self.raw_data()
             .and_then(|data| data.get(key).and_then(ConfigValue::as_f64))
     }
 
-    /// Extract a string value from raw_config.
+    /// Extract a string value from the `Raw` payload.
     pub fn get_str(&self, key: &str) -> Option<&str> {
         self.raw_data()
             .and_then(|data| data.get(key).and_then(ConfigValue::as_str))
     }
 
-    /// Extract a boolean value from raw_config.
+    /// Extract a boolean value from the `Raw` payload.
     pub fn get_bool(&self, key: &str) -> Option<bool> {
         self.raw_data()
             .and_then(|data| data.get(key).and_then(ConfigValue::as_bool))
     }
 
-    /// Extract a float array value from raw_config.
+    /// Extract a float array value from the `Raw` payload.
     pub fn get_f64_array(&self, key: &str) -> Option<&[f64]> {
         self.raw_data()
             .and_then(|data| data.get(key).and_then(ConfigValue::as_f64_array))
+    }
+
+    /// Get a mutable reference to raw config data, or None if the payload is typed.
+    ///
+    /// Prefer building complete configs upfront. This accessor exists for
+    /// equipment types not yet migrated to typed config.
+    #[deprecated(note = "transitional — removed in CFG-015")]
+    pub fn raw_config_mut(&mut self) -> Option<&mut HashMap<String, ConfigValue>> {
+        match &mut self.payload {
+            ConfigPayload::Raw { data } => Some(data),
+            ConfigPayload::Typed { .. } => None,
+        }
     }
 
     /// Get the raw config data, or None if typed.
@@ -183,14 +197,12 @@ impl EquipmentConfig {
         }
     }
 
-    /// Get the raw config data, or an empty HashMap reference if typed.
+    /// Get the raw config data. Panics if called on a `Typed` payload.
     pub fn raw_data_or_empty(&self) -> &HashMap<String, ConfigValue> {
         match &self.payload {
             ConfigPayload::Raw { data } => data,
             ConfigPayload::Typed { .. } => {
-                static EMPTY: std::sync::LazyLock<HashMap<String, ConfigValue>> =
-                    std::sync::LazyLock::new(HashMap::new);
-                &EMPTY
+                unreachable!("raw_data_or_empty called on typed config")
             }
         }
     }
@@ -239,14 +251,14 @@ impl EquipmentConfig {
         name: String,
         ochre_class: String,
         config: T,
-    ) -> crate::Result<Self> {
-        let data = serde_json::to_value(&config).map_err(|e| {
-            hares_types::HaresError::Equipment(format!(
+    ) -> Self {
+        let data = serde_json::to_value(config).unwrap_or_else(|e| {
+            panic!(
                 "typed config serialization failed for {}: {e}",
                 T::equipment_type_name()
-            ))
-        })?;
-        Ok(Self {
+            )
+        });
+        Self {
             name,
             ochre_class,
             payload: ConfigPayload::Typed {
@@ -254,16 +266,16 @@ impl EquipmentConfig {
                 version: T::schema_version(),
                 data,
             },
-        })
+        }
     }
 
-    /// Transitional accessor for migrating legacy code.
-    /// Returns None if the payload is Typed.
-    #[deprecated(note = "transitional — removed in CFG-015")]
-    pub fn raw_config_mut(&mut self) -> Option<&mut HashMap<String, ConfigValue>> {
-        match &mut self.payload {
-            ConfigPayload::Raw { data } => Some(data),
-            ConfigPayload::Typed { .. } => None,
+    /// Constructor for Python adapter layer custom equipment.
+    /// Built-in equipment uses from_typed() instead.
+    pub fn raw(name: String, ochre_class: String, data: HashMap<String, ConfigValue>) -> Self {
+        Self {
+            name,
+            ochre_class,
+            payload: ConfigPayload::Raw { data },
         }
     }
 }
@@ -307,8 +319,7 @@ mod tests {
             "test_name".to_string(),
             "TestClass".to_string(),
             config.clone(),
-        )
-        .unwrap();
+        );
         assert!(ec.is_typed());
         let recovered: TestConfig = ec.typed().unwrap();
         assert_eq!(recovered, config);
@@ -361,8 +372,7 @@ mod tests {
             name: "test".to_string(),
         };
         let ec =
-            EquipmentConfig::from_typed("test_name".to_string(), "TestClass".to_string(), config)
-                .unwrap();
+            EquipmentConfig::from_typed("test_name".to_string(), "TestClass".to_string(), config);
         let result: Result<OtherConfig, _> = ec.typed();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -421,8 +431,7 @@ mod tests {
             value: 42.5,
             name: "test".to_string(),
         };
-        let ec =
-            EquipmentConfig::from_typed("test".to_string(), "Test".to_string(), config).unwrap();
+        let ec = EquipmentConfig::from_typed("test".to_string(), "Test".to_string(), config);
 
         assert!(ec.is_typed());
         assert_eq!(ec.get_f64("any"), None);

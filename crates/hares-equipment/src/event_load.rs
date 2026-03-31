@@ -6,10 +6,11 @@ use std::time::Duration;
 use chrono::Datelike;
 
 use hares_types::{
-    BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
+    BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    telemetry_keys as tk,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -142,6 +143,7 @@ pub struct EventBasedLoad {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     fuel_type: FuelType,
 
     event_window_source: ScheduleSource,
@@ -181,6 +183,7 @@ pub struct WetAppliance {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     fuel_type: FuelType,
 
     event_window_source: ScheduleSource,
@@ -233,7 +236,7 @@ impl EventBasedLoad {
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::EVENT_DELAY,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC,
             telemetry_fields: event_load_telemetry_fields(),
         };
         let ports = ports_for_zone(descriptor.zone);
@@ -242,6 +245,7 @@ impl EventBasedLoad {
             descriptor,
             ports,
             telemetry: default_event_load_telemetry(),
+            core_output: CoreOutput::default(),
             fuel_type: FuelType::Electric,
             event_window_source: ScheduleSource::Constant(1.0),
             event_probability_source: ScheduleSource::Constant(1.0),
@@ -359,7 +363,7 @@ impl EventBasedLoad {
     ) -> std::result::Result<(), HaresError> {
         let active_now = self.phase == EventPhase::Active;
         // PowerSetpoint overrides the configured active_power_kw for this step,
-        // but only when the equipment is actually in an active event phase (EA-004 F2).
+        // but only when the equipment is actually in an active event phase.
         // OCHRE gates p_setpoint on self.mode == "On".
         let active_power_kw = if active_now {
             self.power_setpoint_override
@@ -409,11 +413,28 @@ impl EventBasedLoad {
         }
 
         self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
         self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
         self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
         self.telemetry.set(tk::STATE, phase_ordinal(self.phase));
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::FUEL)
+                    .then_some(FuelPower {
+                        fuel_type: self.fuel_type,
+                        consumption_w: fuel_consumption_w.max(0.0),
+                    }),
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+            },
+        };
         Ok(())
     }
 }
@@ -454,6 +475,12 @@ impl Equipment for EventBasedLoad {
                 .ok_or_else(|| HaresError::Equipment(format!("unrecognised fuel_type: {raw}")))?,
         };
         self.descriptor.fuel = self.fuel_type;
+        self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
+            | if has_combustion_fuel(self.fuel_type) {
+                CoreCapabilities::FUEL
+            } else {
+                CoreCapabilities::empty()
+            };
 
         self.phase = EventPhase::Idle;
         self.remaining_phase_s = 0.0;
@@ -462,6 +489,7 @@ impl Equipment for EventBasedLoad {
         self.power_setpoint_override = None;
         self.delay_remaining_s = 0.0;
         self.telemetry = default_event_load_telemetry();
+        self.core_output = CoreOutput::default();
 
         self.ports = ports_for_zone(self.descriptor.zone);
         if self.fuel_type != FuelType::Electric {
@@ -560,6 +588,10 @@ impl Equipment for EventBasedLoad {
         &self.telemetry
     }
 
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
+    }
+
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&EventBasedLoadState {
             phase: self.phase,
@@ -605,6 +637,7 @@ impl Equipment for EventBasedLoad {
         if self.fuel_type != FuelType::Electric {
             self.ports.push(PortDeclaration::fuel());
         }
+        self.core_output = CoreOutput::default();
 
         // Telemetry is populated on the next step() call, not reconstructed here.
         // This avoids stale values when month_multipliers are configured.
@@ -669,7 +702,7 @@ impl WetAppliance {
             control_capabilities: ControlCapabilities::LOAD_FRACTION
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::EVENT_DELAY,
-            core_capabilities: CoreCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC,
             telemetry_fields: wet_appliance_telemetry_fields(),
         };
         let ports = ports_for_zone(descriptor.zone);
@@ -678,6 +711,7 @@ impl WetAppliance {
             descriptor,
             ports,
             telemetry: default_wet_appliance_telemetry(),
+            core_output: CoreOutput::default(),
             fuel_type: FuelType::Electric,
             event_window_source: ScheduleSource::Constant(1.0),
             event_probability_source: ScheduleSource::Constant(1.0),
@@ -851,7 +885,6 @@ impl WetAppliance {
         }
 
         self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
         self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
         self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_consumption_w);
@@ -859,6 +892,24 @@ impl WetAppliance {
             tk::CYCLE_PHASE,
             cycle_phase_ordinal(self.active, self.phase_index),
         );
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
+                reactive_power_kvar: None,
+                fuel_w: self
+                    .descriptor
+                    .core_capabilities
+                    .contains(CoreCapabilities::FUEL)
+                    .then_some(FuelPower {
+                        fuel_type: self.fuel_type,
+                        consumption_w: fuel_consumption_w.max(0.0),
+                    }),
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+            },
+        };
         Ok(())
     }
 }
@@ -926,6 +977,7 @@ impl Equipment for WetAppliance {
         self.forced_mode = None;
         self.delay_remaining_s = 0.0;
         self.telemetry = default_wet_appliance_telemetry();
+        self.core_output = CoreOutput::default();
 
         self.rng_seed = derive_rng_seed(config);
         self.rng_draws = 0;
@@ -1014,6 +1066,10 @@ impl Equipment for WetAppliance {
         &self.telemetry
     }
 
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
+    }
+
     fn save_state(&self) -> Vec<u8> {
         save_postcard(&WetApplianceState {
             active: self.active,
@@ -1077,6 +1133,7 @@ impl Equipment for WetAppliance {
             &mut self.event_probability_source,
             &decoded.event_probability_source_state,
         )?;
+        self.core_output = CoreOutput::default();
 
         // Telemetry is populated on the next step() call, not reconstructed here.
         Ok(())
@@ -1386,6 +1443,10 @@ fn cycle_phase_ordinal(active: bool, phase_index: usize) -> f64 {
     }
 }
 
+fn has_combustion_fuel(fuel: FuelType) -> bool {
+    !matches!(fuel, FuelType::Electric | FuelType::None)
+}
+
 fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
     let mut ports = vec![PortDeclaration::electrical()];
     if let Some(zone) = zone {
@@ -1397,7 +1458,6 @@ fn ports_for_zone(zone: Option<ZoneId>) -> Vec<PortDeclaration> {
 fn default_event_load_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(5);
     telemetry.insert(tk::ACTIVE_POWER_KW, 0.0);
-    telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
     telemetry.insert(tk::LATENT_GAIN_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
@@ -1408,7 +1468,6 @@ fn default_event_load_telemetry() -> Telemetry {
 fn default_wet_appliance_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(6);
     telemetry.insert(tk::ACTIVE_POWER_KW, 0.0);
-    telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
     telemetry.insert(tk::LATENT_GAIN_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
@@ -1422,11 +1481,6 @@ fn event_load_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ACTIVE_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Active electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Grid-boundary electrical power".to_string(),
         },
         TelemetryField {
             name: tk::SENSIBLE_GAIN_W.to_string(),
@@ -1457,11 +1511,6 @@ fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::ACTIVE_POWER_KW.to_string(),
             unit: "kW".to_string(),
             description: "Active electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Grid-boundary electrical power".to_string(),
         },
         TelemetryField {
             name: tk::SENSIBLE_GAIN_W.to_string(),
@@ -1537,6 +1586,7 @@ mod tests {
                 custom_payload: Some(vec![0.0, 0.0]),
             }],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 3, 18, 0, 0, 0)

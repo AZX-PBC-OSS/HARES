@@ -13,6 +13,10 @@ use crate::config::EquipmentTypedConfig;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BatteryConfig {
+    // Identity
+    pub equipment_id: Option<u32>,
+    pub zone_id: Option<u16>,
+
     // Core energy / power
     pub capacity_kwh: f64,
     pub max_charge_kw: f64,
@@ -24,6 +28,9 @@ pub struct BatteryConfig {
     pub ah_cell: Option<f64>,
     pub v_cell: Option<f64>,
     pub cell_resistance_ohm: Option<f64>,
+    /// Target pack voltage (V). Overrides the hardcoded 350 V used for
+    /// ah_cell/v_cell topology derivation.
+    pub pack_voltage_v: Option<f64>,
 
     // Chemistry
     pub chemistry: Option<String>,
@@ -148,6 +155,8 @@ mod tests {
 
     fn minimal_battery_config() -> BatteryConfig {
         BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
             capacity_kwh: 13.5,
             max_charge_kw: 5.0,
             max_discharge_kw: 5.0,
@@ -156,6 +165,7 @@ mod tests {
             ah_cell: None,
             v_cell: None,
             cell_resistance_ohm: None,
+            pack_voltage_v: None,
             chemistry: None,
             standby_power_w: None,
             self_discharge_pct_per_day: None,
@@ -187,8 +197,7 @@ mod tests {
             "test_battery".to_string(),
             "Battery".to_string(),
             cfg.clone(),
-        )
-        .unwrap();
+        );
         assert!(ec.is_typed());
         let recovered: BatteryConfig = ec.typed().unwrap();
         assert_eq!(recovered.capacity_kwh, cfg.capacity_kwh);

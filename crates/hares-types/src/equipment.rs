@@ -191,6 +191,30 @@ impl OperatingMode {
     }
 }
 
+impl TryFrom<u8> for OperatingMode {
+    type Error = HaresError;
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::Off),
+            1 => Ok(Self::Heating),
+            2 => Ok(Self::Cooling),
+            3 => Ok(Self::Defrost),
+            4 => Ok(Self::Standby),
+            5 => Ok(Self::Charging),
+            6 => Ok(Self::Discharging),
+            7 => Ok(Self::HeatingHP),
+            8 => Ok(Self::HeatingER),
+            9 => Ok(Self::HeatingHPAndER),
+            10 => Ok(Self::HeatPumpWH),
+            11 => Ok(Self::BackupElement),
+            _ => Err(HaresError::Equipment(format!(
+                "unknown OperatingMode discriminant: {v}"
+            ))),
+        }
+    }
+}
+
 /// Custom domain identifier for extension points in the solver.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -797,7 +821,7 @@ impl ElectricPower {
         }
     }
 
-    /// Signed kW value. Consumption positive, generation negative.
+    /// Equivalent to [`net_consumption_kw()`](Self::net_consumption_kw): positive = consuming, negative = generating.
     pub fn signed_kw(&self) -> f64 {
         self.net_consumption_kw()
     }
@@ -806,6 +830,12 @@ impl ElectricPower {
 /// State of charge, constrained to [0.0, 1.0].
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Soc(f64);
+
+impl Default for Soc {
+    fn default() -> Self {
+        Self(0.0)
+    }
+}
 
 impl Soc {
     pub fn get(&self) -> f64 {
@@ -817,7 +847,7 @@ impl TryFrom<f64> for Soc {
     type Error = HaresError;
 
     fn try_from(v: f64) -> Result<Self, Self::Error> {
-        if !(0.0..=1.0).contains(&v) || !v.is_finite() {
+        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
             return Err(HaresError::Equipment(format!(
                 "Soc must be in [0.0, 1.0], got {v}"
             )));
@@ -832,6 +862,20 @@ pub struct FuelPower {
     pub fuel_type: FuelType,
     /// Fuel consumption rate in watts.
     pub consumption_w: f64,
+}
+
+impl FuelPower {
+    pub fn new(fuel_type: FuelType, consumption_w: f64) -> Result<Self, HaresError> {
+        if !consumption_w.is_finite() || consumption_w < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "FuelPower consumption_w must be finite and non-negative, got {consumption_w}"
+            )));
+        }
+        Ok(Self {
+            fuel_type,
+            consumption_w,
+        })
+    }
 }
 
 /// Energy flow outputs from one equipment step.
@@ -857,6 +901,56 @@ pub struct CoreState {
 pub struct CoreOutput {
     pub flows: CoreFlows,
     pub state: CoreState,
+}
+
+/// Validates that declared core capabilities are backed by populated CoreOutput fields.
+pub fn validate_core_contract(
+    desc: &EquipmentDescriptor,
+    co: &CoreOutput,
+) -> Result<(), HaresError> {
+    let caps = desc.core_capabilities;
+
+    // Count missing fields without allocating.
+    let mut missing_bits = 0u8;
+    if caps.contains(CoreCapabilities::ELECTRIC) && co.flows.electric_kw.is_none() {
+        missing_bits |= 1;
+    }
+    if caps.contains(CoreCapabilities::REACTIVE) && co.flows.reactive_power_kvar.is_none() {
+        missing_bits |= 2;
+    }
+    if caps.contains(CoreCapabilities::FUEL) && co.flows.fuel_w.is_none() {
+        missing_bits |= 4;
+    }
+    if caps.contains(CoreCapabilities::HAS_SOC) && co.state.soc.is_none() {
+        missing_bits |= 8;
+    }
+    if caps.contains(CoreCapabilities::HAS_MODE) && co.state.operating_mode.is_none() {
+        missing_bits |= 16;
+    }
+
+    if missing_bits == 0 {
+        return Ok(());
+    }
+
+    // Only build the error string on the failure path.
+    static NAMES: [(u8, &str); 5] = [
+        (1, "flows.electric_kw"),
+        (2, "flows.reactive_power_kvar"),
+        (4, "flows.fuel_w"),
+        (8, "state.soc"),
+        (16, "state.operating_mode"),
+    ];
+    let missing: String = NAMES
+        .iter()
+        .filter(|(bit, _)| missing_bits & bit != 0)
+        .map(|(_, name)| *name)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(HaresError::Equipment(format!(
+        "core_output contract violation for '{}' ({:?}): missing {missing}",
+        desc.name, caps,
+    )))
 }
 
 bitflags! {
@@ -1999,7 +2093,10 @@ mod tests {
     fn electric_power_net_consumption_kw_signs() {
         assert_eq!(ElectricPower::Consumption(3.0).net_consumption_kw(), 3.0);
         assert_eq!(ElectricPower::Generation(3.0).net_consumption_kw(), -3.0);
-        assert_eq!(ElectricPower::Bidirectional(-2.0).net_consumption_kw(), -2.0);
+        assert_eq!(
+            ElectricPower::Bidirectional(-2.0).net_consumption_kw(),
+            -2.0
+        );
     }
 
     #[test]
@@ -2087,5 +2184,96 @@ mod tests {
         assert_eq!(CoreCapabilities::FUEL.bits(), 4u8);
         assert_eq!(CoreCapabilities::HAS_SOC.bits(), 8u8);
         assert_eq!(CoreCapabilities::HAS_MODE.bits(), 16u8);
+    }
+
+    #[test]
+    fn validate_core_contract_accepts_matching_capabilities() {
+        let desc = EquipmentDescriptor {
+            id: EquipmentId(1),
+            name: "Validator Happy Path".to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
+                | CoreCapabilities::FUEL
+                | CoreCapabilities::HAS_SOC
+                | CoreCapabilities::HAS_MODE,
+            telemetry_fields: vec![],
+        };
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_kvar: Some(-0.5),
+                fuel_w: Some(FuelPower {
+                    fuel_type: FuelType::Gas,
+                    consumption_w: 500.0,
+                }),
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Standby),
+                soc: Some(Soc::try_from(0.5).expect("valid SOC")),
+            },
+        };
+        assert!(validate_core_contract(&desc, &out).is_ok());
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_missing_declared_fields() {
+        let desc = EquipmentDescriptor {
+            id: EquipmentId(2),
+            name: "Validator Failure".to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::REACTIVE
+                | CoreCapabilities::HAS_MODE,
+            telemetry_fields: vec![],
+        };
+        let out = CoreOutput::default();
+        let err = validate_core_contract(&desc, &out).expect_err("missing fields must error");
+        let msg = err.to_string();
+        assert!(msg.contains("flows.electric_kw"));
+        assert!(msg.contains("flows.reactive_power_kvar"));
+        assert!(msg.contains("state.operating_mode"));
+    }
+
+    #[test]
+    fn core_capabilities_serde_format_is_pinned() {
+        assert_eq!(
+            serde_json::to_string(&CoreCapabilities::ELECTRIC).unwrap(),
+            "\"ELECTRIC\""
+        );
+    }
+
+    #[test]
+    fn operating_mode_try_from_u8_round_trip() {
+        for v in 0u8..=11 {
+            let mode = OperatingMode::try_from(v).expect("valid discriminant");
+            assert_eq!(mode as u8, v);
+        }
+        assert!(OperatingMode::try_from(12).is_err());
+        assert!(OperatingMode::try_from(255).is_err());
+    }
+
+    #[test]
+    fn soc_default_is_zero() {
+        assert_eq!(Soc::default().get(), 0.0);
+    }
+
+    #[test]
+    fn fuel_power_new_validates() {
+        assert!(FuelPower::new(FuelType::Gas, 100.0).is_ok());
+        assert!(FuelPower::new(FuelType::Gas, 0.0).is_ok());
+        assert!(FuelPower::new(FuelType::Gas, -1.0).is_err());
+        assert!(FuelPower::new(FuelType::Gas, f64::NAN).is_err());
+        assert!(FuelPower::new(FuelType::Gas, f64::INFINITY).is_err());
     }
 }

@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
-    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
-    ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+    ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
+    FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 use uom::si::f64::Volume;
@@ -69,7 +69,6 @@ const KEY_EF_T_MAX_C: &str = "energy_factor_t_max_c";
 const KEY_EF_RH_MIN: &str = "energy_factor_rh_min";
 const KEY_EF_RH_MAX: &str = "energy_factor_rh_max";
 
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DehumidifierState {
     is_on: bool,
@@ -92,6 +91,7 @@ pub struct Dehumidifier {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
+    core_output: CoreOutput,
     zone_id: ZoneId,
     operating_mode: OperatingMode,
     is_on: bool,
@@ -124,7 +124,7 @@ impl Dehumidifier {
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::HUMIDITY_SETPOINT
                     | ControlCapabilities::MODE_OVERRIDE,
-                core_capabilities: CoreCapabilities::empty(),
+                core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
@@ -132,6 +132,7 @@ impl Dehumidifier {
                 PortDeclaration::thermal(zone),
             ],
             telemetry: default_telemetry(),
+            core_output: CoreOutput::default(),
             zone_id: zone,
             operating_mode: OperatingMode::Off,
             is_on: false,
@@ -433,6 +434,7 @@ impl Equipment for Dehumidifier {
         self.mode_override = None;
         self.accumulated_water_removal_l = 0.0;
         self.telemetry = default_telemetry();
+        self.core_output = CoreOutput::default();
         self.write_step_telemetry(PerformanceSnapshot {
             water_removal_l_day: 0.0,
             electric_power_w: 0.0,
@@ -492,12 +494,28 @@ impl Equipment for Dehumidifier {
 
         let water_removed_l = snapshot.water_removal_l_day * dt.as_secs_f64() / SECONDS_PER_DAY;
         self.accumulated_water_removal_l += water_removed_l.max(0.0);
+        let electric_kw = (snapshot.electric_power_w / WATTS_PER_KILOWATT).max(0.0);
         self.write_step_telemetry(snapshot);
+        self.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(electric_kw)),
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(self.operating_mode),
+                soc: None,
+            },
+        };
         Ok(())
     }
 
     fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -530,6 +548,7 @@ impl Equipment for Dehumidifier {
             latent_removal_w: self.telemetry.get(tk::LATENT_REMOVAL_W).unwrap_or(0.0),
             sensible_gain_w: self.telemetry.get(tk::SENSIBLE_GAIN_W).unwrap_or(0.0),
         });
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -844,6 +863,7 @@ mod tests {
             },
             custom_domains: vec![],
             equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
             current_time: FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -1017,8 +1037,7 @@ mod tests {
 
     #[test]
     fn registry_includes_dehumidifier_and_thermal_stage() {
-        let mut registry = EquipmentRegistry::new();
-        register_with_registry(&mut registry);
+        let registry = EquipmentRegistry::new();
         let eq = registry.create("Dehumidifier", config()).unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
     }

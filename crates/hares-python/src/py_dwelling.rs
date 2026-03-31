@@ -9,7 +9,10 @@ use hares_core::{
     ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingConfig,
     environment::SurfaceGeometry,
 };
-use hares_equipment::{BatteryLutType, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
+use hares_equipment::{
+    BatteryLutType, EquipmentConfig, EquipmentRegistry,
+    config::{ConfigPayload, ConfigValue},
+};
 use hares_io::{OutputFormat, SimulationConfig, output::metrics::MetricsCalculator};
 use hares_types::{BatteryChemistry, EvConnectionState, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -24,8 +27,8 @@ use crate::py_control::PyControlSignal;
 use crate::py_enums::PyLutType;
 use crate::py_enums::{PyEvArchetypeId, PyVehicleId};
 use crate::py_equipment::{
-    PyBattery, PyEquipmentDescriptor, PyEv, PyPv, extract_charging_lut, extract_ocv_table,
-    extract_u_neg_table,
+    PyBattery, PyEquipment, PyEquipmentDescriptor, PyEv, PyPv, extract_charging_lut,
+    extract_ocv_table, extract_u_neg_table,
 };
 use crate::py_metrics::PySimulationMetrics;
 use crate::py_telemetry::PyTelemetry;
@@ -670,6 +673,21 @@ impl PyDwelling {
             .collect())
     }
 
+    pub fn equipment(&self) -> PyResult<Vec<PyEquipment>> {
+        let dwelling = lock_dwelling(&self.dwelling)?;
+        Ok(dwelling
+            .equipment()
+            .iter()
+            .map(|eq| {
+                PyEquipment::new(
+                    eq.descriptor().clone(),
+                    eq.core_output().clone(),
+                    eq.telemetry().clone(),
+                )
+            })
+            .collect())
+    }
+
     pub fn equipment_names(&self) -> PyResult<Vec<String>> {
         let dwelling = lock_dwelling(&self.dwelling)?;
         Ok(dwelling
@@ -702,7 +720,7 @@ impl PyDwelling {
         let config = hares_equipment::EquipmentConfig {
             name: battery.name.clone(),
             ochre_class: "Battery".to_string(),
-            raw_config,
+            payload: ConfigPayload::Raw { data: raw_config },
         };
 
         let mut eq = self
@@ -747,7 +765,7 @@ impl PyDwelling {
         let config = hares_equipment::EquipmentConfig {
             name: pv.name.clone(),
             ochre_class: "PV".to_string(),
-            raw_config,
+            payload: ConfigPayload::Raw { data: raw_config },
         };
 
         let mut eq = self
@@ -823,7 +841,7 @@ impl PyDwelling {
         let config = hares_equipment::EquipmentConfig {
             name: ev.name.clone(),
             ochre_class: "EV".to_string(),
-            raw_config,
+            payload: ConfigPayload::Raw { data: raw_config },
         };
 
         let mut eq = self
@@ -883,7 +901,7 @@ impl PyDwelling {
         let config = hares_equipment::EquipmentConfig {
             name: spec.label.to_string(),
             ochre_class: "EV".to_string(),
-            raw_config,
+            payload: ConfigPayload::Raw { data: raw_config },
         };
 
         let mut eq = self
@@ -1345,7 +1363,7 @@ impl PyDwelling {
             let config = EquipmentConfig {
                 name: battery.name.clone(),
                 ochre_class: "Battery".to_string(),
-                raw_config,
+                payload: ConfigPayload::Raw { data: raw_config },
             };
             let mut eq = self
                 .equipment_registry
@@ -1368,7 +1386,7 @@ impl PyDwelling {
             let config = EquipmentConfig {
                 name: pv.name.clone(),
                 ochre_class: "PV".to_string(),
-                raw_config,
+                payload: ConfigPayload::Raw { data: raw_config },
             };
             return self
                 .equipment_registry
@@ -1395,7 +1413,7 @@ impl PyDwelling {
             let config = EquipmentConfig {
                 name: ev.name.clone(),
                 ochre_class: "EV".to_string(),
-                raw_config,
+                payload: ConfigPayload::Raw { data: raw_config },
             };
             let mut eq = self
                 .equipment_registry

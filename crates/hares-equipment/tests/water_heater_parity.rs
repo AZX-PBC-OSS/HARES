@@ -57,6 +57,7 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
         },
         custom_domains: vec![],
         equipment_telemetry: std::collections::HashMap::new(),
+        equipment_core: Default::default(),
         current_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)

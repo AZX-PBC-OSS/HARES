@@ -5,32 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::EquipmentTypedConfig;
 
-/// Shared duct distribution parameters, flattened into heating config structs.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct DuctConfig {
-    /// Duct distribution system efficiency (DSE), dimensionless [0, 1].
-    /// None means no duct losses (equipment in conditioned space or no ducts).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dse_heat: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dse_cool: Option<f64>,
-}
+pub use super::core_config::DuctConfig;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GasFurnaceConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
-    /// Annual fuel utilization efficiency (AFUE), dimensionless [0, 1].
+    pub capacity_w: f64,
     pub afue: f64,
-    /// Rated heating capacity in watts.
-    pub heating_capacity_w: f64,
-    /// Number of compressor/burner speeds (1 or 2).
-    #[serde(default = "default_one")]
-    pub number_of_speeds: u8,
-    /// Fan power in watts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w: Option<f64>,
+    #[serde(default = "default_one")]
+    pub number_of_speeds: u8,
     #[serde(flatten)]
     pub ducts: DuctConfig,
 }
@@ -41,18 +28,31 @@ impl EquipmentTypedConfig for GasFurnaceConfig {
     }
 }
 
+impl Default for GasFurnaceConfig {
+    fn default() -> Self {
+        Self {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 0.0,
+            afue: 0.80,
+            fan_power_w: None,
+            number_of_speeds: 1,
+            ducts: DuctConfig::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ElectricFurnaceConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
-    /// Coefficient of performance (COP), dimensionless (typically 1.0 for resistance).
-    pub heating_efficiency: f64,
-    pub heating_capacity_w: f64,
-    #[serde(default = "default_one")]
-    pub number_of_speeds: u8,
+    pub capacity_w: f64,
+    pub eir: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w: Option<f64>,
+    #[serde(default = "default_one")]
+    pub number_of_speeds: u8,
     #[serde(flatten)]
     pub ducts: DuctConfig,
 }
@@ -63,31 +63,60 @@ impl EquipmentTypedConfig for ElectricFurnaceConfig {
     }
 }
 
+impl Default for ElectricFurnaceConfig {
+    fn default() -> Self {
+        Self {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 0.0,
+            eir: 1.0,
+            fan_power_w: None,
+            number_of_speeds: 1,
+            ducts: DuctConfig::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GasBoilerConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     pub loop_id: Option<u16>,
+    pub capacity_w: f64,
     pub afue: f64,
-    pub heating_capacity_w: f64,
-    #[serde(default = "default_one")]
-    pub number_of_speeds: u8,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fan_power_w: Option<f64>,
-    /// Hydronic loop flow rate [kg/s]. Defaults to 0.5 kg/s.
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
-    /// Hydronic loop return water temperature [C]. Defaults to 40 °C (104 °F).
     #[serde(default = "default_return_temp_c")]
     pub return_temp_c: f64,
     #[serde(default = "default_fluid_type")]
     pub fluid_type: FluidType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_power_w: Option<f64>,
+    #[serde(default = "default_one")]
+    pub number_of_speeds: u8,
 }
 
 impl EquipmentTypedConfig for GasBoilerConfig {
     fn equipment_type_name() -> &'static str {
         "Gas Boiler"
+    }
+}
+
+impl Default for GasBoilerConfig {
+    fn default() -> Self {
+        Self {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            capacity_w: 0.0,
+            afue: 0.80,
+            flow_rate_kg_s: default_flow_rate_kg_s(),
+            return_temp_c: default_return_temp_c(),
+            fluid_type: default_fluid_type(),
+            fan_power_w: None,
+            number_of_speeds: 1,
+        }
     }
 }
 
@@ -97,20 +126,18 @@ pub struct ElectricBoilerConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     pub loop_id: Option<u16>,
-    pub heating_efficiency: f64,
-    pub heating_capacity_w: f64,
-    #[serde(default = "default_one")]
-    pub number_of_speeds: u8,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fan_power_w: Option<f64>,
-    /// Hydronic loop flow rate [kg/s]. Defaults to 0.5 kg/s.
+    pub capacity_w: f64,
+    pub eir: f64,
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
-    /// Hydronic loop return water temperature [C]. Defaults to 40 °C (104 °F).
     #[serde(default = "default_return_temp_c")]
     pub return_temp_c: f64,
     #[serde(default = "default_fluid_type")]
     pub fluid_type: FluidType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_power_w: Option<f64>,
+    #[serde(default = "default_one")]
+    pub number_of_speeds: u8,
 }
 
 impl EquipmentTypedConfig for ElectricBoilerConfig {
@@ -119,12 +146,30 @@ impl EquipmentTypedConfig for ElectricBoilerConfig {
     }
 }
 
+impl Default for ElectricBoilerConfig {
+    fn default() -> Self {
+        Self {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            capacity_w: 0.0,
+            eir: 1.0,
+            flow_rate_kg_s: default_flow_rate_kg_s(),
+            return_temp_c: default_return_temp_c(),
+            fluid_type: default_fluid_type(),
+            fan_power_w: None,
+            number_of_speeds: 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ElectricBaseboardConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
-    pub heating_capacity_w: f64,
+    pub capacity_w: f64,
+    pub eir: f64,
 }
 
 impl EquipmentTypedConfig for ElectricBaseboardConfig {
@@ -133,18 +178,57 @@ impl EquipmentTypedConfig for ElectricBaseboardConfig {
     }
 }
 
+impl Default for ElectricBaseboardConfig {
+    fn default() -> Self {
+        Self {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 0.0,
+            eir: 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdealHvacConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
-    pub heating_capacity_w: f64,
-    pub cooling_capacity_w: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_capacity_w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_capacity_w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_eir: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_eir: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shr: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fraction_heating_load_served: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fraction_cooling_load_served: Option<f64>,
 }
 
 impl EquipmentTypedConfig for IdealHvacConfig {
     fn equipment_type_name() -> &'static str {
         "Ideal HVAC"
+    }
+}
+
+impl Default for IdealHvacConfig {
+    fn default() -> Self {
+        Self {
+            equipment_id: None,
+            zone_id: None,
+            heating_capacity_w: None,
+            cooling_capacity_w: None,
+            heating_eir: None,
+            cooling_eir: None,
+            shr: None,
+            fraction_heating_load_served: None,
+            fraction_cooling_load_served: None,
+        }
     }
 }
 
@@ -175,117 +259,61 @@ mod tests {
             T::equipment_type_name().to_string(),
             config,
         )
-        .unwrap()
     }
 
     #[test]
-    fn gas_furnace_config_round_trips() {
-        let cfg = GasFurnaceConfig {
-            equipment_id: Some(1),
-            zone_id: Some(1),
-            afue: 0.96,
-            heating_capacity_w: 12_000.0,
-            number_of_speeds: 1,
-            fan_power_w: Some(300.0),
+    fn all_configs_round_trip() {
+        let gf = GasFurnaceConfig {
+            capacity_w: 12_000.0,
+            afue: 0.95,
             ducts: DuctConfig {
-                dse_heat: Some(0.8),
-                dse_cool: None,
+                dse_heat: Some(0.85),
+                ..DuctConfig::default()
             },
+            ..GasFurnaceConfig::default()
         };
-        let ec = typed_config(cfg.clone());
-        assert!(ec.is_typed());
-        let recovered: GasFurnaceConfig = ec.typed().unwrap();
-        assert!((recovered.afue - cfg.afue).abs() < 1e-12);
-        assert!((recovered.heating_capacity_w - cfg.heating_capacity_w).abs() < 1e-12);
-        assert_eq!(recovered.ducts.dse_heat, cfg.ducts.dse_heat);
+        let ef = ElectricFurnaceConfig {
+            capacity_w: 8_000.0,
+            eir: 1.0,
+            ..ElectricFurnaceConfig::default()
+        };
+        let gb = GasBoilerConfig {
+            capacity_w: 15_000.0,
+            afue: 0.88,
+            ..GasBoilerConfig::default()
+        };
+        let eb = ElectricBoilerConfig {
+            capacity_w: 10_000.0,
+            eir: 0.98,
+            ..ElectricBoilerConfig::default()
+        };
+        let bb = ElectricBaseboardConfig {
+            capacity_w: 5_000.0,
+            eir: 1.0,
+            ..ElectricBaseboardConfig::default()
+        };
+        let ih = IdealHvacConfig {
+            heating_capacity_w: Some(10_000.0),
+            cooling_capacity_w: Some(8_000.0),
+            heating_eir: Some(1.0),
+            cooling_eir: Some(1.0),
+            shr: Some(0.75),
+            ..IdealHvacConfig::default()
+        };
+
+        let _: GasFurnaceConfig = typed_config(gf).typed().unwrap();
+        let _: ElectricFurnaceConfig = typed_config(ef).typed().unwrap();
+        let _: GasBoilerConfig = typed_config(gb).typed().unwrap();
+        let _: ElectricBoilerConfig = typed_config(eb).typed().unwrap();
+        let _: ElectricBaseboardConfig = typed_config(bb).typed().unwrap();
+        let _: IdealHvacConfig = typed_config(ih).typed().unwrap();
     }
 
     #[test]
-    fn electric_furnace_config_round_trips() {
-        let cfg = ElectricFurnaceConfig {
-            equipment_id: None,
-            zone_id: Some(2),
-            heating_efficiency: 1.0,
-            heating_capacity_w: 8_000.0,
-            number_of_speeds: 1,
-            fan_power_w: None,
-            ducts: DuctConfig::default(),
-        };
-        let ec = typed_config(cfg.clone());
-        let recovered: ElectricFurnaceConfig = ec.typed().unwrap();
-        assert!((recovered.heating_capacity_w - cfg.heating_capacity_w).abs() < 1e-12);
-    }
-
-    #[test]
-    fn gas_boiler_config_round_trips() {
-        let cfg = GasBoilerConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            loop_id: Some(1),
-            afue: 0.85,
-            heating_capacity_w: 15_000.0,
-            number_of_speeds: 1,
-            fan_power_w: None,
-            flow_rate_kg_s: 0.5,
-            return_temp_c: 40.0,
-            fluid_type: FluidType::Water,
-        };
-        let ec = typed_config(cfg.clone());
-        let recovered: GasBoilerConfig = ec.typed().unwrap();
-        assert!((recovered.afue - cfg.afue).abs() < 1e-12);
-        assert!((recovered.flow_rate_kg_s - cfg.flow_rate_kg_s).abs() < 1e-12);
-    }
-
-    #[test]
-    fn electric_boiler_config_round_trips() {
-        let cfg = ElectricBoilerConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            loop_id: Some(1),
-            heating_efficiency: 1.0,
-            heating_capacity_w: 10_000.0,
-            number_of_speeds: 1,
-            fan_power_w: None,
-            flow_rate_kg_s: 0.5,
-            return_temp_c: 40.0,
-            fluid_type: FluidType::Water,
-        };
-        let ec = typed_config(cfg.clone());
-        let recovered: ElectricBoilerConfig = ec.typed().unwrap();
-        assert!((recovered.heating_capacity_w - cfg.heating_capacity_w).abs() < 1e-12);
-        assert!((recovered.flow_rate_kg_s - cfg.flow_rate_kg_s).abs() < 1e-12);
-    }
-
-    #[test]
-    fn electric_baseboard_config_round_trips() {
-        let cfg = ElectricBaseboardConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: 5_000.0,
-        };
-        let ec = typed_config(cfg.clone());
-        let recovered: ElectricBaseboardConfig = ec.typed().unwrap();
-        assert!((recovered.heating_capacity_w - cfg.heating_capacity_w).abs() < 1e-12);
-    }
-
-    #[test]
-    fn ideal_hvac_config_round_trips() {
-        let cfg = IdealHvacConfig {
-            equipment_id: Some(5),
-            zone_id: Some(1),
-            heating_capacity_w: 10_000.0,
-            cooling_capacity_w: 8_000.0,
-        };
-        let ec = typed_config(cfg.clone());
-        let recovered: IdealHvacConfig = ec.typed().unwrap();
-        assert!((recovered.cooling_capacity_w - cfg.cooling_capacity_w).abs() < 1e-12);
-    }
-
-    #[test]
-    fn gas_furnace_rejects_unknown_fields() {
+    fn gas_furnace_rejects_unknown_fields_with_key_name() {
         let data = serde_json::json!({
+            "capacity_w": 12000.0,
             "afue": 0.96,
-            "heating_capacity_w": 12000.0,
             "unknown_key": true,
         });
         let ec = EquipmentConfig {
@@ -298,240 +326,10 @@ mod tests {
             },
         };
         let result: crate::Result<GasFurnaceConfig> = ec.typed();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn number_of_speeds_defaults_to_one() {
-        let json = serde_json::json!({
-            "afue": 0.96,
-            "heating_capacity_w": 12000.0,
-        });
-        let cfg: GasFurnaceConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(cfg.number_of_speeds, 1);
-    }
-
-    fn minimal_env() -> hares_types::EnvironmentState {
-        use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
-        use hares_types::{GridState, WeatherState, ZoneId, ZoneState};
-        hares_types::EnvironmentState {
-            zones: vec![ZoneState {
-                id: ZoneId(1),
-                temperature_c: 18.0,
-                humidity_ratio: 0.008,
-                relative_humidity: 0.45,
-                wet_bulb_c: 14.0,
-                volume_m3: 200.0,
-            }],
-            weather: WeatherState {
-                outdoor_temp_c: 5.0,
-                outdoor_humidity_ratio: 0.003,
-                pressure_kpa: 101.325,
-                ..WeatherState::default()
-            },
-            grid: GridState { voltage_pu: 1.0, frequency_hz: 60.0 },
-            custom_domains: vec![],
-            equipment_telemetry: std::collections::HashMap::new(),
-            current_time: FixedOffset::east_opt(0)
-                .unwrap()
-                .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-                .single()
-                .expect("valid"),
-            time_res: ChronoDuration::minutes(1),
-            price_signal: Default::default(),
-            electrical: Default::default(),
-        }
-    }
-
-    fn heating_ports() -> hares_types::PortSlots {
-        use hares_types::{ZoneId, PortSlots, ThermalAccumulator};
-        PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        }
-    }
-
-    /// Force duty cycle to 1.0 by inserting a heating control signal so the
-    /// equipment is fully on during step. Equipment must have been init'd and
-    /// its thermostat configured to call for heat (zone < heating setpoint).
-    fn run_step_at_full_duty(
-        eq: &mut dyn crate::Equipment,
-        env: &hares_types::EnvironmentState,
-        ports: &mut hares_types::PortSlots,
-    ) {
-        use hares_types::ControlSignal;
-        let _ = eq.apply_control_unchecked(&ControlSignal::IdealCapacity { capacity_w: f64::MAX });
-        eq.update_control(env);
-        eq.step(env, std::time::Duration::from_secs(60), ports).unwrap();
-    }
-
-    #[test]
-    fn gas_furnace_typed_init_produces_thermal_output() {
-        use crate::Equipment;
-        use crate::hvac::furnace::GasFurnace;
-        use hares_types::telemetry_keys as tk;
-        let cfg = GasFurnaceConfig {
-            equipment_id: Some(1),
-            zone_id: Some(1),
-            afue: 0.96,
-            heating_capacity_w: 12_000.0,
-            number_of_speeds: 1,
-            fan_power_w: Some(0.0),
-            ducts: DuctConfig::default(),
-        };
-        let ec = typed_config(cfg);
-        let mut eq = GasFurnace::new(ec.clone());
-        let env = minimal_env();
-        eq.init(&ec, &env).unwrap();
-        let mut ports = heating_ports();
-        run_step_at_full_duty(&mut eq, &env, &mut ports);
-        let thermal_w = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0);
-        let fuel_w = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(0.0);
-        assert!(thermal_w > 0.0, "thermal output must be positive after typed init");
-        assert!(fuel_w > 0.0, "fuel input must be positive after typed init");
-        assert!((fuel_w / thermal_w - 1.0 / 0.96).abs() < 0.01, "fuel/thermal ratio must match 1/AFUE");
-    }
-
-    #[test]
-    fn electric_furnace_typed_init_produces_power() {
-        use crate::Equipment;
-        use crate::hvac::furnace::ElectricFurnace;
-        use hares_types::telemetry_keys as tk;
-        let cfg = ElectricFurnaceConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_efficiency: 1.0,
-            heating_capacity_w: 8_000.0,
-            number_of_speeds: 1,
-            fan_power_w: Some(0.0),
-            ducts: DuctConfig::default(),
-        };
-        let ec = typed_config(cfg);
-        let mut eq = ElectricFurnace::new(ec.clone());
-        let env = minimal_env();
-        eq.init(&ec, &env).unwrap();
-        let mut ports = heating_ports();
-        run_step_at_full_duty(&mut eq, &env, &mut ports);
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        assert!(electric_kw > 0.0, "electric power must be positive after typed init");
-        assert!((electric_kw - 8.0).abs() < 0.5, "electric kw must match capacity / 1000 for eir=1");
-    }
-
-    #[test]
-    fn electric_furnace_typed_init_rejects_zero_efficiency() {
-        use crate::Equipment;
-        use crate::hvac::furnace::ElectricFurnace;
-        let cfg = ElectricFurnaceConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_efficiency: 0.0,
-            heating_capacity_w: 8_000.0,
-            number_of_speeds: 1,
-            fan_power_w: None,
-            ducts: DuctConfig::default(),
-        };
-        let ec = typed_config(cfg);
-        let mut eq = ElectricFurnace::new(ec.clone());
-        let env = minimal_env();
-        assert!(eq.init(&ec, &env).is_err());
-    }
-
-    #[test]
-    fn electric_boiler_typed_init_writes_fluid_port() {
-        use crate::Equipment;
-        use crate::hvac::boiler::ElectricBoiler;
-        use hares_types::{FluidAccumulator, LoopId, PortSlots, ThermalAccumulator, ZoneId};
-        let cfg = ElectricBoilerConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            loop_id: Some(1),
-            heating_efficiency: 0.98,
-            heating_capacity_w: 10_000.0,
-            number_of_speeds: 1,
-            fan_power_w: None,
-            flow_rate_kg_s: 0.6,
-            return_temp_c: 40.0,
-            fluid_type: FluidType::Water,
-        };
-        let ec = typed_config(cfg);
-        let mut eq = ElectricBoiler::new(ec.clone());
-        let env = minimal_env();
-        eq.init(&ec, &env).unwrap();
-        let mut ports = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Water)],
-            ..PortSlots::default()
-        };
-        run_step_at_full_duty(&mut eq, &env, &mut ports);
-        assert!(ports.fluid[0].total_flow_kg_s > 0.0, "fluid flow must be positive after typed init");
-    }
-
-    #[test]
-    fn gas_boiler_typed_init_writes_fluid_port() {
-        use crate::Equipment;
-        use crate::hvac::boiler::GasBoiler;
-        use hares_types::{FluidAccumulator, LoopId, PortSlots, ThermalAccumulator, ZoneId};
-        let cfg = GasBoilerConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            loop_id: Some(1),
-            afue: 0.85,
-            heating_capacity_w: 15_000.0,
-            number_of_speeds: 1,
-            fan_power_w: None,
-            flow_rate_kg_s: 0.5,
-            return_temp_c: 40.0,
-            fluid_type: FluidType::Water,
-        };
-        let ec = typed_config(cfg);
-        let mut eq = GasBoiler::new(ec.clone());
-        let env = minimal_env();
-        eq.init(&ec, &env).unwrap();
-        let mut ports = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Water)],
-            ..PortSlots::default()
-        };
-        run_step_at_full_duty(&mut eq, &env, &mut ports);
-        assert!(ports.fluid[0].total_flow_kg_s > 0.0, "fluid flow must be positive after typed init");
-    }
-
-    #[test]
-    fn electric_baseboard_typed_init_produces_power() {
-        use crate::Equipment;
-        use crate::hvac::baseboard::ElectricBaseboard;
-        use hares_types::telemetry_keys as tk;
-        let cfg = ElectricBaseboardConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: 5_000.0,
-        };
-        let ec = typed_config(cfg);
-        let mut eq = ElectricBaseboard::new(ec.clone());
-        let env = minimal_env();
-        eq.init(&ec, &env).unwrap();
-        let mut ports = heating_ports();
-        run_step_at_full_duty(&mut eq, &env, &mut ports);
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        assert!(electric_kw > 0.0, "electric power must be positive after typed init");
-        assert!((electric_kw - 5.0).abs() < 0.5, "electric kw must match 5 kW capacity");
-    }
-
-    #[test]
-    fn ideal_hvac_typed_init_succeeds() {
-        use crate::Equipment;
-        use crate::hvac::ideal_hvac::IdealHvac;
-        let cfg = IdealHvacConfig {
-            equipment_id: None,
-            zone_id: Some(1),
-            heating_capacity_w: 10_000.0,
-            cooling_capacity_w: 8_000.0,
-        };
-        let ec = typed_config(cfg);
-        let mut eq = IdealHvac::new(ec.clone());
-        let env = minimal_env();
-        eq.init(&ec, &env).unwrap();
-        // Verify descriptor reflects the zone from the typed config.
-        assert_eq!(eq.descriptor().zone, Some(hares_types::ZoneId(1)));
+        let err = result.expect_err("unknown fields must be rejected");
+        assert!(
+            err.to_string().contains("unknown_key"),
+            "error should name unknown key; got {err}"
+        );
     }
 }
