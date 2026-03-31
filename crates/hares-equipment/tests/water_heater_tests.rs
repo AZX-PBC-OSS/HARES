@@ -643,7 +643,7 @@ fn tank_avg_temp_always_physically_bounded() {
             "tank_avg_temp_c must be finite at step {step}; got {temp}"
         );
         assert!(
-            temp >= 0.0 && temp <= 300.0,
+            (0.0..=300.0).contains(&temp),
             "tank_avg_temp_c ({temp:.4}°C) out of physical range [0, 300] at step {step}"
         );
     }

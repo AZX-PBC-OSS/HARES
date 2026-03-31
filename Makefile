@@ -1,4 +1,4 @@
-.PHONY: check-no-magic-config
+.PHONY: check check-no-magic-config
 
 # Fail if any built-in equipment `init*()` method body uses raw config accessors.
 # Custom equipment (Python adapter layer) is excluded from this scan.
@@ -63,3 +63,5 @@ check-no-magic-config:
 	    echo "FAIL: rg returned unexpected exit code $$exit_code"; \
 	    exit 1; \
 	fi
+
+check: check-no-magic-config

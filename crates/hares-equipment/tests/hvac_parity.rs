@@ -198,7 +198,6 @@ fn gas_furnace_energy_balance() {
             number_of_speeds: 1,
             fan_power_w: Some(FAN_POWER_W),
             ducts: DuctConfig::default(),
-            ..GasFurnaceConfig::default()
         },
     );
     let registry = EquipmentRegistry::new();
@@ -276,7 +275,6 @@ fn gas_furnace_fuel_independent_of_duct_dse() {
                     dse_heat: Some(dse),
                     ..DuctConfig::default()
                 },
-                ..GasFurnaceConfig::default()
             },
         );
         let registry = EquipmentRegistry::new();
@@ -713,7 +711,6 @@ fn furnace_thermostat_off_above_setpoint() {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
-            ..GasFurnaceConfig::default()
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1043,7 +1040,6 @@ fn gas_furnace_first_law_thermal_less_than_fuel() {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
-            ..GasFurnaceConfig::default()
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1112,7 +1108,6 @@ fn gas_furnace_dse_multi_zone_energy_conservation() {
                 duct_zone_id: Some(2),
                 ..DuctConfig::default()
             },
-            ..GasFurnaceConfig::default()
         },
     );
     let registry = EquipmentRegistry::new();

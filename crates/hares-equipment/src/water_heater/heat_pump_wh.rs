@@ -425,13 +425,13 @@ impl HeatPumpWH {
         self.shr = c.shr.unwrap_or(DEFAULT_SHR);
         self.lost_heat_fraction =
             c.lost_heat_fraction
-                .unwrap_or_else(|| match c.zone_type.as_deref() {
+                .unwrap_or(match c.zone_type.as_deref() {
                     Some("conditioned") => 0.25,
                     _ => DEFAULT_LOST_HEAT_FRACTION,
                 });
         self.wall_heat_fraction =
             c.wall_heat_fraction
-                .unwrap_or_else(|| match c.zone_type.as_deref() {
+                .unwrap_or(match c.zone_type.as_deref() {
                     Some("conditioned") => 0.5,
                     _ => 0.0,
                 });

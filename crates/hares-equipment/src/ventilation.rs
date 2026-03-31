@@ -109,16 +109,6 @@ impl VentilationConfig {
 
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
 const KEY_ZONE_ID: &str = "zone_id";
-const KEY_FAN_POWER_W: &str = "fan_power_w";
-const KEY_FLOW_RATE_M3_S: &str = "flow_rate_m3_s";
-const KEY_SENSIBLE_EFFECTIVENESS: &str = "sensible_effectiveness";
-const KEY_LATENT_EFFECTIVENESS: &str = "latent_effectiveness";
-const KEY_BYPASS_TEMP_MIN_C: &str = "bypass_temp_min_c";
-const KEY_BYPASS_TEMP_MAX_C: &str = "bypass_temp_max_c";
-const KEY_DEFROST_TEMP_C: &str = "defrost_temp_c";
-const KEY_DEFROST_EFFECTIVENESS_FRACTION: &str = "defrost_effectiveness_fraction";
-const KEY_SCHEDULE_SOURCE: &str = "schedule_source";
-const KEY_SCHEDULE_CONSTANT: &str = "schedule_constant";
 
 const DEFAULT_FAN_POWER_W: f64 = 50.0;
 const DEFAULT_FLOW_RATE_M3_S: f64 = 0.035; // ~75 CFM, typical residential

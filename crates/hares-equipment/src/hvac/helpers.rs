@@ -2,9 +2,10 @@
 //!
 //! # Config access policy
 //!
-//! `get_f64`, `get_str`, `get_bool`, and `first_f64` must only be called from
-//! custom equipment or the Python adapter layer. Built-in equipment uses typed
-//! config structs (see CFG-007 through CFG-015). CI enforces this.
+//! `get_f64`, `get_str`, `get_bool`, and `first_f64` must not appear in built-in
+//! equipment `init()` bodies. Built-in equipment uses typed config structs (see
+//! CFG-007 through CFG-015); these accessors remain available only for
+//! compatibility helpers and custom-equipment adapter paths outside init.
 
 use hares_types::normalize_ascii;
 use hares_types::{
@@ -18,6 +19,8 @@ use crate::{ConfigPayload, EquipmentConfig};
 use crate::HvacEquipment;
 
 #[doc(hidden)]
+/// Compatibility helper for legacy/raw config paths outside built-in `init()`
+/// bodies. Do not use this in new built-in equipment initialization code.
 pub fn first_f64(config: &EquipmentConfig, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|key| config.get_f64(key))
 }

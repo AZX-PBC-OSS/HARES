@@ -14,7 +14,6 @@
 //!   vendors/OCHRE/ochre/Equipment/Generator.py
 //!   vendors/OCHRE/ochre/Equipment/EV.py
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};

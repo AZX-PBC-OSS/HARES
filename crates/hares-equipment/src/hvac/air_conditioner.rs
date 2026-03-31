@@ -1233,7 +1233,7 @@ fn typed_ac_test_config(seer: f64) -> EquipmentConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -1241,11 +1241,10 @@ mod tests {
         ZoneId, ZoneState, telemetry_keys as tk,
     };
 
-    use super::{AirConditioner, RoomAC, register_with_registry};
+    use super::{AirConditioner, RoomAC};
 
     use crate::{
-        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, EquipmentRegistry,
-        RoomAcConfig,
+        CentralAirConditionerConfig, Equipment, EquipmentConfig, EquipmentRegistry, RoomAcConfig,
     };
 
     fn env(
@@ -1670,6 +1669,29 @@ mod tests {
     }
 
     #[test]
+    fn typed_stage_eir_overrides_seer_conversion_path() {
+        let mut typed = super::typed_ac_test_config(16.0)
+            .typed::<CentralAirConditionerConfig>()
+            .expect("typed central AC config");
+        // Intentionally contradictory legacy efficiency; SI-native stage EIR must win.
+        typed.seer = 8.0;
+        typed.stage_eirs = Some(vec![0.30]);
+        typed.stage_capacities_w = Some(vec![typed.capacity_w]);
+
+        let cfg =
+            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);
+        let mut eq = AirConditioner::new(cfg.clone());
+        let environment = env(27.0, 0.010, 19.0, 35.0);
+        eq.init(&cfg, &environment).unwrap();
+
+        assert_eq!(
+            eq.core.hvac.eir_by_stage,
+            vec![0.30],
+            "SI stage_eirs must override seer-derived EIR"
+        );
+    }
+
+    #[test]
     fn room_ac_vs_central_different_dse() {
         let central_with_duct_losses = ac_config_with(|typed| {
             typed.capacity_w = 3_500.0;
@@ -1876,7 +1898,7 @@ mod tests {
 
 #[cfg(test)]
 mod dr_tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -2283,7 +2305,7 @@ mod dr_tests {
 
 #[cfg(test)]
 mod crankcase_tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -2680,7 +2702,7 @@ mod crankcase_tests {
 
 #[cfg(test)]
 mod ideal_capacity_tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{

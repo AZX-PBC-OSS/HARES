@@ -18,12 +18,11 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 
 use super::tank::{StratifiedTank, StratifiedTankConfig};
 use super::{
-    WaterHeaterZip, apply_jacket_r_value, draw_schedule_source, hysteresis_call,
-    mains_temp_schedule_source, parse_usize, resolve_draw_rate_kg_s, resolve_storage_step_inputs,
+    WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
     weighted_average_tank_temp,
 };
 use crate::hvac::helpers::{
-    equipment_id_from_config, first_f64, loop_id_from_config, parse_fuel_type, zone_id_from_config,
+    equipment_id_from_config, loop_id_from_config, zone_id_from_config,
 };
 
 use super::wh_config::GasWaterHeaterConfig;
@@ -289,7 +288,7 @@ impl GasWH {
             .max(0.0);
         self.pilot_power_w = c
             .pilot_power_w
-            .unwrap_or_else(|| match c.ignition_type.as_deref() {
+            .unwrap_or(match c.ignition_type.as_deref() {
                 Some("ElectronicIgnition") | Some("electronic") => 0.0,
                 _ => 5.0,
             })

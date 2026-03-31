@@ -2,15 +2,8 @@
 ///
 /// Provides factory functions for EnvironmentState, EquipmentConfig, and PortSlots
 /// with sensible defaults and chainable setters.
-use std::collections::HashMap;
-use std::time::Duration;
-
 use chrono::{FixedOffset, TimeZone};
-use hares_equipment::config::ConfigValue;
-use hares_equipment::{Equipment, EquipmentConfig, Telemetry};
-use hares_types::{
-    EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
-};
+use hares_types::{EnvironmentState, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState};
 
 /// Build an EnvironmentState with one zone at the given temperature.
 pub fn env_with_zone_temp(zone_temp_c: f64) -> EnvironmentState {
@@ -52,31 +45,6 @@ impl Default for EnvBuilder {
 impl EnvBuilder {
     pub fn zone_temp(mut self, t: f64) -> Self {
         self.zone_temp_c = t;
-        self
-    }
-
-    pub fn outdoor_temp(mut self, t: f64) -> Self {
-        self.outdoor_temp_c = t;
-        self
-    }
-
-    pub fn voltage(mut self, v: f64) -> Self {
-        self.voltage_pu = v;
-        self
-    }
-
-    pub fn wind_speed(mut self, ws: f64) -> Self {
-        self.wind_speed_m_s = ws;
-        self
-    }
-
-    pub fn ghi(mut self, ghi: f64) -> Self {
-        self.ghi_w_m2 = ghi;
-        self
-    }
-
-    pub fn surfaces(mut self, s: Vec<SurfaceIrradiance>) -> Self {
-        self.surfaces = s;
         self
     }
 
@@ -132,70 +100,4 @@ impl EnvBuilder {
 
 pub fn env_builder() -> EnvBuilder {
     EnvBuilder::default()
-}
-
-/// Build a config with the given entries.
-pub fn config(name: &str, ochre_class: &str, entries: &[(&str, f64)]) -> EquipmentConfig {
-    let mut raw = HashMap::new();
-    for &(key, value) in entries {
-        raw.insert(key.to_string(), ConfigValue::Float(value));
-    }
-    EquipmentConfig {
-        name: name.to_string(),
-        ochre_class: ochre_class.to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
-}
-
-/// Build a config with string and float entries.
-pub fn config_mixed(
-    name: &str,
-    ochre_class: &str,
-    floats: &[(&str, f64)],
-    strings: &[(&str, &str)],
-) -> EquipmentConfig {
-    let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-    for &(key, value) in floats {
-        raw.insert(key.to_string(), ConfigValue::Float(value));
-    }
-    for &(key, value) in strings {
-        raw.insert(key.to_string(), ConfigValue::Text(value.to_string()));
-    }
-    EquipmentConfig {
-        name: name.to_string(),
-        ochre_class: ochre_class.to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
-}
-
-/// Step equipment for N timesteps, returning the final telemetry snapshot.
-pub fn step_n(
-    equipment: &mut dyn Equipment,
-    env: &EnvironmentState,
-    ports: &mut PortSlots,
-    dt: Duration,
-    n: usize,
-) -> Telemetry {
-    for _ in 0..n {
-        ports.zero();
-        equipment.update_control(env);
-        equipment.step(env, dt, ports).unwrap();
-    }
-    equipment.telemetry().clone()
-}
-
-/// Assert a value is within [min, max].
-pub fn assert_bounded(value: f64, min: f64, max: f64, label: &str) {
-    assert!(
-        value >= min && value <= max,
-        "{label}: {value} not in [{min}, {max}]"
-    );
-}
-
-/// Assert approximate equality within tolerance.
-pub fn approx_eq(actual: f64, expected: f64, tol: f64) {
-    assert!(
-        (actual - expected).abs() <= tol,
-        "actual={actual}, expected={expected}, tol={tol}"
-    );
 }

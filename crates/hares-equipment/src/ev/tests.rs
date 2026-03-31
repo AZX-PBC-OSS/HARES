@@ -1892,9 +1892,9 @@ fn charging_reaches_full_at_correct_time() {
         }
     }
 
-    let step = full_step.expect("EV should reach full within 400 minutes");
+    let step: i32 = full_step.expect("EV should reach full within 400 minutes");
     assert!(
-        (step as i32 - 278).unsigned_abs() <= 2,
+        (step - 278).abs() <= 2,
         "Expected full at step ~278, got {step}"
     );
 }

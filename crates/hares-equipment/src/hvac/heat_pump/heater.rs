@@ -2485,7 +2485,7 @@ mod ideal_capacity_tests {
     };
 
     use super::ASHPHeater;
-    use crate::{Equipment, EquipmentConfig, HeatPumpHeaterConfig};
+    use crate::{Equipment, EquipmentConfig};
 
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     /// OAT is held above the HP lockout (default -17.78°C) and above the ER lockout

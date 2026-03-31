@@ -11,8 +11,6 @@ use hares_types::{
     TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
-use uom::si::f64::Volume;
-use uom::si::volume::{liter, pint_liquid};
 
 use hares_types::telemetry_keys as tk;
 

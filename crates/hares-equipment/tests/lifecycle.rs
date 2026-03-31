@@ -236,18 +236,6 @@ fn assert_core_output_contract(desc: &EquipmentDescriptor, co: &CoreOutput) {
 // Configuration helpers
 // ---------------------------------------------------------------------------
 
-fn config_with_floats(name: &str, class: &str, entries: &[(&str, f64)]) -> EquipmentConfig {
-    let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-    for &(k, v) in entries {
-        raw.insert(k.to_string(), ConfigValue::Float(v));
-    }
-    EquipmentConfig {
-        name: name.to_string(),
-        ochre_class: class.to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
-}
-
 fn config_mixed(
     name: &str,
     class: &str,
@@ -394,7 +382,6 @@ fn lifecycle_gas_furnace() {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
-            ..GasFurnaceConfig::default()
         },
     );
 
@@ -528,7 +515,6 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 number_of_speeds: 1,
                 fan_power_w: Some(0.0),
                 ducts: DuctConfig::default(),
-                ..GasFurnaceConfig::default()
             },
         ),
         "Electric Furnace" => typed_alias_config(
@@ -541,7 +527,6 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 number_of_speeds: 1,
                 fan_power_w: Some(0.0),
                 ducts: DuctConfig::default(),
-                ..ElectricFurnaceConfig::default()
             },
         ),
         "Electric Baseboard" => typed_alias_config(

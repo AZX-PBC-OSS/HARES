@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
@@ -82,7 +81,6 @@ fn gas_furnace_config(name: &str) -> EquipmentConfig {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
-            ..GasFurnaceConfig::default()
         },
     )
 }
@@ -99,7 +97,6 @@ fn electric_furnace_config(name: &str) -> EquipmentConfig {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
-            ..ElectricFurnaceConfig::default()
         },
     )
 }
@@ -179,7 +176,6 @@ fn gas_furnace_consumes_gas_fuel() {
             number_of_speeds: 1,
             fan_power_w: Some(400.0),
             ducts: DuctConfig::default(),
-            ..GasFurnaceConfig::default()
         },
     );
 
