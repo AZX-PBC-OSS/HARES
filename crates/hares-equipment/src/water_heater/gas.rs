@@ -263,8 +263,11 @@ impl GasWH {
         let diameter_m = (4.0 * tank_volume_m3 / (std::f64::consts::PI * height_m))
             .max(1e-6)
             .sqrt();
-        let n_nodes = 6;
+        let n_nodes = usize::from(c.tank_nodes.unwrap_or(6).max(1));
         self.burner_node = 5;
+        if self.burner_node >= n_nodes {
+            self.burner_node = n_nodes.saturating_sub(1);
+        }
 
         self.tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes,
@@ -272,7 +275,9 @@ impl GasWH {
             diameter_m,
             ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
-            initial_temp_c: c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C),
+            initial_temp_c: c
+                .initial_tank_temp_c
+                .unwrap_or(c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C)),
             element_nodes: [None, Some(self.burner_node)],
             node_volumes_m3: None,
             ua_end_cap_w_per_k: None,
@@ -282,19 +287,22 @@ impl GasWH {
             .heating_capacity_w
             .unwrap_or(DEFAULT_BURNER_INPUT_W)
             .max(0.0);
-        self.pilot_power_w = c.pilot_power_w.unwrap_or(0.0).max(0.0);
+        self.pilot_power_w = c
+            .pilot_power_w
+            .unwrap_or_else(|| match c.ignition_type.as_deref() {
+                Some("ElectronicIgnition") | Some("electronic") => 0.0,
+                _ => 5.0,
+            })
+            .max(0.0);
         self.fan_power_w = 0.0;
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
-        self.deadband_c = DEFAULT_DEADBAND_C;
+        self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
         self.duty_cycle = 1.0;
         self.mode_override = None;
         self.burner_on = false;
 
-        self.draw_flow_rate_kg_s = c
-            .avg_water_draw_l_per_day
-            .map(|l| l / 86_400.0)
-            .unwrap_or(0.0);
+        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = None;
         self.mains_temp_c_source = None;
         self.zip = WaterHeaterZip::default();
@@ -310,8 +318,10 @@ impl GasWH {
         self.fuel_type = c.fuel_type;
         self.descriptor.fuel = self.fuel_type;
 
-        self.skin_loss_fraction = default_skin_loss_fraction(self.burner_efficiency_constant);
-        self.max_tank_temp_c = DEFAULT_MAX_TANK_TEMP_C;
+        self.skin_loss_fraction = c
+            .skin_loss_fraction
+            .unwrap_or_else(|| default_skin_loss_fraction(self.burner_efficiency_constant));
+        self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
 
         self.dr_setpoint_offset_c = 0.0;
         self.dr_load_fraction = 1.0;
@@ -860,35 +870,78 @@ mod tests {
     }
 
     fn config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        raw.insert("pilot_power_w".to_string(), 50.0.into());
-        raw.insert("flue_loss_fraction".to_string(), 0.2.into());
-        EquipmentConfig::raw("GWH".to_string(), "Gas Water Heater".to_string(), raw)
+        EquipmentConfig::from_typed(
+            "GWH".to_string(),
+            "Gas Water Heater".to_string(),
+            crate::GasWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                loop_id: Some(1),
+                fuel_type: hares_types::FuelType::Gas,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                energy_factor: None,
+                uniform_energy_factor: None,
+                heating_capacity_w: None,
+                ua_w_per_k: None,
+                setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: None,
+                initial_tank_temp_c: Some(40.0),
+                tank_nodes: None,
+                avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: Some(0.0),
+                pilot_power_w: Some(50.0),
+                flue_loss_fraction: Some(0.2),
+                skin_loss_fraction: None,
+                ignition_type: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+            },
+        )
     }
 
     fn config_with_extras(
         extras: &[(&str, Option<crate::config::ConfigValue>)],
     ) -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        raw.insert("pilot_power_w".to_string(), 50.0.into());
-        raw.insert("flue_loss_fraction".to_string(), 0.2.into());
+        let mut typed: crate::GasWaterHeaterConfig = config().typed().unwrap();
         for (k, v) in extras {
-            match v {
-                Some(val) => {
-                    raw.insert(k.to_string(), val.clone());
+            match (*k, v) {
+                ("setpoint_c", Some(crate::config::ConfigValue::Float(x))) => typed.setpoint_c = Some(*x),
+                ("setpoint_c", None) => typed.setpoint_c = None,
+                ("deadband_c", Some(crate::config::ConfigValue::Float(x))) => typed.deadband_c = Some(*x),
+                ("deadband_c", None) => typed.deadband_c = None,
+                ("initial_tank_temp_c", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.initial_tank_temp_c = Some(*x)
                 }
-                None => {
-                    raw.remove(*k);
+                ("initial_tank_temp_c", None) => typed.initial_tank_temp_c = None,
+                ("pilot_power_w", Some(crate::config::ConfigValue::Float(x))) => typed.pilot_power_w = Some(*x),
+                ("pilot_power_w", None) => typed.pilot_power_w = None,
+                ("flue_loss_fraction", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.flue_loss_fraction = Some(*x)
                 }
+                ("flue_loss_fraction", None) => typed.flue_loss_fraction = None,
+                ("skin_loss_fraction", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.skin_loss_fraction = Some(*x)
+                }
+                ("skin_loss_fraction", None) => typed.skin_loss_fraction = None,
+                ("max_tank_temp_c", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.max_tank_temp_c = Some(*x)
+                }
+                ("max_tank_temp_c", None) => typed.max_tank_temp_c = None,
+                ("draw_flow_rate_kg_s", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.draw_flow_rate_kg_s = Some(*x)
+                }
+                ("draw_flow_rate_kg_s", None) => typed.draw_flow_rate_kg_s = None,
+                ("ignition_type", Some(crate::config::ConfigValue::Text(x))) => {
+                    typed.ignition_type = Some(x.clone())
+                }
+                ("ignition_type", None) => typed.ignition_type = None,
+                _ => panic!("unsupported gas test override key/value: {k}"),
             }
         }
-        EquipmentConfig::raw("GWH".to_string(), "Gas Water Heater".to_string(), raw)
+        EquipmentConfig::from_typed("GWH".to_string(), "Gas Water Heater".to_string(), typed)
     }
 
     fn ports() -> PortSlots {

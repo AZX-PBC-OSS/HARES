@@ -3,10 +3,8 @@
 //! # Config access policy
 //!
 //! `get_f64`, `get_str`, `get_bool`, and `first_f64` must only be called from
-//! custom equipment or the Python adapter layer. Built-in equipment must use
-//! typed config structs (CFG-007 through CFG-015). CI enforces this via the
-//! `check-no-magic-config` Makefile target once all built-in equipment has been
-//! migrated.
+//! custom equipment or the Python adapter layer. Built-in equipment uses typed
+//! config structs (see CFG-007 through CFG-015). CI enforces this.
 
 use hares_types::normalize_ascii;
 use hares_types::{

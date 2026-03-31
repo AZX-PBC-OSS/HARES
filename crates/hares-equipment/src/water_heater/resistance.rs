@@ -270,9 +270,9 @@ impl ResistanceWH {
         let diameter_m = (4.0 * tank_volume_m3 / (std::f64::consts::PI * height_m))
             .max(1e-6)
             .sqrt();
-        let n_nodes = 6;
+        let n_nodes = usize::from(c.tank_nodes.unwrap_or(6).max(1));
         self.upper_node = 0;
-        self.lower_node = 5;
+        self.lower_node = n_nodes.saturating_sub(1);
 
         self.tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes,
@@ -280,7 +280,9 @@ impl ResistanceWH {
             diameter_m,
             ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
-            initial_temp_c: c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C),
+            initial_temp_c: c
+                .initial_tank_temp_c
+                .unwrap_or(c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C)),
             element_nodes: [Some(self.upper_node), Some(self.lower_node)],
             node_volumes_m3: None,
             ua_end_cap_w_per_k: None,
@@ -294,19 +296,19 @@ impl ResistanceWH {
         self.lower_element_power_w = capacity_w.max(0.0);
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
-        self.deadband_c = DEFAULT_DEADBAND_C;
-        self.max_tank_temp_c = DEFAULT_MAX_TANK_TEMP_C;
+        self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
+        self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
         self.duty_cycle = 1.0;
         self.mode_override = None;
-        self.element_priority = ElementPriorityMode::MasterSlave;
+        self.element_priority = match c.element_priority_mode.as_deref() {
+            Some("Simultaneous") | Some("simultaneous") => ElementPriorityMode::Simultaneous,
+            _ => ElementPriorityMode::MasterSlave,
+        };
         self.upper_element_on = false;
         self.lower_element_on = false;
 
         self.mains_temp_c = 15.0;
-        self.draw_flow_rate_kg_s = c
-            .avg_water_draw_l_per_day
-            .map(|l| l / 86_400.0)
-            .unwrap_or(0.0);
+        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = None;
         self.mains_temp_c_source = None;
         self.zip = WaterHeaterZip::default();
@@ -862,22 +864,19 @@ mod tests {
                 heating_capacity_w: None,
                 ua_w_per_k: None,
                 setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: Some(300.0),
+                initial_tank_temp_c: Some(40.0),
+                tank_nodes: None,
                 avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: Some(0.0),
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
                 element_power_w: None,
+                element_priority_mode: None,
             },
         );
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("deadband_c".to_string(), 2.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("initial_tank_temp_c".to_string(), 40.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
         cfg
     }
 
@@ -1446,27 +1445,19 @@ mod element_priority_tests {
                 heating_capacity_w: None,
                 ua_w_per_k: None,
                 setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: Some(300.0),
+                initial_tank_temp_c: Some(40.0),
+                tank_nodes: None,
                 avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: Some(0.0),
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
                 element_power_w: None,
+                element_priority_mode: Some(mode.to_string()),
             },
         );
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("deadband_c".to_string(), 2.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("initial_tank_temp_c".to_string(), 40.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
-        if !mode.is_empty() {
-            cfg.raw_config_mut()
-                .unwrap()
-                .insert("element_priority_mode".to_string(), mode.to_string().into());
-        }
         cfg
     }
 

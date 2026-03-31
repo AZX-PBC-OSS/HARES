@@ -19,7 +19,7 @@ use hares_types::telemetry_keys as tk;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::ac_config::DehumidifierConfig;
-use super::helpers::{equipment_id_from_config, first_f64, zone_id_from_config};
+use super::helpers::{equipment_id_from_config, zone_id_from_config};
 
 const KG_PER_LITER_WATER: f64 = 1.0;
 const HOURS_PER_DAY: f64 = 24.0;
@@ -158,32 +158,6 @@ impl Dehumidifier {
         }
     }
 
-    fn init_setpoints(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        let target_rh_raw = first_f64(
-            config,
-            &[
-                KEY_TARGET_RH,
-                KEY_DEHUMIDISTAT_SETPOINT,
-                KEY_DEHUMIDISTAT_SETPOINT_ALT,
-            ],
-        )
-        .unwrap_or(DEFAULT_TARGET_RH_FRACTION);
-        let target_rh = parse_rh_fraction(target_rh_raw, "target_rh")?;
-        let min_rh = config
-            .get_f64(KEY_MIN_RH)
-            .map(|v| parse_rh_fraction(v, KEY_MIN_RH))
-            .transpose()?;
-        let max_rh = config
-            .get_f64(KEY_MAX_RH)
-            .map(|v| parse_rh_fraction(v, KEY_MAX_RH))
-            .transpose()?;
-        let (min_rh, max_rh) = resolve_rh_band(target_rh, min_rh, max_rh)?;
-        self.target_rh = target_rh;
-        self.min_rh = min_rh;
-        self.max_rh = max_rh;
-        Ok(())
-    }
-
     fn update_is_on(&mut self, current_rh: f64) {
         let maybe_override = self.mode_override;
         self.is_on = match maybe_override {
@@ -269,7 +243,6 @@ impl Dehumidifier {
 }
 
 impl Dehumidifier {
-
     fn init_from_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         let cfg = config.require_typed::<DehumidifierConfig>("Dehumidifier")?;
         cfg.validate()?;

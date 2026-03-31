@@ -546,6 +546,7 @@ fn generator_fuel_efficiency_at_half_load() {
         "Gas Generator".to_string(),
         GeneratorConfig {
             equipment_id: None,
+            zone_id: None,
             fuel_type: None,
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),
@@ -630,6 +631,7 @@ fn generator_ramp_rate_is_kw_per_second() {
         "Gas Generator".to_string(),
         GeneratorConfig {
             equipment_id: None,
+            zone_id: None,
             fuel_type: None,
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),
@@ -696,6 +698,7 @@ fn generator_capacity_min_enforced() {
         "Gas Generator".to_string(),
         GeneratorConfig {
             equipment_id: None,
+            zone_id: None,
             fuel_type: None,
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),

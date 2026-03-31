@@ -495,18 +495,16 @@ mod tests {
     /// HARES must match: thermostat stays in Deadband, no electrical draw, no cooling.
     #[test]
     fn cooler_off_when_zone_temp_at_setpoint_at_init() {
-        let mut raw = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw.insert("eir".to_string(), 0.33.into());
-        raw.insert("cooling_setpoint_c".to_string(), 24.4.into());
-        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw.insert(
-            "capacity_biquadratic_coeffs".to_string(),
-            "[1,0,0,0,0,0]".into(),
+        let cfg = typed_config(
+            serde_json::json!({
+                "zone_id": 1,
+                "cooling_capacity_w": 8_000.0,
+                "seer": 3.412_141_633 / 0.33,
+                "number_of_speeds": 1,
+                "is_mini_split": false
+            }),
+            "ASHP Cooler",
         );
-        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        let cfg = EquipmentConfig::raw("ASHP Cooler".to_string(), "ASHP Cooler".to_string(), raw);
 
         // Zone at exactly the cooling setpoint (24.4°C).
         // turn_on = 24.4 + 1.0 * (1 - 0.2) = 25.2 → zone NOT above threshold → cooler must be OFF.
@@ -514,6 +512,12 @@ mod tests {
 
         let mut eq = HpCooler::ashp_cooler(cfg.clone());
         eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: Some(24.4),
+            deadband_c: None,
+        })
+        .unwrap();
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

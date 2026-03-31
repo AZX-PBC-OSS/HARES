@@ -41,6 +41,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 #[serde(deny_unknown_fields)]
 pub struct GeneratorConfig {
     pub equipment_id: Option<u32>,
+    pub zone_id: Option<u16>,
     pub fuel_type: Option<FuelType>,
     pub rated_power_kw: f64,
     pub eta_electric: Option<f64>,
@@ -104,6 +105,13 @@ impl GeneratorConfig {
                         .to_string(),
                 ));
             }
+        }
+        if let Some(zone) = self.zone_id
+            && zone == 0
+        {
+            return Err(HaresError::Equipment(
+                "generator zone_id must be non-zero when provided".to_string(),
+            ));
         }
         Ok(())
     }
@@ -570,6 +578,8 @@ impl Generator {
         if let Some(fuel_type) = c.fuel_type {
             self.descriptor.fuel = fuel_type;
         }
+        self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+        self.descriptor.zone = c.zone_id.map(ZoneId);
         self.rated_power_kw = c.rated_power_kw;
         self.capacity_min_kw = c.capacity_min_kw;
         self.eta_thermal = c.eta_thermal.unwrap_or(self.eta_thermal);
@@ -601,6 +611,14 @@ impl Generator {
                 self.chp_loop_id = Some(LoopId(lid));
             }
         }
+        let mut ports = vec![PortDeclaration::electrical(), PortDeclaration::fuel()];
+        if let Some(zone) = self.descriptor.zone {
+            ports.push(PortDeclaration::thermal(zone));
+        }
+        if let Some(loop_id) = self.chp_loop_id {
+            ports.push(PortDeclaration::fluid(loop_id, FluidType::Water));
+        }
+        self.ports = ports;
 
         self.current_power_kw = 0.0;
         self.mode = OperatingMode::Off;
@@ -1039,6 +1057,7 @@ mod tests {
     fn gen_config(overrides: &[(&str, ConfigValue)]) -> EquipmentConfig {
         let mut cfg = GeneratorConfig {
             equipment_id: None,
+            zone_id: None,
             fuel_type: None,
             rated_power_kw: 10.0,
             eta_electric: Some(0.30),
@@ -1079,7 +1098,7 @@ mod tests {
                 }
                 (KEY_SUPPLY_TEMP_C, ConfigValue::Float(value)) => cfg.supply_temp_c = Some(*value),
                 (KEY_RETURN_TEMP_C, ConfigValue::Float(value)) => cfg.return_temp_c = Some(*value),
-                ("zone_id", ConfigValue::Float(_)) => {}
+                ("zone_id", ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
                 ("equipment_id", ConfigValue::Float(value)) => cfg.equipment_id = Some(*value as u32),
                 _ => panic!("unsupported generator test override key/value: {k}"),
             }
@@ -2378,6 +2397,7 @@ mod tests {
     fn minimal_generator_config() -> GeneratorConfig {
         GeneratorConfig {
             equipment_id: None,
+            zone_id: None,
             fuel_type: None,
             rated_power_kw: 10.0,
             eta_electric: None,

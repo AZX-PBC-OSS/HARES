@@ -5,6 +5,7 @@ use hares_types::{BoundaryPolicy, HaresError, ScheduleSource};
 use serde::{Deserialize, Serialize};
 
 use crate::EquipmentConfig;
+use crate::config::ConfigPayload;
 
 use super::hvac_core::DEFAULT_BIQUADRATIC_COEFFS;
 use super::speed_control::SpeedControlMode;
@@ -45,14 +46,30 @@ pub struct DuctConfig {
     pub duct_zone_type: Option<String>,
 }
 
+fn typed_value<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a serde_json::Value> {
+    match &config.payload {
+        ConfigPayload::Typed { data, .. } => data.get(key),
+        ConfigPayload::Raw { .. } => None,
+    }
+}
+
 pub(super) fn extract_numeric(config: &EquipmentConfig, key: &str) -> Option<f64> {
-    config.get_f64(key)
+    config
+        .get_f64(key)
+        .or_else(|| typed_value(config, key).and_then(serde_json::Value::as_f64))
+}
+
+pub(super) fn extract_text<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a str> {
+    config
+        .get_str(key)
+        .or_else(|| typed_value(config, key).and_then(serde_json::Value::as_str))
 }
 
 pub(super) fn extract_bool(config: &EquipmentConfig, key: &str) -> Option<bool> {
     config
         .get_bool(key)
-        .or_else(|| config.get_f64(key).map(|v| v > 0.0))
+        .or_else(|| typed_value(config, key).and_then(serde_json::Value::as_bool))
+        .or_else(|| extract_numeric(config, key).map(|v| v > 0.0))
 }
 
 /// Build a `ScheduleSource` from config params for the given prefix ("heating" or "cooling").

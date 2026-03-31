@@ -8,7 +8,7 @@ use hares_types::{ControlSignal, EnvironmentState, ScheduleSource, ZoneId};
 use crate::EquipmentConfig;
 
 use super::core_config::{
-    build_setpoint_source, extract_bool, extract_numeric, load_biquadratic_coeffs,
+    build_setpoint_source, extract_bool, extract_numeric, extract_text, load_biquadratic_coeffs,
     load_bounds_pair, load_plr_coefficients, parse_biquadratic_list, parse_speed_control_mode,
 };
 use super::speed_control::{SpeedControlMode, StartupConfig};
@@ -366,7 +366,7 @@ impl HvacEquipment {
         // same keys that ac_config::load_curve_pair handles for the AC path; the
         // HP heater goes through this generic init, so we replicate the fallback
         // here.  Split keys override or supplement the combined key at indices 0/1.
-        if let Some(raw) = config.get_str("capacity_biquadratic_coeffs") {
+        if let Some(raw) = extract_text(config, "capacity_biquadratic_coeffs") {
             let cap = parse_biquadratic_list(raw)?;
             if !cap.is_empty() {
                 if self.biquadratic_coeffs.is_empty() {
@@ -376,7 +376,7 @@ impl HvacEquipment {
                 }
             }
         }
-        if let Some(raw) = config.get_str("eir_biquadratic_coeffs") {
+        if let Some(raw) = extract_text(config, "eir_biquadratic_coeffs") {
             let eir = parse_biquadratic_list(raw)?;
             if !eir.is_empty() {
                 while self.biquadratic_coeffs.len() < 2 {

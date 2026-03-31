@@ -44,9 +44,16 @@ pub struct GasWaterHeaterConfig {
     pub heating_capacity_w: Option<f64>,
     pub ua_w_per_k: Option<f64>,
     pub setpoint_c: Option<f64>,
+    pub deadband_c: Option<f64>,
+    pub max_tank_temp_c: Option<f64>,
+    pub initial_tank_temp_c: Option<f64>,
+    pub tank_nodes: Option<u8>,
     pub avg_water_draw_l_per_day: Option<f64>,
+    pub draw_flow_rate_kg_s: Option<f64>,
     pub pilot_power_w: Option<f64>,
     pub flue_loss_fraction: Option<f64>,
+    pub skin_loss_fraction: Option<f64>,
+    pub ignition_type: Option<String>,
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
@@ -82,9 +89,28 @@ impl GasWaterHeaterConfig {
             f64::NEG_INFINITY,
             false,
         )?;
+        check_finite("gas_wh: deadband_c", self.deadband_c, 0.0, false)?;
+        check_finite(
+            "gas_wh: max_tank_temp_c",
+            self.max_tank_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
+        check_finite(
+            "gas_wh: initial_tank_temp_c",
+            self.initial_tank_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
         check_finite(
             "gas_wh: avg_water_draw_l_per_day",
             self.avg_water_draw_l_per_day,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "gas_wh: draw_flow_rate_kg_s",
+            self.draw_flow_rate_kg_s,
             0.0,
             false,
         )?;
@@ -92,6 +118,12 @@ impl GasWaterHeaterConfig {
         check_range(
             "gas_wh: flue_loss_fraction",
             self.flue_loss_fraction,
+            0.0,
+            1.0,
+        )?;
+        check_range(
+            "gas_wh: skin_loss_fraction",
+            self.skin_loss_fraction,
             0.0,
             1.0,
         )?;
@@ -124,11 +156,17 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub heating_capacity_w: Option<f64>,
     pub ua_w_per_k: Option<f64>,
     pub setpoint_c: Option<f64>,
+    pub deadband_c: Option<f64>,
+    pub max_tank_temp_c: Option<f64>,
+    pub initial_tank_temp_c: Option<f64>,
+    pub tank_nodes: Option<u8>,
     pub avg_water_draw_l_per_day: Option<f64>,
+    pub draw_flow_rate_kg_s: Option<f64>,
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
     pub element_power_w: Option<f64>,
+    pub element_priority_mode: Option<String>,
 }
 
 impl EquipmentTypedConfig for ElectricResistanceWaterHeaterConfig {
@@ -171,9 +209,28 @@ impl ElectricResistanceWaterHeaterConfig {
             f64::NEG_INFINITY,
             false,
         )?;
+        check_finite("resistance_wh: deadband_c", self.deadband_c, 0.0, false)?;
+        check_finite(
+            "resistance_wh: max_tank_temp_c",
+            self.max_tank_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
+        check_finite(
+            "resistance_wh: initial_tank_temp_c",
+            self.initial_tank_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
         check_finite(
             "resistance_wh: avg_water_draw_l_per_day",
             self.avg_water_draw_l_per_day,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "resistance_wh: draw_flow_rate_kg_s",
+            self.draw_flow_rate_kg_s,
             0.0,
             false,
         )?;
@@ -213,6 +270,8 @@ pub struct TanklessWaterHeaterConfig {
     pub setpoint_c: Option<f64>,
     pub parasitic_power_w: Option<f64>,
     pub performance_adjustment: Option<f64>,
+    pub inlet_temp_c: Option<f64>,
+    pub draw_flow_rate_kg_s: Option<f64>,
     pub avg_water_draw_l_per_day: Option<f64>,
 }
 
@@ -249,6 +308,18 @@ impl TanklessWaterHeaterConfig {
             0.0,
             false,
         )?;
+        check_finite(
+            "tankless_wh: inlet_temp_c",
+            self.inlet_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
+        check_finite(
+            "tankless_wh: draw_flow_rate_kg_s",
+            self.draw_flow_rate_kg_s,
+            0.0,
+            false,
+        )?;
         check_range(
             "tankless_wh: performance_adjustment",
             self.performance_adjustment,
@@ -277,8 +348,29 @@ pub struct HeatPumpWaterHeaterConfig {
     pub backup_element_power_w: Option<f64>,
     pub ua_w_per_k: Option<f64>,
     pub setpoint_c: Option<f64>,
+    pub deadband_c: Option<f64>,
+    pub max_tank_temp_c: Option<f64>,
+    pub initial_tank_temp_c: Option<f64>,
+    pub tank_nodes: Option<u8>,
     pub tempering_valve_setpoint_c: Option<f64>,
     pub avg_water_draw_l_per_day: Option<f64>,
+    pub draw_flow_rate_kg_s: Option<f64>,
+    pub compressor_power_w: Option<f64>,
+    pub backup_enable_offset_c: Option<f64>,
+    pub min_ambient_temp_c: Option<f64>,
+    pub max_ambient_temp_c: Option<f64>,
+    pub min_on_time_s: Option<f64>,
+    pub min_off_time_s: Option<f64>,
+    pub hp_only_mode: Option<bool>,
+    pub element_hp_control_mode: Option<String>,
+    pub fan_power_w: Option<f64>,
+    pub parasitic_power_w: Option<f64>,
+    pub backup_efficiency: Option<f64>,
+    pub shr: Option<f64>,
+    pub lost_heat_fraction: Option<f64>,
+    pub wall_heat_fraction: Option<f64>,
+    pub capacity_biquadratic_coeffs: Option<[f64; 6]>,
+    pub cop_biquadratic_coeffs: Option<[f64; 6]>,
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
@@ -308,6 +400,19 @@ impl HeatPumpWaterHeaterConfig {
             f64::NEG_INFINITY,
             false,
         )?;
+        check_finite("hpwh: deadband_c", self.deadband_c, 0.0, false)?;
+        check_finite(
+            "hpwh: max_tank_temp_c",
+            self.max_tank_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
+        check_finite(
+            "hpwh: initial_tank_temp_c",
+            self.initial_tank_temp_c,
+            f64::NEG_INFINITY,
+            false,
+        )?;
         check_finite(
             "hpwh: tempering_valve_setpoint_c",
             self.tempering_valve_setpoint_c,
@@ -319,6 +424,47 @@ impl HeatPumpWaterHeaterConfig {
             self.avg_water_draw_l_per_day,
             0.0,
             false,
+        )?;
+        check_finite(
+            "hpwh: draw_flow_rate_kg_s",
+            self.draw_flow_rate_kg_s,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "hpwh: compressor_power_w",
+            self.compressor_power_w,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "hpwh: backup_enable_offset_c",
+            self.backup_enable_offset_c,
+            0.0,
+            false,
+        )?;
+        check_finite("hpwh: min_on_time_s", self.min_on_time_s, 0.0, false)?;
+        check_finite("hpwh: min_off_time_s", self.min_off_time_s, 0.0, false)?;
+        check_finite("hpwh: fan_power_w", self.fan_power_w, 0.0, false)?;
+        check_finite(
+            "hpwh: parasitic_power_w",
+            self.parasitic_power_w,
+            0.0,
+            false,
+        )?;
+        check_range("hpwh: backup_efficiency", self.backup_efficiency, 0.0, 1.0)?;
+        check_range("hpwh: shr", self.shr, 0.0, 1.0)?;
+        check_range(
+            "hpwh: lost_heat_fraction",
+            self.lost_heat_fraction,
+            0.0,
+            1.0,
+        )?;
+        check_range(
+            "hpwh: wall_heat_fraction",
+            self.wall_heat_fraction,
+            0.0,
+            1.0,
         )?;
         check_range(
             "hpwh: performance_adjustment",
@@ -355,9 +501,16 @@ mod tests {
             heating_capacity_w: Some(11_000.0),
             ua_w_per_k: Some(2.0),
             setpoint_c: Some(51.67),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
             avg_water_draw_l_per_day: Some(227.0),
+            draw_flow_rate_kg_s: None,
             pilot_power_w: Some(5.0),
             flue_loss_fraction: Some(0.1),
+            skin_loss_fraction: None,
+            ignition_type: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
@@ -399,11 +552,17 @@ mod tests {
             heating_capacity_w: Some(4_500.0),
             ua_w_per_k: Some(2.0),
             setpoint_c: Some(51.67),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
             avg_water_draw_l_per_day: Some(227.0),
+            draw_flow_rate_kg_s: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
             element_power_w: Some(4_500.0),
+            element_priority_mode: None,
         };
         let ec = EquipmentConfig::from_typed(
             "resistance".to_string(),
@@ -442,6 +601,8 @@ mod tests {
             setpoint_c: Some(51.67),
             parasitic_power_w: Some(7.38),
             performance_adjustment: Some(0.92),
+            inlet_temp_c: None,
+            draw_flow_rate_kg_s: None,
             avg_water_draw_l_per_day: Some(227.0),
         };
         let ec = EquipmentConfig::from_typed(
@@ -480,8 +641,29 @@ mod tests {
             backup_element_power_w: Some(4_500.0),
             ua_w_per_k: Some(2.0),
             setpoint_c: Some(51.67),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
             tempering_valve_setpoint_c: Some(51.67),
             avg_water_draw_l_per_day: Some(227.0),
+            draw_flow_rate_kg_s: None,
+            compressor_power_w: None,
+            backup_enable_offset_c: None,
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: None,
+            min_off_time_s: None,
+            hp_only_mode: None,
+            element_hp_control_mode: None,
+            fan_power_w: None,
+            parasitic_power_w: None,
+            backup_efficiency: None,
+            shr: None,
+            lost_heat_fraction: None,
+            wall_heat_fraction: None,
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),

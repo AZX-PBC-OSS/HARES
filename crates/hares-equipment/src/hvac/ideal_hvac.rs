@@ -23,7 +23,7 @@ use super::thermostat::{
 };
 use super::{
     RuntimeSetpointOverride, ScheduleSetpoints, ThermalSetpoints,
-    core_config::build_setpoint_source,
+    core_config::{build_setpoint_source, extract_numeric, extract_text},
     helpers::{equipment_id_from_config, operating_mode_code, zone_id_from_config},
 };
 
@@ -358,7 +358,7 @@ impl Equipment for IdealHvac {
             }
         }
 
-        if let Some(zone) = config.get_f64("zone_id") {
+        if let Some(zone) = extract_numeric(config, "zone_id") {
             let zone = ZoneId(zone as u16);
             self.zone_id = zone;
             self.descriptor.zone = Some(zone);
@@ -366,26 +366,26 @@ impl Equipment for IdealHvac {
                 thermal_port.zone = Some(zone);
             }
         }
-        if let Some(heating_sp) = config.get_f64("heating_setpoint_c") {
+        if let Some(heating_sp) = extract_numeric(config, "heating_setpoint_c") {
             self.static_setpoints.heating_c = heating_sp;
         }
-        if let Some(cooling_sp) = config.get_f64("cooling_setpoint_c") {
+        if let Some(cooling_sp) = extract_numeric(config, "cooling_setpoint_c") {
             self.static_setpoints.cooling_c = cooling_sp;
         }
-        if let Some(cap) = config.get_f64("capacity_w") {
+        if let Some(cap) = extract_numeric(config, "capacity_w") {
             self.rated_capacity_w = cap.max(0.0);
             self.cooling_capacity_w = cap.max(0.0);
         }
-        if let Some(cool_cap) = config.get_f64("cooling_capacity_w") {
+        if let Some(cool_cap) = extract_numeric(config, "cooling_capacity_w") {
             self.cooling_capacity_w = cool_cap.max(0.0);
         }
-        if let Some(deadband) = config.get_f64("deadband_c") {
+        if let Some(deadband) = extract_numeric(config, "deadband_c") {
             self.thermostat.hysteresis_c = deadband.max(0.0);
         }
-        if let Some(n_speeds) = config.get_f64("n_speeds") {
+        if let Some(n_speeds) = extract_numeric(config, "n_speeds") {
             self.is_variable_speed = n_speeds >= 2.0;
         }
-        if let Some(mode) = config.get_str("ideal_capacity_mode") {
+        if let Some(mode) = extract_text(config, "ideal_capacity_mode") {
             self.ideal_capacity_mode = match mode.trim().to_ascii_lowercase().as_str() {
                 "on" => IdealCapacityMode::On,
                 "off" => IdealCapacityMode::Off,

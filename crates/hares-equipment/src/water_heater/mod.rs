@@ -430,11 +430,17 @@ mod tests {
                 heating_capacity_w: None,
                 ua_w_per_k: None,
                 setpoint_c: None,
+                deadband_c: None,
+                max_tank_temp_c: None,
+                initial_tank_temp_c: None,
+                tank_nodes: None,
                 avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
                 element_power_w: None,
+                element_priority_mode: None,
             },
         )
     }
@@ -767,25 +773,19 @@ mod dhw_integration_tests {
                 heating_capacity_w: None,
                 ua_w_per_k: None,
                 setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: Some(300.0),
+                initial_tank_temp_c: Some(52.0),
+                tank_nodes: None,
                 avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: Some(0.0),
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
                 element_power_w: None,
+                element_priority_mode: None,
             },
         );
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("deadband_c".to_string(), 2.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("initial_tank_temp_c".to_string(), 52.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
         cfg
     }
 

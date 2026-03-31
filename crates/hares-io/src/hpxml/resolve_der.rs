@@ -196,6 +196,7 @@ pub(super) fn resolve_generators(
 
         let cfg = GeneratorConfig {
             equipment_id: None,
+            zone_id: None,
             fuel_type: Some(fuel),
             rated_power_kw: child_f64(generator, "ElectricalPowerOutput").unwrap_or(10.0),
             eta_electric,

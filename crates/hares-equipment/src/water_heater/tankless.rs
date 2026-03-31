@@ -15,9 +15,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 
 use super::wh_config::TanklessWaterHeaterConfig;
 use super::{WaterHeaterZip, resolve_draw_rate_kg_s, resolve_mains_temp_c};
-use crate::hvac::helpers::{
-    equipment_id_from_config, first_f64, parse_fuel_type, zone_id_from_config,
-};
+use crate::hvac::helpers::{equipment_id_from_config, parse_fuel_type, zone_id_from_config};
 
 const WATER_SPECIFIC_HEAT_J_PER_KG_K: f64 = 4183.0;
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
@@ -169,43 +167,7 @@ impl TanklessWH {
         config: &EquipmentConfig,
         _env: &EnvironmentState,
     ) -> crate::Result<()> {
-        let mut c = if config.is_typed() {
-            config.require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")?
-        } else {
-            TanklessWaterHeaterConfig {
-                equipment_id: config.get_f64("equipment_id").map(|v| v as u32),
-                zone_id: config.get_f64("zone_id").map(|v| v as u16),
-                loop_id: config.get_f64("loop_id").map(|v| v as u16),
-                fuel_type: parse_tankless_fuel_type(config.get_str("FuelType")),
-                energy_factor: config.get_f64("energy_factor").or_else(|| config.get_f64("EnergyFactor")),
-                uniform_energy_factor: config.get_f64("uniform_energy_factor"),
-                heating_capacity_w: config
-                    .get_f64("heating_capacity_w")
-                    .or_else(|| config.get_f64("max_thermal_power_w")),
-                setpoint_c: config.get_f64("setpoint_c"),
-                parasitic_power_w: config.get_f64("parasitic_power_w"),
-                performance_adjustment: config.get_f64("performance_adjustment"),
-                avg_water_draw_l_per_day: config.get_f64("avg_water_draw_l_per_day"),
-            }
-        };
-        if let Some(v) = config.get_f64("setpoint_c") {
-            c.setpoint_c = Some(v);
-        }
-        if let Some(v) = config.get_f64("EnergyFactor").or_else(|| config.get_f64("energy_factor")) {
-            c.energy_factor = Some(v);
-        }
-        if let Some(v) = config
-            .get_f64("max_thermal_power_w")
-            .or_else(|| config.get_f64("heating_capacity_w"))
-        {
-            c.heating_capacity_w = Some(v);
-        }
-        if let Some(v) = config.get_f64("parasitic_power_w") {
-            c.parasitic_power_w = Some(v);
-        }
-        if let Some(raw) = config.get_str("FuelType") {
-            c.fuel_type = parse_tankless_fuel_type(Some(raw));
-        }
+        let c = config.require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")?;
         c.validate()?;
 
         self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
@@ -239,8 +201,8 @@ impl TanklessWH {
             .max(0.0);
         self.duty_cycle = 1.0;
         self.mode_override = None;
-        self.inlet_temp_c = config.get_f64("inlet_temp_c").unwrap_or(15.0);
-        self.draw_flow_rate_kg_s = config.get_f64("draw_flow_rate_kg_s").unwrap_or_else(|| {
+        self.inlet_temp_c = c.inlet_temp_c.unwrap_or(15.0);
+        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or_else(|| {
             c.avg_water_draw_l_per_day
                 .map(|l| l / 86_400.0)
                 .unwrap_or(0.0)
@@ -679,15 +641,11 @@ mod tests {
                 setpoint_c: Some(50.0),
                 parasitic_power_w: None,
                 performance_adjustment: None,
+                inlet_temp_c: Some(20.0),
+                draw_flow_rate_kg_s: Some(0.2),
                 avg_water_draw_l_per_day: None,
             },
         );
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("inlet_temp_c".to_string(), 20.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
         cfg
     }
 

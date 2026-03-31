@@ -319,6 +319,8 @@ mod tests {
             setpoint_c: Some(51.67),
             performance_adjustment: Some(0.92),
             parasitic_power_w: Some(5.0),
+            inlet_temp_c: None,
+            draw_flow_rate_kg_s: None,
             avg_water_draw_l_per_day: None,
         };
         let ec = crate::config::EquipmentConfig::from_typed(
