@@ -723,8 +723,7 @@ mod tests {
     #[test]
     fn ideal_hvac_heating_turns_on_and_writes_capacity() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_c".into(), 20.0.into());
         cfg.test_extras_mut()
@@ -751,8 +750,7 @@ mod tests {
     #[test]
     fn ideal_hvac_cooling_turns_on_when_zone_hot() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_c".into(), 20.0.into());
         cfg.test_extras_mut()
@@ -774,8 +772,7 @@ mod tests {
     #[test]
     fn ideal_hvac_deadband_returns_none_target() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_c".into(), 20.0.into());
         cfg.test_extras_mut()
@@ -795,8 +792,7 @@ mod tests {
     #[test]
     fn ideal_hvac_accepts_ideal_capacity_signal() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
 
         let mut eq = IdealHvac::new(cfg.clone());
         let env = env(18.0, 300, 0);
@@ -811,8 +807,7 @@ mod tests {
     #[test]
     fn ideal_hvac_accepts_thermal_setpoint_signal() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
 
         let mut eq = IdealHvac::new(cfg.clone());
         let env = env(18.0, 60, 0);
@@ -834,8 +829,7 @@ mod tests {
     #[test]
     fn ideal_hvac_mode_override_forces_off() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
 
         let mut eq = IdealHvac::new(cfg.clone());
         let env = env(18.0, 60, 0);
@@ -851,8 +845,7 @@ mod tests {
     #[test]
     fn ideal_hvac_step_writes_ideal_capacity_to_thermal_port() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("capacity_w".into(), 10_000.0.into());
 
@@ -875,8 +868,7 @@ mod tests {
     #[test]
     fn ideal_hvac_cooling_step_writes_negative_to_thermal_port() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("cooling_setpoint_c".into(), 24.0.into());
         cfg.test_extras_mut()
@@ -908,8 +900,7 @@ mod tests {
     #[test]
     fn ideal_hvac_state_round_trips() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("capacity_w".into(), 10_000.0.into());
 
@@ -948,8 +939,7 @@ mod tests {
     #[test]
     fn ideal_capacity_mode_auto_engages_at_coarse_timestep() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("ideal_capacity_mode".into(), "auto".into());
 
@@ -966,8 +956,7 @@ mod tests {
     #[test]
     fn ideal_capacity_mode_on_always_uses_ideal() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("ideal_capacity_mode".into(), "on".into());
 
@@ -981,8 +970,7 @@ mod tests {
     #[test]
     fn ideal_capacity_mode_off_never_uses_ideal() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("ideal_capacity_mode".into(), "off".into());
 
@@ -996,8 +984,7 @@ mod tests {
     #[test]
     fn ideal_capacity_mode_off_returns_none_from_ideal_target() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("ideal_capacity_mode".into(), "off".into());
         cfg.test_extras_mut()
@@ -1020,8 +1007,7 @@ mod tests {
     #[test]
     fn ideal_capacity_mode_off_step_uses_rated_capacity() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("ideal_capacity_mode".into(), "off".into());
         cfg.test_extras_mut()
@@ -1053,10 +1039,8 @@ mod tests {
     #[test]
     fn variable_speed_forces_ideal_in_auto_mode() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
-        cfg.test_extras_mut()
-            .insert("n_speeds".into(), 4.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("n_speeds".into(), 4.0.into());
 
         let mut eq = IdealHvac::new(cfg.clone());
         let env_fine = env(18.0, 60, 0);
@@ -1069,8 +1053,7 @@ mod tests {
     #[test]
     fn load_fraction_zero_forces_off() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
 
         let mut eq = IdealHvac::new(cfg.clone());
         let env = env(18.0, 60, 0);
@@ -1087,8 +1070,7 @@ mod tests {
     #[test]
     fn load_fraction_partial_scales_capacity() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("cooling_setpoint_c".into(), 24.0.into());
         cfg.test_extras_mut()
@@ -1119,8 +1101,7 @@ mod tests {
     #[test]
     fn column_ref_setpoint_source_reads_schedule_domain() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_schedule_col".into(), 0.0.into());
         cfg.test_extras_mut()
@@ -1176,8 +1157,7 @@ mod tests {
     #[test]
     fn mode_override_off_is_recoverable() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_c".into(), 20.0.into());
         cfg.test_extras_mut()
@@ -1226,8 +1206,7 @@ mod tests {
     #[test]
     fn ideal_capacity_mode_override_switches_at_runtime() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("ideal_capacity_mode".into(), "off".into());
         cfg.test_extras_mut()
@@ -1260,8 +1239,7 @@ mod tests {
     #[test]
     fn dynamic_cooling_writes_negative_rated_capacity() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("ideal_capacity_mode".into(), "off".into());
         cfg.test_extras_mut()
@@ -1292,8 +1270,7 @@ mod tests {
     #[test]
     fn overlapping_setpoints_rejected() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_c".into(), 22.0.into());
         cfg.test_extras_mut()
@@ -1319,8 +1296,7 @@ mod tests {
         let cooling_weekday = [26.0f64; 24];
 
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("ideal_capacity_mode".into(), "on".into());
         cfg.test_extras_mut().insert(
@@ -1377,8 +1353,7 @@ mod tests {
     #[test]
     fn deadband_outputs_zero_despite_stale_ideal_capacity() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_c".into(), 20.0.into());
         cfg.test_extras_mut()
@@ -1425,8 +1400,7 @@ mod tests {
     #[test]
     fn cooling_mode_clamps_positive_ideal_capacity_to_zero() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_c".into(), 20.0.into());
         cfg.test_extras_mut()
@@ -1462,8 +1436,7 @@ mod tests {
     #[test]
     fn heating_mode_clamps_negative_ideal_capacity_to_zero() {
         let mut cfg = config("IH");
-        cfg.test_extras_mut()
-            .insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
             .insert("heating_setpoint_c".into(), 20.0.into());
         cfg.test_extras_mut()

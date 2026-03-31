@@ -12,8 +12,7 @@ use arrow::array::{Array, Float64Array, StringArray, TimestampMicrosecondArray};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationEngine};
-use hares_io::defaults::DefaultsStore;
-use hares_io::{OutputFormat, SimulationConfig, parse_hpxml, resolve_equipment};
+use hares_io::{OutputFormat, SimulationConfig};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 
@@ -106,31 +105,9 @@ fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
 #[test]
 fn ochre_ashp_fixture_peak_hvac_power_aligns() {
     let fixture = ParityFixture::new("cz4a_ashp_hpwh");
-    let building = parse_hpxml(&fixture.building_xml()).expect("parse fixture hpxml");
-    let defaults = DefaultsStore::load(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
-    )
-    .expect("load defaults");
-    let specs = resolve_equipment(&building, &defaults, &serde_json::Value::Null)
-        .expect("resolve equipment");
-    for spec in specs {
-        if spec.name == "ASHP Heater"
-            && let Some(cfg) = spec.typed_config
-        {
-            eprintln!("ASHP Heater typed payload: {:?}", cfg.payload);
-        }
-    }
     let actual = run_fixture_to_columns(&fixture);
     let reference = read_parquet_columns(&fixture.reference_output_parquet())
         .expect("reference parquet must be readable");
-    eprintln!("--- Actual Peaks ---");
-    for (name, peak) in electric_power_peaks(&actual).into_iter().take(20) {
-        eprintln!("{name}: {peak:.6}");
-    }
-    eprintln!("--- Reference Peaks ---");
-    for (name, peak) in electric_power_peaks(&reference).into_iter().take(20) {
-        eprintln!("{name}: {peak:.6}");
-    }
 
     let actual_peak = peak_hvac_power(&actual).expect("actual HVAC peak power missing");
     let reference_peak = peak_hvac_power(&reference).expect("reference HVAC peak power missing");
@@ -417,21 +394,6 @@ fn peak_hvac_power(columns: &BTreeMap<String, Vec<f64>>) -> Option<f64> {
     }
 
     peak
-}
-
-fn electric_power_peaks(columns: &BTreeMap<String, Vec<f64>>) -> Vec<(String, f64)> {
-    let mut peaks = Vec::new();
-    for (name, series) in columns {
-        let lowered = name.to_ascii_lowercase();
-        if !lowered.ends_with("electric power (kw)") {
-            continue;
-        }
-        if let Some(max_val) = series.iter().copied().reduce(f64::max) {
-            peaks.push((name.clone(), max_val));
-        }
-    }
-    peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    peaks
 }
 
 fn relative_percent_deviation(actual: f64, reference: f64) -> f64 {

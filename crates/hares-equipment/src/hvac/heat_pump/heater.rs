@@ -1486,6 +1486,43 @@ mod tests {
         assert!(electric_kw > 0.0, "ER must draw some power");
     }
 
+    // Regression: ER-only mode must still include blower fan power.
+    // If HP is locked out and ER is active, electric_kw must be strictly greater
+    // than strip-power alone when fan power is configured.
+    #[test]
+    fn er_only_mode_includes_fan_power_in_electric_kw() {
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0);
+            typed.er_lockout_temp_c = Some(5.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.backup_capacity_w = Some(4_000.0);
+            typed.backup_eir = Some(1.0);
+            typed.fan_power_w = Some(500.0);
+        });
+
+        // OAT below HP lockout and below ER lockout -> HP unavailable, ER allowed.
+        let env = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &env).unwrap();
+        let mode = eq.update_control(&env);
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingER,
+            "setup must force ER-only mode"
+        );
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert!(
+            electric_kw > 4.0,
+            "ER-only electric power must include fan draw (expected >4.0 kW), got {electric_kw:.6} kW"
+        );
+    }
+
     // Regression: step() used to call update_control() internally, causing the
     // thermostat FSM to execute twice per timestep. Verify that calling step()
     // without a prior update_control() does NOT change operating mode.
