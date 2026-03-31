@@ -6,8 +6,9 @@ use super::core_config::parse_biquadratic_list;
 use crate::EquipmentConfig;
 
 pub(super) use super::cooling_config::{
-    CentralAirConditionerConfig, DehumidifierConfig, HeatPumpConfig, RoomAcConfig,
+    CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
 };
+pub(super) use super::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
 
 pub(super) const DEFAULT_AC_CAPACITY_CURVE: [f64; 6] =
     [1.5509, -0.07505, 0.0031, 0.0024, -0.00005, -0.00043];

@@ -53,9 +53,8 @@ pub use pv::PvConfig;
 pub use ventilation::VentilationConfig;
 pub use hares_types::Telemetry;
 pub use hares_types::{CoreFlows, CoreOutput, CoreState};
-pub use hvac::cooling_config::{
-    CentralAirConditionerConfig, DehumidifierConfig, HeatPumpConfig, RoomAcConfig,
-};
+pub use hvac::cooling_config::{CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig};
+pub use hvac::heat_pump_config::{HeatPumpConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig};
 pub use hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,

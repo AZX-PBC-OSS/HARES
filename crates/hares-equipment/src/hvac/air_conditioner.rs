@@ -533,6 +533,7 @@ impl CoolingCore {
     ) -> crate::Result<()> {
         if self.is_room_ac {
             let cfg: RoomAcConfig = config.typed()?;
+            cfg.validate()?;
 
             self.hvac.cooling_capacities_w = vec![cfg.capacity_w];
 
@@ -550,6 +551,7 @@ impl CoolingCore {
             self.hvac.startup.c_d = 0.22;
         } else {
             let cfg: CentralAirConditionerConfig = config.typed()?;
+            cfg.validate()?;
 
             self.hvac.cooling_capacities_w = if let Some(stages) = &cfg.stage_capacities_w {
                 stages.clone()
@@ -1346,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn air_conditioner_descriptor_contracts_match_ticket() {
+    fn air_conditioner_descriptor_contracts() {
         let cfg = ac_config();
         let eq = AirConditioner::new(cfg);
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);

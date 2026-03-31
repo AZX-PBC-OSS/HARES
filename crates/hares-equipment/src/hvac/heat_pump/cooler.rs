@@ -12,7 +12,7 @@ use hares_types::{
 use crate::{Equipment, EquipmentConfig, Telemetry};
 
 use super::super::SpeedControlMode;
-use super::super::ac_config::HeatPumpConfig;
+use super::super::ac_config::HeatPumpCoolerConfig;
 use super::super::air_conditioner::AirConditioner;
 use super::super::helpers::{equipment_id_from_config, zone_id_from_config};
 use super::constants::{DEFAULT_EQUIPMENT_ID, DEFAULT_ZONE_ID};
@@ -113,13 +113,11 @@ impl Equipment for HpCooler {
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.inner.init(config, env)?;
 
-        // Mini-split 4-speed rule: force 4 speeds when is_mini_split is true.
         if config.is_typed() {
-            if let Ok(hp_cfg) = config.typed::<HeatPumpConfig>() {
+            if let Ok(hp_cfg) = config.typed::<HeatPumpCoolerConfig>() {
                 if hp_cfg.is_mini_split {
                     self.inner.core.hvac.speed_control_mode =
                         SpeedControlMode::MultiSpeedInterpolated;
-                    // Ensure 4 speed stages if only 1 was provided.
                     let cap = self.inner.core.hvac.cooling_capacities_w.clone();
                     let eir = self.inner.core.hvac.eir_by_stage.clone();
                     if cap.len() == 1 {
@@ -129,8 +127,17 @@ impl Equipment for HpCooler {
                             vec![base_cap * 0.25, base_cap * 0.5, base_cap * 0.75, base_cap];
                         self.inner.core.hvac.eir_by_stage = vec![base_eir; 4];
                     }
-                    // Propagate per-stage SHR if provided.
-                    self.inner.core.stage_shrs = hp_cfg.stage_shrs.clone().unwrap_or_default();
+                    let n_speeds = self.inner.core.hvac.cooling_capacities_w.len();
+                    if let Some(shrs) = &hp_cfg.stage_shrs {
+                        if !shrs.is_empty() && shrs.len() != n_speeds {
+                            return Err(HaresError::Equipment(format!(
+                                "stage_shrs length {} does not match speed stage count {}",
+                                shrs.len(),
+                                n_speeds
+                            )));
+                        }
+                        self.inner.core.stage_shrs = shrs.clone();
+                    }
                 }
             }
         }

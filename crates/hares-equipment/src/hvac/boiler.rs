@@ -194,7 +194,11 @@ impl Equipment for ElectricBoiler {
         self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
             .unwrap_or(12_000.0)
             .max(0.0);
-        self.efficiency = first_f64(config, &["efficiency", "boiler_efficiency"]).unwrap_or(1.0);
+        self.efficiency = first_f64(
+            config,
+            &["efficiency", "boiler_efficiency", "heating_efficiency", "efficiency_afue"],
+        )
+        .unwrap_or(1.0);
         if self.efficiency <= 0.0 || !self.efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Electric Boiler efficiency: {}",
@@ -449,8 +453,11 @@ impl Equipment for GasBoiler {
         self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
             .unwrap_or(12_000.0)
             .max(0.0);
-        let fuel_efficiency = first_f64(config, &["fuel_efficiency", "afue", "efficiency"])
-            .unwrap_or(DEFAULT_GAS_BOILER_AFUE);
+        let fuel_efficiency = first_f64(
+            config,
+            &["fuel_efficiency", "afue", "efficiency", "heating_efficiency", "efficiency_afue"],
+        )
+        .unwrap_or(DEFAULT_GAS_BOILER_AFUE);
         if fuel_efficiency <= 0.0 || !fuel_efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Gas Boiler efficiency: {fuel_efficiency}"

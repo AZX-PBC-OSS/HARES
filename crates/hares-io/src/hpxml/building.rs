@@ -565,7 +565,19 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
-    let mut zones = build_zone_map(details, conditioned_floor_area_m2);
+    // EG-005: subtract basement/crawlspace floor from conditioned zone.
+    // OCHRE: indoor_floor_area = conditioned_floor_area * indoor_floors / total_floors.
+    // Only apply when total > above (i.e. at least one below-grade conditioned floor).
+    let indoor_floor_area_m2 = match (conditioned_floor_area_m2, total_conditioned_floors, floors_above_grade) {
+        (Some(total), Some(n_total), Some(n_above))
+            if n_total > 0.0 && n_above > 0.0 && n_above < n_total =>
+        {
+            Some(total * n_above / n_total)
+        }
+        _ => conditioned_floor_area_m2,
+    };
+
+    let mut zones = build_zone_map(details, indoor_floor_area_m2);
     assign_walls_to_zones(&boundaries, &mut zones);
     parse_duct_systems(details, &mut zones);
 

@@ -13,7 +13,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use hares_physics::constants::{CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_J_KG};
+use hares_physics::constants::{CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
@@ -427,13 +427,13 @@ impl Equipment for Ventilation {
         // but NOT pushed to thermal ports — the envelope solver handles ventilation
         // heat exchange via apply_infiltration_and_ventilation() (CC-009).
         let _q_sensible_w = m_dot_kg_s * CP_DRY_AIR_J_KG_K * (t_supply_c - t_indoor_c);
-        let _q_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_J_KG * (w_supply - w_indoor);
+        let _q_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG * (w_supply - w_indoor);
 
         // Sensible recovery [W] — how much the HRV/ERV saved vs raw ventilation
         let q_recovery_sensible_w =
             m_dot_kg_s * CP_DRY_AIR_J_KG_K * eff_s * (t_indoor_c - t_outdoor_c);
         let q_recovery_latent_w =
-            m_dot_kg_s * LATENT_HEAT_VAPORISATION_J_KG * eff_l * (w_indoor - w_outdoor);
+            m_dot_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG * eff_l * (w_indoor - w_outdoor);
 
         // Fan electrical power [kW]
         let fan_kw = effective_fan_power_w / 1000.0;

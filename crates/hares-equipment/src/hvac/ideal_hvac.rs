@@ -417,14 +417,17 @@ impl Equipment for IdealHvac {
         let capacity_w = match self.mode {
             ThermostatMode::Deadband => 0.0,
             ThermostatMode::Heating if self.use_ideal_cached => {
-                // Solver may return negative (cooling needed) when zone is above target
-                // due to one-step-stale estimate — clamp to non-negative for heating mode.
-                (self.ideal_capacity_w * self.load_fraction).max(0.0)
+                // Clamp: non-negative (one-step-stale estimate may go negative) and
+                // no more than rated capacity (solver has no upper bound).
+                (self.ideal_capacity_w * self.load_fraction)
+                    .max(0.0)
+                    .min(self.rated_capacity_w)
             }
             ThermostatMode::Cooling if self.use_ideal_cached => {
-                // Solver may return positive (heating needed) when zone is below target
-                // due to solar gains dissipating at night — clamp to non-positive for cooling.
-                (self.ideal_capacity_w * self.load_fraction).min(0.0)
+                // Clamp: non-positive and no more than rated cooling capacity in magnitude.
+                (self.ideal_capacity_w * self.load_fraction)
+                    .min(0.0)
+                    .max(-self.cooling_capacity_w)
             }
             ThermostatMode::Heating => self.rated_capacity_w * self.load_fraction,
             ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction,

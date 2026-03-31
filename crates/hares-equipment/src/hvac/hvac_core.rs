@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn part_load_factor_matches_ticket_formula() {
+    fn part_load_factor_formula_correct() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.plf_cooling_degradation_coeff = 0.25;
         let plf = hvac.part_load_factor(0.5);

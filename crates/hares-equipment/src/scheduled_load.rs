@@ -132,6 +132,7 @@ fn slice_to_12(src: &[f64]) -> [f64; 12] {
 struct ScheduledLoadState {
     last_non_zero_power_kw: f64,
     last_non_zero_gas_w: f64,
+    last_reactive_power_kvar: f64,
     load_fraction: f64,
     mode_override: Option<OperatingMode>,
     power_source_state: ScheduleSourceState,
@@ -457,6 +458,7 @@ impl Equipment for ScheduledLoad {
         save_postcard(&ScheduledLoadState {
             last_non_zero_power_kw: self.last_non_zero_power_kw,
             last_non_zero_gas_w: self.last_non_zero_gas_w,
+            last_reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
             load_fraction: self.load_fraction,
             mode_override: self.mode_override,
             power_source_state: capture_schedule_source_state(&self.power_source),
@@ -495,6 +497,8 @@ impl Equipment for ScheduledLoad {
         }
         self.telemetry
             .insert(tk::ELECTRIC_KW, self.last_non_zero_power_kw);
+        self.telemetry
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.last_reactive_power_kvar);
         // last_non_zero_power_kw already holds the ZIP-adjusted kW value (set in step()),
         // so the thermal gain reconstruction below is accurate — it does not need a
         // separate voltage correction. The same ZIP-adjusted wattage drives sensible/latent

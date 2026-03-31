@@ -11,6 +11,8 @@ use hares_types::{
     ZoneId,
 };
 use serde::{Deserialize, Serialize};
+use uom::si::f64::Volume;
+use uom::si::volume::{liter, pint_liquid};
 
 use hares_types::telemetry_keys as tk;
 
@@ -67,7 +69,6 @@ const KEY_EF_T_MAX_C: &str = "energy_factor_t_max_c";
 const KEY_EF_RH_MIN: &str = "energy_factor_rh_min";
 const KEY_EF_RH_MAX: &str = "energy_factor_rh_max";
 
-const PINTS_TO_LITERS: f64 = 0.473_176_473;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DehumidifierState {
@@ -281,7 +282,7 @@ impl Dehumidifier {
             if config.get_f64(KEY_RATED_CAPACITY_L_DAY).is_some() {
                 value
             } else {
-                value * PINTS_TO_LITERS
+                Volume::new::<pint_liquid>(value).get::<liter>()
             }
         })
         .unwrap_or(DEFAULT_RATED_WATER_REMOVAL_L_DAY);
@@ -364,41 +365,25 @@ impl Dehumidifier {
 
     fn init_from_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         let cfg: DehumidifierConfig = config.typed()?;
+        cfg.validate()?;
 
-        // Convert capacity from pints/day to L/day.
         self.rated_water_removal_l_day = cfg
-            .capacity_pints_per_day
-            .map(|pints| pints * PINTS_TO_LITERS)
+            .capacity_liters_per_day
             .unwrap_or(DEFAULT_RATED_WATER_REMOVAL_L_DAY);
-
-        if !self.rated_water_removal_l_day.is_finite() || self.rated_water_removal_l_day <= 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "invalid dehumidifier rated capacity (L/day): {}",
-                self.rated_water_removal_l_day
-            )));
-        }
 
         self.rated_energy_factor_l_kwh = cfg
             .integrated_energy_factor
             .or(cfg.energy_factor)
             .unwrap_or(1.8);
 
-        if !self.rated_energy_factor_l_kwh.is_finite() || self.rated_energy_factor_l_kwh <= 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "invalid dehumidifier rated energy factor (L/kWh): {}",
-                self.rated_energy_factor_l_kwh
-            )));
-        }
-
         self.fraction_load_served = cfg.fraction_served.unwrap_or(1.0).clamp(0.0, 1.0);
 
-        if let Some(target_rh) = cfg.target_rh {
-            self.target_rh = parse_rh_fraction(target_rh, "target_rh")?;
-            self.min_rh = (self.target_rh - DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION)
-                .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION);
-            self.max_rh = (self.target_rh + DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION)
-                .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION);
-        }
+        let target_rh_raw = cfg.target_rh.unwrap_or(DEFAULT_TARGET_RH_FRACTION);
+        self.target_rh = parse_rh_fraction(target_rh_raw, "target_rh")?;
+        self.min_rh = (self.target_rh - DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION)
+            .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION);
+        self.max_rh = (self.target_rh + DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION)
+            .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION);
 
         // Use default curves for typed config.
         self.water_removal_curve = BiquadraticCurve {
@@ -937,8 +922,8 @@ mod tests {
         let electric_power_w = eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap();
         let latent_removal_w = eq.telemetry().get(tk::LATENT_REMOVAL_W).unwrap();
 
-        // 70 pints/day -> liters/day
-        let rated_l_day = 70.0 * 0.473_176_473;
+        // 70 pints/day → liters/day (raw path converts from pints; uom uses 4.731765E-4 m³/pint = 0.4731765 L/pint)
+        let rated_l_day = 70.0 * 0.473_176_5;
         approx_eq(water_l_day, rated_l_day);
 
         let expected_electric_w = (rated_l_day / SECONDS_PER_DAY) * 3_600_000.0 / 2.0;

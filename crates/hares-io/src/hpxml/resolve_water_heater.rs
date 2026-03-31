@@ -107,18 +107,48 @@ pub(super) fn resolve_water_heaters(
             }
         }
 
-        // HPWH COP from UEF
+        // HPWH-specific parameters
         if wh_type.contains("heat pump") {
-            if let Some(uef) = uniform_energy_factor {
-                params.insert("cop".to_string(), json!(1.174_536_058 * uef));
-            }
-            // HPWH tempering valve: storage at 60°C (140°F), delivery at 51.67°C (125°F)
+            // COP from UEF; fall back to EF→UEF conversion when UEF is absent (CW-013 D2).
+            let uef = uniform_energy_factor
+                .or_else(|| energy_factor.map(|ef| (0.60522 + ef) / 1.2101));
+
             let storage_setpoint_c = params
                 .get("setpoint_c")
                 .and_then(|v| v.as_f64())
-                .unwrap_or(60.0);
-            if storage_setpoint_c > 51.67 {
-                params.insert("tempering_valve_setpoint_c".to_string(), json!(51.67));
+                .unwrap_or(51.67);
+
+            if uef.is_some_and(|u| (u - 4.9).abs() < 1e-9) {
+                // Low-power HPWH (UEF == 4.9) — OCHRE override block (CW-013 D3).
+                params.insert("cop".to_string(), json!(4.2));
+                params.insert("compressor_power_w".to_string(), json!(1499.4_f64));
+                params.insert("setpoint_c".to_string(), json!(60.0_f64)); // 140°F storage
+                params.insert("tempering_valve_setpoint_c".to_string(), json!(51.67_f64));
+                params.insert("hp_only_mode".to_string(), json!("true"));
+                params.insert("low_power_hpwh".to_string(), json!("true"));
+            } else {
+                if let Some(uef_val) = uef {
+                    params.insert("cop".to_string(), json!(1.174_536_058 * uef_val));
+                }
+                // Tempering valve = storage setpoint unconditionally (CW-013 D1).
+                params.insert(
+                    "tempering_valve_setpoint_c".to_string(),
+                    json!(storage_setpoint_c),
+                );
+            }
+
+            // Backup element capacity from HPXML HeatingCapacity (CW-013 D4/D5).
+            if let Some(cap_w) = heating_capacity_w {
+                params.insert("backup_element_power_w".to_string(), json!(cap_w));
+            }
+
+            // Zone-dependent heat interaction defaults (CW-013 D6).
+            let location = child_text(wh, "Location").unwrap_or_default();
+            let zone_type = super::building::parse_zone_label(&location);
+            let zone_name = super::building::zone_key(&zone_type);
+            if zone_name == "conditioned" {
+                params.insert("lost_heat_fraction".to_string(), json!(0.25_f64));
+                params.insert("wall_heat_fraction".to_string(), json!(0.5_f64));
             }
         }
 

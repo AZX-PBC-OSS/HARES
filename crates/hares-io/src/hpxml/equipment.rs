@@ -579,7 +579,8 @@ mod tests {
         );
     }
 
-    /// HPXML Battery: RoundTripEfficiency of 0.90 → inverter_efficiency ≈ sqrt(0.90).
+    /// HPXML Battery: RoundTripEfficiency of 0.90 → inverter_efficiency stored as raw RTE.
+    /// Battery::init applies sqrt() per direction internally; the resolver must NOT pre-apply it.
     #[test]
     fn hpxml_battery_rte_converts_to_inverter_efficiency() {
         let rte = 0.90_f64;
@@ -605,10 +606,10 @@ mod tests {
             .and_then(Value::as_f64)
             .expect("inverter_efficiency must be present");
 
-        let expected = rte.sqrt();
+        // Resolver stores raw RTE; battery applies sqrt() per direction, yielding sqrt(rte) each way.
         assert!(
-            (inv_eff - expected).abs() < 1e-9,
-            "inverter_efficiency={inv_eff:.6}, expected sqrt(0.90)≈{expected:.6}"
+            (inv_eff - rte).abs() < 1e-9,
+            "inverter_efficiency={inv_eff:.6}, expected raw rte={rte:.6}"
         );
     }
 

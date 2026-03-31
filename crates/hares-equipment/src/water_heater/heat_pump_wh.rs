@@ -451,7 +451,7 @@ impl Equipment for HeatPumpWH {
         // UEF keys are converted to COP with the same coefficient used by resolver.
         let cop_rated = first_f64(config, &["cop", "rated_cop"])
             .or_else(|| {
-                first_f64(config, &["uniform_energy_factor", "UniformEnergyFactor"])
+                first_f64(config, &["uniform_energy_factor"])
                     .map(|uef| 1.174_536_058 * uef)
             })
             .unwrap_or(DEFAULT_RATED_COP);

@@ -8,6 +8,7 @@ pub(super) mod coil_physics;
 pub(super) mod core_config;
 pub mod cooling_config;
 pub mod dehumidifier;
+pub mod heat_pump_config;
 pub(super) mod duct_distribution;
 pub(super) mod equivalent_battery;
 pub mod furnace;
@@ -21,9 +22,8 @@ pub(super) mod speed_control;
 pub(super) mod staging;
 pub(super) mod thermostat;
 
-pub use cooling_config::{
-    CentralAirConditionerConfig, DehumidifierConfig, HeatPumpConfig, RoomAcConfig,
-};
+pub use cooling_config::{CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig};
+pub use heat_pump_config::{HeatPumpConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig};
 pub use equivalent_battery::EquivalentBatteryModel;
 pub use hvac_core::{HvacEquipment, HvacEquipmentType};
 pub use speed_control::{SpeedControlMode, SpeedSelection, StartupConfig};

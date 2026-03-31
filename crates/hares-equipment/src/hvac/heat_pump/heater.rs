@@ -17,7 +17,7 @@ use crate::{Equipment, EquipmentConfig, load_postcard, save_postcard};
 
 use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
-    ac_config::HeatPumpConfig,
+    ac_config::HeatPumpHeaterConfig,
     helpers::{
         HEATING_CAPACITY_KEYS, apply_heating_control_unchecked, equipment_id_from_config,
         first_f64, load_stage_values, lookup_zone, zone_id_from_config,
@@ -527,9 +527,9 @@ impl HeatPumpHeaterCore {
         config: &EquipmentConfig,
         env: &EnvironmentState,
     ) -> crate::Result<()> {
-        let cfg: HeatPumpConfig = config.typed()?;
+        let cfg: HeatPumpHeaterConfig = config.typed()?;
+        cfg.validate()?;
 
-        // Heating capacities from typed config.
         self.hvac.heating_capacities_w = if let Some(stages) = &cfg.stage_heating_capacities_w {
             stages.clone()
         } else if let Some(cap) = cfg.heating_capacity_w {
@@ -538,7 +538,6 @@ impl HeatPumpHeaterCore {
             vec![DEFAULT_HEATING_CAPACITY_W]
         };
 
-        // EIR from typed config or compute from HSPF.
         let default_eir = if let Some(hspf) = cfg.hspf {
             if hspf > 0.0 {
                 1.0 / (hspf / 3.412_141_633)
@@ -554,10 +553,8 @@ impl HeatPumpHeaterCore {
             vec![default_eir]
         };
 
-        // Mini-split handling.
         if cfg.is_mini_split || matches!(self.variant, HeaterVariant::Minisplit) {
             self.hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
-            // Force 4 speeds for mini-splits.
             if self.hvac.heating_capacities_w.len() == 1 {
                 let base_cap = self.hvac.heating_capacities_w[0];
                 let base_eir = self.hvac.eir_by_stage[0];
