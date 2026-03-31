@@ -21,9 +21,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked, equipment_id_from_config,
-        first_f64, loop_id_from_config, operating_mode_code, update_heating_control,
-        zone_id_from_config,
+        apply_heating_control_unchecked, equipment_id_from_config, first_f64,
+        loop_id_from_config, operating_mode_code, update_heating_control, zone_id_from_config,
     },
 };
 
@@ -181,7 +180,10 @@ impl Equipment for ElectricBoiler {
             self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
             self.default_return_temp_c = typed.return_temp_c;
         } else {
-            self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
+            self.rated_capacity_w = first_f64(
+                config,
+                &["capacity_w", "heating_capacity_w", "capacity", "HVAC Heating Capacity (W)"],
+            )
                 .unwrap_or(0.0)
                 .max(0.0);
             self.efficiency = first_f64(config, &["eir", "efficiency"]).unwrap_or(1.0);
@@ -416,21 +418,35 @@ impl Equipment for GasBoiler {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        let typed = config.typed::<GasBoilerConfig>().map_err(|e| {
-            HaresError::Equipment(format!(
-                "Gas Boiler requires typed config (use EquipmentConfig::from_typed). Error: {e}"
-            ))
-        })?;
         self.hvac.init(config, env)?;
-        self.rated_capacity_w = typed.capacity_w.max(0.0);
-        if let Some(lid) = typed.loop_id {
-            self.loop_id = LoopId(lid);
-        }
-        self.fluid_type = typed.fluid_type;
-        self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
-        self.default_return_temp_c = typed.return_temp_c;
-        self.pump_kw = typed.fan_power_w.unwrap_or(0.0) / 1_000.0;
-        let fuel_efficiency = typed.afue;
+        let fuel_efficiency = if config.is_typed() {
+            let typed = config.typed::<GasBoilerConfig>()?;
+            self.rated_capacity_w = typed.capacity_w.max(0.0);
+            if let Some(lid) = typed.loop_id {
+                self.loop_id = LoopId(lid);
+            }
+            self.fluid_type = typed.fluid_type;
+            self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
+            self.default_return_temp_c = typed.return_temp_c;
+            self.pump_kw = typed.fan_power_w.unwrap_or(0.0) / 1_000.0;
+            typed.afue
+        } else {
+            self.rated_capacity_w = first_f64(
+                config,
+                &["capacity_w", "heating_capacity_w", "capacity", "HVAC Heating Capacity (W)"],
+            )
+            .unwrap_or(0.0)
+            .max(0.0);
+            if let Some(lid) = loop_id_from_config(config, &["loop_id", "hydronic_loop_id"]) {
+                self.loop_id = lid;
+            }
+            self.flow_rate_kg_s = first_f64(config, &["flow_rate_kg_s"])
+                .unwrap_or(0.5)
+                .max(0.0);
+            self.default_return_temp_c = first_f64(config, &["return_temp_c"]).unwrap_or(40.0);
+            self.pump_kw = first_f64(config, &["fan_power_w"]).unwrap_or(0.0) / 1_000.0;
+            first_f64(config, &["afue", "fuel_efficiency", "efficiency"]).unwrap_or(0.8)
+        };
         if fuel_efficiency <= 0.0 || !fuel_efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Gas Boiler efficiency: {fuel_efficiency}"
@@ -874,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_config_rejected_for_gas_boiler() {
+    fn raw_config_accepted_for_gas_boiler_with_defaults() {
         use crate::config::ConfigPayload;
         let cfg = EquipmentConfig {
             name: "GB".to_string(),
@@ -885,13 +901,9 @@ mod tests {
         };
         let mut eq = GasBoiler::new(cfg.clone());
         let result = eq.init(&cfg, &env(18.0));
-        assert!(result.is_err(), "Gas Boiler must reject raw config");
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("requires typed config"),
-            "error must mention requires typed config"
+            result.is_ok(),
+            "Gas Boiler should accept raw config with defaults"
         );
     }
 

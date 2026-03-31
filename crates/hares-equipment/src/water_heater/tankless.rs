@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-use super::water_heater_config::TanklessWaterHeaterConfig;
+use super::wh_config::TanklessWaterHeaterConfig;
 use super::{WaterHeaterZip, resolve_draw_rate_kg_s, resolve_mains_temp_c};
 use crate::hvac::helpers::{
     equipment_id_from_config, first_f64, parse_fuel_type, zone_id_from_config,
@@ -228,22 +228,24 @@ impl TanklessWH {
         let c: TanklessWaterHeaterConfig = config.typed()?;
         c.validate()?;
 
-        self.fuel_type = c
-            .fuel_type
-            .as_deref()
-            .and_then(|s| parse_fuel_type(Some(s)))
-            .unwrap_or(FuelType::Electric);
+        self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+        self.descriptor.zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        self.fuel_type = c.fuel_type;
         self.descriptor.fuel = self.fuel_type;
         self.descriptor.core_capabilities = core_capabilities_for_fuel(self.fuel_type);
         self.ports = build_ports(self.fuel_type);
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
-        self.efficiency_factor = c.efficiency_factor.unwrap_or(DEFAULT_EF).max(1e-6);
+        self.efficiency_factor = c
+            .energy_factor
+            .or(c.uniform_energy_factor)
+            .unwrap_or(DEFAULT_EF)
+            .max(1e-6);
         if let Some(perf_adj) = c.performance_adjustment {
             self.efficiency_factor = (self.efficiency_factor * perf_adj.clamp(0.0, 1.0)).max(1e-6);
         }
         self.rated_thermal_power_w = c
-            .max_thermal_power_w
+            .heating_capacity_w
             .unwrap_or(DEFAULT_MAX_THERMAL_POWER_W)
             .max(0.0);
         self.power_limit_w = None;
@@ -257,35 +259,12 @@ impl TanklessWH {
             .max(0.0);
         self.duty_cycle = 1.0;
         self.mode_override = None;
-        self.inlet_temp_c = c.inlet_temp_c.unwrap_or(self.inlet_temp_c);
-        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or_else(|| {
-            // L/day ÷ 86400 s/day = L/s; water density ≈ 1.0 kg/L at domestic temperatures.
-            c.avg_water_draw_l_per_day
-                .map(|l| l / 86_400.0 * 1.0)
-                .unwrap_or(0.0)
-        });
-
-        let zip_z = c.zip_z.unwrap_or(0.0);
-        let zip_i = c.zip_i.unwrap_or(0.0);
-        let zip_p = c.zip_p.unwrap_or(1.0);
-        let zip_zq = c.zip_zq.unwrap_or(0.0);
-        let zip_iq = c.zip_iq.unwrap_or(0.0);
-        let zip_pq = c.zip_pq.unwrap_or(1.0);
-        if (zip_z + zip_i + zip_p - 1.0).abs() >= 0.01 {
-            return Err(hares_types::HaresError::Equipment(format!(
-                "ZIP z+i+p must sum to 1.0, got z={zip_z} i={zip_i} p={zip_p}"
-            )));
-        }
-        self.zip = WaterHeaterZip {
-            z: zip_z,
-            i: zip_i,
-            p: zip_p,
-            v0: c.zip_v0.unwrap_or(1.0),
-            zq: zip_zq,
-            iq: zip_iq,
-            pq: zip_pq,
-            pf: c.zip_pf.unwrap_or(0.0),
-        };
+        self.inlet_temp_c = 15.0;
+        self.draw_flow_rate_kg_s = c
+            .avg_water_draw_l_per_day
+            .map(|l| l / 86_400.0)
+            .unwrap_or(0.0);
+        self.zip = WaterHeaterZip::default();
 
         self.dr_setpoint_offset_c = 0.0;
         self.dr_load_fraction = 1.0;

@@ -26,7 +26,7 @@ use super::hpwh_compressor::{
     DEFAULT_ZONE_TEMP_BOUNDS_C, LOW_POWER_MAX_AMBIENT_TEMP_C, LOW_POWER_MIN_AMBIENT_TEMP_C,
 };
 use super::tank::{StratifiedTank, StratifiedTankConfig};
-use super::water_heater_config::HeatPumpWaterHeaterConfig;
+use super::wh_config::HeatPumpWaterHeaterConfig;
 use super::{
     WaterHeaterZip, hysteresis_call, parse_usize, resolve_draw_rate_kg_s,
     weighted_average_tank_temp,
@@ -550,45 +550,29 @@ impl HeatPumpWH {
         let c: HeatPumpWaterHeaterConfig = config.typed()?;
         c.validate()?;
 
-        let n_nodes = c.tank_nodes.map(|n| (n as usize).clamp(1, 12)).unwrap_or(6);
+        self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+        let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        self.descriptor.zone = zone;
+        self.ports[1].zone = zone;
+        self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
+        self.ports[2].loop_id = Some(self.loop_id);
+
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
-        let diameter_m = c.tank_diameter_m.unwrap_or(DEFAULT_TANK_DIAMETER_M);
-        let inferred_height_m =
-            tank_volume_m3 / (std::f64::consts::PI * (diameter_m * 0.5).powi(2));
-        let height_m = c.tank_height_m.unwrap_or(inferred_height_m.max(0.2));
-
-        self.thermostat_node = c
-            .thermostat_node
-            .map(|n| (n as usize).min(n_nodes - 1))
-            .unwrap_or(if n_nodes >= 12 { 9 } else { n_nodes - 1 });
-        self.thermostat_upper_node = c
-            .thermostat_upper_node
-            .map(|n| (n as usize).min(n_nodes - 1))
-            .unwrap_or(if n_nodes >= 12 { 2 } else { 0 });
-        self.condenser_node = c
-            .condenser_node
-            .map(|n| (n as usize).min(n_nodes - 1))
-            .unwrap_or(n_nodes / 2);
+        let height_m = c.tank_height_m.unwrap_or(DEFAULT_TANK_HEIGHT_M).max(0.2);
+        let diameter_m = (4.0 * tank_volume_m3 / (std::f64::consts::PI * height_m))
+            .max(1e-6)
+            .sqrt();
+        let n_nodes = 6;
+        self.thermostat_node = 5;
+        self.thermostat_upper_node = 0;
+        self.condenser_node = 3;
         self.condenser_node_weights = default_condenser_weights(n_nodes);
-
-        let ua_base = c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K);
-        let ua_w_per_k = if let Some(jacket_r) = c.jacket_r_value_m2_k_w {
-            if jacket_r > 0.0 && ua_base > 0.0 {
-                let lateral_area_m2 = std::f64::consts::PI * diameter_m * height_m;
-                let r_total = 1.0 / ua_base + jacket_r / lateral_area_m2;
-                1.0 / r_total
-            } else {
-                ua_base
-            }
-        } else {
-            ua_base
-        };
 
         self.tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes,
             height_m,
             diameter_m,
-            ua_w_per_k,
+            ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
             initial_temp_c: c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C),
             element_nodes: [Some(self.condenser_node), Some(self.thermostat_node)],
@@ -597,13 +581,10 @@ impl HeatPumpWH {
         })?;
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
-        self.setpoint_ramp_rate_c_per_s = c
-            .max_setpoint_ramp_rate_c_per_min
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .map(|v| v / 60.0);
+        self.setpoint_ramp_rate_c_per_s = None;
         self.target_setpoint_c = self.setpoint_c;
 
-        self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C).max(0.0);
+        self.deadband_c = DEFAULT_DEADBAND_C;
         self.duty_cycle = 1.0;
         self.hp_duty_cycle = 1.0;
         self.er_duty_cycle = 1.0;
@@ -611,32 +592,18 @@ impl HeatPumpWH {
         self.compressor_on = false;
         self.backup_on = false;
 
-        self.compressor_power_w = c
-            .compressor_power_w
-            .unwrap_or(DEFAULT_COMPRESSOR_POWER_W)
-            .max(0.0);
+        self.compressor_power_w = DEFAULT_COMPRESSOR_POWER_W;
         self.backup_element_power_w = c
             .backup_element_power_w
             .unwrap_or(DEFAULT_BACKUP_ELEMENT_POWER_W)
             .max(0.0);
-        self.backup_enable_offset_c = c
-            .backup_enable_offset_c
-            .unwrap_or(DEFAULT_BACKUP_ENABLE_OFFSET_C)
-            .max(0.0);
+        self.backup_enable_offset_c = DEFAULT_BACKUP_ENABLE_OFFSET_C;
 
-        let cop_rated = c
-            .cop
-            .or_else(|| c.uniform_energy_factor.map(|uef| 1.174_536_058 * uef))
-            .unwrap_or(DEFAULT_RATED_COP);
+        let cop_rated =
+            c.cop.unwrap_or(DEFAULT_RATED_COP) * c.performance_adjustment.unwrap_or(1.0);
 
         self.cop_curve = BiquadraticCurve {
-            coeffs: if let Some(coeffs) = &c.cop_curve_coeffs {
-                [
-                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
-                ]
-            } else {
-                DEFAULT_COP_CURVE
-            },
+            coeffs: DEFAULT_COP_CURVE,
             x1_bounds: (DEFAULT_ZONE_TEMP_BOUNDS_C.0, DEFAULT_ZONE_TEMP_BOUNDS_C.1),
             x2_bounds: (DEFAULT_TANK_TEMP_BOUNDS_C.0, DEFAULT_TANK_TEMP_BOUNDS_C.1),
         };
@@ -650,90 +617,35 @@ impl HeatPumpWH {
 
         self.tempering_valve_setpoint_c = c.tempering_valve_setpoint_c.filter(|&t| t > 0.0);
         self.capacity_curve = BiquadraticCurve {
-            coeffs: if let Some(coeffs) = &c.capacity_curve_coeffs {
-                [
-                    coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
-                ]
-            } else {
-                DEFAULT_CAPACITY_CURVE
-            },
+            coeffs: DEFAULT_CAPACITY_CURVE,
             x1_bounds: self.cop_curve.x1_bounds,
             x2_bounds: self.cop_curve.x2_bounds,
         };
 
-        let low_power = c.low_power_hpwh.unwrap_or(false);
-        let default_min = if low_power {
-            LOW_POWER_MIN_AMBIENT_TEMP_C
-        } else {
-            DEFAULT_MIN_AMBIENT_TEMP_C
-        };
-        let default_max = if low_power {
-            LOW_POWER_MAX_AMBIENT_TEMP_C
-        } else {
-            DEFAULT_MAX_AMBIENT_TEMP_C
-        };
-        self.min_ambient_temp_c = c.min_ambient_temp_c.unwrap_or(default_min);
-        self.max_ambient_temp_c = c.max_ambient_temp_c.unwrap_or(default_max);
-        self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
+        self.min_ambient_temp_c = DEFAULT_MIN_AMBIENT_TEMP_C;
+        self.max_ambient_temp_c = DEFAULT_MAX_AMBIENT_TEMP_C;
+        self.max_tank_temp_c = DEFAULT_MAX_TANK_TEMP_C;
 
-        self.shr = c.shr.unwrap_or(DEFAULT_SHR).clamp(0.0, 1.0);
-        self.lost_heat_fraction = c
-            .lost_heat_fraction
-            .unwrap_or(DEFAULT_LOST_HEAT_FRACTION)
-            .clamp(0.0, 1.0);
-        self.wall_heat_fraction = c.wall_heat_fraction.unwrap_or(0.0).clamp(0.0, 1.0);
-        self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W).max(0.0);
-        self.parasitic_power_w = c
-            .parasitic_power_w
-            .unwrap_or(DEFAULT_PARASITIC_POWER_W)
-            .max(0.0);
-        self.backup_efficiency = c
-            .backup_efficiency
-            .unwrap_or(DEFAULT_BACKUP_EFFICIENCY)
-            .max(0.0);
-        self.min_on_time_s = c.min_on_time_s.unwrap_or(DEFAULT_MIN_ON_TIME_S).max(0.0);
-        self.min_off_time_s = c.min_off_time_s.unwrap_or(0.0).max(0.0);
-        self.hp_only_mode = c.hp_only_mode.unwrap_or(false);
-
-        self.element_hp_control = if c
-            .element_hp_control_mode
-            .as_deref()
-            .is_some_and(|s| s == "Simultaneous")
-        {
-            ElementHpControlMode::Simultaneous
-        } else {
-            ElementHpControlMode::MutuallyExclusive
+        self.shr = DEFAULT_SHR;
+        self.lost_heat_fraction = DEFAULT_LOST_HEAT_FRACTION;
+        self.wall_heat_fraction = match c.zone_type.as_deref() {
+            Some("conditioned") => 0.5,
+            _ => 0.0,
         };
+        self.fan_power_w = DEFAULT_FAN_POWER_W;
+        self.parasitic_power_w = DEFAULT_PARASITIC_POWER_W;
+        self.backup_efficiency = DEFAULT_BACKUP_EFFICIENCY;
+        self.min_on_time_s = DEFAULT_MIN_ON_TIME_S;
+        self.min_off_time_s = 0.0;
+        self.hp_only_mode = false;
 
-        self.mains_temp_c = c.mains_temp_c.unwrap_or(self.mains_temp_c);
-        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or_else(|| {
-            // L/day ÷ 86400 s/day = L/s; water density ≈ 1.0 kg/L at domestic temperatures.
-            c.avg_water_draw_l_per_day
-                .map(|l| l / 86_400.0 * 1.0)
-                .unwrap_or(0.0)
-        });
-
-        let zip_z = c.zip_z.unwrap_or(0.0);
-        let zip_i = c.zip_i.unwrap_or(0.0);
-        let zip_p = c.zip_p.unwrap_or(1.0);
-        let zip_zq = c.zip_zq.unwrap_or(0.0);
-        let zip_iq = c.zip_iq.unwrap_or(0.0);
-        let zip_pq = c.zip_pq.unwrap_or(1.0);
-        if (zip_z + zip_i + zip_p - 1.0).abs() >= 0.01 {
-            return Err(hares_types::HaresError::Equipment(format!(
-                "ZIP z+i+p must sum to 1.0, got z={zip_z} i={zip_i} p={zip_p}"
-            )));
-        }
-        self.zip = WaterHeaterZip {
-            z: zip_z,
-            i: zip_i,
-            p: zip_p,
-            v0: c.zip_v0.unwrap_or(1.0),
-            zq: zip_zq,
-            iq: zip_iq,
-            pq: zip_pq,
-            pf: c.zip_pf.unwrap_or(0.0),
-        };
+        self.element_hp_control = ElementHpControlMode::MutuallyExclusive;
+        self.mains_temp_c = 15.0;
+        self.draw_flow_rate_kg_s = c
+            .avg_water_draw_l_per_day
+            .map(|l| l / 86_400.0)
+            .unwrap_or(0.0);
+        self.zip = WaterHeaterZip::default();
 
         self.compressor_on_since_s = None;
         self.compressor_off_since_s = None;
@@ -742,6 +654,7 @@ impl HeatPumpWH {
         self.dr_duration_remaining_s = None;
         self.dr_level = DRLevel::Normal;
         self.ctrl_load_fraction = 1.0;
+        self.descriptor.telemetry_fields = telemetry_fields(n_nodes);
         self.telemetry = default_telemetry();
         self.tank.register_node_telemetry(&mut self.telemetry);
         self.core_output = CoreOutput::default();
@@ -1410,7 +1323,7 @@ mod tests {
 
     use super::HeatPumpWH;
     use crate::config::ConfigPayload;
-    use crate::{Equipment, EquipmentConfig};
+    use crate::{Equipment, EquipmentConfig, EquipmentTypedConfig, HeatPumpWaterHeaterConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -1467,6 +1380,36 @@ mod tests {
             ochre_class: "Heat Pump Water Heater".to_string(),
             payload: ConfigPayload::Raw { data: raw },
         }
+    }
+
+    #[test]
+    fn typed_init_uses_hpxml_heating_capacity_for_backup_element_power() {
+        let typed = HeatPumpWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: Some(2.5),
+            backup_element_power_w: Some(4500.0),
+            ua_w_per_k: None,
+            setpoint_c: Some(52.0),
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+        };
+        let config = EquipmentConfig::from_typed(
+            "HPWH".to_string(),
+            HeatPumpWaterHeaterConfig::equipment_type_name().to_string(),
+            typed,
+        );
+        let env = env(20.0);
+        let mut eq = HeatPumpWH::new(config.clone());
+        eq.init(&config, &env).expect("typed init should succeed");
+
+        assert_eq!(eq.backup_element_power_w, 4500.0);
     }
 
     fn ports() -> PortSlots {

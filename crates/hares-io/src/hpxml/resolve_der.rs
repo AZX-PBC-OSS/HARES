@@ -2,12 +2,11 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Map, Value, json};
-
+use hares_equipment::{BatteryConfig, EvConfig, GeneratorConfig, PvConfig};
 use hares_types::FuelType;
 
 use super::building::XmlNode;
-use super::equipment::{EquipmentSpec, build_spec};
+use super::equipment::{EquipmentSpec, build_typed_spec};
 use super::xml_helpers::{child_energy_kwh, child_f64, child_text, element_id, parse_fuel};
 
 use crate::defaults::DefaultsStore;
@@ -35,37 +34,33 @@ pub(super) fn resolve_pv(
     }
 
     for pv in photovoltaics.children_named("PVSystem") {
-        let mut params = Map::new();
-        if let Some(watts) = child_f64(pv, "MaxPowerOutput") {
-            let kw = watts / 1000.0;
-            params.insert("capacity_kw".to_string(), json!(kw));
-        }
-        if let Some(tilt) = child_f64(pv, "ArrayTilt") {
-            params.insert("tilt_deg".to_string(), json!(tilt));
-        }
-        if let Some(az) = child_f64(pv, "ArrayAzimuth") {
-            params.insert("azimuth_deg".to_string(), json!(az));
-        }
-        if let Some(module_type) = child_text(pv, "ModuleType") {
-            params.insert("module_type".to_string(), Value::String(module_type));
-        }
-        if let Some(losses) = child_f64(pv, "SystemLossesFraction") {
-            params.insert("system_losses_fraction".to_string(), json!(losses));
-        }
-
         let inverter_eff = pv
             .child("AttachedToInverter")
             .and_then(|n| n.attrs.get("idref"))
             .and_then(|id| inverter_eff_by_id.get(id))
             .copied();
-        if let Some(eff) = inverter_eff {
-            params.insert("inverter_efficiency".to_string(), json!(eff));
-        }
 
-        specs.push(build_spec(
+        let cfg = PvConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kw: child_f64(pv, "MaxPowerOutput")
+                .map(|watts| watts / 1000.0)
+                .unwrap_or(0.0),
+            tilt_deg: child_f64(pv, "ArrayTilt"),
+            azimuth_deg: child_f64(pv, "ArrayAzimuth"),
+            module_type: child_text(pv, "ModuleType"),
+            noct_c: None,
+            system_losses_fraction: child_f64(pv, "SystemLossesFraction"),
+            inverter_efficiency: inverter_eff,
+            inverter_capacity_kw: None,
+            power_factor: None,
+            surface_resolution_deg: None,
+        };
+
+        specs.push(build_typed_spec(
             "PV".to_string(),
             FuelType::Electric,
-            params,
+            cfg,
             defaults,
         ));
     }
@@ -81,26 +76,45 @@ pub(super) fn resolve_batteries(
     };
 
     for battery in batteries.children_named("Battery") {
-        let mut params = Map::new();
-        if let Some(kwh) = child_energy_kwh(battery, "NominalCapacity") {
-            params.insert("capacity_kwh".to_string(), json!(kwh));
-        }
-        if let Some(kw) = child_f64(battery, "RatedPowerOutput") {
-            params.insert("max_charge_kw".to_string(), json!(kw));
-            params.insert("max_discharge_kw".to_string(), json!(kw));
-        }
-        if let Some(rte) = child_f64(battery, "RoundTripEfficiency") {
-            // Store the raw round-trip efficiency under "inverter_efficiency".
-            // Battery::init reads this key and applies sqrt() per direction,
-            // so the final per-direction efficiency is sqrt(rte) each way.
-            // Do NOT pre-apply sqrt() here — that would cause a double-sqrt,
-            // making the effective RTE = rte^0.5 instead of rte.
-            params.insert("inverter_efficiency".to_string(), json!(rte));
-        }
-        specs.push(build_spec(
+        let rated_power_kw = child_f64(battery, "RatedPowerOutput").unwrap_or(5.0);
+        let cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: child_energy_kwh(battery, "NominalCapacity").unwrap_or(13.5),
+            max_charge_kw: rated_power_kw,
+            max_discharge_kw: rated_power_kw,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: None,
+            self_discharge_pct_per_day: None,
+            min_soc: None,
+            max_soc: None,
+            initial_soc: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: child_f64(battery, "RoundTripEfficiency").map(f64::sqrt),
+            charge_efficiency: None,
+            discharge_efficiency: None,
+            bms_mode: None,
+            grid_export_rule: None,
+        };
+        specs.push(build_typed_spec(
             "Battery".to_string(),
             FuelType::Electric,
-            params,
+            cfg,
             defaults,
         ));
     }
@@ -113,20 +127,41 @@ pub(super) fn resolve_ev(
 ) {
     if let Some(evs) = details.path(&["Systems", "ElectricVehicles"]) {
         for ev in evs.children_named("ElectricVehicle") {
-            let mut params = Map::new();
-            if let Some(level) = child_text(ev, "ChargingLevel") {
-                params.insert("ChargingLevel".to_string(), Value::String(level));
-            }
-            if let Some(power_kw) = child_f64(ev, "MaxChargingPower") {
-                params.insert("MaxChargingPower".to_string(), json!(power_kw));
-            }
-            if let Some(kwh) = child_energy_kwh(ev, "BatteryCapacity") {
-                params.insert("BatteryCapacity".to_string(), json!(kwh));
-            }
-            specs.push(build_spec(
+            let cfg = EvConfig {
+                equipment_id: None,
+                capacity_kwh: child_energy_kwh(ev, "BatteryCapacity").unwrap_or(75.0),
+                charging_level: child_text(ev, "ChargingLevel"),
+                max_charging_power_kw: child_f64(ev, "MaxChargingPower").unwrap_or(11.5),
+                charging_efficiency: None,
+                l1_current_a: None,
+                l1_voltage_v: None,
+                soc_max: None,
+                initial_soc: None,
+                battery_temp_c: None,
+                min_charge_temp_c: None,
+                full_power_temp_c: None,
+                heater_power_w: None,
+                heater_threshold_c: None,
+                thermal_mass_j_per_k: None,
+                ua_w_per_k: None,
+                v2l_enabled: None,
+                v2l_soc_reserve: None,
+                v2l_max_discharge_kw: None,
+                v2g_enabled: None,
+                v2g_soc_reserve: None,
+                v2g_max_discharge_kw: None,
+                chemistry: None,
+                fuel_economy_kwh_per_mi: None,
+                ready_soc: None,
+                charging_strategy: None,
+                plug_in_policy: None,
+                power_limit_kw: None,
+                initial_connection_state: None,
+            };
+            specs.push(build_typed_spec(
                 "Electric Vehicle".to_string(),
                 FuelType::Electric,
-                params,
+                cfg,
                 defaults,
             ));
         }
@@ -144,28 +179,42 @@ pub(super) fn resolve_generators(
 
     for generator in generators.children_named("Generator") {
         let fuel = parse_fuel(child_text(generator, "FuelType").as_deref());
-        let mut params = Map::new();
-
-        if let Some(kw) = child_f64(generator, "ElectricalPowerOutput") {
-            params.insert("rated_power_kw".to_string(), json!(kw));
-        }
-
-        // Derive electrical efficiency from annual energy figures when present.
-        // eta = AnnualOutputkWh / (AnnualConsumptionkBtu * KBTU_TO_KWH)
         let annual_output_kwh = child_f64(generator, "AnnualOutputkWh");
         let annual_consumption_kbtu = child_f64(generator, "AnnualConsumptionkBtu");
-        if let (Some(out_kwh), Some(cons_kbtu)) = (annual_output_kwh, annual_consumption_kbtu) {
+        let eta_electric = if let (Some(out_kwh), Some(cons_kbtu)) =
+            (annual_output_kwh, annual_consumption_kbtu)
+        {
             let cons_kwh = cons_kbtu * KBTU_TO_KWH;
             if cons_kwh > 0.0 {
-                let eta = (out_kwh / cons_kwh).clamp(0.0, 1.0);
-                params.insert("eta_electric".to_string(), json!(eta));
+                Some((out_kwh / cons_kwh).clamp(0.0, 1.0))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        specs.push(build_spec(
+        let cfg = GeneratorConfig {
+            equipment_id: None,
+            fuel_type: Some(fuel),
+            rated_power_kw: child_f64(generator, "ElectricalPowerOutput").unwrap_or(10.0),
+            eta_electric,
+            eta_thermal: None,
+            efficiency_type: None,
+            delta_kw_per_s: None,
+            capacity_min_kw: None,
+            grid_import_limit_kw: None,
+            export_limit_kw: None,
+            loop_id: None,
+            flow_rate_kg_s: None,
+            supply_temp_c: None,
+            return_temp_c: None,
+        };
+
+        specs.push(build_typed_spec(
             "Gas Generator".to_string(),
             fuel,
-            params,
+            cfg,
             defaults,
         ));
     }

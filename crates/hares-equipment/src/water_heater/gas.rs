@@ -26,7 +26,7 @@ use crate::hvac::helpers::{
     equipment_id_from_config, first_f64, loop_id_from_config, parse_fuel_type, zone_id_from_config,
 };
 
-use super::water_heater_config::GasWaterHeaterConfig;
+use super::wh_config::GasWaterHeaterConfig;
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
@@ -375,36 +375,26 @@ impl GasWH {
         let c: GasWaterHeaterConfig = config.typed()?;
         c.validate()?;
 
-        let n_nodes = c.tank_nodes.map(|n| (n as usize).clamp(1, 12)).unwrap_or(6);
+        self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+        let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        self.descriptor.zone = zone;
+        self.ports[2].zone = zone;
+        self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
+        self.ports[3].loop_id = Some(self.loop_id);
+
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
-        let diameter_m = c.tank_diameter_m.unwrap_or(DEFAULT_TANK_DIAMETER_M);
-        let inferred_height_m =
-            tank_volume_m3 / (std::f64::consts::PI * (diameter_m * 0.5).powi(2));
-        let height_m = c.tank_height_m.unwrap_or(inferred_height_m.max(0.2));
-
-        self.burner_node = c
-            .burner_node
-            .map(|n| (n as usize).min(n_nodes - 1))
-            .unwrap_or(n_nodes - 1);
-
-        let ua_base = c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K);
-        let ua_w_per_k = if let Some(jacket_r) = c.jacket_r_value_m2_k_w {
-            if jacket_r > 0.0 && ua_base > 0.0 {
-                let lateral_area_m2 = std::f64::consts::PI * diameter_m * height_m;
-                let r_total = 1.0 / ua_base + jacket_r / lateral_area_m2;
-                1.0 / r_total
-            } else {
-                ua_base
-            }
-        } else {
-            ua_base
-        };
+        let height_m = c.tank_height_m.unwrap_or(DEFAULT_TANK_HEIGHT_M).max(0.2);
+        let diameter_m = (4.0 * tank_volume_m3 / (std::f64::consts::PI * height_m))
+            .max(1e-6)
+            .sqrt();
+        let n_nodes = 6;
+        self.burner_node = 5;
 
         self.tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes,
             height_m,
             diameter_m,
-            ua_w_per_k,
+            ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
             initial_temp_c: c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C),
             element_nodes: [None, Some(self.burner_node)],
@@ -412,95 +402,44 @@ impl GasWH {
             ua_end_cap_w_per_k: None,
         })?;
 
-        self.burner_input_w = c
-            .heating_capacity_w
-            .unwrap_or(DEFAULT_BURNER_INPUT_W)
-            .max(0.0);
-        let has_standing_pilot = ignition_uses_standing_pilot(c.ignition_type.as_deref());
-        self.pilot_power_w = c
-            .pilot_power_w
-            .unwrap_or(if has_standing_pilot {
-                DEFAULT_PILOT_POWER_W
-            } else {
-                0.0
-            })
-            .max(0.0);
-        self.fan_power_w = c.fan_power_w.unwrap_or(0.0).max(0.0);
+        self.burner_input_w = c.heating_capacity_w.unwrap_or(DEFAULT_BURNER_INPUT_W).max(0.0);
+        self.pilot_power_w = c.pilot_power_w.unwrap_or(0.0).max(0.0);
+        self.fan_power_w = 0.0;
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
-        self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C).max(0.0);
+        self.deadband_c = DEFAULT_DEADBAND_C;
         self.duty_cycle = 1.0;
         self.mode_override = None;
         self.burner_on = false;
 
-        self.mains_temp_c = c.mains_temp_c.unwrap_or(self.mains_temp_c);
-        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or_else(|| {
-            // L/day ÷ 86400 s/day = L/s; water density ≈ 1.0 kg/L at domestic temperatures.
-            c.avg_water_draw_l_per_day
-                .map(|l| l / 86_400.0 * 1.0)
-                .unwrap_or(0.0)
-        });
-        self.draw_l_per_min_source =
-            c.draw_flow_rate_schedule_col
-                .map(|col| ScheduleSource::ColumnRef {
-                    col_idx: col as usize,
-                    boundary: hares_types::BoundaryPolicy::Clamp,
-                });
-        self.mains_temp_c_source = c
-            .mains_temp_schedule_col
-            .map(|col| ScheduleSource::ColumnRef {
-                col_idx: col as usize,
-                boundary: hares_types::BoundaryPolicy::Clamp,
-            });
+        self.draw_flow_rate_kg_s = c
+            .avg_water_draw_l_per_day
+            .map(|l| l / 86_400.0)
+            .unwrap_or(0.0);
+        self.draw_l_per_min_source = None;
+        self.mains_temp_c_source = None;
+        self.zip = WaterHeaterZip::default();
 
-        let zip_z = c.zip_z.unwrap_or(0.0);
-        let zip_i = c.zip_i.unwrap_or(0.0);
-        let zip_p = c.zip_p.unwrap_or(1.0);
-        let zip_zq = c.zip_zq.unwrap_or(0.0);
-        let zip_iq = c.zip_iq.unwrap_or(0.0);
-        let zip_pq = c.zip_pq.unwrap_or(1.0);
-        if (zip_z + zip_i + zip_p - 1.0).abs() >= 0.01 {
-            return Err(hares_types::HaresError::Equipment(format!(
-                "ZIP z+i+p must sum to 1.0, got z={zip_z} i={zip_i} p={zip_p}"
-            )));
-        }
-        self.zip = WaterHeaterZip {
-            z: zip_z,
-            i: zip_i,
-            p: zip_p,
-            v0: c.zip_v0.unwrap_or(1.0),
-            zq: zip_zq,
-            iq: zip_iq,
-            pq: zip_pq,
-            pf: c.zip_pf.unwrap_or(0.0),
-        };
-
-        self.flue_loss_fraction = c
-            .flue_loss_fraction
-            .unwrap_or(DEFAULT_FLUE_LOSS_FRACTION)
-            .clamp(0.0, 1.0);
-        self.burner_efficiency_constant = c.burner_efficiency.unwrap_or(DEFAULT_BURNER_EFFICIENCY);
+        self.flue_loss_fraction = c.flue_loss_fraction.unwrap_or(DEFAULT_FLUE_LOSS_FRACTION);
+        self.burner_efficiency_constant = c
+            .energy_factor
+            .or(c.uniform_energy_factor)
+            .map(|v| v * c.performance_adjustment.unwrap_or(1.0))
+            .unwrap_or(DEFAULT_BURNER_EFFICIENCY);
         self.burner_efficiency_poly = None;
 
-        self.fuel_type = c
-            .fuel_type
-            .as_deref()
-            .and_then(|s| parse_fuel_type(Some(s)))
-            .unwrap_or(FuelType::Gas);
+        self.fuel_type = c.fuel_type;
         self.descriptor.fuel = self.fuel_type;
 
-        let ef = self.burner_efficiency_constant;
-        self.skin_loss_fraction = c
-            .skin_loss_fraction
-            .unwrap_or_else(|| default_skin_loss_fraction(ef))
-            .clamp(0.0, 1.0);
-        self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
+        self.skin_loss_fraction = default_skin_loss_fraction(self.burner_efficiency_constant);
+        self.max_tank_temp_c = DEFAULT_MAX_TANK_TEMP_C;
 
         self.dr_setpoint_offset_c = 0.0;
         self.dr_load_fraction = 1.0;
         self.dr_duration_remaining_s = None;
         self.dr_level = DRLevel::Normal;
         self.ctrl_load_fraction = 1.0;
+        self.descriptor.telemetry_fields = telemetry_fields(n_nodes);
         self.telemetry = default_telemetry();
         self.tank.register_node_telemetry(&mut self.telemetry);
         self.core_output = CoreOutput::default();

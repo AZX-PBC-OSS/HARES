@@ -59,7 +59,7 @@ pub struct GeneratorConfig {
 
 impl EquipmentTypedConfig for GeneratorConfig {
     fn equipment_type_name() -> &'static str {
-        "Gas Generator"
+        "Generator"
     }
 }
 
@@ -567,6 +567,9 @@ impl Generator {
         let c: GeneratorConfig = config.typed()?;
         c.validate()?;
 
+        if let Some(fuel_type) = c.fuel_type {
+            self.descriptor.fuel = fuel_type;
+        }
         self.rated_power_kw = c.rated_power_kw;
         self.capacity_min_kw = c.capacity_min_kw;
         self.eta_thermal = c.eta_thermal.unwrap_or(self.eta_thermal);
@@ -2467,7 +2470,7 @@ mod tests {
             name: "gen".to_string(),
             ochre_class: "Gas Generator".to_string(),
             payload: ConfigPayload::Typed {
-                type_name: "Gas Generator".to_string(),
+                type_name: "Generator".to_string(),
                 version: 1,
                 data: json,
             },
@@ -2498,5 +2501,23 @@ mod tests {
         cfg.eta_electric = Some(0.35);
         cfg.eta_thermal = Some(0.45);
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn typed_init_uses_fuel_type_enum_directly() {
+        let cfg = GeneratorConfig {
+            fuel_type: Some(FuelType::Propane),
+            ..minimal_generator_config()
+        };
+        let ec = EquipmentConfig::from_typed(
+            "typed_gen".to_string(),
+            "Gas Generator".to_string(),
+            cfg,
+        );
+        let env = base_env();
+        let mut r#gen = Generator::new(ec.clone(), GeneratorKind::GasGenerator);
+        r#gen.init(&ec, &env).expect("typed init");
+
+        assert_eq!(r#gen.descriptor().fuel, FuelType::Propane);
     }
 }

@@ -23,14 +23,14 @@ use hares_equipment::{
     EquipmentTypedConfig, EvConfig, GasBoilerConfig, GasFurnaceConfig, GeneratorConfig,
     HeatPumpHeaterConfig, IdealHvacConfig, RoomAcConfig, VentilationConfig,
     config::ConfigValue,
-    water_heater::water_heater_config::{
+    water_heater::wh_config::{
         ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
         TanklessWaterHeaterConfig,
     },
 };
 use hares_types::{
-    ControlSignal, CoreCapabilities, EnvironmentState, FuelType, OperatingMode, PortSlots,
-    SurfaceIrradiance, ZoneId, validate_core_contract,
+    ControlSignal, CoreCapabilities, CoreOutput, EquipmentDescriptor, EnvironmentState, FuelType,
+    OperatingMode, PortSlots, SurfaceIrradiance, ZoneId, validate_core_contract,
 };
 
 use common::{default_env, env_with_zone_temp};
@@ -132,50 +132,101 @@ fn assert_equipment_lifecycle(
         equipment.descriptor().name
     );
 
-    // 7. Capture port output from first step (reference), then step again (mutate).
-    let port_output_step1 = ports.clone();
+    // 7. Capture the reference outputs from the second step, which should be
+    //    reproduced exactly after restoring the first-step snapshot and stepping again.
 
     let mut ports2 = ports_for(equipment);
     equipment.update_control(env);
     equipment
         .step(env, dt, &mut ports2)
         .expect("second step must return Ok");
+    let port_output_step2 = ports2.clone();
+    let core_output_step2 = equipment.core_output().clone();
 
     // 8. Restore from snapshot and step again. Output must match step 1.
     equipment
         .load_state(&saved)
         .expect("load_state must return Ok for valid snapshot bytes");
+    assert_eq!(
+        equipment.core_output(),
+        &CoreOutput::default(),
+        "load_state must reset cached core_output to default for '{}'",
+        equipment.descriptor().name
+    );
 
     let mut ports_after_restore = ports_for(equipment);
     equipment.update_control(env);
     equipment
         .step(env, dt, &mut ports_after_restore)
         .expect("step after restore must return Ok");
+    assert_eq!(
+        equipment.core_output(),
+        &core_output_step2,
+        "step after restore must deterministically recompute cached core_output for '{}'",
+        equipment.descriptor().name
+    );
 
-    // Same state + same env → same deterministic port output.
-    let orig_net = port_output_step1.electrical.net_active_kw();
+    // Same restored state + same env → same deterministic port output.
+    let orig_net = port_output_step2.electrical.net_active_kw();
     let rest_net = ports_after_restore.electrical.net_active_kw();
     assert!(
         (orig_net - rest_net).abs() < 1e-3,
-        "electrical net_active_kw after restore must match step-1 output within 1 W for '{}': \
-         step1={orig_net}, after_restore={rest_net}",
+        "electrical net_active_kw after restore must match step-2 output within 1 W for '{}': \
+         step2={orig_net}, after_restore={rest_net}",
         equipment.descriptor().name,
     );
-    for (orig_acc, rest_acc) in port_output_step1
+    for (orig_acc, rest_acc) in port_output_step2
         .thermal
         .iter()
         .zip(ports_after_restore.thermal.iter())
     {
         assert!(
             (orig_acc.sensible_gain_w - rest_acc.sensible_gain_w).abs() < 0.05,
-            "sensible_gain_w for zone {:?} after restore must match step-1 for '{}': \
-             step1={}, after_restore={}",
+            "sensible_gain_w for zone {:?} after restore must match step-2 for '{}': \
+             step2={}, after_restore={}",
             orig_acc.zone,
             equipment.descriptor().name,
             orig_acc.sensible_gain_w,
             rest_acc.sensible_gain_w,
         );
     }
+}
+
+fn assert_core_output_contract(desc: &EquipmentDescriptor, co: &CoreOutput) {
+    validate_core_contract(desc, co)
+        .unwrap_or_else(|e| panic!("core contract failed for '{}': {e}", desc.name));
+
+    let caps = desc.core_capabilities;
+    assert_eq!(
+        co.flows.electric_kw.is_some(),
+        caps.contains(CoreCapabilities::ELECTRIC),
+        "electric core output presence must match capabilities for '{}'",
+        desc.name
+    );
+    assert_eq!(
+        co.flows.reactive_power_kvar.is_some(),
+        caps.contains(CoreCapabilities::REACTIVE),
+        "reactive core output presence must match capabilities for '{}'",
+        desc.name
+    );
+    assert_eq!(
+        co.flows.fuel_w.is_some(),
+        caps.contains(CoreCapabilities::FUEL),
+        "fuel core output presence must match capabilities for '{}'",
+        desc.name
+    );
+    assert_eq!(
+        co.state.soc.is_some(),
+        caps.contains(CoreCapabilities::HAS_SOC),
+        "soc core output presence must match capabilities for '{}'",
+        desc.name
+    );
+    assert_eq!(
+        co.state.operating_mode.is_some(),
+        caps.contains(CoreCapabilities::HAS_MODE),
+        "operating_mode core output presence must match capabilities for '{}'",
+        desc.name
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -639,37 +690,21 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             GasWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
+                loop_id: None,
+                fuel_type: FuelType::Gas,
                 tank_volume_m3: None,
                 tank_height_m: None,
-                tank_diameter_m: None,
-                ua_w_per_k: None,
-                jacket_r_value_m2_k_w: None,
-                tank_nodes: None,
-                burner_node: None,
+                energy_factor: Some(0.8),
+                uniform_energy_factor: None,
                 setpoint_c: Some(52.0),
-                deadband_c: Some(2.0),
-                max_tank_temp_c: Some(90.0),
                 heating_capacity_w: Some(12_000.0),
-                burner_efficiency: Some(0.8),
-                flue_loss_fraction: None,
-                ignition_type: None,
-                pilot_power_w: Some(0.0),
-                fan_power_w: Some(0.0),
-                skin_loss_fraction: None,
-                fuel_type: Some("Gas".to_string()),
-                mains_temp_c: Some(15.0),
+                ua_w_per_k: None,
                 avg_water_draw_l_per_day: None,
-                draw_flow_rate_kg_s: Some(0.0),
-                draw_flow_rate_schedule_col: None,
-                mains_temp_schedule_col: None,
-                zip_z: None,
-                zip_i: None,
-                zip_p: None,
-                zip_zq: None,
-                zip_iq: None,
-                zip_pq: None,
-                zip_pf: None,
-                zip_v0: None,
+                pilot_power_w: Some(0.0),
+                flue_loss_fraction: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
             },
         ),
         "Resistance Water Heater" | "Electric Resistance Water Heater" => typed_alias_config(
@@ -677,35 +712,19 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
+                loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
-                tank_diameter_m: None,
-                ua_w_per_k: None,
-                jacket_r_value_m2_k_w: None,
-                tank_nodes: None,
-                upper_element_node: None,
-                lower_element_node: None,
+                energy_factor: None,
+                uniform_energy_factor: None,
                 setpoint_c: Some(52.0),
-                deadband_c: Some(2.0),
-                max_tank_temp_c: Some(90.0),
                 heating_capacity_w: Some(4_500.0),
-                upper_element_power_w: None,
-                lower_element_power_w: None,
-                element_priority_mode: None,
-                max_setpoint_ramp_rate_c_per_min: None,
-                mains_temp_c: Some(15.0),
+                ua_w_per_k: None,
                 avg_water_draw_l_per_day: None,
-                draw_flow_rate_kg_s: Some(0.0),
-                draw_flow_rate_schedule_col: None,
-                mains_temp_schedule_col: None,
-                zip_z: None,
-                zip_i: None,
-                zip_p: None,
-                zip_zq: None,
-                zip_iq: None,
-                zip_pq: None,
-                zip_pf: None,
-                zip_v0: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+                element_power_w: None,
             },
         ),
         "Tankless Water Heater" => typed_alias_config(
@@ -713,23 +732,15 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             TanklessWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                fuel_type: Some("Electric".to_string()),
+                loop_id: None,
+                fuel_type: FuelType::Electric,
+                energy_factor: Some(0.95),
+                uniform_energy_factor: None,
+                heating_capacity_w: Some(12_000.0),
                 setpoint_c: Some(50.0),
-                efficiency_factor: Some(0.95),
-                performance_adjustment: Some(0.92),
-                max_thermal_power_w: Some(12_000.0),
                 parasitic_power_w: Some(5.0),
-                inlet_temp_c: Some(15.0),
-                avg_water_draw_l_per_day: None,
-                draw_flow_rate_kg_s: Some(0.02),
-                zip_z: None,
-                zip_i: None,
-                zip_p: None,
-                zip_zq: None,
-                zip_iq: None,
-                zip_pq: None,
-                zip_pf: None,
-                zip_v0: None,
+                performance_adjustment: Some(0.92),
+                avg_water_draw_l_per_day: Some(227.0),
             },
         ),
         "Gas Tankless Water Heater" => typed_alias_config(
@@ -737,23 +748,15 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             TanklessWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                fuel_type: Some("Gas".to_string()),
+                loop_id: None,
+                fuel_type: FuelType::Gas,
+                energy_factor: Some(0.82),
+                uniform_energy_factor: None,
+                heating_capacity_w: Some(20_000.0),
                 setpoint_c: Some(50.0),
-                efficiency_factor: Some(0.82),
-                performance_adjustment: Some(0.92),
-                max_thermal_power_w: Some(20_000.0),
                 parasitic_power_w: Some(5.0),
-                inlet_temp_c: Some(15.0),
-                avg_water_draw_l_per_day: None,
-                draw_flow_rate_kg_s: Some(0.02),
-                zip_z: None,
-                zip_i: None,
-                zip_p: None,
-                zip_zq: None,
-                zip_iq: None,
-                zip_pq: None,
-                zip_pf: None,
-                zip_v0: None,
+                performance_adjustment: Some(0.92),
+                avg_water_draw_l_per_day: Some(227.0),
             },
         ),
         "Heat Pump Water Heater" | "HPWH" => typed_alias_config(
@@ -761,51 +764,18 @@ fn config_for_class(class: &str) -> EquipmentConfig {
             HeatPumpWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
+                loop_id: None,
                 tank_volume_m3: None,
                 tank_height_m: None,
-                tank_diameter_m: None,
-                ua_w_per_k: None,
-                jacket_r_value_m2_k_w: None,
-                tank_nodes: None,
-                thermostat_node: None,
-                thermostat_upper_node: None,
-                condenser_node: None,
-                setpoint_c: Some(52.0),
-                deadband_c: Some(2.0),
-                max_tank_temp_c: Some(90.0),
-                max_setpoint_ramp_rate_c_per_min: None,
-                compressor_power_w: Some(500.0),
-                backup_element_power_w: Some(4_500.0),
-                backup_enable_offset_c: None,
-                backup_efficiency: None,
-                hp_only_mode: None,
                 cop: Some(2.5),
-                uniform_energy_factor: None,
-                cop_curve_coeffs: None,
-                capacity_curve_coeffs: None,
-                min_ambient_temp_c: None,
-                max_ambient_temp_c: None,
-                low_power_hpwh: None,
-                shr: None,
-                lost_heat_fraction: None,
-                wall_heat_fraction: None,
-                fan_power_w: None,
-                parasitic_power_w: None,
-                min_on_time_s: None,
-                min_off_time_s: None,
+                backup_element_power_w: Some(4_500.0),
+                ua_w_per_k: None,
+                setpoint_c: Some(52.0),
                 tempering_valve_setpoint_c: None,
-                element_hp_control_mode: None,
-                mains_temp_c: Some(15.0),
                 avg_water_draw_l_per_day: None,
-                draw_flow_rate_kg_s: Some(0.0),
-                zip_z: None,
-                zip_i: None,
-                zip_p: None,
-                zip_zq: None,
-                zip_iq: None,
-                zip_pq: None,
-                zip_pf: None,
-                zip_v0: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
             },
         ),
         "Battery" => config_with_floats(
@@ -910,12 +880,10 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
                 defrost_effectiveness_fraction: None,
-                ventilation_type: Some("hrv".to_string()),
-                balanced: None,
-                hours_in_operation: None,
-                schedule_source: Some("constant".to_string()),
-                schedule_constant: Some(1.0),
-            },
+	                ventilation_type: Some("hrv".to_string()),
+	                balanced: None,
+	                hours_in_operation: None,
+	            },
         ),
         "ERV" => typed_alias_config(
             class,
@@ -930,12 +898,10 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
                 defrost_effectiveness_fraction: None,
-                ventilation_type: Some("erv".to_string()),
-                balanced: None,
-                hours_in_operation: None,
-                schedule_source: Some("constant".to_string()),
-                schedule_constant: Some(1.0),
-            },
+	                ventilation_type: Some("erv".to_string()),
+	                balanced: None,
+	                hours_in_operation: None,
+	            },
         ),
         "Ventilation Fan" => typed_alias_config(
             class,
@@ -950,12 +916,10 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
                 defrost_effectiveness_fraction: None,
-                ventilation_type: Some("exhaust_fan".to_string()),
-                balanced: None,
-                hours_in_operation: None,
-                schedule_source: Some("constant".to_string()),
-                schedule_constant: Some(1.0),
-            },
+	                ventilation_type: Some("exhaust_fan".to_string()),
+	                balanced: None,
+	                hours_in_operation: None,
+	            },
         ),
         "EventBasedLoad" | "Clothes Washer" | "Dishwasher" | "Clothes Dryer" | "Cooking Range" => {
             config_mixed(
@@ -1120,8 +1084,7 @@ fn all_registered_equipment_core_output_matches_capabilities_and_ports() {
 
         let desc = eq.descriptor();
         let co = eq.core_output();
-        validate_core_contract(desc, co)
-            .unwrap_or_else(|e| panic!("core contract failed for '{class}': {e}"));
+        assert_core_output_contract(desc, co);
 
         if desc.core_capabilities.contains(CoreCapabilities::ELECTRIC) {
             let core_kw = co

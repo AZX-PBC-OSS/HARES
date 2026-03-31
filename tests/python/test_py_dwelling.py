@@ -14,6 +14,71 @@ WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 
+def assert_core_output_semantics(co):
+    assert co.electric_convention in {"consumption", "generation", "bidirectional"}
+
+    if co.electric_kw is not None:
+        assert isinstance(co.electric_kw, (int, float))
+        assert math.isfinite(co.electric_kw)
+        if co.electric_convention == "consumption":
+            assert co.electric_kw >= 0.0
+        elif co.electric_convention == "generation":
+            assert co.electric_kw <= 0.0
+        else:
+            assert co.electric_convention == "bidirectional"
+    else:
+        # Python binding maps missing electric output to "consumption".
+        assert co.electric_convention == "consumption"
+
+    if co.reactive_power_kvar is not None:
+        assert isinstance(co.reactive_power_kvar, (int, float))
+        assert math.isfinite(co.reactive_power_kvar)
+
+    if co.fuel_w is not None:
+        assert isinstance(co.fuel_w, (int, float))
+        assert math.isfinite(co.fuel_w)
+        assert co.fuel_type in {"Electric", "Gas", "Propane", "Oil", "NoFuel"}
+    else:
+        assert co.fuel_type is None
+
+    if co.operating_mode is not None:
+        assert isinstance(co.operating_mode, str)
+        assert len(co.operating_mode) > 0
+
+    if co.soc is not None:
+        assert isinstance(co.soc, (int, float))
+        assert math.isfinite(co.soc)
+        assert 0.0 <= co.soc <= 1.0
+
+
+def assert_core_output_matches_telemetry(dw):
+    equipment_diag = dw.telemetry().equipment()
+    names = equipment_diag["names"]
+    power_kw = equipment_diag["power_kw"]
+    soc = equipment_diag["soc"]
+    by_name = {name: idx for idx, name in enumerate(names)}
+
+    equipment = dw.equipment()
+    assert len(equipment) > 0, "dw.equipment() should return active equipment"
+
+    for eq in equipment:
+        assert eq.name in by_name, f"missing telemetry index for equipment {eq.name!r}"
+        idx = by_name[eq.name]
+        co = eq.core_output
+
+        assert_core_output_semantics(co)
+
+        if co.electric_kw is None:
+            assert power_kw[idx] == 0.0
+        else:
+            assert math.isclose(co.electric_kw, power_kw[idx], rel_tol=0.0, abs_tol=1e-9)
+
+        if co.soc is None:
+            assert soc[idx] == 0.0
+        else:
+            assert math.isclose(co.soc, soc[idx], rel_tol=0.0, abs_tol=1e-9)
+
+
 class TestStep:
     def test_step_returns_correct_keys_and_types(self):
         from ochre_next import Dwelling
@@ -98,36 +163,9 @@ class TestTelemetry:
             master_seed=0,
         )
         dw.initialize()
-        dw.step()
-
-        equipment_diag = dw.telemetry().equipment()
-        names = equipment_diag["names"]
-        power_kw = equipment_diag["power_kw"]
-        soc = equipment_diag["soc"]
-        by_name = {name: idx for idx, name in enumerate(names)}
-
-        equipment = dw.equipment()
-        assert len(equipment) > 0, "dw.equipment() should return active equipment"
-
-        for eq in equipment:
-            assert eq.name in by_name, f"missing telemetry index for equipment {eq.name!r}"
-            idx = by_name[eq.name]
-            co = eq.core_output
-
-            assert co.electric_convention in {"consumption", "generation", "bidirectional"}
-            assert co.reactive_power_kvar is None or math.isfinite(co.reactive_power_kvar)
-            assert co.fuel_w is None or math.isfinite(co.fuel_w)
-            assert co.operating_mode is None or isinstance(co.operating_mode, str)
-
-            if co.electric_kw is None:
-                assert power_kw[idx] == 0.0
-            else:
-                assert math.isclose(co.electric_kw, power_kw[idx], rel_tol=0.0, abs_tol=1e-9)
-
-            if co.soc is None:
-                assert soc[idx] == 0.0
-            else:
-                assert math.isclose(co.soc, soc[idx], rel_tol=0.0, abs_tol=1e-9)
+        for _ in range(3):
+            dw.step()
+            assert_core_output_matches_telemetry(dw)
 
 
 class TestStepError:

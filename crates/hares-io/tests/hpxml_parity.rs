@@ -16,7 +16,21 @@
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
+use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+use hares_equipment::hvac::heating_config::GasFurnaceConfig;
+use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+use hares_equipment::{
+    Equipment, EquipmentRegistry, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
+    TanklessWaterHeaterConfig,
+};
+use hares_types::telemetry_keys as tk;
+use hares_types::{
+    EnvironmentState, FuelType, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+    ZoneState,
+};
+use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use serde_json::json;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,9 +56,81 @@ fn minimal_xml(systems_xml: &str) -> String {
 }
 
 fn resolve(xml: &str) -> Vec<hares_io::EquipmentSpec> {
+    resolve_with_defaults(xml, &DefaultsStore::empty())
+}
+
+fn resolve_with_defaults(xml: &str, defaults: &DefaultsStore) -> Vec<hares_io::EquipmentSpec> {
     let building = parse_building(xml).expect("should parse");
-    resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+    resolve_equipment(&building, defaults, &json!({}))
         .expect("resolve_equipment should succeed")
+}
+
+fn repo_defaults() -> DefaultsStore {
+    let defaults_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("defaults");
+    DefaultsStore::load(&defaults_dir).expect("load defaults")
+}
+
+fn make_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
+    EnvironmentState {
+        zones: vec![ZoneState {
+            id: ZoneId(1),
+            temperature_c: zone_temp_c,
+            humidity_ratio: 0.008,
+            relative_humidity: 0.45,
+            wet_bulb_c: zone_temp_c - 5.0,
+            volume_m3: 200.0,
+        }],
+        weather: WeatherState {
+            outdoor_temp_c,
+            outdoor_humidity_ratio: 0.005,
+            outdoor_wet_bulb_c: outdoor_temp_c - 4.0,
+            outdoor_enthalpy_j_kg: 22_800.0,
+            wind_speed_m_s: 2.0,
+            wind_dir_deg: 0.0,
+            ground_temp_c: outdoor_temp_c,
+            sky_temp_c: outdoor_temp_c - 3.0,
+            pressure_kpa: 101.325,
+            solar_irradiance: vec![],
+            ..WeatherState::default()
+        },
+        grid: GridState {
+            voltage_pu: 1.0,
+            frequency_hz: 60.0,
+        },
+        custom_domains: vec![],
+        equipment_telemetry: HashMap::new(),
+        equipment_core: HashMap::new(),
+        current_time: FixedOffset::east_opt(0)
+            .expect("offset")
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid timestamp"),
+        time_res: ChronoDuration::minutes(1),
+        price_signal: Default::default(),
+        electrical: Default::default(),
+    }
+}
+
+fn init_equipment(
+    spec: &hares_io::EquipmentSpec,
+    env: &EnvironmentState,
+) -> Box<dyn Equipment> {
+    let registry = EquipmentRegistry::new();
+    let cfg = spec
+        .typed_config
+        .as_ref()
+        .expect("typed config expected")
+        .clone();
+    let mut eq = registry
+        .create(&spec.name, cfg.clone())
+        .expect("equipment should create");
+    eq.init(&cfg, env).expect("equipment should init");
+    eq
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +484,125 @@ fn electric_water_heater_ua_from_ef_matches_ochre() {
     );
 }
 
+#[test]
+fn gas_furnace_typed_config_uses_afue_during_init() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><HeatingSystem>
+            <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+            <HeatingSystemType><Furnace/></HeatingSystemType>
+            <HeatingCapacity>60000</HeatingCapacity>
+            <AnnualHeatingEfficiency>
+                <Units>AFUE</Units><Value>0.96</Value>
+            </AnnualHeatingEfficiency>
+        </HeatingSystem></HVAC></Systems>"#,
+    );
+
+    let spec = resolve(&xml)
+        .into_iter()
+        .find(|s| s.name == "Gas Furnace")
+        .expect("gas furnace spec");
+    let typed_cfg: GasFurnaceConfig = spec
+        .typed_config
+        .as_ref()
+        .expect("typed gas furnace config")
+        .typed()
+        .expect("gas furnace typed config");
+    assert!((typed_cfg.afue - 0.96).abs() < 1e-12);
+    let env = make_env(18.0, 8.0);
+    let mut eq = init_equipment(&spec, &env);
+
+    let mut ports = PortSlots {
+        thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+        ..PortSlots::default()
+    };
+    eq.update_control(&env);
+    eq.step(&env, std::time::Duration::from_secs(60), &mut ports)
+        .expect("step");
+
+    let fuel_w = ports.fuel.get(FuelType::Gas);
+    let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0) * 1_000.0;
+    let gross_capacity_w = ports.thermal[0].sensible_gain_w - fan_w;
+    let observed_afue = gross_capacity_w / fuel_w;
+    assert!(
+        (observed_afue - 0.96).abs() < 0.01,
+        "gas furnace AFUE should round-trip through typed init, got {observed_afue:.4}"
+    );
+}
+
+#[test]
+fn central_ac_typed_config_uses_seer_during_init() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><CoolingSystem>
+            <CoolingSystemType>central air conditioner</CoolingSystemType>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualCoolingEfficiency>
+                <Units>SEER</Units><Value>16</Value>
+            </AnnualCoolingEfficiency>
+        </CoolingSystem></HVAC></Systems>"#,
+    );
+
+    let spec = resolve(&xml)
+        .into_iter()
+        .find(|s| s.name == "Air Conditioner")
+        .expect("air conditioner spec");
+    let typed_cfg: CentralAirConditionerConfig = spec
+        .typed_config
+        .as_ref()
+        .expect("typed air conditioner config")
+        .typed()
+        .expect("air conditioner typed config");
+    assert!((typed_cfg.seer - 16.0).abs() < 1e-12);
+    let env = make_env(26.0, 35.0);
+    let mut eq = init_equipment(&spec, &env);
+
+    let mut ports = PortSlots {
+        thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+        ..PortSlots::default()
+    };
+    eq.update_control(&env);
+    eq.step(&env, std::time::Duration::from_secs(60), &mut ports)
+        .expect("step");
+
+    assert!(eq.telemetry().get(tk::COP).unwrap_or(0.0) > 0.0);
+    assert!(eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0) > 0.0);
+}
+
+#[test]
+fn heat_pump_typed_config_for_mini_split_sets_four_speeds() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><HeatPump>
+            <HeatPumpType>mini-split</HeatPumpType>
+            <HeatingCapacity>24000</HeatingCapacity>
+            <CoolingCapacity>24000</CoolingCapacity>
+            <AnnualHeatingEfficiency><Units>HSPF</Units><Value>9.0</Value></AnnualHeatingEfficiency>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>18.0</Value></AnnualCoolingEfficiency>
+        </HeatPump></HVAC></Systems>"#,
+    );
+
+    let defaults = repo_defaults();
+    let building = parse_building(&xml).expect("should parse");
+    let resolved = resolve_equipment(&building, &defaults, &json!({}))
+        .expect("resolve_equipment should succeed");
+    let cooler_spec = resolved
+        .iter()
+        .find(|s| s.name == "MSHP Cooler")
+        .expect("MSHP cooler spec");
+    let heater_spec = resolved
+        .iter()
+        .find(|s| s.name == "MSHP Heater")
+        .expect("MSHP heater spec");
+
+    let cooler_typed = cooler_spec.typed_config.as_ref().expect("typed hp config");
+    let heater_typed = heater_spec.typed_config.as_ref().expect("typed hp config");
+    let cooler_cfg: HeatPumpCoolerConfig = cooler_typed.typed().expect("cooler typed config");
+    let heater_cfg: HeatPumpHeaterConfig = heater_typed.typed().expect("heater typed config");
+
+    assert!(cooler_cfg.is_mini_split);
+    assert_eq!(cooler_cfg.number_of_speeds, 4);
+    assert!(heater_cfg.is_mini_split);
+    assert_eq!(heater_cfg.number_of_speeds, 4);
+}
+
 // ---------------------------------------------------------------------------
 // Test: startup_capacity_degradation field presence
 //
@@ -490,5 +695,107 @@ fn ashp_backup_lockout_temperature_extracted() {
     assert!(
         (lockout_c - expected).abs() < 0.01,
         "30°F backup lockout should be {expected:.2}°C, got {lockout_c:.2}"
+    );
+}
+
+#[test]
+fn propane_storage_water_heater_resolves_and_inits_as_propane() {
+    let xml = minimal_xml(
+        r#"<Systems><WaterHeating>
+            <WaterHeatingSystem>
+                <FuelType>propane</FuelType>
+                <WaterHeaterType>storage water heater</WaterHeaterType>
+                <HotWaterTemperature>125.0</HotWaterTemperature>
+            </WaterHeatingSystem>
+        </WaterHeating></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment");
+
+    let wh = specs
+        .iter()
+        .find(|s| s.name == "Gas Water Heater")
+        .expect("should emit Gas Water Heater");
+
+    let typed_cfg: GasWaterHeaterConfig = wh
+        .typed_config
+        .as_ref()
+        .expect("typed gas water heater config")
+        .typed()
+        .expect("gas water heater typed config");
+    assert_eq!(typed_cfg.fuel_type, FuelType::Propane);
+
+    let env = make_env(20.0, 10.0);
+    let eq = init_equipment(wh, &env);
+    assert_eq!(eq.descriptor().fuel, FuelType::Propane);
+}
+
+#[test]
+fn natural_gas_tankless_water_heater_resolves_and_inits_as_gas() {
+    let xml = minimal_xml(
+        r#"<Systems><WaterHeating>
+            <WaterHeatingSystem>
+                <FuelType>natural gas</FuelType>
+                <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                <HeatingCapacity>20000</HeatingCapacity>
+            </WaterHeatingSystem>
+        </WaterHeating></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment");
+
+    let wh = specs
+        .iter()
+        .find(|s| s.name == "Gas Tankless Water Heater")
+        .expect("should emit Gas Tankless Water Heater");
+
+    let typed_cfg: TanklessWaterHeaterConfig = wh
+        .typed_config
+        .as_ref()
+        .expect("typed tankless water heater config")
+        .typed()
+        .expect("tankless water heater typed config");
+    assert_eq!(typed_cfg.fuel_type, FuelType::Gas);
+
+    let env = make_env(20.0, 10.0);
+    let eq = init_equipment(wh, &env);
+    assert_eq!(eq.descriptor().fuel, FuelType::Gas);
+}
+
+#[test]
+fn hpwh_heating_capacity_populates_backup_element_power() {
+    let xml = minimal_xml(
+        r#"<Systems><WaterHeating>
+            <WaterHeatingSystem>
+                <FuelType>electricity</FuelType>
+                <WaterHeaterType>heat pump water heater</WaterHeaterType>
+                <EnergyFactor>0.92</EnergyFactor>
+                <HeatingCapacity>4500</HeatingCapacity>
+            </WaterHeatingSystem>
+        </WaterHeating></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment");
+
+    let wh = specs
+        .iter()
+        .find(|s| s.name == "Heat Pump Water Heater")
+        .expect("should emit Heat Pump Water Heater");
+
+    let typed_cfg: HeatPumpWaterHeaterConfig = wh
+        .typed_config
+        .as_ref()
+        .expect("typed hpwh config")
+        .typed()
+        .expect("hpwh typed config");
+    assert_eq!(typed_cfg.backup_element_power_w, Some(4500.0));
+    assert_eq!(
+        wh.parameters
+            .get("backup_element_power_w")
+            .and_then(|v| v.as_f64()),
+        Some(4500.0)
     );
 }

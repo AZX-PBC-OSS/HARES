@@ -35,7 +35,7 @@ pub enum ElementPriorityMode {
     Simultaneous,
 }
 
-use super::water_heater_config::ElectricResistanceWaterHeaterConfig;
+use super::wh_config::ElectricResistanceWaterHeaterConfig;
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
@@ -373,40 +373,27 @@ impl ResistanceWH {
         let c: ElectricResistanceWaterHeaterConfig = config.typed()?;
         c.validate()?;
 
-        let n_nodes = c.tank_nodes.map(|n| (n as usize).clamp(1, 12)).unwrap_or(6);
+        self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
+        let zone = c.zone_id.map(ZoneId).or(self.descriptor.zone);
+        self.descriptor.zone = zone;
+        self.ports[1].zone = zone;
+        self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
+        self.ports[2].loop_id = Some(self.loop_id);
+
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
-        let diameter_m = c.tank_diameter_m.unwrap_or(DEFAULT_TANK_DIAMETER_M);
-        let inferred_height_m =
-            tank_volume_m3 / (std::f64::consts::PI * (diameter_m * 0.5).powi(2));
-        let height_m = c.tank_height_m.unwrap_or(inferred_height_m.max(0.2));
-
-        self.upper_node = c
-            .upper_element_node
-            .map(|n| (n as usize).min(n_nodes - 1))
-            .unwrap_or(0);
-        self.lower_node = c
-            .lower_element_node
-            .map(|n| (n as usize).min(n_nodes - 1))
-            .unwrap_or(n_nodes - 1);
-
-        let ua_base = c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K);
-        let ua_w_per_k = if let Some(jacket_r) = c.jacket_r_value_m2_k_w {
-            if jacket_r > 0.0 && ua_base > 0.0 {
-                let lateral_area_m2 = std::f64::consts::PI * diameter_m * height_m;
-                let r_total = 1.0 / ua_base + jacket_r / lateral_area_m2;
-                1.0 / r_total
-            } else {
-                ua_base
-            }
-        } else {
-            ua_base
-        };
+        let height_m = c.tank_height_m.unwrap_or(DEFAULT_TANK_HEIGHT_M).max(0.2);
+        let diameter_m = (4.0 * tank_volume_m3 / (std::f64::consts::PI * height_m))
+            .max(1e-6)
+            .sqrt();
+        let n_nodes = 6;
+        self.upper_node = 0;
+        self.lower_node = 5;
 
         self.tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes,
             height_m,
             diameter_m,
-            ua_w_per_k,
+            ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
             initial_temp_c: c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C),
             element_nodes: [Some(self.upper_node), Some(self.lower_node)],
@@ -414,73 +401,32 @@ impl ResistanceWH {
             ua_end_cap_w_per_k: None,
         })?;
 
-        let capacity_w = c.heating_capacity_w.unwrap_or(DEFAULT_ELEMENT_POWER_W);
-        self.upper_element_power_w = c.upper_element_power_w.unwrap_or(capacity_w).max(0.0);
-        self.lower_element_power_w = c.lower_element_power_w.unwrap_or(capacity_w).max(0.0);
+        let capacity_w = c
+            .element_power_w
+            .or(c.heating_capacity_w)
+            .unwrap_or(DEFAULT_ELEMENT_POWER_W);
+        self.upper_element_power_w = capacity_w.max(0.0);
+        self.lower_element_power_w = capacity_w.max(0.0);
 
         self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
-        self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C).max(0.0);
-        self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
+        self.deadband_c = DEFAULT_DEADBAND_C;
+        self.max_tank_temp_c = DEFAULT_MAX_TANK_TEMP_C;
         self.duty_cycle = 1.0;
         self.mode_override = None;
-        self.element_priority = if c
-            .element_priority_mode
-            .as_deref()
-            .is_some_and(|s| s == "Simultaneous")
-        {
-            ElementPriorityMode::Simultaneous
-        } else {
-            ElementPriorityMode::MasterSlave
-        };
+        self.element_priority = ElementPriorityMode::MasterSlave;
         self.upper_element_on = false;
         self.lower_element_on = false;
 
-        self.mains_temp_c = c.mains_temp_c.unwrap_or(self.mains_temp_c);
-        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or_else(|| {
-            // L/day ÷ 86400 s/day = L/s; water density ≈ 1.0 kg/L at domestic temperatures.
-            c.avg_water_draw_l_per_day
-                .map(|l| l / 86_400.0 * 1.0)
-                .unwrap_or(0.0)
-        });
-        self.draw_l_per_min_source =
-            c.draw_flow_rate_schedule_col
-                .map(|col| ScheduleSource::ColumnRef {
-                    col_idx: col as usize,
-                    boundary: hares_types::BoundaryPolicy::Clamp,
-                });
-        self.mains_temp_c_source = c
-            .mains_temp_schedule_col
-            .map(|col| ScheduleSource::ColumnRef {
-                col_idx: col as usize,
-                boundary: hares_types::BoundaryPolicy::Clamp,
-            });
+        self.mains_temp_c = 15.0;
+        self.draw_flow_rate_kg_s = c
+            .avg_water_draw_l_per_day
+            .map(|l| l / 86_400.0)
+            .unwrap_or(0.0);
+        self.draw_l_per_min_source = None;
+        self.mains_temp_c_source = None;
+        self.zip = WaterHeaterZip::default();
 
-        let zip_z = c.zip_z.unwrap_or(0.0);
-        let zip_i = c.zip_i.unwrap_or(0.0);
-        let zip_p = c.zip_p.unwrap_or(1.0);
-        let zip_zq = c.zip_zq.unwrap_or(0.0);
-        let zip_iq = c.zip_iq.unwrap_or(0.0);
-        let zip_pq = c.zip_pq.unwrap_or(1.0);
-        if (zip_z + zip_i + zip_p - 1.0).abs() >= 0.01 {
-            return Err(hares_types::HaresError::Equipment(format!(
-                "ZIP z+i+p must sum to 1.0, got z={zip_z} i={zip_i} p={zip_p}"
-            )));
-        }
-        self.zip = WaterHeaterZip {
-            z: zip_z,
-            i: zip_i,
-            p: zip_p,
-            v0: c.zip_v0.unwrap_or(1.0),
-            zq: zip_zq,
-            iq: zip_iq,
-            pq: zip_pq,
-            pf: c.zip_pf.unwrap_or(0.0),
-        };
-
-        self.setpoint_ramp_rate_c_per_s = c
-            .max_setpoint_ramp_rate_c_per_min
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .map(|v| v / 60.0);
+        self.setpoint_ramp_rate_c_per_s = None;
         self.target_setpoint_c = self.setpoint_c;
 
         self.dr_setpoint_offset_c = 0.0;
@@ -488,6 +434,7 @@ impl ResistanceWH {
         self.dr_duration_remaining_s = None;
         self.dr_level = DRLevel::Normal;
         self.ctrl_load_fraction = 1.0;
+        self.descriptor.telemetry_fields = telemetry_fields(n_nodes);
         self.telemetry = default_telemetry();
         self.tank.register_node_telemetry(&mut self.telemetry);
         self.core_output = CoreOutput::default();

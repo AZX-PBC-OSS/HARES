@@ -64,7 +64,7 @@ pub use pv::PvConfig;
 pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
-pub use water_heater::water_heater_config::{
+pub use water_heater::wh_config::{
     ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
     TanklessWaterHeaterConfig,
 };

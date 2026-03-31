@@ -304,30 +304,22 @@ mod tests {
     #[test]
     fn gas_tankless_water_heater_init_sets_gas_fuel_type() {
         use crate::config::EquipmentTypedConfig;
-        use crate::water_heater::water_heater_config::TanklessWaterHeaterConfig;
+        use crate::water_heater::wh_config::TanklessWaterHeaterConfig;
         use chrono::{FixedOffset, TimeZone};
-        use hares_types::{EnvironmentState, GridState, WeatherState, ZoneId, ZoneState};
+        use hares_types::{EnvironmentState, FuelType, GridState, WeatherState, ZoneId, ZoneState};
 
         let cfg = TanklessWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            fuel_type: Some("Gas".to_string()),
+            loop_id: None,
+            fuel_type: FuelType::Gas,
+            energy_factor: Some(0.82),
+            uniform_energy_factor: None,
+            heating_capacity_w: Some(20_000.0),
             setpoint_c: Some(51.67),
-            efficiency_factor: Some(0.82),
             performance_adjustment: Some(0.92),
-            max_thermal_power_w: Some(20_000.0),
             parasitic_power_w: Some(5.0),
-            inlet_temp_c: Some(10.0),
             avg_water_draw_l_per_day: None,
-            draw_flow_rate_kg_s: None,
-            zip_z: None,
-            zip_i: None,
-            zip_p: None,
-            zip_zq: None,
-            zip_iq: None,
-            zip_pq: None,
-            zip_pf: None,
-            zip_v0: None,
         };
         let ec = crate::config::EquipmentConfig::from_typed(
             "Gas Tankless Water Heater".to_string(),

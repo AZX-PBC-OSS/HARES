@@ -106,8 +106,8 @@ const DEFAULT_HEATER_POWER_W: f64 = 0.0;
 /// Heater activation threshold. Tesla Heat Mode targets 0 C minimum cell temp;
 /// Franklin activates around 5-10 C. 0 C is the Li-ion plating safety boundary.
 const DEFAULT_HEATER_THRESHOLD_C: f64 = 0.0;
-/// OCHRE/industry-standard symmetric RTE: sqrt(0.97) ≈ 0.9849 per direction.
-/// When only `inverter_efficiency` is given, both directions use sqrt(rte).
+/// Default round-trip efficiency used by the raw config path.
+/// Typed configs convert RTE to one-way efficiency before init.
 const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.97;
 /// All major residential batteries (Powerwall, aPower 2, Enphase IQ) spec -20 C
 /// as the lower operating limit for discharge.
@@ -941,20 +941,19 @@ impl Battery {
             .unwrap_or(DEFAULT_SELF_DISCHARGE_PCT_PER_DAY);
         self.self_discharge_rate_per_s = self_discharge / 100.0 / SECONDS_PER_DAY;
 
-        // Efficiency: symmetric RTE split as sqrt(rte) per direction.
-        // Explicit per-direction values override the split.
-        let sym_eta = c
+        // Typed configs carry one-way efficiency directly.
+        // Raw configs still pass round-trip efficiency and are split in init_raw().
+        let one_way_eta = c
             .inverter_efficiency
             .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
             .clamp(f64::EPSILON, 1.0);
-        let sym_split = sym_eta.sqrt();
         self.charge_efficiency = c
             .charge_efficiency
-            .unwrap_or(sym_split)
+            .unwrap_or(one_way_eta)
             .clamp(f64::EPSILON, 1.0);
         self.discharge_efficiency = c
             .discharge_efficiency
-            .unwrap_or(sym_split)
+            .unwrap_or(one_way_eta)
             .clamp(f64::EPSILON, 1.0);
 
         if let Some(mode_str) = c.bms_mode.as_deref() {

@@ -298,19 +298,22 @@ fn ev_plug_load_emits_ev_equipment_spec_with_correct_parameters() {
         .find(|s| s.name == "Electric Vehicle")
         .expect("should emit Electric Vehicle spec");
 
-    // kwh=1200 < 1500 → range_miles=100
-    assert_eq!(ev.parameters["vehicle_type"], "BEV");
-    assert_eq!(ev.parameters["charging_level"], "Level 2");
-    assert_eq!(ev.parameters["range_miles"], 100);
+    let typed: hares_equipment::EvConfig = ev
+        .typed_config
+        .as_ref()
+        .expect("EV spec should carry typed config")
+        .typed()
+        .expect("EV typed config");
 
-    // battery_capacity_kwh = range_miles / (1000/325) = 100 / 3.077 = 32.5
-    let battery_kwh = ev.parameters["battery_capacity_kwh"]
-        .as_f64()
-        .expect("battery_capacity_kwh should be f64");
+    assert_eq!(typed.charging_level.as_deref(), Some("Level 2"));
+
+    // kwh=1200 < 1500 → range_miles=100 → capacity = 32.5 kWh
+    let battery_kwh = typed.capacity_kwh;
     assert!(
         (battery_kwh - 32.5).abs() < 0.1,
-        "battery_capacity_kwh for 100-mile BEV should be ~32.5 kWh, got {battery_kwh:.2}"
+        "capacity_kwh for 100-mile EV should be ~32.5 kWh, got {battery_kwh:.2}"
     );
+    assert!((typed.max_charging_power_kw - 7.2).abs() < 1e-9);
 }
 
 #[test]
@@ -332,17 +335,20 @@ fn ev_plug_load_large_kwh_emits_250_mile_range() {
         .find(|s| s.name == "Electric Vehicle")
         .expect("should emit Electric Vehicle spec");
 
-    // kwh=2000 >= 1500 → range_miles=250
-    assert_eq!(ev.parameters["range_miles"], 250);
+    let typed: hares_equipment::EvConfig = ev
+        .typed_config
+        .as_ref()
+        .expect("EV spec should carry typed config")
+        .typed()
+        .expect("EV typed config");
 
-    // battery_capacity_kwh = 250 / 3.077 = 81.25
-    let battery_kwh = ev.parameters["battery_capacity_kwh"]
-        .as_f64()
-        .expect("battery_capacity_kwh should be f64");
+    // kwh=2000 >= 1500 → range_miles=250 → capacity = 81.25 kWh
+    let battery_kwh = typed.capacity_kwh;
     assert!(
         (battery_kwh - 81.25).abs() < 0.1,
-        "battery_capacity_kwh for 250-mile BEV should be ~81.25 kWh, got {battery_kwh:.2}"
+        "capacity_kwh for 250-mile EV should be ~81.25 kWh, got {battery_kwh:.2}"
     );
+    assert!((typed.max_charging_power_kw - 11.5).abs() < 1e-9);
 }
 
 #[test]
@@ -389,16 +395,22 @@ fn whole_building_ventilation_fan_is_emitted() {
         .iter()
         .find(|s| s.name == "Ventilation Fan")
         .expect("whole-building ventilation fan should be emitted");
-    let flow_m3_s = fan.parameters["flow_rate_m3_s"]
-        .as_f64()
-        .expect("flow_rate_m3_s should be a float");
+    let typed: hares_equipment::VentilationConfig = fan
+        .typed_config
+        .as_ref()
+        .expect("ventilation fan should carry typed config")
+        .typed()
+        .expect("ventilation typed config");
+    let flow_m3_s = typed.flow_rate_m3_s;
     // 72 CFM × CFM_TO_M3_S
     assert!(
         (flow_m3_s - 72.0 * hares_physics::constants::CFM_TO_M3_S).abs() < 1e-9,
         "expected ~{:.6} m³/s, got {flow_m3_s}",
         72.0 * hares_physics::constants::CFM_TO_M3_S
     );
-    assert_eq!(fan.parameters["power_w"], 30.0);
+    assert_eq!(typed.fan_power_w, Some(30.0));
+    assert_eq!(typed.sensible_effectiveness, None);
+    assert_eq!(typed.ventilation_type.as_deref(), Some("hrv"));
 }
 
 #[test]

@@ -6,7 +6,7 @@ pub(crate) mod hpwh_compressor;
 pub mod resistance;
 pub mod tank;
 pub mod tankless;
-pub mod water_heater_config;
+pub mod wh_config;
 
 pub use tank::{DrawResult, StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 
@@ -276,20 +276,7 @@ impl WaterHeaterZip {
         let zq = config.get_f64("zip_zq").unwrap_or(0.0);
         let iq = config.get_f64("zip_iq").unwrap_or(0.0);
         let pq = config.get_f64("zip_pq").unwrap_or(1.0);
-
-        if (z + i + p - 1.0).abs() >= 0.01 {
-            return Err(hares_types::HaresError::Equipment(format!(
-                "ZIP z+i+p must sum to 1.0, got z={z} i={i} p={p} sum={}",
-                z + i + p
-            )));
-        }
-        let has_reactive = zq != 0.0 || iq != 0.0 || pq != 0.0;
-        if has_reactive && (zq + iq + pq - 1.0).abs() >= 0.01 {
-            return Err(hares_types::HaresError::Equipment(format!(
-                "ZIP zq+iq+pq must sum to 1.0, got zq={zq} iq={iq} pq={pq} sum={}",
-                zq + iq + pq
-            )));
-        }
+        validate_zip_terms(z, i, p, zq, iq, pq)?;
 
         Ok(Self {
             z,
@@ -358,6 +345,30 @@ pub(super) fn resolve_draw_rate_kg_s(config: &crate::EquipmentConfig) -> f64 {
         }
         _ => 0.0,
     }
+}
+
+fn validate_zip_terms(
+    z: f64,
+    i: f64,
+    p: f64,
+    zq: f64,
+    iq: f64,
+    pq: f64,
+) -> std::result::Result<(), hares_types::HaresError> {
+    if (z + i + p - 1.0).abs() >= 0.01 {
+        return Err(hares_types::HaresError::Equipment(format!(
+            "ZIP z+i+p must sum to 1.0, got z={z} i={i} p={p} sum={}",
+            z + i + p
+        )));
+    }
+    let has_reactive = zq != 0.0 || iq != 0.0 || pq != 0.0;
+    if has_reactive && (zq + iq + pq - 1.0).abs() >= 0.01 {
+        return Err(hares_types::HaresError::Equipment(format!(
+            "ZIP zq+iq+pq must sum to 1.0, got zq={zq} iq={iq} pq={pq} sum={}",
+            zq + iq + pq
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

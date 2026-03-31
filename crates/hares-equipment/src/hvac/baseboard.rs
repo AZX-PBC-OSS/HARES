@@ -101,13 +101,19 @@ impl Equipment for ElectricBaseboard {
         self.hvac.basement_heat_frac = 0.0;
         self.hvac.basement_zone_id = None;
         self.hvac.update_zone_heat_fractions();
-        let typed = config.typed::<ElectricBaseboardConfig>().map_err(|e| {
-            HaresError::Equipment(format!(
-                "Electric Baseboard requires typed config (use EquipmentConfig::from_typed). Error: {e}"
-            ))
-        })?;
-        self.rated_capacity_w = typed.capacity_w.max(0.0);
-        self.eir = typed.eir;
+        if config.is_typed() {
+            let typed = config.typed::<ElectricBaseboardConfig>()?;
+            self.rated_capacity_w = typed.capacity_w.max(0.0);
+            self.eir = typed.eir;
+        } else {
+            self.rated_capacity_w = super::helpers::first_f64(
+                config,
+                &["capacity_w", "heating_capacity_w", "capacity", "HVAC Heating Capacity (W)"],
+            )
+            .unwrap_or(0.0)
+            .max(0.0);
+            self.eir = super::helpers::first_f64(config, &["eir", "efficiency"]).unwrap_or(1.0);
+        }
         if self.eir <= 0.0 || !self.eir.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Electric Baseboard eir: {}",
@@ -365,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_config_rejected() {
+    fn raw_config_accepted_with_defaults() {
         let cfg = EquipmentConfig {
             name: "BB".to_string(),
             ochre_class: "Electric Baseboard".to_string(),
@@ -375,13 +381,7 @@ mod tests {
         };
         let mut eq = ElectricBaseboard::new(cfg.clone());
         let result = eq.init(&cfg, &env(18.0));
-        assert!(result.is_err(), "Electric Baseboard must reject raw config");
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("requires typed config")
-        );
+        assert!(result.is_ok(), "Electric Baseboard should accept raw config");
     }
 
     #[test]

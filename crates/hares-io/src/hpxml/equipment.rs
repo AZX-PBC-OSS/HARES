@@ -3,6 +3,7 @@
 use serde_json::{Map, Value, json};
 
 use hares_types::FuelType;
+use hares_equipment::{EquipmentConfig, EquipmentTypedConfig};
 
 use super::HpxmlError;
 use super::building::Building;
@@ -86,10 +87,7 @@ pub(super) fn build_spec(
     mut parameters: Map<String, Value>,
     defaults: &DefaultsStore,
 ) -> EquipmentSpec {
-    parameters.insert(
-        "fuel_type".to_string(),
-        Value::String(format!("{fuel_type:?}")),
-    );
+    parameters.insert("fuel_type".to_string(), Value::String(fuel_type_label(fuel_type)));
 
     // Inject OCHRE-compatible default gain fractions when HPXML did not provide them.
     if !parameters.contains_key("frac_sensible")
@@ -116,11 +114,46 @@ pub(super) fn build_spec(
     }
 }
 
+pub(super) fn build_typed_spec<T>(
+    name: String,
+    fuel_type: FuelType,
+    config: T,
+    defaults: &DefaultsStore,
+) -> EquipmentSpec
+where
+    T: EquipmentTypedConfig,
+{
+    let parameters = serde_json::to_value(&config)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let typed_config = EquipmentConfig::from_typed(name.clone(), name.clone(), config);
+    EquipmentSpec {
+        name: name.clone(),
+        fuel_type,
+        parameters,
+        zip_params: defaults.zip_params(&name).cloned(),
+        typed_config: Some(typed_config),
+    }
+}
+
+fn fuel_type_label(fuel_type: FuelType) -> String {
+    match fuel_type {
+        FuelType::Electric => "electricity",
+        FuelType::Gas => "natural gas",
+        FuelType::Propane => "propane",
+        FuelType::Oil => "fuel oil",
+        FuelType::None => "none",
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Map, Value, json};
 
     use hares_physics::units as conv;
+    use hares_types::FuelType;
 
     use super::{nested_update, resolve_equipment};
     use crate::defaults::DefaultsStore;
@@ -543,7 +576,7 @@ mod tests {
         );
     }
 
-    /// HPXML Battery: RatedPowerOutput maps to both max_charge_kw and max_discharge_kw.
+    /// HPXML Battery: RatedPowerOutput maps to the typed config power fields.
     #[test]
     fn hpxml_battery_rated_power_maps_to_charge_discharge_keys() {
         let xml = minimal_wh_xml(
@@ -562,29 +595,31 @@ mod tests {
             .find(|s| s.name == "Battery")
             .expect("Battery spec must be present");
 
-        let charge_kw = battery
-            .parameters
-            .get("max_charge_kw")
-            .and_then(Value::as_f64)
-            .expect("max_charge_kw must be present");
-        let discharge_kw = battery
-            .parameters
-            .get("max_discharge_kw")
-            .and_then(Value::as_f64)
-            .expect("max_discharge_kw must be present");
+        let typed: hares_equipment::BatteryConfig = battery
+            .typed_config
+            .as_ref()
+            .expect("Battery spec must carry typed config")
+            .typed()
+            .expect("Battery typed config");
 
         assert!(
-            (charge_kw - 5.0).abs() < 1e-9,
-            "max_charge_kw={charge_kw}, expected 5.0"
+            (typed.capacity_kwh - 10.0).abs() < 1e-9,
+            "capacity_kwh={}, expected 10.0",
+            typed.capacity_kwh
         );
         assert!(
-            (discharge_kw - 5.0).abs() < 1e-9,
-            "max_discharge_kw={discharge_kw}, expected 5.0"
+            (typed.max_charge_kw - 5.0).abs() < 1e-9,
+            "max_charge_kw={}, expected 5.0",
+            typed.max_charge_kw
+        );
+        assert!(
+            (typed.max_discharge_kw - 5.0).abs() < 1e-9,
+            "max_discharge_kw={}, expected 5.0",
+            typed.max_discharge_kw
         );
     }
 
-    /// HPXML Battery: RoundTripEfficiency of 0.90 → inverter_efficiency stored as raw RTE.
-    /// Battery::init applies sqrt() per direction internally; the resolver must NOT pre-apply it.
+    /// HPXML Battery: RoundTripEfficiency of 0.90 is converted to one-way efficiency.
     #[test]
     fn hpxml_battery_rte_converts_to_inverter_efficiency() {
         let rte = 0.90_f64;
@@ -604,20 +639,25 @@ mod tests {
             .find(|s| s.name == "Battery")
             .expect("Battery spec must be present");
 
-        let inv_eff = battery
-            .parameters
-            .get("inverter_efficiency")
-            .and_then(Value::as_f64)
-            .expect("inverter_efficiency must be present");
+        let typed: hares_equipment::BatteryConfig = battery
+            .typed_config
+            .as_ref()
+            .expect("Battery spec must carry typed config")
+            .typed()
+            .expect("Battery typed config");
+        let inv_eff = typed
+            .inverter_efficiency
+            .expect("typed battery inverter_efficiency must be present");
 
-        // Resolver stores raw RTE; battery applies sqrt() per direction, yielding sqrt(rte) each way.
+        // Resolver stores one-way efficiency = sqrt(rte).
         assert!(
-            (inv_eff - rte).abs() < 1e-9,
-            "inverter_efficiency={inv_eff:.6}, expected raw rte={rte:.6}"
+            (inv_eff - rte.sqrt()).abs() < 1e-9,
+            "inverter_efficiency={inv_eff:.6}, expected sqrt(rte)={:.6}",
+            rte.sqrt()
         );
     }
 
-    /// HPXML ElectricVehicle: resolve_ev emits ChargingLevel, MaxChargingPower, BatteryCapacity.
+    /// HPXML ElectricVehicle: resolve_ev emits a typed EV config with the expected fields.
     #[test]
     fn hpxml_ev_keys_emitted_with_correct_names() {
         let xml = minimal_wh_xml(
@@ -637,33 +677,159 @@ mod tests {
             .find(|s| s.name == "Electric Vehicle")
             .expect("Electric Vehicle spec must be present");
 
-        assert_eq!(
-            ev.parameters.get("ChargingLevel").and_then(Value::as_str),
-            Some("Level 2"),
-            "ChargingLevel key must be present with correct value"
-        );
-        let max_power = ev
-            .parameters
-            .get("MaxChargingPower")
-            .and_then(Value::as_f64)
-            .expect("MaxChargingPower must be present");
+        let typed: hares_equipment::EvConfig = ev
+            .typed_config
+            .as_ref()
+            .expect("EV spec must carry typed config")
+            .typed()
+            .expect("EV typed config");
+
+        assert_eq!(typed.charging_level.as_deref(), Some("Level 2"));
         assert!(
-            (max_power - 7.2).abs() < 1e-9,
-            "MaxChargingPower={max_power}, expected 7.2"
+            (typed.max_charging_power_kw - 7.2).abs() < 1e-9,
+            "max_charging_power_kw={}, expected 7.2",
+            typed.max_charging_power_kw
         );
-        let capacity = ev
-            .parameters
-            .get("BatteryCapacity")
-            .and_then(Value::as_f64)
-            .expect("BatteryCapacity must be present");
         assert!(
-            (capacity - 60.0).abs() < 1e-9,
-            "BatteryCapacity={capacity}, expected 60.0"
+            (typed.capacity_kwh - 60.0).abs() < 1e-9,
+            "capacity_kwh={}, expected 60.0",
+            typed.capacity_kwh
         );
     }
 
-    /// Gas WH without HeatingCapacity: ua_w_per_k must not be inserted
-    /// (the UA formula requires capacity; without it we leave the default).
+    #[test]
+    fn build_spec_uses_parseable_fuel_type_string() {
+        let spec = super::build_spec(
+            "Test Load".to_string(),
+            FuelType::Gas,
+            Map::new(),
+            &DefaultsStore::empty(),
+        );
+
+        assert_eq!(
+            spec.parameters.get("fuel_type").and_then(Value::as_str),
+            Some("natural gas")
+        );
+    }
+
+    #[test]
+    fn hpxml_pv_produces_typed_config() {
+        let xml = minimal_wh_xml(
+            r#"<Photovoltaics>
+          <PVSystem>
+            <MaxPowerOutput>5000</MaxPowerOutput>
+            <ArrayTilt>30</ArrayTilt>
+            <ArrayAzimuth>180</ArrayAzimuth>
+            <ModuleType>standard</ModuleType>
+            <SystemLossesFraction>0.14</SystemLossesFraction>
+          </PVSystem>
+        </Photovoltaics>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+        let pv = specs
+            .iter()
+            .find(|s| s.name == "PV")
+            .expect("PV spec must be present");
+
+        let typed: hares_equipment::PvConfig = pv
+            .typed_config
+            .as_ref()
+            .expect("PV spec must carry typed config")
+            .typed()
+            .expect("PV typed config");
+
+        assert!((typed.capacity_kw - 5.0).abs() < 1e-9);
+        assert_eq!(typed.tilt_deg, Some(30.0));
+        assert_eq!(typed.azimuth_deg, Some(180.0));
+        assert_eq!(typed.module_type.as_deref(), Some("standard"));
+        assert_eq!(typed.system_losses_fraction, Some(0.14));
+    }
+
+    #[test]
+    fn hpxml_generator_produces_typed_config() {
+        let xml = minimal_wh_xml(
+            r#"<extension><Generators>
+          <Generator>
+            <FuelType>natural gas</FuelType>
+            <ElectricalPowerOutput>10.0</ElectricalPowerOutput>
+            <AnnualOutputkWh>2500</AnnualOutputkWh>
+            <AnnualConsumptionkBtu>9000</AnnualConsumptionkBtu>
+          </Generator>
+        </Generators></extension>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+        let generator = specs
+            .iter()
+            .find(|s| s.name == "Gas Generator")
+            .expect("Gas Generator spec must be present");
+
+        let typed: hares_equipment::GeneratorConfig = generator
+            .typed_config
+            .as_ref()
+            .expect("generator spec must carry typed config")
+            .typed()
+            .expect("generator typed config");
+
+        assert_eq!(typed.fuel_type, Some(FuelType::Gas));
+        assert!((typed.rated_power_kw - 10.0).abs() < 1e-9);
+        let eta = typed.eta_electric.expect("eta_electric must be present");
+        let expected = 2500.0 / (9000.0 * 0.293_071_07);
+        assert!((eta - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hpxml_ventilation_produces_typed_config() {
+        let xml = minimal_wh_xml(
+            r#"<MechanicalVentilation><VentilationFans>
+          <VentilationFan>
+            <UsedForWholeBuildingVentilation>true</UsedForWholeBuildingVentilation>
+            <FanType>energy recovery ventilator</FanType>
+            <RatedFlowRate>75</RatedFlowRate>
+            <FanPower>30</FanPower>
+            <SensibleRecoveryEfficiency>0.75</SensibleRecoveryEfficiency>
+            <TotalRecoveryEfficiency>0.85</TotalRecoveryEfficiency>
+            <HoursInOperation>8</HoursInOperation>
+          </VentilationFan>
+        </VentilationFans></MechanicalVentilation>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+        let fan = specs
+            .iter()
+            .find(|s| s.name == "Ventilation Fan")
+            .expect("Ventilation Fan spec must be present");
+
+        let typed: hares_equipment::VentilationConfig = fan
+            .typed_config
+            .as_ref()
+            .expect("ventilation spec must carry typed config")
+            .typed()
+            .expect("ventilation typed config");
+
+        assert!(
+            (typed.flow_rate_m3_s - 75.0 * hares_physics::constants::CFM_TO_M3_S).abs() < 1e-9
+        );
+        assert_eq!(typed.fan_power_w, Some(30.0));
+        assert_eq!(typed.sensible_effectiveness, Some(0.75));
+        assert!(
+            typed
+                .latent_effectiveness
+                .map(|v| (v - 0.10).abs() < 1e-9)
+                .unwrap_or(false)
+        );
+        assert_eq!(typed.ventilation_type.as_deref(), Some("erv"));
+        assert_eq!(typed.balanced, Some(true));
+        assert_eq!(typed.hours_in_operation, Some(8.0));
+    }
+
+    /// Gas WH without HeatingCapacity: no usable numeric ua_w_per_k override
+    /// should be emitted. A serialized `null` is acceptable, but it must not
+    /// become a real UA value that overrides the equipment default.
     #[test]
     fn gas_wh_without_capacity_omits_ua_w_per_k() {
         let xml = minimal_wh_xml(
@@ -687,8 +853,11 @@ mod tests {
         // Without HeatingCapacity the gas EF→UA formula cannot be evaluated;
         // ua_w_per_k must be absent so the equipment model uses its built-in default.
         assert!(
-            !wh.parameters.contains_key("ua_w_per_k"),
-            "gas WH without capacity must not produce ua_w_per_k"
+            wh.parameters
+                .get("ua_w_per_k")
+                .and_then(|v| v.as_f64())
+                .is_none(),
+            "gas WH without capacity must not produce a usable numeric ua_w_per_k override"
         );
     }
 

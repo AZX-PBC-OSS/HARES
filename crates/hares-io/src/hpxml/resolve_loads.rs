@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use serde_json::{Map, Value, json};
 
 use hares_types::FuelType;
+use hares_equipment::{EvConfig, VentilationConfig};
 
 use super::building::{Building, XmlNode, ZoneType};
-use super::equipment::{EquipmentSpec, build_spec};
+use super::equipment::{EquipmentSpec, build_spec, build_typed_spec};
 use super::xml_helpers::{
     capitalize, child_f64, child_load_kwh, child_load_therms, child_text, parse_fuel,
 };
@@ -421,31 +422,51 @@ pub(super) fn resolve_scheduled_loads(
                 "tv other" => ("TV", FuelType::Electric),
                 "well pump" => ("Well Pump", FuelType::Electric),
                 "electric vehicle charging" => {
-                    let mut ev_params = Map::new();
                     if let Some(kwh) = child_load_kwh(plug) {
-                        ev_params
-                            .insert("vehicle_type".to_string(), Value::String("BEV".to_string()));
-                        ev_params.insert(
-                            "charging_level".to_string(),
-                            Value::String("Level 2".to_string()),
-                        );
                         // Splits the two EV size options from ResStock (matches OCHRE parse_ev)
-                        let range_miles = if kwh < 1500.0 { 100 } else { 250 };
-                        ev_params.insert("range_miles".to_string(), json!(range_miles));
+                        let range_miles = if kwh < 1500.0 { 100.0 } else { 250.0 };
                         // OCHRE: capacity = range / EV_FUEL_ECONOMY where
                         // EV_FUEL_ECONOMY = 1/325 * 1000 miles/kWh
-                        let battery_capacity_kwh = f64::from(range_miles) / EV_FUEL_ECONOMY;
-                        ev_params.insert(
-                            "battery_capacity_kwh".to_string(),
-                            json!(battery_capacity_kwh),
-                        );
+                        let battery_capacity_kwh = range_miles / EV_FUEL_ECONOMY;
+                        let max_charging_power_kw = if range_miles < 175.0 { 7.2 } else { 11.5 };
+                        let cfg = EvConfig {
+                            equipment_id: None,
+                            capacity_kwh: battery_capacity_kwh,
+                            charging_level: Some("Level 2".to_string()),
+                            max_charging_power_kw,
+                            charging_efficiency: None,
+                            l1_current_a: None,
+                            l1_voltage_v: None,
+                            soc_max: None,
+                            initial_soc: None,
+                            battery_temp_c: None,
+                            min_charge_temp_c: None,
+                            full_power_temp_c: None,
+                            heater_power_w: None,
+                            heater_threshold_c: None,
+                            thermal_mass_j_per_k: None,
+                            ua_w_per_k: None,
+                            v2l_enabled: None,
+                            v2l_soc_reserve: None,
+                            v2l_max_discharge_kw: None,
+                            v2g_enabled: None,
+                            v2g_soc_reserve: None,
+                            v2g_max_discharge_kw: None,
+                            chemistry: None,
+                            fuel_economy_kwh_per_mi: None,
+                            ready_soc: None,
+                            charging_strategy: None,
+                            plug_in_policy: None,
+                            power_limit_kw: None,
+                            initial_connection_state: None,
+                        };
+                        specs.push(build_typed_spec(
+                            "Electric Vehicle".to_string(),
+                            FuelType::Electric,
+                            cfg,
+                            defaults,
+                        ));
                     }
-                    specs.push(build_spec(
-                        "Electric Vehicle".to_string(),
-                        FuelType::Electric,
-                        ev_params,
-                        defaults,
-                    ));
                     continue;
                 }
                 _ => ("MELs", FuelType::Electric),
@@ -563,18 +584,12 @@ pub(super) fn resolve_ventilation(
             continue;
         }
 
-        let mut params = Map::new();
         let flow_cfm = child_f64(fan, "RatedFlowRate");
-        if let Some(cfm) = flow_cfm {
-            // Convert CFM → m³/s at the parse boundary (SI internally).
-            let flow_m3_s = cfm * hares_physics::constants::CFM_TO_M3_S;
-            params.insert("flow_rate_m3_s".to_string(), json!(flow_m3_s));
-        }
         let fan_type_str = child_text(fan, "FanType");
         let fan_type_lower = fan_type_str.as_deref().unwrap_or("").to_ascii_lowercase();
-        if let Some(power_w) = child_f64(fan, "FanPower") {
-            params.insert("fan_power_w".to_string(), json!(power_w));
-            params.insert("power_w".to_string(), json!(power_w));
+        let flow_m3_s = flow_cfm.map(|cfm| cfm * hares_physics::constants::CFM_TO_M3_S);
+        let fan_power_w = if let Some(power_w) = child_f64(fan, "FanPower") {
+            Some(power_w)
         } else if let Some(cfm) = flow_cfm {
             // OCHRE default W/CFM by fan type when FanPower is absent.
             let w_per_cfm = match fan_type_lower.as_str() {
@@ -583,52 +598,44 @@ pub(super) fn resolve_ventilation(
                 "whole house fan" => 0.1,
                 _ => 0.35,
             };
-            let power_w = cfm * w_per_cfm;
-            params.insert("fan_power_w".to_string(), json!(power_w));
-            params.insert("power_w".to_string(), json!(power_w));
-        }
-        if let Some(fan_type) = fan_type_str {
-            let balanced = matches!(
-                fan_type_lower.as_str(),
-                "energy recovery ventilator" | "heat recovery ventilator" | "balanced"
-            );
-            let ventilation_type = match fan_type_lower.as_str() {
-                "exhaust only" | "supply only" => "exhaust_fan",
-                "energy recovery ventilator" => "erv",
-                "heat recovery ventilator" | "balanced" => "hrv",
-                _ => "hrv",
-            };
-            params.insert(
-                "ventilation_type".to_string(),
-                Value::String(ventilation_type.to_string()),
-            );
-            params.insert("fan_type".to_string(), Value::String(fan_type));
-            params.insert("balanced".to_string(), json!(balanced));
-        }
+            Some(cfm * w_per_cfm)
+        } else {
+            None
+        };
+        let balanced = matches!(
+            fan_type_lower.as_str(),
+            "energy recovery ventilator" | "heat recovery ventilator" | "balanced"
+        );
+        let ventilation_type = match fan_type_lower.as_str() {
+            "exhaust only" | "supply only" => "exhaust_fan",
+            "energy recovery ventilator" => "erv",
+            "heat recovery ventilator" | "balanced" => "hrv",
+            _ => "hrv",
+        };
         let sensible_re = child_f64(fan, "SensibleRecoveryEfficiency").unwrap_or(0.0);
         let total_re = child_f64(fan, "TotalRecoveryEfficiency").unwrap_or(0.0);
-        if sensible_re > 0.0 {
-            // Equipment reads "sensible_effectiveness" in init().
-            params.insert("sensible_effectiveness".to_string(), json!(sensible_re));
-            // Solver builder reads "sensible_recovery_efficiency" for infiltration path.
-            params.insert(
-                "sensible_recovery_efficiency".to_string(),
-                json!(sensible_re),
-            );
-        }
         let latent_re = (total_re - sensible_re).max(0.0);
-        if latent_re > 0.0 {
-            params.insert("latent_effectiveness".to_string(), json!(latent_re));
-            params.insert("latent_recovery_efficiency".to_string(), json!(latent_re));
-        }
-        if !params.is_empty() {
-            specs.push(build_spec(
-                "Ventilation Fan".to_string(),
-                FuelType::Electric,
-                params,
-                defaults,
-            ));
-        }
+        let cfg = VentilationConfig {
+            equipment_id: None,
+            zone_id: None,
+            flow_rate_m3_s: flow_m3_s.unwrap_or(0.0),
+            fan_power_w,
+            sensible_effectiveness: (sensible_re > 0.0).then_some(sensible_re),
+            latent_effectiveness: (latent_re > 0.0).then_some(latent_re),
+            bypass_temp_min_c: None,
+            bypass_temp_max_c: None,
+            defrost_temp_c: None,
+            defrost_effectiveness_fraction: None,
+            ventilation_type: Some(ventilation_type.to_string()),
+            balanced: Some(balanced),
+            hours_in_operation: child_f64(fan, "HoursInOperation"),
+        };
+        specs.push(build_typed_spec(
+            "Ventilation Fan".to_string(),
+            FuelType::Electric,
+            cfg,
+            defaults,
+        ));
     }
 }
 

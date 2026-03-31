@@ -57,14 +57,11 @@ pub struct VentilationConfig {
     pub balanced: Option<bool>,
     /// Daily hours of operation (0–24). Used by the EA-001 energy audit model.
     pub hours_in_operation: Option<f64>,
-    /// Schedule source: only "constant" is supported; defaults to 1.0
-    pub schedule_source: Option<String>,
-    pub schedule_constant: Option<f64>,
 }
 
 impl EquipmentTypedConfig for VentilationConfig {
     fn equipment_type_name() -> &'static str {
-        "VentilationFan"
+        "Ventilation"
     }
 }
 
@@ -98,6 +95,13 @@ impl VentilationConfig {
                     )));
                 }
             }
+        }
+        if let Some(hours) = self.hours_in_operation
+            && (!hours.is_finite() || !(0.0..=24.0).contains(&hours))
+        {
+            return Err(HaresError::Equipment(
+                "ventilation hours_in_operation must be finite and within [0, 24]".to_string(),
+            ));
         }
         Ok(())
     }
@@ -137,6 +141,16 @@ pub enum VentilationType {
     Hrv,
     /// Energy recovery ventilator — sensible + latent recovery.
     Erv,
+}
+
+fn parse_ventilation_type(raw: Option<&str>) -> VentilationType {
+    match raw.unwrap_or("hrv").trim().to_ascii_lowercase().as_str() {
+        "exhaust_fan" | "exhaust fan" | "exhaust only" | "supply only" | "whole house fan" => {
+            VentilationType::ExhaustFan
+        }
+        "erv" | "energy recovery ventilator" => VentilationType::Erv,
+        _ => VentilationType::Hrv,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,11 +201,7 @@ impl Ventilation {
             .map(|v| ZoneId(v as u16))
             .unwrap_or(ZoneId(1));
 
-        let ventilation_type = match config.get_str("ventilation_type").unwrap_or("hrv") {
-            "exhaust_fan" | "ExhaustFan" => VentilationType::ExhaustFan,
-            "erv" | "ERV" => VentilationType::Erv,
-            _ => VentilationType::Hrv,
-        };
+        let ventilation_type = parse_ventilation_type(config.get_str("ventilation_type"));
 
         let end_use = EndUse::VENTILATION;
 
@@ -281,6 +291,12 @@ impl Ventilation {
         let c: VentilationConfig = config.typed()?;
         c.validate()?;
 
+        self.ventilation_type = parse_ventilation_type(c.ventilation_type.as_deref());
+        self.descriptor.equipment_type = Cow::Borrowed(match self.ventilation_type {
+            VentilationType::ExhaustFan => "ExhaustFan",
+            VentilationType::Hrv => "HRV",
+            VentilationType::Erv => "ERV",
+        });
         self.flow_rate_m3_s = c.flow_rate_m3_s;
         self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
         self.sensible_effectiveness = c
@@ -299,17 +315,18 @@ impl Ventilation {
             .unwrap_or(DEFAULT_DEFROST_EFFECTIVENESS_FRACTION)
             .clamp(0.0, 1.0);
 
-        self.schedule_source = match c.schedule_source.as_deref() {
-            Some("constant") | None => {
-                let v = c.schedule_constant.unwrap_or(1.0);
-                ScheduleSource::Constant(v)
+        let schedule_frac = if let Some(hours) = c.hours_in_operation {
+            if !hours.is_finite() || !(0.0..=24.0).contains(&hours) {
+                return Err(HaresError::Equipment(
+                    "ventilation hours_in_operation must be finite and within [0, 24]"
+                        .to_string(),
+                ));
             }
-            Some(other) => {
-                return Err(HaresError::Equipment(format!(
-                    "ventilation: unsupported schedule_source '{other}' (only 'constant' supported)"
-                )));
-            }
+            (hours / 24.0).clamp(0.0, 1.0)
+        } else {
+            1.0
         };
+        self.schedule_source = ScheduleSource::Constant(schedule_frac);
 
         self.mode = OperatingMode::Standby;
         self.core_output = CoreOutput::default();
@@ -1043,8 +1060,6 @@ mod tests {
             ventilation_type: None,
             balanced: None,
             hours_in_operation: None,
-            schedule_source: None,
-            schedule_constant: None,
         }
     }
 
@@ -1053,7 +1068,7 @@ mod tests {
         let cfg = minimal_ventilation_config();
         let ec = EquipmentConfig::from_typed(
             "test_vent".to_string(),
-            "VentilationFan".to_string(),
+            "Ventilation Fan".to_string(),
             cfg.clone(),
         );
         assert!(ec.is_typed());
@@ -1069,9 +1084,9 @@ mod tests {
         });
         let ec = EquipmentConfig {
             name: "vent".to_string(),
-            ochre_class: "VentilationFan".to_string(),
+            ochre_class: "Ventilation Fan".to_string(),
             payload: ConfigPayload::Typed {
-                type_name: "VentilationFan".to_string(),
+                type_name: "Ventilation".to_string(),
                 version: 1,
                 data: json,
             },
@@ -1099,5 +1114,33 @@ mod tests {
     fn ventilation_config_validate_passes_for_valid_config() {
         let cfg = minimal_ventilation_config();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn typed_init_uses_hours_in_operation_and_ventilation_type() {
+        let cfg = VentilationConfig {
+            hours_in_operation: Some(8.0),
+            ventilation_type: Some("erv".to_string()),
+            fan_power_w: Some(40.0),
+            sensible_effectiveness: Some(0.75),
+            latent_effectiveness: Some(0.10),
+            balanced: Some(true),
+            ..minimal_ventilation_config()
+        };
+        let ec = EquipmentConfig::from_typed(
+            "typed_vent".to_string(),
+            "Ventilation Fan".to_string(),
+            cfg,
+        );
+        let env = env(0.0, 20.0);
+        let mut fan = Ventilation::new(ec.clone());
+        fan.init(&ec, &env).expect("typed init");
+
+        assert_eq!(fan.ventilation_type, VentilationType::Erv);
+        assert!((fan.flow_rate_m3_s - 0.035).abs() < 1e-9);
+        assert_eq!(fan.fan_power_w, 40.0);
+        assert_eq!(fan.sensible_effectiveness, 0.75);
+        assert_eq!(fan.latent_effectiveness, 0.10);
+        assert!((fan.schedule_source.value_at(&env).unwrap() - (8.0 / 24.0)).abs() < 1e-9);
     }
 }

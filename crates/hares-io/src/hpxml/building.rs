@@ -581,6 +581,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     };
 
     let mut zones = build_zone_map(details, indoor_floor_area_m2);
+    ensure_referenced_zones_exist(&boundaries, &mut zones);
     assign_walls_to_zones(&boundaries, &mut zones);
     parse_duct_systems(details, &mut zones);
 
@@ -1463,6 +1464,35 @@ fn build_zone_map(
     zones
 }
 
+fn ensure_referenced_zones_exist(boundaries: &[Boundary], zones: &mut HashMap<String, Zone>) {
+    for boundary in boundaries {
+        for zone_type in [&boundary.interior_zone, &boundary.exterior_zone]
+            .into_iter()
+            .flatten()
+        {
+            match zone_type {
+                ZoneType::Attic | ZoneType::Garage | ZoneType::Foundation => {
+                    zones.entry(zone_key(zone_type)).or_insert_with(|| Zone {
+                        zone_type: zone_type.clone(),
+                        floor_area_m2: None,
+                        volume_m3: None,
+                        attached_wall_ids: Vec::new(),
+                        duct_systems: Vec::new(),
+                        vented: false,
+                        ventilation_ach: None,
+                        ventilation_sla: None,
+                    });
+                }
+                ZoneType::Conditioned
+                | ZoneType::Outdoor
+                | ZoneType::Ground
+                | ZoneType::Adjacent
+                | ZoneType::Other(_) => {}
+            }
+        }
+    }
+}
+
 fn assign_walls_to_zones(boundaries: &[Boundary], zones: &mut HashMap<String, Zone>) {
     for boundary in boundaries {
         if !matches!(
@@ -1834,14 +1864,14 @@ fn parse_zone_ref(node: Option<&XmlNode>) -> Option<ZoneType> {
 
 pub(crate) fn parse_zone_label(text: &str) -> ZoneType {
     let norm = normalize_ascii(text);
-    if norm.contains("condition") || norm == "living space" {
-        ZoneType::Conditioned
-    } else if norm.contains("attic") {
+    if norm.contains("attic") {
         ZoneType::Attic
     } else if norm.contains("garage") {
         ZoneType::Garage
     } else if norm.contains("foundation") || norm.contains("basement") || norm.contains("crawl") {
         ZoneType::Foundation
+    } else if norm.contains("condition") || norm == "living space" {
+        ZoneType::Conditioned
     } else if norm == "ground" {
         ZoneType::Ground
     } else if norm.contains("out") || norm.contains("ambient") {

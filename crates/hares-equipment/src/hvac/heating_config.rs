@@ -189,7 +189,7 @@ impl Default for ElectricBaseboardConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdealHvacConfig {
     pub equipment_id: Option<u32>,
@@ -216,22 +216,6 @@ impl EquipmentTypedConfig for IdealHvacConfig {
     }
 }
 
-impl Default for IdealHvacConfig {
-    fn default() -> Self {
-        Self {
-            equipment_id: None,
-            zone_id: None,
-            heating_capacity_w: None,
-            cooling_capacity_w: None,
-            heating_eir: None,
-            cooling_eir: None,
-            shr: None,
-            fraction_heating_load_served: None,
-            fraction_cooling_load_served: None,
-        }
-    }
-}
-
 fn default_one() -> u8 {
     1
 }
@@ -253,16 +237,8 @@ mod tests {
     use super::*;
     use crate::config::{ConfigPayload, EquipmentConfig};
 
-    fn typed_config<T: EquipmentTypedConfig>(config: T) -> EquipmentConfig {
-        EquipmentConfig::from_typed(
-            "test".to_string(),
-            T::equipment_type_name().to_string(),
-            config,
-        )
-    }
-
     #[test]
-    fn all_configs_round_trip() {
+    fn all_configs_round_trip_via_serde_json() {
         let gf = GasFurnaceConfig {
             capacity_w: 12_000.0,
             afue: 0.95,
@@ -301,12 +277,21 @@ mod tests {
             ..IdealHvacConfig::default()
         };
 
-        let _: GasFurnaceConfig = typed_config(gf).typed().unwrap();
-        let _: ElectricFurnaceConfig = typed_config(ef).typed().unwrap();
-        let _: GasBoilerConfig = typed_config(gb).typed().unwrap();
-        let _: ElectricBoilerConfig = typed_config(eb).typed().unwrap();
-        let _: ElectricBaseboardConfig = typed_config(bb).typed().unwrap();
-        let _: IdealHvacConfig = typed_config(ih).typed().unwrap();
+        fn assert_round_trip<T>(config: T)
+        where
+            T: EquipmentTypedConfig,
+        {
+            let value = serde_json::to_value(&config).unwrap();
+            let recovered: T = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(recovered).unwrap(), value);
+        }
+
+        assert_round_trip(gf);
+        assert_round_trip(ef);
+        assert_round_trip(gb);
+        assert_round_trip(eb);
+        assert_round_trip(bb);
+        assert_round_trip(ih);
     }
 
     #[test]

@@ -41,7 +41,6 @@ const WATTS_PER_KILOWATT: f64 = 1_000.0;
 const WATTS_PER_KILOWATT_HOUR: f64 = 3_600_000.0;
 const DEFAULT_NORMALIZED_CURVE: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
-use crate::config::KEY_EQUIPMENT_ID;
 const KEY_RATED_CAPACITY_PINTS_DAY: &str = "Capacity";
 const KEY_RATED_CAPACITY_PINTS_DAY_ALT: &str = "capacity_pints_day";
 const KEY_RATED_CAPACITY_L_DAY: &str = "capacity_l_day";
@@ -115,7 +114,7 @@ impl Dehumidifier {
         let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
         Self {
             descriptor: EquipmentDescriptor {
-                id: EquipmentId(parse_u32_from_f64(config.get_f64(KEY_EQUIPMENT_ID)).unwrap_or(0)),
+                id: EquipmentId(equipment_id_from_config(&config).unwrap_or(0)),
                 name: config.name,
                 end_use: EndUse::DEHUMIDIFIER,
                 equipment_type: Cow::Borrowed("Dehumidifier"),
@@ -590,14 +589,6 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     );
 }
 
-fn parse_u32_from_f64(raw: Option<f64>) -> Option<u32> {
-    let value = raw?;
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
-        return None;
-    }
-    Some(value as u32)
-}
-
 fn parse_rh_fraction(value: f64, field: &str) -> crate::Result<f64> {
     if !value.is_finite() {
         return Err(HaresError::Equipment(format!("{field} must be finite")));
@@ -816,11 +807,11 @@ mod tests {
     };
 
     use super::{
-        Dehumidifier, KEY_DEHUMIDISTAT_SETPOINT, KEY_ENERGY_FACTOR, KEY_EQUIPMENT_ID,
+        Dehumidifier, KEY_DEHUMIDISTAT_SETPOINT, KEY_ENERGY_FACTOR,
         KEY_RATED_CAPACITY_PINTS_DAY, LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY,
         WATTS_PER_KILOWATT, register_with_registry,
     };
-    use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
+    use crate::{config::KEY_EQUIPMENT_ID, Equipment, EquipmentConfig, EquipmentRegistry};
 
     const TOLERANCE_REL: f64 = 1e-9;
 

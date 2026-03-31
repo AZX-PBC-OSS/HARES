@@ -13,7 +13,9 @@ use hares_types::{
     ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, ZoneId,
 };
 
-use crate::EquipmentConfig;
+use crate::{
+    ConfigPayload, EquipmentConfig,
+};
 
 // Re-exported from crate root; used by `apply_heating_control_unchecked`
 // and `update_heating_control`.
@@ -41,7 +43,9 @@ fn validate_u16_id(raw: f64) -> bool {
 }
 
 pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
-    let raw = config.get_f64("zone_id")?;
+    let raw = config
+        .get_f64("zone_id")
+        .or_else(|| typed_f64(config, "zone_id"))?;
     if !validate_u16_id(raw) {
         return None;
     }
@@ -50,7 +54,7 @@ pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
 
 /// Parse an optional `ZoneId` from a named config key.
 pub fn parse_zone_id_key(config: &EquipmentConfig, key: &str) -> Option<ZoneId> {
-    let raw = config.get_f64(key)?;
+    let raw = config.get_f64(key).or_else(|| typed_f64(config, key))?;
     if !validate_u16_id(raw) {
         return None;
     }
@@ -58,7 +62,7 @@ pub fn parse_zone_id_key(config: &EquipmentConfig, key: &str) -> Option<ZoneId> 
 }
 
 pub fn loop_id_from_config(config: &EquipmentConfig, keys: &[&str]) -> Option<LoopId> {
-    let raw = first_f64(config, keys)?;
+    let raw = first_f64(config, keys).or_else(|| typed_first_f64(config, keys))?;
     if !validate_u16_id(raw) {
         return None;
     }
@@ -101,7 +105,10 @@ pub fn lookup_zone(
 }
 
 pub fn equipment_id_from_config(config: &EquipmentConfig) -> crate::Result<u32> {
-    let Some(raw) = config.get_f64("equipment_id") else {
+    let Some(raw) = config
+        .get_f64("equipment_id")
+        .or_else(|| typed_f64(config, "equipment_id"))
+    else {
         return Ok(0);
     };
     if !raw.is_finite() || raw < 0.0 || raw.fract() != 0.0 || raw > u32::MAX as f64 {
@@ -110,6 +117,17 @@ pub fn equipment_id_from_config(config: &EquipmentConfig) -> crate::Result<u32> 
         )));
     }
     Ok(raw as u32)
+}
+
+fn typed_f64(config: &EquipmentConfig, key: &str) -> Option<f64> {
+    match &config.payload {
+        ConfigPayload::Typed { data, .. } => data.get(key).and_then(|v| v.as_f64()),
+        ConfigPayload::Raw { .. } => None,
+    }
+}
+
+fn typed_first_f64(config: &EquipmentConfig, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| typed_f64(config, key))
 }
 
 pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
@@ -291,7 +309,15 @@ fn parse_ashrae152_zone_type(s: &str) -> Option<hares_physics::ashrae152::Ashrae
 mod tests {
     use hares_types::{FuelType, OperatingMode};
 
-    use super::{operating_mode_code, parse_fuel_type};
+    use crate::{
+        EquipmentConfig,
+        hvac::heating_config::{ElectricBoilerConfig, GasFurnaceConfig},
+    };
+
+    use super::{
+        equipment_id_from_config, loop_id_from_config, operating_mode_code, parse_fuel_type,
+        zone_id_from_config,
+    };
 
     #[test]
     fn parse_fuel_type_covers_all_variants() {
@@ -370,5 +396,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn typed_configs_preserve_identity_fields_for_helper_accessors() {
+        let gas_furnace = EquipmentConfig::from_typed(
+            "GF".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                equipment_id: Some(42),
+                zone_id: Some(7),
+                capacity_w: 10_000.0,
+                afue: 0.96,
+                ..GasFurnaceConfig::default()
+            },
+        );
+        assert_eq!(equipment_id_from_config(&gas_furnace).unwrap(), 42);
+        assert_eq!(zone_id_from_config(&gas_furnace), Some(hares_types::ZoneId(7)));
+
+        let boiler = EquipmentConfig::from_typed(
+            "EB".to_string(),
+            "Electric Boiler".to_string(),
+            ElectricBoilerConfig {
+                equipment_id: Some(11),
+                zone_id: Some(3),
+                loop_id: Some(9),
+                capacity_w: 8_000.0,
+                eir: 1.0,
+                ..ElectricBoilerConfig::default()
+            },
+        );
+        assert_eq!(
+            loop_id_from_config(&boiler, &["loop_id", "hydronic_loop_id"]),
+            Some(hares_types::LoopId(9))
+        );
     }
 }

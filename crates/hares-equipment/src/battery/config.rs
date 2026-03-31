@@ -6,10 +6,9 @@ use crate::config::EquipmentTypedConfig;
 
 /// Typed configuration for a residential battery storage system.
 ///
-/// `inverter_efficiency` is the symmetric round-trip efficiency (RTE) as a
-/// fraction in (0, 1].  The equipment splits it as `sqrt(rte)` per direction —
-/// applying `sqrt()` exactly once.  Do NOT pre-apply `sqrt()` when constructing
-/// this struct; pass the raw RTE value directly.
+/// `inverter_efficiency` is the one-way charge/discharge efficiency as a
+/// fraction in (0, 1]. HPXML resolvers convert round-trip efficiency to
+/// one-way by applying `sqrt()` once before constructing this struct.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BatteryConfig {
@@ -60,7 +59,7 @@ pub struct BatteryConfig {
     pub cell_thermal_mass_j_per_k: Option<f64>,
     pub cell_ua_w_per_k: Option<f64>,
 
-    // Efficiency — symmetric RTE; split as sqrt(rte) per direction.
+    // Efficiency — one-way charge/discharge efficiency.
     // Overridden per-direction by charge_efficiency / discharge_efficiency.
     pub inverter_efficiency: Option<f64>,
     pub charge_efficiency: Option<f64>,
