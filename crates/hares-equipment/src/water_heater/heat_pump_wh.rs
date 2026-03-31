@@ -6,10 +6,10 @@ use std::time::Duration;
 use super::apply_jacket_r_value;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
-    ControlCapabilities, ControlSignal, DRLevel, DutyCycleComponent, EndUse, EnvironmentState,
-    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
-    ThermalCategory, ZoneId, telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, DutyCycleComponent, EndUse,
+    EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType,
+    HaresError, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
+    TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +21,8 @@ use super::hpwh_compressor::{
     DEFAULT_BACKUP_ENABLE_OFFSET_C, DEFAULT_CAPACITY_CURVE, DEFAULT_COMPRESSOR_POWER_W,
     DEFAULT_COP_CURVE, DEFAULT_DEADBAND_C, DEFAULT_FAN_POWER_W, DEFAULT_LOST_HEAT_FRACTION,
     DEFAULT_MAX_AMBIENT_TEMP_C, DEFAULT_MIN_AMBIENT_TEMP_C, DEFAULT_MIN_ON_TIME_S,
-    DEFAULT_PARASITIC_POWER_W, DEFAULT_SHR, DEFAULT_TANK_TEMP_BOUNDS_C, DEFAULT_ZONE_TEMP_BOUNDS_C,
-    DEFAULT_RATED_COP, LOW_POWER_MAX_AMBIENT_TEMP_C, LOW_POWER_MIN_AMBIENT_TEMP_C,
+    DEFAULT_PARASITIC_POWER_W, DEFAULT_RATED_COP, DEFAULT_SHR, DEFAULT_TANK_TEMP_BOUNDS_C,
+    DEFAULT_ZONE_TEMP_BOUNDS_C, LOW_POWER_MAX_AMBIENT_TEMP_C, LOW_POWER_MIN_AMBIENT_TEMP_C,
 };
 use super::tank::{StratifiedTank, StratifiedTankConfig};
 use super::{
@@ -202,6 +202,7 @@ impl HeatPumpWH {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
+                core_capabilities: CoreCapabilities::empty(),
                 telemetry_fields: telemetry_fields(n_nodes),
             },
             ports: vec![

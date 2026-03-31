@@ -311,7 +311,13 @@ pub(super) fn resolve_hvac(
         for (k, v) in &basement_params {
             params.insert(k.clone(), v.clone());
         }
-        insert_startup_degradation(&mut params, &name, true);
+        // OCHRE only applies startup_cd for heat pump heaters (ASHP/MSHP),
+        // not for furnaces, boilers, or baseboard (CW-001 F1).
+        if matches!(name.as_str(), "ASHP Heater" | "MSHP Heater") {
+            insert_startup_degradation(&mut params, &name, true);
+        } else {
+            params.insert("startup_cd".to_string(), json!(0.0));
+        }
         specs.push(build_spec(name, fuel, params, defaults));
     }
 

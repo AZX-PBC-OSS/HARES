@@ -7,7 +7,7 @@ use std::time::Duration;
 use chrono::Datelike;
 use hares_physics::constants::GAS_THERMS_PER_HOUR_TO_W;
 use hares_types::{
-    BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
+    BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
     ThermalCategory, ZoneId, telemetry_keys as tk,
@@ -197,6 +197,7 @@ impl ScheduledLoad {
             control_capabilities: ControlCapabilities::LOAD_FRACTION
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::POWER_SETPOINT,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: scheduled_load_telemetry_fields(),
         };
         Self {
@@ -1038,7 +1039,7 @@ mod tests {
         KEY_RADIATIVE_GAIN_FRACTION, KEY_SENSIBLE_GAIN_FRACTION, KEY_ZIP_I, KEY_ZIP_P, KEY_ZIP_V0,
         KEY_ZIP_Z, ScheduledLoad, register_with_registry,
     };
-    
+
     use crate::schedule_helpers::KEY_MONTH_MULTIPLIER_PREFIX;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 

@@ -16,9 +16,10 @@ use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, InverterPriority,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry,
+    TelemetryField, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -166,6 +167,7 @@ impl PV {
                 | ControlCapabilities::REACTIVE_SETPOINT
                 | ControlCapabilities::POWER_FACTOR_SETPOINT
                 | ControlCapabilities::INVERTER_PRIORITY_MODE,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: telemetry_fields(),
         };
 

@@ -5,14 +5,16 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
+use crate::hvac::heating_config::ElectricBaseboardConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::{
@@ -60,6 +62,7 @@ impl ElectricBaseboard {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: telemetry_fields(),
         };
 
@@ -88,6 +91,20 @@ impl Equipment for ElectricBaseboard {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            let typed = config.typed::<ElectricBaseboardConfig>()?;
+            self.hvac.init(config, env)?;
+            self.hvac.duct_dse = 1.0;
+            self.hvac.duct_zone_id = None;
+            self.hvac.update_zone_heat_fractions();
+            self.rated_capacity_w = typed.heating_capacity_w.max(0.0);
+            self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
+            self.operating_mode = OperatingMode::Off;
+            self.run_time_s = 0.0;
+            self.telemetry = default_telemetry();
+            return Ok(());
+        }
+
         self.hvac.init(config, env)?;
         self.hvac.duct_dse = 1.0;
         self.hvac.duct_zone_id = None;
@@ -225,7 +242,7 @@ mod tests {
     };
 
     use super::{ElectricBaseboard, register_with_registry};
-    
+
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {

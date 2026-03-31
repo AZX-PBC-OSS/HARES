@@ -90,9 +90,12 @@ pub(super) fn resolve_batteries(
             params.insert("max_discharge_kw".to_string(), json!(kw));
         }
         if let Some(rte) = child_f64(battery, "RoundTripEfficiency") {
-            // Round-trip efficiency is the product of charge and discharge
-            // efficiencies; each one-way efficiency is the square root.
-            params.insert("inverter_efficiency".to_string(), json!(rte.sqrt()));
+            // Store the raw round-trip efficiency under "inverter_efficiency".
+            // Battery::init reads this key and applies sqrt() per direction,
+            // so the final per-direction efficiency is sqrt(rte) each way.
+            // Do NOT pre-apply sqrt() here — that would cause a double-sqrt,
+            // making the effective RTE = rte^0.5 instead of rte (CW-016 F-1).
+            params.insert("inverter_efficiency".to_string(), json!(rte));
         }
         specs.push(build_spec(
             "Battery".to_string(),

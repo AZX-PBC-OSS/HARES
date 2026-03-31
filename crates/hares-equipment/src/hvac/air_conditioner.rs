@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,8 @@ use hares_types::telemetry_keys as tk;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::ac_config::{
-    default_telemetry, load_curve_pair, parse_crankcase_capacity_curve, telemetry_fields,
+    CentralAirConditionerConfig, RoomAcConfig, default_telemetry, load_curve_pair,
+    parse_crankcase_capacity_curve, telemetry_fields,
 };
 use super::coil_physics::{
     CoilResult, LatentDegradationParams, calculate_shr, effective_shr_with_latent_degradation,
@@ -75,6 +76,8 @@ pub(super) struct CoolingCore {
     is_room_ac: bool,
     /// Rated SHR at AHRI conditions, stored for latent degradation model.
     rated_shr: f64,
+    /// Per-stage rated SHR values, if provided by config.
+    pub(crate) stage_shrs: Vec<f64>,
     /// Henderson-Rengarajan latent degradation model parameters.
     /// All four fields must be > 0 (checked via `is_active()`) to enable the model.
     latent_degradation: LatentDegradationParams,
@@ -322,6 +325,7 @@ impl CoolingCore {
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY,
+                core_capabilities: CoreCapabilities::empty(),
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
@@ -344,6 +348,7 @@ impl CoolingCore {
             coil_ao_by_stage: vec![10.0],
             is_room_ac,
             rated_shr: 0.75,
+            stage_shrs: vec![],
             latent_degradation: LatentDegradationParams::default(),
             last_adp_c: 0.0,
             last_bypass_factor: 0.0,
@@ -363,6 +368,7 @@ impl CoolingCore {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
+
         if self.is_room_ac {
             if self.hvac.speed_control_mode != SpeedControlMode::SingleSpeed {
                 return Err(HaresError::Equipment(
@@ -372,6 +378,23 @@ impl CoolingCore {
             self.hvac.speed_control_mode = SpeedControlMode::SingleSpeed;
             self.hvac.duct_dse = 1.0;
             self.hvac.duct_zone_id = None;
+        } else {
+            self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
+        }
+
+        if config.is_typed() {
+            return self.init_from_typed(config, env);
+        }
+
+        self.init_from_raw(config, env)
+    }
+
+    fn init_from_raw(
+        &mut self,
+        config: &EquipmentConfig,
+        _env: &EnvironmentState,
+    ) -> crate::Result<()> {
+        if self.is_room_ac {
             // Window/room AC fans deliver less airflow than ducted central AC blowers.
             // 320 CFM/ton from manufacturer data median (AHRI 310/380 conditions).
             if config.get_f64("airflow_cfm_per_ton").is_none() {
@@ -388,9 +411,6 @@ impl CoolingCore {
                 self.hvac.plf_cooling_degradation_coeff = 0.22;
                 self.hvac.startup.c_d = 0.22;
             }
-        } else {
-            // DSE computed below after capacity is resolved.
-            self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
         }
 
         self.flow_fraction_correction = first_f64(
@@ -494,6 +514,115 @@ impl CoolingCore {
         };
 
         // fan_power_w_per_cfm → fan_power_w_per_m3_s conversion handled by hvac.init()
+
+        self.operating_mode = OperatingMode::Off;
+        self.run_time_s = 0.0;
+        self.cycle_on_steps = 0;
+        self.cycle_off_steps = 0;
+        self.crankcase_heater_on = false;
+        self.crankcase_heater_kw = 0.0;
+        self.last_cooling_rtf = 0.0;
+        self.telemetry = default_telemetry();
+        Ok(())
+    }
+
+    fn init_from_typed(
+        &mut self,
+        config: &EquipmentConfig,
+        _env: &EnvironmentState,
+    ) -> crate::Result<()> {
+        if self.is_room_ac {
+            let cfg: RoomAcConfig = config.typed()?;
+
+            self.hvac.cooling_capacities_w = vec![cfg.capacity_w];
+
+            let eir = if cfg.eer > 0.0 {
+                BTU_PER_HR_PER_W / cfg.eer
+            } else {
+                DEFAULT_EIR_FALLBACK
+            };
+            self.hvac.eir_by_stage = vec![eir];
+
+            use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
+            self.hvac.airflow_m3_s_per_w =
+                super::hvac_core::AIRFLOW_ROOM_AC_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
+            self.hvac.plf_cooling_degradation_coeff = 0.22;
+            self.hvac.startup.c_d = 0.22;
+        } else {
+            let cfg: CentralAirConditionerConfig = config.typed()?;
+
+            self.hvac.cooling_capacities_w = if let Some(stages) = &cfg.stage_capacities_w {
+                stages.clone()
+            } else {
+                vec![cfg.capacity_w]
+            };
+
+            let default_eir = if cfg.seer > 0.0 {
+                BTU_PER_HR_PER_W / cfg.seer
+            } else {
+                DEFAULT_EIR_FALLBACK
+            };
+
+            self.hvac.eir_by_stage = if let Some(stages) = &cfg.stage_eirs {
+                stages.clone()
+            } else {
+                vec![default_eir]
+            };
+
+            if self.hvac.cooling_capacities_w.len() != self.hvac.eir_by_stage.len() {
+                if self.hvac.eir_by_stage.len() == 1 {
+                    self.hvac.eir_by_stage =
+                        vec![self.hvac.eir_by_stage[0]; self.hvac.cooling_capacities_w.len()];
+                } else {
+                    return Err(HaresError::Equipment(
+                        "cooling capacity and EIR stage counts must match".to_string(),
+                    ));
+                }
+            }
+
+            let rated_cap = self
+                .hvac
+                .cooling_capacities_w
+                .last()
+                .copied()
+                .unwrap_or(0.0);
+            let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
+            let n_speeds = self.hvac.cooling_capacities_w.len().min(255) as u8;
+            self.hvac.duct_dse = if let Some(dse) = cfg.duct.dse_cool {
+                dse
+            } else {
+                super::helpers::resolve_duct_dse(
+                    config, false, rated_cap, fan_flow, n_speeds, false,
+                )
+            };
+
+            self.hvac.speed_control_mode = match cfg.number_of_speeds {
+                1 => SpeedControlMode::SingleSpeed,
+                2 => SpeedControlMode::TwoSpeedSetpoint,
+                n if n >= 4 => SpeedControlMode::MultiSpeedInterpolated,
+                _ => SpeedControlMode::SingleSpeed,
+            };
+
+            self.rated_shr = cfg.shr.unwrap_or(0.75).clamp(0.0, 1.0);
+
+            // Per-stage SHR values if provided.
+            self.stage_shrs = cfg.stage_shrs.clone().unwrap_or_default();
+            if !self.stage_shrs.is_empty() {
+                self.rated_shr = self.stage_shrs[0].clamp(0.0, 1.0);
+            }
+
+            if let Some(cd) = cfg.startup_cd {
+                self.hvac.plf_cooling_degradation_coeff = cd;
+                self.hvac.startup.c_d = cd;
+            }
+        }
+
+        self.hvac.update_zone_heat_fractions();
+        self.hvac.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
+        self.compute_coil_ao(self.rated_shr)?;
+
+        self.crankcase_rated_kw = CRANKCASE_HEATER_KW;
+        self.crankcase_threshold_c = CRANKCASE_HEATER_THRESHOLD_C;
 
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
@@ -1145,7 +1274,7 @@ mod tests {
     };
 
     use super::{AirConditioner, RoomAC, register_with_registry};
-    
+
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(

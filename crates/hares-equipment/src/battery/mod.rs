@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use hares_types::telemetry_keys as tk;
 use hares_types::{
-    BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, DRLevel, EndUse,
-    EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule,
-    HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry,
-    TelemetryField, ThermalCategory, ZoneId,
+    BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel,
+    EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType,
+    GridExportRule, HaresError, OperatingMode, PortContribution, PortDeclaration, PortSlots,
+    Telemetry, TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -362,6 +362,7 @@ impl Battery {
                 | ControlCapabilities::SELF_CONSUMPTION
                 | ControlCapabilities::POWER_LIMIT
                 | ControlCapabilities::DEMAND_RESPONSE,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: battery_telemetry_fields(),
         };
 
@@ -512,8 +513,17 @@ impl Battery {
         if let Some(target) = self.soc_target {
             if dt_hours > 0.0 {
                 let error = target - self.soc;
-                let power = error * self.capacity_kwh / dt_hours;
-                return self.clamp_power(power);
+                // DC power needed to hit target in one step (EA-006 F6).
+                let dc_power = error * self.capacity_kwh / dt_hours;
+                // Convert DC→AC: compute_electrical expects AC (grid-side) power.
+                // Charging (dc_power > 0): AC = DC / charge_eta
+                // Discharging (dc_power < 0): AC = DC * discharge_eta
+                let ac_power = if dc_power > 0.0 {
+                    dc_power / self.charge_efficiency
+                } else {
+                    dc_power * self.discharge_efficiency
+                };
+                return self.clamp_power(ac_power);
             }
         }
 
@@ -2262,8 +2272,14 @@ mod tests {
         );
     }
 
-    /// Inverter efficiency losses must appear in addition to ohmic losses.
-    /// Round-trip efficiency with inverter should be lower than without.
+    /// Inverter efficiency reduces DC stored per AC drawn (charging) and increases
+    /// DC consumed per AC delivered (discharging). The combined effect equals
+    /// charge_eta * discharge_eta = inv_eta in SOC terms.
+    ///
+    /// Measuring at the AC port always shows the setpoint regardless of efficiency;
+    /// the effect is visible in SOC delta: for the same AC power and step count,
+    /// lower inv_eta stores less SOC per charge step and consumes more SOC per
+    /// discharge step.
     #[test]
     fn inverter_efficiency_reduces_round_trip_efficiency() {
         let make_bat = |inv_eta: f64| {
@@ -2274,6 +2290,9 @@ mod tests {
             raw.insert(KEY_STANDBY_POWER_W.to_string(), 0.0.into());
             raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
             raw.insert(KEY_SELF_DISCHARGE_PCT_PER_DAY.to_string(), 0.0.into());
+            raw.insert(KEY_MIN_SOC.to_string(), 0.0.into());
+            raw.insert(KEY_MAX_SOC.to_string(), 1.0.into());
+            raw.insert(KEY_CELL_RESISTANCE_OHM.to_string(), 0.0.into()); // isolate inverter effect
             raw.insert(KEY_INVERTER_EFFICIENCY.to_string(), inv_eta.into());
             EquipmentConfig {
                 name: "TestBat".to_string(),
@@ -2287,55 +2306,55 @@ mod tests {
         let charge_power_kw = 3.0;
         let env = base_env();
 
-        let measure_round_trip = |inv_eta: f64| -> f64 {
+        // Returns SOC-based RTE = delta_soc_charge / delta_soc_discharge.
+        // With symmetric efficiency: RTE = charge_eta * discharge_eta = inv_eta.
+        let measure_soc_rte = |inv_eta: f64| -> f64 {
             let config = make_bat(inv_eta);
             let mut bat = Battery::new(config.clone());
             bat.init(&config, &env).unwrap();
 
+            let soc_before_charge = bat.telemetry().get(tk::SOC).unwrap_or(0.5);
             bat.apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: charge_power_kw,
                 reactive_power_kvar: None,
             })
             .unwrap();
-            let mut energy_in = 0.0;
             for _ in 0..charge_steps {
-                let mut ports = default_ports();
-                bat.step(&env, dt, &mut ports).unwrap();
-                energy_in += ports.electrical.net_active_kw() * dt.as_secs_f64() / 3600.0;
+                bat.step(&env, dt, &mut default_ports()).unwrap();
             }
+            let soc_after_charge = bat.telemetry().get(tk::SOC).unwrap_or(0.5);
+            let delta_soc_charge = soc_after_charge - soc_before_charge;
 
             bat.apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: -charge_power_kw,
                 reactive_power_kvar: None,
             })
             .unwrap();
-            let mut energy_out = 0.0;
             for _ in 0..charge_steps {
-                let mut ports = default_ports();
-                bat.step(&env, dt, &mut ports).unwrap();
-                energy_out += (-ports.electrical.net_active_kw()) * dt.as_secs_f64() / 3600.0;
+                bat.step(&env, dt, &mut default_ports()).unwrap();
             }
+            let soc_after_discharge = bat.telemetry().get(tk::SOC).unwrap_or(0.5);
+            let delta_soc_discharge = soc_after_charge - soc_after_discharge;
 
-            energy_out / energy_in
+            delta_soc_charge / delta_soc_discharge
         };
 
-        let rte_ideal = measure_round_trip(1.0);
-        let rte_with_inverter = measure_round_trip(0.96);
+        let rte_ideal = measure_soc_rte(1.0);
+        let rte_with_inverter = measure_soc_rte(0.96);
 
         assert!(
+            (rte_ideal - 1.0).abs() < 1e-6,
+            "ideal RTE (inv_eta=1.0) should be exactly 1.0, got {rte_ideal:.6}"
+        );
+        assert!(
             rte_with_inverter < rte_ideal,
-            "inverter losses (eta=0.96) must reduce round-trip efficiency below ideal (eta=1.0): \
+            "inverter losses (eta=0.96) must reduce RTE below ideal: \
              rte_ideal={rte_ideal:.4}, rte_with_inverter={rte_with_inverter:.4}"
         );
-        // With eta=0.96, round-trip inverter loss alone is 0.96^2 = 0.9216.
-        // The inverter loss should be measurably different from the ideal case.
-        // With eta=0.96, the round-trip inverter penalty is 0.96^2 ≈ 0.9216, but
-        // the actual RTE difference is smaller here because we're only cycling a
-        // small fraction of the capacity.  We just need to confirm the direction.
-        let gap = rte_ideal - rte_with_inverter;
+        // charge_eta = discharge_eta = sqrt(0.96), so RTE = 0.96
         assert!(
-            gap > 1e-4,
-            "inverter loss should be measurable: rte_ideal={rte_ideal:.4}, rte_with_inverter={rte_with_inverter:.4}, gap={gap:.6}"
+            (rte_with_inverter - 0.96).abs() < 1e-4,
+            "RTE with inv_eta=0.96 should be ~0.96, got {rte_with_inverter:.6}"
         );
     }
 
@@ -2993,24 +3012,34 @@ mod tests {
                 }
                 state.accumulate(dt_s, cell_temp_k, v_oc, soc);
             }
-            // Simulate a rainflow counter with daily DOD of 0.6
+            // One half-cycle of DOD=0.6 per day: push 3 points to complete the reversal.
+            // The 3-point algorithm requires [low, high, low] to extract a half-cycle.
             let mut rf = RainflowCounter::default();
             rf.push(0.2);
             rf.push(0.8);
-            let sum_sq = rf.sum_squared_dod_daily();
+            rf.push(0.2); // completes the reversal → half-cycle range 0.6
+            let sum_sq = rf.sum_squared_dod_daily(); // 0.5 × 0.6² = 0.18
             state.update_daily(&u_neg, cell_temp_k, sum_sq);
             state.reset_day_tracking(soc);
             let _ = day; // suppress lint
         }
 
-        let fade = state.capacity_fade_pct();
+        // The BOL transient (q_li3 ≈ B3_REF ≈ -2.8%) dominates capacity_fade for years.
+        // Verify the individual mechanisms are accumulating — q_li1 and q_li2 must be positive.
         assert!(
-            fade > 0.0,
-            "capacity fade must be positive after 1 year: got {fade}"
+            state.q_li1 > 0.0,
+            "q_li1 (calendar) must be positive after 1 year: got {}",
+            state.q_li1
         );
         assert!(
-            fade < 0.5,
-            "capacity fade must be <50% after 1 year: got {fade}"
+            state.q_li2 > 0.0,
+            "q_li2 (cycle) must be positive after 1 year: got {}",
+            state.q_li2
+        );
+        assert!(
+            state.q_li3 < 0.0,
+            "q_li3 (BOL boost) must be negative: got {}",
+            state.q_li3
         );
     }
 
@@ -3036,15 +3065,18 @@ mod tests {
             state.reset_day_tracking(0.5);
         }
 
-        let fade = state.capacity_fade_pct();
+        // q_li1 must be positive (calendar mechanism active).
+        // capacity_fade includes q_li3 (BOL boost, negative), which can dominate for years.
         assert!(
-            fade > 0.0,
-            "calendar aging must produce positive fade at rest: got {fade}"
+            state.q_li1 > 0.0,
+            "q_li1 (calendar) must be positive after 365 days at rest: got {}",
+            state.q_li1
         );
     }
 
-    /// Higher temperature must produce more capacity fade than lower temperature
-    /// (Arrhenius relationship: both calendar and cycle mechanisms accelerate with T).
+    /// Higher temperature must produce more q_li1 (calendar SEI growth) than lower temperature.
+    /// Uses q_li1 directly — capacity_fade_pct includes q_li3 whose temperature dependence
+    /// differs and can mask the Arrhenius effect during the BOL transient.
     #[test]
     fn degradation_higher_temp_more_fade() {
         let u_neg = UNegTable::default_li_nmc();
@@ -3052,7 +3084,7 @@ mod tests {
         let steps_per_day = (86_400.0 / dt_s) as usize;
         let v_oc = 3.69;
 
-        let simulate_fade = |temp_k: f64| -> f64 {
+        let simulate = |temp_k: f64| -> DegradationState {
             let mut state = DegradationState::default();
             state.reset_day_tracking(0.5);
             let mut rf = RainflowCounter::default();
@@ -3067,15 +3099,17 @@ mod tests {
                 state.update_daily(&u_neg, temp_k, sum_sq);
                 state.reset_day_tracking(0.5);
             }
-            state.capacity_fade_pct()
+            state
         };
 
-        let fade_cold = simulate_fade(278.15); // 5 °C
-        let fade_warm = simulate_fade(318.15); // 45 °C
+        let ds_cold = simulate(278.15); // 5 °C
+        let ds_warm = simulate(318.15); // 45 °C
 
         assert!(
-            fade_warm > fade_cold,
-            "higher temperature must produce more fade: 45C={fade_warm:.6}, 5C={fade_cold:.6}"
+            ds_warm.q_li1 > ds_cold.q_li1,
+            "higher temperature must produce more q_li1: 45C={:.6}, 5C={:.6}",
+            ds_warm.q_li1,
+            ds_cold.q_li1
         );
     }
 
@@ -3177,15 +3211,14 @@ mod tests {
             state_5.reset_day_tracking(soc);
         }
 
-        // The BOL transient b3_accum is always negative (B3_REF < 0). The
-        // `.max(0.0)` clamp in update_daily prevents dq_li3 from being positive,
-        // so q_li3 stays at 0.0 — confirming no capacity loss from this mechanism.
+        // b3_accum < 0 (B3_REF < 0), so q_li3 is strictly negative — the BOL transient
+        // provides a transient capacity gain (negative lithium loss). Not zero as with the
+        // former broken `.max(0.0)` clamp (EA-006 F3).
         assert!(
-            state_5.q_li3 <= 0.0,
-            "q_li3 should be <= 0.0 after 5 days of calendar aging (BOL transient provides capacity gain, not loss): got {}",
+            state_5.q_li3 < 0.0,
+            "q_li3 must be negative after 5 days (BOL boost active): got {}",
             state_5.q_li3
         );
-        let fade_5_days = state_5.capacity_fade_pct();
 
         // --- Simulate 60 days of calendar aging (no cycling) ---
         let mut state_60 = DegradationState::default();
@@ -3200,17 +3233,19 @@ mod tests {
         }
 
         assert!(
-            state_60.q_li3 <= 0.0,
-            "q_li3 should be <= 0.0 after 60 days of calendar aging: got {}",
+            state_60.q_li3 < 0.0,
+            "q_li3 must be negative after 60 days (BOL boost active): got {}",
             state_60.q_li3
         );
-        let fade_60_days = state_60.capacity_fade_pct();
 
-        // Calendar aging (mechanism 1) grows monotonically with time: 60-day fade
-        // must exceed 5-day fade.
+        // Calendar aging (mechanism 1) grows monotonically with time: 60-day q_li1
+        // must exceed 5-day q_li1. Test q_li1 directly — capacity_fade includes the
+        // q_li3 BOL term which is also growing more negative over 60 days.
         assert!(
-            fade_60_days > fade_5_days,
-            "capacity fade after 60 days ({fade_60_days:.6}) must exceed fade after 5 days ({fade_5_days:.6})"
+            state_60.q_li1 > state_5.q_li1,
+            "q_li1 after 60 days ({:.6}) must exceed after 5 days ({:.6})",
+            state_60.q_li1,
+            state_5.q_li1
         );
     }
 
@@ -3245,12 +3280,14 @@ mod tests {
         // OCHRE Battery Max Import Limit: clamps the charge power drawn from the grid.
         // Setting import_limit_w=2000 W = 2 kW should cap charging to 2 kW even
         // when max_charge_kw=5 kW and a 5 kW setpoint is applied.
+        // Standby = 0 so ACTIVE_POWER_KW == charging power for a clean assertion.
         let config = battery_config(&[
             (KEY_IMPORT_LIMIT_W, 2000.0), // 2 kW limit
             (KEY_INITIAL_SOC, 0.1),       // plenty of room to charge
             (KEY_MIN_SOC, 0.0),
             (KEY_MAX_SOC, 1.0),
             (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
+            (KEY_STANDBY_POWER_W, 0.0),
         ]);
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
@@ -3265,9 +3302,7 @@ mod tests {
         bat.step(&base_env(), Duration::from_secs(300), &mut slots)
             .unwrap();
 
-        // Standby is always drawn on top; charging itself must not exceed 2 kW.
-        let standby_kw = DEFAULT_STANDBY_POWER_W / 1000.0;
-        let charging_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) - standby_kw;
+        let charging_kw = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
         assert!(
             charging_kw <= 2.0 + 1e-9,
             "charge power {charging_kw:.4} kW should be capped at 2 kW by import_limit_w"
@@ -3740,7 +3775,8 @@ mod tests {
         })
         .unwrap();
         config
-            .raw_config_mut().unwrap()
+            .raw_config_mut()
+            .unwrap()
             .insert(KEY_BMS_MODE.to_string(), ConfigValue::Text(json));
 
         let mut bat = Battery::new(config.clone());
@@ -3783,7 +3819,8 @@ mod tests {
         })
         .unwrap();
         config
-            .raw_config_mut().unwrap()
+            .raw_config_mut()
+            .unwrap()
             .insert(KEY_BMS_MODE.to_string(), ConfigValue::Text(json));
 
         let mut bat = Battery::new(config.clone());

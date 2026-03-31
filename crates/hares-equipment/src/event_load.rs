@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::Datelike;
 
 use hares_types::{
-    BoundaryPolicy, ControlCapabilities, ControlSignal, EndUse, EnvironmentState,
+    BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
     TelemetryField, ThermalCategory, ZoneId, telemetry_keys as tk,
@@ -233,6 +233,7 @@ impl EventBasedLoad {
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::EVENT_DELAY,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: event_load_telemetry_fields(),
         };
         let ports = ports_for_zone(descriptor.zone);
@@ -357,14 +358,15 @@ impl EventBasedLoad {
         month_scale: f64,
     ) -> std::result::Result<(), HaresError> {
         let active_now = self.phase == EventPhase::Active;
-        // PowerSetpoint overrides the configured active_power_kw for this step.
-        // The override is unconditional: it replaces the phase-based power regardless
-        // of whether the equipment is currently in the Active phase.
-        let active_power_kw = if let Some(override_kw) = self.power_setpoint_override.take() {
-            override_kw
-        } else if active_now {
-            self.active_power_kw * self.load_fraction.max(0.0) * month_scale
+        // PowerSetpoint overrides the configured active_power_kw for this step,
+        // but only when the equipment is actually in an active event phase (EA-004 F2).
+        // OCHRE gates p_setpoint on self.mode == "On".
+        let active_power_kw = if active_now {
+            self.power_setpoint_override
+                .take()
+                .unwrap_or(self.active_power_kw * self.load_fraction.max(0.0) * month_scale)
         } else {
+            self.power_setpoint_override = None;
             0.0
         };
 
@@ -667,6 +669,7 @@ impl WetAppliance {
             control_capabilities: ControlCapabilities::LOAD_FRACTION
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::EVENT_DELAY,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: wet_appliance_telemetry_fields(),
         };
         let ports = ports_for_zone(descriptor.zone);
@@ -1491,14 +1494,12 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DomainUpdate, EnvironmentState, ExecutionStage, FuelType, GridState,
-        PortSlots, PortType, WeatherState, ZoneId, ZoneState, SCHEDULE_DOMAIN_ID,
+        PortSlots, PortType, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
         telemetry_keys as tk,
     };
 
-    use super::{
-        EventBasedLoad, WetAppliance, map_ochre_pdf_to_cycle_schedule,
-    };
-    
+    use super::{EventBasedLoad, WetAppliance, map_ochre_pdf_to_cycle_schedule};
+
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn base_env() -> EnvironmentState {

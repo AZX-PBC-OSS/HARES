@@ -4,9 +4,10 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId, telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,6 +97,7 @@ impl TanklessWH {
                     | ControlCapabilities::LOAD_FRACTION
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::DEMAND_RESPONSE,
+                core_capabilities: CoreCapabilities::empty(),
                 telemetry_fields: telemetry_fields(),
             },
             ports,

@@ -15,9 +15,10 @@ use std::time::Duration;
 
 use hares_physics::constants::{CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_J_KG};
 use hares_types::{
-    ControlCapabilities, ControlSignal, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, DRLevel, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -137,6 +138,7 @@ impl Ventilation {
             control_capabilities: ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::DEMAND_RESPONSE
                 | ControlCapabilities::LOAD_FRACTION,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: telemetry_fields(),
         };
 

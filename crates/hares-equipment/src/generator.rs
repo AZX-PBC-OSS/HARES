@@ -21,10 +21,10 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
-    telemetry_keys as tk,
+    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
+    ThermalCategory, ZoneId, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -380,6 +380,7 @@ impl Generator {
             control_capabilities: ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::SELF_CONSUMPTION,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: generator_telemetry_fields(has_chp),
         };
 

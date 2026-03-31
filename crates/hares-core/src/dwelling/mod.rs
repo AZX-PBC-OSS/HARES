@@ -2719,9 +2719,9 @@ mod tests {
     use hares_equipment::{Equipment, EquipmentConfig};
     use hares_types::ports::{PortContribution, PortSlots};
     use hares_types::{
-        ControlCapabilities, ControlSignal, EndUse, EquipmentDescriptor, EquipmentId,
-        ExecutionStage, FuelType, OperatingMode, PortDeclaration, Telemetry, TelemetryField,
-        ZoneId,
+        ControlCapabilities, CoreCapabilities, ControlSignal, EndUse, EquipmentDescriptor,
+        EquipmentId, ExecutionStage, FuelType, OperatingMode, PortDeclaration, Telemetry,
+        TelemetryField, ZoneId,
     };
     use std::borrow::Cow;
     use std::fs;
@@ -2772,6 +2772,7 @@ mod tests {
                     fuel: FuelType::Electric,
                     stage: ExecutionStage::Independent,
                     control_capabilities: capabilities,
+                    core_capabilities: CoreCapabilities::empty(),
                     telemetry_fields: vec![TelemetryField {
                         name: tk::LAST_POWER_KW.to_string(),
                         unit: "kW".to_string(),
@@ -2865,6 +2866,7 @@ mod tests {
                     fuel: FuelType::Electric,
                     stage: ExecutionStage::Independent,
                     control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::empty(),
                     telemetry_fields: vec![
                         TelemetryField {
                             name: "active_power_kw".to_string(),
@@ -3395,6 +3397,7 @@ master_seed = 0
                     stage: ExecutionStage::Thermal,
                     control_capabilities: ControlCapabilities::IDEAL_CAPACITY
                         | ControlCapabilities::THERMAL_SETPOINT,
+                    core_capabilities: CoreCapabilities::empty(),
                     telemetry_fields: vec![TelemetryField {
                         name: tk::IDEAL_CAPACITY_W.to_string(),
                         unit: "W".to_string(),

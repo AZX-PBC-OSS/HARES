@@ -5,14 +5,16 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
+use crate::hvac::heating_config::{ElectricFurnaceConfig, GasFurnaceConfig};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::{
@@ -83,6 +85,7 @@ impl ElectricFurnace {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: electric_furnace_telemetry_fields(),
         };
 
@@ -113,6 +116,32 @@ impl Equipment for ElectricFurnace {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            let typed = config.typed::<ElectricFurnaceConfig>()?;
+            self.hvac.init(config, env)?;
+            self.rated_capacity_w = typed.heating_capacity_w.max(0.0);
+            self.eir = typed.heating_efficiency;
+            if self.eir <= 0.0 || !self.eir.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "invalid Electric Furnace heating efficiency: {}",
+                    self.eir
+                )));
+            }
+            let airflow_m3_s = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
+            self.fan_power_w = typed
+                .fan_power_w
+                .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
+            self.hvac.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
+            self.hvac.duct_zone_id = None;
+            self.hvac.update_zone_heat_fractions();
+            self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
+            self.hvac.eir_by_stage = vec![self.eir];
+            self.operating_mode = OperatingMode::Off;
+            self.run_time_s = 0.0;
+            self.telemetry = electric_furnace_default_telemetry();
+            return Ok(());
+        }
+
         self.hvac.init(config, env)?;
 
         self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
@@ -162,8 +191,7 @@ impl Equipment for ElectricFurnace {
         let gross_capacity_w = self.rated_capacity_w * duty;
         let fan_kw = (self.fan_power_w * duty) / 1_000.0 * sf;
         // Heating element power + fan power
-        let electric_kw =
-            (self.rated_capacity_w * self.eir * duty) / 1_000.0 * sf + fan_kw;
+        let electric_kw = (self.rated_capacity_w * self.eir * duty) / 1_000.0 * sf + fan_kw;
 
         if electric_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -262,6 +290,7 @@ impl GasFurnace {
             control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::IDEAL_CAPACITY,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: gas_furnace_telemetry_fields(),
         };
 
@@ -294,6 +323,32 @@ impl Equipment for GasFurnace {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            let typed = config.typed::<GasFurnaceConfig>()?;
+            self.hvac.init(config, env)?;
+            self.rated_capacity_w = typed.heating_capacity_w.max(0.0);
+            self.fuel_efficiency = typed.afue;
+            if self.fuel_efficiency <= 0.0 || !self.fuel_efficiency.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "invalid Gas Furnace fuel efficiency: {}",
+                    self.fuel_efficiency
+                )));
+            }
+            let airflow_m3_s = self.rated_capacity_w * FURNACE_AIRFLOW_M3_S_PER_W_HEATING;
+            self.fan_power_w = typed
+                .fan_power_w
+                .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
+            self.hvac.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
+            self.hvac.duct_zone_id = None;
+            self.hvac.update_zone_heat_fractions();
+            self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
+            self.hvac.eir_by_stage = vec![1.0 / self.fuel_efficiency];
+            self.operating_mode = OperatingMode::Off;
+            self.run_time_s = 0.0;
+            self.telemetry = gas_furnace_default_telemetry();
+            return Ok(());
+        }
+
         self.hvac.init(config, env)?;
 
         self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
@@ -584,7 +639,7 @@ mod tests {
     };
 
     use super::{ElectricFurnace, FURNACE_FAN_CFM_PER_TON, GasFurnace, register_with_registry};
-    
+
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -629,11 +684,13 @@ mod tests {
         }
     }
 
-fn config(name: &str, class: &str) -> EquipmentConfig {
+    fn config(name: &str, class: &str) -> EquipmentConfig {
         EquipmentConfig {
             name: name.to_string(),
             ochre_class: class.to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: HashMap::new() },
+            payload: crate::config::ConfigPayload::Raw {
+                data: HashMap::new(),
+            },
         }
     }
 

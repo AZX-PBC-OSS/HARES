@@ -78,7 +78,17 @@ pub(super) fn resolve_scheduled_loads(
             for node in appliances.children_named(tag) {
                 let mut params = Map::new();
                 let mut fuel = FuelType::Electric;
-                if let Some(kwh) = child_f64(node, "RatedAnnualkWh") {
+                // Default RatedAnnualkWh: washer=400, dishwasher=467, fridge=637+18*beds, freezer=319.8.
+                // OCHRE falls back to these when HPXML omits the element.
+                let default_kwh = match tag {
+                    "ClothesWasher" => Some(400.0),
+                    "Dishwasher" => Some(467.0),
+                    "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
+                    "Freezer" => Some(319.8),
+                    _ => None,
+                };
+                let rated_kwh = child_f64(node, "RatedAnnualkWh").or(default_kwh);
+                if let Some(kwh) = rated_kwh {
                     params.insert("annual_electric_kwh".to_string(), json!(kwh));
                 }
                 if let Some(load_kwh) = child_load_kwh(node) {
@@ -130,16 +140,21 @@ pub(super) fn resolve_scheduled_loads(
 
                             const GAS_H20: f64 = 0.3914;
                             const ELEC_H20: f64 = 0.0178;
-                            const GAS_RATE: f64 = 1.09;
-                            const GAS_COST: f64 = 27.0;
-                            const ELECTRIC_RATE: f64 = 0.12;
+                            // Read per-appliance label rates from HPXML, fall back
+                            // to OCHRE defaults when absent (CW-020 F2).
+                            let gas_rate =
+                                child_f64(node, "LabelGasRate").unwrap_or(1.09);
+                            let gas_cost =
+                                child_f64(node, "LabelAnnualGasCost").unwrap_or(27.0);
+                            let electric_rate =
+                                child_f64(node, "LabelElectricRate").unwrap_or(0.12);
 
                             let lcy = label_usage * 52.0;
                             let scy = 164.0 + n_bedrooms * 46.5;
                             let acy = scy * ((3.0 * 2.08 + 1.59) / (capacity_ft3 * 2.08 + 1.59));
-                            let cw_appl = (GAS_COST * GAS_H20 / GAS_RATE
-                                - rated_kwh * ELECTRIC_RATE * ELEC_H20 / ELECTRIC_RATE)
-                                / (ELECTRIC_RATE * GAS_H20 / GAS_RATE - ELEC_H20);
+                            let cw_appl = (gas_cost * GAS_H20 / gas_rate
+                                - rated_kwh * electric_rate * ELEC_H20 / electric_rate)
+                                / (electric_rate * GAS_H20 / gas_rate - ELEC_H20);
                             let actual_kwh = cw_appl / lcy * acy * multiplier;
                             params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
                         }
@@ -241,14 +256,17 @@ pub(super) fn resolve_scheduled_loads(
                                 .and_then(|e| child_f64(e, "UsageMultiplier"))
                                 .unwrap_or(1.0);
 
-                            const GAS_RATE: f64 = 1.09;
-                            const GAS_COST: f64 = 33.12;
-                            const ELECTRIC_RATE: f64 = 0.12;
+                            let gas_rate =
+                                child_f64(node, "LabelGasRate").unwrap_or(1.09);
+                            let gas_cost =
+                                child_f64(node, "LabelAnnualGasCost").unwrap_or(33.12);
+                            let electric_rate =
+                                child_f64(node, "LabelElectricRate").unwrap_or(0.12);
 
                             let usage_annual = label_usage * 52.0;
-                            let kwh_per_cyc = ((GAS_COST * 0.5497 / GAS_RATE
-                                - rated_kwh * ELECTRIC_RATE * 0.02504 / ELECTRIC_RATE)
-                                / (ELECTRIC_RATE * 0.5497 / GAS_RATE - 0.02504))
+                            let kwh_per_cyc = ((gas_cost * 0.5497 / gas_rate
+                                - rated_kwh * electric_rate * 0.02504 / electric_rate)
+                                / (electric_rate * 0.5497 / gas_rate - 0.02504))
                                 / usage_annual;
                             let dwcpy = (88.4 + 34.9 * n_bedrooms) * (12.0 / capacity);
                             let actual_kwh = kwh_per_cyc * dwcpy * multiplier;
@@ -551,22 +569,35 @@ pub(super) fn resolve_ventilation(
 
         let mut params = Map::new();
         if let Some(flow_cfm) = child_f64(fan, "RatedFlowRate") {
+            // Convert CFM → m³/s at the parse boundary (SI internally).
+            let flow_m3_s = flow_cfm * hares_physics::constants::CFM_TO_M3_S;
+            params.insert("flow_rate_m3_s".to_string(), json!(flow_m3_s));
+            // Also store CFM for solver_builder which reads this key for
+            // the infiltration path.
             params.insert("ventilation_rate_cfm".to_string(), json!(flow_cfm));
         }
         if let Some(power_w) = child_f64(fan, "FanPower") {
-            // `fan_power_w` is the key the Ventilation equipment reads in init().
             params.insert("fan_power_w".to_string(), json!(power_w));
-            // `power_w` is used by inject_constant_power_schedule for the
-            // ScheduledLoad fallback path (kept for compatibility).
             params.insert("power_w".to_string(), json!(power_w));
         }
         if let Some(fan_type) = child_text(fan, "FanType") {
-            // OCHRE hpxml.py:556: balanced = fan_type in ["energy recovery ventilator",
-            // "heat recovery ventilator", "balanced"]
             let ft_lower = fan_type.to_ascii_lowercase();
             let balanced = matches!(
                 ft_lower.as_str(),
                 "energy recovery ventilator" | "heat recovery ventilator" | "balanced"
+            );
+            // Map HPXML FanType to the equipment's ventilation_type key.
+            let ventilation_type = match ft_lower.as_str() {
+                "exhaust only" => "exhaust_fan",
+                "energy recovery ventilator" => "erv",
+                "heat recovery ventilator" => "hrv",
+                "balanced" => "hrv",
+                "supply only" => "exhaust_fan",
+                _ => "hrv",
+            };
+            params.insert(
+                "ventilation_type".to_string(),
+                Value::String(ventilation_type.to_string()),
             );
             params.insert("fan_type".to_string(), Value::String(fan_type));
             params.insert("balanced".to_string(), json!(balanced));
@@ -574,14 +605,14 @@ pub(super) fn resolve_ventilation(
         let sensible_re = child_f64(fan, "SensibleRecoveryEfficiency").unwrap_or(0.0);
         let total_re = child_f64(fan, "TotalRecoveryEfficiency").unwrap_or(0.0);
         if sensible_re > 0.0 {
-            params.insert(
-                "sensible_recovery_efficiency".to_string(),
-                json!(sensible_re),
-            );
+            // Equipment reads "sensible_effectiveness" in init().
+            params.insert("sensible_effectiveness".to_string(), json!(sensible_re));
+            // Solver builder reads "sensible_recovery_efficiency" for infiltration path.
+            params.insert("sensible_recovery_efficiency".to_string(), json!(sensible_re));
         }
-        // OCHRE hpxml.py:560: latent_recovery = total_recovery - sensible_recovery
         let latent_re = (total_re - sensible_re).max(0.0);
         if latent_re > 0.0 {
+            params.insert("latent_effectiveness".to_string(), json!(latent_re));
             params.insert("latent_recovery_efficiency".to_string(), json!(latent_re));
         }
         if !params.is_empty() {
@@ -597,10 +628,12 @@ pub(super) fn resolve_ventilation(
 
 /// Default sensible and latent gain fractions per equipment name, matching OCHRE defaults.
 /// Returns `(sensible, latent)`.
+/// Default sensible and latent gain fractions per equipment name.
+/// Source: OCHRE `hpxml.py:1416-1472` `parse_mel()` and per-equipment parse functions.
+/// Returns (sensible_fraction, latent_fraction) of equipment power entering the zone.
 pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<(f64, f64)> {
     match name {
-        // OCHRE hpxml.py:1461-1472: gas range sensible ~0.64 (0.80 × 0.7942),
-        // electric range sensible ~0.72 (0.80 × 0.90). Latent ~0.16.
+        // OCHRE hpxml.py:1461-1472: gas range sensible ~0.64, electric ~0.72.
         "Cooking Range" => {
             if fuel_type == FuelType::Gas {
                 Some((0.64, 0.16))
@@ -608,14 +641,28 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
                 Some((0.72, 0.08))
             }
         }
-        // Dryer fractions are computed inline with venting awareness; see ClothesDryer arm.
         "Clothes Washer" => Some((0.27, 0.03)),
         "Dishwasher" => Some((0.30, 0.30)),
-        "Refrigerator" | "Freezer" => Some((1.00, 0.00)),
-        "MELs" | "Plug Loads" | "TV" => Some((0.73, 0.02)),
+        "Refrigerator" => Some((1.00, 0.00)),
+        // OCHRE: freezer gain_frac=0 (typically in garage/basement, not conditioned zone).
+        "Freezer" => Some((0.00, 0.00)),
+        // OCHRE parse_mel: "other" plug loads → (0.855, 0.045).
+        "MELs" | "Plug Loads" => Some((0.855, 0.045)),
+        // OCHRE parse_mel: "TV other" → (0.0, 0.0).
+        "TV" => Some((0.00, 0.00)),
+        // OCHRE parse_lighting: Convective=1.0 for all lighting types.
         "Indoor Lighting" | "Exterior Lighting" | "Basement Lighting" | "Garage Lighting"
-        | "Lighting" | "Gas Lighting" => Some((0.70, 0.00)),
-        "Ceiling Fan" | "Ventilation Fan" => Some((1.00, 0.00)),
+        | "Lighting" => Some((1.00, 0.00)),
+        // OCHRE: gas lighting and outdoor equipment → 0 zone gain.
+        "Gas Lighting" => Some((0.00, 0.00)),
+        // OCHRE: ceiling fan → 0 zone gain (CW-017: parse_mel default for non-"other").
+        "Ceiling Fan" => Some((0.00, 0.00)),
+        "Ventilation Fan" => Some((1.00, 0.00)),
+        // Outdoor equipment: well pump, grill, pool/hot tub.
+        "Well Pump" | "Gas Grill" | "Pool Heater" | "Hot Tub Heater" | "Pool Pump"
+        | "Hot Tub Pump" => Some((0.00, 0.00)),
+        // OCHRE: gas fireplace → (0.50, 0.10).
+        "Gas Fireplace" => Some((0.50, 0.10)),
         _ => None,
     }
 }

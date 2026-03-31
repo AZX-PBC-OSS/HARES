@@ -6,10 +6,10 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset, Timelike};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
-    BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal, EndUse,
-    EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState, ExecutionStage,
-    FuelType, HaresError, OperatingMode, PlugInPolicy, PortContribution, PortDeclaration,
-    PortSlots, Telemetry,
+    BatteryChemistry, ChargingLevel, ChargingStrategy, ControlCapabilities, ControlSignal,
+    CoreCapabilities, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
+    EvConnectionState, ExecutionStage, FuelType, HaresError, OperatingMode, PlugInPolicy,
+    PortContribution, PortDeclaration, PortSlots, Telemetry,
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
@@ -135,6 +135,7 @@ impl Ev {
                 | ControlCapabilities::EV_DRIVE
                 | ControlCapabilities::EV_AWAY_CHARGE
                 | ControlCapabilities::EV_SET_READY_BY,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: telemetry_fields(),
         };
 

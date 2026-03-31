@@ -22,6 +22,9 @@ pub use environment::*;
 pub use equipment::*;
 pub use error::*;
 pub use fluid::*;
+
+/// Crate-level result alias.
+pub type Result<T> = std::result::Result<T, HaresError>;
 pub use ports::*;
 pub use schedule::*;
 pub use telemetry::*;

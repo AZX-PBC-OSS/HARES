@@ -110,10 +110,7 @@ mod tests {
             Err(e) => e.to_string(),
             Ok(_) => panic!("should fail for ambiguous class"),
         };
-        assert!(
-            msg.contains("ambiguous"),
-            "expected 'ambiguous' in: {msg}"
-        );
+        assert!(msg.contains("ambiguous"), "expected 'ambiguous' in: {msg}");
     }
 
     #[test]

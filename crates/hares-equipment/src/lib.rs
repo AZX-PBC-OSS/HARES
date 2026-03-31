@@ -49,7 +49,15 @@ pub use battery::{BatteryLutType, OcvTable, UNegTable};
 pub use config::{ConfigPayload, EquipmentConfig, EquipmentTypedConfig};
 pub use ev::ChargingCurveLut;
 pub use hares_types::Telemetry;
-pub use hvac::{EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride};
+pub use hares_types::{CoreFlows, CoreOutput, CoreState};
+pub use hvac::heating_config::{
+    DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
+    GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
+};
+pub use hvac::{
+    CentralAirConditionerConfig, DehumidifierConfig, EquivalentBatteryModel, HeatPumpConfig,
+    HvacEquipment, HvacEquipmentType, RoomAcConfig, RuntimeSetpointOverride,
+};
 pub use ndinterp::RegularGridInterpolator;
 pub use registry::{EquipmentFactory, EquipmentRegistry};
 pub use water_heater::DHW_DEMAND_LOOP;
@@ -88,6 +96,22 @@ pub trait Equipment: Send + Sync {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError>;
     fn telemetry(&self) -> &Telemetry;
+
+    fn core_output(&self) -> &CoreOutput {
+        static DEFAULT: CoreOutput = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: None,
+                reactive_power_kvar: None,
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: None,
+                soc: None,
+            },
+        };
+        &DEFAULT
+    }
+
     fn save_state(&self) -> Vec<u8>;
     fn load_state(&mut self, state: &[u8]) -> Result<()>;
 
@@ -235,10 +259,10 @@ mod tests {
 
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
-        ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor,
-        EquipmentId, ExecutionStage, FluidType, FuelType, GridState, LoopId, OperatingMode,
-        PortDeclaration, PortSlots, ProtocolId, SurfaceIrradiance, Telemetry, TelemetryField,
-        WeatherState, ZoneId, ZoneState,
+        ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
+        EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FluidType,
+        FuelType, GridState, LoopId, OperatingMode, PortDeclaration, PortSlots, ProtocolId,
+        SurfaceIrradiance, Telemetry, TelemetryField, WeatherState, ZoneId, ZoneState,
     };
     use serde::{Deserialize, Serialize};
 
@@ -252,6 +276,7 @@ mod tests {
         telemetry: Telemetry,
         mode: OperatingMode,
         state_value: f64,
+        core_output: CoreOutput,
     }
 
     impl MockEquipment {
@@ -266,6 +291,7 @@ mod tests {
                     fuel: FuelType::Electric,
                     stage: ExecutionStage::Independent,
                     control_capabilities,
+                    core_capabilities: CoreCapabilities::empty(),
                     telemetry_fields: vec![TelemetryField {
                         name: "x".to_string(),
                         unit: "-".to_string(),
@@ -276,6 +302,7 @@ mod tests {
                 telemetry: Telemetry::with_capacity(2),
                 mode: OperatingMode::Off,
                 state_value: 0.0,
+                core_output: CoreOutput::default(),
             }
         }
     }
@@ -313,6 +340,10 @@ mod tests {
 
         fn telemetry(&self) -> &Telemetry {
             &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
         }
 
         fn save_state(&self) -> Vec<u8> {
@@ -584,5 +615,38 @@ mod tests {
     #[test]
     fn linear_temp_derate_degenerate_span_returns_zero() {
         assert_eq!(linear_temp_derate(5.0, 10.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn equipment_core_output_default_returns_empty() {
+        let eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        let out = eq.core_output();
+        assert!(out.flows.electric_kw.is_none());
+        assert!(out.flows.reactive_power_kvar.is_none());
+        assert!(out.flows.fuel_w.is_none());
+        assert!(out.state.operating_mode.is_none());
+        assert!(out.state.soc.is_none());
+    }
+
+    #[test]
+    fn equipment_core_output_returns_cached_field() {
+        use hares_types::ElectricPower;
+        let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
+        eq.core_output = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(1.5)),
+                reactive_power_kvar: Some(0.2),
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Charging),
+                soc: Some(std::convert::TryInto::try_into(0.8).unwrap()),
+            },
+        };
+        let out = eq.core_output();
+        assert!(
+            matches!(out.flows.electric_kw, Some(ElectricPower::Consumption(kw)) if (kw - 1.5).abs() < 1e-10)
+        );
+        assert_eq!(out.state.operating_mode, Some(OperatingMode::Charging));
     }
 }

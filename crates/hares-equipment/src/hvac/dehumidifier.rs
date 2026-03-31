@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,7 @@ use hares_types::telemetry_keys as tk;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
+use super::ac_config::DehumidifierConfig;
 use super::helpers::{equipment_id_from_config, first_f64, zone_id_from_config};
 
 const KG_PER_LITER_WATER: f64 = 1.0;
@@ -121,6 +123,7 @@ impl Dehumidifier {
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::HUMIDITY_SETPOINT
                     | ControlCapabilities::MODE_OVERRIDE,
+                core_capabilities: CoreCapabilities::empty(),
                 telemetry_fields: telemetry_fields(),
             },
             ports: vec![
@@ -264,25 +267,8 @@ impl Dehumidifier {
     }
 }
 
-impl Equipment for Dehumidifier {
-    fn descriptor(&self) -> &EquipmentDescriptor {
-        &self.descriptor
-    }
-
-    fn ports(&self) -> &[PortDeclaration] {
-        &self.ports
-    }
-
-    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
-        let equipment_id = equipment_id_from_config(config)?;
-        self.descriptor.id = EquipmentId(equipment_id);
-        self.zone_id = zone_id_from_config(config).unwrap_or(self.zone_id);
-        self.descriptor.zone = Some(self.zone_id);
-        self.ports = vec![
-            PortDeclaration::electrical(),
-            PortDeclaration::thermal(self.zone_id),
-        ];
-
+impl Dehumidifier {
+    fn init_from_raw(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
         self.rated_water_removal_l_day = first_f64(
             config,
             &[
@@ -371,6 +357,90 @@ impl Equipment for Dehumidifier {
             return Err(HaresError::Equipment(
                 "energy factor curve rated-condition value must be finite and positive".to_string(),
             ));
+        }
+
+        Ok(())
+    }
+
+    fn init_from_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
+        let cfg: DehumidifierConfig = config.typed()?;
+
+        // Convert capacity from pints/day to L/day.
+        self.rated_water_removal_l_day = cfg
+            .capacity_pints_per_day
+            .map(|pints| pints * PINTS_TO_LITERS)
+            .unwrap_or(DEFAULT_RATED_WATER_REMOVAL_L_DAY);
+
+        if !self.rated_water_removal_l_day.is_finite() || self.rated_water_removal_l_day <= 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "invalid dehumidifier rated capacity (L/day): {}",
+                self.rated_water_removal_l_day
+            )));
+        }
+
+        self.rated_energy_factor_l_kwh = cfg
+            .integrated_energy_factor
+            .or(cfg.energy_factor)
+            .unwrap_or(1.8);
+
+        if !self.rated_energy_factor_l_kwh.is_finite() || self.rated_energy_factor_l_kwh <= 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "invalid dehumidifier rated energy factor (L/kWh): {}",
+                self.rated_energy_factor_l_kwh
+            )));
+        }
+
+        self.fraction_load_served = cfg.fraction_served.unwrap_or(1.0).clamp(0.0, 1.0);
+
+        if let Some(target_rh) = cfg.target_rh {
+            self.target_rh = parse_rh_fraction(target_rh, "target_rh")?;
+            self.min_rh = (self.target_rh - DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION)
+                .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION);
+            self.max_rh = (self.target_rh + DEFAULT_DEADBAND_HALF_WIDTH_RH_FRACTION)
+                .clamp(RH_MIN_FRACTION, RH_MAX_FRACTION);
+        }
+
+        // Use default curves for typed config.
+        self.water_removal_curve = BiquadraticCurve {
+            coeffs: DEFAULT_NORMALIZED_CURVE,
+            x1_bounds: DEFAULT_DB_BOUNDS_C,
+            x2_bounds: DEFAULT_RH_BOUNDS,
+        };
+        self.energy_factor_curve = BiquadraticCurve {
+            coeffs: DEFAULT_NORMALIZED_CURVE,
+            x1_bounds: DEFAULT_DB_BOUNDS_C,
+            x2_bounds: DEFAULT_RH_BOUNDS,
+        };
+        self.water_removal_curve_rated_value = 1.0;
+        self.energy_factor_curve_rated_value = 1.0;
+
+        Ok(())
+    }
+}
+
+impl Equipment for Dehumidifier {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        let equipment_id = equipment_id_from_config(config)?;
+        self.descriptor.id = EquipmentId(equipment_id);
+        self.zone_id = zone_id_from_config(config).unwrap_or(self.zone_id);
+        self.descriptor.zone = Some(self.zone_id);
+        self.ports = vec![
+            PortDeclaration::electrical(),
+            PortDeclaration::thermal(self.zone_id),
+        ];
+
+        if config.is_typed() {
+            self.init_from_typed(config)?;
+        } else {
+            self.init_from_raw(config)?;
         }
 
         self.operating_mode = OperatingMode::Off;

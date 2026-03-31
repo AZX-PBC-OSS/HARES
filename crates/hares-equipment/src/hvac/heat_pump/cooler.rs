@@ -4,12 +4,15 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortDeclaration, PortSlots,
+    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortDeclaration, PortSlots,
 };
 
 use crate::{Equipment, EquipmentConfig, Telemetry};
 
+use super::super::SpeedControlMode;
+use super::super::ac_config::HeatPumpConfig;
 use super::super::air_conditioner::AirConditioner;
 use super::super::helpers::{equipment_id_from_config, zone_id_from_config};
 use super::constants::{DEFAULT_EQUIPMENT_ID, DEFAULT_ZONE_ID};
@@ -61,6 +64,7 @@ impl HpCooler {
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                     | ControlCapabilities::THERMAL_SETPOINT_DELTA
                     | ControlCapabilities::IDEAL_CAPACITY,
+                core_capabilities: CoreCapabilities::empty(),
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
             },
             ports: inner.ports().to_vec(),
@@ -108,6 +112,29 @@ impl Equipment for HpCooler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.inner.init(config, env)?;
+
+        // Mini-split 4-speed rule: force 4 speeds when is_mini_split is true.
+        if config.is_typed() {
+            if let Ok(hp_cfg) = config.typed::<HeatPumpConfig>() {
+                if hp_cfg.is_mini_split {
+                    self.inner.core.hvac.speed_control_mode =
+                        SpeedControlMode::MultiSpeedInterpolated;
+                    // Ensure 4 speed stages if only 1 was provided.
+                    let cap = self.inner.core.hvac.cooling_capacities_w.clone();
+                    let eir = self.inner.core.hvac.eir_by_stage.clone();
+                    if cap.len() == 1 {
+                        let base_cap = cap[0];
+                        let base_eir = eir[0];
+                        self.inner.core.hvac.cooling_capacities_w =
+                            vec![base_cap * 0.25, base_cap * 0.5, base_cap * 0.75, base_cap];
+                        self.inner.core.hvac.eir_by_stage = vec![base_eir; 4];
+                    }
+                    // Propagate per-stage SHR if provided.
+                    self.inner.core.stage_shrs = hp_cfg.stage_shrs.clone().unwrap_or_default();
+                }
+            }
+        }
+
         if self.is_mshp {
             // MSHP crankcase heater: 15 W / 0 °C, overriding central AC defaults
             // (50 W / 12.8 °C) unless the user explicitly configured them.
@@ -169,7 +196,6 @@ mod tests {
     };
 
     use super::{super::super::super::Equipment, super::super::super::EquipmentConfig, HpCooler};
-    
 
     fn cooling_env(zone_temp_c: f64, outdoor_c: f64) -> EnvironmentState {
         EnvironmentState {

@@ -173,8 +173,8 @@ pub(crate) struct DegradationState {
     b3_accum: f64,
 
     // ---- Cumulative lithium losses ----
-    q_li1: f64,
-    q_li2: f64,
+    pub(crate) q_li1: f64,
+    pub(crate) q_li2: f64,
     pub(crate) q_li3: f64,
 
     // ---- Day-level tracking ----
@@ -316,8 +316,12 @@ impl DegradationState {
         // electrochemical cycle-life models (Schmalstieg 2014, Xu 2018).
         let dq_li2 = B2_REF * self.b2_accum * sum_squared_dod.sqrt();
 
-        // Mechanism 3: BOL transient (exponential relaxation toward b3_accum)
-        let dq_li3 = (self.b3_accum - self.q_li3).max(0.0) / TAU_B3;
+        // Mechanism 3: BOL transient — exponential relaxation of q_li3 toward b3_accum.
+        // b3_accum < 0 (B3_REF < 0), so q_li3 decreases toward a negative equilibrium.
+        // A negative q_li3 subtracts from the capacity loss sum, producing a transient
+        // capacity boost at beginning-of-life (Smith 2017, Eq.15; EA-006 F3).
+        // Use .min(0.0) so the step is always negative (moving toward negative b3_accum).
+        let dq_li3 = (self.b3_accum - self.q_li3).min(0.0) / TAU_B3;
 
         // ---- Step 3: Update cumulative lithium losses ----
         self.q_li1 += dq_li1;
@@ -535,31 +539,35 @@ mod tests {
     /// Smith 2017 Eq. 3: at 45C the Arrhenius factor for mechanism 1 is
     /// arr_b1 = exp(-35392/8.314 * (1/318.15 - 1/298.15)) = exp(0.898) ~ 2.454.
     /// Combined with Tafel correction (which also depends on T), the overall
-    /// calendar fade ratio between 45C and 25C should be ~3.40.
+    /// q_li1 ratio between 45C and 25C should be ~3.40.
     ///
     /// Derivation: ratio = (arr_45 * tafel_45) / (arr_25 * tafel_25)
     ///   arr_25 = 1.0, tafel_25 = exp(-F/R * (u_neg/298.15 - 0.08/298.15)) ~ 0.1256
     ///   arr_45 = 2.454, tafel_45 = exp(-F/R * (u_neg/318.15 - 0.08/298.15)) ~ 0.1740
     ///   ratio = (2.454 * 0.1740) / (1.0 * 0.1256) ~ 3.40
+    ///
+    /// Uses q_li1 directly (not capacity_fade_pct) since the BOL q_li3 term has a
+    /// different temperature dependence that would skew the ratio.
     #[test]
     fn arrhenius_factor_at_45c_mechanism1() {
         let ds_25 = run_calendar_aging(30, T_REF, V_REF, 0.5);
         let ds_45 = run_calendar_aging(30, 318.15, V_REF, 0.5);
 
-        // Compute physics reference ratio from Arrhenius + Tafel
+        // Compute physics reference ratio from Arrhenius + Tafel (mechanism 1 only)
         let arr_25 = 1.0_f64;
         let arr_45 = (-(EA_B1 / R_GAS) * (1.0 / 318.15 - 1.0 / T_REF)).exp();
         let tafel_25 = tafel_b1_factor(0.5, T_REF);
         let tafel_45 = tafel_b1_factor(0.5, 318.15);
         let expected_ratio = (arr_45 * tafel_45) / (arr_25 * tafel_25);
 
-        let ratio = ds_45.capacity_fade_pct() / ds_25.capacity_fade_pct();
+        // Compare q_li1 (mechanism 1) directly to isolate the Arrhenius effect.
+        let ratio = ds_45.q_li1 / ds_25.q_li1;
         assert!(
             (ratio - expected_ratio).abs() < 0.1,
-            "45C/25C calendar fade ratio should be ~{expected_ratio:.2}, got {ratio:.4} \
-             (fade_25={:.6}, fade_45={:.6})",
-            ds_25.capacity_fade_pct(),
-            ds_45.capacity_fade_pct()
+            "45C/25C q_li1 ratio should be ~{expected_ratio:.2}, got {ratio:.4} \
+             (q_li1_25={:.6}, q_li1_45={:.6})",
+            ds_25.q_li1,
+            ds_45.q_li1
         );
     }
 
@@ -572,20 +580,24 @@ mod tests {
     /// At DOD=0: exp(gamma * 0^beta) = exp(0) = 1.0
     /// b1_eff = 3.503e-3 * 0.1256 = 4.40e-4 per day^0.5
     /// q_li1(30d) ~ 4.40e-4 * sqrt(30) ~ 2.41e-3 => 0.241%
+    ///
+    /// Note: capacity_fade also includes q_li3 (BOL transient, negative at these conditions),
+    /// so this test checks q_li1 directly rather than capacity_fade_pct().
     #[test]
     fn calendar_aging_30_days_25c() {
         let ds = run_calendar_aging(30, T_REF, V_REF, 0.5);
-        let fade_pct = ds.capacity_fade_pct() * 100.0;
+        let q_li1_pct = ds.q_li1 * 100.0;
 
         // Compute physics reference: B1_REF * tafel * sqrt(30)
         let tafel = tafel_b1_factor(0.5, T_REF);
         let b1_eff = B1_REF * tafel; // arr = 1.0 at T_REF, dod_corr = 1.0 at dod=0
         let analytic_q_li1_pct = b1_eff * (30.0_f64).sqrt() * 100.0;
 
-        // The discrete integrator should match the analytic sqrt(t) curve within 0.05%
+        // The discrete integrator should match the analytic sqrt(t) curve within 0.05%.
+        // Check q_li1 directly — capacity_fade also includes the q_li3 BOL term.
         assert!(
-            (fade_pct - analytic_q_li1_pct).abs() < 0.05,
-            "Calendar fade after 30d at 25C should be ~{analytic_q_li1_pct:.3}%, got {fade_pct:.4}%. \
+            (q_li1_pct - analytic_q_li1_pct).abs() < 0.05,
+            "q_li1 after 30d at 25C should be ~{analytic_q_li1_pct:.3}%, got {q_li1_pct:.4}%. \
              (B1_REF={B1_REF}, tafel={tafel:.4}, b1_eff={b1_eff:.4e})"
         );
     }
@@ -621,7 +633,7 @@ mod tests {
         let dt_s = SECONDS_PER_DAY;
         let mut ds = DegradationState::default();
 
-        let mut prev_fade = 0.0_f64;
+        let mut prev_q_li1 = 0.0_f64;
         for day in 0..3 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5);
             ds.update_daily(&u_neg, T_REF, 0.0);
@@ -633,12 +645,14 @@ mod tests {
                 day + 1
             );
 
-            let fade = ds.capacity_fade_pct();
+            // During BOL transient, capacity_fade is negative (q_li3 dominates).
+            // Assert q_li1 (calendar loss) is monotonically increasing instead.
+            let q_li1 = ds.q_li1;
             assert!(
-                fade >= prev_fade,
-                "Fade must be monotonically increasing: day {day} fade {fade} < prev {prev_fade}"
+                q_li1 >= prev_q_li1,
+                "q_li1 must be monotonically increasing: day {day} q_li1={q_li1} < prev={prev_q_li1}"
             );
-            prev_fade = fade;
+            prev_q_li1 = q_li1;
 
             let fade_before = ds.capacity_fade_pct();
             let q_li3_before = ds.q_li3;
@@ -663,56 +677,64 @@ mod tests {
         }
     }
 
-    /// Smith 2017 §II-B: capacity_fade must increase (or remain flat) on every day.
-    /// Runs 10 days of pure calendar aging at 25°C and asserts strict monotonicity.
-    /// Also verifies that fade is non-zero after day 2, when the sqrt(t) integrator
-    /// has enough history to produce a positive dq_li1.
+    /// Smith 2017 §II-B: q_li1 (calendar SEI growth) must increase monotonically.
+    /// Runs 10 days of pure calendar aging at 25°C.
+    /// capacity_fade is negative during the BOL transient (q_li3 dominates),
+    /// so we assert on q_li1 directly to isolate mechanism 1 behaviour.
     #[test]
     fn degradation_calendar_aging() {
         let u_neg = make_u_neg_table();
         let dt_s = SECONDS_PER_DAY;
         let mut ds = DegradationState::default();
-        let mut prev_fade = 0.0_f64;
+        let mut prev_q_li1 = 0.0_f64;
 
         for day in 0..10_u32 {
             ds.accumulate(dt_s, T_REF, V_REF, 0.5);
             ds.update_daily(&u_neg, T_REF, 0.0);
-            let fade = ds.capacity_fade_pct();
+            let q_li1 = ds.q_li1;
             assert!(
-                fade >= prev_fade,
-                "capacity_fade must be monotonically non-decreasing: day {day} fade={fade:.8} < prev={prev_fade:.8}"
+                q_li1 >= prev_q_li1,
+                "q_li1 must be monotonically non-decreasing: day {day} q_li1={q_li1:.8} < prev={prev_q_li1:.8}"
             );
-            prev_fade = fade;
+            prev_q_li1 = q_li1;
             ds.reset_day_tracking(0.5);
         }
         // After 10 days the SEI layer should have grown measurably.
         assert!(
-            prev_fade > 0.0,
-            "capacity_fade must be positive after 10 days of calendar aging, got {prev_fade}"
+            prev_q_li1 > 0.0,
+            "q_li1 must be positive after 10 days of calendar aging, got {prev_q_li1}"
+        );
+        // q_li3 must be negative (BOL boost active).
+        assert!(
+            ds.q_li3 < 0.0,
+            "q_li3 must be negative during BOL transient, got {}",
+            ds.q_li3
         );
     }
 
-    /// Smith 2017 Eq. 3: Arrhenius factor for mechanism 1 is positive, so
-    /// calendar fade at 45°C must exceed fade at 25°C over the same period.
+    /// Smith 2017 Eq. 3: Arrhenius factor for mechanism 1 is positive, so q_li1
+    /// (calendar SEI growth) at 45°C must exceed that at 25°C over the same period.
     /// This validates that the thermal acceleration is wired correctly end-to-end.
+    /// Uses q_li1 directly — capacity_fade also includes q_li3 which has its own
+    /// temperature dependence and is negative during the BOL transient.
     #[test]
     fn degradation_temperature_dependence() {
         let ds_25 = run_calendar_aging(30, T_REF, V_REF, 0.5);
         let ds_45 = run_calendar_aging(30, 318.15, V_REF, 0.5);
 
         assert!(
-            ds_45.capacity_fade_pct() > ds_25.capacity_fade_pct(),
-            "Calendar fade at 45°C ({:.6}) must exceed 25°C ({:.6}): \
+            ds_45.q_li1 > ds_25.q_li1,
+            "q_li1 at 45°C ({:.6}) must exceed 25°C ({:.6}): \
              higher temperature should accelerate SEI growth via Arrhenius",
-            ds_45.capacity_fade_pct(),
-            ds_25.capacity_fade_pct()
+            ds_45.q_li1,
+            ds_25.q_li1
         );
         // The ratio must be strictly greater than 1; a sanity-check lower bound of 2×
         // ensures the temperature sensitivity is not trivially small.
-        let ratio = ds_45.capacity_fade_pct() / ds_25.capacity_fade_pct();
+        let ratio = ds_45.q_li1 / ds_25.q_li1;
         assert!(
             ratio > 2.0,
-            "45°C/25°C fade ratio should be substantially above 1.0 (got {ratio:.3}); \
+            "45°C/25°C q_li1 ratio should be substantially above 1.0 (got {ratio:.3}); \
              Arrhenius + Tafel together should produce at least 2× acceleration"
         );
     }
@@ -776,13 +798,15 @@ mod tests {
             "day_age must not change during reset_day_tracking"
         );
 
-        // Day 2 aging must continue to accumulate — lifetime is preserved.
+        // Day 2 aging must continue to accumulate — q_li1 is monotonically increasing.
+        // (capacity_fade itself is negative during the BOL transient.)
+        let q_li1_after_day1 = ds.q_li1;
         ds.accumulate(dt_s, T_REF, V_REF, 0.5);
         ds.update_daily(&u_neg, T_REF, 0.0);
         assert!(
-            ds.capacity_fade_pct() >= fade_after_day1,
-            "Fade after day 2 ({:.10}) must be >= day 1 ({fade_after_day1:.10})",
-            ds.capacity_fade_pct()
+            ds.q_li1 >= q_li1_after_day1,
+            "q_li1 after day 2 ({:.10}) must be >= day 1 ({q_li1_after_day1:.10})",
+            ds.q_li1
         );
         assert_eq!(
             ds.day_age, 2,
@@ -852,12 +876,14 @@ mod tests {
     }
 
     /// Run 7 days of combined calendar + cycling aging and verify:
-    ///   1. capacity_fade_pct is strictly positive after the first update.
-    ///   2. capacity_fade_pct is non-decreasing across all days.
-    ///   3. The 7-day cumulative fade is approximately the sum of daily contributions.
+    ///   1. Cumulative fade equals the sum of daily increments (bookkeeping invariant).
+    ///   2. q_li3 is negative after day 0 (BOL transient is active, not dead code).
+    ///   3. Quantitative day-1 increment matches Smith 2017 Eq.2 + Eq.13 + Eq.15.
     ///
     /// Each day: one full discharge–charge cycle (DOD = 1.0 → sum_squared_dod = 1.0)
-    /// at 25°C.  The daily cycling contribution is B2_REF × b2_accum × √1.0 = B2_REF.
+    /// at 25°C.  During the BOL transient phase (~first 27 days), capacity_fade is
+    /// negative (capacity temporarily above nominal) because the Mechanism 3 term
+    /// (B3_REF < 0) dominates the smaller calendar + cycle contributions.
     #[test]
     fn degradation_accumulate_multi_day() {
         let u_neg = make_u_neg_table();
@@ -875,17 +901,20 @@ mod tests {
 
             let fade = ds.capacity_fade_pct();
 
+            // During the BOL transient (~first 27 days at these conditions), capacity_fade
+            // is negative because Mechanism 3 (B3_REF < 0) gives a larger anti-fade
+            // contribution than the positive calendar + cycle terms.
             assert!(
-                fade >= prev_fade,
-                "day {day}: capacity_fade must be non-decreasing: prev={prev_fade:.8}, got={fade:.8}"
+                fade < 0.0,
+                "day {day}: capacity_fade should be negative during BOL transient, got {fade:.8}"
             );
 
-            // After day 0 the sqrt-of-time integrator skips (day_age == 0 before update),
-            // so fade may be zero on day 0.  From day 1 onward it must be positive.
+            // q_li3 must be strictly negative after day 0 — Mechanism 3 is active.
+            let q_li3_val = ds.q_li3;
             if day >= 1 {
                 assert!(
-                    fade > 0.0,
-                    "day {day}: capacity_fade_pct must be positive, got {fade:.8}"
+                    q_li3_val < 0.0,
+                    "day {day}: q_li3 must be negative (BOL boost), got {q_li3_val:.8}"
                 );
             }
 
@@ -895,7 +924,7 @@ mod tests {
             ds.reset_day_tracking(0.5);
         }
 
-        // The final capacity_fade must equal the sum of daily increments.
+        // The final capacity_fade must equal the sum of daily increments (bookkeeping invariant).
         let sum_of_increments: f64 = daily_fade.iter().sum();
         let final_fade = ds.capacity_fade_pct();
         assert!(
@@ -903,32 +932,79 @@ mod tests {
             "final capacity_fade ({final_fade:.10}) must equal sum of daily increments ({sum_of_increments:.10})"
         );
 
-        // Days 1–6 must each show a positive increment (cycling adds fade every day).
-        for (day, &inc) in daily_fade.iter().enumerate().skip(1) {
-            assert!(
-                inc > 0.0,
-                "day {day}: daily fade increment must be positive when cycling, got {inc:.10}"
-            );
-        }
-
-        // Quantitative check for day-1 fade against Smith 2017 Eq. 2 + Eq. 13.
+        // Quantitative check for day-1 increment against Smith 2017 Eq. 2 + Eq. 13 + Eq. 15.
         //
-        // At day=1 (day_age==1, q_li1 still zero after day-0 skip):
-        //   b1_accum = B1_REF (arr=1 at T_REF, dt_day=1)
-        //   tafel = exp(ALPHA_B1 * F/R * (u_neg/T_REF − U_NEG_REF/T_REF))
-        //   dod_max_today = 0 → dod_corr = exp(GAMMA_B1 * 0^BETA_B1) = exp(0) = 1.0
-        //   b1_eff = B1_REF * tafel * 1.0
-        //   dq_li1 = b1_eff / sqrt(day_age=1) = b1_eff
-        //   dq_li2 = B2_REF * b2_accum(=1) * sqrt(sum_sq_dod=1) = B2_REF
-        //   dq_li3 = max(b3_accum − 0, 0) / TAU_B3 = 0  (B3_REF < 0)
-        //   day-1 increment = dq_li1 + dq_li2
+        // At day=1 (day_age==1):
+        //   b1_accum = B1_REF (Arrhenius=1 at T_REF, dt_day=1)
+        //   tafel_b1 = exp(ALPHA_B1 * F/R * (u_neg/T_REF − U_NEG_REF/T_REF))
+        //   dod_max_today = 0 → dod_corr = exp(GAMMA_B1 * 0^BETA_B1) = 1.0
+        //   dq_li1 = B1_REF * tafel_b1 / sqrt(day_age=1)
+        //   dq_li2 = B2_REF * 1.0 * sqrt(1.0) = B2_REF
+        //   dq_li3_day0 = B3_REF / TAU_B3   (first daily update, q_li3_init = 0)
+        //   dq_li3_day1 = (B3_REF − dq_li3_day0) / TAU_B3  (day-1, q_li3 = dq_li3_day0)
         let tafel_day1 = tafel_b1_factor(0.5, T_REF);
-        let b1_eff_day1 = B1_REF * tafel_day1; // dod_corr=1, arr=1, dt_day=1
-        let expected_day1_increment = b1_eff_day1 + B2_REF;
+        let b1_eff_day1 = B1_REF * tafel_day1; // dod_corr=1, Arrhenius=1, dt_day=1
+        let dq_li3_day0 = B3_REF / TAU_B3; // q_li3 after day 0
+        let dq_li3_day1 = (B3_REF - dq_li3_day0) / TAU_B3;
+        let expected_day1_increment = b1_eff_day1 + B2_REF + dq_li3_day1;
         assert!(
             (daily_fade[1] - expected_day1_increment).abs() < 1e-10,
-            "day-1 fade increment: expected {expected_day1_increment:.10} (Smith 2017 Eq.2+13), got {:.10}",
+            "day-1 increment: expected {expected_day1_increment:.10} (Eq.2+13+15), got {:.10}",
             daily_fade[1]
+        );
+    }
+
+    /// Mechanism 3 (BOL transient): q_li3 must converge toward an equilibrium determined
+    /// by the daily b3_accum value (B3_REF at T_REF). After sufficient days the incremental
+    /// change in q_li3 should shrink (exponential convergence with τ = TAU_B3 = 5 days).
+    #[test]
+    fn degradation_bol_transient_converges() {
+        let u_neg = make_u_neg_table();
+        let dt_s = SECONDS_PER_DAY;
+        let mut ds = DegradationState::default();
+        let sum_sq_dod_per_day = 1.0_f64;
+
+        let mut prev_dq_li3 = f64::NEG_INFINITY;
+        let mut prev_q_li3 = 0.0_f64;
+
+        for day in 0..30u32 {
+            ds.accumulate(dt_s, T_REF, V_REF, 0.5);
+            ds.update_daily(&u_neg, T_REF, sum_sq_dod_per_day);
+            let dq_li3 = ds.q_li3 - prev_q_li3;
+
+            // q_li3 is monotonically decreasing (negative increments) during convergence.
+            assert!(
+                ds.q_li3 < 0.0,
+                "day {day}: q_li3 must be negative (BOL boost active), got {}",
+                ds.q_li3
+            );
+            assert!(
+                dq_li3 < 0.0,
+                "day {day}: dq_li3 must be negative (q_li3 decreasing), got {dq_li3:.8}"
+            );
+
+            if day >= 1 {
+                // Increments shrink each day: |dq_li3[d]| < |dq_li3[d-1]| (exponential decay).
+                assert!(
+                    dq_li3.abs() < prev_dq_li3.abs(),
+                    "day {day}: |dq_li3| ({:.8}) should decrease each day (was {:.8})",
+                    dq_li3.abs(),
+                    prev_dq_li3.abs()
+                );
+            }
+
+            prev_dq_li3 = dq_li3;
+            prev_q_li3 = ds.q_li3;
+            ds.reset_day_tracking(0.5);
+        }
+
+        // After 30 days (6τ), q_li3 should be within 1% of its equilibrium (B3_REF at T_REF).
+        // Equilibrium: q_li3_eq = B3_REF (the daily b3_accum at T_REF with dod=0, v_oc=V_REF).
+        let equilibrium = B3_REF; // at T_REF, arr=1, tafel=1, dod=0: b3_accum/day = B3_REF
+        assert!(
+            (ds.q_li3 - equilibrium).abs() < equilibrium.abs() * 0.01,
+            "After 30 days q_li3 ({:.6}) should be within 1% of equilibrium ({equilibrium:.6})",
+            ds.q_li3
         );
     }
 

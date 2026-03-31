@@ -5,14 +5,16 @@ use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
-    ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, IdealCapacityMode, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    ControlCapabilities, ControlSignal, CoreCapabilities, EndUse, EnvironmentState,
+    EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, IdealCapacityMode,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
+    TelemetryField, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
+use crate::hvac::heating_config::IdealHvacConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::core_config::build_setpoint_source;
@@ -81,6 +83,7 @@ impl IdealHvac {
                 | ControlCapabilities::THERMAL_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT_DELTA
                 | ControlCapabilities::MODE_OVERRIDE,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: ideal_hvac_telemetry_fields(),
         };
 
@@ -325,6 +328,17 @@ impl Equipment for IdealHvac {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            let typed = config.typed::<IdealHvacConfig>()?;
+            self.rated_capacity_w = typed.heating_capacity_w.max(0.0);
+            self.cooling_capacity_w = typed.cooling_capacity_w.max(0.0);
+            self.effective_setpoints()
+                .validate_for_deadband(self.thermostat.hysteresis_c)?;
+            self.thermostat.validate(env)?;
+            self.telemetry = ideal_hvac_default_telemetry();
+            return Ok(());
+        }
+
         if let Some(value) = first_f64(config, &["capacity_w", "heating_capacity_w"]) {
             self.rated_capacity_w = value.max(0.0);
         }

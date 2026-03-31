@@ -6,9 +6,10 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-use crate::{ControlCapabilities, DayFilter, ZoneId};
+use crate::{ControlCapabilities, DayFilter, HaresError, ZoneId};
 
 /// Stable equipment instance identifier.
 #[derive(
@@ -166,21 +167,28 @@ pub enum ExecutionStage {
 }
 
 /// Runtime operating mode reported by equipment.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OperatingMode {
     #[default]
-    Off,
-    Heating,
-    Cooling,
-    Defrost,
-    Standby,
-    Charging,
-    Discharging,
-    HeatingHP,
-    HeatingER,
-    HeatingHPAndER,
-    HeatPumpWH,
-    BackupElement,
+    Off = 0,
+    Heating = 1,
+    Cooling = 2,
+    Defrost = 3,
+    Standby = 4,
+    Charging = 5,
+    Discharging = 6,
+    HeatingHP = 7,
+    HeatingER = 8,
+    HeatingHPAndER = 9,
+    HeatPumpWH = 10,
+    BackupElement = 11,
+}
+
+impl OperatingMode {
+    pub fn as_code(&self) -> f64 {
+        *self as u8 as f64
+    }
 }
 
 /// Custom domain identifier for extension points in the solver.
@@ -739,6 +747,130 @@ fn validate_fraction(name: &str, v: f64) -> Result<(), crate::HaresError> {
     Ok(())
 }
 
+/// Electrical power measurement for equipment output.
+///
+/// All values must be finite and non-negative for Consumption and Generation.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ElectricPower {
+    /// Net power consumed from the grid (kW). Must be >= 0.
+    Consumption(f64),
+    /// Net power generated/exported to the grid (kW). Must be >= 0.
+    Generation(f64),
+    /// Bidirectional power (kW). Positive = consuming, negative = generating.
+    Bidirectional(f64),
+}
+
+impl ElectricPower {
+    pub fn consumption(kw: f64) -> Result<Self, HaresError> {
+        if kw < 0.0 || !kw.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "ElectricPower::Consumption requires finite non-negative value, got {kw}"
+            )));
+        }
+        Ok(Self::Consumption(kw))
+    }
+
+    pub fn generation(kw: f64) -> Result<Self, HaresError> {
+        if kw < 0.0 || !kw.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "ElectricPower::Generation requires finite non-negative value, got {kw}"
+            )));
+        }
+        Ok(Self::Generation(kw))
+    }
+
+    pub fn bidirectional(kw: f64) -> Result<Self, HaresError> {
+        if !kw.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "ElectricPower::Bidirectional requires finite value, got {kw}"
+            )));
+        }
+        Ok(Self::Bidirectional(kw))
+    }
+
+    /// Net consumption in kW. Generation is negative, bidirectional follows sign.
+    pub fn net_consumption_kw(&self) -> f64 {
+        match self {
+            Self::Consumption(v) => *v,
+            Self::Generation(v) => -*v,
+            Self::Bidirectional(v) => *v,
+        }
+    }
+
+    /// Signed kW value. Consumption positive, generation negative.
+    pub fn signed_kw(&self) -> f64 {
+        self.net_consumption_kw()
+    }
+}
+
+/// State of charge, constrained to [0.0, 1.0].
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct Soc(f64);
+
+impl Soc {
+    pub fn get(&self) -> f64 {
+        self.0
+    }
+}
+
+impl TryFrom<f64> for Soc {
+    type Error = HaresError;
+
+    fn try_from(v: f64) -> Result<Self, Self::Error> {
+        if !(0.0..=1.0).contains(&v) || !v.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "Soc must be in [0.0, 1.0], got {v}"
+            )));
+        }
+        Ok(Self(v))
+    }
+}
+
+/// Fuel consumption for thermal/combustion equipment.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FuelPower {
+    pub fuel_type: FuelType,
+    /// Fuel consumption rate in watts.
+    pub consumption_w: f64,
+}
+
+/// Energy flow outputs from one equipment step.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoreFlows {
+    pub electric_kw: Option<ElectricPower>,
+    /// Reactive power in kvar. Positive = inductive/lagging (IEEE 1547).
+    pub reactive_power_kvar: Option<f64>,
+    pub fuel_w: Option<FuelPower>,
+}
+
+/// Discrete/continuous state outputs from one equipment step.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoreState {
+    pub operating_mode: Option<OperatingMode>,
+    pub soc: Option<Soc>,
+}
+
+/// Typed output from one equipment simulation step.
+///
+/// Not persisted in checkpoints — reconstructed each step.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoreOutput {
+    pub flows: CoreFlows,
+    pub state: CoreState,
+}
+
+bitflags! {
+    /// Capabilities declared by equipment for CoreOutput validation.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct CoreCapabilities: u8 {
+        const ELECTRIC   = 0b0000_0001;
+        const REACTIVE   = 0b0000_0010;
+        const FUEL       = 0b0000_0100;
+        const HAS_SOC    = 0b0000_1000;
+        const HAS_MODE   = 0b0001_0000;
+    }
+}
+
 /// Describes one telemetry channel exposed by an equipment model.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TelemetryField {
@@ -790,6 +922,7 @@ pub struct EquipmentDescriptor {
     pub fuel: FuelType,
     pub stage: ExecutionStage,
     pub control_capabilities: ControlCapabilities,
+    pub core_capabilities: CoreCapabilities,
     pub telemetry_fields: Vec<TelemetryField>,
 }
 
@@ -810,6 +943,7 @@ mod tests {
             stage: ExecutionStage::Electrical,
             control_capabilities: ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::THERMAL_SETPOINT,
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC,
             telemetry_fields: vec![TelemetryField {
                 name: "electric_kw".to_string(),
                 unit: "kW".to_string(),
@@ -899,6 +1033,7 @@ mod tests {
             fuel: FuelType::None,
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: vec![],
         };
         let json = serde_json::to_string(&descriptor).expect("serialize");
@@ -971,6 +1106,7 @@ mod tests {
             fuel: FuelType::Electric,
             stage: ExecutionStage::Independent,
             control_capabilities: ControlCapabilities::POWER_SETPOINT,
+            core_capabilities: CoreCapabilities::empty(),
             telemetry_fields: vec![],
         };
 
@@ -1812,5 +1948,144 @@ mod tests {
                 departure_schedule: vec![],
             }
         );
+    }
+
+    #[test]
+    fn operating_mode_numeric_codes_are_stable() {
+        assert_eq!(OperatingMode::Off as u8, 0);
+        assert_eq!(OperatingMode::Heating as u8, 1);
+        assert_eq!(OperatingMode::Cooling as u8, 2);
+        assert_eq!(OperatingMode::Defrost as u8, 3);
+        assert_eq!(OperatingMode::Standby as u8, 4);
+        assert_eq!(OperatingMode::Charging as u8, 5);
+        assert_eq!(OperatingMode::Discharging as u8, 6);
+        assert_eq!(OperatingMode::HeatingHP as u8, 7);
+        assert_eq!(OperatingMode::HeatingER as u8, 8);
+        assert_eq!(OperatingMode::HeatingHPAndER as u8, 9);
+        assert_eq!(OperatingMode::HeatPumpWH as u8, 10);
+        assert_eq!(OperatingMode::BackupElement as u8, 11);
+    }
+
+    #[test]
+    fn operating_mode_as_code_returns_f64_discriminant() {
+        assert_eq!(OperatingMode::Off.as_code(), 0.0);
+        assert_eq!(OperatingMode::Heating.as_code(), 1.0);
+        assert_eq!(OperatingMode::BackupElement.as_code(), 11.0);
+    }
+
+    #[test]
+    fn electric_power_consumption_rejects_negative() {
+        assert!(ElectricPower::consumption(-1.0).is_err());
+        assert!(ElectricPower::consumption(f64::NAN).is_err());
+        assert!(ElectricPower::consumption(f64::INFINITY).is_err());
+        assert!(ElectricPower::consumption(0.0).is_ok());
+        assert!(ElectricPower::consumption(5.0).is_ok());
+    }
+
+    #[test]
+    fn electric_power_generation_rejects_negative() {
+        assert!(ElectricPower::generation(-0.001).is_err());
+        assert!(ElectricPower::generation(0.0).is_ok());
+    }
+
+    #[test]
+    fn electric_power_bidirectional_rejects_non_finite() {
+        assert!(ElectricPower::bidirectional(f64::NAN).is_err());
+        assert!(ElectricPower::bidirectional(-5.0).is_ok());
+        assert!(ElectricPower::bidirectional(5.0).is_ok());
+    }
+
+    #[test]
+    fn electric_power_net_consumption_kw_signs() {
+        assert_eq!(ElectricPower::Consumption(3.0).net_consumption_kw(), 3.0);
+        assert_eq!(ElectricPower::Generation(3.0).net_consumption_kw(), -3.0);
+        assert_eq!(ElectricPower::Bidirectional(-2.0).net_consumption_kw(), -2.0);
+    }
+
+    #[test]
+    fn soc_try_from_rejects_out_of_range() {
+        assert!(Soc::try_from(1.5).is_err());
+        assert!(Soc::try_from(-0.1).is_err());
+        assert!(Soc::try_from(f64::NAN).is_err());
+        assert!(Soc::try_from(0.0).is_ok());
+        assert!(Soc::try_from(1.0).is_ok());
+        assert!(Soc::try_from(0.5).is_ok());
+    }
+
+    #[test]
+    fn soc_get_round_trips() {
+        let soc = Soc::try_from(0.75).unwrap();
+        assert_eq!(soc.get(), 0.75);
+    }
+
+    #[test]
+    fn core_capabilities_round_trips_through_json() {
+        let caps = CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC;
+        let json = serde_json::to_string(&caps).expect("serialize CoreCapabilities");
+        let decoded: CoreCapabilities =
+            serde_json::from_str(&json).expect("deserialize CoreCapabilities");
+        assert_eq!(decoded, caps);
+    }
+
+    #[test]
+    fn core_output_default_has_no_fields_set() {
+        let out = CoreOutput::default();
+        assert!(out.flows.electric_kw.is_none());
+        assert!(out.flows.fuel_w.is_none());
+        assert!(out.flows.reactive_power_kvar.is_none());
+        assert!(out.state.operating_mode.is_none());
+        assert!(out.state.soc.is_none());
+    }
+
+    #[test]
+    fn core_output_round_trips_through_json() {
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(3.5)),
+                reactive_power_kvar: Some(0.2),
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Heating),
+                soc: Some(Soc::try_from(0.8).unwrap()),
+            },
+        };
+        let json = serde_json::to_string(&out).expect("serialize");
+        let decoded: CoreOutput = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, out);
+    }
+
+    #[test]
+    fn soc_rejects_nan() {
+        assert!(Soc::try_from(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn soc_rejects_infinity() {
+        assert!(Soc::try_from(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn electric_power_consumption_rejects_nan() {
+        assert!(ElectricPower::consumption(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn electric_power_consumption_rejects_infinity() {
+        assert!(ElectricPower::consumption(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn electric_power_generation_rejects_nan() {
+        assert!(ElectricPower::generation(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn core_capabilities_bit_values_are_stable() {
+        assert_eq!(CoreCapabilities::ELECTRIC.bits(), 1u8);
+        assert_eq!(CoreCapabilities::REACTIVE.bits(), 2u8);
+        assert_eq!(CoreCapabilities::FUEL.bits(), 4u8);
+        assert_eq!(CoreCapabilities::HAS_SOC.bits(), 8u8);
+        assert_eq!(CoreCapabilities::HAS_MODE.bits(), 16u8);
     }
 }
