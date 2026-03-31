@@ -57,7 +57,7 @@ struct ResistanceWhState {
     tank_avg_temp_c: f64,
     upper_element_power_w: f64,
     lower_element_power_w: f64,
-    electric_power_w: f64,
+    electric_kw: f64,
     draw_flow_rate_kg_s: f64,
     // --- Demand response state ---
     dr_level: DRLevel,
@@ -552,6 +552,7 @@ impl Equipment for ResistanceWH {
         self.telemetry.set(tk::LOWER_ELEMENT_POWER_W, lower_power_w);
         self.telemetry
             .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
+        self.telemetry.set(tk::ELECTRIC_POWER_W, electric_power_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(
             tk::OPERATING_MODE,
@@ -588,7 +589,7 @@ impl Equipment for ResistanceWH {
             tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
             upper_element_power_w: self.telemetry.get(tk::UPPER_ELEMENT_POWER_W).unwrap_or(0.0),
             lower_element_power_w: self.telemetry.get(tk::LOWER_ELEMENT_POWER_W).unwrap_or(0.0),
-            electric_power_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
             draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
             dr_level: self.dr_level,
             dr_setpoint_offset_c: self.dr_setpoint_offset_c,
@@ -619,8 +620,9 @@ impl Equipment for ResistanceWH {
             .insert(tk::UPPER_ELEMENT_POWER_W, decoded.upper_element_power_w);
         self.telemetry
             .insert(tk::LOWER_ELEMENT_POWER_W, decoded.lower_element_power_w);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
-            .insert(tk::ELECTRIC_KW, decoded.electric_power_w);
+            .insert(tk::ELECTRIC_POWER_W, decoded.electric_kw * 1_000.0);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -733,11 +735,12 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(6);
+    let mut telemetry = Telemetry::with_capacity(7);
     telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
     telemetry.insert(tk::UPPER_ELEMENT_POWER_W, 0.0);
     telemetry.insert(tk::LOWER_ELEMENT_POWER_W, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
@@ -763,6 +766,11 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
+            description: "Total electric draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::ELECTRIC_POWER_W.to_string(),
+            unit: "W".to_string(),
             description: "Total electric draw".to_string(),
         },
         TelemetryField {

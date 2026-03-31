@@ -28,7 +28,37 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::config::EquipmentTypedConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+
+// ---------------------------------------------------------------------------
+// Typed config
+// ---------------------------------------------------------------------------
+
+/// Typed configuration for gas generator and fuel cell equipment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratorConfig {
+    pub rated_power_kw: f64,
+    pub eta_electric: Option<f64>,
+    pub eta_thermal: Option<f64>,
+    pub efficiency_type: Option<String>,
+    pub delta_kw_per_s: Option<f64>,
+    pub capacity_min_kw: Option<f64>,
+    pub grid_import_limit_kw: Option<f64>,
+    pub export_limit_kw: Option<f64>,
+    /// CHP fluid loop ID (non-zero when thermal recovery is enabled)
+    pub loop_id: Option<u16>,
+    pub flow_rate_kg_s: Option<f64>,
+    pub supply_temp_c: Option<f64>,
+    pub return_temp_c: Option<f64>,
+}
+
+impl EquipmentTypedConfig for GeneratorConfig {
+    fn equipment_type_name() -> &'static str {
+        "GasGenerator"
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Config keys
@@ -481,6 +511,86 @@ impl Generator {
         }
         raw
     }
+
+    fn init_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
+        let c: GeneratorConfig = config.typed()?;
+
+        self.rated_power_kw = c.rated_power_kw;
+        self.capacity_min_kw = c.capacity_min_kw;
+        self.eta_thermal = c.eta_thermal.unwrap_or(self.eta_thermal);
+        self.delta_kw_per_s = c.delta_kw_per_s.unwrap_or(self.delta_kw_per_s);
+        self.grid_import_limit_kw = c
+            .grid_import_limit_kw
+            .unwrap_or(self.grid_import_limit_kw);
+        self.export_limit_kw = c.export_limit_kw.unwrap_or(self.export_limit_kw);
+        self.flow_rate_kg_s = c.flow_rate_kg_s.unwrap_or(self.flow_rate_kg_s);
+        self.supply_temp_c = c.supply_temp_c.unwrap_or(self.supply_temp_c);
+        self.return_temp_c = c.return_temp_c.unwrap_or(self.return_temp_c);
+
+        let rated = c.eta_electric.unwrap_or(DEFAULT_ETA_ELECTRIC);
+        self.efficiency = match c.efficiency_type.as_deref() {
+            Some("curve") => EfficiencyModel::Curve {
+                rated,
+                points: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)],
+            },
+            Some("quadratic") => EfficiencyModel::Quadratic { rated },
+            _ => EfficiencyModel::Constant { rated },
+        };
+
+        if self.rated_power_kw <= 0.0 {
+            return Err(HaresError::Equipment(
+                "generator rated_power_kw must be positive".to_string(),
+            ));
+        }
+        self.efficiency.validate()?;
+        if !(0.0..=1.0).contains(&self.eta_thermal) {
+            return Err(HaresError::Equipment(
+                "generator eta_thermal must be in [0, 1]".to_string(),
+            ));
+        }
+        if self.efficiency.rated() + self.eta_thermal > 1.0 {
+            return Err(HaresError::Equipment(format!(
+                "generator eta_electric ({}) + eta_thermal ({}) exceeds 1.0; flue loss would be negative",
+                self.efficiency.rated(),
+                self.eta_thermal
+            )));
+        }
+        if self.delta_kw_per_s <= 0.0 {
+            return Err(HaresError::Equipment(
+                "generator delta_kw_per_s must be positive".to_string(),
+            ));
+        }
+        if let Some(min_kw) = self.capacity_min_kw {
+            if min_kw < 0.0 || min_kw > self.rated_power_kw {
+                return Err(HaresError::Equipment(format!(
+                    "generator capacity_min_kw ({min_kw}) must be in [0, rated_power_kw]"
+                )));
+            }
+        }
+
+        if self.eta_thermal > 0.0 {
+            if let Some(lid) = c.loop_id {
+                if lid == 0 {
+                    return Err(HaresError::Equipment(
+                        "generator CHP fluid loop_id must be non-zero".to_string(),
+                    ));
+                }
+                self.chp_loop_id = Some(LoopId(lid));
+            }
+        }
+
+        self.current_power_kw = 0.0;
+        self.mode = OperatingMode::Off;
+        self.power_setpoint_kw = None;
+        self.self_consumption_enabled = true;
+
+        let has_chp = self.eta_thermal > 0.0;
+        self.telemetry = default_telemetry(has_chp);
+        self.telemetry
+            .set(tk::ETA_ELECTRIC, self.efficiency.rated());
+
+        Ok(())
+    }
 }
 
 impl Equipment for Generator {
@@ -493,6 +603,9 @@ impl Equipment for Generator {
     }
 
     fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            return self.init_typed(config);
+        }
         self.rated_power_kw = config
             .get_f64(KEY_RATED_POWER_KW)
             .unwrap_or(self.rated_power_kw);

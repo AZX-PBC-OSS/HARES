@@ -5,6 +5,7 @@
 //! and degradation tracking (stubbed in v1).
 
 pub mod catalog;
+pub mod config;
 pub(crate) mod degradation;
 pub mod ocv;
 
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
+pub use config::BatteryConfig;
 pub use ocv::{OcvTable, UNegTable};
 
 use degradation::{DegradationState, RainflowCounter};
@@ -634,16 +636,10 @@ impl Battery {
     }
 }
 
-impl Equipment for Battery {
-    fn descriptor(&self) -> &EquipmentDescriptor {
-        &self.descriptor
-    }
+// init_typed is defined below in a separate impl Battery block (see after Equipment impl).
 
-    fn ports(&self) -> &[PortDeclaration] {
-        &self.ports
-    }
-
-    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+impl Battery {
+    fn init_raw(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.capacity_kwh = config
             .get_f64(KEY_CAPACITY_KWH)
             .unwrap_or(DEFAULT_CAPACITY_KWH);
@@ -863,6 +859,184 @@ impl Equipment for Battery {
         self.telemetry.set(tk::SOC, self.soc);
 
         Ok(())
+    }
+}
+
+impl Battery {
+    fn init_typed(
+        &mut self,
+        config: &EquipmentConfig,
+        env: &EnvironmentState,
+    ) -> crate::Result<()> {
+        let c: BatteryConfig = config.typed()?;
+
+        self.capacity_kwh = c.capacity_kwh;
+        if self.capacity_kwh <= 0.0 {
+            return Err(HaresError::Equipment(
+                "battery capacity_kwh must be positive".to_string(),
+            ));
+        }
+        self.capacity_kwh_nominal = self.capacity_kwh;
+        self.max_charge_kw = c.max_charge_kw;
+        self.max_discharge_kw = c.max_discharge_kw;
+
+        // Pack topology
+        self.n_series = c.n_series.unwrap_or(DEFAULT_N_SERIES);
+        self.n_parallel = c.n_parallel.unwrap_or(DEFAULT_N_PARALLEL);
+        if let (Some(ah_cell), Some(v_cell)) = (c.ah_cell, c.v_cell) {
+            if ah_cell > 0.0 && v_cell > 0.0 {
+                let target_pack_v = 350.0_f64;
+                self.n_series = (target_pack_v / v_cell).round() as u32;
+                if self.n_series == 0 {
+                    self.n_series = 1;
+                }
+                let pack_v = self.n_series as f64 * v_cell;
+                let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
+                self.n_parallel = (pack_ah / ah_cell).round() as u32;
+                if self.n_parallel == 0 {
+                    self.n_parallel = 1;
+                }
+            }
+        }
+        if self.n_series == 0 || self.n_parallel == 0 {
+            return Err(HaresError::Equipment(
+                "n_series and n_parallel must be positive".to_string(),
+            ));
+        }
+
+        self.cell_resistance_ohm = c
+            .cell_resistance_ohm
+            .unwrap_or(DEFAULT_CELL_RESISTANCE_OHM);
+
+        self.chemistry = c
+            .chemistry
+            .as_deref()
+            .and_then(|s| s.parse::<BatteryChemistry>().ok())
+            .unwrap_or(BatteryChemistry::Nmc);
+        if !self.custom_ocv {
+            self.ocv_table = OcvTable::for_chemistry(self.chemistry);
+        }
+        if !self.custom_u_neg {
+            self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
+        }
+
+        self.standby_power_w = c.standby_power_w.unwrap_or(DEFAULT_STANDBY_POWER_W);
+        self.min_soc = c.min_soc.unwrap_or(DEFAULT_MIN_SOC);
+        self.max_soc = c.max_soc.unwrap_or(DEFAULT_MAX_SOC);
+        if self.min_soc >= self.max_soc {
+            return Err(HaresError::Equipment(
+                "battery min_soc must be less than max_soc".to_string(),
+            ));
+        }
+        self.import_limit_kw = c.import_limit_w.map(|w| w / 1000.0);
+        if let Some(lim) = self.import_limit_kw {
+            if lim < 0.0 {
+                return Err(HaresError::Equipment(
+                    "battery import_limit_w must be non-negative".to_string(),
+                ));
+            }
+        }
+        self.export_limit_kw = c.export_limit_w.map(|w| w / 1000.0);
+        if let Some(lim) = self.export_limit_kw {
+            if lim < 0.0 {
+                return Err(HaresError::Equipment(
+                    "battery export_limit_w must be non-negative".to_string(),
+                ));
+            }
+        }
+        self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
+        self.heater_threshold_c = c
+            .heater_threshold_c
+            .unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
+        self.heater_on_discharge = c.heater_on_discharge.unwrap_or(false);
+        self.min_discharge_temp_c = c
+            .min_discharge_temp_c
+            .unwrap_or(DEFAULT_MIN_DISCHARGE_TEMP_C);
+        self.full_power_temp_c = c.full_power_temp_c.unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
+        self.min_charge_temp_c = c.min_charge_temp_c.unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
+        self.cell_thermal_mass_j_per_k = c
+            .cell_thermal_mass_j_per_k
+            .unwrap_or(DEFAULT_CELL_THERMAL_MASS_J_PER_K);
+        self.cell_ua_w_per_k = c.cell_ua_w_per_k.unwrap_or(DEFAULT_CELL_UA_W_PER_K);
+
+        let self_discharge = c
+            .self_discharge_pct_per_day
+            .unwrap_or(DEFAULT_SELF_DISCHARGE_PCT_PER_DAY);
+        self.self_discharge_rate_per_s = self_discharge / 100.0 / SECONDS_PER_DAY;
+
+        // Efficiency: symmetric RTE split as sqrt(rte) per direction.
+        // Explicit per-direction values override the split.
+        let sym_eta = c
+            .inverter_efficiency
+            .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
+            .clamp(f64::EPSILON, 1.0);
+        let sym_split = sym_eta.sqrt();
+        self.charge_efficiency = c
+            .charge_efficiency
+            .unwrap_or(sym_split)
+            .clamp(f64::EPSILON, 1.0);
+        self.discharge_efficiency = c
+            .discharge_efficiency
+            .unwrap_or(sym_split)
+            .clamp(f64::EPSILON, 1.0);
+
+        if let Some(mode_str) = c.bms_mode.as_deref() {
+            self.bms_mode = serde_json::from_str(mode_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid bms_mode: {e}")))?;
+        }
+        if let Some(rule_str) = c.grid_export_rule.as_deref() {
+            self.grid_export_rule = serde_json::from_str(rule_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid grid_export_rule: {e}")))?;
+        }
+
+        let initial_soc = c.initial_soc.unwrap_or(DEFAULT_INITIAL_SOC);
+        self.soc = initial_soc.clamp(self.min_soc, self.max_soc);
+
+        self.cell_temp_c = if let Some(zone_id) = self.descriptor.zone {
+            env.zones
+                .iter()
+                .find(|z| z.id == zone_id)
+                .map(|z| z.temperature_c)
+                .unwrap_or(env.weather.outdoor_temp_c)
+        } else {
+            env.weather.outdoor_temp_c
+        };
+
+        self.mode = OperatingMode::Off;
+        self.heater_active = false;
+        self.degradation = DegradationState::default();
+        self.degradation.reset_day_tracking(self.soc);
+        self.rainflow = RainflowCounter::default();
+        self.self_consumption_enabled = true;
+        self.solar_only_charging = false;
+        self.grid_connected = true;
+        self.power_setpoint_kw = None;
+        self.soc_target = None;
+        self.soc_target_min = None;
+        self.soc_target_max = None;
+        self.last_daily_update_day = Self::day_ordinal(env);
+
+        self.telemetry = default_telemetry();
+        self.telemetry.set(tk::SOC, self.soc);
+
+        Ok(())
+    }
+}
+
+impl Equipment for Battery {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            return self.init_typed(config, env);
+        }
+        self.init_raw(config, env)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {

@@ -1,12 +1,14 @@
 //! Photovoltaic panel equipment model.
 
 mod array_config;
+pub mod config;
 mod lut;
 pub mod shading;
 pub mod soiling;
 
 pub use array_config::{ModuleType, PvArray, surface_id_for_orientation};
 use array_config::{parse_arrays_from_config, parse_u32_from_f64};
+pub use config::PvConfig;
 use lut::PvLut;
 
 use std::borrow::Cow;
@@ -347,6 +349,133 @@ fn enforce_min_pf(p: f64, q: f64, min_pf: f64) -> f64 {
     q.clamp(-max_q_abs, max_q_abs)
 }
 
+impl PV {
+    fn init_typed(
+        &mut self,
+        config: &EquipmentConfig,
+        env: &EnvironmentState,
+    ) -> crate::Result<()> {
+        let c: PvConfig = config.typed()?;
+
+        if !c.capacity_kw.is_finite() || c.capacity_kw <= 0.0 {
+            return Err(HaresError::Equipment(
+                "PV capacity_kw must be finite and > 0".to_string(),
+            ));
+        }
+        let tilt_deg = c.tilt_deg.unwrap_or(30.0);
+        let azimuth_deg = c.azimuth_deg.unwrap_or(180.0);
+        let noct_c = c.noct_c.unwrap_or(DEFAULT_NOCT_C);
+        if !tilt_deg.is_finite() || !(0.0..=180.0).contains(&tilt_deg) {
+            return Err(HaresError::Equipment(
+                "PV tilt_deg must be finite and within [0, 180]".to_string(),
+            ));
+        }
+        if !azimuth_deg.is_finite() {
+            return Err(HaresError::Equipment(
+                "PV azimuth_deg must be finite".to_string(),
+            ));
+        }
+        if !noct_c.is_finite() {
+            return Err(HaresError::Equipment(
+                "PV noct_c must be finite".to_string(),
+            ));
+        }
+
+        let module_type = c
+            .module_type
+            .as_deref()
+            .map(ModuleType::from_str)
+            .unwrap_or(ModuleType::Standard);
+
+        self.arrays = vec![PvArray {
+            tilt_deg,
+            azimuth_deg,
+            capacity_kw: c.capacity_kw,
+            noct_c,
+            module_type,
+            surface_id: None,
+            sam_lut_path: None,
+            attached_boundary_id: None,
+        }];
+
+        self.surface_resolution_deg = c
+            .surface_resolution_deg
+            .unwrap_or(DEFAULT_SURFACE_RESOLUTION_DEG);
+        if !self.surface_resolution_deg.is_finite() || self.surface_resolution_deg <= 0.0 {
+            return Err(HaresError::Equipment(
+                "PV surface_resolution_deg must be finite and > 0".to_string(),
+            ));
+        }
+
+        self.inverter_efficiency = c
+            .inverter_efficiency
+            .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
+            .clamp(0.0, 1.0);
+
+        self.inverter_capacity_kw = c.inverter_capacity_kw;
+        if let Some(cap) = self.inverter_capacity_kw {
+            if !cap.is_finite() || cap < 0.0 {
+                return Err(HaresError::Equipment(
+                    "PV inverter_capacity_kw must be finite and >= 0".to_string(),
+                ));
+            }
+        }
+
+        self.power_factor = c
+            .power_factor
+            .unwrap_or(DEFAULT_POWER_FACTOR)
+            .clamp(0.0, 1.0);
+
+        let losses = c
+            .system_losses_fraction
+            .unwrap_or(DEFAULT_SYSTEM_LOSSES_FRACTION);
+        if !losses.is_finite() || !(0.0..1.0).contains(&losses) {
+            return Err(HaresError::Equipment(
+                "PV system_losses_fraction must be in [0.0, 1.0)".to_string(),
+            ));
+        }
+        self.system_losses_fraction = losses;
+
+        self.luts_by_surface.clear();
+        for array in &mut self.arrays {
+            let surface_id = surface_id_for_orientation(
+                array.tilt_deg,
+                array.azimuth_deg,
+                self.surface_resolution_deg,
+            )?;
+            array.surface_id = Some(surface_id);
+            let Some(_entry) = env
+                .weather
+                .solar_irradiance
+                .iter()
+                .find(|entry| entry.surface_id == surface_id)
+            else {
+                return Err(HaresError::Equipment(format!(
+                    "PV array tilt={} azimuth={} (surface_id={}) has no matching SurfaceIrradiance entry",
+                    array.tilt_deg, array.azimuth_deg, surface_id
+                )));
+            };
+        }
+
+        self.soiling_config = None;
+        self.soiling_state = None;
+
+        self.telemetry
+            .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
+        self.telemetry.set(tk::DC_POWER_KW, 0.0);
+        self.telemetry.set(tk::AC_POWER_KW, 0.0);
+        self.telemetry.set(tk::ELECTRIC_KW, 0.0);
+        self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
+        self.telemetry
+            .set(tk::CELL_TEMP_C, env.weather.outdoor_temp_c);
+        self.telemetry.set(tk::IRRADIANCE_W_M2, 0.0);
+        self.telemetry.set(tk::CURTAILMENT_KW, 0.0);
+        self.telemetry.set(tk::INVERTER_CLIPPING_KW, 0.0);
+        self.telemetry.set(tk::SOILING_RATIO, 1.0);
+        Ok(())
+    }
+}
+
 impl Equipment for PV {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
@@ -360,6 +489,10 @@ impl Equipment for PV {
         // Surface any deferred parse error from PV::new before doing full init.
         if let Some(e) = self.init_error.take() {
             return Err(e);
+        }
+
+        if config.is_typed() {
+            return self.init_typed(config, env);
         }
 
         self.arrays = parse_arrays_from_config(config)?;

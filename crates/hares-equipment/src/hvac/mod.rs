@@ -6,6 +6,7 @@ pub mod baseboard;
 pub mod boiler;
 pub(super) mod coil_physics;
 pub(super) mod core_config;
+pub mod cooling_config;
 pub mod dehumidifier;
 pub(super) mod duct_distribution;
 pub(super) mod equivalent_battery;
@@ -20,7 +21,7 @@ pub(super) mod speed_control;
 pub(super) mod staging;
 pub(super) mod thermostat;
 
-pub use ac_config::{
+pub use cooling_config::{
     CentralAirConditionerConfig, DehumidifierConfig, HeatPumpConfig, RoomAcConfig,
 };
 pub use equivalent_battery::EquivalentBatteryModel;

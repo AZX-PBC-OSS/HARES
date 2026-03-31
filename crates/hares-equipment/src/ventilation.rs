@@ -24,10 +24,43 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
 
+use crate::config::EquipmentTypedConfig;
 use crate::schedule_helpers::{
     ScheduleSourceState, capture_schedule_source_state, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
+
+// ---------------------------------------------------------------------------
+// Typed config
+// ---------------------------------------------------------------------------
+
+/// Typed configuration for mechanical ventilation (exhaust fan, HRV, ERV).
+///
+/// `flow_rate_m3_s` must be provided in SI units (m³/s). Convert CFM at the
+/// parse boundary using `hares_physics::constants::CFM_TO_M3_S`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VentilationConfig {
+    pub flow_rate_m3_s: f64,
+    pub fan_power_w: Option<f64>,
+    pub sensible_effectiveness: Option<f64>,
+    pub latent_effectiveness: Option<f64>,
+    pub bypass_temp_min_c: Option<f64>,
+    pub bypass_temp_max_c: Option<f64>,
+    pub defrost_temp_c: Option<f64>,
+    pub defrost_effectiveness_fraction: Option<f64>,
+    /// Ventilation type: "exhaust_fan", "hrv", or "erv"
+    pub ventilation_type: Option<String>,
+    /// Schedule source: only "constant" is supported; defaults to 1.0
+    pub schedule_source: Option<String>,
+    pub schedule_constant: Option<f64>,
+}
+
+impl EquipmentTypedConfig for VentilationConfig {
+    fn equipment_type_name() -> &'static str {
+        "VentilationFan"
+    }
+}
 
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
 const KEY_ZONE_ID: &str = "zone_id";
@@ -203,6 +236,59 @@ impl Ventilation {
     }
 }
 
+impl Ventilation {
+    fn init_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
+        let c: VentilationConfig = config.typed()?;
+
+        self.flow_rate_m3_s = c.flow_rate_m3_s;
+        if self.flow_rate_m3_s < 0.0 || !self.flow_rate_m3_s.is_finite() {
+            return Err(HaresError::Equipment(
+                "ventilation flow_rate_m3_s must be finite and >= 0".to_string(),
+            ));
+        }
+        self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
+        if self.fan_power_w < 0.0 || !self.fan_power_w.is_finite() {
+            return Err(HaresError::Equipment(
+                "ventilation fan_power_w must be finite and >= 0".to_string(),
+            ));
+        }
+        self.sensible_effectiveness = c
+            .sensible_effectiveness
+            .unwrap_or(DEFAULT_SENSIBLE_EFFECTIVENESS)
+            .clamp(0.0, 1.0);
+        self.latent_effectiveness = c
+            .latent_effectiveness
+            .unwrap_or(DEFAULT_LATENT_EFFECTIVENESS)
+            .clamp(0.0, 1.0);
+        self.bypass_temp_min_c = c
+            .bypass_temp_min_c
+            .unwrap_or(DEFAULT_BYPASS_TEMP_MIN_C);
+        self.bypass_temp_max_c = c
+            .bypass_temp_max_c
+            .unwrap_or(DEFAULT_BYPASS_TEMP_MAX_C);
+        self.defrost_temp_c = c.defrost_temp_c.unwrap_or(DEFAULT_DEFROST_TEMP_C);
+        self.defrost_effectiveness_fraction = c
+            .defrost_effectiveness_fraction
+            .unwrap_or(DEFAULT_DEFROST_EFFECTIVENESS_FRACTION)
+            .clamp(0.0, 1.0);
+
+        self.schedule_source = match c.schedule_source.as_deref() {
+            Some("constant") | None => {
+                let v = c.schedule_constant.unwrap_or(1.0);
+                ScheduleSource::Constant(v)
+            }
+            Some(other) => {
+                return Err(HaresError::Equipment(format!(
+                    "ventilation: unsupported schedule_source '{other}' (only 'constant' supported)"
+                )));
+            }
+        };
+
+        self.mode = OperatingMode::Standby;
+        Ok(())
+    }
+}
+
 impl Equipment for Ventilation {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
@@ -213,6 +299,9 @@ impl Equipment for Ventilation {
     }
 
     fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            return self.init_typed(config);
+        }
         self.fan_power_w = config
             .get_f64(KEY_FAN_POWER_W)
             .unwrap_or(DEFAULT_FAN_POWER_W);

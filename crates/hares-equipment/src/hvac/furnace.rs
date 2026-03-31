@@ -25,12 +25,10 @@ use super::{
         zone_id_from_config,
     },
 };
-use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
 
 /// Default gas furnace AFUE. DOE 10 CFR Part 430, federal minimum.
 const DEFAULT_GAS_AFUE: f64 = 0.8;
-const FURNACE_FAN_CFM_PER_TON: f64 = 400.0;
-const FURNACE_AIRFLOW_M3_S_PER_W_HEATING: f64 = FURNACE_FAN_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
+
 
 pub struct ElectricFurnace {
     descriptor: EquipmentDescriptor,
@@ -334,7 +332,7 @@ impl Equipment for GasFurnace {
                     self.fuel_efficiency
                 )));
             }
-            let airflow_m3_s = self.rated_capacity_w * FURNACE_AIRFLOW_M3_S_PER_W_HEATING;
+            let airflow_m3_s = self.rated_capacity_w * self.hvac.airflow_m3_s_per_w;
             self.fan_power_w = typed
                 .fan_power_w
                 .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
@@ -366,8 +364,17 @@ impl Equipment for GasFurnace {
         );
         self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
         self.hvac.update_zone_heat_fractions();
-        self.fuel_efficiency = first_f64(config, &["fuel_efficiency", "afue", "efficiency"])
-            .unwrap_or(DEFAULT_GAS_AFUE);
+        self.fuel_efficiency = first_f64(
+            config,
+            &[
+                "fuel_efficiency",
+                "afue",
+                "efficiency",
+                "heating_efficiency",
+                "efficiency_afue",
+            ],
+        )
+        .unwrap_or(DEFAULT_GAS_AFUE);
         if self.fuel_efficiency <= 0.0 || !self.fuel_efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Gas Furnace fuel efficiency: {}",
@@ -379,7 +386,7 @@ impl Equipment for GasFurnace {
             &["fan_power_w", "fan_only_power_w", "auxiliary_power_w"],
         )
         .unwrap_or_else(|| {
-            let airflow_m3_s = self.rated_capacity_w * FURNACE_AIRFLOW_M3_S_PER_W_HEATING;
+            let airflow_m3_s = self.rated_capacity_w * self.hvac.airflow_m3_s_per_w;
             self.hvac.fan_power_w(airflow_m3_s)
         });
         self.fuel_type = parse_fuel_type(config.get_str("fuel_type")).unwrap_or(FuelType::Gas);
@@ -638,7 +645,7 @@ mod tests {
         ZoneId, ZoneState, telemetry_keys as tk,
     };
 
-    use super::{ElectricFurnace, FURNACE_FAN_CFM_PER_TON, GasFurnace, register_with_registry};
+    use super::{ElectricFurnace, GasFurnace, register_with_registry};
 
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
@@ -804,7 +811,8 @@ mod tests {
         let mut eq = GasFurnace::new(cfg.clone());
         eq.init(&cfg, &env(18.0)).unwrap();
 
-        assert!((eq.fan_power_w - 696.0).abs() < 1e-9);
+        // 350 CFM/ton × 3 tons × 0.58 W/CFM = 609 W (350 CFM/ton is the ASHRAE/OCHRE standard)
+        assert!((eq.fan_power_w - 609.0).abs() < 1e-9);
     }
 
     #[test]
@@ -854,7 +862,7 @@ mod tests {
         let mut eq = GasFurnace::new(cfg.clone());
         eq.init(&cfg, &env(18.0)).unwrap();
 
-        let expected_airflow_m3_s = FURNACE_FAN_CFM_PER_TON * CFM_TO_M3_S * 3.0;
+        let expected_airflow_m3_s = eq.hvac.airflow_m3_s_per_w * (3.0 * W_PER_TON);
         let expected = eq.hvac.fan_power_w(expected_airflow_m3_s);
         assert!((eq.fan_power_w - expected).abs() < 1e-9);
     }

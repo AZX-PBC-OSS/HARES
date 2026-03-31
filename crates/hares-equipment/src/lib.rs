@@ -45,19 +45,22 @@ pub enum ActorSeed {
     },
 }
 
-pub use battery::{BatteryLutType, OcvTable, UNegTable};
+pub use battery::{BatteryConfig, BatteryLutType, OcvTable, UNegTable};
 pub use config::{ConfigPayload, EquipmentConfig, EquipmentTypedConfig};
 pub use ev::ChargingCurveLut;
+pub use generator::GeneratorConfig;
+pub use pv::PvConfig;
+pub use ventilation::VentilationConfig;
 pub use hares_types::Telemetry;
 pub use hares_types::{CoreFlows, CoreOutput, CoreState};
+pub use hvac::cooling_config::{
+    CentralAirConditionerConfig, DehumidifierConfig, HeatPumpConfig, RoomAcConfig,
+};
 pub use hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, IdealHvacConfig,
 };
-pub use hvac::{
-    CentralAirConditionerConfig, DehumidifierConfig, EquivalentBatteryModel, HeatPumpConfig,
-    HvacEquipment, HvacEquipmentType, RoomAcConfig, RuntimeSetpointOverride,
-};
+pub use hvac::{EquivalentBatteryModel, HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride};
 pub use ndinterp::RegularGridInterpolator;
 pub use registry::{EquipmentFactory, EquipmentRegistry};
 pub use water_heater::DHW_DEMAND_LOOP;

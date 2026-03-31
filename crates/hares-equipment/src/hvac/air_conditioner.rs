@@ -441,7 +441,7 @@ impl CoolingCore {
         }
 
         let default_eir =
-            first_f64(config, &["seer", "SEER"]).map_or(DEFAULT_EIR_FALLBACK, |seer| {
+            first_f64(config, &["seer", "SEER", "efficiency_seer"]).map_or(DEFAULT_EIR_FALLBACK, |seer| {
                 if seer.is_finite() && seer > 0.0 {
                     BTU_PER_HR_PER_W / seer
                 } else {

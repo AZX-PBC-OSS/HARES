@@ -202,9 +202,12 @@ impl Equipment for TanklessWH {
         .unwrap_or(DEFAULT_MAX_THERMAL_POWER_W)
         .max(0.0);
         self.power_limit_w = None;
-        self.parasitic_power_w = first_f64(config, &["parasitic_power_w"])
-            .unwrap_or(DEFAULT_GAS_PARASITIC_POWER_W)
-            .max(0.0);
+        self.parasitic_power_w = if self.fuel_type == FuelType::Gas {
+            first_f64(config, &["parasitic_power_w"]).unwrap_or(DEFAULT_GAS_PARASITIC_POWER_W)
+        } else {
+            first_f64(config, &["parasitic_power_w"]).unwrap_or(0.0)
+        }
+        .max(0.0);
         self.duty_cycle = 1.0;
         self.mode_override = None;
         self.inlet_temp_c =
