@@ -591,12 +591,16 @@ impl Generator {
         self.return_temp_c = c.return_temp_c.unwrap_or(self.return_temp_c);
 
         let rated = c.eta_electric.unwrap_or(DEFAULT_ETA_ELECTRIC);
-        self.efficiency = match c.efficiency_type.as_deref() {
-            Some("curve") => EfficiencyModel::Curve {
+        let efficiency_type = c
+            .efficiency_type
+            .as_deref()
+            .unwrap_or(self.kind.default_efficiency_type());
+        self.efficiency = match efficiency_type {
+            "curve" => EfficiencyModel::Curve {
                 rated,
                 points: vec![(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)],
             },
-            Some("quadratic") => EfficiencyModel::Quadratic { rated },
+            "quadratic" => EfficiencyModel::Quadratic { rated },
             _ => EfficiencyModel::Constant { rated },
         };
         self.efficiency.validate()?;
@@ -1099,7 +1103,9 @@ mod tests {
                 (KEY_SUPPLY_TEMP_C, ConfigValue::Float(value)) => cfg.supply_temp_c = Some(*value),
                 (KEY_RETURN_TEMP_C, ConfigValue::Float(value)) => cfg.return_temp_c = Some(*value),
                 ("zone_id", ConfigValue::Float(value)) => cfg.zone_id = Some(*value as u16),
-                ("equipment_id", ConfigValue::Float(value)) => cfg.equipment_id = Some(*value as u32),
+                ("equipment_id", ConfigValue::Float(value)) => {
+                    cfg.equipment_id = Some(*value as u32)
+                }
                 _ => panic!("unsupported generator test override key/value: {k}"),
             }
         }
@@ -1934,12 +1940,11 @@ mod tests {
             (KEY_ETA_THERMAL, 0.50.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        let err = generator.init(&config, &base_env()).unwrap_err();
         assert!(
-            generator
-                .init(&config, &base_env())
-                .unwrap_err()
-                .to_string()
-                .contains("exceeds 1.0")
+            err.to_string()
+                .contains("generator eta_electric + eta_thermal must not exceed 1.0"),
+            "unexpected validation error: {err}"
         );
     }
 

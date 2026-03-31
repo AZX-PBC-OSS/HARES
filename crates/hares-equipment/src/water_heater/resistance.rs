@@ -16,13 +16,10 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 
 use super::tank::{StratifiedTank, StratifiedTankConfig};
 use super::{
-    WaterHeaterZip, apply_jacket_r_value, draw_schedule_source, hysteresis_call,
-    mains_temp_schedule_source, parse_usize, resolve_draw_rate_kg_s, resolve_storage_step_inputs,
+    WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
     weighted_average_tank_temp,
 };
-use crate::hvac::helpers::{
-    equipment_id_from_config, first_f64, loop_id_from_config, zone_id_from_config,
-};
+use crate::hvac::helpers::{equipment_id_from_config, loop_id_from_config, zone_id_from_config};
 
 /// Element priority control mode for dual-element electric resistance water heaters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -313,7 +310,8 @@ impl ResistanceWH {
         self.mains_temp_c_source = None;
         self.zip = WaterHeaterZip::default();
 
-        self.setpoint_ramp_rate_c_per_s = None;
+        self.setpoint_ramp_rate_c_per_s =
+            c.max_setpoint_ramp_rate_c_per_min.map(|rate| rate / 60.0);
         self.target_setpoint_c = self.setpoint_c;
 
         self.dr_setpoint_offset_c = 0.0;
@@ -794,17 +792,17 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, EnvironmentState, GridState, PortDeclaration, PortSlots, ThermalAccumulator,
+        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::ResistanceWH;
-    use crate::config::ConfigPayload;
-    use crate::{Equipment, EquipmentConfig};
+    use crate::water_heater::DHW_DEMAND_LOOP;
+    use crate::{ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -849,35 +847,67 @@ mod tests {
         }
     }
 
+    fn config_from_typed(cfg: ElectricResistanceWaterHeaterConfig) -> EquipmentConfig {
+        EquipmentConfig::from_typed("WH".to_string(), "Resistance Water Heater".to_string(), cfg)
+    }
+
+    fn typed_config() -> ElectricResistanceWaterHeaterConfig {
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(52.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+        }
+    }
+
     fn config() -> EquipmentConfig {
-        let mut cfg = EquipmentConfig::from_typed(
-            "WH".to_string(),
-            "Resistance Water Heater".to_string(),
-            crate::ElectricResistanceWaterHeaterConfig {
-                equipment_id: None,
-                zone_id: None,
-                loop_id: None,
-                tank_volume_m3: None,
-                tank_height_m: None,
-                energy_factor: None,
-                uniform_energy_factor: None,
-                heating_capacity_w: None,
-                ua_w_per_k: None,
-                setpoint_c: Some(52.0),
-                deadband_c: Some(2.0),
-                max_tank_temp_c: Some(300.0),
-                initial_tank_temp_c: Some(40.0),
-                tank_nodes: None,
-                avg_water_draw_l_per_day: None,
-                draw_flow_rate_kg_s: Some(0.0),
-                performance_adjustment: None,
-                zone_type: None,
-                first_hour_rating_m3: None,
-                element_power_w: None,
-                element_priority_mode: None,
-            },
+        config_from_typed(typed_config())
+    }
+
+    #[test]
+    fn ports_and_telemetry_contract_match_water_heater_schema() {
+        let cfg = config();
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env(21.0)).unwrap();
+
+        assert_eq!(wh.ports().len(), 4);
+        assert!(wh.ports().contains(&PortDeclaration::electrical()));
+        assert!(wh.ports().contains(&PortDeclaration::thermal(ZoneId(1))));
+        assert!(wh.ports().contains(&PortDeclaration::fluid(
+            hares_types::LoopId(1),
+            hares_types::FluidType::Water,
+        )));
+        assert!(wh.ports().contains(&PortDeclaration::fluid(
+            DHW_DEMAND_LOOP,
+            hares_types::FluidType::Water
+        )));
+
+        let mut p = ports();
+        wh.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+        assert_eq!(
+            wh.telemetry().len(),
+            wh.descriptor().telemetry_fields.len(),
+            "resistance telemetry map must match declared telemetry schema"
         );
-        cfg
     }
 
     fn ports() -> PortSlots {
@@ -914,12 +944,7 @@ mod tests {
     #[test]
     fn lower_element_runs_after_upper_is_satisfied() {
         let mut eq = ResistanceWH::new(config());
-        // Set max_tank_temp_c high so safety clamp does not interfere with
-        // the thermostat logic being tested here.
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let cfg = config();
         eq.init(&cfg, &env(21.0)).unwrap();
 
         eq.tank
@@ -960,11 +985,9 @@ mod tests {
 
     #[test]
     fn default_deadband_matches_ochre_when_not_configured() {
-        let mut cfg = config();
-        cfg.raw_config_mut().unwrap().remove("deadband_c");
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let mut typed = typed_config();
+        typed.deadband_c = None;
+        let cfg = config_from_typed(typed);
 
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -978,13 +1001,9 @@ mod tests {
 
     #[test]
     fn explicit_deadband_override_is_applied() {
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("deadband_c".to_string(), 3.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let mut typed = typed_config();
+        typed.deadband_c = Some(3.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -998,18 +1017,10 @@ mod tests {
     /// average of lower_node and lower_node-1, not just lower_node alone.
     #[test]
     fn lower_thermostat_averages_two_bottom_nodes_for_large_tanks() {
-        let mut cfg_map = std::collections::HashMap::new();
-        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
-        cfg_map.insert("deadband_c".to_string(), 2.0.into());
-        cfg_map.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        cfg_map.insert("tank_nodes".to_string(), 12.0.into());
-        // Use max_tank_temp_c high so safety doesn't interfere.
-        cfg_map.insert("max_tank_temp_c".to_string(), 300.0.into());
-        let cfg = EquipmentConfig::raw(
-            "WH12".to_string(),
-            "Resistance Water Heater".to_string(),
-            cfg_map,
-        );
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(40.0);
+        typed.tank_nodes = Some(12);
+        let cfg = config_from_typed(typed);
 
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -1040,17 +1051,10 @@ mod tests {
         );
 
         // For a 2-node or 1-node tank, it should use only the lower_node directly.
-        let mut cfg_small = std::collections::HashMap::new();
-        cfg_small.insert("setpoint_c".to_string(), 52.0.into());
-        cfg_small.insert("deadband_c".to_string(), 2.0.into());
-        cfg_small.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        cfg_small.insert("tank_nodes".to_string(), 2.0.into());
-        cfg_small.insert("max_tank_temp_c".to_string(), 300.0.into());
-        let cfg2 = EquipmentConfig::raw(
-            "WH2".to_string(),
-            "Resistance Water Heater".to_string(),
-            cfg_small,
-        );
+        let mut typed_small = typed_config();
+        typed_small.initial_tank_temp_c = Some(40.0);
+        typed_small.tank_nodes = Some(2);
+        let cfg2 = config_from_typed(typed_small);
         let mut eq2 = ResistanceWH::new(cfg2.clone());
         eq2.init(&cfg2, &env(21.0)).unwrap();
         let single_sensor = eq2.lower_sensor_temp();
@@ -1068,13 +1072,9 @@ mod tests {
     #[test]
     fn wh_dr_moderate_reduces_setpoint() {
         // Start with tank just below setpoint so there is a call for heat.
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("initial_tank_temp_c".to_string(), 50.0.into()); // setpoint=52, deadband=2
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(50.0); // setpoint=52, deadband=2
+        let cfg = config_from_typed(typed);
 
         let e = env(21.0);
 
@@ -1111,13 +1111,9 @@ mod tests {
         // Tank at 40°C, setpoint=52, deadband=2; Critical offset=-10 → effective_sp=42.
         // 40 < 42-2=40 is the hysteresis boundary — tank at 40°C is at the deadband edge.
         // Use 38°C so it is clearly below 42-2=40 to ensure heating still fires.
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("initial_tank_temp_c".to_string(), 38.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(38.0);
+        let cfg = config_from_typed(typed);
 
         let e = env(21.0);
 
@@ -1160,16 +1156,9 @@ mod tests {
     #[test]
     fn max_tank_temp_safety_forces_off_for_resistance_wh() {
         // Set max_tank_temp_c below the initial temperature to immediately trigger safety.
-        let mut cfg_map = std::collections::HashMap::new();
-        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
-        cfg_map.insert("deadband_c".to_string(), 2.0.into());
-        cfg_map.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        cfg_map.insert("max_tank_temp_c".to_string(), 35.0.into());
-        let cfg = EquipmentConfig::raw(
-            "WH".to_string(),
-            "Resistance Water Heater".to_string(),
-            cfg_map,
-        );
+        let mut typed = typed_config();
+        typed.max_tank_temp_c = Some(35.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -1188,16 +1177,10 @@ mod tests {
     /// Safety cutout must still trigger (checks max of all nodes).
     #[test]
     fn max_tank_temp_safety_triggers_on_stratified_hot_bottom() {
-        let mut cfg_map = std::collections::HashMap::new();
-        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
-        cfg_map.insert("deadband_c".to_string(), 2.0.into());
-        cfg_map.insert("initial_tank_temp_c".to_string(), 30.0.into());
-        cfg_map.insert("max_tank_temp_c".to_string(), 55.0.into());
-        let cfg = EquipmentConfig::raw(
-            "WH".to_string(),
-            "Resistance Water Heater".to_string(),
-            cfg_map,
-        );
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(30.0);
+        typed.max_tank_temp_c = Some(55.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -1220,16 +1203,10 @@ mod tests {
     /// Safety cutout must NOT fire; element must be allowed to operate.
     #[test]
     fn safety_cutout_does_not_fire_when_all_nodes_below_limit() {
-        let mut cfg_map = std::collections::HashMap::new();
-        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
-        cfg_map.insert("deadband_c".to_string(), 2.0.into());
-        cfg_map.insert("initial_tank_temp_c".to_string(), 30.0.into());
-        cfg_map.insert("max_tank_temp_c".to_string(), 55.0.into());
-        let cfg = EquipmentConfig::raw(
-            "WH".to_string(),
-            "Resistance Water Heater".to_string(),
-            cfg_map,
-        );
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(30.0);
+        typed.max_tank_temp_c = Some(55.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
@@ -1257,19 +1234,13 @@ mod tests {
     fn jacket_loss_appears_in_thermal_port_when_tank_above_zone_temp() {
         use hares_types::ThermalCategory;
 
-        let mut cfg_map = std::collections::HashMap::new();
-        cfg_map.insert("setpoint_c".to_string(), 55.0.into());
-        cfg_map.insert("deadband_c".to_string(), 2.0.into());
+        let mut typed = typed_config();
+        typed.setpoint_c = Some(55.0);
         // Start the tank at 50°C — below setpoint so elements don't interfere with the loss signal.
-        cfg_map.insert("initial_tank_temp_c".to_string(), 50.0.into());
-        cfg_map.insert("max_tank_temp_c".to_string(), 300.0.into());
-        cfg_map.insert("ua_w_per_k".to_string(), 5.0.into());
-        cfg_map.insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
-        let cfg = EquipmentConfig::raw(
-            "WH".to_string(),
-            "Resistance Water Heater".to_string(),
-            cfg_map,
-        );
+        typed.initial_tank_temp_c = Some(50.0);
+        typed.ua_w_per_k = Some(5.0);
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let cfg = config_from_typed(typed);
 
         let zone_temp_c = 20.0;
         let e = env(zone_temp_c);
@@ -1312,13 +1283,9 @@ mod tests {
     fn load_fraction_does_not_corrupt_dr_state() {
         use hares_types::{ControlSignal, DRLevel};
 
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("initial_tank_temp_c".to_string(), 38.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(38.0);
+        let cfg = config_from_typed(typed);
         let e = env(21.0);
 
         let mut eq = ResistanceWH::new(cfg.clone());
@@ -1373,7 +1340,7 @@ mod tests {
 
 #[cfg(test)]
 mod element_priority_tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -1382,7 +1349,6 @@ mod element_priority_tests {
     };
 
     use super::{ElementPriorityMode, ResistanceWH};
-    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig};
 
     fn env_state() -> EnvironmentState {
@@ -1431,7 +1397,7 @@ mod element_priority_tests {
     /// Build a config with both elements cold (initial_tank_temp_c well below setpoint).
     /// max_tank_temp_c is set high so the safety clamp never interferes.
     fn cold_config(mode: &str) -> EquipmentConfig {
-        let mut cfg = EquipmentConfig::from_typed(
+        let cfg = EquipmentConfig::from_typed(
             "WH".to_string(),
             "Resistance Water Heater".to_string(),
             crate::ElectricResistanceWaterHeaterConfig {
@@ -1455,6 +1421,7 @@ mod element_priority_tests {
                 zone_type: None,
                 first_hour_rating_m3: None,
                 element_power_w: None,
+                max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: Some(mode.to_string()),
             },
         );

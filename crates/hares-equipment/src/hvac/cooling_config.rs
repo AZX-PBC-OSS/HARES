@@ -40,9 +40,30 @@ pub struct CentralAirConditionerConfig {
     /// Fan power per CFM of airflow (W/CFM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w_per_cfm: Option<f64>,
+    /// Cooling setpoint used by the HVAC thermostat FSM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_c: Option<f64>,
+    /// Heating setpoint used by the HVAC thermostat FSM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    /// Thermostat hysteresis around the setpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hysteresis_c: Option<f64>,
+    /// Airflow in m^3/s/W for the HVAC wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub airflow_m3_s_per_w: Option<f64>,
     /// Fraction of zone load served by this equipment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_load_served: Option<f64>,
+    /// Crankcase heater rated power [kW].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crankcase_heater_kw: Option<f64>,
+    /// Crankcase activation threshold [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crankcase_heater_threshold_c: Option<f64>,
+    /// Outdoor-temperature capacity curve coefficients `[c0, c1, c2]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crankcase_capacity_curve_coeffs: Option<[f64; 3]>,
     /// Duct configuration (distribution system efficiency).
     #[serde(flatten)]
     pub duct: DuctConfig,
@@ -100,6 +121,47 @@ impl CentralAirConditionerConfig {
                 self.seer
             )));
         }
+        for (name, value) in [
+            ("cooling_setpoint_c", self.cooling_setpoint_c),
+            ("heating_setpoint_c", self.heating_setpoint_c),
+            ("hysteresis_c", self.hysteresis_c),
+            ("airflow_m3_s_per_w", self.airflow_m3_s_per_w),
+            (
+                "crankcase_heater_threshold_c",
+                self.crankcase_heater_threshold_c,
+            ),
+        ] {
+            if let Some(v) = value
+                && !v.is_finite()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "CentralAirConditionerConfig: {name} must be finite, got {v}"
+                )));
+            }
+        }
+        if let Some(v) = self.airflow_m3_s_per_w
+            && v <= 0.0
+        {
+            return Err(HaresError::Equipment(
+                "CentralAirConditionerConfig: airflow_m3_s_per_w must be > 0".to_string(),
+            ));
+        }
+        if let Some(v) = self.crankcase_heater_kw
+            && (!v.is_finite() || v < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "CentralAirConditionerConfig: crankcase_heater_kw must be finite and >= 0"
+                    .to_string(),
+            ));
+        }
+        if let Some(coeffs) = self.crankcase_capacity_curve_coeffs
+            && coeffs.iter().any(|v| !v.is_finite())
+        {
+            return Err(HaresError::Equipment(
+                "CentralAirConditionerConfig: crankcase_capacity_curve_coeffs must be finite"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -114,6 +176,18 @@ pub struct RoomAcConfig {
     pub capacity_w: f64,
     /// Required; resolver errors if absent.
     pub eer: f64,
+    /// Cooling setpoint used by the HVAC thermostat FSM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_c: Option<f64>,
+    /// Heating setpoint used by the HVAC thermostat FSM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    /// Thermostat hysteresis around the setpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hysteresis_c: Option<f64>,
+    /// Airflow in m^3/s/W for the HVAC wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub airflow_m3_s_per_w: Option<f64>,
     /// Biquadratic curve x1 (wet-bulb) lower bound [C].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub biquadratic_x1_min: Option<f64>,
@@ -138,6 +212,15 @@ pub struct RoomAcConfig {
     /// Part-load fraction (PLF) upper clamp bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plf_max: Option<f64>,
+    /// Crankcase heater rated power [kW].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crankcase_heater_kw: Option<f64>,
+    /// Crankcase activation threshold [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crankcase_heater_threshold_c: Option<f64>,
+    /// Outdoor-temperature capacity curve coefficients `[c0, c1, c2]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crankcase_capacity_curve_coeffs: Option<[f64; 3]>,
 }
 
 impl EquipmentTypedConfig for RoomAcConfig {
@@ -161,6 +244,45 @@ impl RoomAcConfig {
                 "RoomAcConfig: eer must be finite and positive, got {}",
                 self.eer
             )));
+        }
+        for (name, value) in [
+            ("cooling_setpoint_c", self.cooling_setpoint_c),
+            ("heating_setpoint_c", self.heating_setpoint_c),
+            ("hysteresis_c", self.hysteresis_c),
+            ("airflow_m3_s_per_w", self.airflow_m3_s_per_w),
+            (
+                "crankcase_heater_threshold_c",
+                self.crankcase_heater_threshold_c,
+            ),
+        ] {
+            if let Some(v) = value
+                && !v.is_finite()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "RoomAcConfig: {name} must be finite, got {v}"
+                )));
+            }
+        }
+        if let Some(v) = self.airflow_m3_s_per_w
+            && v <= 0.0
+        {
+            return Err(HaresError::Equipment(
+                "RoomAcConfig: airflow_m3_s_per_w must be > 0".to_string(),
+            ));
+        }
+        if let Some(v) = self.crankcase_heater_kw
+            && (!v.is_finite() || v < 0.0)
+        {
+            return Err(HaresError::Equipment(
+                "RoomAcConfig: crankcase_heater_kw must be finite and >= 0".to_string(),
+            ));
+        }
+        if let Some(coeffs) = self.crankcase_capacity_curve_coeffs
+            && coeffs.iter().any(|v| !v.is_finite())
+        {
+            return Err(HaresError::Equipment(
+                "RoomAcConfig: crankcase_capacity_curve_coeffs must be finite".to_string(),
+            ));
         }
         Ok(())
     }
@@ -228,6 +350,7 @@ impl DehumidifierConfig {
 mod tests {
     use super::*;
     use crate::config::{ConfigPayload, EquipmentConfig};
+    use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
 
     fn typed_config<T: EquipmentTypedConfig>(config: T) -> EquipmentConfig {
         EquipmentConfig::from_typed(
@@ -235,6 +358,10 @@ mod tests {
             T::equipment_type_name().to_string(),
             config,
         )
+    }
+
+    fn airflow_m3_s_per_w(cfm_per_ton: f64) -> f64 {
+        cfm_per_ton * CFM_TO_M3_S / W_PER_TON
     }
 
     #[test]
@@ -251,7 +378,14 @@ mod tests {
             stage_shrs: Some(vec![0.78, 0.72]),
             fan_power_w: Some(300.0),
             fan_power_w_per_cfm: None,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            airflow_m3_s_per_w: Some(airflow_m3_s_per_w(400.0)),
             fraction_load_served: Some(1.0),
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig {
                 dse_heat: Some(0.8),
                 dse_cool: Some(0.85),
@@ -313,7 +447,14 @@ mod tests {
             stage_shrs: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
             fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
             system_type: None,
             startup_cd: None,
@@ -343,7 +484,14 @@ mod tests {
             stage_shrs: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
             fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
             system_type: None,
             startup_cd: None,
@@ -366,6 +514,10 @@ mod tests {
             zone_id: Some(1),
             capacity_w: 3_500.0,
             eer: 10.0,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            airflow_m3_s_per_w: Some(airflow_m3_s_per_w(320.0)),
             biquadratic_x1_min: Some(10.0),
             biquadratic_x1_max: Some(25.0),
             biquadratic_x2_min: None,
@@ -374,6 +526,9 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
         };
         let ec = typed_config(cfg.clone());
         let recovered: RoomAcConfig = ec.typed().unwrap();
@@ -389,6 +544,10 @@ mod tests {
             zone_id: None,
             capacity_w: 3_500.0,
             eer: 0.0,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
             biquadratic_x1_min: None,
             biquadratic_x1_max: None,
             biquadratic_x2_min: None,
@@ -397,6 +556,9 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -408,6 +570,10 @@ mod tests {
             zone_id: None,
             capacity_w: f64::NAN,
             eer: 10.0,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
             biquadratic_x1_min: None,
             biquadratic_x1_max: None,
             biquadratic_x2_min: None,
@@ -416,6 +582,9 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
         };
         assert!(cfg.validate().is_err());
     }

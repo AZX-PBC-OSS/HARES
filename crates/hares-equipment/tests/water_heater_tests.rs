@@ -5,13 +5,14 @@
 //! tolerances reflect real tank-simulation uncertainty (0.1 °C for temperature,
 //! 2% for energy balance given the trapezoidal approximation of per-step averages).
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::water_heater::gas::GasWH;
 use hares_equipment::water_heater::resistance::ResistanceWH;
-use hares_equipment::{Equipment, EquipmentConfig};
+use hares_equipment::{
+    ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig, GasWaterHeaterConfig,
+};
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots, WeatherState,
     ZoneId, ZoneState,
@@ -72,23 +73,34 @@ fn resistance_config(
     initial_tank_temp_c: f64,
     draw_flow_rate_kg_s: f64,
 ) -> EquipmentConfig {
-    let mut raw: HashMap<String, hares_equipment::config::ConfigValue> = HashMap::new();
-    raw.insert("setpoint_c".to_string(), setpoint_c.into());
-    raw.insert("deadband_c".to_string(), deadband_c.into());
-    raw.insert(
-        "initial_tank_temp_c".to_string(),
-        initial_tank_temp_c.into(),
-    );
-    raw.insert(
-        "draw_flow_rate_kg_s".to_string(),
-        draw_flow_rate_kg_s.into(),
-    );
-    raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-    EquipmentConfig {
-        name: "RWH".to_string(),
-        ochre_class: "Resistance Water Heater".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
+    EquipmentConfig::from_typed(
+        "RWH".to_string(),
+        "Resistance Water Heater".to_string(),
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(setpoint_c),
+            deadband_c: Some(deadband_c),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(initial_tank_temp_c),
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(draw_flow_rate_kg_s),
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+        },
+    )
 }
 
 fn gas_config(
@@ -97,25 +109,36 @@ fn gas_config(
     initial_tank_temp_c: f64,
     draw_flow_rate_kg_s: f64,
 ) -> EquipmentConfig {
-    let mut raw: HashMap<String, hares_equipment::config::ConfigValue> = HashMap::new();
-    raw.insert("setpoint_c".to_string(), setpoint_c.into());
-    raw.insert("deadband_c".to_string(), deadband_c.into());
-    raw.insert(
-        "initial_tank_temp_c".to_string(),
-        initial_tank_temp_c.into(),
-    );
-    raw.insert(
-        "draw_flow_rate_kg_s".to_string(),
-        draw_flow_rate_kg_s.into(),
-    );
-    raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-    // No standing pilot; isolates burner power from fuel_input_w.
-    raw.insert("pilot_power_w".to_string(), 0.0.into());
-    EquipmentConfig {
-        name: "GWH".to_string(),
-        ochre_class: "Gas Water Heater".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
+    EquipmentConfig::from_typed(
+        "GWH".to_string(),
+        "Gas Water Heater".to_string(),
+        GasWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            fuel_type: FuelType::Gas,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(setpoint_c),
+            deadband_c: Some(deadband_c),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(initial_tank_temp_c),
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(draw_flow_rate_kg_s),
+            pilot_power_w: Some(0.0),
+            flue_loss_fraction: None,
+            skin_loss_fraction: None,
+            ignition_type: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+        },
+    )
 }
 
 /// Step the WH, resetting port accumulators each call so readings are per-step.
@@ -315,23 +338,34 @@ fn gas_wh_consumes_gas_not_electricity() {
 fn energy_conservation_over_draw_cycle() {
     let env = make_env(21.0);
 
-    let mut raw: HashMap<String, hares_equipment::config::ConfigValue> = HashMap::new();
-    raw.insert("setpoint_c".to_string(), 80.0.into()); // high setpoint — element runs all 30 steps
-    raw.insert("deadband_c".to_string(), 2.0.into());
-    // Start above mains temp (15°C) so all draw steps cool the tank —
-    // avoids the cold-start regime where incoming water heats the tank.
-    raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
-    raw.insert("draw_flow_rate_kg_s".to_string(), 0.02.into());
-    raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-    // Single node for tractable energy accounting.
-    raw.insert("tank_nodes".to_string(), 1.0.into());
-    // Zero UA to isolate electrical input vs draw loss.
-    raw.insert("ua_w_per_k".to_string(), 0.0.into());
-    let cfg = EquipmentConfig {
-        name: "RWH".to_string(),
-        ochre_class: "Resistance Water Heater".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    let cfg = EquipmentConfig::from_typed(
+        "RWH".to_string(),
+        "Resistance Water Heater".to_string(),
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: Some(0.0),
+            setpoint_c: Some(80.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(20.0),
+            tank_nodes: Some(1),
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.02),
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+        },
+    );
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -456,18 +490,34 @@ fn max_tank_temp_safety_limit() {
     let env = make_env(21.0);
     let max_temp_c = 55.0_f64;
 
-    let mut raw: HashMap<String, hares_equipment::config::ConfigValue> = HashMap::new();
-    raw.insert("setpoint_c".to_string(), 80.0.into()); // above max
-    raw.insert("deadband_c".to_string(), 2.0.into());
-    raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
-    raw.insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
-    raw.insert("max_tank_temp_c".to_string(), max_temp_c.into());
-    raw.insert("tank_nodes".to_string(), 1.0.into());
-    let cfg = EquipmentConfig {
-        name: "RWH".to_string(),
-        ochre_class: "Resistance Water Heater".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    let cfg = EquipmentConfig::from_typed(
+        "RWH".to_string(),
+        "Resistance Water Heater".to_string(),
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(80.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(max_temp_c),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: Some(1),
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+        },
+    );
 
     let mut wh = ResistanceWH::new(cfg.clone());
     wh.init(&cfg, &env).unwrap();
@@ -651,21 +701,34 @@ fn resistance_config_with_ramp(
     initial_temp_c: f64,
     ramp_rate_c_per_min: f64,
 ) -> EquipmentConfig {
-    let mut raw: HashMap<String, hares_equipment::config::ConfigValue> = HashMap::new();
-    raw.insert("setpoint_c".to_string(), setpoint_c.into());
-    raw.insert("deadband_c".to_string(), deadband_c.into());
-    raw.insert("initial_tank_temp_c".to_string(), initial_temp_c.into());
-    raw.insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
-    raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-    raw.insert(
-        "max_setpoint_ramp_rate_c_per_min".to_string(),
-        ramp_rate_c_per_min.into(),
-    );
-    EquipmentConfig {
-        name: "RWH".to_string(),
-        ochre_class: "Resistance Water Heater".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
+    EquipmentConfig::from_typed(
+        "RWH".to_string(),
+        "Resistance Water Heater".to_string(),
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(setpoint_c),
+            deadband_c: Some(deadband_c),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(initial_temp_c),
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: Some(ramp_rate_c_per_min),
+            element_priority_mode: None,
+        },
+    )
 }
 
 #[test]

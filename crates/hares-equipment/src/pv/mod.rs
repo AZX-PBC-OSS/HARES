@@ -834,7 +834,7 @@ mod tests {
     use super::{
         DEFAULT_GAMMA_PER_C, DEFAULT_NOCT_C, DEFAULT_SYSTEM_LOSSES_FRACTION, Equipment,
         EquipmentConfig, ModuleType, NOCT_REFERENCE_IRRADIANCE_W_M2, NOCT_REFERENCE_TEMP_C, PV,
-        cell_temperature_noct_wind, register_with_registry, surface_id_for_orientation,
+        PvConfig, cell_temperature_noct_wind, register_with_registry, surface_id_for_orientation,
     };
 
     fn env_with_surfaces(
@@ -890,32 +890,35 @@ mod tests {
         }
     }
 
+    fn base_pv_typed_config() -> PvConfig {
+        PvConfig {
+            equipment_id: Some(29),
+            zone_id: None,
+            capacity_kw: 5.0,
+            tilt_deg: Some(30.0),
+            azimuth_deg: Some(180.0),
+            module_type: None,
+            noct_c: Some(DEFAULT_NOCT_C),
+            system_losses_fraction: None,
+            inverter_efficiency: Some(0.96),
+            inverter_capacity_kw: None,
+            power_factor: None,
+            surface_resolution_deg: Some(5.0),
+        }
+    }
+
     fn config_single() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("equipment_id".to_string(), 29.0.into());
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
-        raw.insert("inverter_efficiency".to_string(), 0.96.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        EquipmentConfig::raw("PV South".to_string(), "PV".to_string(), raw)
+        EquipmentConfig::from_typed(
+            "PV South".to_string(),
+            "PV".to_string(),
+            base_pv_typed_config(),
+        )
     }
 
     fn config_single_with_losses(system_losses_fraction: f64) -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("equipment_id".to_string(), 29.0.into());
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
-        raw.insert("inverter_efficiency".to_string(), 0.96.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert(
-            "system_losses_fraction".to_string(),
-            system_losses_fraction.into(),
-        );
-        EquipmentConfig::raw("PV South".to_string(), "PV".to_string(), raw)
+        let mut cfg = base_pv_typed_config();
+        cfg.system_losses_fraction = Some(system_losses_fraction);
+        EquipmentConfig::from_typed("PV South".to_string(), "PV".to_string(), cfg)
     }
 
     fn approx_eq(a: f64, b: f64) {
@@ -1177,14 +1180,9 @@ mod tests {
     fn wind_cooling_increases_pv_output() {
         // Higher wind → lower cell temp → less temperature derating → more power.
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
-        let mut raw = HashMap::new();
-        raw.insert("equipment_id".to_string(), 1.0.into());
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        let cfg = EquipmentConfig::raw("PV Wind".to_string(), "PV".to_string(), raw);
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(1);
+        let cfg = EquipmentConfig::from_typed("PV Wind".to_string(), "PV".to_string(), cfg);
 
         // Calm day (0.5 m/s)
         let env_calm = env_with_surfaces_full(
@@ -1241,16 +1239,10 @@ mod tests {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         // 5 kW DC array at STC, 96% efficient inverter would give ~4.8 kW AC.
         // Set inverter_capacity_kw = 3.0 to force clipping.
-        let mut raw = HashMap::new();
-        raw.insert("equipment_id".to_string(), 1.0.into());
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
-        raw.insert("inverter_efficiency".to_string(), 0.96.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("inverter_capacity_kw".to_string(), 3.0.into());
-        let cfg = EquipmentConfig::raw("PV Clip".to_string(), "PV".to_string(), raw);
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(1);
+        cfg.inverter_capacity_kw = Some(3.0);
+        let cfg = EquipmentConfig::from_typed("PV Clip".to_string(), "PV".to_string(), cfg);
 
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1287,16 +1279,11 @@ mod tests {
     #[test]
     fn power_factor_produces_reactive_power() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
-        let mut raw = HashMap::new();
-        raw.insert("equipment_id".to_string(), 2.0.into());
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
-        raw.insert("inverter_efficiency".to_string(), 1.0.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("power_factor".to_string(), 0.9.into());
-        let cfg = EquipmentConfig::raw("PV Q".to_string(), "PV".to_string(), raw);
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(2);
+        cfg.inverter_efficiency = Some(1.0);
+        cfg.power_factor = Some(0.9);
+        let cfg = EquipmentConfig::from_typed("PV Q".to_string(), "PV".to_string(), cfg);
 
         // At 25°C cell temp, 1000 W/m² → DC = 5 kW, AC = 5 kW (eff=1.0, T_derate at T_ref).
         let env = env_with_surfaces(
@@ -1337,17 +1324,12 @@ mod tests {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
 
         let make_cfg = |module_type: &str| {
-            let mut raw = HashMap::new();
-            raw.insert("equipment_id".to_string(), 3.0.into());
-            raw.insert("capacity_kw".to_string(), 5.0.into());
-            raw.insert("tilt_deg".to_string(), 30.0.into());
-            raw.insert("azimuth_deg".to_string(), 180.0.into());
-            raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
-            raw.insert("inverter_efficiency".to_string(), 1.0.into());
-            raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-            raw.insert("system_losses_fraction".to_string(), 0.0.into());
-            raw.insert("ModuleType".to_string(), module_type.into());
-            EquipmentConfig::raw(format!("PV {module_type}"), "PV".to_string(), raw)
+            let mut cfg = base_pv_typed_config();
+            cfg.equipment_id = Some(3);
+            cfg.inverter_efficiency = Some(1.0);
+            cfg.system_losses_fraction = Some(0.0);
+            cfg.module_type = Some(module_type.to_string());
+            EquipmentConfig::from_typed(format!("PV {module_type}"), "PV".to_string(), cfg)
         };
 
         // T_amb = 31.25°C → T_cell = 31.25 + 1000*(47-20)/800 = 65°C (40°C above T_ref).
@@ -1856,14 +1838,10 @@ mod tests {
     fn power_setpoint_active_power_limits_generation() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         // 5 kW array at STC, no losses, inverter eff=1.0 → ~5 kW unconstrained.
-        let mut raw = HashMap::new();
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("inverter_efficiency".to_string(), 1.0.into());
-        raw.insert("system_losses_fraction".to_string(), 0.0.into());
-        let cfg = EquipmentConfig::raw("PV Setpoint".to_string(), "PV".to_string(), raw);
+        let mut cfg = base_pv_typed_config();
+        cfg.inverter_efficiency = Some(1.0);
+        cfg.system_losses_fraction = Some(0.0);
+        let cfg = EquipmentConfig::from_typed("PV Setpoint".to_string(), "PV".to_string(), cfg);
 
         // Use wind=1.0 and T_amb=25°C so T_cell = 25 + 1000*(47-20)/800 = 58.75°C.
         // Temperature derating is slight but the unconstrained AC output is well above 2 kW.
@@ -1997,18 +1975,13 @@ mod tests {
     #[test]
     fn inverter_capacity_4kw_clips_5kw_panels() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
-        let mut raw = HashMap::new();
-        raw.insert("equipment_id".to_string(), 1.0.into());
-        raw.insert("capacity_kw".to_string(), 5.0.into());
-        raw.insert("tilt_deg".to_string(), 30.0.into());
-        raw.insert("azimuth_deg".to_string(), 180.0.into());
-        raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
-        // Perfect inverter efficiency so DC→AC conversion does not reduce below 4 kW.
-        raw.insert("inverter_efficiency".to_string(), 1.0.into());
-        raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        raw.insert("system_losses_fraction".to_string(), 0.0.into());
-        raw.insert("inverter_capacity_kw".to_string(), 4.0.into());
-        let cfg = EquipmentConfig::raw("PV 5kW/4kW inverter".to_string(), "PV".to_string(), raw);
+        let mut cfg = base_pv_typed_config();
+        cfg.equipment_id = Some(1);
+        cfg.inverter_efficiency = Some(1.0);
+        cfg.system_losses_fraction = Some(0.0);
+        cfg.inverter_capacity_kw = Some(4.0);
+        let cfg =
+            EquipmentConfig::from_typed("PV 5kW/4kW inverter".to_string(), "PV".to_string(), cfg);
 
         // Cold ambient (-10 °C) keeps cell temp well below 25 °C, giving positive
         // temp derating so DC > nameplate 5 kW and definitely above the 4 kW cap.

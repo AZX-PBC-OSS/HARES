@@ -908,15 +908,21 @@ mod tests {
         let mut typed: crate::GasWaterHeaterConfig = config().typed().unwrap();
         for (k, v) in extras {
             match (*k, v) {
-                ("setpoint_c", Some(crate::config::ConfigValue::Float(x))) => typed.setpoint_c = Some(*x),
+                ("setpoint_c", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.setpoint_c = Some(*x)
+                }
                 ("setpoint_c", None) => typed.setpoint_c = None,
-                ("deadband_c", Some(crate::config::ConfigValue::Float(x))) => typed.deadband_c = Some(*x),
+                ("deadband_c", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.deadband_c = Some(*x)
+                }
                 ("deadband_c", None) => typed.deadband_c = None,
                 ("initial_tank_temp_c", Some(crate::config::ConfigValue::Float(x))) => {
                     typed.initial_tank_temp_c = Some(*x)
                 }
                 ("initial_tank_temp_c", None) => typed.initial_tank_temp_c = None,
-                ("pilot_power_w", Some(crate::config::ConfigValue::Float(x))) => typed.pilot_power_w = Some(*x),
+                ("pilot_power_w", Some(crate::config::ConfigValue::Float(x))) => {
+                    typed.pilot_power_w = Some(*x)
+                }
                 ("pilot_power_w", None) => typed.pilot_power_w = None,
                 ("flue_loss_fraction", Some(crate::config::ConfigValue::Float(x))) => {
                     typed.flue_loss_fraction = Some(*x)

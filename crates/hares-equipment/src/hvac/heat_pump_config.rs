@@ -80,6 +80,30 @@ pub struct HeatPumpHeaterConfig {
     /// Fan power per CFM of airflow (W/CFM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w_per_cfm: Option<f64>,
+    /// Heating setpoint used by the HVAC thermostat FSM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    /// Cooling setpoint used by the HVAC thermostat FSM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooling_setpoint_c: Option<f64>,
+    /// Thermostat hysteresis around the setpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hysteresis_c: Option<f64>,
+    /// Heat-pump lockout below this outdoor temperature [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hp_lockout_temp_c: Option<f64>,
+    /// Electric-resistance lockout below this outdoor temperature [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub er_lockout_temp_c: Option<f64>,
+    /// EnergyPlus supplemental-ER upper OAT cap [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_oat_supplemental_c: Option<f64>,
+    /// ER call threshold offset below the heating setpoint [C].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub er_setpoint_offset_c: Option<f64>,
+    /// ER hard lockout duration after a setpoint raise [s].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub er_hard_lockout_time_s: Option<f64>,
     /// Duct configuration.
     #[serde(flatten)]
     pub duct: DuctConfig,
@@ -133,6 +157,14 @@ impl Default for HeatPumpHeaterConfig {
             shr: None,
             fan_power_w: None,
             fan_power_w_per_cfm: None,
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            hysteresis_c: None,
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
             duct: DuctConfig::default(),
             biquadratic_x1_min: None,
             biquadratic_x1_max: None,
@@ -192,6 +224,38 @@ impl HeatPumpHeaterConfig {
                     "HeatPumpHeaterConfig: backup_capacity_w must be finite and non-negative, got {v}"
                 )));
             }
+        }
+        for (name, value) in [
+            ("heating_setpoint_c", self.heating_setpoint_c),
+            ("cooling_setpoint_c", self.cooling_setpoint_c),
+            ("hysteresis_c", self.hysteresis_c),
+            ("hp_lockout_temp_c", self.hp_lockout_temp_c),
+            ("er_lockout_temp_c", self.er_lockout_temp_c),
+            ("max_oat_supplemental_c", self.max_oat_supplemental_c),
+            ("er_setpoint_offset_c", self.er_setpoint_offset_c),
+            ("er_hard_lockout_time_s", self.er_hard_lockout_time_s),
+        ] {
+            if let Some(v) = value
+                && !v.is_finite()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "HeatPumpHeaterConfig: {name} must be finite, got {v}"
+                )));
+            }
+        }
+        if let Some(v) = self.hysteresis_c
+            && v < 0.0
+        {
+            return Err(HaresError::Equipment(
+                "HeatPumpHeaterConfig: hysteresis_c must be >= 0".to_string(),
+            ));
+        }
+        if let Some(v) = self.er_hard_lockout_time_s
+            && v < 0.0
+        {
+            return Err(HaresError::Equipment(
+                "HeatPumpHeaterConfig: er_hard_lockout_time_s must be >= 0".to_string(),
+            ));
         }
         Ok(())
     }
@@ -323,6 +387,14 @@ mod tests {
             shr: Some(0.75),
             fan_power_w: Some(300.0),
             fan_power_w_per_cfm: None,
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            hysteresis_c: Some(1.0),
+            hp_lockout_temp_c: Some(-17.8),
+            er_lockout_temp_c: Some(4.4),
+            max_oat_supplemental_c: Some(21.0),
+            er_setpoint_offset_c: Some(1.6),
+            er_hard_lockout_time_s: Some(600.0),
             duct: DuctConfig::default(),
             biquadratic_x1_min: Some(12.0),
             biquadratic_x1_max: Some(24.0),

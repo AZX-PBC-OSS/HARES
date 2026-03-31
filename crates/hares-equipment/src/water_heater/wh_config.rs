@@ -166,6 +166,7 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
     pub element_power_w: Option<f64>,
+    pub max_setpoint_ramp_rate_c_per_min: Option<f64>,
     pub element_priority_mode: Option<String>,
 }
 
@@ -249,6 +250,12 @@ impl ElectricResistanceWaterHeaterConfig {
         check_finite(
             "resistance_wh: element_power_w",
             self.element_power_w,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "resistance_wh: max_setpoint_ramp_rate_c_per_min",
+            self.max_setpoint_ramp_rate_c_per_min,
             0.0,
             false,
         )?;
@@ -562,6 +569,7 @@ mod tests {
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
             element_power_w: Some(4_500.0),
+            max_setpoint_ramp_rate_c_per_min: Some(3.0),
             element_priority_mode: None,
         };
         let ec = EquipmentConfig::from_typed(

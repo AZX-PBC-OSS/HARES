@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use super::apply_jacket_r_value;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
@@ -23,17 +22,12 @@ use super::hpwh_compressor::{
     DEFAULT_COP_CURVE, DEFAULT_DEADBAND_C, DEFAULT_FAN_POWER_W, DEFAULT_LOST_HEAT_FRACTION,
     DEFAULT_MAX_AMBIENT_TEMP_C, DEFAULT_MIN_AMBIENT_TEMP_C, DEFAULT_MIN_ON_TIME_S,
     DEFAULT_PARASITIC_POWER_W, DEFAULT_RATED_COP, DEFAULT_SHR, DEFAULT_TANK_TEMP_BOUNDS_C,
-    DEFAULT_ZONE_TEMP_BOUNDS_C, LOW_POWER_MAX_AMBIENT_TEMP_C, LOW_POWER_MIN_AMBIENT_TEMP_C,
+    DEFAULT_ZONE_TEMP_BOUNDS_C,
 };
 use super::tank::{StratifiedTank, StratifiedTankConfig};
 use super::wh_config::HeatPumpWaterHeaterConfig;
-use super::{
-    WaterHeaterZip, hysteresis_call, parse_usize, resolve_draw_rate_kg_s,
-    weighted_average_tank_temp,
-};
-use crate::hvac::helpers::{
-    equipment_id_from_config, first_f64, loop_id_from_config, zone_id_from_config,
-};
+use super::{WaterHeaterZip, hysteresis_call, parse_usize, weighted_average_tank_temp};
+use crate::hvac::helpers::{equipment_id_from_config, loop_id_from_config, zone_id_from_config};
 
 use super::{
     DEFAULT_CONDUCTIVITY_W_M_K, DEFAULT_MAX_TANK_TEMP_C, DEFAULT_SETPOINT_C,
@@ -57,9 +51,12 @@ struct HpwhState {
     tank_avg_temp_c: f64,
     cop: f64,
     cap_mult: f64,
+    electric_kw: f64,
     compressor_power_w: f64,
     backup_element_power_w: f64,
     zone_heat_extraction_w: f64,
+    wall_sensible_gain_w: f64,
+    unmet_load_w: f64,
     draw_flow_rate_kg_s: f64,
     /// Elapsed time (s) since compressor last turned on; `None` if currently off.
     compressor_on_since_s: Option<f64>,
@@ -414,7 +411,9 @@ impl HeatPumpWH {
 
         self.tempering_valve_setpoint_c = c.tempering_valve_setpoint_c.filter(|&t| t > 0.0);
         self.capacity_curve = BiquadraticCurve {
-            coeffs: c.capacity_biquadratic_coeffs.unwrap_or(DEFAULT_CAPACITY_CURVE),
+            coeffs: c
+                .capacity_biquadratic_coeffs
+                .unwrap_or(DEFAULT_CAPACITY_CURVE),
             x1_bounds: self.cop_curve.x1_bounds,
             x2_bounds: self.cop_curve.x2_bounds,
         };
@@ -424,11 +423,18 @@ impl HeatPumpWH {
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
 
         self.shr = c.shr.unwrap_or(DEFAULT_SHR);
-        self.lost_heat_fraction = c.lost_heat_fraction.unwrap_or(DEFAULT_LOST_HEAT_FRACTION);
-        self.wall_heat_fraction = c.wall_heat_fraction.unwrap_or_else(|| match c.zone_type.as_deref() {
-            Some("conditioned") => 0.5,
-            _ => 0.0,
-        });
+        self.lost_heat_fraction =
+            c.lost_heat_fraction
+                .unwrap_or_else(|| match c.zone_type.as_deref() {
+                    Some("conditioned") => 0.25,
+                    _ => DEFAULT_LOST_HEAT_FRACTION,
+                });
+        self.wall_heat_fraction =
+            c.wall_heat_fraction
+                .unwrap_or_else(|| match c.zone_type.as_deref() {
+                    Some("conditioned") => 0.5,
+                    _ => 0.0,
+                });
         self.fan_power_w = c.fan_power_w.unwrap_or(DEFAULT_FAN_POWER_W);
         self.parasitic_power_w = c.parasitic_power_w.unwrap_or(DEFAULT_PARASITIC_POWER_W);
         self.backup_efficiency = c.backup_efficiency.unwrap_or(DEFAULT_BACKUP_EFFICIENCY);
@@ -754,11 +760,11 @@ impl Equipment for HeatPumpWH {
         self.telemetry.set(tk::COP, cop);
         self.telemetry.set(tk::CAP_MULT, cap_mult);
         self.telemetry
+            .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
+        self.telemetry
             .set(tk::COMPRESSOR_POWER_W, compressor_power_w);
         self.telemetry
             .set(tk::BACKUP_ELEMENT_POWER_W, backup_power_w);
-        self.telemetry
-            .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
         self.telemetry
             .set(tk::ZONE_HEAT_EXTRACTION_W, zone_heat_extraction_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
@@ -821,6 +827,7 @@ impl Equipment for HeatPumpWH {
             tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
             cop: self.telemetry.get(tk::COP).unwrap_or(0.0),
             cap_mult: self.telemetry.get(tk::CAP_MULT).unwrap_or(1.0),
+            electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
             compressor_power_w: self.telemetry.get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0),
             backup_element_power_w: self
                 .telemetry
@@ -830,6 +837,8 @@ impl Equipment for HeatPumpWH {
                 .telemetry
                 .get(tk::ZONE_HEAT_EXTRACTION_W)
                 .unwrap_or(0.0),
+            wall_sensible_gain_w: self.telemetry.get(tk::WALL_SENSIBLE_GAIN_W).unwrap_or(0.0),
+            unmet_load_w: self.telemetry.get(tk::UNMET_LOAD_W).unwrap_or(0.0),
             draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
             compressor_on_since_s: self.compressor_on_since_s,
             compressor_off_since_s: self.compressor_off_since_s,
@@ -868,12 +877,17 @@ impl Equipment for HeatPumpWH {
             .insert(tk::TANK_AVG_TEMP_C, decoded.tank_avg_temp_c);
         self.telemetry.insert(tk::COP, decoded.cop);
         self.telemetry.insert(tk::CAP_MULT, decoded.cap_mult);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
             .insert(tk::COMPRESSOR_POWER_W, decoded.compressor_power_w);
         self.telemetry
             .insert(tk::BACKUP_ELEMENT_POWER_W, decoded.backup_element_power_w);
         self.telemetry
             .insert(tk::ZONE_HEAT_EXTRACTION_W, decoded.zone_heat_extraction_w);
+        self.telemetry
+            .insert(tk::WALL_SENSIBLE_GAIN_W, decoded.wall_sensible_gain_w);
+        self.telemetry
+            .insert(tk::UNMET_LOAD_W, decoded.unmet_load_w);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -1033,6 +1047,12 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
                 .to_string(),
         },
         TelemetryField {
+            name: tk::ELECTRIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Total electrical power draw (compressor + backup + fan + parasitic)"
+                .to_string(),
+        },
+        TelemetryField {
             name: tk::COMPRESSOR_POWER_W.to_string(),
             unit: "W".to_string(),
             description: "Compressor electric power".to_string(),
@@ -1107,7 +1127,7 @@ fn parse_curve_coeffs(config: &EquipmentConfig, key: &str) -> crate::Result<Opti
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -1116,7 +1136,6 @@ mod tests {
     };
 
     use super::HeatPumpWH;
-    use crate::config::ConfigPayload;
     use crate::{Equipment, EquipmentConfig, EquipmentTypedConfig, HeatPumpWaterHeaterConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -1161,49 +1180,56 @@ mod tests {
         }
     }
 
-    fn config() -> EquipmentConfig {
-        let mut cfg = EquipmentConfig::from_typed(
+    pub(super) fn base_typed_config() -> HeatPumpWaterHeaterConfig {
+        HeatPumpWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: Some(2.5),
+            backup_element_power_w: Some(4500.0),
+            ua_w_per_k: None,
+            setpoint_c: Some(52.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            compressor_power_w: Some(1200.0),
+            backup_enable_offset_c: Some(3.0),
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: Some(0.0),
+            min_off_time_s: Some(0.0),
+            hp_only_mode: Some(false),
+            element_hp_control_mode: None,
+            fan_power_w: Some(35.0),
+            parasitic_power_w: Some(1.0),
+            backup_efficiency: Some(1.0),
+            shr: Some(0.88),
+            lost_heat_fraction: Some(0.0),
+            wall_heat_fraction: Some(0.0),
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            performance_adjustment: Some(1.0),
+            zone_type: Some("conditioned".to_string()),
+            first_hour_rating_m3: None,
+        }
+    }
+
+    pub(super) fn equipment_config(typed: HeatPumpWaterHeaterConfig) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
             "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            HeatPumpWaterHeaterConfig {
-                equipment_id: None,
-                zone_id: Some(1),
-                loop_id: None,
-                tank_volume_m3: None,
-                tank_height_m: None,
-                cop: Some(2.5),
-                backup_element_power_w: Some(4500.0),
-                ua_w_per_k: None,
-                setpoint_c: Some(52.0),
-                deadband_c: Some(2.0),
-                max_tank_temp_c: None,
-                initial_tank_temp_c: Some(40.0),
-                tank_nodes: None,
-                tempering_valve_setpoint_c: None,
-                avg_water_draw_l_per_day: None,
-                draw_flow_rate_kg_s: Some(0.0),
-                compressor_power_w: Some(1200.0),
-                backup_enable_offset_c: Some(3.0),
-                min_ambient_temp_c: None,
-                max_ambient_temp_c: None,
-                min_on_time_s: None,
-                min_off_time_s: None,
-                hp_only_mode: None,
-                element_hp_control_mode: None,
-                fan_power_w: None,
-                parasitic_power_w: None,
-                backup_efficiency: None,
-                shr: None,
-                lost_heat_fraction: None,
-                wall_heat_fraction: None,
-                capacity_biquadratic_coeffs: None,
-                cop_biquadratic_coeffs: None,
-                performance_adjustment: None,
-                zone_type: None,
-                first_hour_rating_m3: None,
-            },
-        );
-        cfg
+            HeatPumpWaterHeaterConfig::equipment_type_name().to_string(),
+            typed,
+        )
+    }
+
+    pub(super) fn config() -> EquipmentConfig {
+        equipment_config(base_typed_config())
     }
 
     #[test]
@@ -1245,11 +1271,7 @@ mod tests {
             zone_type: None,
             first_hour_rating_m3: None,
         };
-        let config = EquipmentConfig::from_typed(
-            "HPWH".to_string(),
-            HeatPumpWaterHeaterConfig::equipment_type_name().to_string(),
-            typed,
-        );
+        let config = equipment_config(typed);
         let env = env(20.0);
         let mut eq = HeatPumpWH::new(config.clone());
         eq.init(&config, &env).expect("typed init should succeed");
@@ -1388,19 +1410,10 @@ mod tests {
     /// rather than concentrated at a single node.
     #[test]
     fn condenser_heat_distributed_across_multiple_nodes_for_12_node_tank() {
-        let mut cfg_map = std::collections::HashMap::new();
-        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
-        cfg_map.insert("deadband_c".to_string(), 2.0.into());
-        cfg_map.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        cfg_map.insert("compressor_power_w".to_string(), 1200.0.into());
-        cfg_map.insert("backup_element_power_w".to_string(), 4500.0.into());
-        cfg_map.insert("backup_enable_offset_c".to_string(), 3.0.into());
-        cfg_map.insert("tank_nodes".to_string(), 12.0.into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH12".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            cfg_map,
-        );
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(40.0);
+        typed.tank_nodes = Some(12);
+        let cfg = equipment_config(typed);
 
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env(24.0)).unwrap();
@@ -1458,20 +1471,9 @@ mod tests {
     #[test]
     fn max_tank_temp_safety_forces_off_when_exceeded() {
         // Set a very low max_tank_temp_c so the 40°C initial temp is already above it.
-        let mut cfg_map = std::collections::HashMap::new();
-        cfg_map.insert("setpoint_c".to_string(), 52.0.into());
-        cfg_map.insert("deadband_c".to_string(), 2.0.into());
-        cfg_map.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        cfg_map.insert("compressor_power_w".to_string(), 1200.0.into());
-        cfg_map.insert("backup_element_power_w".to_string(), 4500.0.into());
-        cfg_map.insert("backup_enable_offset_c".to_string(), 3.0.into());
-        // Max tank temp below initial temp triggers safety immediately.
-        cfg_map.insert("max_tank_temp_c".to_string(), 35.0.into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            cfg_map,
-        );
+        let mut typed = base_typed_config();
+        typed.max_tank_temp_c = Some(35.0);
+        let cfg = equipment_config(typed);
 
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env(24.0)).unwrap();
@@ -1495,23 +1497,13 @@ mod tests {
 
         // Build two HPWHs: one with composite (default), one where we force single-node
         // by making thermostat_upper_node == thermostat_node.
-        let mut cfg_composite = config();
-        // tank_nodes=6, thermostat_node defaults to 5 (bottom), thermostat_upper_node=0 (top)
-        cfg_composite
-            .raw_config_mut()
-            .unwrap()
-            .insert("min_on_time_s".to_string(), 0.0.into()); // disable min-on for this test
+        let mut cfg_composite = base_typed_config();
+        cfg_composite.min_on_time_s = Some(0.0);
+        let cfg_composite = equipment_config(cfg_composite);
 
-        let mut cfg_single = config();
-        // Force upper == lower so composite collapses to single-node.
-        cfg_single
-            .raw_config_mut()
-            .unwrap()
-            .insert("thermostat_upper_node".to_string(), 5.0.into());
-        cfg_single
-            .raw_config_mut()
-            .unwrap()
-            .insert("min_on_time_s".to_string(), 0.0.into());
+        let mut cfg_single = base_typed_config();
+        cfg_single.min_on_time_s = Some(0.0);
+        let cfg_single = equipment_config(cfg_single);
 
         let e = env(24.0);
 
@@ -1520,6 +1512,7 @@ mod tests {
 
         let mut eq_single = HeatPumpWH::new(cfg_single.clone());
         eq_single.init(&cfg_single, &e).unwrap();
+        eq_single.thermostat_upper_node = eq_single.thermostat_node;
 
         // Set tank profile: upper nodes hot (above setpoint), lower nodes cold.
         // With composite: control_temp = 0.75 * hot_upper + 0.25 * cold_lower (> setpoint → off).
@@ -1573,13 +1566,10 @@ mod tests {
     /// OCHRE WaterHeater.py:662,671.
     #[test]
     fn fan_and_parasitic_appear_in_electrical() {
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("fan_power_w".to_string(), 35.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("parasitic_power_w".to_string(), 2.0.into());
+        let mut typed = base_typed_config();
+        typed.fan_power_w = Some(35.0);
+        typed.parasitic_power_w = Some(2.0);
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env(24.0)).unwrap();
 
@@ -1603,13 +1593,10 @@ mod tests {
     /// OCHRE WaterHeater.py:672-674.
     #[test]
     fn shr_produces_latent_gain_when_humidity_gap_exists() {
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("shr".to_string(), 0.88.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("lost_heat_fraction".to_string(), 0.0.into());
+        let mut typed = base_typed_config();
+        typed.shr = Some(0.88);
+        typed.lost_heat_fraction = Some(0.0);
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env(24.0)).unwrap();
 
@@ -1633,14 +1620,9 @@ mod tests {
     /// even when the tank has risen above setpoint.
     #[test]
     fn hpwh_min_on_time_prevents_early_shutdown() {
-        let mut cfg = config();
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("min_on_time_s".to_string(), 120.0.into());
-        // Raise max_tank_temp_c high enough that the safety cutout won't interfere.
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let mut typed = base_typed_config();
+        typed.min_on_time_s = Some(120.0);
+        let cfg = equipment_config(typed);
 
         let e = env(24.0);
         let mut eq = HeatPumpWH::new(cfg.clone());
@@ -1686,14 +1668,10 @@ mod tests {
     /// compressor_on_since_s increments each step while running, then resets to None when off.
     #[test]
     fn hpwh_min_on_time_timer_lifecycle() {
-        let mut cfg = config();
+        let mut typed = base_typed_config();
         // Set min_on_time_s well above test duration so the compressor never self-stops.
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("min_on_time_s".to_string(), 9999.0.into());
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        typed.min_on_time_s = Some(9999.0);
+        let cfg = equipment_config(typed);
 
         let e = env(24.0);
         let mut eq = HeatPumpWH::new(cfg.clone());
@@ -1740,16 +1718,10 @@ mod tests {
     /// the compressor off immediately regardless of how recently it started.
     #[test]
     fn hpwh_safety_override_bypasses_min_on_time() {
-        let mut cfg = config();
+        let mut typed = base_typed_config();
         // Long min-on-time so normal logic would keep the compressor running.
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("min_on_time_s".to_string(), 600.0.into());
-        // Set max_tank_temp_c just above initial tank temp (40°C) so the safety
-        // cutout triggers as soon as we raise the tank a little.
-        cfg.raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        typed.min_on_time_s = Some(600.0);
+        let cfg = equipment_config(typed);
 
         let e = env(24.0);
         let mut eq = HeatPumpWH::new(cfg.clone());
@@ -1792,34 +1764,13 @@ mod tests {
     /// heat than a curve that returns cap_mult < 1.0 at the same conditions.
     #[test]
     fn hpwh_capacity_curve_modulates_heat_delivery() {
-        // Default capacity curve at wet_bulb=14°C, tank_avg≈40°C gives cap_mult < 1.0.
-        // Verify by computing it: DEFAULT_CAPACITY_CURVE = [0.563, 0.0437, 0.000039, 0.0055, -0.000148, -0.000145]
-        // At wb=14, tank=40: 0.563 + 0.0437*14 + 0.000039*196 + 0.0055*40 + (-0.000148)*1600 + (-0.000145)*560
-        //   ≈ 0.563 + 0.612 + 0.0076 + 0.22 - 0.237 - 0.0812 ≈ 1.084  (clamped by curves, so let's use as-is)
-        // To guarantee cap_mult < 1.0 at test conditions, use a curve with constant 0.8.
-        // Constant biquadratic curve that always returns 0.8: coeffs = [0.8, 0, 0, 0, 0, 0].
-        let low_curve_str = "0.8, 0.0, 0.0, 0.0, 0.0, 0.0";
-        let unit_curve_str = "1.0, 0.0, 0.0, 0.0, 0.0, 0.0";
+        let mut low_typed = base_typed_config();
+        low_typed.capacity_biquadratic_coeffs = Some([0.8, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let cfg_low = equipment_config(low_typed);
 
-        let mut cfg_low = config();
-        cfg_low
-            .raw_config_mut()
-            .unwrap()
-            .insert("capacity_curve_coeffs".to_string(), low_curve_str.into());
-        cfg_low
-            .raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
-
-        let mut cfg_unit = config();
-        cfg_unit
-            .raw_config_mut()
-            .unwrap()
-            .insert("capacity_curve_coeffs".to_string(), unit_curve_str.into());
-        cfg_unit
-            .raw_config_mut()
-            .unwrap()
-            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        let mut unit_typed = base_typed_config();
+        unit_typed.capacity_biquadratic_coeffs = Some([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let cfg_unit = equipment_config(unit_typed);
 
         let e = env(24.0);
 
@@ -1883,20 +1834,17 @@ mod tests {
     fn lost_heat_fraction_reduces_zone_gains() {
         let e = env_with_wet_bulb(24.0, 14.0);
 
-        let mut cfg0 = config();
-        cfg0.raw_config_mut()
-            .unwrap()
-            .insert("lost_heat_fraction".to_string(), 0.0.into());
+        let mut typed0 = base_typed_config();
+        typed0.lost_heat_fraction = Some(0.0);
+        let cfg0 = equipment_config(typed0);
         let mut eq0 = HeatPumpWH::new(cfg0.clone());
         eq0.init(&cfg0, &e).unwrap();
         let mut p0 = ports();
         eq0.step(&e, Duration::from_secs(60), &mut p0).unwrap();
 
-        let mut cfg50 = config();
-        cfg50
-            .raw_config_mut()
-            .unwrap()
-            .insert("lost_heat_fraction".to_string(), 0.5.into());
+        let mut typed50 = base_typed_config();
+        typed50.lost_heat_fraction = Some(0.5);
+        let cfg50 = equipment_config(typed50);
         let mut eq50 = HeatPumpWH::new(cfg50.clone());
         eq50.init(&cfg50, &e).unwrap();
         let mut p50 = ports();
@@ -1921,23 +1869,14 @@ mod tests {
         // With backup_efficiency=0.8, delivered heat = 0.8 * electrical input,
         // so the tank heats less per step than at efficiency=1.0.
         let make_cfg = |eff: f64| {
-            let mut raw = HashMap::new();
-            raw.insert("setpoint_c".to_string(), 52.0.into());
-            raw.insert("deadband_c".to_string(), 2.0.into());
-            raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
-            raw.insert("compressor_power_w".to_string(), 1200.0.into());
-            raw.insert("backup_element_power_w".to_string(), 4500.0.into());
-            raw.insert("backup_enable_offset_c".to_string(), 8.0.into());
-            raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-            raw.insert("backup_efficiency".to_string(), eff.into());
+            let mut typed = base_typed_config();
+            typed.initial_tank_temp_c = Some(20.0);
+            typed.backup_enable_offset_c = Some(8.0);
+            typed.backup_efficiency = Some(eff);
             // Use Simultaneous mode so backup fires alongside compressor
             // when control temp is below backup threshold.
-            raw.insert("element_hp_control_mode".to_string(), "Simultaneous".into());
-            EquipmentConfig::raw(
-                "HPWH".to_string(),
-                "Heat Pump Water Heater".to_string(),
-                raw,
-            )
+            typed.element_hp_control_mode = Some("Simultaneous".into());
+            equipment_config(typed)
         };
 
         let e = env(24.0);
@@ -1987,7 +1926,7 @@ mod tests {
 
 #[cfg(test)]
 mod mutual_exclusion_tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -1996,7 +1935,7 @@ mod mutual_exclusion_tests {
     };
 
     use super::{ElementHpControlMode, HeatPumpWH};
-    use crate::config::ConfigPayload;
+    use crate::water_heater::heat_pump_wh::tests::{base_typed_config, equipment_config};
     use crate::{Equipment, EquipmentConfig};
 
     fn env_state() -> EnvironmentState {
@@ -2044,50 +1983,21 @@ mod mutual_exclusion_tests {
     /// Config: tank at 40°C (below setpoint 52°C, so call for heat active),
     /// backup_enable_offset is large so backup only triggers well below setpoint.
     fn base_config(mode: &str) -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        raw.insert("compressor_power_w".to_string(), 1200.0.into());
-        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
-        // offset=20 means backup only fires when temp <= 32°C, so at 40°C backup stays off.
-        raw.insert("backup_enable_offset_c".to_string(), 20.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-        if !mode.is_empty() {
-            raw.insert(
-                "element_hp_control_mode".to_string(),
-                mode.to_string().into(),
-            );
-        }
-        EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        )
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(40.0);
+        typed.backup_enable_offset_c = Some(20.0);
+        typed.element_hp_control_mode = (!mode.is_empty()).then(|| mode.to_string());
+        equipment_config(typed)
     }
 
     /// Config where tank is very cold so backup threshold is also triggered.
     fn very_cold_config(mode: &str) -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
+        let mut typed = base_typed_config();
         // Tank starts so cold that control_temp <= setpoint - backup_enable_offset.
-        raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
-        raw.insert("compressor_power_w".to_string(), 1200.0.into());
-        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
-        raw.insert("backup_enable_offset_c".to_string(), 8.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-        if !mode.is_empty() {
-            raw.insert(
-                "element_hp_control_mode".to_string(),
-                mode.to_string().into(),
-            );
-        }
-        EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        )
+        typed.initial_tank_temp_c = Some(20.0);
+        typed.backup_enable_offset_c = Some(8.0);
+        typed.element_hp_control_mode = (!mode.is_empty()).then(|| mode.to_string());
+        equipment_config(typed)
     }
 
     fn ports() -> PortSlots {
@@ -2300,7 +2210,7 @@ mod mutual_exclusion_tests {
 
 #[cfg(test)]
 mod dr_tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -2309,7 +2219,7 @@ mod dr_tests {
     };
 
     use super::HeatPumpWH;
-    use crate::config::ConfigPayload;
+    use crate::water_heater::heat_pump_wh::tests::{base_typed_config, equipment_config};
     use crate::{Equipment, EquipmentConfig};
 
     fn env_state() -> EnvironmentState {
@@ -2357,38 +2267,20 @@ mod dr_tests {
     /// Config: tank at 50°C (just below setpoint 52°C, within deadband → calling for heat).
     /// max_tank_temp_c is high so safety never fires.
     fn config_near_setpoint() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 50.0.into());
-        raw.insert("compressor_power_w".to_string(), 1200.0.into());
-        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
-        raw.insert("backup_enable_offset_c".to_string(), 20.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-        raw.insert("min_on_time_s".to_string(), 0.0.into());
-        EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        )
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(50.0);
+        typed.backup_enable_offset_c = Some(20.0);
+        typed.min_on_time_s = Some(0.0);
+        equipment_config(typed)
     }
 
     /// Config: tank at 40°C (well below setpoint 52°C → calling for heat even with DR offsets).
     fn config_cold_tank() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        raw.insert("compressor_power_w".to_string(), 1200.0.into());
-        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
-        raw.insert("backup_enable_offset_c".to_string(), 20.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-        raw.insert("min_on_time_s".to_string(), 0.0.into());
-        EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        )
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(40.0);
+        typed.backup_enable_offset_c = Some(20.0);
+        typed.min_on_time_s = Some(0.0);
+        equipment_config(typed)
     }
 
     fn ports() -> PortSlots {
@@ -2512,23 +2404,14 @@ mod dr_tests {
     /// and compressor power is scaled by the load fraction.
     #[test]
     fn hpwh_dr_critical_with_mutual_exclusion_interaction() {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        raw.insert("compressor_power_w".to_string(), 1200.0.into());
-        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(40.0);
         // Large offset: backup only fires when control_temp <= 42°C; tank starts at 40°C
         // which is right on the boundary. Use very large offset so backup definitely off.
-        raw.insert("backup_enable_offset_c".to_string(), 30.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-        raw.insert("min_on_time_s".to_string(), 0.0.into());
+        typed.backup_enable_offset_c = Some(30.0);
+        typed.min_on_time_s = Some(0.0);
         // Explicit MutuallyExclusive (default, but stated for clarity).
-        let cfg = EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        );
+        let cfg = equipment_config(typed);
 
         let e = env_state();
 
@@ -2591,18 +2474,11 @@ mod dr_tests {
     /// thermostat_upper_node configuration.
     #[test]
     fn safety_cutout_fires_when_any_node_exceeds_limit() {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 60.0.into());
-        raw.insert("thermostat_upper_node".to_string(), 0.0.into());
-        raw.insert("min_on_time_s".to_string(), 0.0.into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(20.0);
+        typed.max_tank_temp_c = Some(60.0);
+        typed.min_on_time_s = Some(0.0);
+        let cfg = equipment_config(typed);
 
         let e = env_state();
 
@@ -2621,18 +2497,12 @@ mod dr_tests {
     /// All nodes below max_tank_temp_c — safety cutout must NOT fire.
     #[test]
     fn safety_cutout_does_not_fire_when_all_nodes_below_limit() {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 30.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 55.0.into());
-        raw.insert("min_on_time_s".to_string(), 0.0.into());
-        raw.insert("backup_enable_offset_c".to_string(), 30.0.into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(30.0);
+        typed.max_tank_temp_c = Some(55.0);
+        typed.min_on_time_s = Some(0.0);
+        typed.backup_enable_offset_c = Some(30.0);
+        let cfg = equipment_config(typed);
 
         let e = env_state();
 
@@ -2652,7 +2522,7 @@ mod dr_tests {
 
 #[cfg(test)]
 mod new_feature_tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
@@ -2661,8 +2531,8 @@ mod new_feature_tests {
     };
 
     use super::HeatPumpWH;
-    use crate::config::ConfigPayload;
-    use crate::{Equipment, EquipmentConfig};
+    use crate::water_heater::heat_pump_wh::tests::{base_typed_config, equipment_config};
+    use crate::{Equipment, EquipmentConfig, HeatPumpWaterHeaterConfig};
 
     fn env_at(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {
@@ -2707,20 +2577,10 @@ mod new_feature_tests {
     }
 
     fn base_config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
-        raw.insert("compressor_power_w".to_string(), 1200.0.into());
-        raw.insert("backup_element_power_w".to_string(), 4500.0.into());
-        raw.insert("backup_enable_offset_c".to_string(), 8.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-        raw.insert("min_on_time_s".to_string(), 0.0.into());
-        EquipmentConfig::raw(
-            "HPWH".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        )
+        let mut typed = base_typed_config();
+        typed.backup_enable_offset_c = Some(8.0);
+        typed.min_on_time_s = Some(0.0);
+        equipment_config(typed)
     }
 
     fn ports() -> PortSlots {
@@ -2736,7 +2596,7 @@ mod new_feature_tests {
         }
     }
 
-    // --- Change 2: low_power_hpwh lockout bounds ---
+    // --- Change 2: explicit lockout bounds ---
 
     #[test]
     fn standard_hpwh_lockout_bounds_are_ochre_values() {
@@ -2756,43 +2616,89 @@ mod new_feature_tests {
     }
 
     #[test]
-    fn low_power_hpwh_lockout_bounds_are_wider() {
-        let mut raw = base_config().raw_data().unwrap().clone();
-        raw.insert("low_power_hpwh".to_string(), "true".into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH_LP".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        );
+    fn explicit_lockout_bounds_are_respected() {
+        let mut typed = base_typed_config();
+        typed.min_ambient_temp_c = Some(2.778);
+        typed.max_ambient_temp_c = Some(62.778);
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
         assert!(
             (eq.min_ambient_temp_c - 2.778).abs() < 1e-3,
-            "low-power min lockout should be 2.778, got {}",
+            "configured min lockout should be 2.778, got {}",
             eq.min_ambient_temp_c
         );
         assert!(
             (eq.max_ambient_temp_c - 62.778).abs() < 1e-3,
-            "low-power max lockout should be 62.778, got {}",
+            "configured max lockout should be 62.778, got {}",
             eq.max_ambient_temp_c
         );
     }
 
     #[test]
-    fn explicit_lockout_config_overrides_low_power_default() {
-        let mut raw = base_config().raw_data().unwrap().clone();
-        raw.insert("low_power_hpwh".to_string(), "true".into());
-        raw.insert("min_ambient_temp_c".to_string(), 1.0.into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH_LP".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        );
+    fn explicit_lockout_config_overrides_default_bounds() {
+        let mut typed = base_typed_config();
+        typed.min_ambient_temp_c = Some(1.0);
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
         assert!(
             (eq.min_ambient_temp_c - 1.0).abs() < 1e-9,
-            "explicit min_ambient_temp_c=1.0 must override low_power default"
+            "explicit min_ambient_temp_c=1.0 must override default"
+        );
+    }
+
+    #[test]
+    fn conditioned_zone_uses_default_interaction_fractions() {
+        let typed = HeatPumpWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: Some(2.5),
+            backup_element_power_w: Some(4500.0),
+            ua_w_per_k: None,
+            setpoint_c: Some(52.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(40.0),
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            compressor_power_w: Some(1200.0),
+            backup_enable_offset_c: Some(3.0),
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: Some(0.0),
+            min_off_time_s: Some(0.0),
+            hp_only_mode: Some(false),
+            element_hp_control_mode: None,
+            fan_power_w: Some(35.0),
+            parasitic_power_w: Some(1.0),
+            backup_efficiency: Some(1.0),
+            shr: Some(0.88),
+            lost_heat_fraction: None,
+            wall_heat_fraction: None,
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            performance_adjustment: Some(1.0),
+            zone_type: Some("conditioned".to_string()),
+            first_hour_rating_m3: None,
+        };
+        let cfg = equipment_config(typed);
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(24.0)).unwrap();
+        assert!(
+            (eq.lost_heat_fraction - 0.25).abs() < 1e-12,
+            "conditioned-zone default lost_heat_fraction should be 0.25, got {}",
+            eq.lost_heat_fraction
+        );
+        assert!(
+            (eq.wall_heat_fraction - 0.5).abs() < 1e-12,
+            "conditioned-zone default wall_heat_fraction should be 0.5, got {}",
+            eq.wall_heat_fraction
         );
     }
 
@@ -2809,13 +2715,9 @@ mod new_feature_tests {
         eq0.step(&e, Duration::from_secs(60), &mut p0).unwrap();
         let sens0 = p0.thermal[0].sensible_gain_w;
 
-        let mut raw50 = base_config().raw_data().unwrap().clone();
-        raw50.insert("wall_heat_fraction".to_string(), 0.5.into());
-        let cfg50 = EquipmentConfig::raw(
-            "HPWH_WF".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw50,
-        );
+        let mut typed50 = base_typed_config();
+        typed50.wall_heat_fraction = Some(0.5);
+        let cfg50 = equipment_config(typed50);
         let mut eq50 = HeatPumpWH::new(cfg50.clone());
         eq50.init(&cfg50, &e).unwrap();
         let mut p50 = ports();
@@ -2849,16 +2751,12 @@ mod new_feature_tests {
 
     #[test]
     fn hp_only_mode_disables_backup_element() {
-        let mut raw = base_config().raw_data().unwrap().clone();
-        raw.insert("hp_only_mode".to_string(), "true".into());
-        raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
-        raw.insert("backup_enable_offset_c".to_string(), 5.0.into());
-        raw.insert("element_hp_control_mode".to_string(), "Simultaneous".into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH_HPOnly".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = base_typed_config();
+        typed.hp_only_mode = Some(true);
+        typed.initial_tank_temp_c = Some(20.0);
+        typed.backup_enable_offset_c = Some(5.0);
+        typed.element_hp_control_mode = Some("Simultaneous".into());
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
         for _ in 0..5 {
@@ -2874,15 +2772,11 @@ mod new_feature_tests {
 
     #[test]
     fn without_hp_only_mode_backup_fires_when_tank_cold() {
-        let mut raw = base_config().raw_data().unwrap().clone();
-        raw.insert("initial_tank_temp_c".to_string(), 20.0.into());
-        raw.insert("backup_enable_offset_c".to_string(), 5.0.into());
-        raw.insert("element_hp_control_mode".to_string(), "Simultaneous".into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH_Normal".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(20.0);
+        typed.backup_enable_offset_c = Some(5.0);
+        typed.element_hp_control_mode = Some("Simultaneous".into());
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
         let mode = eq.update_control(&env_at(24.0));
@@ -2897,13 +2791,9 @@ mod new_feature_tests {
 
     #[test]
     fn min_off_time_prevents_early_compressor_restart() {
-        let mut raw = base_config().raw_data().unwrap().clone();
-        raw.insert("min_off_time_s".to_string(), 120.0.into());
-        let cfg = EquipmentConfig::raw(
-            "HPWH_MinOff".to_string(),
-            "Heat Pump Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = base_typed_config();
+        typed.min_off_time_s = Some(120.0);
+        let cfg = equipment_config(typed);
         let e = env_at(24.0);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &e).unwrap();
@@ -2965,12 +2855,9 @@ mod new_feature_tests {
 
     #[test]
     fn split_duty_cycle_curtails_compressor_independently() {
-        let cfg = {
-            let mut raw = HashMap::new();
-            raw.insert("zone_id".to_string(), 1.0.into());
-            raw.insert("setpoint_c".to_string(), 50.0.into());
-            EquipmentConfig::raw("HPWH".to_string(), "HPWH".to_string(), raw)
-        };
+        let mut typed = base_typed_config();
+        typed.setpoint_c = Some(50.0);
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(20.0)).expect("init");
 
@@ -2995,12 +2882,9 @@ mod new_feature_tests {
 
     #[test]
     fn split_duty_cycle_curtails_backup_independently() {
-        let cfg = {
-            let mut raw = HashMap::new();
-            raw.insert("zone_id".to_string(), 1.0.into());
-            raw.insert("setpoint_c".to_string(), 50.0.into());
-            EquipmentConfig::raw("HPWH".to_string(), "HPWH".to_string(), raw)
-        };
+        let mut typed = base_typed_config();
+        typed.setpoint_c = Some(50.0);
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(20.0)).expect("init");
 
@@ -3025,12 +2909,9 @@ mod new_feature_tests {
 
     #[test]
     fn whole_equipment_duty_cycle_backward_compatible() {
-        let cfg = {
-            let mut raw = HashMap::new();
-            raw.insert("zone_id".to_string(), 1.0.into());
-            raw.insert("setpoint_c".to_string(), 50.0.into());
-            EquipmentConfig::raw("HPWH".to_string(), "HPWH".to_string(), raw)
-        };
+        let mut typed = base_typed_config();
+        typed.setpoint_c = Some(50.0);
+        let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(20.0)).expect("init");
 

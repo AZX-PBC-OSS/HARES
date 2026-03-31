@@ -42,7 +42,7 @@ impl HpCooler {
             // Ductless mini-split: 312 CFM/ton (no duct back-pressure).
             use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
             inner.core.hvac.airflow_m3_s_per_w =
-                mshp_type.default_airflow_cfm_per_ton() * CFM_TO_M3_S / W_PER_TON;
+                mshp_type.default_airflow_m3_s_per_w() * CFM_TO_M3_S / W_PER_TON;
             // Apply MSHP crankcase defaults at construction so that step() uses
             // correct values (15 W / 0 °C) even if init() has not been called yet.
             inner.set_crankcase_defaults_if_unconfigured(
@@ -138,7 +138,14 @@ impl HpCooler {
             stage_shrs: hp_cfg.stage_shrs.clone(),
             fan_power_w: hp_cfg.fan_power_w,
             fan_power_w_per_cfm: hp_cfg.fan_power_w_per_cfm,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            airflow_m3_s_per_w: None,
             fraction_load_served: hp_cfg.fraction_cooling_load_served,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.duct.clone(),
             system_type: hp_cfg.is_mini_split.then(|| "mini-split".to_string()),
             startup_cd: None,

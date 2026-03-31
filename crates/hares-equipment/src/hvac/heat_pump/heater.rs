@@ -471,6 +471,16 @@ impl HeatPumpHeaterCore {
             .unwrap_or(DEFAULT_BACKUP_CAPACITY_W)
             .max(0.0);
         self.backup_eir = cfg.backup_eir.unwrap_or(DEFAULT_BACKUP_EIR).max(0.0);
+        self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
+        self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
+        self.max_oat_supplemental_c = cfg
+            .max_oat_supplemental_c
+            .unwrap_or(MAX_OAT_SUPPLEMENTAL_C)
+            .min(MAX_OAT_SUPPLEMENTAL_C);
+        self.er_setpoint_offset_c = cfg.er_setpoint_offset_c.unwrap_or(0.0);
+        self.er_hard_lockout_time_s = cfg
+            .er_hard_lockout_time_s
+            .unwrap_or(DEFAULT_ER_HARD_LOCKOUT_TIME_S);
 
         if matches!(self.variant, HeaterVariant::Ashp) {
             self.hvac.equipment_type = if self.backup_capacity_w > 0.0 {
@@ -1236,6 +1246,14 @@ mod tests {
                 shr: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(1.0),
+                hp_lockout_temp_c: None,
+                er_lockout_temp_c: None,
+                max_oat_supplemental_c: None,
+                er_setpoint_offset_c: None,
+                er_hard_lockout_time_s: None,
                 duct: Default::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
@@ -2617,6 +2635,14 @@ mod ideal_capacity_tests {
                 shr: None,
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
+                heating_setpoint_c: None,
+                cooling_setpoint_c: None,
+                hysteresis_c: None,
+                hp_lockout_temp_c: None,
+                er_lockout_temp_c: None,
+                max_oat_supplemental_c: None,
+                er_setpoint_offset_c: None,
+                er_hard_lockout_time_s: None,
                 duct: Default::default(),
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,

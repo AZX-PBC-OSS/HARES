@@ -10,6 +10,7 @@ use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, Float64Array, StringArray, TimestampMicrosecondArray};
 use arrow::record_batch::RecordBatch;
+use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationEngine};
 use hares_io::{OutputFormat, SimulationConfig};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -63,35 +64,38 @@ impl ParityFixture {
 }
 
 #[test]
-fn ochre_battery_fixture_time_axis_matches_reference_exactly() {
+fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     let fixture = ParityFixture::new("cz4a_battery_only");
-    let reference = read_parquet_columns(&fixture.reference_output_parquet())
-        .expect("reference parquet must be readable");
+    let dwelling_config = build_dwelling_config(&fixture);
+    let local_offset = *dwelling_config.sim_config.start_time.offset();
+    let expected_start_time = dwelling_config.sim_config.start_time;
 
-    let actual_time = simulate_fixture_timestamps(&fixture);
+    let actual_time = simulate_fixture_timestamps(dwelling_config);
     let reference_time =
-        first_matching_column(&reference, &["Time"]).expect("reference time column missing");
+        read_reference_time_axis_local(&fixture.reference_output_parquet(), local_offset)
+            .expect("reference parquet time axis must be readable");
     assert_eq!(
         actual_time.len(),
         reference_time.len(),
         "actual and reference time axes must have identical row counts"
     );
-    let epoch_offset_us = actual_time[0] as i64 - reference_time[0] as i64;
+    assert_eq!(
+        actual_time.first().map(|ts| ts.naive_local()),
+        Some(expected_start_time.naive_local()),
+        "fixture must start at the configured local wall-clock time"
+    );
     for (idx, (actual_value, reference_value)) in
         actual_time.iter().zip(reference_time.iter()).enumerate()
     {
-        let actual_us = *actual_value as i64;
-        let reference_us = *reference_value as i64;
-        assert_eq!(
-            actual_us - reference_us,
-            epoch_offset_us,
-            "time axis must keep a constant epoch offset from the OCHRE reference at row {idx}"
-        );
         if idx > 0 {
-            let actual_step_us = actual_us - actual_time[idx - 1] as i64;
-            let reference_step_us = reference_us - reference_time[idx - 1] as i64;
+            let actual_step = actual_value
+                .naive_local()
+                .signed_duration_since(actual_time[idx - 1].naive_local());
+            let reference_step = reference_value
+                .naive_local()
+                .signed_duration_since(reference_time[idx - 1].naive_local());
             assert_eq!(
-                actual_step_us, reference_step_us,
+                actual_step, reference_step,
                 "time axis cadence must match the OCHRE reference at row {idx}"
             );
         }
@@ -178,17 +182,38 @@ fn run_fixture_to_columns(fixture: &ParityFixture) -> BTreeMap<String, Vec<f64>>
     columns
 }
 
-fn simulate_fixture_timestamps(fixture: &ParityFixture) -> Vec<f64> {
-    let mut dwelling =
-        Dwelling::from_config(build_dwelling_config(fixture)).expect("fixture dwelling must load");
+fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<DateTime<FixedOffset>> {
+    let mut dwelling = Dwelling::from_config(config).expect("fixture dwelling must load");
     let results = dwelling
         .simulate()
         .expect("fixture simulation must succeed")
         .steps;
-    results
-        .into_iter()
-        .map(|step| step.timestamp.timestamp_micros() as f64)
-        .collect()
+    results.into_iter().map(|step| step.timestamp).collect()
+}
+
+fn read_reference_time_axis_local(
+    path: &Path,
+    local_offset: FixedOffset,
+) -> Result<Vec<DateTime<FixedOffset>>, String> {
+    let reference = read_parquet_columns(path)?;
+    let reference_time = first_matching_column(&reference, &["Time"])
+        .ok_or_else(|| format!("reference time column missing in '{}'", path.display()))?;
+
+    let mut values = Vec::with_capacity(reference_time.len());
+    for &micros in reference_time {
+        let micros = micros as i64;
+        let naive = DateTime::<Utc>::from_timestamp_micros(micros)
+            .ok_or_else(|| {
+                format!(
+                    "reference time axis contains invalid timestamp micros {micros} in '{}'",
+                    path.display()
+                )
+            })?
+            .naive_utc();
+        values.push(local_offset.from_utc_datetime(&naive));
+    }
+
+    Ok(values)
 }
 
 fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {

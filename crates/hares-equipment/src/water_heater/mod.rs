@@ -440,6 +440,7 @@ mod tests {
                 zone_type: None,
                 first_hour_rating_m3: None,
                 element_power_w: None,
+                max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
             },
         )
@@ -783,6 +784,7 @@ mod dhw_integration_tests {
                 zone_type: None,
                 first_hour_rating_m3: None,
                 element_power_w: None,
+                max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
             },
         );

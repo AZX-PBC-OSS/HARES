@@ -70,6 +70,14 @@ const AIRFLOW_HEATING_CFM_PER_TON: f64 = 350.0;
 const AIRFLOW_CENTRAL_AC_CFM_PER_TON: f64 = 400.0;
 const AIRFLOW_MSHP_COOLING_CFM_PER_TON: f64 = 312.0;
 pub(crate) const AIRFLOW_ROOM_AC_CFM_PER_TON: f64 = 320.0;
+pub(crate) const AIRFLOW_HEATING_M3_S_PER_W: f64 =
+    AIRFLOW_HEATING_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
+pub(crate) const AIRFLOW_CENTRAL_AC_M3_S_PER_W: f64 =
+    AIRFLOW_CENTRAL_AC_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
+pub(crate) const AIRFLOW_MSHP_COOLING_M3_S_PER_W: f64 =
+    AIRFLOW_MSHP_COOLING_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
+pub(crate) const AIRFLOW_ROOM_AC_M3_S_PER_W: f64 =
+    AIRFLOW_ROOM_AC_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
 
 impl HvacEquipmentType {
     pub fn default_supply_air_temp_c(self, outdoor_temp_c: f64) -> f64 {
@@ -102,6 +110,10 @@ impl HvacEquipmentType {
             | Self::Baseboard
             | Self::Other => AIRFLOW_HEATING_CFM_PER_TON,
         }
+    }
+
+    pub fn default_airflow_m3_s_per_w(self) -> f64 {
+        self.default_airflow_cfm_per_ton() * CFM_TO_M3_S / W_PER_TON
     }
 
     /// True for heating-side equipment types.
@@ -260,8 +272,17 @@ impl HvacEquipment {
             basement_zone_id: None,
             supply_air_temp_c: equipment_type
                 .default_supply_air_temp_c(DEFAULT_INIT_OUTDOOR_TEMP_C),
-            airflow_m3_s_per_w: equipment_type.default_airflow_cfm_per_ton() * CFM_TO_M3_S
-                / W_PER_TON,
+            airflow_m3_s_per_w: match equipment_type {
+                HvacEquipmentType::AcCooler => AIRFLOW_CENTRAL_AC_M3_S_PER_W,
+                HvacEquipmentType::MiniSplitCool => AIRFLOW_MSHP_COOLING_M3_S_PER_W,
+                HvacEquipmentType::GasFurnace
+                | HvacEquipmentType::ElectricFurnace
+                | HvacEquipmentType::AshpHeatPumpOnly
+                | HvacEquipmentType::AshpHeatPumpAux
+                | HvacEquipmentType::MiniSplitHeat
+                | HvacEquipmentType::Baseboard
+                | HvacEquipmentType::Other => AIRFLOW_HEATING_M3_S_PER_W,
+            },
             zone_heat_fractions: vec![(zone_id, 1.0)],
             biquadratic_coeffs: vec![DEFAULT_BIQUADRATIC_COEFFS],
             // OCHRE HVAC.py: biquadratic curve inputs clamped to calibrated range.
@@ -326,13 +347,13 @@ impl HvacEquipment {
         self.static_setpoints
             .validate_for_deadband(self.thermostat.hysteresis_c)?;
 
-        let mut airflow_cfm_per_ton = extract_numeric(config, "airflow_cfm_per_ton")
-            .unwrap_or_else(|| self.equipment_type.default_airflow_cfm_per_ton());
+        let mut airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w")
+            .unwrap_or_else(|| self.equipment_type.default_airflow_m3_s_per_w());
         let airflow_defect_ratio = extract_numeric(config, "AirflowDefectRatio")
             .or_else(|| extract_numeric(config, "airflow_defect_ratio"))
             .unwrap_or(1.0);
-        airflow_cfm_per_ton *= airflow_defect_ratio;
-        self.airflow_m3_s_per_w = airflow_cfm_per_ton * CFM_TO_M3_S / W_PER_TON;
+        airflow_m3_s_per_w *= airflow_defect_ratio;
+        self.airflow_m3_s_per_w = airflow_m3_s_per_w;
         if let Some(w_per_m3_s) = extract_numeric(config, "fan_power_w_per_m3_s") {
             self.fan_power_w_per_m3_s = w_per_m3_s.max(0.0);
         } else if let Some(w_per_cfm) = extract_numeric(config, "fan_power_w_per_cfm") {

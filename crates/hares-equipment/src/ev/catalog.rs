@@ -12,8 +12,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::EquipmentConfig;
 use super::config::EvConfig;
+use crate::EquipmentConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VehicleId {

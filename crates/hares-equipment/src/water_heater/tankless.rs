@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
 use super::wh_config::TanklessWaterHeaterConfig;
-use super::{WaterHeaterZip, resolve_draw_rate_kg_s, resolve_mains_temp_c};
+use super::{WaterHeaterZip, resolve_mains_temp_c};
 use crate::hvac::helpers::{equipment_id_from_config, parse_fuel_type, zone_id_from_config};
 
 const WATER_SPECIFIC_HEAT_J_PER_KG_K: f64 = 4183.0;
@@ -202,11 +202,7 @@ impl TanklessWH {
         self.duty_cycle = 1.0;
         self.mode_override = None;
         self.inlet_temp_c = c.inlet_temp_c.unwrap_or(15.0);
-        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or_else(|| {
-            c.avg_water_draw_l_per_day
-                .map(|l| l / 86_400.0)
-                .unwrap_or(0.0)
-        });
+        self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.zip = WaterHeaterZip::default();
 
         self.dr_setpoint_offset_c = 0.0;
@@ -566,17 +562,17 @@ fn telemetry_fields() -> Vec<TelemetryField> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
-        telemetry_keys as tk,
+        EnvironmentState, FuelType, GridState, PortDeclaration, PortSlots, WeatherState, ZoneId,
+        ZoneState, telemetry_keys as tk,
     };
 
     use super::{DEFAULT_GAS_PARASITIC_POWER_W, TanklessWH, WATER_SPECIFIC_HEAT_J_PER_KG_K};
-    use crate::config::ConfigPayload;
-    use crate::{Equipment, EquipmentConfig};
+    use crate::water_heater::DHW_DEMAND_LOOP;
+    use crate::{Equipment, EquipmentConfig, TanklessWaterHeaterConfig};
 
     fn env() -> EnvironmentState {
         EnvironmentState {
@@ -621,32 +617,74 @@ mod tests {
         }
     }
 
+    fn config_from_typed(cfg: TanklessWaterHeaterConfig) -> EquipmentConfig {
+        EquipmentConfig::from_typed(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            cfg,
+        )
+    }
+
+    fn typed_config() -> TanklessWaterHeaterConfig {
+        TanklessWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            fuel_type: FuelType::Gas,
+            energy_factor: Some(0.8),
+            uniform_energy_factor: None,
+            heating_capacity_w: Some(30_000.0),
+            setpoint_c: Some(50.0),
+            parasitic_power_w: None,
+            performance_adjustment: None,
+            inlet_temp_c: Some(20.0),
+            draw_flow_rate_kg_s: Some(0.2),
+            avg_water_draw_l_per_day: None,
+        }
+    }
+
     fn config() -> EquipmentConfig {
-        config_with_capacity(30_000.0)
+        config_from_typed(typed_config())
     }
 
     /// Build a config that also sets max_thermal_power_w explicitly.
     fn config_with_capacity(max_thermal_power_w: f64) -> EquipmentConfig {
-        let mut cfg = EquipmentConfig::from_typed(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            crate::TanklessWaterHeaterConfig {
-                equipment_id: None,
-                zone_id: None,
-                loop_id: None,
-                fuel_type: hares_types::FuelType::Gas,
-                energy_factor: Some(0.8),
-                uniform_energy_factor: None,
-                heating_capacity_w: Some(max_thermal_power_w),
-                setpoint_c: Some(50.0),
-                parasitic_power_w: None,
-                performance_adjustment: None,
-                inlet_temp_c: Some(20.0),
-                draw_flow_rate_kg_s: Some(0.2),
-                avg_water_draw_l_per_day: None,
-            },
+        let mut cfg = typed_config();
+        cfg.heating_capacity_w = Some(max_thermal_power_w);
+        config_from_typed(cfg)
+    }
+
+    #[test]
+    fn port_declarations_and_telemetry_contract_match_fuel_type() {
+        let gas = TanklessWH::new(config());
+        assert_eq!(gas.ports().len(), 3);
+        assert!(gas.ports().contains(&PortDeclaration::fuel()));
+        assert!(gas.ports().contains(&PortDeclaration::electrical()));
+        assert!(gas.ports().contains(&PortDeclaration::fluid(
+            DHW_DEMAND_LOOP,
+            hares_types::FluidType::Water
+        )));
+
+        let mut electric_cfg = typed_config();
+        electric_cfg.fuel_type = FuelType::Electric;
+        electric_cfg.energy_factor = Some(0.95);
+        let electric_cfg = config_from_typed(electric_cfg);
+        let electric = TanklessWH::new(electric_cfg.clone());
+        assert_eq!(electric.ports().len(), 2);
+        assert!(electric.ports().contains(&PortDeclaration::electrical()));
+        assert!(electric.ports().contains(&PortDeclaration::fluid(
+            DHW_DEMAND_LOOP,
+            hares_types::FluidType::Water
+        )));
+
+        let mut eq = TanklessWH::new(electric_cfg.clone());
+        eq.init(&electric_cfg, &env()).unwrap();
+        step_once(&mut eq);
+        assert_eq!(
+            eq.telemetry().len(),
+            eq.descriptor().telemetry_fields.len(),
+            "tankless telemetry map must match declared telemetry schema"
         );
-        cfg
     }
 
     fn step_once(eq: &mut TanklessWH) -> PortSlots {
@@ -886,19 +924,11 @@ mod tests {
     /// With max_thermal_power_w=20,000 W, output clamps at 20,000 W.
     #[test]
     fn over_capacity_clamps_output_and_reduces_outlet_temp() {
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
         // 1.0 kg/s → demand = 1.0 * 4183 * 30 = 125,490 W >> 20,000 W capacity
-        raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
-        raw.insert("EnergyFactor".to_string(), 0.8.into());
-        raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cap = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(1.0);
+        typed.heating_capacity_w = Some(20_000.0);
+        let cap = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cap.clone());
         eq.init(&cap, &env()).unwrap();
@@ -941,17 +971,11 @@ mod tests {
     /// Zero flow: no thermal output and no fuel consumption in any mode.
     #[test]
     fn zero_flow_produces_no_output_and_no_fuel() {
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "electric".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 0.0_f64.into());
-        raw.insert("EnergyFactor".to_string(), 0.95.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.fuel_type = FuelType::Electric;
+        typed.energy_factor = Some(0.95);
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -978,18 +1002,13 @@ mod tests {
     #[test]
     fn fuel_input_never_exceeds_max_input_power() {
         // Very high flow to force over-capacity.
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 60.0.into());
-        raw.insert("inlet_temp_c".to_string(), 5.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 5.0.into());
-        raw.insert("EnergyFactor".to_string(), 0.85.into());
-        raw.insert("max_thermal_power_w".to_string(), 25_000.0_f64.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.setpoint_c = Some(60.0);
+        typed.inlet_temp_c = Some(5.0);
+        typed.draw_flow_rate_kg_s = Some(5.0);
+        typed.energy_factor = Some(0.85);
+        typed.heating_capacity_w = Some(25_000.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1008,19 +1027,12 @@ mod tests {
     /// Very low flow rate: demand is well within capacity, setpoint delivered.
     #[test]
     fn very_low_flow_rate_within_capacity() {
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
         // 0.001 kg/s → demand = 0.001 * 4183 * 30 ≈ 125.5 W, well below 20 kW capacity
-        raw.insert("draw_flow_rate_kg_s".to_string(), 0.001_f64.into());
-        raw.insert("EnergyFactor".to_string(), 0.9.into());
-        raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(0.001_f64);
+        typed.energy_factor = Some(0.9);
+        typed.heating_capacity_w = Some(20_000.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1043,18 +1055,11 @@ mod tests {
         let capacity_w = 20_000.0_f64;
         let m_dot = capacity_w / (WATER_SPECIFIC_HEAT_J_PER_KG_K * delta_t);
 
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), m_dot.into());
-        raw.insert("EnergyFactor".to_string(), 0.9.into());
-        raw.insert("max_thermal_power_w".to_string(), capacity_w.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(m_dot);
+        typed.energy_factor = Some(0.9);
+        typed.heating_capacity_w = Some(capacity_w);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1082,18 +1087,11 @@ mod tests {
 
         // flow=1.0 kg/s, delta_T=30 K → unclamped demand = 125,490 W
         // max capacity = 20,000 W, duty=0.5 → time-averaged output = 10,000 W
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
-        raw.insert("EnergyFactor".to_string(), 0.8.into());
-        raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(1.0);
+        typed.energy_factor = Some(0.8);
+        typed.heating_capacity_w = Some(20_000.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1132,18 +1130,11 @@ mod tests {
         use hares_types::ControlSignal;
 
         // High-flow config to ensure we are in the over-capacity regime.
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
-        raw.insert("EnergyFactor".to_string(), 0.8.into());
-        raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(1.0);
+        typed.energy_factor = Some(0.8);
+        typed.heating_capacity_w = Some(20_000.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1237,18 +1228,11 @@ mod tests {
     fn gas_parasitic_power_configurable() {
         use hares_types::{ControlSignal, OperatingMode};
 
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
-        raw.insert("EnergyFactor".to_string(), 0.8.into());
-        raw.insert("parasitic_power_w".to_string(), 15.0_f64.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(0.2);
+        typed.energy_factor = Some(0.8);
+        typed.parasitic_power_w = Some(15.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1274,18 +1258,11 @@ mod tests {
     fn power_limit_resets_after_step() {
         use hares_types::ControlSignal;
 
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
-        raw.insert("EnergyFactor".to_string(), 0.8.into());
-        raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(1.0);
+        typed.energy_factor = Some(0.8);
+        typed.heating_capacity_w = Some(20_000.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1319,18 +1296,11 @@ mod tests {
     fn power_limit_is_transient_across_checkpoint() {
         use hares_types::ControlSignal;
 
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
-        raw.insert("EnergyFactor".to_string(), 0.8.into());
-        raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(1.0);
+        typed.energy_factor = Some(0.8);
+        typed.heating_capacity_w = Some(20_000.0);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1361,17 +1331,11 @@ mod tests {
     fn electric_tankless_has_no_parasitic_draw_when_off() {
         use hares_types::{ControlSignal, OperatingMode};
 
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "electric".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
-        raw.insert("EnergyFactor".to_string(), 0.95.into());
-        let cfg = EquipmentConfig::raw(
-            "Tankless".to_string(),
-            "Tankless Water Heater".to_string(),
-            raw,
-        );
+        let mut typed = typed_config();
+        typed.fuel_type = FuelType::Electric;
+        typed.energy_factor = Some(0.95);
+        typed.draw_flow_rate_kg_s = Some(0.2);
+        let cfg = config_from_typed(typed);
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1436,19 +1400,12 @@ mod tests {
         }
 
         let cfg = {
-            let mut raw = HashMap::new();
-            raw.insert("FuelType".to_string(), "gas".into());
-            raw.insert("setpoint_c".to_string(), 50.0.into());
+            let mut typed = typed_config();
+            typed.heating_capacity_w = Some(60_000.0);
+            typed.energy_factor = Some(0.9);
+            typed.draw_flow_rate_kg_s = Some(0.2);
             // inlet_temp_c is the static fallback; the dynamic value should override it.
-            raw.insert("inlet_temp_c".to_string(), 20.0.into());
-            raw.insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
-            raw.insert("EnergyFactor".to_string(), 0.9.into());
-            raw.insert("max_thermal_power_w".to_string(), 60_000.0_f64.into());
-            EquipmentConfig::raw(
-                "TanklessTest".to_string(),
-                "Tankless Water Heater".to_string(),
-                raw,
-            )
+            config_from_typed(typed)
         };
 
         let cold_env = env_with_mains(5.0);
