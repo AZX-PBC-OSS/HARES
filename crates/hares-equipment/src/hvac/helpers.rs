@@ -13,27 +13,13 @@ use hares_types::{
     ControlSignal, EnvironmentState, FuelType, HaresError, LoopId, OperatingMode, ZoneId,
 };
 
-use crate::{
-    ConfigPayload, EquipmentConfig,
-};
+use crate::{ConfigPayload, EquipmentConfig};
 
 // Re-exported from crate root; used by `apply_heating_control_unchecked`
 // and `update_heating_control`.
 use crate::HvacEquipment;
 
-/// Standard config keys for heating capacity with OCHRE aliases.
-#[allow(dead_code)]
-pub const HEATING_CAPACITY_KEYS: &[&str] = &[
-    "capacity_w",
-    "heating_capacity_w",
-    "capacity",
-    "HVAC Heating Capacity (W)",
-];
-
-/// Standard config keys for duct distribution system efficiency.
-#[allow(dead_code)]
-pub const DUCT_DSE_KEYS: &[&str] = &["duct_dse", "duct_distribution_efficiency"];
-
+#[doc(hidden)]
 pub fn first_f64(config: &EquipmentConfig, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|key| config.get_f64(key))
 }
@@ -226,7 +212,7 @@ pub fn resolve_duct_dse(
     is_heat_pump: bool,
 ) -> f64 {
     // Direct override takes priority.
-    if let Some(dse) = first_f64(config, DUCT_DSE_KEYS) {
+    if let Some(dse) = first_f64(config, &["duct_dse", "duct_distribution_efficiency"]) {
         return dse.clamp(0.0, 1.0);
     }
 
@@ -412,7 +398,10 @@ mod tests {
             },
         );
         assert_eq!(equipment_id_from_config(&gas_furnace).unwrap(), 42);
-        assert_eq!(zone_id_from_config(&gas_furnace), Some(hares_types::ZoneId(7)));
+        assert_eq!(
+            zone_id_from_config(&gas_furnace),
+            Some(hares_types::ZoneId(7))
+        );
 
         let boiler = EquipmentConfig::from_typed(
             "EB".to_string(),

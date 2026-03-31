@@ -1872,24 +1872,8 @@ impl Dwelling {
         self.solver_feedback_actor
             .collect_and_solve(&self.equipment, &self.thermal_solver);
 
-        // Populate equipment telemetry snapshot for actors to read.
-        // One-step lag by design: telemetry reflects equipment state after
-        // control dispatch (Step 1b) but before physics simulation (Step 3).
-        // This is the standard explicit-integration pattern — actors observe
-        // the previous step's physics output.
-        if !self.actors.is_empty() {
-            for eq in &self.equipment {
-                let desc = eq.descriptor();
-                let telemetry = eq.telemetry();
-                if let Some(existing) = self.latest_env.equipment_telemetry.get_mut(&desc.name) {
-                    existing.clone_from(telemetry);
-                } else {
-                    self.latest_env
-                        .equipment_telemetry
-                        .insert(desc.name.clone(), telemetry.clone());
-                }
-            }
-        }
+        // Actor-facing equipment state is sourced from `latest_env.equipment_core`.
+        // Keep legacy string telemetry map untouched to avoid per-step clone churn.
 
         // Step 1d: actors decide and queue control signals (registration order, last write wins).
         // Solver feedback actor decides first (Schedule priority, can be overridden by user actors).
@@ -1992,6 +1976,8 @@ impl Dwelling {
                     self.equipment[idx].descriptor().name
                 ));
             } else {
+                // Fail fast on core contract violations: continuing the step with
+                // partially invalid equipment state can poison downstream actors/ports.
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
                     self.equipment[idx].core_output(),
@@ -2051,6 +2037,8 @@ impl Dwelling {
                     self.equipment[idx].descriptor().name
                 ));
             } else {
+                // Fail fast on core contract violations: continuing the step with
+                // partially invalid equipment state can poison downstream actors/ports.
                 validate_core_contract(
                     self.equipment[idx].descriptor(),
                     self.equipment[idx].core_output(),
@@ -2178,7 +2166,7 @@ impl Dwelling {
                 self.equipment_id_by_name
                     .get(&desc.name)
                     .copied()
-                    .unwrap_or(desc.id)
+                    .expect("invariant: equipment_id_by_name is built from this equipment set")
             })
             .collect();
         self.latest_env
@@ -2194,7 +2182,7 @@ impl Dwelling {
                 .equipment_id_by_name
                 .get(&desc.name)
                 .copied()
-                .unwrap_or(desc.id);
+                .expect("invariant: equipment_id_by_name is built from this equipment set");
             self.latest_env
                 .equipment_core
                 .insert(id, eq.core_output().clone());

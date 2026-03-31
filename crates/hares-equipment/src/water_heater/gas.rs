@@ -243,136 +243,12 @@ impl GasWH {
 }
 
 impl GasWH {
-    fn init_raw(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        let n_nodes = parse_usize(config.get_f64("tank_nodes"))
-            .unwrap_or(6)
-            .clamp(1, 12);
-        let tank_volume_m3 =
-            first_f64(config, &["tank_volume_m3"]).unwrap_or(DEFAULT_TANK_VOLUME_M3);
-        let diameter_m = first_f64(config, &["tank_diameter_m", "diameter_m"])
-            .unwrap_or(DEFAULT_TANK_DIAMETER_M);
-        let inferred_height_m =
-            tank_volume_m3 / (std::f64::consts::PI * (diameter_m * 0.5).powi(2));
-        let height_m =
-            first_f64(config, &["tank_height_m", "height_m"]).unwrap_or(inferred_height_m.max(0.2));
-
-        self.burner_node = parse_usize(config.get_f64("burner_node"))
-            .unwrap_or(n_nodes - 1)
-            .min(n_nodes - 1);
-
-        let ua_base = first_f64(config, &["ua_w_per_k", "UA"]).unwrap_or(DEFAULT_UA_W_PER_K);
-        let ua_w_per_k = apply_jacket_r_value(ua_base, height_m, diameter_m, config);
-
-        self.tank = StratifiedTank::new(StratifiedTankConfig {
-            n_nodes,
-            height_m,
-            diameter_m,
-            ua_w_per_k,
-            conductivity_w_m_k: first_f64(
-                config,
-                &["conductivity_w_m_k", "water_conductivity_w_m_k"],
-            )
-            .unwrap_or(DEFAULT_CONDUCTIVITY_W_M_K),
-            initial_temp_c: first_f64(
-                config,
-                &[
-                    "initial_tank_temp_c",
-                    "initial_temp_c",
-                    "SetpointTemperature",
-                ],
-            )
-            .unwrap_or(DEFAULT_SETPOINT_C),
-            element_nodes: [None, Some(self.burner_node)],
-            node_volumes_m3: None,
-            ua_end_cap_w_per_k: None,
-        })?;
-
-        self.burner_input_w = first_f64(config, &["heating_capacity_w"])
-            .unwrap_or(DEFAULT_BURNER_INPUT_W)
-            .max(0.0);
-        let has_standing_pilot =
-            ignition_uses_standing_pilot(first_str(config, &["ignition_type", "IgnitionType"]));
-        self.pilot_power_w = first_f64(config, &["pilot_power_w", "PilotPower"])
-            .unwrap_or(if has_standing_pilot {
-                DEFAULT_PILOT_POWER_W
-            } else {
-                0.0
-            })
-            .max(0.0);
-        self.fan_power_w = first_f64(config, &["fan_power_w", "fan_electric_w", "fan_kw"])
-            .map(|v| if v > 100.0 { v } else { v * 1_000.0 })
-            .unwrap_or(0.0)
-            .max(0.0);
-
-        self.setpoint_c = first_f64(
-            config,
-            &[
-                "setpoint_c",
-                "SetpointTemperature",
-                "setpoint_temperature_c",
-                "ThermostatSetpointC",
-            ],
-        )
-        .unwrap_or(DEFAULT_SETPOINT_C);
-        self.deadband_c = first_f64(config, &["deadband_c", "thermostat_deadband_c"])
-            .unwrap_or(DEFAULT_DEADBAND_C)
-            .max(0.0);
-        self.duty_cycle = 1.0;
-        self.mode_override = None;
-        self.burner_on = false;
-
-        self.loop_id =
-            loop_id_from_config(config, &["loop_id", "dhw_loop_id"]).unwrap_or(self.loop_id);
-        self.ports[3].loop_id = Some(self.loop_id);
-        self.mains_temp_c =
-            first_f64(config, &["mains_temp_c", "inlet_temp_c"]).unwrap_or(self.mains_temp_c);
-        self.draw_flow_rate_kg_s = resolve_draw_rate_kg_s(config);
-        self.draw_l_per_min_source = draw_schedule_source(config);
-        self.mains_temp_c_source = mains_temp_schedule_source(config);
-        self.zip = WaterHeaterZip::from_config(config)?;
-
-        self.flue_loss_fraction = first_f64(config, &["flue_loss_fraction", "FlueLossFraction"])
-            .unwrap_or(DEFAULT_FLUE_LOSS_FRACTION)
-            .clamp(0.0, 1.0);
-        self.burner_efficiency_constant = first_f64(
-            config,
-            &[
-                "burner_efficiency",
-                "thermal_efficiency",
-                "EnergyFactor",
-                "UniformEnergyFactor",
-            ],
-        )
-        .unwrap_or(DEFAULT_BURNER_EFFICIENCY);
-        self.burner_efficiency_poly = parse_poly3(config, "burner_efficiency_coeffs")?;
-
-        self.fuel_type = parse_fuel_type(config.get_str("FuelType")).unwrap_or(FuelType::Gas);
-        self.descriptor.fuel = self.fuel_type;
-
-        let ef = self.burner_efficiency_constant;
-        self.skin_loss_fraction = first_f64(config, &["skin_loss_fraction", "SkinLossFraction"])
-            .unwrap_or_else(|| default_skin_loss_fraction(ef))
-            .clamp(0.0, 1.0);
-        self.max_tank_temp_c =
-            first_f64(config, &["max_tank_temp_c"]).unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
-
-        self.dr_setpoint_offset_c = 0.0;
-        self.dr_load_fraction = 1.0;
-        self.dr_duration_remaining_s = None;
-        self.dr_level = DRLevel::Normal;
-        self.ctrl_load_fraction = 1.0;
-        self.telemetry = default_telemetry();
-        self.tank.register_node_telemetry(&mut self.telemetry);
-        self.core_output = CoreOutput::default();
-        Ok(())
-    }
-
     fn init_typed(
         &mut self,
         config: &EquipmentConfig,
         _env: &EnvironmentState,
     ) -> crate::Result<()> {
-        let c: GasWaterHeaterConfig = config.typed()?;
+        let c = config.require_typed::<GasWaterHeaterConfig>("Gas Water Heater")?;
         c.validate()?;
 
         self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
@@ -402,7 +278,10 @@ impl GasWH {
             ua_end_cap_w_per_k: None,
         })?;
 
-        self.burner_input_w = c.heating_capacity_w.unwrap_or(DEFAULT_BURNER_INPUT_W).max(0.0);
+        self.burner_input_w = c
+            .heating_capacity_w
+            .unwrap_or(DEFAULT_BURNER_INPUT_W)
+            .max(0.0);
         self.pilot_power_w = c.pilot_power_w.unwrap_or(0.0).max(0.0);
         self.fan_power_w = 0.0;
 
@@ -457,10 +336,7 @@ impl Equipment for GasWH {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            return self.init_typed(config, env);
-        }
-        self.init_raw(config)
+        self.init_typed(config, env)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -990,11 +866,7 @@ mod tests {
         raw.insert("initial_tank_temp_c".to_string(), 40.0.into());
         raw.insert("pilot_power_w".to_string(), 50.0.into());
         raw.insert("flue_loss_fraction".to_string(), 0.2.into());
-        EquipmentConfig {
-            name: "GWH".to_string(),
-            ochre_class: "Gas Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw("GWH".to_string(), "Gas Water Heater".to_string(), raw)
     }
 
     fn config_with_extras(
@@ -1016,11 +888,7 @@ mod tests {
                 }
             }
         }
-        EquipmentConfig {
-            name: "GWH".to_string(),
-            ochre_class: "Gas Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw("GWH".to_string(), "Gas Water Heater".to_string(), raw)
     }
 
     fn ports() -> PortSlots {

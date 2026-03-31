@@ -134,15 +134,15 @@ mod tests {
             "capacity_kw": 5.0,
             "not_a_field": true
         });
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "test".to_string(),
+            "PV".to_string(),
+            ConfigPayload::Typed {
                 type_name: "PV".to_string(),
                 version: 1,
                 data: json,
             },
-        };
+        );
         let result: crate::Result<PvConfig> = ec.typed();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown field"));

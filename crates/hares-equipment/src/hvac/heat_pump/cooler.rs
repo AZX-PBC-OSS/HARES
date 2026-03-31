@@ -166,43 +166,32 @@ impl Equipment for HpCooler {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        let typed_hp_cfg = if config.is_typed() {
-            config.typed::<HeatPumpCoolerConfig>().ok()
-        } else {
-            None
-        };
+        let typed_hp_cfg = config.require_typed::<HeatPumpCoolerConfig>("Heat Pump Cooler")?;
+        let mapped = Self::typed_hp_to_central_ac_config(config, &typed_hp_cfg);
+        self.inner.init(&mapped, env)?;
 
-        if let Some(hp_cfg) = typed_hp_cfg.as_ref() {
-            let mapped = Self::typed_hp_to_central_ac_config(config, hp_cfg);
-            self.inner.init(&mapped, env)?;
-        } else {
-            self.inner.init(config, env)?;
+        if typed_hp_cfg.is_mini_split {
+            self.inner.core.hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+            let cap = self.inner.core.hvac.cooling_capacities_w.clone();
+            let eir = self.inner.core.hvac.eir_by_stage.clone();
+            if cap.len() == 1 {
+                let base_cap = cap[0];
+                let base_eir = eir[0];
+                self.inner.core.hvac.cooling_capacities_w =
+                    vec![base_cap * 0.25, base_cap * 0.5, base_cap * 0.75, base_cap];
+                self.inner.core.hvac.eir_by_stage = vec![base_eir; 4];
+            }
         }
-
-        if let Some(hp_cfg) = typed_hp_cfg {
-            if hp_cfg.is_mini_split {
-                self.inner.core.hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
-                let cap = self.inner.core.hvac.cooling_capacities_w.clone();
-                let eir = self.inner.core.hvac.eir_by_stage.clone();
-                if cap.len() == 1 {
-                    let base_cap = cap[0];
-                    let base_eir = eir[0];
-                    self.inner.core.hvac.cooling_capacities_w =
-                        vec![base_cap * 0.25, base_cap * 0.5, base_cap * 0.75, base_cap];
-                    self.inner.core.hvac.eir_by_stage = vec![base_eir; 4];
-                }
+        let n_speeds = self.inner.core.hvac.cooling_capacities_w.len();
+        if let Some(shrs) = &typed_hp_cfg.stage_shrs {
+            if !shrs.is_empty() && shrs.len() != n_speeds {
+                return Err(HaresError::Equipment(format!(
+                    "stage_shrs length {} does not match speed stage count {}",
+                    shrs.len(),
+                    n_speeds
+                )));
             }
-            let n_speeds = self.inner.core.hvac.cooling_capacities_w.len();
-            if let Some(shrs) = &hp_cfg.stage_shrs {
-                if !shrs.is_empty() && shrs.len() != n_speeds {
-                    return Err(HaresError::Equipment(format!(
-                        "stage_shrs length {} does not match speed stage count {}",
-                        shrs.len(),
-                        n_speeds
-                    )));
-                }
-                self.inner.core.stage_shrs = shrs.clone();
-            }
+            self.inner.core.stage_shrs = shrs.clone();
         }
 
         if self.is_mshp {
@@ -317,34 +306,68 @@ mod tests {
     }
 
     fn base_config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw.insert("eir".to_string(), 0.33.into());
-        raw.insert("cooling_setpoint_c".to_string(), 24.0.into());
-        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw.insert(
+        let mut cfg = EquipmentConfig::from_typed(
+            "HP Cooler".to_string(),
+            "ASHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: None,
+                hspf: None,
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: None,
+                backup_eir: None,
+                fraction_heating_load_served: None,
+                cooling_capacity_w: Some(8_000.0),
+                seer: Some(3.412_141_633 / 0.33),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                stage_shrs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                duct: Default::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("cooling_setpoint_c".to_string(), 24.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("heating_setpoint_c".to_string(), 18.0.into());
+        cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        EquipmentConfig {
-            name: "HP Cooler".to_string(),
-            ochre_class: "ASHP Cooler".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        cfg
     }
 
     fn typed_config(data: serde_json::Value, ochre_class: &str) -> EquipmentConfig {
-        EquipmentConfig {
-            name: "HP Cooler".to_string(),
-            ochre_class: ochre_class.to_string(),
-            payload: ConfigPayload::Typed {
+        EquipmentConfig::with_payload(
+            "HP Cooler".to_string(),
+            ochre_class.to_string(),
+            ConfigPayload::Typed {
                 type_name: "ASHP Cooler".to_string(),
                 version: 1,
                 data,
             },
-        }
+        )
     }
 
     /// Zone above cooling setpoint — cooler must remove heat (negative thermal
@@ -483,11 +506,7 @@ mod tests {
             "[1,0,0,0,0,0]".into(),
         );
         raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        let cfg = EquipmentConfig {
-            name: "ASHP Cooler".to_string(),
-            ochre_class: "ASHP Cooler".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("ASHP Cooler".to_string(), "ASHP Cooler".to_string(), raw);
 
         // Zone at exactly the cooling setpoint (24.4°C).
         // turn_on = 24.4 + 1.0 * (1 - 0.2) = 25.2 → zone NOT above threshold → cooler must be OFF.

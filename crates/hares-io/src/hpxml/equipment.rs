@@ -2,8 +2,8 @@
 
 use serde_json::{Map, Value, json};
 
-use hares_types::FuelType;
 use hares_equipment::{EquipmentConfig, EquipmentTypedConfig};
+use hares_types::FuelType;
 
 use super::HpxmlError;
 use super::building::Building;
@@ -87,7 +87,10 @@ pub(super) fn build_spec(
     mut parameters: Map<String, Value>,
     defaults: &DefaultsStore,
 ) -> EquipmentSpec {
-    parameters.insert("fuel_type".to_string(), Value::String(fuel_type_label(fuel_type)));
+    parameters.insert(
+        "fuel_type".to_string(),
+        Value::String(fuel_type_label(fuel_type)),
+    );
 
     // Inject OCHRE-compatible default gain fractions when HPXML did not provide them.
     if !parameters.contains_key("frac_sensible")
@@ -811,9 +814,7 @@ mod tests {
             .typed()
             .expect("ventilation typed config");
 
-        assert!(
-            (typed.flow_rate_m3_s - 75.0 * hares_physics::constants::CFM_TO_M3_S).abs() < 1e-9
-        );
+        assert!((typed.flow_rate_m3_s - 75.0 * hares_physics::constants::CFM_TO_M3_S).abs() < 1e-9);
         assert_eq!(typed.fan_power_w, Some(30.0));
         assert_eq!(typed.sensible_effectiveness, Some(0.75));
         assert!(

@@ -454,11 +454,11 @@ mod tests {
     fn telemetry_returns_reference_and_explicit_clone_is_independent() {
         let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
         eq.init(
-            &EquipmentConfig {
-                name: "Mock".to_string(),
-                ochre_class: "Mock".to_string(),
-                payload: ConfigPayload::default(),
-            },
+            &EquipmentConfig::with_payload(
+                "Mock".to_string(),
+                "Mock".to_string(),
+                ConfigPayload::default(),
+            ),
             &sample_env(),
         )
         .unwrap();
@@ -475,11 +475,11 @@ mod tests {
         let registry = EquipmentRegistry::new();
         let result = registry.create(
             "DoesNotExist",
-            EquipmentConfig {
-                name: "x".to_string(),
-                ochre_class: "x".to_string(),
-                payload: ConfigPayload::default(),
-            },
+            EquipmentConfig::with_payload(
+                "x".to_string(),
+                "x".to_string(),
+                ConfigPayload::default(),
+            ),
         );
         assert!(result.is_err());
     }
@@ -498,11 +498,11 @@ mod tests {
         let equipment = registry
             .create(
                 "Mock",
-                EquipmentConfig {
-                    name: "x".to_string(),
-                    ochre_class: "Mock".to_string(),
-                    payload: ConfigPayload::default(),
-                },
+                EquipmentConfig::with_payload(
+                    "x".to_string(),
+                    "Mock".to_string(),
+                    ConfigPayload::default(),
+                ),
             )
             .unwrap();
         assert_eq!(equipment.descriptor().equipment_type, "Mock");

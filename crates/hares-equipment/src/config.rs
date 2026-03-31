@@ -150,9 +150,39 @@ pub struct EquipmentConfig {
     pub name: String,
     pub ochre_class: String,
     pub payload: ConfigPayload,
+    #[cfg(test)]
+    #[serde(skip, default)]
+    test_extras: HashMap<String, ConfigValue>,
 }
 
 impl EquipmentConfig {
+    pub fn with_payload(name: String, ochre_class: String, payload: ConfigPayload) -> Self {
+        Self {
+            name,
+            ochre_class,
+            payload,
+            #[cfg(test)]
+            test_extras: HashMap::new(),
+        }
+    }
+
+    /// Deserialize a built-in equipment payload, surfacing a clearer error when
+    /// a caller accidentally passes a raw payload to a typed-only init path.
+    pub fn require_typed<T: EquipmentTypedConfig>(
+        &self,
+        equipment_label: &str,
+    ) -> crate::Result<T> {
+        self.typed::<T>().map_err(|err| match &self.payload {
+            ConfigPayload::Raw { .. } => hares_types::HaresError::Equipment(format!(
+                "{equipment_label} requires typed config (was Raw). \
+                 Did you use EquipmentConfig::from_typed()? Error: {err}"
+            )),
+            ConfigPayload::Typed { .. } => hares_types::HaresError::Equipment(format!(
+                "{equipment_label} typed config validation failed: {err}"
+            )),
+        })
+    }
+
     /// Extract a numeric value from the `Raw` payload.
     pub fn get_f64(&self, key: &str) -> Option<f64> {
         self.raw_data()
@@ -183,6 +213,10 @@ impl EquipmentConfig {
     /// equipment types not yet migrated to typed config.
     #[deprecated(note = "transitional — removed in CFG-015")]
     pub fn raw_config_mut(&mut self) -> Option<&mut HashMap<String, ConfigValue>> {
+        #[cfg(test)]
+        if let ConfigPayload::Typed { .. } = &self.payload {
+            return Some(&mut self.test_extras);
+        }
         match &mut self.payload {
             ConfigPayload::Raw { data } => Some(data),
             ConfigPayload::Typed { .. } => None,
@@ -191,6 +225,12 @@ impl EquipmentConfig {
 
     /// Get the raw config data, or None if typed.
     pub fn raw_data(&self) -> Option<&HashMap<String, ConfigValue>> {
+        #[cfg(test)]
+        if let ConfigPayload::Typed { .. } = &self.payload
+            && !self.test_extras.is_empty()
+        {
+            return Some(&self.test_extras);
+        }
         match &self.payload {
             ConfigPayload::Raw { data } => Some(data),
             ConfigPayload::Typed { .. } => None,
@@ -199,6 +239,10 @@ impl EquipmentConfig {
 
     /// Get the raw config data. Panics if called on a `Typed` payload.
     pub fn raw_data_or_empty(&self) -> &HashMap<String, ConfigValue> {
+        #[cfg(test)]
+        if let ConfigPayload::Typed { .. } = &self.payload {
+            return &self.test_extras;
+        }
         match &self.payload {
             ConfigPayload::Raw { data } => data,
             ConfigPayload::Typed { .. } => {
@@ -266,6 +310,8 @@ impl EquipmentConfig {
                 version: T::schema_version(),
                 data,
             },
+            #[cfg(test)]
+            test_extras: HashMap::new(),
         }
     }
 
@@ -276,6 +322,8 @@ impl EquipmentConfig {
             name,
             ochre_class,
             payload: ConfigPayload::Raw { data },
+            #[cfg(test)]
+            test_extras: HashMap::new(),
         }
     }
 }
@@ -327,13 +375,7 @@ mod tests {
 
     #[test]
     fn typed_on_raw_payload_returns_err() {
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "Test".to_string(),
-            payload: crate::config::ConfigPayload::Raw {
-                data: HashMap::new(),
-            },
-        };
+        let ec = EquipmentConfig::raw("test".to_string(), "Test".to_string(), HashMap::new());
         let result: Result<TestConfig, _> = ec.typed();
         assert!(result.is_err());
         assert!(
@@ -351,15 +393,15 @@ mod tests {
             "name": "test",
             "unknown_field": "should_fail"
         });
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "Test".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "test".to_string(),
+            "Test".to_string(),
+            ConfigPayload::Typed {
                 type_name: "TestEquipment".to_string(),
                 version: 1,
                 data: json,
             },
-        };
+        );
         let result: Result<TestConfig, _> = ec.typed();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown field"));
@@ -385,15 +427,15 @@ mod tests {
             value: 42.5,
             name: "test".to_string(),
         };
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "TestClass".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "test".to_string(),
+            "TestClass".to_string(),
+            ConfigPayload::Typed {
                 type_name: "TestEquipment".to_string(),
                 version: 99,
                 data: serde_json::to_value(&config).unwrap(),
             },
-        };
+        );
         let result: Result<TestConfig, _> = ec.typed();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -411,11 +453,7 @@ mod tests {
             ConfigValue::FloatArray(vec![1.0, 2.0, 3.0]),
         );
 
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "Test".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data },
-        };
+        let ec = EquipmentConfig::raw("test".to_string(), "Test".to_string(), data);
 
         assert_eq!(ec.get_f64("num"), Some(3.125));
         assert_eq!(ec.get_str("text"), Some("hello"));

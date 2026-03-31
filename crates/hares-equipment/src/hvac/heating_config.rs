@@ -12,7 +12,9 @@ pub use super::core_config::DuctConfig;
 pub struct GasFurnaceConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
+    /// Required; resolver errors if absent.
     pub capacity_w: f64,
+    /// Required; resolver errors if absent.
     pub afue: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w: Option<f64>,
@@ -47,7 +49,9 @@ impl Default for GasFurnaceConfig {
 pub struct ElectricFurnaceConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
+    /// Required; resolver errors if absent.
     pub capacity_w: f64,
+    /// Required; resolver errors if absent.
     pub eir: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w: Option<f64>,
@@ -83,7 +87,9 @@ pub struct GasBoilerConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     pub loop_id: Option<u16>,
+    /// Required; resolver errors if absent.
     pub capacity_w: f64,
+    /// Required; resolver errors if absent.
     pub afue: f64,
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
@@ -126,7 +132,9 @@ pub struct ElectricBoilerConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     pub loop_id: Option<u16>,
+    /// Required; resolver errors if absent.
     pub capacity_w: f64,
+    /// Required; resolver errors if absent.
     pub eir: f64,
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
@@ -168,7 +176,9 @@ impl Default for ElectricBoilerConfig {
 pub struct ElectricBaseboardConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
+    /// Required; resolver errors if absent.
     pub capacity_w: f64,
+    /// Required; resolver errors if absent.
     pub eir: f64,
 }
 
@@ -301,15 +311,15 @@ mod tests {
             "afue": 0.96,
             "unknown_key": true,
         });
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "Gas Furnace".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "test".to_string(),
+            "Gas Furnace".to_string(),
+            ConfigPayload::Typed {
                 type_name: "Gas Furnace".to_string(),
                 version: 1,
                 data,
             },
-        };
+        );
         let result: crate::Result<GasFurnaceConfig> = ec.typed();
         let err = result.expect_err("unknown fields must be rejected");
         assert!(

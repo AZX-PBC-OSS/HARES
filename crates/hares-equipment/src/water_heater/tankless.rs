@@ -164,68 +164,48 @@ impl TanklessWH {
 }
 
 impl TanklessWH {
-    fn init_raw(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        self.fuel_type = parse_tankless_fuel_type(config.get_str("FuelType"));
-        self.descriptor.fuel = self.fuel_type;
-        self.descriptor.core_capabilities = core_capabilities_for_fuel(self.fuel_type);
-        self.ports = build_ports(self.fuel_type);
-
-        self.setpoint_c = first_f64(
-            config,
-            &[
-                "setpoint_c",
-                "SetpointTemperature",
-                "setpoint_temperature_c",
-                "ThermostatSetpointC",
-            ],
-        )
-        .unwrap_or(DEFAULT_SETPOINT_C);
-        self.efficiency_factor = first_f64(
-            config,
-            &["EnergyFactor", "UniformEnergyFactor", "efficiency_factor"],
-        )
-        .unwrap_or(DEFAULT_EF)
-        .max(1e-6);
-        // ANSI/RESNET 301 performance adjustment for tankless units (typically 0.92).
-        // Applied as a derate on top of the base efficiency factor.
-        if let Some(perf_adj) = first_f64(config, &["performance_adjustment"]) {
-            self.efficiency_factor = (self.efficiency_factor * perf_adj.clamp(0.0, 1.0)).max(1e-6);
-        }
-        self.rated_thermal_power_w = first_f64(
-            config,
-            &["max_thermal_power_w", "RatedCapacityW", "capacity_w"],
-        )
-        .unwrap_or(DEFAULT_MAX_THERMAL_POWER_W)
-        .max(0.0);
-        self.power_limit_w = None;
-        self.parasitic_power_w = if self.fuel_type == FuelType::Gas {
-            first_f64(config, &["parasitic_power_w"]).unwrap_or(DEFAULT_GAS_PARASITIC_POWER_W)
-        } else {
-            first_f64(config, &["parasitic_power_w"]).unwrap_or(0.0)
-        }
-        .max(0.0);
-        self.duty_cycle = 1.0;
-        self.mode_override = None;
-        self.inlet_temp_c =
-            first_f64(config, &["inlet_temp_c", "mains_temp_c"]).unwrap_or(self.inlet_temp_c);
-        self.draw_flow_rate_kg_s = resolve_draw_rate_kg_s(config);
-        self.zip = WaterHeaterZip::from_config(config)?;
-        self.dr_setpoint_offset_c = 0.0;
-        self.dr_load_fraction = 1.0;
-        self.dr_duration_remaining_s = None;
-        self.dr_level = DRLevel::Normal;
-        self.ctrl_load_fraction = 1.0;
-        self.telemetry = default_telemetry();
-        self.core_output = CoreOutput::default();
-        Ok(())
-    }
-
     fn init_typed(
         &mut self,
         config: &EquipmentConfig,
         _env: &EnvironmentState,
     ) -> crate::Result<()> {
-        let c: TanklessWaterHeaterConfig = config.typed()?;
+        let mut c = if config.is_typed() {
+            config.require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")?
+        } else {
+            TanklessWaterHeaterConfig {
+                equipment_id: config.get_f64("equipment_id").map(|v| v as u32),
+                zone_id: config.get_f64("zone_id").map(|v| v as u16),
+                loop_id: config.get_f64("loop_id").map(|v| v as u16),
+                fuel_type: parse_tankless_fuel_type(config.get_str("FuelType")),
+                energy_factor: config.get_f64("energy_factor").or_else(|| config.get_f64("EnergyFactor")),
+                uniform_energy_factor: config.get_f64("uniform_energy_factor"),
+                heating_capacity_w: config
+                    .get_f64("heating_capacity_w")
+                    .or_else(|| config.get_f64("max_thermal_power_w")),
+                setpoint_c: config.get_f64("setpoint_c"),
+                parasitic_power_w: config.get_f64("parasitic_power_w"),
+                performance_adjustment: config.get_f64("performance_adjustment"),
+                avg_water_draw_l_per_day: config.get_f64("avg_water_draw_l_per_day"),
+            }
+        };
+        if let Some(v) = config.get_f64("setpoint_c") {
+            c.setpoint_c = Some(v);
+        }
+        if let Some(v) = config.get_f64("EnergyFactor").or_else(|| config.get_f64("energy_factor")) {
+            c.energy_factor = Some(v);
+        }
+        if let Some(v) = config
+            .get_f64("max_thermal_power_w")
+            .or_else(|| config.get_f64("heating_capacity_w"))
+        {
+            c.heating_capacity_w = Some(v);
+        }
+        if let Some(v) = config.get_f64("parasitic_power_w") {
+            c.parasitic_power_w = Some(v);
+        }
+        if let Some(raw) = config.get_str("FuelType") {
+            c.fuel_type = parse_tankless_fuel_type(Some(raw));
+        }
         c.validate()?;
 
         self.descriptor.id = EquipmentId(c.equipment_id.unwrap_or(self.descriptor.id.0));
@@ -259,11 +239,12 @@ impl TanklessWH {
             .max(0.0);
         self.duty_cycle = 1.0;
         self.mode_override = None;
-        self.inlet_temp_c = 15.0;
-        self.draw_flow_rate_kg_s = c
-            .avg_water_draw_l_per_day
-            .map(|l| l / 86_400.0)
-            .unwrap_or(0.0);
+        self.inlet_temp_c = config.get_f64("inlet_temp_c").unwrap_or(15.0);
+        self.draw_flow_rate_kg_s = config.get_f64("draw_flow_rate_kg_s").unwrap_or_else(|| {
+            c.avg_water_draw_l_per_day
+                .map(|l| l / 86_400.0)
+                .unwrap_or(0.0)
+        });
         self.zip = WaterHeaterZip::default();
 
         self.dr_setpoint_offset_c = 0.0;
@@ -287,10 +268,7 @@ impl Equipment for TanklessWH {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            return self.init_typed(config, env);
-        }
-        self.init_raw(config)
+        self.init_typed(config, env)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -682,38 +660,35 @@ mod tests {
     }
 
     fn config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
-        raw.insert("EnergyFactor".to_string(), 0.8.into());
-        // 0.2 kg/s × 4183 J/(kg·K) × 30 K ≈ 25,098 W; set capacity above demand.
-        raw.insert("max_thermal_power_w".to_string(), 30_000.0_f64.into());
-        EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        }
+        config_with_capacity(30_000.0)
     }
 
     /// Build a config that also sets max_thermal_power_w explicitly.
     fn config_with_capacity(max_thermal_power_w: f64) -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("FuelType".to_string(), "gas".into());
-        raw.insert("setpoint_c".to_string(), 50.0.into());
-        raw.insert("inlet_temp_c".to_string(), 20.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
-        raw.insert("EnergyFactor".to_string(), 0.8.into());
-        raw.insert(
-            "max_thermal_power_w".to_string(),
-            max_thermal_power_w.into(),
+        let mut cfg = EquipmentConfig::from_typed(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            crate::TanklessWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: None,
+                loop_id: None,
+                fuel_type: hares_types::FuelType::Gas,
+                energy_factor: Some(0.8),
+                uniform_energy_factor: None,
+                heating_capacity_w: Some(max_thermal_power_w),
+                setpoint_c: Some(50.0),
+                parasitic_power_w: None,
+                performance_adjustment: None,
+                avg_water_draw_l_per_day: None,
+            },
         );
-        EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        }
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("inlet_temp_c".to_string(), 20.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
+        cfg
     }
 
     fn step_once(eq: &mut TanklessWH) -> PortSlots {
@@ -961,11 +936,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
         raw.insert("EnergyFactor".to_string(), 0.8.into());
         raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cap = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cap = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cap.clone());
         eq.init(&cap, &env()).unwrap();
@@ -1014,11 +989,11 @@ mod tests {
         raw.insert("inlet_temp_c".to_string(), 20.0.into());
         raw.insert("draw_flow_rate_kg_s".to_string(), 0.0_f64.into());
         raw.insert("EnergyFactor".to_string(), 0.95.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1052,11 +1027,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), 5.0.into());
         raw.insert("EnergyFactor".to_string(), 0.85.into());
         raw.insert("max_thermal_power_w".to_string(), 25_000.0_f64.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1083,11 +1058,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), 0.001_f64.into());
         raw.insert("EnergyFactor".to_string(), 0.9.into());
         raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1117,11 +1092,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), m_dot.into());
         raw.insert("EnergyFactor".to_string(), 0.9.into());
         raw.insert("max_thermal_power_w".to_string(), capacity_w.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1156,11 +1131,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
         raw.insert("EnergyFactor".to_string(), 0.8.into());
         raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1206,11 +1181,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
         raw.insert("EnergyFactor".to_string(), 0.8.into());
         raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1311,11 +1286,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
         raw.insert("EnergyFactor".to_string(), 0.8.into());
         raw.insert("parasitic_power_w".to_string(), 15.0_f64.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1348,11 +1323,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
         raw.insert("EnergyFactor".to_string(), 0.8.into());
         raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1393,11 +1368,11 @@ mod tests {
         raw.insert("draw_flow_rate_kg_s".to_string(), 1.0.into());
         raw.insert("EnergyFactor".to_string(), 0.8.into());
         raw.insert("max_thermal_power_w".to_string(), 20_000.0_f64.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1434,11 +1409,11 @@ mod tests {
         raw.insert("inlet_temp_c".to_string(), 20.0.into());
         raw.insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
         raw.insert("EnergyFactor".to_string(), 0.95.into());
-        let cfg = EquipmentConfig {
-            name: "Tankless".to_string(),
-            ochre_class: "Tankless Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw(
+            "Tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            raw,
+        );
 
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
@@ -1511,11 +1486,11 @@ mod tests {
             raw.insert("draw_flow_rate_kg_s".to_string(), 0.2.into());
             raw.insert("EnergyFactor".to_string(), 0.9.into());
             raw.insert("max_thermal_power_w".to_string(), 60_000.0_f64.into());
-            EquipmentConfig {
-                name: "TanklessTest".to_string(),
-                ochre_class: "Tankless Water Heater".to_string(),
-                payload: ConfigPayload::Raw { data: raw },
-            }
+            EquipmentConfig::raw(
+                "TanklessTest".to_string(),
+                "Tankless Water Heater".to_string(),
+                raw,
+            )
         };
 
         let cold_env = env_with_mains(5.0);

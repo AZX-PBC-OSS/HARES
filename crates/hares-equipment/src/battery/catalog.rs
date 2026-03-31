@@ -1,20 +1,12 @@
 //! Battery product catalog with factory methods for commercial products.
 
-use std::collections::HashMap;
 use std::fmt;
 
 use hares_types::BatteryChemistry;
 use serde::{Deserialize, Serialize};
 
 use crate::EquipmentConfig;
-use crate::config::ConfigValue;
-
-use super::{
-    KEY_CAPACITY_KWH, KEY_CHARGE_EFFICIENCY, KEY_CHEMISTRY, KEY_DISCHARGE_EFFICIENCY,
-    KEY_FULL_POWER_TEMP_C, KEY_HEATER_POWER_W, KEY_HEATER_THRESHOLD_C, KEY_MAX_CHARGE_KW,
-    KEY_MAX_DISCHARGE_KW, KEY_MAX_SOC, KEY_MIN_CHARGE_TEMP_C, KEY_MIN_SOC,
-    KEY_SELF_DISCHARGE_PCT_PER_DAY, KEY_STANDBY_POWER_W,
-};
+use crate::battery::config::BatteryConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BatteryProductId {
@@ -126,56 +118,44 @@ impl BatterySpec {
     /// where inverter losses dominate and are symmetric.
     pub fn to_config(&self) -> EquipmentConfig {
         let eta = self.round_trip_efficiency.sqrt();
-        let mut data = HashMap::new();
-        data.insert(
-            KEY_CAPACITY_KWH.into(),
-            ConfigValue::Float(self.capacity_kwh),
-        );
-        data.insert(
-            KEY_MAX_CHARGE_KW.into(),
-            ConfigValue::Float(self.max_charge_kw),
-        );
-        data.insert(
-            KEY_MAX_DISCHARGE_KW.into(),
-            ConfigValue::Float(self.max_discharge_kw),
-        );
-        data.insert(KEY_CHARGE_EFFICIENCY.into(), ConfigValue::Float(eta));
-        data.insert(KEY_DISCHARGE_EFFICIENCY.into(), ConfigValue::Float(eta));
-        data.insert(
-            KEY_CHEMISTRY.into(),
-            ConfigValue::Text(self.chemistry.as_config_str().to_string()),
-        );
-        data.insert(
-            KEY_STANDBY_POWER_W.into(),
-            ConfigValue::Float(self.standby_power_w),
-        );
-        data.insert(
-            KEY_SELF_DISCHARGE_PCT_PER_DAY.into(),
-            ConfigValue::Float(self.self_discharge_pct_per_day),
-        );
-        data.insert(KEY_MIN_SOC.into(), ConfigValue::Float(self.min_soc));
-        data.insert(KEY_MAX_SOC.into(), ConfigValue::Float(self.max_soc));
-        data.insert(
-            KEY_HEATER_POWER_W.into(),
-            ConfigValue::Float(self.heater_power_w),
-        );
-        data.insert(
-            KEY_HEATER_THRESHOLD_C.into(),
-            ConfigValue::Float(self.heater_threshold_c),
-        );
-        data.insert(
-            KEY_MIN_CHARGE_TEMP_C.into(),
-            ConfigValue::Float(self.min_charge_temp_c),
-        );
-        data.insert(
-            KEY_FULL_POWER_TEMP_C.into(),
-            ConfigValue::Float(self.full_power_temp_c),
-        );
-        EquipmentConfig {
-            name: self.label.to_string(),
-            ochre_class: "Battery".to_string(),
-            payload: crate::ConfigPayload::Raw { data },
-        }
+        EquipmentConfig::from_typed(
+            self.label.to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                equipment_id: None,
+                zone_id: None,
+                capacity_kwh: self.capacity_kwh,
+                max_charge_kw: self.max_charge_kw,
+                max_discharge_kw: self.max_discharge_kw,
+                n_series: None,
+                n_parallel: None,
+                ah_cell: None,
+                v_cell: None,
+                cell_resistance_ohm: None,
+                pack_voltage_v: None,
+                chemistry: Some(self.chemistry.as_config_str().to_string()),
+                standby_power_w: Some(self.standby_power_w),
+                self_discharge_pct_per_day: Some(self.self_discharge_pct_per_day),
+                min_soc: Some(self.min_soc),
+                max_soc: Some(self.max_soc),
+                initial_soc: None,
+                import_limit_w: None,
+                export_limit_w: None,
+                heater_power_w: Some(self.heater_power_w),
+                heater_threshold_c: Some(self.heater_threshold_c),
+                heater_on_discharge: None,
+                min_discharge_temp_c: None,
+                full_power_temp_c: Some(self.full_power_temp_c),
+                min_charge_temp_c: Some(self.min_charge_temp_c),
+                cell_thermal_mass_j_per_k: None,
+                cell_ua_w_per_k: None,
+                inverter_efficiency: None,
+                charge_efficiency: Some(eta),
+                discharge_efficiency: Some(eta),
+                bms_mode: None,
+                grid_export_rule: None,
+            },
+        )
     }
 }
 
@@ -454,11 +434,12 @@ mod tests {
         let spec = BatteryProductId::TeslaPw3.spec();
         let cfg = spec.to_config();
         let eta = 0.90_f64.sqrt();
-        let charge_eff = cfg.get_f64("charge_efficiency").unwrap();
-        let discharge_eff = cfg.get_f64("discharge_efficiency").unwrap();
+        let typed: BatteryConfig = cfg.typed().unwrap();
+        let charge_eff = typed.charge_efficiency.unwrap();
+        let discharge_eff = typed.discharge_efficiency.unwrap();
         assert!((charge_eff - eta).abs() < 1e-10);
         assert!((discharge_eff - eta).abs() < 1e-10);
-        assert_eq!(cfg.get_str("chemistry").unwrap(), "lfp");
+        assert_eq!(typed.chemistry.as_deref(), Some("lfp"));
     }
 
     #[test]
@@ -466,8 +447,9 @@ mod tests {
         for spec in CATALOG {
             let cfg = spec.to_config();
             let expected_eta = spec.round_trip_efficiency.sqrt();
-            let charge = cfg.get_f64("charge_efficiency").unwrap();
-            let discharge = cfg.get_f64("discharge_efficiency").unwrap();
+            let typed: BatteryConfig = cfg.typed().unwrap();
+            let charge = typed.charge_efficiency.unwrap();
+            let discharge = typed.discharge_efficiency.unwrap();
             assert!(
                 (charge - expected_eta).abs() < 1e-10,
                 "{}: charge_eff {charge} != sqrt({}) = {expected_eta}",

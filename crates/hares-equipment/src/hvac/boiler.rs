@@ -21,8 +21,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, equipment_id_from_config, first_f64,
-        loop_id_from_config, operating_mode_code, update_heating_control, zone_id_from_config,
+        apply_heating_control_unchecked, equipment_id_from_config, loop_id_from_config,
+        operating_mode_code, update_heating_control, zone_id_from_config,
     },
 };
 
@@ -169,32 +169,15 @@ impl Equipment for ElectricBoiler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        if config.is_typed() {
-            let typed = config.typed::<ElectricBoilerConfig>()?;
-            self.rated_capacity_w = typed.capacity_w.max(0.0);
-            self.efficiency = typed.eir;
-            if let Some(lid) = typed.loop_id {
-                self.loop_id = LoopId(lid);
-            }
-            self.fluid_type = typed.fluid_type;
-            self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
-            self.default_return_temp_c = typed.return_temp_c;
-        } else {
-            self.rated_capacity_w = first_f64(
-                config,
-                &["capacity_w", "heating_capacity_w", "capacity", "HVAC Heating Capacity (W)"],
-            )
-                .unwrap_or(0.0)
-                .max(0.0);
-            self.efficiency = first_f64(config, &["eir", "efficiency"]).unwrap_or(1.0);
-            if let Some(lid) = loop_id_from_config(config, &["loop_id", "hydronic_loop_id"]) {
-                self.loop_id = lid;
-            }
-            self.flow_rate_kg_s = first_f64(config, &["flow_rate_kg_s"])
-                .unwrap_or(0.5)
-                .max(0.0);
-            self.default_return_temp_c = first_f64(config, &["return_temp_c"]).unwrap_or(40.0);
+        let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
+        self.rated_capacity_w = typed.capacity_w.max(0.0);
+        self.efficiency = typed.eir;
+        if let Some(lid) = typed.loop_id {
+            self.loop_id = LoopId(lid);
         }
+        self.fluid_type = typed.fluid_type;
+        self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
+        self.default_return_temp_c = typed.return_temp_c;
         if self.efficiency <= 0.0 || !self.efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Electric Boiler eir: {}",
@@ -419,34 +402,16 @@ impl Equipment for GasBoiler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        let fuel_efficiency = if config.is_typed() {
-            let typed = config.typed::<GasBoilerConfig>()?;
-            self.rated_capacity_w = typed.capacity_w.max(0.0);
-            if let Some(lid) = typed.loop_id {
-                self.loop_id = LoopId(lid);
-            }
-            self.fluid_type = typed.fluid_type;
-            self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
-            self.default_return_temp_c = typed.return_temp_c;
-            self.pump_kw = typed.fan_power_w.unwrap_or(0.0) / 1_000.0;
-            typed.afue
-        } else {
-            self.rated_capacity_w = first_f64(
-                config,
-                &["capacity_w", "heating_capacity_w", "capacity", "HVAC Heating Capacity (W)"],
-            )
-            .unwrap_or(0.0)
-            .max(0.0);
-            if let Some(lid) = loop_id_from_config(config, &["loop_id", "hydronic_loop_id"]) {
-                self.loop_id = lid;
-            }
-            self.flow_rate_kg_s = first_f64(config, &["flow_rate_kg_s"])
-                .unwrap_or(0.5)
-                .max(0.0);
-            self.default_return_temp_c = first_f64(config, &["return_temp_c"]).unwrap_or(40.0);
-            self.pump_kw = first_f64(config, &["fan_power_w"]).unwrap_or(0.0) / 1_000.0;
-            first_f64(config, &["afue", "fuel_efficiency", "efficiency"]).unwrap_or(0.8)
-        };
+        let typed = config.require_typed::<GasBoilerConfig>("Gas Boiler")?;
+        self.rated_capacity_w = typed.capacity_w.max(0.0);
+        if let Some(lid) = typed.loop_id {
+            self.loop_id = LoopId(lid);
+        }
+        self.fluid_type = typed.fluid_type;
+        self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
+        self.default_return_temp_c = typed.return_temp_c;
+        self.pump_kw = typed.fan_power_w.unwrap_or(0.0) / 1_000.0;
+        let fuel_efficiency = typed.afue;
         if fuel_efficiency <= 0.0 || !fuel_efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Gas Boiler efficiency: {fuel_efficiency}"
@@ -872,39 +837,33 @@ mod tests {
     }
 
     #[test]
-    fn raw_config_accepted_for_electric_boiler_with_defaults() {
-        use crate::config::ConfigPayload;
-        let cfg = EquipmentConfig {
-            name: "EB".to_string(),
-            ochre_class: "Electric Boiler".to_string(),
-            payload: ConfigPayload::Raw {
-                data: std::collections::HashMap::new(),
-            },
-        };
+    fn raw_config_rejected_for_electric_boiler_with_typed_diagnostic() {
+        let cfg = EquipmentConfig::raw(
+            "EB".to_string(),
+            "Electric Boiler".to_string(),
+            std::collections::HashMap::new(),
+        );
         let mut eq = ElectricBoiler::new(cfg.clone());
         let result = eq.init(&cfg, &env(18.0));
-        assert!(
-            result.is_ok(),
-            "Electric Boiler should accept raw config with defaults"
-        );
+        let err = result.expect_err("raw electric boiler config must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("Electric Boiler requires typed config"));
+        assert!(msg.contains("from_typed"));
     }
 
     #[test]
-    fn raw_config_accepted_for_gas_boiler_with_defaults() {
-        use crate::config::ConfigPayload;
-        let cfg = EquipmentConfig {
-            name: "GB".to_string(),
-            ochre_class: "Gas Boiler".to_string(),
-            payload: ConfigPayload::Raw {
-                data: std::collections::HashMap::new(),
-            },
-        };
+    fn raw_config_rejected_for_gas_boiler_with_typed_diagnostic() {
+        let cfg = EquipmentConfig::raw(
+            "GB".to_string(),
+            "Gas Boiler".to_string(),
+            std::collections::HashMap::new(),
+        );
         let mut eq = GasBoiler::new(cfg.clone());
         let result = eq.init(&cfg, &env(18.0));
-        assert!(
-            result.is_ok(),
-            "Gas Boiler should accept raw config with defaults"
-        );
+        let err = result.expect_err("raw gas boiler config must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("Gas Boiler requires typed config"));
+        assert!(msg.contains("from_typed"));
     }
 
     #[test]

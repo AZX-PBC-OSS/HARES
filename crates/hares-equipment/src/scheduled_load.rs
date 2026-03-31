@@ -1176,11 +1176,7 @@ mod tests {
             KEY_POWER_CONSTANT_KW.to_string(),
             schedule.first().copied().unwrap_or(0.0).into(),
         );
-        EquipmentConfig {
-            name: name.to_string(),
-            ochre_class: ochre_class.to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
     }
 
     fn config_with_extras(
@@ -1199,11 +1195,7 @@ mod tests {
         for (k, v) in extras {
             raw.insert(k.to_string(), v.clone());
         }
-        EquipmentConfig {
-            name: name.to_string(),
-            ochre_class: ochre_class.to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
     }
 
     fn config_no_zone(name: &str, ochre_class: &str, schedule: &[f64]) -> EquipmentConfig {
@@ -1213,11 +1205,7 @@ mod tests {
             KEY_POWER_CONSTANT_KW.to_string(),
             schedule.first().copied().unwrap_or(0.0).into(),
         );
-        EquipmentConfig {
-            name: name.to_string(),
-            ochre_class: ochre_class.to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
     }
 
     #[test]

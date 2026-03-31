@@ -416,13 +416,27 @@ mod tests {
     }
 
     fn base_config() -> EquipmentConfig {
-        EquipmentConfig {
-            name: "WH".to_string(),
-            ochre_class: "Resistance Water Heater".to_string(),
-            payload: ConfigPayload::Raw {
-                data: HashMap::new(),
+        EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: None,
+                loop_id: None,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                energy_factor: None,
+                uniform_energy_factor: None,
+                heating_capacity_w: None,
+                ua_w_per_k: None,
+                setpoint_c: None,
+                avg_water_draw_l_per_day: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+                element_power_w: None,
             },
-        }
+        )
     }
 
     fn env_with_payloads(
@@ -735,25 +749,44 @@ mod dhw_integration_tests {
         raw.insert("building_id".to_string(), 11.0.into());
         raw.insert("master_seed".to_string(), 987.0.into());
         raw.insert("hot_water_draw_volume_l".to_string(), draw_volume_l.into());
-        EquipmentConfig {
-            name: "washer".to_string(),
-            ochre_class: "Clothes Washer".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw("washer".to_string(), "Clothes Washer".to_string(), raw)
     }
 
     fn wh_config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("setpoint_c".to_string(), 52.0.into());
-        raw.insert("deadband_c".to_string(), 2.0.into());
-        raw.insert("initial_tank_temp_c".to_string(), 52.0.into());
-        raw.insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
-        raw.insert("max_tank_temp_c".to_string(), 300.0.into());
-        EquipmentConfig {
-            name: "WH".to_string(),
-            ochre_class: "Resistance Water Heater".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        }
+        let mut cfg = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: None,
+                loop_id: None,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                energy_factor: None,
+                uniform_energy_factor: None,
+                heating_capacity_w: None,
+                ua_w_per_k: None,
+                setpoint_c: Some(52.0),
+                avg_water_draw_l_per_day: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+                element_power_w: None,
+            },
+        );
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("deadband_c".to_string(), 2.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("initial_tank_temp_c".to_string(), 52.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("draw_flow_rate_kg_s".to_string(), 0.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("max_tank_temp_c".to_string(), 300.0.into());
+        cfg
     }
 
     /// Merge port declarations from multiple equipment into shared PortSlots,

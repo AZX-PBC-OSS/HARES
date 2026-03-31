@@ -288,7 +288,7 @@ impl Ventilation {
 
 impl Ventilation {
     fn init_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        let c: VentilationConfig = config.typed()?;
+        let c = config.require_typed::<VentilationConfig>("Ventilation")?;
         c.validate()?;
 
         self.ventilation_type = parse_ventilation_type(c.ventilation_type.as_deref());
@@ -318,8 +318,7 @@ impl Ventilation {
         let schedule_frac = if let Some(hours) = c.hours_in_operation {
             if !hours.is_finite() || !(0.0..=24.0).contains(&hours) {
                 return Err(HaresError::Equipment(
-                    "ventilation hours_in_operation must be finite and within [0, 24]"
-                        .to_string(),
+                    "ventilation hours_in_operation must be finite and within [0, 24]".to_string(),
                 ));
             }
             (hours / 24.0).clamp(0.0, 1.0)
@@ -344,63 +343,7 @@ impl Equipment for Ventilation {
     }
 
     fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            return self.init_typed(config);
-        }
-        self.fan_power_w = config
-            .get_f64(KEY_FAN_POWER_W)
-            .unwrap_or(DEFAULT_FAN_POWER_W);
-        self.flow_rate_m3_s = config
-            .get_f64(KEY_FLOW_RATE_M3_S)
-            .unwrap_or(DEFAULT_FLOW_RATE_M3_S);
-        self.sensible_effectiveness = config
-            .get_f64(KEY_SENSIBLE_EFFECTIVENESS)
-            .unwrap_or(DEFAULT_SENSIBLE_EFFECTIVENESS)
-            .clamp(0.0, 1.0);
-        self.latent_effectiveness = config
-            .get_f64(KEY_LATENT_EFFECTIVENESS)
-            .unwrap_or(DEFAULT_LATENT_EFFECTIVENESS)
-            .clamp(0.0, 1.0);
-        self.bypass_temp_min_c = config
-            .get_f64(KEY_BYPASS_TEMP_MIN_C)
-            .unwrap_or(DEFAULT_BYPASS_TEMP_MIN_C);
-        self.bypass_temp_max_c = config
-            .get_f64(KEY_BYPASS_TEMP_MAX_C)
-            .unwrap_or(DEFAULT_BYPASS_TEMP_MAX_C);
-        self.defrost_temp_c = config
-            .get_f64(KEY_DEFROST_TEMP_C)
-            .unwrap_or(DEFAULT_DEFROST_TEMP_C);
-        self.defrost_effectiveness_fraction = config
-            .get_f64(KEY_DEFROST_EFFECTIVENESS_FRACTION)
-            .unwrap_or(DEFAULT_DEFROST_EFFECTIVENESS_FRACTION)
-            .clamp(0.0, 1.0);
-
-        if self.flow_rate_m3_s < 0.0 || !self.flow_rate_m3_s.is_finite() {
-            return Err(HaresError::Equipment(
-                "ventilation flow_rate_m3_s must be finite and >= 0".to_string(),
-            ));
-        }
-        if self.fan_power_w < 0.0 || !self.fan_power_w.is_finite() {
-            return Err(HaresError::Equipment(
-                "ventilation fan_power_w must be finite and >= 0".to_string(),
-            ));
-        }
-
-        self.schedule_source = match config.get_str(KEY_SCHEDULE_SOURCE) {
-            Some("constant") | None => {
-                let v = config.get_f64(KEY_SCHEDULE_CONSTANT).unwrap_or(1.0);
-                ScheduleSource::Constant(v)
-            }
-            Some(other) => {
-                return Err(HaresError::Equipment(format!(
-                    "ventilation: unsupported schedule_source '{other}' (only 'constant' supported)"
-                )));
-            }
-        };
-
-        self.mode = OperatingMode::Standby;
-        self.core_output = CoreOutput::default();
-        Ok(())
+        self.init_typed(config)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -685,32 +628,47 @@ mod tests {
     }
 
     fn hrv_config() -> EquipmentConfig {
-        let mut raw = std::collections::HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("ventilation_type".to_string(), "hrv".into());
-        raw.insert(KEY_SENSIBLE_EFFECTIVENESS.to_string(), 0.70.into());
-        raw.insert(KEY_FLOW_RATE_M3_S.to_string(), 0.035.into());
-        raw.insert(KEY_FAN_POWER_W.to_string(), 50.0.into());
-        EquipmentConfig {
-            name: "HRV".to_string(),
-            ochre_class: "HRV".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::from_typed(
+            "HRV".to_string(),
+            "HRV".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.035,
+                fan_power_w: Some(50.0),
+                sensible_effectiveness: Some(0.70),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("hrv".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        )
     }
 
     fn erv_config() -> EquipmentConfig {
-        let mut raw = std::collections::HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("ventilation_type".to_string(), "erv".into());
-        raw.insert(KEY_SENSIBLE_EFFECTIVENESS.to_string(), 0.70.into());
-        raw.insert(KEY_LATENT_EFFECTIVENESS.to_string(), 0.50.into());
-        raw.insert(KEY_FLOW_RATE_M3_S.to_string(), 0.035.into());
-        raw.insert(KEY_FAN_POWER_W.to_string(), 60.0.into());
-        EquipmentConfig {
-            name: "ERV".to_string(),
-            ochre_class: "ERV".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::from_typed(
+            "ERV".to_string(),
+            "ERV".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.035,
+                fan_power_w: Some(60.0),
+                sensible_effectiveness: Some(0.70),
+                latent_effectiveness: Some(0.50),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("erv".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        )
     }
 
     #[test]
@@ -915,16 +873,25 @@ mod tests {
 
     #[test]
     fn exhaust_fan_has_no_recovery() {
-        let mut raw = std::collections::HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("ventilation_type".to_string(), "exhaust_fan".into());
-        raw.insert(KEY_FAN_POWER_W.to_string(), 30.0.into());
-        raw.insert(KEY_FLOW_RATE_M3_S.to_string(), 0.025.into());
-        let cfg = EquipmentConfig {
-            name: "Exhaust".to_string(),
-            ochre_class: "Ventilation Fan".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::from_typed(
+            "Exhaust".to_string(),
+            "Ventilation Fan".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.025,
+                fan_power_w: Some(30.0),
+                sensible_effectiveness: Some(0.0),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("exhaust_fan".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        );
         let mut fan = Ventilation::new(cfg.clone());
         let e = env(-10.0, 20.0);
         fan.init(&cfg, &e).expect("init");
@@ -956,36 +923,15 @@ mod tests {
 
     #[test]
     fn constant_half_schedule_halves_flow_and_power() {
-        let mut raw = std::collections::HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("ventilation_type".to_string(), "hrv".into());
-        raw.insert(KEY_FAN_POWER_W.to_string(), 50.0.into());
-        raw.insert(KEY_FLOW_RATE_M3_S.to_string(), 0.035.into());
-        raw.insert(KEY_SENSIBLE_EFFECTIVENESS.to_string(), 0.70.into());
-        raw.insert(KEY_SCHEDULE_SOURCE.to_string(), "constant".into());
-        raw.insert(KEY_SCHEDULE_CONSTANT.to_string(), 0.5.into());
-        let cfg = EquipmentConfig {
-            name: "HRV-half".to_string(),
-            ochre_class: "HRV".to_string(),
-            payload: ConfigPayload::Raw { data: raw },
-        };
+        let cfg = hrv_config();
 
         let e = env(0.0, 20.0);
         let mut hrv = Ventilation::new(cfg.clone());
         hrv.init(&cfg, &e).expect("init");
+        hrv.schedule_source = ScheduleSource::Constant(0.5);
 
         // Run full-schedule reference first (separate instance)
-        let mut raw_full = std::collections::HashMap::new();
-        raw_full.insert("zone_id".to_string(), 1.0.into());
-        raw_full.insert("ventilation_type".to_string(), "hrv".into());
-        raw_full.insert(KEY_FAN_POWER_W.to_string(), 50.0.into());
-        raw_full.insert(KEY_FLOW_RATE_M3_S.to_string(), 0.035.into());
-        raw_full.insert(KEY_SENSIBLE_EFFECTIVENESS.to_string(), 0.70.into());
-        let cfg_full = EquipmentConfig {
-            name: "HRV-full".to_string(),
-            ochre_class: "HRV".to_string(),
-            payload: ConfigPayload::Raw { data: raw_full },
-        };
+        let cfg_full = hrv_config();
         let mut hrv_full = Ventilation::new(cfg_full.clone());
         hrv_full.init(&cfg_full, &e).expect("init full");
 
@@ -1082,15 +1028,15 @@ mod tests {
             "flow_rate_m3_s": 0.035,
             "mystery_key": 99
         });
-        let ec = EquipmentConfig {
-            name: "vent".to_string(),
-            ochre_class: "Ventilation Fan".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "vent".to_string(),
+            "Ventilation Fan".to_string(),
+            ConfigPayload::Typed {
                 type_name: "Ventilation".to_string(),
                 version: 1,
                 data: json,
             },
-        };
+        );
         let result: crate::Result<VentilationConfig> = ec.typed();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown field"));

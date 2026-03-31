@@ -49,11 +49,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("heating_setpoint_c".to_string(), 21.0.into());
         raw.insert("cooling_setpoint_c".to_string(), 26.0.into());
-        EquipmentConfig {
-            name: name.to_string(),
-            ochre_class: class.to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw(name.to_string(), class.to_string(), raw)
     }
 
     #[test]

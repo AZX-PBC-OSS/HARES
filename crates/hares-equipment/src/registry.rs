@@ -171,11 +171,11 @@ mod tests {
     use super::*;
 
     fn minimal_config(class: &str) -> EquipmentConfig {
-        EquipmentConfig {
-            name: class.to_string(),
-            ochre_class: class.to_string(),
-            ..Default::default()
-        }
+        EquipmentConfig::with_payload(
+            class.to_string(),
+            class.to_string(),
+            crate::config::ConfigPayload::default(),
+        )
     }
 
     #[test]

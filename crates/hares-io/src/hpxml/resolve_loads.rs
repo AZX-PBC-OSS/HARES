@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-use hares_types::FuelType;
 use hares_equipment::{EvConfig, VentilationConfig};
+use hares_types::FuelType;
 
 use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec, build_typed_spec};

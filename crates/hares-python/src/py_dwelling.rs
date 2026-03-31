@@ -10,8 +10,8 @@ use hares_core::{
     environment::SurfaceGeometry,
 };
 use hares_equipment::{
-    BatteryLutType, EquipmentConfig, EquipmentRegistry,
-    config::{ConfigPayload, ConfigValue},
+    BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig, PvConfig,
+    config::ConfigValue,
 };
 use hares_io::{OutputFormat, SimulationConfig, output::metrics::MetricsCalculator};
 use hares_types::{BatteryChemistry, EvConnectionState, SurfaceIrradiance};
@@ -360,79 +360,103 @@ fn parse_solar_override_from_list(
     Ok(result)
 }
 
-fn insert_battery_optional_config(
-    raw_config: &mut std::collections::HashMap<String, ConfigValue>,
-    battery: &PyBattery,
-) {
-    if let Some(c) = battery.chemistry {
-        raw_config.insert(
-            "chemistry".to_string(),
-            ConfigValue::Text(BatteryChemistry::from(c).as_config_str().to_string()),
-        );
-    }
-    if let Some(v) = battery.initial_soc {
-        raw_config.insert("initial_soc".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.min_soc {
-        raw_config.insert("min_soc".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.max_soc {
-        raw_config.insert("max_soc".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.inverter_efficiency {
-        raw_config.insert("inverter_efficiency".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.charge_efficiency {
-        raw_config.insert("charge_efficiency".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.discharge_efficiency {
-        raw_config.insert("discharge_efficiency".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.self_discharge_pct_per_day {
-        raw_config.insert(
-            "self_discharge_pct_per_day".to_string(),
-            ConfigValue::Float(v),
-        );
-    }
-    if let Some(v) = battery.standby_power_w {
-        raw_config.insert("standby_power_w".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.import_limit_w {
-        raw_config.insert("import_limit_w".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.export_limit_w {
-        raw_config.insert("export_limit_w".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.n_series {
-        raw_config.insert("n_series".to_string(), ConfigValue::Float(f64::from(v)));
-    }
-    if let Some(v) = battery.n_parallel {
-        raw_config.insert("n_parallel".to_string(), ConfigValue::Float(f64::from(v)));
-    }
-    if let Some(v) = battery.cell_resistance_ohm {
-        raw_config.insert("cell_resistance_ohm".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.heater_power_w {
-        raw_config.insert("heater_power_w".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.heater_threshold_c {
-        raw_config.insert("heater_threshold_c".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.min_charge_temp_c {
-        raw_config.insert("min_charge_temp_c".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.full_power_temp_c {
-        raw_config.insert("full_power_temp_c".to_string(), ConfigValue::Float(v));
-    }
-    if let Some(v) = battery.cell_thermal_mass_j_per_k {
-        raw_config.insert(
-            "cell_thermal_mass_j_per_k".to_string(),
-            ConfigValue::Float(v),
-        );
-    }
-    if let Some(v) = battery.cell_ua_w_per_k {
-        raw_config.insert("cell_ua_w_per_k".to_string(), ConfigValue::Float(v));
-    }
+fn battery_config_from_py(battery: &PyBattery) -> EquipmentConfig {
+    let cfg = BatteryConfig {
+        equipment_id: None,
+        zone_id: None,
+        capacity_kwh: battery.capacity_kwh,
+        max_charge_kw: battery.max_charge_kw.unwrap_or(5.0),
+        max_discharge_kw: battery.max_discharge_kw.unwrap_or(5.0),
+        n_series: battery.n_series,
+        n_parallel: battery.n_parallel,
+        ah_cell: None,
+        v_cell: None,
+        cell_resistance_ohm: battery.cell_resistance_ohm,
+        pack_voltage_v: None,
+        chemistry: battery
+            .chemistry
+            .map(|c| BatteryChemistry::from(c).as_config_str().to_string()),
+        standby_power_w: battery.standby_power_w,
+        self_discharge_pct_per_day: battery.self_discharge_pct_per_day,
+        min_soc: battery.min_soc,
+        max_soc: battery.max_soc,
+        initial_soc: battery.initial_soc,
+        import_limit_w: battery.import_limit_w,
+        export_limit_w: battery.export_limit_w,
+        heater_power_w: battery.heater_power_w,
+        heater_threshold_c: battery.heater_threshold_c,
+        heater_on_discharge: None,
+        min_discharge_temp_c: None,
+        full_power_temp_c: battery.full_power_temp_c,
+        min_charge_temp_c: battery.min_charge_temp_c,
+        cell_thermal_mass_j_per_k: battery.cell_thermal_mass_j_per_k,
+        cell_ua_w_per_k: battery.cell_ua_w_per_k,
+        inverter_efficiency: battery.inverter_efficiency,
+        charge_efficiency: battery.charge_efficiency,
+        discharge_efficiency: battery.discharge_efficiency,
+        bms_mode: None,
+        grid_export_rule: None,
+    };
+    EquipmentConfig::from_typed(battery.name.clone(), "Battery".to_string(), cfg)
+}
+
+fn pv_config_from_py(pv: &PyPv) -> EquipmentConfig {
+    let cfg = PvConfig {
+        equipment_id: None,
+        zone_id: None,
+        capacity_kw: pv.capacity_kw,
+        tilt_deg: Some(pv.tilt),
+        azimuth_deg: Some(pv.azimuth),
+        module_type: None,
+        noct_c: None,
+        system_losses_fraction: None,
+        inverter_efficiency: None,
+        inverter_capacity_kw: None,
+        power_factor: None,
+        surface_resolution_deg: None,
+    };
+    EquipmentConfig::from_typed(pv.name.clone(), "PV".to_string(), cfg)
+}
+
+fn ev_config_from_py(ev: &PyEv) -> EquipmentConfig {
+    let capacity_kwh = ev.capacity_kwh.unwrap_or(75.0);
+    let max_charging_power_kw =
+        ev.max_charging_kw
+            .unwrap_or(if capacity_kwh < 56.875 { 7.2 } else { 11.5 });
+    let cfg = EvConfig {
+        equipment_id: None,
+        capacity_kwh,
+        charging_level: None,
+        max_charging_power_kw,
+        charging_efficiency: None,
+        l1_current_a: None,
+        l1_voltage_v: None,
+        soc_max: None,
+        initial_soc: ev.initial_soc,
+        battery_temp_c: None,
+        min_charge_temp_c: None,
+        full_power_temp_c: None,
+        heater_power_w: None,
+        heater_threshold_c: None,
+        thermal_mass_j_per_k: None,
+        ua_w_per_k: None,
+        v2l_enabled: None,
+        v2l_soc_reserve: None,
+        v2l_max_discharge_kw: None,
+        v2g_enabled: None,
+        v2g_soc_reserve: None,
+        v2g_max_discharge_kw: None,
+        chemistry: None,
+        fuel_economy_kwh_per_mi: None,
+        ready_soc: None,
+        charging_strategy: None,
+        plug_in_policy: None,
+        power_limit_kw: None,
+        initial_connection_state: ev
+            .initial_connection_state
+            .map(|state| EvConnectionState::from(state).to_string()),
+    };
+    EquipmentConfig::from_typed(ev.name.clone(), "EV".to_string(), cfg)
 }
 
 fn lock_dwelling(dwelling: &Mutex<Dwelling>) -> PyResult<MutexGuard<'_, Dwelling>> {
@@ -698,30 +722,7 @@ impl PyDwelling {
     }
 
     pub fn add_battery(&mut self, battery: &PyBattery) -> PyResult<()> {
-        let mut raw_config = std::collections::HashMap::new();
-        raw_config.insert(
-            "capacity_kwh".to_string(),
-            hares_equipment::config::ConfigValue::Float(battery.capacity_kwh),
-        );
-        if let Some(v) = battery.max_charge_kw {
-            raw_config.insert(
-                "max_charge_kw".to_string(),
-                hares_equipment::config::ConfigValue::Float(v),
-            );
-        }
-        if let Some(v) = battery.max_discharge_kw {
-            raw_config.insert(
-                "max_discharge_kw".to_string(),
-                hares_equipment::config::ConfigValue::Float(v),
-            );
-        }
-        insert_battery_optional_config(&mut raw_config, battery);
-
-        let config = hares_equipment::EquipmentConfig {
-            name: battery.name.clone(),
-            ochre_class: "Battery".to_string(),
-            payload: ConfigPayload::Raw { data: raw_config },
-        };
+        let config = battery_config_from_py(battery);
 
         let mut eq = self
             .equipment_registry
@@ -748,25 +749,7 @@ impl PyDwelling {
     }
 
     pub fn add_pv(&mut self, pv: &PyPv) -> PyResult<()> {
-        let mut raw_config = std::collections::HashMap::new();
-        raw_config.insert(
-            "capacity_kw".to_string(),
-            hares_equipment::config::ConfigValue::Float(pv.capacity_kw),
-        );
-        raw_config.insert(
-            "tilt_deg".to_string(),
-            hares_equipment::config::ConfigValue::Float(pv.tilt),
-        );
-        raw_config.insert(
-            "azimuth_deg".to_string(),
-            hares_equipment::config::ConfigValue::Float(pv.azimuth),
-        );
-
-        let config = hares_equipment::EquipmentConfig {
-            name: pv.name.clone(),
-            ochre_class: "PV".to_string(),
-            payload: ConfigPayload::Raw { data: raw_config },
-        };
+        let config = pv_config_from_py(pv);
 
         let mut eq = self
             .equipment_registry
@@ -810,39 +793,7 @@ impl PyDwelling {
     }
 
     pub fn add_ev(&mut self, ev: &PyEv) -> PyResult<()> {
-        let mut raw_config = std::collections::HashMap::new();
-        if let Some(v) = ev.capacity_kwh {
-            raw_config.insert(
-                "capacity_kwh".to_string(),
-                hares_equipment::config::ConfigValue::Float(v),
-            );
-        }
-        if let Some(v) = ev.max_charging_kw {
-            raw_config.insert(
-                "max_charging_power_kw".to_string(),
-                hares_equipment::config::ConfigValue::Float(v),
-            );
-        }
-        if let Some(v) = ev.initial_soc {
-            raw_config.insert(
-                "initial_soc".to_string(),
-                hares_equipment::config::ConfigValue::Float(v),
-            );
-        }
-        if let Some(state) = &ev.initial_connection_state {
-            raw_config.insert(
-                "initial_connection_state".to_string(),
-                hares_equipment::config::ConfigValue::Text(
-                    EvConnectionState::from(*state).to_string(),
-                ),
-            );
-        }
-
-        let config = hares_equipment::EquipmentConfig {
-            name: ev.name.clone(),
-            ochre_class: "EV".to_string(),
-            payload: ConfigPayload::Raw { data: raw_config },
-        };
+        let config = ev_config_from_py(ev);
 
         let mut eq = self
             .equipment_registry
@@ -881,28 +832,44 @@ impl PyDwelling {
             hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
         };
 
-        let mut raw_config = std::collections::HashMap::new();
-        raw_config.insert(
-            "capacity_kwh".to_string(),
-            hares_equipment::config::ConfigValue::Float(spec.capacity_kwh),
+        let config = EquipmentConfig::from_typed(
+            spec.label.to_string(),
+            "EV".to_string(),
+            EvConfig {
+                equipment_id: None,
+                capacity_kwh: spec.capacity_kwh,
+                charging_level: Some(match preset.charging_level {
+                    hares_types::ChargingLevel::L1 => "L1".to_string(),
+                    hares_types::ChargingLevel::L2 => "L2".to_string(),
+                }),
+                max_charging_power_kw: max_power,
+                charging_efficiency: None,
+                l1_current_a: None,
+                l1_voltage_v: None,
+                soc_max: None,
+                initial_soc: None,
+                battery_temp_c: None,
+                min_charge_temp_c: None,
+                full_power_temp_c: None,
+                heater_power_w: None,
+                heater_threshold_c: None,
+                thermal_mass_j_per_k: None,
+                ua_w_per_k: None,
+                v2l_enabled: None,
+                v2l_soc_reserve: None,
+                v2l_max_discharge_kw: None,
+                v2g_enabled: None,
+                v2g_soc_reserve: None,
+                v2g_max_discharge_kw: None,
+                chemistry: None,
+                fuel_economy_kwh_per_mi: None,
+                ready_soc: None,
+                charging_strategy: None,
+                plug_in_policy: None,
+                power_limit_kw: None,
+                initial_connection_state: None,
+            },
         );
-        raw_config.insert(
-            "max_charging_power_kw".to_string(),
-            hares_equipment::config::ConfigValue::Float(max_power),
-        );
-        raw_config.insert(
-            "charging_level".to_string(),
-            hares_equipment::config::ConfigValue::Text(match preset.charging_level {
-                hares_types::ChargingLevel::L1 => "L1".to_string(),
-                hares_types::ChargingLevel::L2 => "L2".to_string(),
-            }),
-        );
-
-        let config = hares_equipment::EquipmentConfig {
-            name: spec.label.to_string(),
-            ochre_class: "EV".to_string(),
-            payload: ConfigPayload::Raw { data: raw_config },
-        };
 
         let mut eq = self
             .equipment_registry
@@ -1348,23 +1315,7 @@ impl PyDwelling {
         obj: &Bound<'_, PyAny>,
     ) -> PyResult<Box<dyn hares_equipment::Equipment>> {
         if let Ok(battery) = obj.extract::<PyRef<'_, PyBattery>>() {
-            let mut raw_config = std::collections::HashMap::new();
-            raw_config.insert(
-                "capacity_kwh".to_string(),
-                ConfigValue::Float(battery.capacity_kwh),
-            );
-            if let Some(v) = battery.max_charge_kw {
-                raw_config.insert("max_charge_kw".to_string(), ConfigValue::Float(v));
-            }
-            if let Some(v) = battery.max_discharge_kw {
-                raw_config.insert("max_discharge_kw".to_string(), ConfigValue::Float(v));
-            }
-            insert_battery_optional_config(&mut raw_config, &battery);
-            let config = EquipmentConfig {
-                name: battery.name.clone(),
-                ochre_class: "Battery".to_string(),
-                payload: ConfigPayload::Raw { data: raw_config },
-            };
+            let config = battery_config_from_py(&battery);
             let mut eq = self
                 .equipment_registry
                 .create("Battery", config)
@@ -1376,45 +1327,14 @@ impl PyDwelling {
             return Ok(eq);
         }
         if let Ok(pv) = obj.extract::<PyRef<'_, PyPv>>() {
-            let mut raw_config = std::collections::HashMap::new();
-            raw_config.insert(
-                "capacity_kw".to_string(),
-                ConfigValue::Float(pv.capacity_kw),
-            );
-            raw_config.insert("tilt".to_string(), ConfigValue::Float(pv.tilt));
-            raw_config.insert("azimuth".to_string(), ConfigValue::Float(pv.azimuth));
-            let config = EquipmentConfig {
-                name: pv.name.clone(),
-                ochre_class: "PV".to_string(),
-                payload: ConfigPayload::Raw { data: raw_config },
-            };
+            let config = pv_config_from_py(&pv);
             return self
                 .equipment_registry
                 .create("PV", config)
                 .map_err(to_py_err);
         }
         if let Ok(ev) = obj.extract::<PyRef<'_, PyEv>>() {
-            let mut raw_config = std::collections::HashMap::new();
-            if let Some(v) = ev.capacity_kwh {
-                raw_config.insert("capacity_kwh".to_string(), ConfigValue::Float(v));
-            }
-            if let Some(v) = ev.max_charging_kw {
-                raw_config.insert("max_charging_power_kw".to_string(), ConfigValue::Float(v));
-            }
-            if let Some(v) = ev.initial_soc {
-                raw_config.insert("initial_soc".to_string(), ConfigValue::Float(v));
-            }
-            if let Some(state) = &ev.initial_connection_state {
-                raw_config.insert(
-                    "initial_connection_state".to_string(),
-                    ConfigValue::Text(EvConnectionState::from(*state).to_string()),
-                );
-            }
-            let config = EquipmentConfig {
-                name: ev.name.clone(),
-                ochre_class: "EV".to_string(),
-                payload: ConfigPayload::Raw { data: raw_config },
-            };
+            let config = ev_config_from_py(&ev);
             let mut eq = self
                 .equipment_registry
                 .create("EV", config)

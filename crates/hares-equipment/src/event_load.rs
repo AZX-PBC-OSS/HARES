@@ -1610,11 +1610,7 @@ mod tests {
         raw.insert("latent_gain_fraction".to_string(), 0.1.into());
         raw.insert("building_id".to_string(), 7.0.into());
         raw.insert("master_seed".to_string(), 1234.0.into());
-        EquipmentConfig {
-            name: name.to_string(),
-            ochre_class: class_name.to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw(name.to_string(), class_name.to_string(), raw)
     }
 
     fn wet_config(name: &str, class_name: &str, n_units: f64) -> EquipmentConfig {
@@ -1632,11 +1628,7 @@ mod tests {
         raw.insert("latent_gain_fraction".to_string(), 0.05.into());
         raw.insert("building_id".to_string(), 11.0.into());
         raw.insert("master_seed".to_string(), 987.0.into());
-        EquipmentConfig {
-            name: name.to_string(),
-            ochre_class: class_name.to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw(name.to_string(), class_name.to_string(), raw)
     }
 
     fn set_schedule_payload(env: &mut EnvironmentState, values: Vec<f64>) {
@@ -1937,11 +1929,7 @@ mod tests {
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 1.0.into());
         raw.insert("master_seed".to_string(), 42.0.into());
-        let config = EquipmentConfig {
-            name: "wrap_test".to_string(),
-            ochre_class: "EventBasedLoad".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let config = EquipmentConfig::raw("wrap_test".to_string(), "EventBasedLoad".to_string(), raw);
 
         let mut env = base_env();
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
@@ -1962,11 +1950,7 @@ mod tests {
         raw.insert("active_power_kw".to_string(), 1.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         // No compact event schedule keys
-        let config = EquipmentConfig {
-            name: "empty".to_string(),
-            ochre_class: "EventBasedLoad".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let config = EquipmentConfig::raw("empty".to_string(), "EventBasedLoad".to_string(), raw);
         let mut eq = EventBasedLoad::new(config.clone());
         let err = eq.init(&config, &env);
         assert!(err.is_err(), "init with no schedule should fail");
@@ -2153,11 +2137,7 @@ mod tests {
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 1.0.into());
         raw.insert("master_seed".to_string(), 1.0.into());
-        let config = EquipmentConfig {
-            name: "setpoint_test".to_string(),
-            ochre_class: "EventBasedLoad".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let config = EquipmentConfig::raw("setpoint_test".to_string(), "EventBasedLoad".to_string(), raw);
 
         let mut env = base_env();
         let mut eq = EventBasedLoad::new(config.clone());
@@ -2786,11 +2766,7 @@ mod tests {
             "event_power_kw_series".to_string(),
             ConfigValue::FloatArray(kw_series),
         );
-        let config = crate::EquipmentConfig {
-            name: "replay_test".to_string(),
-            ochre_class: "EventBasedLoad".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let config = EquipmentConfig::raw("replay_test".to_string(), "EventBasedLoad".to_string(), raw);
 
         let mut env = base_env();
         let mut eq = EventBasedLoad::new(config.clone());

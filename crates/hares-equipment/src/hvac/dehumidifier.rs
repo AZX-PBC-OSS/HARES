@@ -269,102 +269,9 @@ impl Dehumidifier {
 }
 
 impl Dehumidifier {
-    fn init_from_raw(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        self.rated_water_removal_l_day = first_f64(
-            config,
-            &[
-                KEY_RATED_CAPACITY_L_DAY,
-                KEY_RATED_CAPACITY_PINTS_DAY,
-                KEY_RATED_CAPACITY_PINTS_DAY_ALT,
-            ],
-        )
-        .map(|value| {
-            if config.get_f64(KEY_RATED_CAPACITY_L_DAY).is_some() {
-                value
-            } else {
-                Volume::new::<pint_liquid>(value).get::<liter>()
-            }
-        })
-        .unwrap_or(DEFAULT_RATED_WATER_REMOVAL_L_DAY);
-        if !self.rated_water_removal_l_day.is_finite() || self.rated_water_removal_l_day <= 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "invalid dehumidifier rated capacity (L/day): {}",
-                self.rated_water_removal_l_day
-            )));
-        }
-
-        let maybe_ief = first_f64(
-            config,
-            &[
-                KEY_INTEGRATED_ENERGY_FACTOR,
-                KEY_INTEGRATED_ENERGY_FACTOR_ALT,
-            ],
-        );
-        let maybe_ef = first_f64(config, &[KEY_ENERGY_FACTOR, KEY_ENERGY_FACTOR_ALT]);
-        self.rated_energy_factor_l_kwh = maybe_ief.or(maybe_ef).unwrap_or(1.8);
-        if maybe_ief.is_some() {
-            tracing::warn!(
-                "IntegratedEnergyFactor is used with EF-era curves; part-load predictions may deviate"
-            );
-        }
-        if !self.rated_energy_factor_l_kwh.is_finite() || self.rated_energy_factor_l_kwh <= 0.0 {
-            return Err(HaresError::Equipment(format!(
-                "invalid dehumidifier rated energy factor (L/kWh): {}",
-                self.rated_energy_factor_l_kwh
-            )));
-        }
-
-        self.fraction_load_served = first_f64(
-            config,
-            &[KEY_FRACTION_LOAD_SERVED, KEY_FRACTION_LOAD_SERVED_ALT],
-        )
-        .unwrap_or(1.0)
-        .clamp(0.0, 1.0);
-
-        self.init_setpoints(config)?;
-
-        self.water_removal_curve = parse_curve(
-            config,
-            KEY_WR_CURVE,
-            KEY_WR_PREFIX,
-            DEFAULT_NORMALIZED_CURVE,
-            [KEY_WR_T_MIN_C, KEY_WR_T_MAX_C],
-            [KEY_WR_RH_MIN, KEY_WR_RH_MAX],
-        )?;
-        self.energy_factor_curve = parse_curve(
-            config,
-            KEY_EF_CURVE,
-            KEY_EF_PREFIX,
-            DEFAULT_NORMALIZED_CURVE,
-            [KEY_EF_T_MIN_C, KEY_EF_T_MAX_C],
-            [KEY_EF_RH_MIN, KEY_EF_RH_MAX],
-        )?;
-        self.water_removal_curve_rated_value = self
-            .water_removal_curve
-            .evaluate(RATED_DRY_BULB_C, RATED_RH_FRACTION);
-        self.energy_factor_curve_rated_value = self
-            .energy_factor_curve
-            .evaluate(RATED_DRY_BULB_C, RATED_RH_FRACTION);
-        if self.water_removal_curve_rated_value <= 0.0
-            || !self.water_removal_curve_rated_value.is_finite()
-        {
-            return Err(HaresError::Equipment(
-                "water removal curve rated-condition value must be finite and positive".to_string(),
-            ));
-        }
-        if self.energy_factor_curve_rated_value <= 0.0
-            || !self.energy_factor_curve_rated_value.is_finite()
-        {
-            return Err(HaresError::Equipment(
-                "energy factor curve rated-condition value must be finite and positive".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
 
     fn init_from_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        let cfg: DehumidifierConfig = config.typed()?;
+        let cfg = config.require_typed::<DehumidifierConfig>("Dehumidifier")?;
         cfg.validate()?;
 
         self.rated_water_removal_l_day = cfg
@@ -422,11 +329,7 @@ impl Equipment for Dehumidifier {
             PortDeclaration::thermal(self.zone_id),
         ];
 
-        if config.is_typed() {
-            self.init_from_typed(config)?;
-        } else {
-            self.init_from_raw(config)?;
-        }
+        self.init_from_typed(config)?;
 
         self.operating_mode = OperatingMode::Off;
         self.is_on = false;
@@ -807,11 +710,10 @@ mod tests {
     };
 
     use super::{
-        Dehumidifier, KEY_DEHUMIDISTAT_SETPOINT, KEY_ENERGY_FACTOR,
-        KEY_RATED_CAPACITY_PINTS_DAY, LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY,
-        WATTS_PER_KILOWATT, register_with_registry,
+        Dehumidifier, KEY_DEHUMIDISTAT_SETPOINT, KEY_ENERGY_FACTOR, KEY_RATED_CAPACITY_PINTS_DAY,
+        LATENT_HEAT_VAPORIZATION_J_KG, SECONDS_PER_DAY, WATTS_PER_KILOWATT, register_with_registry,
     };
-    use crate::{config::KEY_EQUIPMENT_ID, Equipment, EquipmentConfig, EquipmentRegistry};
+    use crate::{Equipment, EquipmentConfig, EquipmentRegistry, config::KEY_EQUIPMENT_ID};
 
     const TOLERANCE_REL: f64 = 1e-9;
 
@@ -866,17 +768,19 @@ mod tests {
     }
 
     fn config() -> EquipmentConfig {
-        let mut raw_config = HashMap::new();
-        raw_config.insert(KEY_EQUIPMENT_ID.to_string(), 9.0.into());
-        raw_config.insert("zone_id".to_string(), 1.0.into());
-        raw_config.insert(KEY_RATED_CAPACITY_PINTS_DAY.to_string(), 70.0.into());
-        raw_config.insert(KEY_ENERGY_FACTOR.to_string(), 2.0.into());
-        raw_config.insert(KEY_DEHUMIDISTAT_SETPOINT.to_string(), 50.0.into());
-        EquipmentConfig {
-            name: "Test Dehumidifier".to_string(),
-            ochre_class: "Dehumidifier".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw_config },
-        }
+        EquipmentConfig::from_typed(
+            "Test Dehumidifier".to_string(),
+            "Dehumidifier".to_string(),
+            crate::DehumidifierConfig {
+                equipment_id: Some(9),
+                zone_id: Some(1),
+                capacity_liters_per_day: Some(70.0 * 0.473_176_5),
+                energy_factor: Some(2.0),
+                integrated_energy_factor: None,
+                fraction_served: None,
+                target_rh: Some(50.0),
+            },
+        )
     }
 
     fn ports() -> PortSlots {

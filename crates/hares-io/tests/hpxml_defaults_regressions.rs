@@ -62,7 +62,9 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
         .iter()
         .find(|zone| matches!(zone.zone_type, ZoneType::Conditioned))
         .expect("conditioned zone expected");
-    let floor_area_m2 = conditioned.floor_area_m2.expect("conditioned area expected");
+    let floor_area_m2 = conditioned
+        .floor_area_m2
+        .expect("conditioned area expected");
     let volume_m3 = building
         .conditioned_volume_m3
         .expect("conditioned volume expected");
@@ -88,10 +90,16 @@ fn base_fixture_preserves_summary_fields_and_imperial_unit_defaults() {
 
 #[test]
 fn windows_physical_properties_fixture_preserves_explicit_fields_without_synthetic_defaults() {
-    let building = parse_hpxml_str(&read_fixture("base-enclosure-windows-physical-properties.xml"))
-        .expect("window fixture should parse");
+    let building = parse_hpxml_str(&read_fixture(
+        "base-enclosure-windows-physical-properties.xml",
+    ))
+    .expect("window fixture should parse");
 
-    assert_eq!(building.windows.len(), 4, "fixture coverage changed unexpectedly");
+    assert_eq!(
+        building.windows.len(),
+        4,
+        "fixture coverage changed unexpectedly"
+    );
 
     for window in &building.windows {
         assert!(
@@ -125,23 +133,30 @@ fn windows_physical_properties_fixture_preserves_explicit_fields_without_synthet
 
 #[test]
 fn garage_basement_fixture_preserves_explicit_zone_adjacency() {
-    let building =
-        parse_hpxml_str(&read_fixture("base-foundation-basement-garage.xml"))
-            .expect("garage fixture should parse");
+    let building = parse_hpxml_str(&read_fixture("base-foundation-basement-garage.xml"))
+        .expect("garage fixture should parse");
 
     assert!(
-        building.zones.iter().any(|zone| matches!(zone.zone_type, ZoneType::Garage)),
+        building
+            .zones
+            .iter()
+            .any(|zone| matches!(zone.zone_type, ZoneType::Garage)),
         "garage zone should be created from explicit garage adjacencies"
     );
     assert!(
-        building.zones.iter().any(|zone| matches!(zone.zone_type, ZoneType::Foundation)),
+        building
+            .zones
+            .iter()
+            .any(|zone| matches!(zone.zone_type, ZoneType::Foundation)),
         "foundation zone should be created from explicit basement foundation data"
     );
 
     let wall_to_garage = building
         .boundaries
         .iter()
-        .find(|boundary| boundary.id == "Wall3" && matches!(boundary.boundary_type, BoundaryType::Wall))
+        .find(|boundary| {
+            boundary.id == "Wall3" && matches!(boundary.boundary_type, BoundaryType::Wall)
+        })
         .expect("Wall3 should exist in garage fixture");
     assert!(
         matches!(wall_to_garage.interior_zone, Some(ZoneType::Foundation)),

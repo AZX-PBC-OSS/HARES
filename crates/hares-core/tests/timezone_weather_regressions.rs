@@ -208,7 +208,10 @@ fn civil_timezone_requires_dst_feature() {
     .expect_err("civil timezone should require dst feature");
 
     assert!(
-        matches!(err, hares_core::environment::EnvironmentManagerError::DstNotEnabled),
+        matches!(
+            err,
+            hares_core::environment::EnvironmentManagerError::DstNotEnabled
+        ),
         "expected DstNotEnabled, got {err:?}"
     );
 }

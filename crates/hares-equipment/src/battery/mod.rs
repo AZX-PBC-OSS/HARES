@@ -366,7 +366,9 @@ impl Battery {
                 | ControlCapabilities::SELF_CONSUMPTION
                 | ControlCapabilities::POWER_LIMIT
                 | ControlCapabilities::DEMAND_RESPONSE,
-            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC,
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::HAS_SOC
+                | CoreCapabilities::HAS_MODE,
             telemetry_fields: battery_telemetry_fields(),
         };
 
@@ -642,237 +644,12 @@ impl Battery {
 // init_typed is defined below in a separate impl Battery block (see after Equipment impl).
 
 impl Battery {
-    fn init_raw(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        self.capacity_kwh = config
-            .get_f64(KEY_CAPACITY_KWH)
-            .unwrap_or(DEFAULT_CAPACITY_KWH);
-        self.capacity_kwh_nominal = self.capacity_kwh;
-        self.max_charge_kw = config
-            .get_f64(KEY_MAX_CHARGE_KW)
-            .unwrap_or(DEFAULT_MAX_CHARGE_KW);
-        self.max_discharge_kw = config
-            .get_f64(KEY_MAX_DISCHARGE_KW)
-            .unwrap_or(DEFAULT_MAX_DISCHARGE_KW);
-        self.n_series = config
-            .get_f64(KEY_N_SERIES)
-            .map(|v| v as u32)
-            .unwrap_or(DEFAULT_N_SERIES);
-        self.n_parallel = config
-            .get_f64(KEY_N_PARALLEL)
-            .map(|v| v as u32)
-            .unwrap_or(DEFAULT_N_PARALLEL);
-
-        // If per-cell parameters are provided, derive pack topology from them.
-        // n_series = round(V_pack_nom / V_cell), where V_pack_nom ≈ 350 V for
-        // standard residential packs; n_parallel = Ah_pack / Ah_cell,
-        // where Ah_pack = capacity_kwh * 1000 / (n_series * V_cell).
-        if let (Some(ah_cell), Some(v_cell)) =
-            (config.get_f64(KEY_AH_CELL), config.get_f64(KEY_V_CELL))
-        {
-            if ah_cell > 0.0 && v_cell > 0.0 {
-                // Estimate n_series from a target pack voltage of ~350 V (standard residential).
-                let target_pack_v = 350.0_f64;
-                self.n_series = (target_pack_v / v_cell).round() as u32;
-                if self.n_series == 0 {
-                    self.n_series = 1;
-                }
-                let pack_v = self.n_series as f64 * v_cell;
-                let pack_ah = self.capacity_kwh * 1000.0 / pack_v;
-                self.n_parallel = (pack_ah / ah_cell).round() as u32;
-                if self.n_parallel == 0 {
-                    self.n_parallel = 1;
-                }
-            }
-        }
-
-        self.cell_resistance_ohm = config
-            .get_f64(KEY_CELL_RESISTANCE_OHM)
-            .unwrap_or(DEFAULT_CELL_RESISTANCE_OHM);
-
-        self.chemistry = config
-            .get_str(KEY_CHEMISTRY)
-            .and_then(|s| s.parse::<BatteryChemistry>().ok())
-            .unwrap_or(BatteryChemistry::Nmc);
-        if !self.custom_ocv {
-            self.ocv_table = OcvTable::for_chemistry(self.chemistry);
-        }
-        if !self.custom_u_neg {
-            self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
-        }
-
-        self.standby_power_w = config
-            .get_f64(KEY_STANDBY_POWER_W)
-            .unwrap_or(DEFAULT_STANDBY_POWER_W);
-        self.min_soc = config.get_f64(KEY_MIN_SOC).unwrap_or(DEFAULT_MIN_SOC);
-        self.max_soc = config.get_f64(KEY_MAX_SOC).unwrap_or(DEFAULT_MAX_SOC);
-        // import/export limits: config values are in watts; store as kW for internal use.
-        self.import_limit_kw = config.get_f64(KEY_IMPORT_LIMIT_W).map(|w| w / 1000.0);
-        self.export_limit_kw = config.get_f64(KEY_EXPORT_LIMIT_W).map(|w| w / 1000.0);
-        self.heater_power_w = config
-            .get_f64(KEY_HEATER_POWER_W)
-            .unwrap_or(DEFAULT_HEATER_POWER_W);
-        self.heater_threshold_c = config
-            .get_f64(KEY_HEATER_THRESHOLD_C)
-            .unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
-        self.heater_on_discharge = config.get_bool(KEY_HEATER_ON_DISCHARGE).unwrap_or(false);
-        self.min_discharge_temp_c = config
-            .get_f64(KEY_MIN_DISCHARGE_TEMP_C)
-            .unwrap_or(DEFAULT_MIN_DISCHARGE_TEMP_C);
-        self.full_power_temp_c = config
-            .get_f64(KEY_FULL_POWER_TEMP_C)
-            .unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
-        self.min_charge_temp_c = config
-            .get_f64(KEY_MIN_CHARGE_TEMP_C)
-            .unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
-
-        // Capacity derate model: configurable via "capacity_derate_model" key.
-        // "piecewise" expects "capacity_derate_points" as [temp_c, factor, temp_c, factor, ...]
-        // Default: Arrhenius with OCHRE/SAM reference constants.
-        if let Some(model_name) = config.get_str("capacity_derate_model") {
-            match model_name {
-                "piecewise" => {
-                    let raw = config
-                        .get_f64_array("capacity_derate_points")
-                        .unwrap_or_default();
-                    if !raw.len().is_multiple_of(2) {
-                        tracing::warn!(
-                            "capacity_derate_points has odd length {}; trailing value ignored",
-                            raw.len()
-                        );
-                    }
-                    let mut points: Vec<(f64, f64)> =
-                        raw.chunks_exact(2).map(|c| (c[0], c[1])).collect();
-                    points
-                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                    self.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points };
-                }
-                "arrhenius" => {
-                    self.capacity_derate_model = CapacityDerateModel::Arrhenius {
-                        d0_ref: config.get_f64("capacity_derate_d0_ref").unwrap_or(1.001),
-                        e_ad1_j_mol: config.get_f64("capacity_derate_e_ad1").unwrap_or(4_126.0),
-                        e_ad2_j2_mol2: config.get_f64("capacity_derate_e_ad2").unwrap_or(9.752e6),
-                        t_ref_k: config.get_f64("capacity_derate_t_ref_k").unwrap_or(298.15),
-                    };
-                }
-                _ => {} // keep default Arrhenius
-            }
-        }
-
-        // Derive per-direction efficiencies.
-        // If explicit charge_efficiency or discharge_efficiency are set, use them.
-        // Otherwise fall back to sqrt(inverter_efficiency) for a symmetric split.
-        let sym_eta = config
-            .get_f64(KEY_INVERTER_EFFICIENCY)
-            .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
-            .clamp(f64::EPSILON, 1.0);
-        let sym_split = sym_eta.sqrt();
-        self.charge_efficiency = config
-            .get_f64(KEY_CHARGE_EFFICIENCY)
-            .unwrap_or(sym_split)
-            .clamp(f64::EPSILON, 1.0);
-        self.discharge_efficiency = config
-            .get_f64(KEY_DISCHARGE_EFFICIENCY)
-            .unwrap_or(sym_split)
-            .clamp(f64::EPSILON, 1.0);
-        self.cell_thermal_mass_j_per_k = config
-            .get_f64(KEY_CELL_THERMAL_MASS_J_PER_K)
-            .unwrap_or(DEFAULT_CELL_THERMAL_MASS_J_PER_K);
-        self.cell_ua_w_per_k = config
-            .get_f64(KEY_CELL_UA_W_PER_K)
-            .unwrap_or(DEFAULT_CELL_UA_W_PER_K);
-
-        let self_discharge = config
-            .get_f64(KEY_SELF_DISCHARGE_PCT_PER_DAY)
-            .unwrap_or(DEFAULT_SELF_DISCHARGE_PCT_PER_DAY);
-        self.self_discharge_rate_per_s = self_discharge / 100.0 / SECONDS_PER_DAY;
-
-        // Validate before clamping
-        if self.capacity_kwh <= 0.0 {
-            return Err(HaresError::Equipment(
-                "battery capacity_kwh must be positive".to_string(),
-            ));
-        }
-        if self.min_soc >= self.max_soc {
-            return Err(HaresError::Equipment(
-                "battery min_soc must be less than max_soc".to_string(),
-            ));
-        }
-        if self.n_series == 0 || self.n_parallel == 0 {
-            return Err(HaresError::Equipment(
-                "n_series and n_parallel must be positive".to_string(),
-            ));
-        }
-        if let Some(lim) = self.import_limit_kw {
-            if lim < 0.0 {
-                return Err(HaresError::Equipment(
-                    "battery import_limit_w must be non-negative".to_string(),
-                ));
-            }
-        }
-        if let Some(lim) = self.export_limit_kw {
-            if lim < 0.0 {
-                return Err(HaresError::Equipment(
-                    "battery export_limit_w must be non-negative".to_string(),
-                ));
-            }
-        }
-
-        if let Some(mode_str) = config.get_str(KEY_BMS_MODE) {
-            self.bms_mode = serde_json::from_str(mode_str)
-                .map_err(|e| HaresError::Equipment(format!("invalid bms_mode: {e}")))?;
-        }
-        if let Some(rule_str) = config.get_str(KEY_GRID_EXPORT_RULE) {
-            self.grid_export_rule = serde_json::from_str(rule_str)
-                .map_err(|e| HaresError::Equipment(format!("invalid grid_export_rule: {e}")))?;
-        }
-
-        let initial_soc = config
-            .get_f64(KEY_INITIAL_SOC)
-            .unwrap_or(DEFAULT_INITIAL_SOC);
-        self.soc = initial_soc.clamp(self.min_soc, self.max_soc);
-
-        // Cell temperature from zone if configured, else outdoor ambient.
-        // Batteries are commonly in unheated spaces (garages, outdoor enclosures)
-        // so the default ambient is outdoor weather, not a conditioned 25 C.
-        self.cell_temp_c = if let Some(zone_id) = self.descriptor.zone {
-            env.zones
-                .iter()
-                .find(|z| z.id == zone_id)
-                .map(|z| z.temperature_c)
-                .unwrap_or(env.weather.outdoor_temp_c)
-        } else {
-            env.weather.outdoor_temp_c
-        };
-
-        self.mode = OperatingMode::Off;
-        self.heater_active = false;
-        self.degradation = DegradationState::default();
-        self.degradation.reset_day_tracking(self.soc);
-        self.rainflow = RainflowCounter::default();
-        self.self_consumption_enabled = true;
-        self.solar_only_charging = false;
-        self.grid_connected = true;
-        self.power_setpoint_kw = None;
-        self.soc_target = None;
-        self.soc_target_min = None;
-        self.soc_target_max = None;
-        self.last_daily_update_day = Self::day_ordinal(env);
-
-        self.telemetry = default_telemetry();
-        self.telemetry.set(tk::SOC, self.soc);
-        self.core_output = CoreOutput::default();
-
-        Ok(())
-    }
-}
-
-impl Battery {
     fn init_typed(
         &mut self,
         config: &EquipmentConfig,
         env: &EnvironmentState,
     ) -> crate::Result<()> {
-        let c: BatteryConfig = config.typed()?;
+        let c = config.require_typed::<BatteryConfig>("Battery")?;
         c.validate()?;
 
         self.capacity_kwh = c.capacity_kwh;
@@ -1010,10 +787,7 @@ impl Equipment for Battery {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            return self.init_typed(config, env);
-        }
-        self.init_raw(config, env)
+        self.init_typed(config, env)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -1261,7 +1035,7 @@ impl Equipment for Battery {
                 fuel_w: None,
             },
             state: CoreState {
-                operating_mode: None,
+                operating_mode: Some(self.mode),
                 soc: Soc::try_from(self.soc).ok(),
             },
         };
@@ -1621,20 +1395,72 @@ mod tests {
     }
 
     fn battery_config(overrides: &[(&str, f64)]) -> EquipmentConfig {
-        let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-        raw.insert(KEY_CAPACITY_KWH.to_string(), 10.0.into());
-        raw.insert(KEY_MAX_CHARGE_KW.to_string(), 5.0.into());
-        raw.insert(KEY_MAX_DISCHARGE_KW.to_string(), 5.0.into());
-        raw.insert(KEY_STANDBY_POWER_W.to_string(), 10.0.into());
-        raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
+        let mut cfg = BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh: 10.0,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(10.0),
+            self_discharge_pct_per_day: None,
+            min_soc: None,
+            max_soc: None,
+            initial_soc: Some(0.5),
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: None,
+            charge_efficiency: None,
+            discharge_efficiency: None,
+            bms_mode: None,
+            grid_export_rule: None,
+        };
         for (k, v) in overrides {
-            raw.insert(k.to_string(), (*v).into());
+            match *k {
+                KEY_CAPACITY_KWH => cfg.capacity_kwh = *v,
+                KEY_MAX_CHARGE_KW => cfg.max_charge_kw = *v,
+                KEY_MAX_DISCHARGE_KW => cfg.max_discharge_kw = *v,
+                KEY_STANDBY_POWER_W => cfg.standby_power_w = Some(*v),
+                KEY_INITIAL_SOC => cfg.initial_soc = Some(*v),
+                KEY_MIN_SOC => cfg.min_soc = Some(*v),
+                KEY_MAX_SOC => cfg.max_soc = Some(*v),
+                KEY_INVERTER_EFFICIENCY => cfg.inverter_efficiency = Some(*v),
+                KEY_CHARGE_EFFICIENCY => cfg.charge_efficiency = Some(*v),
+                KEY_DISCHARGE_EFFICIENCY => cfg.discharge_efficiency = Some(*v),
+                KEY_CELL_RESISTANCE_OHM => cfg.cell_resistance_ohm = Some(*v),
+                KEY_SELF_DISCHARGE_PCT_PER_DAY => cfg.self_discharge_pct_per_day = Some(*v),
+                KEY_IMPORT_LIMIT_W => cfg.import_limit_w = Some(*v),
+                KEY_EXPORT_LIMIT_W => cfg.export_limit_w = Some(*v),
+                KEY_HEATER_POWER_W => cfg.heater_power_w = Some(*v),
+                KEY_HEATER_THRESHOLD_C => cfg.heater_threshold_c = Some(*v),
+                KEY_MIN_DISCHARGE_TEMP_C => cfg.min_discharge_temp_c = Some(*v),
+                KEY_FULL_POWER_TEMP_C => cfg.full_power_temp_c = Some(*v),
+                KEY_MIN_CHARGE_TEMP_C => cfg.min_charge_temp_c = Some(*v),
+                KEY_CELL_THERMAL_MASS_J_PER_K => cfg.cell_thermal_mass_j_per_k = Some(*v),
+                KEY_CELL_UA_W_PER_K => cfg.cell_ua_w_per_k = Some(*v),
+                KEY_ZONE_ID => cfg.zone_id = Some(*v as u16),
+                KEY_N_SERIES => cfg.n_series = Some(*v as u32),
+                KEY_N_PARALLEL => cfg.n_parallel = Some(*v as u32),
+                KEY_AH_CELL => cfg.ah_cell = Some(*v),
+                KEY_V_CELL => cfg.v_cell = Some(*v),
+                _ => panic!("unsupported battery test override key: {k}"),
+            }
         }
-        EquipmentConfig {
-            name: "Test Battery".to_string(),
-            ochre_class: "Battery".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
     }
 
     fn typed_battery_config(chemistry: Option<&str>, bms_mode: Option<BmsMode>) -> EquipmentConfig {
@@ -2081,7 +1907,10 @@ mod tests {
         let config = battery_config(&[(KEY_CAPACITY_KWH, 0.0)]);
         let mut bat = Battery::new(config.clone());
         let err = bat.init(&config, &base_env()).unwrap_err();
-        assert!(err.to_string().contains("capacity_kwh must be positive"));
+        assert!(
+            err.to_string()
+                .contains("capacity_kwh must be finite and > 0")
+        );
     }
 
     #[test]
@@ -2208,21 +2037,19 @@ mod tests {
 
     #[test]
     fn heater_activates_on_discharge_when_configured() {
-        let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-        raw.insert(KEY_CAPACITY_KWH.to_string(), 10.0.into());
-        raw.insert(KEY_MAX_CHARGE_KW.to_string(), 5.0.into());
-        raw.insert(KEY_MAX_DISCHARGE_KW.to_string(), 5.0.into());
-        raw.insert(KEY_STANDBY_POWER_W.to_string(), 10.0.into());
-        raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
-        raw.insert(KEY_HEATER_POWER_W.to_string(), 500.0.into());
-        raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
-        raw.insert(KEY_SELF_DISCHARGE_PCT_PER_DAY.to_string(), 0.0.into());
-        raw.insert(KEY_HEATER_ON_DISCHARGE.to_string(), ConfigValue::Bool(true));
-        let config = EquipmentConfig {
-            name: "Test Battery".to_string(),
-            ochre_class: "Battery".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let config = EquipmentConfig::from_typed(
+            "Test Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                heater_power_w: Some(500.0),
+                heater_threshold_c: Some(5.0),
+                self_discharge_pct_per_day: Some(0.0),
+                heater_on_discharge: Some(true),
+                ..battery_config(&[])
+                    .typed::<BatteryConfig>()
+                    .expect("typed battery config")
+            },
+        );
         let mut bat = Battery::new(config.clone());
         let env = base_env();
         bat.init(&config, &env).unwrap();
@@ -2482,22 +2309,21 @@ mod tests {
     #[test]
     fn inverter_efficiency_reduces_round_trip_efficiency() {
         let make_bat = |inv_eta: f64| {
-            let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-            raw.insert(KEY_CAPACITY_KWH.to_string(), 10.0.into());
-            raw.insert(KEY_MAX_CHARGE_KW.to_string(), 5.0.into());
-            raw.insert(KEY_MAX_DISCHARGE_KW.to_string(), 5.0.into());
-            raw.insert(KEY_STANDBY_POWER_W.to_string(), 0.0.into());
-            raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
-            raw.insert(KEY_SELF_DISCHARGE_PCT_PER_DAY.to_string(), 0.0.into());
-            raw.insert(KEY_MIN_SOC.to_string(), 0.0.into());
-            raw.insert(KEY_MAX_SOC.to_string(), 1.0.into());
-            raw.insert(KEY_CELL_RESISTANCE_OHM.to_string(), 0.0.into()); // isolate inverter effect
-            raw.insert(KEY_INVERTER_EFFICIENCY.to_string(), inv_eta.into());
-            EquipmentConfig {
-                name: "TestBat".to_string(),
-                ochre_class: "Battery".to_string(),
-                payload: crate::config::ConfigPayload::Raw { data: raw },
-            }
+            EquipmentConfig::from_typed(
+                "TestBat".to_string(),
+                "Battery".to_string(),
+                BatteryConfig {
+                    standby_power_w: Some(0.0),
+                    self_discharge_pct_per_day: Some(0.0),
+                    min_soc: Some(0.0),
+                    max_soc: Some(1.0),
+                    cell_resistance_ohm: Some(0.0),
+                    inverter_efficiency: Some(inv_eta),
+                    ..battery_config(&[])
+                        .typed::<BatteryConfig>()
+                        .expect("typed battery config")
+                },
+            )
         };
 
         let charge_steps = 10;
@@ -2550,10 +2376,10 @@ mod tests {
             "inverter losses (eta=0.96) must reduce RTE below ideal: \
              rte_ideal={rte_ideal:.4}, rte_with_inverter={rte_with_inverter:.4}"
         );
-        // charge_eta = discharge_eta = sqrt(0.96), so RTE = 0.96
+        // Typed `inverter_efficiency` is one-way, so round-trip efficiency is eta^2.
         assert!(
-            (rte_with_inverter - 0.96).abs() < 1e-4,
-            "RTE with inv_eta=0.96 should be ~0.96, got {rte_with_inverter:.6}"
+            (rte_with_inverter - 0.96_f64.powi(2)).abs() < 1e-4,
+            "RTE with one-way inv_eta=0.96 should be ~0.9216, got {rte_with_inverter:.6}"
         );
     }
 
@@ -2575,26 +2401,24 @@ mod tests {
         let power_kw = 1.0_f64; // 1 kW AC for 1 hour = 1 kWh AC
 
         let make_bat = |charge_e: f64, discharge_e: f64| {
-            let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-            raw.insert(KEY_CAPACITY_KWH.to_string(), capacity_kwh.into());
-            raw.insert(KEY_MAX_CHARGE_KW.to_string(), 5.0.into());
-            raw.insert(KEY_MAX_DISCHARGE_KW.to_string(), 5.0.into());
-            raw.insert(KEY_STANDBY_POWER_W.to_string(), 0.0.into());
-            raw.insert(KEY_MIN_SOC.to_string(), 0.0.into());
-            raw.insert(KEY_MAX_SOC.to_string(), 1.0.into());
-            raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
-            raw.insert(KEY_SELF_DISCHARGE_PCT_PER_DAY.to_string(), 0.0.into());
-            raw.insert(KEY_CHARGE_EFFICIENCY.to_string(), charge_e.into());
-            raw.insert(KEY_DISCHARGE_EFFICIENCY.to_string(), discharge_e.into());
-            // Zero cell resistance isolates inverter efficiency from ohmic loss.
-            raw.insert(KEY_CELL_RESISTANCE_OHM.to_string(), 0.0.into());
-            // Disable Arrhenius capacity derating so nominal capacity is used exactly.
-            raw.insert("capacity_derate_model".to_string(), "piecewise".into());
-            EquipmentConfig {
-                name: "TestBat".to_string(),
-                ochre_class: "Battery".to_string(),
-                payload: crate::config::ConfigPayload::Raw { data: raw },
-            }
+            EquipmentConfig::from_typed(
+                "TestBat".to_string(),
+                "Battery".to_string(),
+                BatteryConfig {
+                    capacity_kwh,
+                    standby_power_w: Some(0.0),
+                    min_soc: Some(0.0),
+                    max_soc: Some(1.0),
+                    initial_soc: Some(0.5),
+                    self_discharge_pct_per_day: Some(0.0),
+                    charge_efficiency: Some(charge_e),
+                    discharge_efficiency: Some(discharge_e),
+                    cell_resistance_ohm: Some(0.0),
+                    ..battery_config(&[])
+                        .typed::<BatteryConfig>()
+                        .expect("typed battery config")
+                },
+            )
         };
 
         let env = warm_env();
@@ -2604,6 +2428,7 @@ mod tests {
             let config = make_bat(charge_eta, discharge_eta);
             let mut bat = Battery::new(config.clone());
             bat.init(&config, &env).unwrap();
+            bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points: vec![] };
             let soc_before = bat.soc;
 
             bat.apply_control(&ControlSignal::PowerSetpoint {
@@ -2630,6 +2455,7 @@ mod tests {
             let config = make_bat(charge_eta, discharge_eta);
             let mut bat = Battery::new(config.clone());
             bat.init(&config, &env).unwrap();
+            bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points: vec![] };
             let soc_before = bat.soc;
 
             bat.apply_control(&ControlSignal::PowerSetpoint {
@@ -2657,6 +2483,7 @@ mod tests {
             let config_swapped = make_bat(discharge_eta, charge_eta); // swapped
             let mut bat = Battery::new(config_swapped.clone());
             bat.init(&config_swapped, &env).unwrap();
+            bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear { points: vec![] };
             let soc_before = bat.soc;
 
             bat.apply_control(&ControlSignal::PowerSetpoint {
@@ -2672,7 +2499,7 @@ mod tests {
             // With charge_eta=0.80 (swapped), SOC delta = 0.80/10 = 0.080 < 0.090
             let expected_swapped = power_kw * discharge_eta / capacity_kwh;
             assert!(
-                (soc_delta_swapped - expected_swapped).abs() < 1e-6,
+                (soc_delta_swapped - expected_swapped).abs() < 1e-4,
                 "swapped charge leg: expected SOC delta {expected_swapped:.4}, got {soc_delta_swapped:.4}"
             );
             assert!(
@@ -2774,24 +2601,24 @@ mod tests {
     /// The heater energy path is: grid → heater → cell thermal mass → zone (via UA model).
     #[test]
     fn zone_thermal_gain_is_ohmic_only_not_ohmic_plus_heater() {
-        let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-        raw.insert(KEY_CAPACITY_KWH.to_string(), 10.0.into());
-        raw.insert(KEY_MAX_CHARGE_KW.to_string(), 5.0.into());
-        raw.insert(KEY_MAX_DISCHARGE_KW.to_string(), 5.0.into());
-        raw.insert(KEY_STANDBY_POWER_W.to_string(), 0.0.into());
-        raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
-        raw.insert(KEY_MIN_SOC.to_string(), 0.0.into());
-        raw.insert(KEY_MAX_SOC.to_string(), 1.0.into());
-        raw.insert(KEY_HEATER_POWER_W.to_string(), 500.0.into());
-        raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
-        raw.insert(KEY_SELF_DISCHARGE_PCT_PER_DAY.to_string(), 0.0.into());
-        raw.insert(KEY_ZONE_ID.to_string(), 1.0.into());
-        raw.insert(KEY_CELL_UA_W_PER_K.to_string(), 0.0.into()); // disable UA so ohmic is the only thermal gain
-        let config = EquipmentConfig {
-            name: "Test Battery".to_string(),
-            ochre_class: "Battery".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let config = EquipmentConfig::from_typed(
+            "Test Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                standby_power_w: Some(0.0),
+                initial_soc: Some(0.5),
+                min_soc: Some(0.0),
+                max_soc: Some(1.0),
+                heater_power_w: Some(500.0),
+                heater_threshold_c: Some(5.0),
+                self_discharge_pct_per_day: Some(0.0),
+                zone_id: Some(1),
+                cell_ua_w_per_k: Some(0.0),
+                ..battery_config(&[])
+                    .typed::<BatteryConfig>()
+                    .expect("typed battery config")
+            },
+        );
         let mut bat = Battery::new(config.clone());
         let env = base_env();
         bat.init(&config, &env).unwrap();

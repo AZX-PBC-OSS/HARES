@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::{
-    DuctConfig, ElectricBaseboardConfig, ElectricFurnaceConfig, EquipmentConfig, EquipmentRegistry,
-    GasFurnaceConfig, config::ConfigValue,
+    CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, ElectricFurnaceConfig,
+    EquipmentConfig, EquipmentRegistry, GasFurnaceConfig, HeatPumpHeaterConfig,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
@@ -257,18 +257,42 @@ fn electric_furnace_consumes_electricity() {
 
 #[test]
 fn ashp_heating_cop_above_unity() {
-    let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-    raw.insert("zone_id".to_string(), ConfigValue::Float(1.0));
-    // Default EIR for ASHP is < 1.0 (COP > 1); capacity will use default.
-    raw.insert("heating_setpoint_c".to_string(), ConfigValue::Float(21.0));
-    raw.insert("cooling_setpoint_c".to_string(), ConfigValue::Float(27.0));
-    // backup_capacity_w=0 → AshpHeatPumpOnly variant (no resistance strip).
-    raw.insert("backup_capacity_w".to_string(), ConfigValue::Float(0.0));
-    let cfg = EquipmentConfig {
-        name: "ashp".to_string(),
-        ochre_class: "ASHP Heater".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    let cfg = EquipmentConfig::from_typed(
+        "ashp".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(8_000.0),
+            hspf: Some(9.0),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: Some(0.0),
+            backup_eir: None,
+            fraction_heating_load_served: Some(1.0),
+            cooling_capacity_w: Some(8_000.0),
+            seer: Some(14.0),
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            stage_shrs: None,
+            fraction_cooling_load_served: Some(1.0),
+            number_of_speeds: 1,
+            is_mini_split: false,
+            shr: Some(0.75),
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    );
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -336,16 +360,35 @@ fn hvac_port_contributions_are_correct_sign() {
     );
 
     // Cooling equipment: AC at 30°C with cooling setpoint 26°C.
-    let mut cool_raw: HashMap<String, ConfigValue> = HashMap::new();
-    cool_raw.insert("zone_id".to_string(), ConfigValue::Float(1.0));
-    cool_raw.insert("capacity_w".to_string(), ConfigValue::Float(10_000.0));
-    cool_raw.insert("heating_setpoint_c".to_string(), ConfigValue::Float(20.0));
-    cool_raw.insert("cooling_setpoint_c".to_string(), ConfigValue::Float(26.0));
-    let cool_cfg = EquipmentConfig {
-        name: "ac".to_string(),
-        ochre_class: "Air Conditioner".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: cool_raw },
-    };
+    let cool_cfg = EquipmentConfig::from_typed(
+        "ac".to_string(),
+        "Air Conditioner".to_string(),
+        CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 10_000.0,
+            seer: 14.0,
+            shr: Some(0.75),
+            number_of_speeds: 1,
+            stage_capacities_w: None,
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            fraction_load_served: Some(1.0),
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    );
     let mut cooler = registry
         .create("Air Conditioner", cool_cfg.clone())
         .unwrap();

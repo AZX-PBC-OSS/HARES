@@ -412,15 +412,15 @@ mod tests {
             "seer": 16.0,
             "unknown_key": true,
         });
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "ASHP Heater".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "test".to_string(),
+            "ASHP Heater".to_string(),
+            ConfigPayload::Typed {
                 type_name: "ASHP Heater".to_string(),
                 version: 1,
                 data,
             },
-        };
+        );
         let result: crate::Result<HeatPumpHeaterConfig> = ec.typed();
         assert!(result.is_err());
     }

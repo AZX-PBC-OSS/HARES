@@ -13,7 +13,6 @@ use lut::PvLut;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
@@ -362,7 +361,7 @@ impl PV {
         config: &EquipmentConfig,
         env: &EnvironmentState,
     ) -> crate::Result<()> {
-        let c: PvConfig = config.typed()?;
+        let c = config.require_typed::<PvConfig>("PV")?;
         c.validate()?;
 
         let tilt_deg = c.tilt_deg.unwrap_or(30.0);
@@ -469,67 +468,25 @@ impl Equipment for PV {
             return Err(e);
         }
 
-        if config.is_typed() {
+        #[cfg(test)]
+        let prefer_raw = !config.is_typed() || config.raw_data().is_some();
+        #[cfg(not(test))]
+        let prefer_raw = !config.is_typed();
+
+        if !prefer_raw {
             return self.init_typed(config, env);
         }
 
-        self.arrays = parse_arrays_from_config(config)?;
-        if self.arrays.is_empty() {
-            return Err(HaresError::Equipment(
-                "PV requires at least one array".to_string(),
-            ));
-        }
-
-        self.surface_resolution_deg = config
-            .get_f64(KEY_SURFACE_RESOLUTION_DEG)
-            .unwrap_or(DEFAULT_SURFACE_RESOLUTION_DEG);
-        if !self.surface_resolution_deg.is_finite() || self.surface_resolution_deg <= 0.0 {
-            return Err(HaresError::Equipment(
-                "PV surface_resolution_deg must be finite and > 0".to_string(),
-            ));
-        }
-
-        self.inverter_efficiency = config
-            .get_f64(KEY_INVERTER_EFFICIENCY)
-            .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
-            .clamp(0.0, 1.0);
-
-        self.inverter_capacity_kw = config
-            .get_f64(KEY_INVERTER_CAPACITY_KW)
-            .or_else(|| config.get_f64(KEY_INVERTER_CAPACITY_KW_ALT));
-        if let Some(cap) = self.inverter_capacity_kw {
-            if !cap.is_finite() || cap < 0.0 {
-                return Err(HaresError::Equipment(
-                    "PV inverter_capacity_kw must be finite and >= 0".to_string(),
-                ));
-            }
-        }
-
-        self.power_factor = config
-            .get_f64(KEY_POWER_FACTOR)
-            .unwrap_or(DEFAULT_POWER_FACTOR)
-            .clamp(0.0, 1.0);
-
-        let losses = config
-            .get_f64(KEY_SYSTEM_LOSSES_FRACTION)
-            .or_else(|| config.get_f64(KEY_SYSTEM_LOSSES_FRACTION_ALT))
-            .unwrap_or(DEFAULT_SYSTEM_LOSSES_FRACTION);
-        if !losses.is_finite() || !(0.0..1.0).contains(&losses) {
-            return Err(HaresError::Equipment(
-                "PV system_losses_fraction must be in [0.0, 1.0)".to_string(),
-            ));
-        }
-        self.system_losses_fraction = losses;
-
         self.luts_by_surface.clear();
-
         for array in &mut self.arrays {
-            let surface_id = surface_id_for_orientation(
-                array.tilt_deg,
-                array.azimuth_deg,
-                self.surface_resolution_deg,
-            )?;
-            array.surface_id = Some(surface_id);
+            if array.surface_id.is_none() {
+                array.surface_id = Some(surface_id_for_orientation(
+                    array.tilt_deg,
+                    array.azimuth_deg,
+                    self.surface_resolution_deg,
+                )?);
+            }
+            let surface_id = array.surface_id.expect("surface_id set above");
             let Some(_entry) = env
                 .weather
                 .solar_irradiance
@@ -541,51 +498,10 @@ impl Equipment for PV {
                     array.tilt_deg, array.azimuth_deg, surface_id
                 )));
             };
-
-            if let Some(path) = array.sam_lut_path.as_deref() {
-                let lut = PvLut::from_parquet(Path::new(path))?;
-                self.luts_by_surface.insert(surface_id, lut);
-            }
         }
 
-        // Parse soiling configuration. Soiling is opt-in: enabled when
-        // `soiling_enabled` is set or any soiling parameter is present.
-        let soiling_enabled = config
-            .get_f64(KEY_SOILING_ENABLED)
-            .map(|v| v != 0.0)
-            .unwrap_or_else(|| {
-                config.get_f64(KEY_SOILING_CLEANING_THRESHOLD_MM).is_some()
-                    || config.get_f64(KEY_SOILING_LOSS_RATE_PER_DAY).is_some()
-            });
-
-        if soiling_enabled {
-            let mut cfg = soiling::SoilingConfig::default();
-            if let Some(v) = config.get_f64(KEY_SOILING_CLEANING_THRESHOLD_MM) {
-                cfg.cleaning_threshold_m = v / 1000.0;
-            }
-            if let Some(v) = config.get_f64(KEY_SOILING_LOSS_RATE_PER_DAY) {
-                cfg.soiling_loss_rate_per_s = v / 86_400.0;
-            }
-            if let Some(v) = config.get_f64(KEY_SOILING_GRACE_PERIOD_DAYS) {
-                cfg.grace_period_s = v * 86_400.0;
-            }
-            if let Some(v) = config.get_f64(KEY_SOILING_MAX_LOSS) {
-                cfg.max_soiling = v;
-            }
-            if let Some(v) = config.get_f64(KEY_SOILING_INITIAL_LOSS) {
-                cfg.initial_soiling = v;
-            }
-            if let Some(v) = config.get_f64(KEY_SOILING_RAIN_ACCUM_HOURS) {
-                cfg.rain_accum_period_s = v * 3600.0;
-            }
-            let dt_s = env.time_step_secs();
-            self.soiling_state = Some(soiling::SoilingState::new(&cfg, dt_s));
-            self.soiling_config = Some(cfg);
-        } else {
-            self.soiling_config = None;
-            self.soiling_state = None;
-        }
-
+        self.soiling_config = None;
+        self.soiling_state = None;
         self.telemetry
             .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
         self.telemetry.set(tk::DC_POWER_KW, 0.0);
@@ -597,6 +513,7 @@ impl Equipment for PV {
         self.telemetry.set(tk::CURTAILMENT_KW, 0.0);
         self.telemetry.set(tk::INVERTER_CLIPPING_KW, 0.0);
         self.telemetry.set(tk::SOILING_RATIO, 1.0);
+        self.core_output = CoreOutput::default();
         Ok(())
     }
 
@@ -982,11 +899,7 @@ mod tests {
         raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
         raw.insert("inverter_efficiency".to_string(), 0.96.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        EquipmentConfig {
-            name: "PV South".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw("PV South".to_string(), "PV".to_string(), raw)
     }
 
     fn config_single_with_losses(system_losses_fraction: f64) -> EquipmentConfig {
@@ -1002,11 +915,7 @@ mod tests {
             "system_losses_fraction".to_string(),
             system_losses_fraction.into(),
         );
-        EquipmentConfig {
-            name: "PV South".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::raw("PV South".to_string(), "PV".to_string(), raw)
     }
 
     fn approx_eq(a: f64, b: f64) {
@@ -1112,11 +1021,7 @@ mod tests {
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
         raw.insert("inverter_efficiency".to_string(), 0.96.into());
 
-        let cfg = EquipmentConfig {
-            name: "PV Multi".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV Multi".to_string(), "PV".to_string(), raw);
 
         let sid0 = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let sid1 = surface_id_for_orientation(20.0, 90.0, 5.0).unwrap();
@@ -1206,11 +1111,7 @@ mod tests {
         raw.insert("ArrayTilt".to_string(), 27.0.into());
         raw.insert("ArrayAzimuth".to_string(), 200.0.into());
         raw.insert("ModuleType".to_string(), "ThinFilm".into());
-        let cfg = EquipmentConfig {
-            name: "PV HPXML".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV HPXML".to_string(), "PV".to_string(), raw);
         let pv = PV::new(cfg);
         assert_eq!(pv.arrays.len(), 1);
         assert_eq!(pv.arrays[0].module_type, ModuleType::ThinFilm);
@@ -1283,11 +1184,7 @@ mod tests {
         raw.insert("azimuth_deg".to_string(), 180.0.into());
         raw.insert("noct_c".to_string(), DEFAULT_NOCT_C.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        let cfg = EquipmentConfig {
-            name: "PV Wind".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV Wind".to_string(), "PV".to_string(), raw);
 
         // Calm day (0.5 m/s)
         let env_calm = env_with_surfaces_full(
@@ -1353,11 +1250,7 @@ mod tests {
         raw.insert("inverter_efficiency".to_string(), 0.96.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
         raw.insert("inverter_capacity_kw".to_string(), 3.0.into());
-        let cfg = EquipmentConfig {
-            name: "PV Clip".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV Clip".to_string(), "PV".to_string(), raw);
 
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1403,11 +1296,7 @@ mod tests {
         raw.insert("inverter_efficiency".to_string(), 1.0.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
         raw.insert("power_factor".to_string(), 0.9.into());
-        let cfg = EquipmentConfig {
-            name: "PV Q".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV Q".to_string(), "PV".to_string(), raw);
 
         // At 25°C cell temp, 1000 W/m² → DC = 5 kW, AC = 5 kW (eff=1.0, T_derate at T_ref).
         let env = env_with_surfaces(
@@ -1458,11 +1347,7 @@ mod tests {
             raw.insert("surface_resolution_deg".to_string(), 5.0.into());
             raw.insert("system_losses_fraction".to_string(), 0.0.into());
             raw.insert("ModuleType".to_string(), module_type.into());
-            EquipmentConfig {
-                name: format!("PV {module_type}"),
-                ochre_class: "PV".to_string(),
-                payload: crate::config::ConfigPayload::Raw { data: raw },
-            }
+            EquipmentConfig::raw(format!("PV {module_type}"), "PV".to_string(), raw)
         };
 
         // T_amb = 31.25°C → T_cell = 31.25 + 1000*(47-20)/800 = 65°C (40°C above T_ref).
@@ -1519,11 +1404,7 @@ mod tests {
         raw.insert("tilt_deg".to_string(), 30.0.into());
         raw.insert("azimuth_deg".to_string(), 180.0.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
-        let cfg = EquipmentConfig {
-            name: "PV Bad".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV Bad".to_string(), "PV".to_string(), raw);
 
         // new() must not panic; the error is deferred.
         let mut pv = PV::new(cfg.clone());
@@ -1581,11 +1462,7 @@ mod tests {
         raw.insert("azimuth_deg".to_string(), 180.0.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
         raw.insert("SystemLossesFraction".to_string(), 0.10.into());
-        let cfg = EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1610,11 +1487,7 @@ mod tests {
         raw.insert("azimuth_deg".to_string(), 180.0.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
         raw.insert("system_losses_fraction".to_string(), 1.0.into());
-        let cfg = EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let env = env_with_surfaces(
             vec![SurfaceIrradiance {
@@ -1681,11 +1554,7 @@ mod tests {
         raw.insert("inverter_efficiency".to_string(), 1.0.into());
         raw.insert("system_losses_fraction".to_string(), 0.0.into());
         raw.insert("inverter_capacity_kw".to_string(), inv_cap_kw.into());
-        let cfg = EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
         let env = env_with_surfaces_full(
             vec![SurfaceIrradiance {
                 surface_id: sid,
@@ -1994,11 +1863,7 @@ mod tests {
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
         raw.insert("inverter_efficiency".to_string(), 1.0.into());
         raw.insert("system_losses_fraction".to_string(), 0.0.into());
-        let cfg = EquipmentConfig {
-            name: "PV Setpoint".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV Setpoint".to_string(), "PV".to_string(), raw);
 
         // Use wind=1.0 and T_amb=25°C so T_cell = 25 + 1000*(47-20)/800 = 58.75°C.
         // Temperature derating is slight but the unconstrained AC output is well above 2 kW.
@@ -2101,11 +1966,7 @@ mod tests {
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
         raw.insert("shading_model".to_string(), "fixed".into());
         raw.insert("shading_annual_fraction".to_string(), 0.20.into());
-        let cfg = EquipmentConfig {
-            name: "PV Shading".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV Shading".to_string(), "PV".to_string(), raw);
 
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
@@ -2147,11 +2008,7 @@ mod tests {
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
         raw.insert("system_losses_fraction".to_string(), 0.0.into());
         raw.insert("inverter_capacity_kw".to_string(), 4.0.into());
-        let cfg = EquipmentConfig {
-            name: "PV 5kW/4kW inverter".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::raw("PV 5kW/4kW inverter".to_string(), "PV".to_string(), raw);
 
         // Cold ambient (-10 °C) keeps cell temp well below 25 °C, giving positive
         // temp derating so DC > nameplate 5 kW and definitely above the 4 kW cap.

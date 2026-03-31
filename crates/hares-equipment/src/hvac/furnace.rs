@@ -20,8 +20,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        DUCT_DSE_KEYS, HEATING_CAPACITY_KEYS, apply_heating_control_unchecked,
-        equipment_id_from_config, first_f64, operating_mode_code, parse_zone_id_key,
+        apply_heating_control_unchecked, equipment_id_from_config, operating_mode_code,
         update_heating_control, zone_id_from_config,
     },
 };
@@ -117,29 +116,15 @@ impl Equipment for ElectricFurnace {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        if config.is_typed() {
-            let typed = config.typed::<ElectricFurnaceConfig>()?;
-            self.rated_capacity_w = typed.capacity_w.max(0.0);
-            self.eir = typed.eir;
-            let airflow_m3_s = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
-            self.fan_power_w = typed
-                .fan_power_w
-                .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
-            self.hvac.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
-            self.hvac.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
-        } else {
-            self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
-                .unwrap_or(0.0)
-                .max(0.0);
-            self.eir = first_f64(config, &["eir", "efficiency"]).unwrap_or(1.0);
-            let airflow_m3_s = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
-            self.fan_power_w = first_f64(config, &["fan_power_w"])
-                .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
-            self.hvac.duct_dse = first_f64(config, DUCT_DSE_KEYS)
-                .unwrap_or(1.0)
-                .clamp(0.0, 1.0);
-            self.hvac.duct_zone_id = parse_zone_id_key(config, "duct_zone_id");
-        }
+        let typed = config.require_typed::<ElectricFurnaceConfig>("Electric Furnace")?;
+        self.rated_capacity_w = typed.capacity_w.max(0.0);
+        self.eir = typed.eir;
+        let airflow_m3_s = self.hvac.airflow_m3_s_per_w * self.rated_capacity_w;
+        self.fan_power_w = typed
+            .fan_power_w
+            .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
+        self.hvac.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
+        self.hvac.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
         if self.eir <= 0.0 || !self.eir.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Electric Furnace eir: {}",
@@ -324,30 +309,15 @@ impl Equipment for GasFurnace {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
-        if config.is_typed() {
-            let typed = config.typed::<GasFurnaceConfig>()?;
-            self.rated_capacity_w = typed.capacity_w.max(0.0);
-            self.fuel_efficiency = typed.afue;
-            let airflow_m3_s = self.rated_capacity_w * self.hvac.airflow_m3_s_per_w;
-            self.fan_power_w = typed
-                .fan_power_w
-                .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
-            self.hvac.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
-            self.hvac.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
-        } else {
-            self.rated_capacity_w = first_f64(config, HEATING_CAPACITY_KEYS)
-                .unwrap_or(0.0)
-                .max(0.0);
-            self.fuel_efficiency = first_f64(config, &["fuel_efficiency", "afue", "efficiency"])
-                .unwrap_or(DEFAULT_GAS_AFUE);
-            let airflow_m3_s = self.rated_capacity_w * self.hvac.airflow_m3_s_per_w;
-            self.fan_power_w = first_f64(config, &["fan_power_w"])
-                .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
-            self.hvac.duct_dse = first_f64(config, DUCT_DSE_KEYS)
-                .unwrap_or(1.0)
-                .clamp(0.0, 1.0);
-            self.hvac.duct_zone_id = parse_zone_id_key(config, "duct_zone_id");
-        }
+        let typed = config.require_typed::<GasFurnaceConfig>("Gas Furnace")?;
+        self.rated_capacity_w = typed.capacity_w.max(0.0);
+        self.fuel_efficiency = typed.afue;
+        let airflow_m3_s = self.rated_capacity_w * self.hvac.airflow_m3_s_per_w;
+        self.fan_power_w = typed
+            .fan_power_w
+            .unwrap_or_else(|| self.hvac.fan_power_w(airflow_m3_s));
+        self.hvac.duct_dse = typed.ducts.dse_heat.unwrap_or(1.0).clamp(0.0, 1.0);
+        self.hvac.duct_zone_id = typed.ducts.duct_zone_id.map(ZoneId);
         if self.fuel_efficiency <= 0.0 || !self.fuel_efficiency.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Gas Furnace fuel efficiency: {}",
@@ -981,37 +951,33 @@ mod tests {
     }
 
     #[test]
-    fn raw_config_accepted_for_gas_furnace_with_defaults() {
-        let cfg = EquipmentConfig {
-            name: "GF".to_string(),
-            ochre_class: "Gas Furnace".to_string(),
-            payload: crate::config::ConfigPayload::Raw {
-                data: std::collections::HashMap::new(),
-            },
-        };
+    fn raw_config_rejected_for_gas_furnace_with_typed_diagnostic() {
+        let cfg = EquipmentConfig::raw(
+            "GF".to_string(),
+            "Gas Furnace".to_string(),
+            std::collections::HashMap::new(),
+        );
         let mut eq = GasFurnace::new(cfg.clone());
         let result = eq.init(&cfg, &env(18.0));
-        assert!(
-            result.is_ok(),
-            "Gas Furnace should accept raw config with defaults"
-        );
+        let err = result.expect_err("raw gas furnace config must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("Gas Furnace requires typed config"));
+        assert!(msg.contains("from_typed"));
     }
 
     #[test]
-    fn raw_config_accepted_for_electric_furnace_with_defaults() {
-        let cfg = EquipmentConfig {
-            name: "EF".to_string(),
-            ochre_class: "Electric Furnace".to_string(),
-            payload: crate::config::ConfigPayload::Raw {
-                data: std::collections::HashMap::new(),
-            },
-        };
+    fn raw_config_rejected_for_electric_furnace_with_typed_diagnostic() {
+        let cfg = EquipmentConfig::raw(
+            "EF".to_string(),
+            "Electric Furnace".to_string(),
+            std::collections::HashMap::new(),
+        );
         let mut eq = ElectricFurnace::new(cfg.clone());
         let result = eq.init(&cfg, &env(18.0));
-        assert!(
-            result.is_ok(),
-            "Electric Furnace should accept raw config with defaults"
-        );
+        let err = result.expect_err("raw electric furnace config must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("Electric Furnace requires typed config"));
+        assert!(msg.contains("from_typed"));
     }
 
     #[test]

@@ -239,512 +239,12 @@ impl Ev {
         &self.charging_strategy
     }
 
-    fn init_from_config(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        self.battery_capacity_kwh =
-            resolve_capacity_kwh(config).unwrap_or(self.battery_capacity_kwh);
-        self.charging_level = charging_level_from_config(config);
-        self.rated_power_kw =
-            resolve_rated_power_kw(config, self.charging_level, self.battery_capacity_kwh)
-                .unwrap_or_else(|| {
-                    default_max_power_kw(config, self.charging_level, self.battery_capacity_kwh)
-                });
-
-        self.charging_efficiency = config.get_f64(KEY_EFFICIENCY).unwrap_or(DEFAULT_EFFICIENCY);
-        if !(0.0..=1.0).contains(&self.charging_efficiency) || !self.charging_efficiency.is_finite()
-        {
-            return Err(HaresError::Equipment(
-                "EV charging_efficiency must be finite and within [0, 1]".to_string(),
-            ));
-        }
-
-        self.soc_max = config.get_f64(KEY_SOC_MAX).unwrap_or(DEFAULT_SOC_MAX);
-        if !(0.0..=1.0).contains(&self.soc_max) || !self.soc_max.is_finite() {
-            return Err(HaresError::Equipment(
-                "EV soc_max must be finite and within [0, 1]".to_string(),
-            ));
-        }
-
-        self.l1_current_a = config.get_f64(KEY_L1_CURRENT_A);
-        if let Some(current_a) = self.l1_current_a
-            && (!current_a.is_finite() || current_a <= 0.0)
-        {
-            return Err(HaresError::Equipment(
-                "EV l1_current_a must be finite and > 0".to_string(),
-            ));
-        }
-        self.l1_voltage_v = config
-            .get_f64(KEY_L1_VOLTAGE_V)
-            .unwrap_or(DEFAULT_L1_VOLTAGE_V);
-        if !self.l1_voltage_v.is_finite() || self.l1_voltage_v <= 0.0 {
-            return Err(HaresError::Equipment(
-                "EV l1_voltage_v must be finite and > 0".to_string(),
-            ));
-        }
-
-        // Charging curve LUT is injected via set_charging_curve_lut() as a
-        // 4D RegularGridInterpolator (soc × temp × c_rate × soh).
-        self.charging_curve_lut = None;
-        self.min_charge_temp_c = config
-            .get_f64(KEY_MIN_CHARGE_TEMP_C)
-            .unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
-        self.full_power_temp_c = config
-            .get_f64(KEY_FULL_POWER_TEMP_C)
-            .unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
-        self.heater_power_w = config
-            .get_f64(KEY_HEATER_POWER_W)
-            .unwrap_or(DEFAULT_HEATER_POWER_W);
-        self.heater_threshold_c = config
-            .get_f64(KEY_HEATER_THRESHOLD_C)
-            .unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
-        self.thermal_mass_j_per_k = config
-            .get_f64(KEY_THERMAL_MASS_J_PER_K)
-            .unwrap_or(DEFAULT_THERMAL_MASS_J_PER_K);
-        self.ua_w_per_k = config.get_f64(KEY_UA_W_PER_K).unwrap_or(DEFAULT_UA_W_PER_K);
-
-        if !self.min_charge_temp_c.is_finite()
-            || !self.full_power_temp_c.is_finite()
-            || self.full_power_temp_c < self.min_charge_temp_c
-        {
-            return Err(HaresError::Equipment(
-                "EV temperature thresholds must be finite and full_power_temp_c >= min_charge_temp_c"
-                    .to_string(),
-            ));
-        }
-        if !self.heater_power_w.is_finite()
-            || self.heater_power_w < 0.0
-            || !self.heater_threshold_c.is_finite()
-        {
-            return Err(HaresError::Equipment(
-                "EV heater parameters must be finite and heater_power_w >= 0".to_string(),
-            ));
-        }
-        if !self.thermal_mass_j_per_k.is_finite()
-            || self.thermal_mass_j_per_k <= 0.0
-            || !self.ua_w_per_k.is_finite()
-            || self.ua_w_per_k < 0.0
-        {
-            return Err(HaresError::Equipment(
-                "EV thermal parameters must be finite with thermal_mass_j_per_k > 0 and ua_w_per_k >= 0"
-                    .to_string(),
-            ));
-        }
-
-        self.v2l_enabled = config.get_bool(KEY_V2L_ENABLED).unwrap_or(false);
-        self.v2l_soc_reserve = config
-            .get_f64(KEY_V2L_SOC_RESERVE)
-            .unwrap_or(DEFAULT_V2L_SOC_RESERVE);
-        if !self.v2l_soc_reserve.is_finite() || !(0.0..=1.0).contains(&self.v2l_soc_reserve) {
-            return Err(HaresError::Equipment(
-                "EV v2l_soc_reserve must be finite and within [0, 1]".to_string(),
-            ));
-        }
-        self.v2l_max_discharge_kw = config
-            .get_f64(KEY_V2L_MAX_DISCHARGE_KW)
-            .unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW);
-        if !self.v2l_max_discharge_kw.is_finite() || self.v2l_max_discharge_kw < 0.0 {
-            return Err(HaresError::Equipment(
-                "EV v2l_max_discharge_kw must be finite and >= 0".to_string(),
-            ));
-        }
-        self.v2g_enabled = config.get_bool(KEY_V2G_ENABLED).unwrap_or(false);
-        self.v2g_soc_reserve = config
-            .get_f64(KEY_V2G_SOC_RESERVE)
-            .unwrap_or(DEFAULT_V2G_SOC_RESERVE);
-        if !self.v2g_soc_reserve.is_finite() || !(0.0..=1.0).contains(&self.v2g_soc_reserve) {
-            return Err(HaresError::Equipment(
-                "EV v2g_soc_reserve must be finite and within [0, 1]".to_string(),
-            ));
-        }
-        self.v2g_max_discharge_kw = config
-            .get_f64(KEY_V2G_MAX_DISCHARGE_KW)
-            .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW);
-        if !self.v2g_max_discharge_kw.is_finite() || self.v2g_max_discharge_kw < 0.0 {
-            return Err(HaresError::Equipment(
-                "EV v2g_max_discharge_kw must be finite and >= 0".to_string(),
-            ));
-        }
-
-        self.chemistry = config
-            .get_str(KEY_CHEMISTRY)
-            .and_then(|s| s.parse::<BatteryChemistry>().ok())
-            .unwrap_or(BatteryChemistry::Nmc);
-        if !self.custom_ocv {
-            self.ocv_table = OcvTable::for_chemistry(self.chemistry);
-        }
-        if !self.custom_u_neg {
-            self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
-        }
-
-        self.fuel_economy_kwh_per_mi = config
-            .get_f64(KEY_FUEL_ECONOMY_KWH_PER_MI)
-            .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
-
-        self.ready_soc = config.get_f64(KEY_READY_SOC).unwrap_or(self.soc_max);
-        if !self.ready_soc.is_finite() || !(0.0..=1.0).contains(&self.ready_soc) {
-            return Err(HaresError::Equipment(
-                "EV ready_soc must be finite and within [0, 1]".to_string(),
-            ));
-        }
-        self.ready_by_hour = None;
-        self.ready_by_soc = None;
-
-        self.soc = config
-            .get_f64(KEY_INITIAL_SOC)
-            .unwrap_or(self.soc)
-            .clamp(0.0, 1.0);
-        self.connection_state = config
-            .get_str(KEY_INITIAL_CONNECTION_STATE)
-            .and_then(|s| s.parse::<EvConnectionState>().ok())
-            .unwrap_or(EvConnectionState::HomePluggedIn);
-        self.away_charger_power_kw = 0.0;
-        self.away_charge_actual_kw = 0.0;
-        self.heater_active = false;
-        self.battery_temp_c = config
-            .get_f64(KEY_BATTERY_TEMP_C)
-            .unwrap_or(self.battery_temp_c);
-        self.active_power_kw = 0.0;
-
-        if let Some(strat_str) = config.get_str(KEY_CHARGING_STRATEGY) {
-            self.charging_strategy = serde_json::from_str(strat_str)
-                .map_err(|e| HaresError::Equipment(format!("invalid charging_strategy: {e}")))?;
-        }
-
-        if let Some(policy_str) = config.get_str(KEY_PLUG_IN_POLICY) {
-            self.plug_in_policy = serde_json::from_str(policy_str)
-                .map_err(|e| HaresError::Equipment(format!("invalid plug_in_policy: {e}")))?;
-        }
-
-        self.power_setpoint_kw = None;
-        self.soc_target = None;
-        self.soc_target_min = None;
-        self.soc_target_max = None;
-        self.telemetry = default_telemetry(self.charging_level);
-        self.core_output = CoreOutput::default();
-        self.write_telemetry();
-
-        Ok(())
-    }
-
-    fn effective_soc_limit(&self) -> f64 {
-        let mut limit = self.soc_target.unwrap_or(self.soc_max);
-        if let Some(min) = self.soc_target_min {
-            limit = limit.max(min);
-        }
-        if let Some(max) = self.soc_target_max {
-            limit = limit.min(max);
-        }
-        limit.clamp(0.0, self.soc_max)
-    }
-
-    /// Compute charging power for this timestep.
-    ///
-    /// `charge_derate` is applied before the taper limit so that the taper
-    /// correctly prevents SOC overshoot even under cold-temperature derating.
-    /// `max_power_kw` is the charger's rated power (home rated or away charger).
-    fn compute_charging_power_kw(
-        &self,
-        now: DateTime<FixedOffset>,
-        dt: Duration,
-        charge_derate: f64,
-        max_power_kw: f64,
-    ) -> f64 {
-        // V2L/V2G discharge path: negative setpoint with discharge enabled
-        // Only available when HomePluggedIn
-        if self.connection_state == EvConnectionState::HomePluggedIn {
-            if let Some(setpoint) = self.power_setpoint_kw {
-                if setpoint < 0.0 {
-                    if self.v2g_enabled {
-                        return self.compute_v2g_discharge(dt);
-                    } else if self.v2l_enabled {
-                        return self.compute_v2l_discharge(dt);
-                    }
-                }
-            }
-        }
-
-        // Determine effective target SOC: soc_target > ready_by_soc > ready_soc
-        let target = self
-            .soc_target
-            .or(self.ready_by_soc)
-            .unwrap_or(self.ready_soc);
-        let soc_limit = {
-            let mut limit = target;
-            if let Some(min) = self.soc_target_min {
-                limit = limit.max(min);
-            }
-            if let Some(max) = self.soc_target_max {
-                limit = limit.min(max);
-            }
-            limit.clamp(0.0, self.soc_max)
-        };
-
-        if self.soc >= soc_limit {
-            return 0.0;
-        }
-
-        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
-        let rated = match self.charging_level {
-            ChargingLevel::L1 => self.l1_power_kw().min(max_power_kw),
-            ChargingLevel::L2 => self.rated_power_kw.min(max_power_kw),
-        };
-        let curve_limited_rated = if let Some(lut) = &self.charging_curve_lut {
-            let soh = 1.0 - self.degradation.capacity_fade_pct();
-            let effective_kwh = self.battery_capacity_kwh * soh;
-            let c_rate = if effective_kwh > 0.0 {
-                rated / effective_kwh
-            } else {
-                0.0
-            };
-            rated * lut.interpolate(&[self.soc, self.battery_temp_c, c_rate, soh]) as f64
-        } else {
-            rated
-        };
-        let derated_rated = curve_limited_rated * charge_derate;
-
-        let mut requested = self
-            .power_setpoint_kw
-            .unwrap_or(derated_rated)
-            .max(0.0)
-            .min(derated_rated);
-
-        // BMS ready-by scheduling: delay charging if we have time
-        if self.ready_by_hour.is_some() && self.power_setpoint_kw.is_none() {
-            let bms_power = self.bms_ready_by_power(now, derated_rated, soc_limit);
-            requested = bms_power;
-        }
-
-        // Taper limit uses derated power as the effective DC ceiling to prevent
-        // SOC overshoot when charge rate is reduced by temperature derating.
-        let taper_limit = (soc_limit - self.soc).max(0.0) * self.battery_capacity_kwh
-            / dt_hours
-            / self.charging_efficiency;
-
-        let mut power = requested.min(derated_rated).min(taper_limit).max(0.0);
-        if let Some(limit) = self.power_limit_kw {
-            // PowerLimit only constrains residential (home) charging
-            if self.connection_state == EvConnectionState::HomePluggedIn {
-                power = power.min(limit.max(0.0));
-            }
-        }
-        power
-    }
-
-    /// BMS ready-by scheduling: compute power based on deadline.
-    fn bms_ready_by_power(
-        &self,
-        now: DateTime<FixedOffset>,
-        derated_rated: f64,
-        soc_limit: f64,
-    ) -> f64 {
-        let ready_by_hour = match self.ready_by_hour {
-            Some(h) => h,
-            None => return derated_rated,
-        };
-
-        let soc_deficit = (soc_limit - self.soc).max(0.0);
-        if soc_deficit <= 0.0 {
-            return 0.0;
-        }
-
-        let eff_power = derated_rated * self.charging_efficiency * CC_CV_MARGIN;
-        let hours_needed = if eff_power > 0.0 {
-            soc_deficit * self.battery_capacity_kwh / eff_power
-        } else {
-            return derated_rated;
-        };
-
-        let current_hour =
-            now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0;
-
-        let hours_until_deadline = if ready_by_hour > current_hour {
-            ready_by_hour - current_hour
-        } else if (current_hour - ready_by_hour).abs() < 1.0 {
-            // Deadline just passed (within 1 hour) — charge immediately
-            return derated_rated;
-        } else {
-            // Overnight wrap (e.g., current=18, deadline=7 → 13h)
-            24.0 - current_hour + ready_by_hour
-        };
-
-        if hours_needed >= hours_until_deadline {
-            return derated_rated;
-        }
-
-        // BMS delays: start charging hours_needed before deadline
-        0.0
-    }
-
-    /// Compute V2L (vehicle-to-load) discharge power as a negative value.
-    fn compute_v2l_discharge(&self, dt: Duration) -> f64 {
-        if self.soc <= self.v2l_soc_reserve {
-            return 0.0;
-        }
-        let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
-        let capped = setpoint_magnitude.min(self.v2l_max_discharge_kw);
-        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
-        let available_kwh = (self.soc - self.v2l_soc_reserve) * self.battery_capacity_kwh;
-        let max_discharge_kw = available_kwh / dt_hours;
-        -(capped.min(max_discharge_kw).max(0.0))
-    }
-
-    /// Compute V2G (vehicle-to-grid) discharge power as a negative value.
-    fn compute_v2g_discharge(&self, dt: Duration) -> f64 {
-        if self.soc <= self.v2g_soc_reserve {
-            return 0.0;
-        }
-        let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
-        let capped = setpoint_magnitude.min(self.v2g_max_discharge_kw);
-        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
-        let available_kwh = (self.soc - self.v2g_soc_reserve) * self.battery_capacity_kwh;
-        let max_discharge_kw = available_kwh / dt_hours;
-        -(capped.min(max_discharge_kw).max(0.0))
-    }
-
-    fn charge_derate_factor(&self) -> f64 {
-        crate::linear_temp_derate(
-            self.battery_temp_c,
-            self.min_charge_temp_c,
-            self.full_power_temp_c,
-        )
-    }
-
-    fn l1_power_kw(&self) -> f64 {
-        match self.l1_current_a {
-            Some(current_a) => (current_a * self.l1_voltage_v / 1_000.0).max(0.0),
-            None => self.rated_power_kw,
-        }
-    }
-
-    fn write_telemetry(&mut self) {
-        self.telemetry.set(tk::SOC, self.soc);
-        self.telemetry
-            .set(tk::ACTIVE_POWER_KW, self.active_power_kw);
-        self.telemetry.set(
-            tk::CONNECTION_STATE,
-            match self.connection_state {
-                EvConnectionState::HomePluggedIn => 0.0,
-                EvConnectionState::AwayPluggedIn => 1.0,
-                EvConnectionState::Disconnected => 2.0,
-            },
-        );
-        self.telemetry
-            .set(tk::CHARGING_LEVEL, telemetry_code(self.charging_level));
-        self.telemetry.set(tk::BATTERY_TEMP_C, self.battery_temp_c);
-        self.telemetry.set(
-            tk::HEATER_POWER_W,
-            if self.heater_active {
-                self.heater_power_w
-            } else {
-                0.0
-            },
-        );
-        self.telemetry
-            .set(tk::CHARGE_DERATE, self.charge_derate_factor());
-        self.telemetry
-            .set(tk::V2L_ACTIVE, if self.v2l_active { 1.0 } else { 0.0 });
-        self.telemetry.set(tk::V2L_POWER_KW, self.v2l_power_kw);
-        self.telemetry
-            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
-        self.telemetry
-            .set(tk::AWAY_CHARGE_POWER_KW, self.away_charge_actual_kw);
-        self.telemetry
-            .set(tk::CAPACITY_KWH, self.battery_capacity_kwh);
-        self.telemetry
-            .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
-    }
-
-    /// Accumulate degradation and run daily update.
-    fn update_degradation(&mut self, env: &EnvironmentState, dt_s: f64) {
-        let cell_temp_k = self.battery_temp_c + 273.15;
-        let v_oc = self.ocv_table.voltage_at_soc(self.soc);
-        self.rainflow.push(self.soc);
-        self.degradation
-            .accumulate(dt_s, cell_temp_k, v_oc, self.soc);
-
-        let current_day = {
-            use chrono::Datelike;
-            env.current_time.date_naive().num_days_from_ce()
-        };
-        if current_day != self.last_daily_update_day {
-            let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
-            self.degradation
-                .update_daily(&self.u_neg_table, cell_temp_k, sum_sq_dod);
-            self.degradation.reset_day_tracking(self.soc);
-            self.rainflow.reset_daily();
-            self.last_daily_update_day = current_day;
-        }
-    }
-
-    /// Run full charging physics for a given max power.
-    /// Returns (charger_kw, heater_kw, is_v2l_discharge).
-    fn run_charging_physics(
-        &mut self,
-        env: &EnvironmentState,
-        dt: Duration,
-        max_power_kw: f64,
-    ) -> (f64, f64, bool) {
-        let charge_derate = self.charge_derate_factor();
-        let charger_kw =
-            self.compute_charging_power_kw(env.current_time, dt, charge_derate, max_power_kw);
-
-        let is_v2l_discharge = charger_kw < 0.0;
-
-        let would_charge_underated = !is_v2l_discharge && self.soc < self.effective_soc_limit();
-        self.heater_active = self.heater_power_w > 0.0
-            && would_charge_underated
-            && self.battery_temp_c <= self.heater_threshold_c;
-        let heater_kw = if self.heater_active {
-            self.heater_power_w / 1000.0
-        } else {
-            0.0
-        };
-
-        (charger_kw, heater_kw, is_v2l_discharge)
-    }
-
-    /// Update SOC and thermal state from charging physics.
-    fn apply_soc_and_thermal(
-        &mut self,
-        dt: Duration,
-        charger_kw: f64,
-        heater_kw: f64,
-        is_v2l_discharge: bool,
-        ambient_c: f64,
-    ) {
-        let dt_s = dt.as_secs_f64();
-
-        // Passive thermal decay toward ambient
-        let q_loss_w = self.ua_w_per_k * (self.battery_temp_c - ambient_c);
-        self.battery_temp_c -= (q_loss_w * dt_s) / self.thermal_mass_j_per_k;
-
-        if is_v2l_discharge {
-            let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
-            let ac_discharge_kw = charger_kw.abs();
-            let dc_discharge_kwh =
-                (ac_discharge_kw / self.charging_efficiency.max(0.01)) * dt_hours;
-            self.soc = (self.soc - dc_discharge_kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
-        } else if charger_kw > 0.0 {
-            let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
-            let net_charge_kw = (charger_kw - heater_kw).max(0.0);
-            let dc_stored_kw = net_charge_kw * self.charging_efficiency;
-            let dc_energy_kwh = dc_stored_kw * dt_hours;
-            self.soc = (self.soc + dc_energy_kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
-
-            let ohmic_like_heat_w = (net_charge_kw - dc_stored_kw) * 1000.0;
-            let heater_w = heater_kw * 1000.0;
-            self.battery_temp_c +=
-                ((ohmic_like_heat_w + heater_w) * dt_s) / self.thermal_mass_j_per_k;
-        }
-    }
-}
-
-impl Ev {
     fn init_typed(
         &mut self,
         config: &EquipmentConfig,
         env: &EnvironmentState,
     ) -> crate::Result<()> {
-        let c: EvConfig = config.typed()?;
+        let c = config.require_typed::<EvConfig>("EV")?;
         c.validate()?;
 
         self.battery_capacity_kwh = c.capacity_kwh;
@@ -857,6 +357,298 @@ impl Ev {
 
         Ok(())
     }
+
+    fn effective_soc_limit(&self) -> f64 {
+        let mut limit = self.soc_target.unwrap_or(self.soc_max);
+        if let Some(min) = self.soc_target_min {
+            limit = limit.max(min);
+        }
+        if let Some(max) = self.soc_target_max {
+            limit = limit.min(max);
+        }
+        limit.clamp(0.0, self.soc_max)
+    }
+
+    /// Compute charging power for this timestep.
+    ///
+    /// `charge_derate` is applied before the taper limit so that the taper
+    /// correctly prevents SOC overshoot even under cold-temperature derating.
+    /// `max_power_kw` is the charger's rated power (home rated or away charger).
+    fn compute_charging_power_kw(
+        &self,
+        now: DateTime<FixedOffset>,
+        dt: Duration,
+        charge_derate: f64,
+        max_power_kw: f64,
+    ) -> f64 {
+        if self.connection_state == EvConnectionState::HomePluggedIn
+            && let Some(setpoint) = self.power_setpoint_kw
+            && setpoint < 0.0
+        {
+            if self.v2g_enabled {
+                return self.compute_v2g_discharge(dt);
+            } else if self.v2l_enabled {
+                return self.compute_v2l_discharge(dt);
+            }
+        }
+
+        let target = self
+            .soc_target
+            .or(self.ready_by_soc)
+            .unwrap_or(self.ready_soc);
+        let soc_limit = {
+            let mut limit = target;
+            if let Some(min) = self.soc_target_min {
+                limit = limit.max(min);
+            }
+            if let Some(max) = self.soc_target_max {
+                limit = limit.min(max);
+            }
+            limit.clamp(0.0, self.soc_max)
+        };
+
+        if self.soc >= soc_limit {
+            return 0.0;
+        }
+
+        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        let rated = match self.charging_level {
+            ChargingLevel::L1 => self.l1_power_kw().min(max_power_kw),
+            ChargingLevel::L2 => self.rated_power_kw.min(max_power_kw),
+        };
+        let curve_limited_rated = if let Some(lut) = &self.charging_curve_lut {
+            let soh = 1.0 - self.degradation.capacity_fade_pct();
+            let effective_kwh = self.battery_capacity_kwh * soh;
+            let c_rate = if effective_kwh > 0.0 {
+                rated / effective_kwh
+            } else {
+                0.0
+            };
+            rated * lut.interpolate(&[self.soc, self.battery_temp_c, c_rate, soh]) as f64
+        } else {
+            rated
+        };
+        let derated_rated = curve_limited_rated * charge_derate;
+
+        let mut requested = self
+            .power_setpoint_kw
+            .unwrap_or(derated_rated)
+            .max(0.0)
+            .min(derated_rated);
+
+        if self.ready_by_hour.is_some() && self.power_setpoint_kw.is_none() {
+            requested = self.bms_ready_by_power(now, derated_rated, soc_limit);
+        }
+
+        let taper_limit = (soc_limit - self.soc).max(0.0) * self.battery_capacity_kwh
+            / dt_hours
+            / self.charging_efficiency;
+
+        let mut power = requested.min(derated_rated).min(taper_limit).max(0.0);
+        if let Some(limit) = self.power_limit_kw
+            && self.connection_state == EvConnectionState::HomePluggedIn
+        {
+            power = power.min(limit.max(0.0));
+        }
+        power
+    }
+
+    fn bms_ready_by_power(
+        &self,
+        now: DateTime<FixedOffset>,
+        derated_rated: f64,
+        soc_limit: f64,
+    ) -> f64 {
+        let ready_by_hour = match self.ready_by_hour {
+            Some(h) => h,
+            None => return derated_rated,
+        };
+
+        let soc_deficit = (soc_limit - self.soc).max(0.0);
+        if soc_deficit <= 0.0 {
+            return 0.0;
+        }
+
+        let eff_power = derated_rated * self.charging_efficiency * CC_CV_MARGIN;
+        let hours_needed = if eff_power > 0.0 {
+            soc_deficit * self.battery_capacity_kwh / eff_power
+        } else {
+            return derated_rated;
+        };
+
+        let current_hour =
+            now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0;
+
+        let hours_until_deadline = if ready_by_hour > current_hour {
+            ready_by_hour - current_hour
+        } else if (current_hour - ready_by_hour).abs() < 1.0 {
+            return derated_rated;
+        } else {
+            24.0 - current_hour + ready_by_hour
+        };
+
+        if hours_needed >= hours_until_deadline {
+            return derated_rated;
+        }
+
+        0.0
+    }
+
+    fn compute_v2l_discharge(&self, dt: Duration) -> f64 {
+        if self.soc <= self.v2l_soc_reserve {
+            return 0.0;
+        }
+        let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
+        let capped = setpoint_magnitude.min(self.v2l_max_discharge_kw);
+        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        let available_kwh = (self.soc - self.v2l_soc_reserve) * self.battery_capacity_kwh;
+        let max_discharge_kw = available_kwh / dt_hours;
+        -(capped.min(max_discharge_kw).max(0.0))
+    }
+
+    fn compute_v2g_discharge(&self, dt: Duration) -> f64 {
+        if self.soc <= self.v2g_soc_reserve {
+            return 0.0;
+        }
+        let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
+        let capped = setpoint_magnitude.min(self.v2g_max_discharge_kw);
+        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        let available_kwh = (self.soc - self.v2g_soc_reserve) * self.battery_capacity_kwh;
+        let max_discharge_kw = available_kwh / dt_hours;
+        -(capped.min(max_discharge_kw).max(0.0))
+    }
+
+    fn charge_derate_factor(&self) -> f64 {
+        crate::linear_temp_derate(
+            self.battery_temp_c,
+            self.min_charge_temp_c,
+            self.full_power_temp_c,
+        )
+    }
+
+    fn l1_power_kw(&self) -> f64 {
+        match self.l1_current_a {
+            Some(current_a) => (current_a * self.l1_voltage_v / 1_000.0).max(0.0),
+            None => self.rated_power_kw,
+        }
+    }
+
+    fn write_telemetry(&mut self) {
+        self.telemetry.set(tk::SOC, self.soc);
+        self.telemetry
+            .set(tk::ACTIVE_POWER_KW, self.active_power_kw);
+        self.telemetry.set(
+            tk::CONNECTION_STATE,
+            match self.connection_state {
+                EvConnectionState::HomePluggedIn => 0.0,
+                EvConnectionState::AwayPluggedIn => 1.0,
+                EvConnectionState::Disconnected => 2.0,
+            },
+        );
+        self.telemetry
+            .set(tk::CHARGING_LEVEL, telemetry_code(self.charging_level));
+        self.telemetry.set(tk::BATTERY_TEMP_C, self.battery_temp_c);
+        self.telemetry.set(
+            tk::HEATER_POWER_W,
+            if self.heater_active {
+                self.heater_power_w
+            } else {
+                0.0
+            },
+        );
+        self.telemetry
+            .set(tk::CHARGE_DERATE, self.charge_derate_factor());
+        self.telemetry
+            .set(tk::V2L_ACTIVE, if self.v2l_active { 1.0 } else { 0.0 });
+        self.telemetry.set(tk::V2L_POWER_KW, self.v2l_power_kw);
+        self.telemetry
+            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
+        self.telemetry
+            .set(tk::AWAY_CHARGE_POWER_KW, self.away_charge_actual_kw);
+        self.telemetry
+            .set(tk::CAPACITY_KWH, self.battery_capacity_kwh);
+        self.telemetry
+            .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
+    }
+
+    fn update_degradation(&mut self, env: &EnvironmentState, dt_s: f64) {
+        let cell_temp_k = self.battery_temp_c + 273.15;
+        let v_oc = self.ocv_table.voltage_at_soc(self.soc);
+        self.rainflow.push(self.soc);
+        self.degradation
+            .accumulate(dt_s, cell_temp_k, v_oc, self.soc);
+
+        let current_day = {
+            use chrono::Datelike;
+            env.current_time.date_naive().num_days_from_ce()
+        };
+        if current_day != self.last_daily_update_day {
+            let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
+            self.degradation
+                .update_daily(&self.u_neg_table, cell_temp_k, sum_sq_dod);
+            self.degradation.reset_day_tracking(self.soc);
+            self.rainflow.reset_daily();
+            self.last_daily_update_day = current_day;
+        }
+    }
+
+    fn run_charging_physics(
+        &mut self,
+        env: &EnvironmentState,
+        dt: Duration,
+        max_power_kw: f64,
+    ) -> (f64, f64, bool) {
+        let charge_derate = self.charge_derate_factor();
+        let charger_kw =
+            self.compute_charging_power_kw(env.current_time, dt, charge_derate, max_power_kw);
+
+        let is_v2l_discharge = charger_kw < 0.0;
+
+        let would_charge_underated = !is_v2l_discharge && self.soc < self.effective_soc_limit();
+        self.heater_active = self.heater_power_w > 0.0
+            && would_charge_underated
+            && self.battery_temp_c <= self.heater_threshold_c;
+        let heater_kw = if self.heater_active {
+            self.heater_power_w / 1000.0
+        } else {
+            0.0
+        };
+
+        (charger_kw, heater_kw, is_v2l_discharge)
+    }
+
+    fn apply_soc_and_thermal(
+        &mut self,
+        dt: Duration,
+        charger_kw: f64,
+        heater_kw: f64,
+        is_v2l_discharge: bool,
+        ambient_c: f64,
+    ) {
+        let dt_s = dt.as_secs_f64();
+
+        let q_loss_w = self.ua_w_per_k * (self.battery_temp_c - ambient_c);
+        self.battery_temp_c -= (q_loss_w * dt_s) / self.thermal_mass_j_per_k;
+
+        if is_v2l_discharge {
+            let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+            let ac_discharge_kw = charger_kw.abs();
+            let dc_discharge_kwh =
+                (ac_discharge_kw / self.charging_efficiency.max(0.01)) * dt_hours;
+            self.soc = (self.soc - dc_discharge_kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
+        } else if charger_kw > 0.0 {
+            let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+            let net_charge_kw = (charger_kw - heater_kw).max(0.0);
+            let dc_stored_kw = net_charge_kw * self.charging_efficiency;
+            let dc_energy_kwh = dc_stored_kw * dt_hours;
+            self.soc = (self.soc + dc_energy_kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
+
+            let ohmic_like_heat_w = (net_charge_kw - dc_stored_kw) * 1000.0;
+            let heater_w = heater_kw * 1000.0;
+            self.battery_temp_c +=
+                ((ohmic_like_heat_w + heater_w) * dt_s) / self.thermal_mass_j_per_k;
+        }
+    }
 }
 
 impl Equipment for Ev {
@@ -869,20 +661,7 @@ impl Equipment for Ev {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            return self.init_typed(config, env);
-        }
-
-        let explicit_temp = config.get_f64(KEY_BATTERY_TEMP_C);
-        self.init_from_config(config)?;
-
-        // EV battery temperature starts at outdoor ambient — vehicles are
-        // parked outside or in unconditioned garages, not at a fixed 20 °C.
-        if explicit_temp.is_none() {
-            self.battery_temp_c = env.weather.outdoor_temp_c;
-        }
-
-        Ok(())
+        self.init_typed(config, env)
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {

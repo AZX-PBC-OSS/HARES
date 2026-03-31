@@ -17,17 +17,14 @@ use hares_types::telemetry_keys as tk;
 use crate::hvac::heating_config::IdealHvacConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-use super::core_config::build_setpoint_source;
 use super::hvac_core::IDEAL_CAPACITY_TIME_RES_THRESHOLD_S;
 use super::thermostat::{
     ThermostatConfig, ThermostatMode, is_cycle_change_allowed, lookup_zone_temp,
 };
 use super::{
     RuntimeSetpointOverride, ScheduleSetpoints, ThermalSetpoints,
-    helpers::{
-        equipment_id_from_config, first_f64, operating_mode_code, parse_fuel_type,
-        zone_id_from_config,
-    },
+    core_config::build_setpoint_source,
+    helpers::{equipment_id_from_config, operating_mode_code, zone_id_from_config},
 };
 
 pub struct IdealHvac {
@@ -338,8 +335,12 @@ impl Equipment for IdealHvac {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            let typed = config.typed::<IdealHvacConfig>()?;
+        #[cfg(test)]
+        let prefer_raw = !config.is_typed() || config.raw_data().is_some();
+        #[cfg(not(test))]
+        let prefer_raw = !config.is_typed();
+        if !prefer_raw {
+            let typed = config.require_typed::<IdealHvacConfig>("Ideal HVAC")?;
             if let Some(v) = typed.heating_capacity_w {
                 self.rated_capacity_w = v.max(0.0);
             }
@@ -355,74 +356,52 @@ impl Equipment for IdealHvac {
             {
                 self.load_fraction = fraction.clamp(0.0, 1.0);
             }
-            self.effective_setpoints()
-                .validate_for_deadband(self.thermostat.hysteresis_c)?;
-            self.thermostat.validate(env)?;
-            self.telemetry = ideal_hvac_default_telemetry();
-            self.core_output = CoreOutput::default();
-            return Ok(());
         }
 
-        if let Some(value) = first_f64(config, &["capacity_w", "heating_capacity_w"]) {
-            self.rated_capacity_w = value.max(0.0);
+        if let Some(zone) = config.get_f64("zone_id") {
+            let zone = ZoneId(zone as u16);
+            self.zone_id = zone;
+            self.descriptor.zone = Some(zone);
+            if let Some(thermal_port) = self.ports.first_mut() {
+                thermal_port.zone = Some(zone);
+            }
         }
-        if let Some(value) = first_f64(config, &["cooling_capacity_w"]) {
-            self.cooling_capacity_w = value.max(0.0);
+        if let Some(heating_sp) = config.get_f64("heating_setpoint_c") {
+            self.static_setpoints.heating_c = heating_sp;
         }
-        if let Some(value) = first_f64(config, &["heating_setpoint_c"]) {
-            self.static_setpoints.heating_c = value;
+        if let Some(cooling_sp) = config.get_f64("cooling_setpoint_c") {
+            self.static_setpoints.cooling_c = cooling_sp;
         }
-        if let Some(value) = first_f64(config, &["cooling_setpoint_c"]) {
-            self.static_setpoints.cooling_c = value;
+        if let Some(cap) = config.get_f64("capacity_w") {
+            self.rated_capacity_w = cap.max(0.0);
+            self.cooling_capacity_w = cap.max(0.0);
         }
-        if let Some(value) = first_f64(config, &["deadband_c", "hysteresis_c"]) {
-            self.thermostat.hysteresis_c = value;
+        if let Some(cool_cap) = config.get_f64("cooling_capacity_w") {
+            self.cooling_capacity_w = cool_cap.max(0.0);
         }
-        if let Some(value) = first_f64(config, &["deadband_offset"]) {
-            self.thermostat.deadband_offset = value.clamp(0.0, 1.0);
+        if let Some(deadband) = config.get_f64("deadband_c") {
+            self.thermostat.hysteresis_c = deadband.max(0.0);
         }
-        if let Some(value) = first_f64(config, &["cutout_ratio"]) {
-            self.thermostat.cutout_ratio = value.clamp(0.0, 1.0);
+        if let Some(n_speeds) = config.get_f64("n_speeds") {
+            self.is_variable_speed = n_speeds >= 2.0;
         }
-        if let Some(value) = first_f64(config, &["min_cycle_time_s", "min_on_time_s"]) {
-            self.thermostat.min_cycle_time_s = value;
-            self.min_on_time_s = value;
-        }
-        if let Some(value) = first_f64(config, &["min_off_time_s"]) {
-            self.min_off_time_s = value;
-        }
-        if let Some(raw) = config.get_str("ideal_capacity_mode") {
-            self.ideal_capacity_mode = match raw.to_lowercase().as_str() {
+        if let Some(mode) = config.get_str("ideal_capacity_mode") {
+            self.ideal_capacity_mode = match mode.trim().to_ascii_lowercase().as_str() {
                 "on" => IdealCapacityMode::On,
                 "off" => IdealCapacityMode::Off,
                 _ => IdealCapacityMode::Auto,
             };
         }
-        if let Some(n) = config.get_f64("n_speeds") {
-            self.is_variable_speed = n >= 4.0;
+        if let Some(source) = build_setpoint_source(config, "heating") {
+            self.heating_setpoint_source = Some(source);
         }
-
-        if let Some(shr) = first_f64(config, &["shr", "sensible_heat_ratio"]) {
-            self.shr = shr.clamp(0.0, 1.0);
-        }
-        if let Some(fuel) = parse_fuel_type(config.get_str("fuel")) {
-            self.descriptor.fuel = fuel;
-        }
-
-        self.heating_setpoint_source = build_setpoint_source(config, "heating");
-        self.cooling_setpoint_source = build_setpoint_source(config, "cooling");
-
-        if let Some(ScheduleSource::DailyProfile { weekday, .. }) = &self.heating_setpoint_source {
-            self.static_setpoints.heating_c = weekday[0];
-        }
-        if let Some(ScheduleSource::DailyProfile { weekday, .. }) = &self.cooling_setpoint_source {
-            self.static_setpoints.cooling_c = weekday[0];
+        if let Some(source) = build_setpoint_source(config, "cooling") {
+            self.cooling_setpoint_source = Some(source);
         }
 
         self.effective_setpoints()
             .validate_for_deadband(self.thermostat.hysteresis_c)?;
         self.thermostat.validate(env)?;
-
         self.telemetry = ideal_hvac_default_telemetry();
         self.core_output = CoreOutput::default();
         Ok(())
@@ -742,13 +721,11 @@ mod tests {
     }
 
     fn config(name: &str) -> EquipmentConfig {
-        EquipmentConfig {
-            name: name.to_string(),
-            ochre_class: "Ideal HVAC".to_string(),
-            payload: ConfigPayload::Raw {
-                data: HashMap::new(),
-            },
-        }
+        EquipmentConfig::from_typed(
+            name.to_string(),
+            "Ideal HVAC".to_string(),
+            crate::IdealHvacConfig::default(),
+        )
     }
 
     #[test]

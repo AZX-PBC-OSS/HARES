@@ -624,9 +624,19 @@ fn all_equipment_types_init_without_error() {
     let env = sample_env();
 
     smoke_case(&registry, "Gas Furnace", sample_gas_furnace_config(), &env);
-    smoke_case(&registry, "Electric Furnace", sample_electric_furnace_config(), &env);
+    smoke_case(
+        &registry,
+        "Electric Furnace",
+        sample_electric_furnace_config(),
+        &env,
+    );
     smoke_case(&registry, "Gas Boiler", sample_gas_boiler_config(), &env);
-    smoke_case(&registry, "Electric Boiler", sample_electric_boiler_config(), &env);
+    smoke_case(
+        &registry,
+        "Electric Boiler",
+        sample_electric_boiler_config(),
+        &env,
+    );
     smoke_case(
         &registry,
         "Electric Baseboard",
@@ -634,11 +644,26 @@ fn all_equipment_types_init_without_error() {
         &env,
     );
     smoke_case(&registry, "Ideal HVAC", sample_ideal_hvac_config(), &env);
-    smoke_case(&registry, "Air Conditioner", sample_central_ac_config(), &env);
+    smoke_case(
+        &registry,
+        "Air Conditioner",
+        sample_central_ac_config(),
+        &env,
+    );
     smoke_case(&registry, "Room AC", sample_room_ac_config(), &env);
     smoke_case(&registry, "ASHP Heater", sample_heat_pump_config(), &env);
-    smoke_case(&registry, "Dehumidifier", sample_dehumidifier_config(), &env);
-    smoke_case(&registry, "Gas Water Heater", sample_gas_water_heater_config(), &env);
+    smoke_case(
+        &registry,
+        "Dehumidifier",
+        sample_dehumidifier_config(),
+        &env,
+    );
+    smoke_case(
+        &registry,
+        "Gas Water Heater",
+        sample_gas_water_heater_config(),
+        &env,
+    );
     smoke_case(
         &registry,
         "Electric Resistance Water Heater",

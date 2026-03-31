@@ -1,7 +1,6 @@
 //! EV vehicle catalog with factory methods for real-world vehicles,
 //! plus behavioral archetype presets for EvDriverActor configuration.
 
-use std::collections::HashMap;
 use std::fmt;
 
 use hares_types::DayFilter;
@@ -14,12 +13,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::EquipmentConfig;
-use crate::config::ConfigValue;
-
-use super::config::{
-    KEY_BATTERY_CAPACITY_KWH, KEY_CHARGING_LEVEL, KEY_CHEMISTRY, KEY_FUEL_ECONOMY_KWH_PER_MI,
-    KEY_MAX_CHARGING_POWER_KW, KEY_RANGE_MILES, KEY_READY_SOC, KEY_VEHICLE_TYPE,
-};
+use super::config::EvConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VehicleId {
@@ -124,38 +118,41 @@ pub struct VehicleSpec {
 impl VehicleSpec {
     pub fn to_config(&self) -> EquipmentConfig {
         let fuel_economy = self.capacity_kwh / self.range_miles;
-        let mut data = HashMap::new();
-        data.insert(
-            KEY_BATTERY_CAPACITY_KWH.into(),
-            ConfigValue::Float(self.capacity_kwh),
-        );
-        data.insert(
-            KEY_MAX_CHARGING_POWER_KW.into(),
-            ConfigValue::Float(self.max_l2_power_kw),
-        );
-        data.insert(
-            KEY_CHARGING_LEVEL.into(),
-            ConfigValue::Text("L2".to_string()),
-        );
-        data.insert(KEY_RANGE_MILES.into(), ConfigValue::Float(self.range_miles));
-        data.insert(
-            KEY_VEHICLE_TYPE.into(),
-            ConfigValue::Text(self.vehicle_type.to_string()),
-        );
-        data.insert(
-            KEY_CHEMISTRY.into(),
-            ConfigValue::Text(self.chemistry.as_config_str().to_string()),
-        );
-        data.insert(
-            KEY_FUEL_ECONOMY_KWH_PER_MI.into(),
-            ConfigValue::Float(fuel_economy),
-        );
-        data.insert(KEY_READY_SOC.into(), ConfigValue::Float(1.0));
-        EquipmentConfig {
-            name: self.label.to_string(),
-            ochre_class: "EV".to_string(),
-            payload: crate::ConfigPayload::Raw { data },
-        }
+        EquipmentConfig::from_typed(
+            self.label.to_string(),
+            "EV".to_string(),
+            EvConfig {
+                equipment_id: None,
+                capacity_kwh: self.capacity_kwh,
+                charging_level: Some("L2".to_string()),
+                max_charging_power_kw: self.max_l2_power_kw,
+                charging_efficiency: None,
+                l1_current_a: None,
+                l1_voltage_v: None,
+                soc_max: None,
+                initial_soc: None,
+                battery_temp_c: None,
+                min_charge_temp_c: None,
+                full_power_temp_c: None,
+                heater_power_w: None,
+                heater_threshold_c: None,
+                thermal_mass_j_per_k: None,
+                ua_w_per_k: None,
+                v2l_enabled: None,
+                v2l_soc_reserve: None,
+                v2l_max_discharge_kw: None,
+                v2g_enabled: None,
+                v2g_soc_reserve: None,
+                v2g_max_discharge_kw: None,
+                chemistry: Some(self.chemistry.as_config_str().to_string()),
+                fuel_economy_kwh_per_mi: Some(fuel_economy),
+                ready_soc: Some(1.0),
+                charging_strategy: None,
+                plug_in_policy: None,
+                power_limit_kw: None,
+                initial_connection_state: None,
+            },
+        )
     }
 }
 
@@ -923,12 +920,12 @@ mod tests {
     fn to_config_sets_fuel_economy() {
         let spec = VehicleId::TeslaModelYLr.spec();
         let cfg = spec.to_config();
-        let fuel_econ = cfg.get_f64("fuel_economy_kwh_per_mi").unwrap();
+        let typed: EvConfig = cfg.typed().unwrap();
+        let fuel_econ = typed.fuel_economy_kwh_per_mi.unwrap();
         let expected = 77.0 / 310.0;
         assert!((fuel_econ - expected).abs() < 1e-10);
-        assert_eq!(cfg.get_str("chemistry").unwrap(), "nca");
-        assert_eq!(cfg.get_str("vehicle_type").unwrap(), "BEV");
-        assert_eq!(cfg.get_str("charging_level").unwrap(), "L2");
+        assert_eq!(typed.chemistry.as_deref(), Some("nca"));
+        assert_eq!(typed.charging_level.as_deref(), Some("L2"));
     }
 
     // ── Archetype tests ──────────────────────────────────────────────

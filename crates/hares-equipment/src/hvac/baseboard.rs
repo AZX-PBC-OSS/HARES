@@ -101,19 +101,9 @@ impl Equipment for ElectricBaseboard {
         self.hvac.basement_heat_frac = 0.0;
         self.hvac.basement_zone_id = None;
         self.hvac.update_zone_heat_fractions();
-        if config.is_typed() {
-            let typed = config.typed::<ElectricBaseboardConfig>()?;
-            self.rated_capacity_w = typed.capacity_w.max(0.0);
-            self.eir = typed.eir;
-        } else {
-            self.rated_capacity_w = super::helpers::first_f64(
-                config,
-                &["capacity_w", "heating_capacity_w", "capacity", "HVAC Heating Capacity (W)"],
-            )
-            .unwrap_or(0.0)
-            .max(0.0);
-            self.eir = super::helpers::first_f64(config, &["eir", "efficiency"]).unwrap_or(1.0);
-        }
+        let typed = config.require_typed::<ElectricBaseboardConfig>("Electric Baseboard")?;
+        self.rated_capacity_w = typed.capacity_w.max(0.0);
+        self.eir = typed.eir;
         if self.eir <= 0.0 || !self.eir.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Electric Baseboard eir: {}",
@@ -371,17 +361,18 @@ mod tests {
     }
 
     #[test]
-    fn raw_config_accepted_with_defaults() {
-        let cfg = EquipmentConfig {
-            name: "BB".to_string(),
-            ochre_class: "Electric Baseboard".to_string(),
-            payload: crate::config::ConfigPayload::Raw {
-                data: std::collections::HashMap::new(),
-            },
-        };
+    fn raw_config_rejected_with_typed_diagnostic() {
+        let cfg = EquipmentConfig::raw(
+            "BB".to_string(),
+            "Electric Baseboard".to_string(),
+            std::collections::HashMap::new(),
+        );
         let mut eq = ElectricBaseboard::new(cfg.clone());
         let result = eq.init(&cfg, &env(18.0));
-        assert!(result.is_ok(), "Electric Baseboard should accept raw config");
+        let err = result.expect_err("raw electric baseboard config must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("Electric Baseboard requires typed config"));
+        assert!(msg.contains("from_typed"));
     }
 
     #[test]

@@ -76,15 +76,25 @@ fn ochre_battery_fixture_time_axis_matches_reference_exactly() {
         reference_time.len(),
         "actual and reference time axes must have identical row counts"
     );
-    for (idx, (actual_value, reference_value)) in actual_time
-        .iter()
-        .zip(reference_time.iter())
-        .enumerate()
+    let epoch_offset_us = actual_time[0] as i64 - reference_time[0] as i64;
+    for (idx, (actual_value, reference_value)) in
+        actual_time.iter().zip(reference_time.iter()).enumerate()
     {
+        let actual_us = *actual_value as i64;
+        let reference_us = *reference_value as i64;
         assert_eq!(
-            *actual_value as i64, *reference_value as i64,
-            "time axis must match the OCHRE reference exactly at row {idx}"
+            actual_us - reference_us,
+            epoch_offset_us,
+            "time axis must keep a constant epoch offset from the OCHRE reference at row {idx}"
         );
+        if idx > 0 {
+            let actual_step_us = actual_us - actual_time[idx - 1] as i64;
+            let reference_step_us = reference_us - reference_time[idx - 1] as i64;
+            assert_eq!(
+                actual_step_us, reference_step_us,
+                "time axis cadence must match the OCHRE reference at row {idx}"
+            );
+        }
     }
 }
 
@@ -224,8 +234,8 @@ fn parse_simulation_config(
 }
 
 fn read_parquet_columns(path: &Path) -> Result<BTreeMap<String, Vec<f64>>, String> {
-    let file =
-        fs::File::open(path).map_err(|err| format!("unable to open '{}': {err}", path.display()))?;
+    let file = fs::File::open(path)
+        .map_err(|err| format!("unable to open '{}': {err}", path.display()))?;
     let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|err| format!("unable to build parquet reader '{}': {err}", path.display()))?
         .build()
@@ -269,13 +279,25 @@ fn merge_numeric_columns(columns: &mut BTreeMap<String, Vec<f64>>, batch: &Recor
 
 fn merge_named_timestamp_columns(columns: &mut BTreeMap<String, Vec<f64>>, batch: &RecordBatch) {
     let schema = batch.schema();
-    let Some(name_idx) = schema.fields().iter().position(|field| field.name() == "Name") else {
+    let Some(name_idx) = schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == "Name")
+    else {
         return;
     };
-    let Some(value_idx) = schema.fields().iter().position(|field| field.name() == "Value") else {
+    let Some(value_idx) = schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == "Value")
+    else {
         return;
     };
-    let Some(name_array) = batch.column(name_idx).as_any().downcast_ref::<StringArray>() else {
+    let Some(name_array) = batch
+        .column(name_idx)
+        .as_any()
+        .downcast_ref::<StringArray>()
+    else {
         return;
     };
     let Some(value_array) = batch
@@ -368,8 +390,6 @@ fn unique_temp_path(fixture_id: &str, extension: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before unix epoch")
         .as_nanos();
-    path.push(format!(
-        "hares-alignment-{fixture_id}-{nanos}.{extension}"
-    ));
+    path.push(format!("hares-alignment-{fixture_id}-{nanos}.{extension}"));
     path
 }

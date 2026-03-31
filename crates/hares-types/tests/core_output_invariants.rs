@@ -78,7 +78,10 @@ fn soc_property_invariants_hold_for_random_finite_inputs() {
 
         match Soc::try_from(value) {
             Ok(soc) => {
-                assert!(expected_valid, "unexpected acceptance for out-of-range value {value}");
+                assert!(
+                    expected_valid,
+                    "unexpected acceptance for out-of-range value {value}"
+                );
                 assert_eq!(soc.get(), value);
             }
             Err(_) => {
@@ -118,7 +121,10 @@ fn operating_mode_codes_are_stable_and_unique() {
         let code_u8 = expected_code as u8;
         assert_eq!(mode as u8, code_u8);
         assert_eq!(mode.as_code(), code_u8 as f64);
-        assert_eq!(OperatingMode::try_from(code_u8).expect("valid discriminant"), mode);
+        assert_eq!(
+            OperatingMode::try_from(code_u8).expect("valid discriminant"),
+            mode
+        );
         seen_codes.push(mode.as_code());
     }
 

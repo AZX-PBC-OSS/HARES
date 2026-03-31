@@ -337,11 +337,7 @@ mod tests {
         let mut raw = std::collections::HashMap::new();
         raw.insert("shading_model".to_string(), "fixed".into());
         raw.insert("shading_annual_fraction".to_string(), 0.15.into());
-        let cfg = crate::EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
         let model = parse_shading_config(&cfg);
         assert!((model.shading_factor(45.0, 180.0, 6) - 0.85).abs() < 1e-10);
     }
@@ -356,11 +352,7 @@ mod tests {
                 0.5, 0.4, 0.3, 0.2, 0.1, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5,
             ]),
         );
-        let cfg = crate::EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
         let model = parse_shading_config(&cfg);
         assert!((model.shading_factor(45.0, 180.0, 1) - 0.5).abs() < 1e-10); // Jan: 50% shade
         assert!((model.shading_factor(45.0, 180.0, 6) - 1.0).abs() < 1e-10); // Jun: 0% shade
@@ -373,11 +365,7 @@ mod tests {
         raw.insert("shading_obstruction_azimuth_deg".to_string(), 90.0.into());
         raw.insert("shading_obstruction_elevation_deg".to_string(), 25.0.into());
         raw.insert("shading_obstruction_width_deg".to_string(), 40.0.into());
-        let cfg = crate::EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
         let model = parse_shading_config(&cfg);
         // Sun at east (90°), low altitude (10°) → blocked
         assert_eq!(model.shading_factor(10.0, 90.0, 6), 0.0);
@@ -388,11 +376,7 @@ mod tests {
     #[test]
     fn config_parsing_none_default() {
         let raw = std::collections::HashMap::new();
-        let cfg = crate::EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
         let model = parse_shading_config(&cfg);
         assert_eq!(model.shading_factor(45.0, 180.0, 6), 1.0);
     }
@@ -405,11 +389,7 @@ mod tests {
             "shading_horizon_points".to_string(),
             crate::config::ConfigValue::FloatArray(vec![90.0, 20.0, 180.0, 10.0, 270.0, 15.0]),
         );
-        let cfg = crate::EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = crate::EquipmentConfig::raw("PV".to_string(), "PV".to_string(), raw);
         let model = parse_shading_config(&cfg);
         // Sun at east (90°), altitude 15° → below 20° horizon → blocked
         assert_eq!(model.shading_factor(15.0, 90.0, 6), 0.0);

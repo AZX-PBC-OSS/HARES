@@ -67,11 +67,88 @@ fn sample_env() -> EnvironmentState {
 }
 
 fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfig {
-    EquipmentConfig {
-        name: "EV #1".to_string(),
-        ochre_class: "EV".to_string(),
-        payload: crate::config::ConfigPayload::Raw { data: raw },
-    }
+    let get_f64 = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| raw.get(*key).and_then(crate::config::ConfigValue::as_f64))
+    };
+    let get_bool = |key: &str| raw.get(key).and_then(crate::config::ConfigValue::as_bool);
+    let get_str = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            raw.get(*key)
+                .and_then(crate::config::ConfigValue::as_str)
+                .map(str::to_string)
+        })
+    };
+
+    let charging_level = get_str(&[KEY_CHARGING_LEVEL, KEY_CHARGING_LEVEL_HPIXML]).map(|level| {
+        match level.as_str() {
+            "Level1" => "L1".to_string(),
+            "Level2" => "L2".to_string(),
+            _ => level,
+        }
+    });
+
+    let capacity_kwh = get_f64(&[KEY_BATTERY_CAPACITY_KWH, KEY_BATTERY_CAPACITY_HPIXML_KWH])
+        .or_else(|| {
+            get_f64(&[KEY_RANGE_MILES]).map(|range| {
+                let economy = get_f64(&[KEY_FUEL_ECONOMY_KWH_PER_MI])
+                    .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
+                range * economy
+            })
+        })
+        .unwrap_or(DEFAULT_CAPACITY_KWH);
+
+    let default_level = charging_level.clone().unwrap_or_else(|| "L2".to_string());
+    let max_charging_power_kw =
+        get_f64(&[KEY_MAX_CHARGING_POWER_KW, KEY_MAX_CHARGING_POWER_HPIXML_KW]).unwrap_or_else(
+            || match default_level.as_str() {
+                "L1" => L1_CHARGING_POWER_KW,
+                _ => default_max_power_kw(
+                    &EquipmentConfig::raw("EV #1".to_string(), "EV".to_string(), raw.clone()),
+                    hares_types::ChargingLevel::L2,
+                    capacity_kwh,
+                ),
+            },
+        );
+
+    EquipmentConfig::from_typed(
+        "EV #1".to_string(),
+        "EV".to_string(),
+        EvConfig {
+            equipment_id: raw
+                .get(KEY_EQUIPMENT_ID)
+                .and_then(crate::config::ConfigValue::as_f64)
+                .map(|value| value as u32),
+            capacity_kwh,
+            charging_level,
+            max_charging_power_kw,
+            charging_efficiency: get_f64(&[KEY_EFFICIENCY]),
+            l1_current_a: get_f64(&[KEY_L1_CURRENT_A]),
+            l1_voltage_v: get_f64(&[KEY_L1_VOLTAGE_V]),
+            soc_max: get_f64(&[KEY_SOC_MAX]),
+            initial_soc: get_f64(&[KEY_INITIAL_SOC]),
+            battery_temp_c: get_f64(&[KEY_BATTERY_TEMP_C]),
+            min_charge_temp_c: get_f64(&[KEY_MIN_CHARGE_TEMP_C]),
+            full_power_temp_c: get_f64(&[KEY_FULL_POWER_TEMP_C]),
+            heater_power_w: get_f64(&[KEY_HEATER_POWER_W]),
+            heater_threshold_c: get_f64(&[KEY_HEATER_THRESHOLD_C]),
+            thermal_mass_j_per_k: get_f64(&[KEY_THERMAL_MASS_J_PER_K]),
+            ua_w_per_k: get_f64(&[KEY_UA_W_PER_K]),
+            v2l_enabled: get_bool(KEY_V2L_ENABLED),
+            v2l_soc_reserve: get_f64(&[KEY_V2L_SOC_RESERVE]),
+            v2l_max_discharge_kw: get_f64(&[KEY_V2L_MAX_DISCHARGE_KW]),
+            v2g_enabled: get_bool(KEY_V2G_ENABLED),
+            v2g_soc_reserve: get_f64(&[KEY_V2G_SOC_RESERVE]),
+            v2g_max_discharge_kw: get_f64(&[KEY_V2G_MAX_DISCHARGE_KW]),
+            chemistry: get_str(&[KEY_CHEMISTRY]),
+            fuel_economy_kwh_per_mi: get_f64(&[KEY_FUEL_ECONOMY_KWH_PER_MI]),
+            ready_soc: get_f64(&[KEY_READY_SOC]),
+            charging_strategy: get_str(&[KEY_CHARGING_STRATEGY]),
+            plug_in_policy: get_str(&[KEY_PLUG_IN_POLICY]),
+            power_limit_kw: get_f64(&[KEY_POWER_LIMIT_KW]),
+            initial_connection_state: get_str(&[KEY_INITIAL_CONNECTION_STATE]),
+        },
+    )
 }
 
 fn base_raw() -> HashMap<String, crate::config::ConfigValue> {
@@ -2570,15 +2647,15 @@ fn ev_config_rejects_unknown_fields() {
         "max_charging_power_kw": 7.2,
         "unexpected_key": "bad"
     });
-    let ec = crate::EquipmentConfig {
-        name: "ev".to_string(),
-        ochre_class: "EV".to_string(),
-        payload: ConfigPayload::Typed {
+    let ec = crate::EquipmentConfig::with_payload(
+        "ev".to_string(),
+        "EV".to_string(),
+        ConfigPayload::Typed {
             type_name: "EV".to_string(),
             version: 1,
             data: json,
         },
-    };
+    );
     let result: crate::Result<EvConfig> = ec.typed();
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("unknown field"));

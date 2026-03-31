@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use hares_core::{Actor, Dwelling, DwellingConfig, StepResult};
 use hares_core::actor::testing::TestEnvBuilder;
 use hares_core::actors::BatteryManagementActor;
+use hares_core::{Actor, Dwelling, DwellingConfig, StepResult};
 use hares_io::SimulationConfig;
 use hares_types::{
-    BmsMode, ControlSignal, EndUse, EquipmentId, GridExportRule,
-    CoreOutput, CoreState, ElectricalSummary, Soc, telemetry_keys::FUEL_INPUT_W,
+    BmsMode, ControlSignal, CoreOutput, CoreState, ElectricalSummary, EndUse, EquipmentId,
+    GridExportRule, Soc, telemetry_keys::FUEL_INPUT_W,
 };
 
 fn approx_eq(left: f64, right: f64, context: &str) {
@@ -123,10 +123,7 @@ fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
         );
 
         let co = eq.core_output();
-        let electric_kw = co
-            .flows
-            .electric_kw
-            .map_or(0.0, |power| power.signed_kw());
+        let electric_kw = co.flows.electric_kw.map_or(0.0, |power| power.signed_kw());
         let soc = co.state.soc.map_or(0.0, |s| s.get());
         let operating_mode = co.state.operating_mode.map_or(0.0, |mode| mode.as_code());
         let fuel_w = co.flows.fuel_w.map_or(0.0, |fuel| fuel.consumption_w);
@@ -191,7 +188,9 @@ fn battery_core_output_matches_dwelling_aggregation() {
         )
         .expect("battery power setpoint must validate");
 
-    let second_step = dwelling.step().expect("controlled battery step must succeed");
+    let second_step = dwelling
+        .step()
+        .expect("controlled battery step must succeed");
     assert_snapshot_aligned(&dwelling, &second_step);
 }
 
@@ -232,7 +231,10 @@ fn gas_fuel_core_output_matches_dwelling_aggregation() {
         }
     }
 
-    assert!(saw_fuel, "gas fixture must produce nonzero fuel consumption");
+    assert!(
+        saw_fuel,
+        "gas fixture must produce nonzero fuel consumption"
+    );
 }
 
 #[test]
@@ -276,8 +278,10 @@ fn actors_observe_previous_equipment_core_snapshot() {
     let mut out = Vec::new();
     actor.decide(&env, &mut out);
     assert!(
-        out.iter()
-            .any(|req| matches!(req.signal, ControlSignal::SelfConsumption { enabled: true, .. })),
+        out.iter().any(|req| matches!(
+            req.signal,
+            ControlSignal::SelfConsumption { enabled: true, .. }
+        )),
         "actor must see the low-SOC snapshot and request charging"
     );
 

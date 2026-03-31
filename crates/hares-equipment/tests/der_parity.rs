@@ -20,7 +20,9 @@ use std::time::Duration;
 use chrono::{FixedOffset, TimeZone};
 use hares_equipment::battery::Battery;
 use hares_equipment::pv::surface_id_for_orientation;
-use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry, config::ConfigValue};
+use hares_equipment::{
+    BatteryConfig, Equipment, EquipmentConfig, EquipmentRegistry, GeneratorConfig, PvConfig,
+};
 use hares_types::{
     ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance, WeatherState, ZoneId,
     ZoneState,
@@ -85,23 +87,44 @@ fn base_env() -> EnvironmentState {
 }
 
 fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> EquipmentConfig {
-    let mut raw = HashMap::new();
-    raw.insert("capacity_kwh".to_string(), ConfigValue::Float(capacity_kwh));
-    raw.insert("max_charge_kw".to_string(), ConfigValue::Float(5.0));
-    raw.insert("max_discharge_kw".to_string(), ConfigValue::Float(5.0));
-    raw.insert("initial_soc".to_string(), ConfigValue::Float(initial_soc));
-    raw.insert("min_soc".to_string(), ConfigValue::Float(0.05));
-    raw.insert("max_soc".to_string(), ConfigValue::Float(0.95));
-    raw.insert(
-        "inverter_efficiency".to_string(),
-        ConfigValue::Float(inverter_eta),
-    );
-    raw.insert("standby_power_w".to_string(), ConfigValue::Float(0.0));
-    EquipmentConfig {
-        name: "Battery".to_string(),
-        ochre_class: "Battery".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    }
+    EquipmentConfig::from_typed(
+        "Battery".to_string(),
+        "Battery".to_string(),
+        BatteryConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kwh,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(0.0),
+            self_discharge_pct_per_day: None,
+            min_soc: Some(0.05),
+            max_soc: Some(0.95),
+            initial_soc: Some(initial_soc),
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: Some(inverter_eta),
+            charge_efficiency: None,
+            discharge_efficiency: None,
+            bms_mode: None,
+            grid_export_rule: None,
+        },
+    )
 }
 
 fn make_battery(cfg: &EquipmentConfig) -> Battery {
@@ -335,22 +358,24 @@ fn battery_degradation_model_documented() {
 // ---------------------------------------------------------------------------
 #[test]
 fn pv_cell_temperature_noct_model() {
-    let mut raw = HashMap::new();
-    raw.insert("capacity_kw".to_string(), ConfigValue::Float(5.0));
-    raw.insert("tilt_deg".to_string(), ConfigValue::Float(20.0));
-    raw.insert("azimuth_deg".to_string(), ConfigValue::Float(180.0));
-    raw.insert("noct_c".to_string(), ConfigValue::Float(47.0));
-    raw.insert("inverter_efficiency".to_string(), ConfigValue::Float(0.96));
-    raw.insert(
-        "system_losses_fraction".to_string(),
-        ConfigValue::Float(0.0),
-    ); // isolate cell temp
-
-    let cfg = EquipmentConfig {
-        name: "PV".to_string(),
-        ochre_class: "PV".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    let cfg = EquipmentConfig::from_typed(
+        "PV".to_string(),
+        "PV".to_string(),
+        PvConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_kw: 5.0,
+            tilt_deg: Some(20.0),
+            azimuth_deg: Some(180.0),
+            module_type: None,
+            noct_c: Some(47.0),
+            system_losses_fraction: Some(0.0),
+            inverter_efficiency: Some(0.96),
+            inverter_capacity_kw: None,
+            power_factor: None,
+            surface_resolution_deg: Some(5.0),
+        },
+    );
 
     let mut env = base_env();
     // Irradiance = 800 W/m², ambient = 30°C, wind = 2 m/s
@@ -428,21 +453,24 @@ fn pv_power_temperature_derating() {
     let pv_surface_id = surface_id_for_orientation(0.0, 180.0, 5.0).unwrap();
 
     let make_pv = |outdoor_temp_c: f64| {
-        let mut raw = HashMap::new();
-        raw.insert("capacity_kw".to_string(), ConfigValue::Float(5.0));
-        raw.insert("tilt_deg".to_string(), ConfigValue::Float(0.0));
-        raw.insert("azimuth_deg".to_string(), ConfigValue::Float(180.0));
-        raw.insert("noct_c".to_string(), ConfigValue::Float(47.0));
-        raw.insert("inverter_efficiency".to_string(), ConfigValue::Float(1.0)); // remove inv loss
-        raw.insert(
-            "system_losses_fraction".to_string(),
-            ConfigValue::Float(0.0),
-        ); // isolate temp
-        let cfg = EquipmentConfig {
-            name: "PV".to_string(),
-            ochre_class: "PV".to_string(),
-            payload: hares_equipment::ConfigPayload::Raw { data: raw },
-        };
+        let cfg = EquipmentConfig::from_typed(
+            "PV".to_string(),
+            "PV".to_string(),
+            PvConfig {
+                equipment_id: None,
+                zone_id: None,
+                capacity_kw: 5.0,
+                tilt_deg: Some(0.0),
+                azimuth_deg: Some(180.0),
+                module_type: None,
+                noct_c: Some(47.0),
+                system_losses_fraction: Some(0.0),
+                inverter_efficiency: Some(1.0),
+                inverter_capacity_kw: None,
+                power_factor: None,
+                surface_resolution_deg: Some(5.0),
+            },
+        );
         let mut env = base_env();
         env.weather.outdoor_temp_c = outdoor_temp_c;
         env.weather.wind_speed_m_s = 0.5; // low wind → high cell temp
@@ -513,15 +541,26 @@ fn pv_power_temperature_derating() {
 // ---------------------------------------------------------------------------
 #[test]
 fn generator_fuel_efficiency_at_half_load() {
-    let mut raw = HashMap::new();
-    raw.insert("rated_power_kw".to_string(), ConfigValue::Float(10.0));
-    raw.insert("eta_electric".to_string(), ConfigValue::Float(0.30));
-    raw.insert("delta_kw_per_s".to_string(), ConfigValue::Float(100.0)); // fast ramp for test
-    let cfg = EquipmentConfig {
-        name: "Gen".to_string(),
-        ochre_class: "Gas Generator".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    let cfg = EquipmentConfig::from_typed(
+        "Gen".to_string(),
+        "Gas Generator".to_string(),
+        GeneratorConfig {
+            equipment_id: None,
+            fuel_type: None,
+            rated_power_kw: 10.0,
+            eta_electric: Some(0.30),
+            eta_thermal: None,
+            efficiency_type: None,
+            delta_kw_per_s: Some(100.0),
+            capacity_min_kw: None,
+            grid_import_limit_kw: None,
+            export_limit_kw: None,
+            loop_id: None,
+            flow_rate_kg_s: None,
+            supply_temp_c: None,
+            return_temp_c: None,
+        },
+    );
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Generator", cfg.clone()).unwrap();
@@ -586,18 +625,26 @@ fn generator_fuel_efficiency_at_half_load() {
 fn generator_ramp_rate_is_kw_per_second() {
     // Configure ramp rate = 1.0 kW/s explicitly
     let delta_kw_per_s = 1.0_f64;
-    let mut raw = HashMap::new();
-    raw.insert("rated_power_kw".to_string(), ConfigValue::Float(10.0));
-    raw.insert("eta_electric".to_string(), ConfigValue::Float(0.30));
-    raw.insert(
-        "delta_kw_per_s".to_string(),
-        ConfigValue::Float(delta_kw_per_s),
+    let cfg = EquipmentConfig::from_typed(
+        "Gen".to_string(),
+        "Gas Generator".to_string(),
+        GeneratorConfig {
+            equipment_id: None,
+            fuel_type: None,
+            rated_power_kw: 10.0,
+            eta_electric: Some(0.30),
+            eta_thermal: None,
+            efficiency_type: None,
+            delta_kw_per_s: Some(delta_kw_per_s),
+            capacity_min_kw: None,
+            grid_import_limit_kw: None,
+            export_limit_kw: None,
+            loop_id: None,
+            flow_rate_kg_s: None,
+            supply_temp_c: None,
+            return_temp_c: None,
+        },
     );
-    let cfg = EquipmentConfig {
-        name: "Gen".to_string(),
-        ochre_class: "Gas Generator".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Generator", cfg.clone()).unwrap();
@@ -644,16 +691,26 @@ fn generator_ramp_rate_is_kw_per_second() {
 // ---------------------------------------------------------------------------
 #[test]
 fn generator_capacity_min_enforced() {
-    let mut raw = HashMap::new();
-    raw.insert("rated_power_kw".to_string(), ConfigValue::Float(10.0));
-    raw.insert("eta_electric".to_string(), ConfigValue::Float(0.30));
-    raw.insert("capacity_min_kw".to_string(), ConfigValue::Float(2.0));
-    raw.insert("delta_kw_per_s".to_string(), ConfigValue::Float(100.0)); // instant ramp
-    let cfg = EquipmentConfig {
-        name: "Gen".to_string(),
-        ochre_class: "Gas Generator".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
-    };
+    let cfg = EquipmentConfig::from_typed(
+        "Gen".to_string(),
+        "Gas Generator".to_string(),
+        GeneratorConfig {
+            equipment_id: None,
+            fuel_type: None,
+            rated_power_kw: 10.0,
+            eta_electric: Some(0.30),
+            eta_thermal: None,
+            efficiency_type: None,
+            delta_kw_per_s: Some(100.0),
+            capacity_min_kw: Some(2.0),
+            grid_import_limit_kw: None,
+            export_limit_kw: None,
+            loop_id: None,
+            flow_rate_kg_s: None,
+            supply_temp_c: None,
+            return_temp_c: None,
+        },
+    );
 
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Gas Generator", cfg.clone()).unwrap();

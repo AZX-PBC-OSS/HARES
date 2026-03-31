@@ -18,10 +18,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use hares_equipment::{
+    BatteryConfig,
     CentralAirConditionerConfig, DehumidifierConfig, DuctConfig, ElectricBaseboardConfig,
     ElectricBoilerConfig, ElectricFurnaceConfig, Equipment, EquipmentConfig, EquipmentRegistry,
     EquipmentTypedConfig, EvConfig, GasBoilerConfig, GasFurnaceConfig, GeneratorConfig,
-    HeatPumpHeaterConfig, IdealHvacConfig, RoomAcConfig, VentilationConfig,
+    HeatPumpCoolerConfig, HeatPumpHeaterConfig, IdealHvacConfig, PvConfig, RoomAcConfig,
+    VentilationConfig,
     config::ConfigValue,
     water_heater::wh_config::{
         ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
@@ -29,7 +31,7 @@ use hares_equipment::{
     },
 };
 use hares_types::{
-    ControlSignal, CoreCapabilities, CoreOutput, EquipmentDescriptor, EnvironmentState, FuelType,
+    ControlSignal, CoreCapabilities, CoreOutput, EnvironmentState, EquipmentDescriptor, FuelType,
     OperatingMode, PortSlots, SurfaceIrradiance, ZoneId, validate_core_contract,
 };
 
@@ -92,6 +94,7 @@ fn assert_equipment_lifecycle(
     equipment
         .step(env, dt, &mut ports)
         .expect("step must return Ok");
+    assert_core_output_contract(equipment.descriptor(), equipment.core_output());
 
     // Verify at least one port domain has a non-zero accumulation.
     // Equipment may contribute to thermal, electrical, or fuel — at least one must be non-zero.
@@ -159,6 +162,7 @@ fn assert_equipment_lifecycle(
     equipment
         .step(env, dt, &mut ports_after_restore)
         .expect("step after restore must return Ok");
+    assert_core_output_contract(equipment.descriptor(), equipment.core_output());
     assert_eq!(
         equipment.core_output(),
         &core_output_step2,
@@ -313,17 +317,42 @@ fn lifecycle_scheduled_load() {
 #[test]
 fn lifecycle_battery() {
     let registry = EquipmentRegistry::new();
-    let cfg = config_with_floats(
+    let cfg = typed_alias_config(
         "Battery",
-        "Battery",
-        &[
-            ("capacity_kwh", 13.5),
-            ("max_charge_kw", 5.0),
-            ("max_discharge_kw", 5.0),
-            ("initial_soc", 0.5),
-            ("min_soc", 0.15),
-            ("max_soc", 0.95),
-        ],
+        BatteryConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_kwh: 13.5,
+            max_charge_kw: 5.0,
+            max_discharge_kw: 5.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: None,
+            self_discharge_pct_per_day: None,
+            min_soc: Some(0.15),
+            max_soc: Some(0.95),
+            initial_soc: Some(0.5),
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            heater_on_discharge: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: None,
+            charge_efficiency: None,
+            discharge_efficiency: None,
+            bms_mode: None,
+            grid_export_rule: None,
+        },
     );
 
     let mut eq = registry
@@ -649,22 +678,29 @@ fn config_for_class(class: &str) -> EquipmentConfig {
         ),
         "ASHP Cooler" | "MSHP Cooler" => typed_alias_config(
             class,
-            CentralAirConditionerConfig {
+            HeatPumpCoolerConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                capacity_w: 8_000.0,
-                seer: 14.0,
+                heating_capacity_w: Some(8_000.0),
+                hspf: Some(9.0),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: None,
+                backup_eir: None,
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                seer: Some(14.0),
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
                 shr: Some(0.75),
+                fraction_cooling_load_served: Some(1.0),
                 number_of_speeds: 1,
-                stage_capacities_w: None,
-                stage_eirs: None,
                 stage_shrs: None,
                 fan_power_w: Some(0.0),
                 fan_power_w_per_cfm: None,
-                fraction_load_served: Some(1.0),
+                is_mini_split: class == "MSHP Cooler",
                 duct: DuctConfig::default(),
-                system_type: None,
-                startup_cd: None,
                 biquadratic_x1_min: None,
                 biquadratic_x1_max: None,
                 biquadratic_x2_min: None,
@@ -778,30 +814,59 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 first_hour_rating_m3: None,
             },
         ),
-        "Battery" => config_with_floats(
+        "Battery" => typed_alias_config(
             class,
-            class,
-            &[
-                ("capacity_kwh", 13.5),
-                ("max_charge_kw", 5.0),
-                ("max_discharge_kw", 5.0),
-                ("initial_soc", 0.5),
-                ("min_soc", 0.15),
-                ("max_soc", 0.95),
-            ],
+            BatteryConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_kwh: 13.5,
+                max_charge_kw: 5.0,
+                max_discharge_kw: 5.0,
+                n_series: None,
+                n_parallel: None,
+                ah_cell: None,
+                v_cell: None,
+                cell_resistance_ohm: None,
+                pack_voltage_v: None,
+                chemistry: None,
+                standby_power_w: None,
+                self_discharge_pct_per_day: None,
+                min_soc: Some(0.15),
+                max_soc: Some(0.95),
+                initial_soc: Some(0.5),
+                import_limit_w: None,
+                export_limit_w: None,
+                heater_power_w: None,
+                heater_threshold_c: None,
+                heater_on_discharge: None,
+                min_discharge_temp_c: None,
+                full_power_temp_c: None,
+                min_charge_temp_c: None,
+                cell_thermal_mass_j_per_k: None,
+                cell_ua_w_per_k: None,
+                inverter_efficiency: None,
+                charge_efficiency: None,
+                discharge_efficiency: None,
+                bms_mode: None,
+                grid_export_rule: None,
+            },
         ),
-        "PV" => config_with_floats(
+        "PV" => typed_alias_config(
             class,
-            class,
-            &[
-                ("capacity_kw", 5.0),
-                ("tilt_deg", 0.0),
-                ("azimuth_deg", 0.0),
-                ("surface_resolution_deg", 360.0),
-                ("power_factor", 1.0),
-                ("inverter_efficiency", 0.96),
-                ("inverter_capacity_kw", 5.0),
-            ],
+            PvConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_kw: 5.0,
+                tilt_deg: Some(0.0),
+                azimuth_deg: Some(0.0),
+                module_type: None,
+                noct_c: None,
+                system_losses_fraction: None,
+                inverter_efficiency: Some(0.96),
+                inverter_capacity_kw: Some(5.0),
+                power_factor: Some(1.0),
+                surface_resolution_deg: Some(360.0),
+            },
         ),
         "EV" | "Electric Vehicle" => typed_alias_config(
             class,
@@ -880,10 +945,10 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
                 defrost_effectiveness_fraction: None,
-	                ventilation_type: Some("hrv".to_string()),
-	                balanced: None,
-	                hours_in_operation: None,
-	            },
+                ventilation_type: Some("hrv".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
         ),
         "ERV" => typed_alias_config(
             class,
@@ -898,10 +963,10 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
                 defrost_effectiveness_fraction: None,
-	                ventilation_type: Some("erv".to_string()),
-	                balanced: None,
-	                hours_in_operation: None,
-	            },
+                ventilation_type: Some("erv".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
         ),
         "Ventilation Fan" => typed_alias_config(
             class,
@@ -916,10 +981,10 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 bypass_temp_max_c: None,
                 defrost_temp_c: None,
                 defrost_effectiveness_fraction: None,
-	                ventilation_type: Some("exhaust_fan".to_string()),
-	                balanced: None,
-	                hours_in_operation: None,
-	            },
+                ventilation_type: Some("exhaust_fan".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
         ),
         "EventBasedLoad" | "Clothes Washer" | "Dishwasher" | "Clothes Dryer" | "Cooking Range" => {
             config_mixed(
@@ -1050,6 +1115,30 @@ fn lifecycle_tankless_water_heater() {
         .expect("create tankless");
     let env = env_for_class("Tankless Water Heater");
     eq.init(&cfg, &env).expect("init tankless");
+    assert_equipment_lifecycle(
+        eq.as_mut(),
+        &env,
+        ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(50.0),
+            cooling_setpoint_c: None,
+            deadband_c: Some(2.0),
+        },
+        ControlSignal::PowerSetpoint {
+            active_power_kw: 1.0,
+            reactive_power_kvar: None,
+        },
+    );
+}
+
+#[test]
+fn lifecycle_gas_tankless_water_heater() {
+    let registry = EquipmentRegistry::new();
+    let cfg = config_for_class("Gas Tankless Water Heater");
+    let mut eq = registry
+        .create("Gas Tankless Water Heater", cfg.clone())
+        .expect("create gas tankless");
+    let env = env_for_class("Gas Tankless Water Heater");
+    eq.init(&cfg, &env).expect("init gas tankless");
     assert_equipment_lifecycle(
         eq.as_mut(),
         &env,

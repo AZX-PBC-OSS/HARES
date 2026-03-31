@@ -478,7 +478,11 @@ fn inject_water_heater_schedule_columns(
         .or_else(|| {
             first_present_column(
                 csv_col_map,
-                &["hot_water_fixtures", "hot_water_draw", "hot_water_delivered"],
+                &[
+                    "hot_water_fixtures",
+                    "hot_water_draw",
+                    "hot_water_delivered",
+                ],
             )
             .map(|col_idx| (col_idx, WaterHeaterDrawSource::Fraction))
         });
@@ -999,7 +1003,10 @@ mod tests {
         column_index.insert("hot_water_mains_temperature".to_string(), 1);
         ScheduleTimeSeries {
             timestamps,
-            column_names: vec![draw_col_name.to_string(), "hot_water_mains_temperature".to_string()],
+            column_names: vec![
+                draw_col_name.to_string(),
+                "hot_water_mains_temperature".to_string(),
+            ],
             columns: vec![draw_values.to_vec(), mains_values.to_vec()],
             column_index,
             source_step_secs: 3600,
@@ -1332,8 +1339,11 @@ mod tests {
 
     #[test]
     fn storage_water_heaters_receive_draw_and_mains_schedule_columns() {
-        let mut schedule =
-            make_schedule_with_water_heater_columns("hot_water_fixtures", &[0.2, 0.0], &[11.0, 12.0]);
+        let mut schedule = make_schedule_with_water_heater_columns(
+            "hot_water_fixtures",
+            &[0.2, 0.0],
+            &[11.0, 12.0],
+        );
         let mut specs = vec![
             make_water_heater_spec("Electric Resistance Water Heater", 200.0),
             make_water_heater_spec("Gas Water Heater", 200.0),
@@ -1369,8 +1379,7 @@ mod tests {
                 draw_col.unwrap()
             );
             assert_eq!(
-                draw_rate_col,
-                draw_col,
+                draw_rate_col, draw_col,
                 "{} should mirror draw_rate_schedule_col and draw_flow_rate_schedule_col",
                 spec.name
             );

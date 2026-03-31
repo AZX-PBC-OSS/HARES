@@ -393,155 +393,7 @@ impl CoolingCore {
             self.hvac.duct_zone_id = super::helpers::parse_zone_id_key(config, "duct_zone_id");
         }
 
-        if config.is_typed() {
-            return self.init_from_typed(config, env);
-        }
-
-        self.init_from_raw(config, env)
-    }
-
-    fn init_from_raw(
-        &mut self,
-        config: &EquipmentConfig,
-        _env: &EnvironmentState,
-    ) -> crate::Result<()> {
-        if self.is_room_ac {
-            // Window/room AC fans deliver less airflow than ducted central AC blowers.
-            // 320 CFM/ton from manufacturer data median (AHRI 310/380 conditions).
-            if config.get_f64("airflow_cfm_per_ton").is_none() {
-                use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
-                self.hvac.airflow_m3_s_per_w =
-                    super::hvac_core::AIRFLOW_ROOM_AC_CFM_PER_TON * CFM_TO_M3_S / W_PER_TON;
-            }
-            // Room AC Cd = 0.22 (AHRI test data for window/through-wall units).
-            let explicit_cd = config
-                .get_f64("startup_cd")
-                .or_else(|| config.get_f64("cooling_cd"))
-                .or_else(|| config.get_f64("cd"));
-            if explicit_cd.is_none() {
-                self.hvac.plf_cooling_degradation_coeff = 0.22;
-                self.hvac.startup.c_d = 0.22;
-            }
-        }
-
-        self.flow_fraction_correction = first_f64(
-            config,
-            &["flow_fraction_correction", "airflow_fraction_correction"],
-        )
-        .unwrap_or(1.0);
-
-        self.hvac.cooling_capacities_w = load_stage_values(
-            config,
-            &[
-                "capacity_w",
-                "cooling_capacity_w",
-                "capacity",
-                "HVAC Cooling Capacity (W)",
-            ],
-            "cooling_capacity_w_stage",
-            if self.is_room_ac {
-                DEFAULT_ROOM_AC_CAPACITY_W
-            } else {
-                DEFAULT_CENTRAL_AC_CAPACITY_W
-            },
-        );
-        if self.is_room_ac && self.hvac.cooling_capacities_w.len() > 1 {
-            return Err(HaresError::Equipment(
-                "Room AC cannot define multiple cooling stages".to_string(),
-            ));
-        }
-
-        let default_eir = first_f64(config, &["seer", "SEER", "efficiency_seer"]).map_or(
-            DEFAULT_EIR_FALLBACK,
-            |seer| {
-                if seer.is_finite() && seer > 0.0 {
-                    BTU_PER_HR_PER_W / seer
-                } else {
-                    DEFAULT_EIR_FALLBACK
-                }
-            },
-        );
-        self.hvac.eir_by_stage = load_stage_values(
-            config,
-            &["eir", "cooling_eir", "EIR", "HVAC Cooling EIR (-)"],
-            "cooling_eir_stage",
-            default_eir,
-        );
-
-        if self.hvac.cooling_capacities_w.len() != self.hvac.eir_by_stage.len() {
-            if self.hvac.eir_by_stage.len() == 1 {
-                self.hvac.eir_by_stage =
-                    vec![self.hvac.eir_by_stage[0]; self.hvac.cooling_capacities_w.len()];
-            } else {
-                return Err(HaresError::Equipment(
-                    "cooling capacity and EIR stage counts must match".to_string(),
-                ));
-            }
-        }
-
-        // Resolve DSE now that cooling capacity is known.
-        if !self.is_room_ac {
-            let rated_cap = self
-                .hvac
-                .cooling_capacities_w
-                .last()
-                .copied()
-                .unwrap_or(0.0);
-            let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
-            let n_speeds = self.hvac.cooling_capacities_w.len().min(255) as u8;
-            let cap_low = (n_speeds > 1)
-                .then(|| self.hvac.cooling_capacities_w.first().copied())
-                .flatten();
-            let flow_low = cap_low.map(|c| self.hvac.airflow_m3_s_per_w * c);
-            self.hvac.duct_dse = super::helpers::resolve_duct_dse(
-                config, false, rated_cap, fan_flow, n_speeds, cap_low, flow_low, false,
-            );
-        }
-        self.hvac.update_zone_heat_fractions();
-
-        self.hvac.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
-        // Rated SHR at the AHRI test point, used only for coil Ao initialisation.
-        // Defaults to 0.75 — ASHRAE Handbook HVAC Systems and Equipment Ch. 42 typical value.
-        let rated_shr =
-            first_f64(config, &["rated_shr", "shr", "SHR", "shr_rated"]).unwrap_or(0.75);
-        self.rated_shr = rated_shr.clamp(0.0, 1.0);
-        self.compute_coil_ao(rated_shr)?;
-
-        self.crankcase_rated_kw =
-            first_f64(config, &["crankcase_heater_kw"]).unwrap_or(CRANKCASE_HEATER_KW);
-        self.crankcase_threshold_c = first_f64(config, &["crankcase_heater_threshold_c"])
-            .unwrap_or(CRANKCASE_HEATER_THRESHOLD_C);
-        self.crankcase_capacity_curve =
-            parse_crankcase_capacity_curve(config.get_str("crankcase_capacity_curve_coeffs"))?;
-
-        // Latent degradation defaults moved to module scope.
-
-        self.latent_degradation = LatentDegradationParams {
-            twet_rated_s: first_f64(config, &["twet_rated_s", "latent_twet_rated_s"])
-                .unwrap_or(DEFAULT_TWET_RATED_S),
-            gamma_rated: first_f64(config, &["gamma_rated", "latent_gamma_rated"])
-                .unwrap_or(DEFAULT_GAMMA_RATED),
-            max_cycling_rate: first_f64(config, &["max_cycling_rate", "latent_max_cycling_rate"])
-                .unwrap_or(DEFAULT_MAX_CYCLING_RATE),
-            latent_time_constant_s: first_f64(
-                config,
-                &["latent_time_constant_s", "latent_capacity_time_constant_s"],
-            )
-            .unwrap_or(DEFAULT_LATENT_TIME_CONSTANT_S),
-        };
-
-        // fan_power_w_per_cfm → fan_power_w_per_m3_s conversion handled by hvac.init()
-
-        self.operating_mode = OperatingMode::Off;
-        self.run_time_s = 0.0;
-        self.cycle_on_steps = 0;
-        self.cycle_off_steps = 0;
-        self.crankcase_heater_on = false;
-        self.crankcase_heater_kw = 0.0;
-        self.last_cooling_rtf = 0.0;
-        self.telemetry = default_telemetry();
-        self.core_output = CoreOutput::default();
-        Ok(())
+        self.init_from_typed(config, env)
     }
 
     fn init_from_typed(
@@ -550,7 +402,7 @@ impl CoolingCore {
         _env: &EnvironmentState,
     ) -> crate::Result<()> {
         if self.is_room_ac {
-            let cfg: RoomAcConfig = config.typed()?;
+            let cfg = config.require_typed::<RoomAcConfig>("Room AC")?;
             cfg.validate()?;
 
             self.hvac.cooling_capacities_w = vec![cfg.capacity_w];
@@ -568,7 +420,7 @@ impl CoolingCore {
             self.hvac.plf_cooling_degradation_coeff = 0.22;
             self.hvac.startup.c_d = 0.22;
         } else {
-            let cfg: CentralAirConditionerConfig = config.typed()?;
+            let cfg = config.require_typed::<CentralAirConditionerConfig>("Air Conditioner")?;
             cfg.validate()?;
 
             self.hvac.cooling_capacities_w = if let Some(stages) = &cfg.stage_capacities_w {
@@ -1301,6 +1153,39 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 #[cfg(test)]
+fn typed_ac_test_config(seer: f64) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        "AC".to_string(),
+        "Air Conditioner".to_string(),
+        CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 8_000.0,
+            seer,
+            shr: Some(0.75),
+            number_of_speeds: 1,
+            stage_capacities_w: None,
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: None,
+            fan_power_w_per_cfm: None,
+            fraction_load_served: None,
+            duct: crate::DuctConfig::default(),
+            system_type: None,
+            startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use std::{collections::HashMap, time::Duration};
 
@@ -1364,79 +1249,33 @@ mod tests {
     }
 
     fn ac_config() -> EquipmentConfig {
-        let mut raw_config = HashMap::new();
-        raw_config.insert("zone_id".to_string(), 1.0.into());
-        raw_config.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw_config.insert("eir".to_string(), 0.33.into());
-        raw_config.insert("cooling_setpoint_c".to_string(), 24.0.into());
-        raw_config.insert("heating_setpoint_c".to_string(), 18.0.into());
+        let mut cfg = super::typed_ac_test_config(3.412_141_633 / 0.33);
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("cooling_setpoint_c".to_string(), 24.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("heating_setpoint_c".to_string(), 18.0.into());
         // Explicit airflow so coil bypass-factor init stays stable across
         // equipment-type default changes; airflow defaults are tested in hvac_core.
-        raw_config.insert(
+        cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        raw_config.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-
-        EquipmentConfig {
-            name: "AC".to_string(),
-            ochre_class: "Air Conditioner".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw_config },
-        }
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        cfg
     }
 
     fn ac_config_with_extras(extras: &[(&str, crate::config::ConfigValue)]) -> EquipmentConfig {
-        let mut raw_config = HashMap::new();
-        raw_config.insert("zone_id".to_string(), 1.0.into());
-        raw_config.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw_config.insert("eir".to_string(), 0.33.into());
-        raw_config.insert("cooling_setpoint_c".to_string(), 24.0.into());
-        raw_config.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw_config.insert(
-            "capacity_biquadratic_coeffs".to_string(),
-            "[1,0,0,0,0,0]".into(),
-        );
-        raw_config.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        let mut cfg = ac_config();
         for (k, v) in extras {
-            raw_config.insert(k.to_string(), v.clone());
+            cfg.raw_config_mut()
+                .unwrap()
+                .insert(k.to_string(), v.clone());
         }
-        EquipmentConfig {
-            name: "AC".to_string(),
-            ochre_class: "Air Conditioner".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw_config },
-        }
-    }
-
-    fn typed_ac_config(seer: f64) -> EquipmentConfig {
-        EquipmentConfig::from_typed(
-            "AC".to_string(),
-            "Air Conditioner".to_string(),
-            CentralAirConditionerConfig {
-                equipment_id: None,
-                zone_id: Some(1),
-                capacity_w: 8_000.0,
-                seer,
-                shr: Some(0.75),
-                number_of_speeds: 1,
-                stage_capacities_w: None,
-                stage_eirs: None,
-                stage_shrs: None,
-                fan_power_w: None,
-                fan_power_w_per_cfm: None,
-                fraction_load_served: None,
-                duct: DuctConfig::default(),
-                system_type: None,
-                startup_cd: None,
-                biquadratic_x1_min: None,
-                biquadratic_x1_max: None,
-                biquadratic_x2_min: None,
-                biquadratic_x2_max: None,
-                ff_min: None,
-                ff_max: None,
-                plf_min: None,
-                plf_max: None,
-            },
-        )
+        cfg
     }
 
     #[test]
@@ -1773,7 +1612,7 @@ mod tests {
 
     #[test]
     fn typed_ac_seer_sets_expected_eir() {
-        let cfg = typed_ac_config(16.0);
+        let cfg = super::typed_ac_test_config(16.0);
         let mut eq = AirConditioner::new(cfg.clone());
         let environment = env(27.0, 0.010, 19.0, 35.0);
         eq.init(&cfg, &environment).unwrap();
@@ -2060,24 +1899,27 @@ mod dr_tests {
     }
 
     fn base_config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw.insert("eir".to_string(), 0.33.into());
-        raw.insert("cooling_setpoint_c".to_string(), 24.0.into());
-        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw.insert("hysteresis_c".to_string(), 0.0.into());
-        raw.insert("airflow_cfm_per_ton".to_string(), 375.0.into());
-        raw.insert(
+        let mut cfg = super::typed_ac_test_config(3.412_141_633 / 0.33);
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("cooling_setpoint_c".to_string(), 24.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("heating_setpoint_c".to_string(), 18.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("hysteresis_c".to_string(), 0.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("airflow_cfm_per_ton".to_string(), 375.0.into());
+        cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        EquipmentConfig {
-            name: "AC".to_string(),
-            ochre_class: "Air Conditioner".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        cfg
     }
 
     fn make_ports() -> PortSlots {
@@ -2425,22 +2267,21 @@ mod crankcase_tests {
     }
 
     fn ac_config() -> EquipmentConfig {
-        let mut raw_config = HashMap::new();
-        raw_config.insert("zone_id".to_string(), 1.0.into());
-        raw_config.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw_config.insert("eir".to_string(), 0.33.into());
-        raw_config.insert("cooling_setpoint_c".to_string(), 24.0.into());
-        raw_config.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw_config.insert(
+        let mut cfg = super::typed_ac_test_config(3.412_141_633 / 0.33);
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("cooling_setpoint_c".to_string(), 24.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("heating_setpoint_c".to_string(), 18.0.into());
+        cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        raw_config.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        EquipmentConfig {
-            name: "AC".to_string(),
-            ochre_class: "Air Conditioner".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw_config },
-        }
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        cfg
     }
 
     fn cold_env(outdoor_c: f64, zone_temp_c: f64) -> EnvironmentState {
@@ -2486,50 +2327,40 @@ mod crankcase_tests {
     }
 
     fn base_config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw.insert("eir".to_string(), 0.33.into());
-        raw.insert("cooling_setpoint_c".to_string(), 26.0.into());
-        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw.insert("airflow_cfm_per_ton".to_string(), 375.0.into());
-        raw.insert(
+        let mut cfg = super::typed_ac_test_config(3.412_141_633 / 0.33);
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("cooling_setpoint_c".to_string(), 26.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("heating_setpoint_c".to_string(), 18.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("airflow_cfm_per_ton".to_string(), 375.0.into());
+        cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        raw.insert("crankcase_heater_kw".to_string(), 0.10.into()); // 100 W rated
-        raw.insert("crankcase_heater_threshold_c".to_string(), 12.8_f64.into());
-        EquipmentConfig {
-            name: "AC".to_string(),
-            ochre_class: "Air Conditioner".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("crankcase_heater_kw".to_string(), 0.10.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("crankcase_heater_threshold_c".to_string(), 12.8_f64.into());
+        cfg
     }
 
     fn base_config_with_extras(extras: &[(&str, crate::config::ConfigValue)]) -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw.insert("eir".to_string(), 0.33.into());
-        raw.insert("cooling_setpoint_c".to_string(), 26.0.into());
-        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw.insert("airflow_cfm_per_ton".to_string(), 375.0.into());
-        raw.insert(
-            "capacity_biquadratic_coeffs".to_string(),
-            "[1,0,0,0,0,0]".into(),
-        );
-        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        raw.insert("crankcase_heater_kw".to_string(), 0.10.into());
-        raw.insert("crankcase_heater_threshold_c".to_string(), 12.8_f64.into());
+        let mut cfg = base_config();
         for (k, v) in extras {
-            raw.insert(k.to_string(), v.clone());
+            cfg.raw_config_mut()
+                .unwrap()
+                .insert(k.to_string(), v.clone());
         }
-        EquipmentConfig {
-            name: "AC".to_string(),
-            ochre_class: "Air Conditioner".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        cfg
     }
 
     fn step_ac_off(cfg: &EquipmentConfig, outdoor_c: f64) -> f64 {
@@ -2775,23 +2606,24 @@ mod ideal_capacity_tests {
 
     /// AC with setpoint=24°C, hysteresis=1°C, single-speed, flat biquadratic curves.
     fn ac_config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("cooling_capacity_w".to_string(), 8_000.0.into());
-        raw.insert("eir".to_string(), 0.33.into());
-        raw.insert("cooling_setpoint_c".to_string(), 24.0.into());
-        raw.insert("heating_setpoint_c".to_string(), 18.0.into());
-        raw.insert("hysteresis_c".to_string(), 1.0.into());
-        raw.insert(
+        let mut cfg = super::typed_ac_test_config(3.412_141_633 / 0.33);
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("cooling_setpoint_c".to_string(), 24.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("heating_setpoint_c".to_string(), 18.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("hysteresis_c".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert(
             "capacity_biquadratic_coeffs".to_string(),
             "[1,0,0,0,0,0]".into(),
         );
-        raw.insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
-        EquipmentConfig {
-            name: "AC".to_string(),
-            ochre_class: "Air Conditioner".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        cfg
     }
 
     fn make_ports() -> PortSlots {

@@ -270,11 +270,8 @@ where
         .ok()
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    let typed_config = EquipmentConfig::from_typed(
-        name.clone(),
-        T::equipment_type_name().to_string(),
-        cfg,
-    );
+    let typed_config =
+        EquipmentConfig::from_typed(name.clone(), T::equipment_type_name().to_string(), cfg);
     EquipmentSpec {
         name: name.clone(),
         fuel_type,
@@ -457,11 +454,14 @@ mod tests {
             cfg,
             &DefaultsStore::empty(),
         );
-        assert!(spec.typed_config.as_ref().expect("typed payload").is_typed());
+        assert!(
+            spec.typed_config
+                .as_ref()
+                .expect("typed payload")
+                .is_typed()
+        );
         assert_eq!(
-            spec.parameters
-                .get("fuel_type")
-                .and_then(Value::as_str),
+            spec.parameters.get("fuel_type").and_then(Value::as_str),
             Some("Propane")
         );
         assert_eq!(

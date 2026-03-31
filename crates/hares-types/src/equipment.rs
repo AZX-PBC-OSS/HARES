@@ -786,7 +786,7 @@ pub enum ElectricPower {
 
 impl ElectricPower {
     pub fn consumption(kw: f64) -> Result<Self, HaresError> {
-        if kw < 0.0 || !kw.is_finite() {
+        if !kw.is_finite() || kw < 0.0 {
             return Err(HaresError::Equipment(format!(
                 "ElectricPower::Consumption requires finite non-negative value, got {kw}"
             )));
@@ -795,7 +795,7 @@ impl ElectricPower {
     }
 
     pub fn generation(kw: f64) -> Result<Self, HaresError> {
-        if kw < 0.0 || !kw.is_finite() {
+        if !kw.is_finite() || kw < 0.0 {
             return Err(HaresError::Equipment(format!(
                 "ElectricPower::Generation requires finite non-negative value, got {kw}"
             )));
@@ -910,25 +910,41 @@ pub fn validate_core_contract(
 ) -> Result<(), HaresError> {
     let caps = desc.core_capabilities;
 
-    // Count missing fields without allocating.
+    // Count missing/undeclared-populated fields without allocating.
     let mut missing_bits = 0u8;
+    let mut unexpected_bits = 0u8;
     if caps.contains(CoreCapabilities::ELECTRIC) && co.flows.electric_kw.is_none() {
         missing_bits |= 1;
+    }
+    if !caps.contains(CoreCapabilities::ELECTRIC) && co.flows.electric_kw.is_some() {
+        unexpected_bits |= 1;
     }
     if caps.contains(CoreCapabilities::REACTIVE) && co.flows.reactive_power_kvar.is_none() {
         missing_bits |= 2;
     }
+    if !caps.contains(CoreCapabilities::REACTIVE) && co.flows.reactive_power_kvar.is_some() {
+        unexpected_bits |= 2;
+    }
     if caps.contains(CoreCapabilities::FUEL) && co.flows.fuel_w.is_none() {
         missing_bits |= 4;
+    }
+    if !caps.contains(CoreCapabilities::FUEL) && co.flows.fuel_w.is_some() {
+        unexpected_bits |= 4;
     }
     if caps.contains(CoreCapabilities::HAS_SOC) && co.state.soc.is_none() {
         missing_bits |= 8;
     }
+    if !caps.contains(CoreCapabilities::HAS_SOC) && co.state.soc.is_some() {
+        unexpected_bits |= 8;
+    }
     if caps.contains(CoreCapabilities::HAS_MODE) && co.state.operating_mode.is_none() {
         missing_bits |= 16;
     }
+    if !caps.contains(CoreCapabilities::HAS_MODE) && co.state.operating_mode.is_some() {
+        unexpected_bits |= 16;
+    }
 
-    if missing_bits == 0 {
+    if missing_bits == 0 && unexpected_bits == 0 {
         return Ok(());
     }
 
@@ -946,10 +962,25 @@ pub fn validate_core_contract(
         .map(|(_, name)| *name)
         .collect::<Vec<_>>()
         .join(", ");
+    let unexpected: String = NAMES
+        .iter()
+        .filter(|(bit, _)| unexpected_bits & bit != 0)
+        .map(|(_, name)| *name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut details = Vec::new();
+    if !missing.is_empty() {
+        details.push(format!("missing {missing}"));
+    }
+    if !unexpected.is_empty() {
+        details.push(format!("undeclared fields populated: {unexpected}"));
+    }
 
     Err(HaresError::Equipment(format!(
-        "core_output contract violation for '{}' ({:?}): missing {missing}",
-        desc.name, caps,
+        "core_output contract violation for '{}' ({:?}): {}",
+        desc.name,
+        caps,
+        details.join("; "),
     )))
 }
 
@@ -2241,6 +2272,39 @@ mod tests {
         let err = validate_core_contract(&desc, &out).expect_err("missing fields must error");
         let msg = err.to_string();
         assert!(msg.contains("flows.electric_kw"));
+        assert!(msg.contains("flows.reactive_power_kvar"));
+        assert!(msg.contains("state.operating_mode"));
+    }
+
+    #[test]
+    fn validate_core_contract_rejects_undeclared_populated_fields() {
+        let desc = EquipmentDescriptor {
+            id: EquipmentId(3),
+            name: "Validator Unexpected Fields".to_string(),
+            end_use: EndUse::OTHER,
+            equipment_type: Cow::Borrowed("Test"),
+            zone: None,
+            fuel: FuelType::Electric,
+            stage: ExecutionStage::Independent,
+            control_capabilities: ControlCapabilities::empty(),
+            core_capabilities: CoreCapabilities::ELECTRIC,
+            telemetry_fields: vec![],
+        };
+        let out = CoreOutput {
+            flows: CoreFlows {
+                electric_kw: Some(ElectricPower::Consumption(0.5)),
+                reactive_power_kvar: Some(0.2),
+                fuel_w: None,
+            },
+            state: CoreState {
+                operating_mode: Some(OperatingMode::Standby),
+                soc: None,
+            },
+        };
+
+        let err = validate_core_contract(&desc, &out)
+            .expect_err("undeclared but populated fields must error");
+        let msg = err.to_string();
         assert!(msg.contains("flows.reactive_power_kvar"));
         assert!(msg.contains("state.operating_mode"));
     }

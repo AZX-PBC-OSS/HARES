@@ -15,9 +15,9 @@ fn default_one() -> u8 {
 pub struct CentralAirConditionerConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
-    /// Rated cooling capacity in watts.
+    /// Required; resolver errors if absent.
     pub capacity_w: f64,
-    /// Seasonal Energy Efficiency Ratio (BTU/Wh). EIR = 3.412 / SEER.
+    /// Required; resolver errors if absent.
     pub seer: f64,
     /// Sensible heat ratio at rated conditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,9 +110,9 @@ impl CentralAirConditionerConfig {
 pub struct RoomAcConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
-    /// Rated cooling capacity in watts.
+    /// Required; resolver errors if absent.
     pub capacity_w: f64,
-    /// Energy Efficiency Ratio (BTU/Wh). EIR = 3.412 / EER.
+    /// Required; resolver errors if absent.
     pub eer: f64,
     /// Biquadratic curve x1 (wet-bulb) lower bound [C].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -286,15 +286,15 @@ mod tests {
             "seer": 16.0,
             "unknown_key": true,
         });
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "Central AC".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "test".to_string(),
+            "Central AC".to_string(),
+            ConfigPayload::Typed {
                 type_name: "Central AC".to_string(),
                 version: 1,
                 data,
             },
-        };
+        );
         let result: crate::Result<CentralAirConditionerConfig> = ec.typed();
         assert!(result.is_err());
     }
@@ -474,15 +474,15 @@ mod tests {
             "capacity_liters_per_day": 33.1223531,
             "unknown_field": true,
         });
-        let ec = EquipmentConfig {
-            name: "test".to_string(),
-            ochre_class: "Dehumidifier".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "test".to_string(),
+            "Dehumidifier".to_string(),
+            ConfigPayload::Typed {
                 type_name: "Dehumidifier".to_string(),
                 version: 1,
                 data,
             },
-        };
+        );
         let result: crate::Result<DehumidifierConfig> = ec.typed();
         assert!(result.is_err());
     }

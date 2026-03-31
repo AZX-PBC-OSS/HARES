@@ -559,6 +559,36 @@ mod tests {
     }
 
     #[test]
+    fn bms_missing_equipment_core_entry_is_graceful() {
+        let mut actor = BatteryManagementActor::new(
+            "bat1",
+            BmsMode::SelfConsumption {
+                min_soc: 0.1,
+                max_soc: 0.95,
+                solar_only_charging: false,
+            },
+            GridExportRule::Unrestricted,
+            5.0,
+            5.0,
+            None,
+            24,
+        );
+        let mut id_by_name = std::collections::HashMap::new();
+        id_by_name.insert("bat1".to_string(), EquipmentId(1));
+        actor.resolve_equipment_id(&id_by_name);
+
+        let env = TestEnvBuilder::new().build();
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            out.is_empty(),
+            "missing equipment_core entry must not panic or emit invalid control"
+        );
+        assert_eq!(actor.last_action(), "idle:no_soc");
+    }
+
+    #[test]
     fn bms_self_consumption_pv_surplus_charges() {
         let mut actor = BatteryManagementActor::new(
             "bat1",

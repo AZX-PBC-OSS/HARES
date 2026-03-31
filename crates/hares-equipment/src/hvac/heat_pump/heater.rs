@@ -20,8 +20,8 @@ use super::super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     ac_config::HeatPumpHeaterConfig,
     helpers::{
-        HEATING_CAPACITY_KEYS, apply_heating_control_unchecked, equipment_id_from_config,
-        first_f64, load_stage_values, lookup_zone, zone_id_from_config,
+        apply_heating_control_unchecked, equipment_id_from_config, first_f64, load_stage_values,
+        lookup_zone, zone_id_from_config,
     },
 };
 use super::constants::{
@@ -368,12 +368,7 @@ impl HeatPumpHeaterCore {
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.hvac.init(config, env)?;
         self.hvac.duct_zone_id = super::super::helpers::parse_zone_id_key(config, "duct_zone_id");
-
-        if config.is_typed() {
-            self.init_from_typed(config, env)?;
-        } else {
-            self.init_from_raw(config, env)?;
-        }
+        self.init_from_typed(config, env)?;
 
         self.operating_mode = OperatingMode::Off;
         self.defrost_active = false;
@@ -405,141 +400,12 @@ impl HeatPumpHeaterCore {
         Ok(())
     }
 
-    fn init_from_raw(
-        &mut self,
-        config: &EquipmentConfig,
-        env: &EnvironmentState,
-    ) -> crate::Result<()> {
-        self.hvac.heating_capacities_w = load_stage_values(
-            config,
-            HEATING_CAPACITY_KEYS,
-            "heating_capacity_w_stage",
-            DEFAULT_HEATING_CAPACITY_W,
-        );
-
-        // Convert heating_efficiency (HSPF/COP/etc.) to EIR if explicitly provided,
-        // otherwise use configured EIR or default.
-        let base_eir = compute_eir_from_efficiency(config, DEFAULT_HEATING_EIR);
-        self.hvac.eir_by_stage = load_stage_values(
-            config,
-            &["eir", "heating_eir", "EIR", "HVAC Heating EIR (-)"],
-            "heating_eir_stage",
-            base_eir,
-        );
-
-        if matches!(self.variant, HeaterVariant::Minisplit) {
-            self.mshp_speed_map = parse_mshp_speed_map(config)?;
-            self.hvac.heating_capacities_w = remap_minisplit_stages(
-                self.hvac.heating_capacities_w.clone(),
-                self.mshp_speed_map,
-            )?;
-            self.hvac.eir_by_stage =
-                remap_minisplit_stages(self.hvac.eir_by_stage.clone(), self.mshp_speed_map)?;
-            self.hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
-            self.pan_heater_kw = first_f64(config, &["pan_heater_kw", "mshp_pan_heater_kw"])
-                .unwrap_or(MSHP_PAN_HEATER_DEFAULT_KW);
-            self.pan_heater_temp_c =
-                first_f64(config, &["pan_heater_temp_c", "mshp_pan_heater_temp_c"])
-                    .unwrap_or(MSHP_PAN_HEATER_DEFAULT_TEMP_C);
-        }
-
-        reconcile_stage_lengths(
-            &mut self.hvac.heating_capacities_w,
-            &mut self.hvac.eir_by_stage,
-            DEFAULT_HEATING_EIR,
-        )?;
-
-        // Resolve DSE now that capacity stages are known.
-        let is_mshp = matches!(self.variant, HeaterVariant::Minisplit);
-        if is_mshp {
-            // Ductless MSHP: no distribution losses.
-            self.hvac.duct_dse = 1.0;
-        } else {
-            let rated_cap = self
-                .hvac
-                .heating_capacities_w
-                .last()
-                .copied()
-                .unwrap_or(0.0);
-            let fan_flow = self.hvac.airflow_m3_s_per_w * rated_cap;
-            let n_speeds = self.hvac.heating_capacities_w.len().min(255) as u8;
-            let cap_low = (n_speeds > 1)
-                .then(|| self.hvac.heating_capacities_w.first().copied())
-                .flatten();
-            let flow_low = cap_low.map(|c| self.hvac.airflow_m3_s_per_w * c);
-            self.hvac.duct_dse = super::super::helpers::resolve_duct_dse(
-                config, true, rated_cap, fan_flow, n_speeds, cap_low, flow_low, true,
-            );
-        }
-        self.hvac.update_zone_heat_fractions();
-
-        self.defrost_config = DefrostConfig::on_demand(
-            first_f64(config, &["defrost_capacity_reduction_factor"])
-                .unwrap_or(DEFAULT_DEFROST_CAPACITY_REDUCTION_FACTOR),
-            first_f64(config, &["defrost_power_w"]).unwrap_or(DEFAULT_DEFROST_POWER_W),
-        );
-
-        self.hp_lockout_temp_c = first_f64(
-            config,
-            &["hp_lockout_temp_c", "Heat Pump Lockout Temperature (C)"],
-        )
-        .unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
-        self.er_lockout_temp_c = first_f64(
-            config,
-            &["er_lockout_temp_c", "Backup Lockout Temperature (C)"],
-        )
-        .unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
-
-        let configured_oat_cap =
-            first_f64(config, &["max_oat_supplemental_c"]).unwrap_or(MAX_OAT_SUPPLEMENTAL_C);
-        // EnergyPlus hard maximum: supplemental ER must not fire above 21°C (69.8°F).
-        // Clamp silently; the caller is responsible for passing sensible values.
-        self.max_oat_supplemental_c = configured_oat_cap.min(MAX_OAT_SUPPLEMENTAL_C);
-
-        // OCHRE: er_setpoint_offset = deadband * (MULTIPLIER - DEADBAND_OFFSET)
-        // Default deadband=1.0 → offset = 1.0 * (1.8 - 0.2) = 1.6°C.
-        // This means ER turns on when zone drops to setpoint - 1.6°C, which is
-        // 0.6°C below the heating deadband threshold (setpoint - 1.0°C).
-        let default_er_offset = self.hvac.thermostat.hysteresis_c
-            * (DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER - DEFAULT_ER_SETPOINT_DEADBAND_OFFSET);
-        self.er_setpoint_offset_c = first_f64(
-            config,
-            &["er_setpoint_offset_c", "Backup Setpoint Offset (C)"],
-        )
-        .unwrap_or(default_er_offset);
-
-        self.min_er_cycle_time_s =
-            first_f64(config, &["min_er_cycle_time_s"]).unwrap_or(DEFAULT_MIN_ER_CYCLE_TIME_S);
-        self.backup_capacity_w = first_f64(config, &["backup_capacity_w", "Backup Capacity (W)"])
-            .unwrap_or(DEFAULT_BACKUP_CAPACITY_W)
-            .max(0.0);
-        self.backup_eir = first_f64(config, &["backup_eir", "Backup EIR (-)"])
-            .unwrap_or(DEFAULT_BACKUP_EIR)
-            .max(0.0);
-        if matches!(self.variant, HeaterVariant::Ashp) {
-            self.hvac.equipment_type = if self.backup_capacity_w > 0.0 {
-                HvacEquipmentType::AshpHeatPumpAux
-            } else {
-                HvacEquipmentType::AshpHeatPumpOnly
-            };
-            self.hvac.supply_air_temp_c = self
-                .hvac
-                .equipment_type
-                .default_supply_air_temp_c(env.weather.outdoor_temp_c);
-        }
-
-        self.er_hard_lockout_time_s = first_f64(config, &["er_hard_lockout_time_s"])
-            .unwrap_or(DEFAULT_ER_HARD_LOCKOUT_TIME_S);
-
-        Ok(())
-    }
-
     fn init_from_typed(
         &mut self,
         config: &EquipmentConfig,
         env: &EnvironmentState,
     ) -> crate::Result<()> {
-        let cfg: HeatPumpHeaterConfig = config.typed()?;
+        let cfg = config.require_typed::<HeatPumpHeaterConfig>("Heat Pump Heater")?;
         cfg.validate()?;
 
         self.hvac.heating_capacities_w = if let Some(stages) = &cfg.stage_heating_capacities_w {
@@ -1345,24 +1211,56 @@ mod tests {
     }
 
     fn heater_config() -> EquipmentConfig {
-        let mut raw_config = HashMap::new();
-        raw_config.insert("zone_id".to_string(), 1.0.into());
-        raw_config.insert("heating_capacity_w".to_string(), 8_000.0.into());
-        raw_config.insert("eir".to_string(), 0.33.into());
-        raw_config.insert("backup_capacity_w".to_string(), 4_000.0.into());
-        raw_config.insert("heating_setpoint_c".to_string(), 21.0.into());
-        raw_config.insert("cooling_setpoint_c".to_string(), 26.0.into());
-        raw_config.insert("hysteresis_c".to_string(), 1.0.into());
-        raw_config.insert(
+        let mut cfg = EquipmentConfig::from_typed(
+            "HP Heater".to_string(),
+            "ASHP Heater".to_string(),
+            crate::HeatPumpHeaterConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(8_000.0),
+                hspf: Some(3.412_141_633 / 0.33),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(4_000.0),
+                backup_eir: None,
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                seer: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                stage_shrs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                duct: Default::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("heating_setpoint_c".to_string(), 21.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("cooling_setpoint_c".to_string(), 26.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("hysteresis_c".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert(
             "biquadratic_coeffs".to_string(),
             "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
         );
-
-        EquipmentConfig {
-            name: "HP Heater".to_string(),
-            ochre_class: "ASHP Heater".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw_config },
-        }
+        cfg
     }
 
     #[test]
@@ -2614,11 +2512,11 @@ mod tests {
             HeatPumpHeaterConfig::equipment_type_name().to_string(),
             cfg,
         );
-        let ec = crate::config::EquipmentConfig {
-            name: "MSHP Heater".to_string(),
-            ochre_class: "MSHP Heater".to_string(),
-            ..ec
-        };
+        let ec = crate::config::EquipmentConfig::with_payload(
+            "MSHP Heater".to_string(),
+            "MSHP Heater".to_string(),
+            ec.payload.clone(),
+        );
 
         let environment = env(18.0, 0.0, 0.003);
         let mut eq = MinisplitHeater::new(ec.clone());
@@ -2694,24 +2592,56 @@ mod ideal_capacity_tests {
     /// HP heater with setpoint=21°C, hysteresis=1°C, no ER strip heat (backup_capacity_w=0),
     /// OAT above ER lockout so only the HP compressor runs.
     fn heater_config() -> EquipmentConfig {
-        let mut raw = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("heating_capacity_w".to_string(), 8_000.0.into());
-        raw.insert("eir".to_string(), 0.33.into());
-        // No backup strip so electric_kw comes purely from HP compressor.
-        raw.insert("backup_capacity_w".to_string(), 0.0.into());
-        raw.insert("heating_setpoint_c".to_string(), 21.0.into());
-        raw.insert("cooling_setpoint_c".to_string(), 26.0.into());
-        raw.insert("hysteresis_c".to_string(), 1.0.into());
-        raw.insert(
+        let mut cfg = EquipmentConfig::from_typed(
+            "HP Heater".to_string(),
+            "ASHP Heater".to_string(),
+            crate::HeatPumpHeaterConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(8_000.0),
+                hspf: Some(3.412_141_633 / 0.33),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(0.0),
+                backup_eir: None,
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                seer: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                stage_shrs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                duct: Default::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("heating_setpoint_c".to_string(), 21.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("cooling_setpoint_c".to_string(), 26.0.into());
+        cfg.raw_config_mut()
+            .unwrap()
+            .insert("hysteresis_c".to_string(), 1.0.into());
+        cfg.raw_config_mut().unwrap().insert(
             "biquadratic_coeffs".to_string(),
             "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
         );
-        EquipmentConfig {
-            name: "HP Heater".to_string(),
-            ochre_class: "ASHP Heater".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        cfg
     }
 
     fn make_ports() -> PortSlots {

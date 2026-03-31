@@ -838,12 +838,12 @@ impl PyCoreOutput {
     }
 
     #[getter]
-    fn electric_convention(&self) -> String {
+    fn electric_convention(&self) -> Option<String> {
         match self.inner.flows.electric_kw {
-            Some(ElectricPower::Consumption(_)) => "consumption".to_string(),
-            Some(ElectricPower::Generation(_)) => "generation".to_string(),
-            Some(ElectricPower::Bidirectional(_)) => "bidirectional".to_string(),
-            None => "consumption".to_string(),
+            Some(ElectricPower::Consumption(_)) => Some("consumption".to_string()),
+            Some(ElectricPower::Generation(_)) => Some("generation".to_string()),
+            Some(ElectricPower::Bidirectional(_)) => Some("bidirectional".to_string()),
+            None => None,
         }
     }
 

@@ -564,7 +564,7 @@ impl Generator {
     }
 
     fn init_typed(&mut self, config: &EquipmentConfig) -> crate::Result<()> {
-        let c: GeneratorConfig = config.typed()?;
+        let c = config.require_typed::<GeneratorConfig>("Generator")?;
         c.validate()?;
 
         if let Some(fuel_type) = c.fuel_type {
@@ -627,99 +627,7 @@ impl Equipment for Generator {
     }
 
     fn init(&mut self, config: &EquipmentConfig, _env: &EnvironmentState) -> crate::Result<()> {
-        if config.is_typed() {
-            return self.init_typed(config);
-        }
-        self.rated_power_kw = config
-            .get_f64(KEY_RATED_POWER_KW)
-            .unwrap_or(self.rated_power_kw);
-        self.capacity_min_kw = config.get_f64(KEY_CAPACITY_MIN_KW).or(self.capacity_min_kw);
-        self.eta_thermal = config.get_f64(KEY_ETA_THERMAL).unwrap_or(self.eta_thermal);
-        self.delta_kw_per_s = config
-            .get_f64(KEY_DELTA_KW_PER_S)
-            .unwrap_or(self.delta_kw_per_s);
-        self.grid_import_limit_kw = config
-            .get_f64(KEY_GRID_IMPORT_LIMIT_KW)
-            .unwrap_or(self.grid_import_limit_kw);
-        self.export_limit_kw = config
-            .get_f64(KEY_EXPORT_LIMIT_KW)
-            .unwrap_or(self.export_limit_kw);
-        self.flow_rate_kg_s = config
-            .get_f64(KEY_FLOW_RATE_KG_S)
-            .unwrap_or(self.flow_rate_kg_s);
-        self.supply_temp_c = config
-            .get_f64(KEY_SUPPLY_TEMP_C)
-            .unwrap_or(self.supply_temp_c);
-        self.return_temp_c = config
-            .get_f64(KEY_RETURN_TEMP_C)
-            .unwrap_or(self.return_temp_c);
-
-        // Rebuild efficiency model if eta_electric changed in config
-        let rated = config
-            .get_f64(KEY_ETA_ELECTRIC)
-            .unwrap_or(self.efficiency.rated());
-        self.efficiency = EfficiencyModel::from_config(config, rated, self.kind);
-
-        // Validation
-        if self.rated_power_kw <= 0.0 {
-            return Err(HaresError::Equipment(
-                "generator rated_power_kw must be positive".to_string(),
-            ));
-        }
-        self.efficiency.validate()?;
-        if !(0.0..=1.0).contains(&self.eta_thermal) {
-            return Err(HaresError::Equipment(
-                "generator eta_thermal must be in [0, 1]".to_string(),
-            ));
-        }
-        if self.efficiency.rated() + self.eta_thermal > 1.0 {
-            return Err(HaresError::Equipment(format!(
-                "generator eta_electric ({}) + eta_thermal ({}) exceeds 1.0; flue loss would be negative",
-                self.efficiency.rated(),
-                self.eta_thermal
-            )));
-        }
-        if self.delta_kw_per_s <= 0.0 {
-            return Err(HaresError::Equipment(
-                "generator delta_kw_per_s must be positive".to_string(),
-            ));
-        }
-        if let Some(min_kw) = self.capacity_min_kw {
-            if min_kw < 0.0 || min_kw > self.rated_power_kw {
-                return Err(HaresError::Equipment(format!(
-                    "generator capacity_min_kw ({min_kw}) must be in [0, rated_power_kw]"
-                )));
-            }
-        }
-
-        // Validate CHP fluid configuration.
-        // TODO: Validate that loop_id references an existing water heater loop.
-        // This requires cross-equipment lookup which depends on the stage snapshot mechanism.
-        // Currently only validates loop_id != 0.
-        if self.eta_thermal > 0.0 {
-            if let Some(raw_loop) = config.get_f64(KEY_LOOP_ID) {
-                let lid = raw_loop as u16;
-                if lid == 0 {
-                    return Err(HaresError::Equipment(
-                        "generator CHP fluid loop_id must be non-zero".to_string(),
-                    ));
-                }
-                self.chp_loop_id = Some(LoopId(lid));
-            }
-        }
-
-        self.current_power_kw = 0.0;
-        self.mode = OperatingMode::Off;
-        self.power_setpoint_kw = None;
-        self.self_consumption_enabled = true;
-
-        let has_chp = self.eta_thermal > 0.0;
-        self.telemetry = default_telemetry(has_chp);
-        self.telemetry
-            .set(tk::ETA_ELECTRIC, self.efficiency.rated());
-        self.core_output = CoreOutput::default();
-
-        Ok(())
+        self.init_typed(config)
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
@@ -1129,18 +1037,58 @@ mod tests {
     }
 
     fn gen_config(overrides: &[(&str, ConfigValue)]) -> EquipmentConfig {
-        let mut raw: HashMap<String, ConfigValue> = HashMap::new();
-        raw.insert(KEY_RATED_POWER_KW.to_string(), 10.0.into());
-        raw.insert(KEY_ETA_ELECTRIC.to_string(), 0.30.into());
-        raw.insert(KEY_DELTA_KW_PER_S.to_string(), 1.0.into());
+        let mut cfg = GeneratorConfig {
+            equipment_id: None,
+            fuel_type: None,
+            rated_power_kw: 10.0,
+            eta_electric: Some(0.30),
+            eta_thermal: None,
+            efficiency_type: None,
+            delta_kw_per_s: Some(1.0),
+            capacity_min_kw: None,
+            grid_import_limit_kw: None,
+            export_limit_kw: None,
+            loop_id: None,
+            flow_rate_kg_s: None,
+            supply_temp_c: None,
+            return_temp_c: None,
+        };
         for (k, v) in overrides {
-            raw.insert(k.to_string(), v.clone());
+            match (*k, v) {
+                (KEY_RATED_POWER_KW, ConfigValue::Float(value)) => cfg.rated_power_kw = *value,
+                (KEY_ETA_ELECTRIC, ConfigValue::Float(value)) => cfg.eta_electric = Some(*value),
+                (KEY_ETA_THERMAL, ConfigValue::Float(value)) => cfg.eta_thermal = Some(*value),
+                (KEY_EFFICIENCY_TYPE, ConfigValue::Text(value)) => {
+                    cfg.efficiency_type = Some(value.clone())
+                }
+                (KEY_DELTA_KW_PER_S, ConfigValue::Float(value)) => {
+                    cfg.delta_kw_per_s = Some(*value)
+                }
+                (KEY_CAPACITY_MIN_KW, ConfigValue::Float(value)) => {
+                    cfg.capacity_min_kw = Some(*value)
+                }
+                (KEY_GRID_IMPORT_LIMIT_KW, ConfigValue::Float(value)) => {
+                    cfg.grid_import_limit_kw = Some(*value)
+                }
+                (KEY_EXPORT_LIMIT_KW, ConfigValue::Float(value)) => {
+                    cfg.export_limit_kw = Some(*value)
+                }
+                (KEY_LOOP_ID, ConfigValue::Float(value)) => cfg.loop_id = Some(*value as u16),
+                (KEY_FLOW_RATE_KG_S, ConfigValue::Float(value)) => {
+                    cfg.flow_rate_kg_s = Some(*value)
+                }
+                (KEY_SUPPLY_TEMP_C, ConfigValue::Float(value)) => cfg.supply_temp_c = Some(*value),
+                (KEY_RETURN_TEMP_C, ConfigValue::Float(value)) => cfg.return_temp_c = Some(*value),
+                ("zone_id", ConfigValue::Float(_)) => {}
+                ("equipment_id", ConfigValue::Float(value)) => cfg.equipment_id = Some(*value as u32),
+                _ => panic!("unsupported generator test override key/value: {k}"),
+            }
         }
-        EquipmentConfig {
-            name: "Test Generator".to_string(),
-            ochre_class: "Gas Generator".to_string(),
-            payload: crate::config::ConfigPayload::Raw { data: raw },
-        }
+        EquipmentConfig::from_typed(
+            "Test Generator".to_string(),
+            "Gas Generator".to_string(),
+            cfg,
+        )
     }
 
     fn ports_for(generator: &Generator) -> PortSlots {
@@ -2466,15 +2414,15 @@ mod tests {
             "rated_power_kw": 10.0,
             "mystery_field": "oops"
         });
-        let ec = EquipmentConfig {
-            name: "gen".to_string(),
-            ochre_class: "Gas Generator".to_string(),
-            payload: ConfigPayload::Typed {
+        let ec = EquipmentConfig::with_payload(
+            "gen".to_string(),
+            "Gas Generator".to_string(),
+            ConfigPayload::Typed {
                 type_name: "Generator".to_string(),
                 version: 1,
                 data: json,
             },
-        };
+        );
         let result: crate::Result<GeneratorConfig> = ec.typed();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown field"));
@@ -2509,11 +2457,8 @@ mod tests {
             fuel_type: Some(FuelType::Propane),
             ..minimal_generator_config()
         };
-        let ec = EquipmentConfig::from_typed(
-            "typed_gen".to_string(),
-            "Gas Generator".to_string(),
-            cfg,
-        );
+        let ec =
+            EquipmentConfig::from_typed("typed_gen".to_string(), "Gas Generator".to_string(), cfg);
         let env = base_env();
         let mut r#gen = Generator::new(ec.clone(), GeneratorKind::GasGenerator);
         r#gen.init(&ec, &env).expect("typed init");

@@ -13,22 +13,22 @@
 //! Tests for gaps that are NOT yet implemented are marked #[ignore] with a
 //! description of what is missing.
 
-use hares_io::defaults::DefaultsStore;
-use hares_io::hpxml::building::parse_building;
-use hares_io::hpxml::equipment::resolve_equipment;
+use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
-use hares_equipment::hvac::heating_config::GasFurnaceConfig;
 use hares_equipment::hvac::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
+use hares_equipment::hvac::heating_config::GasFurnaceConfig;
 use hares_equipment::{
     Equipment, EquipmentRegistry, GasWaterHeaterConfig, HeatPumpWaterHeaterConfig,
     TanklessWaterHeaterConfig,
 };
+use hares_io::defaults::DefaultsStore;
+use hares_io::hpxml::building::parse_building;
+use hares_io::hpxml::equipment::resolve_equipment;
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     EnvironmentState, FuelType, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
     ZoneState,
 };
-use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -61,8 +61,7 @@ fn resolve(xml: &str) -> Vec<hares_io::EquipmentSpec> {
 
 fn resolve_with_defaults(xml: &str, defaults: &DefaultsStore) -> Vec<hares_io::EquipmentSpec> {
     let building = parse_building(xml).expect("should parse");
-    resolve_equipment(&building, defaults, &json!({}))
-        .expect("resolve_equipment should succeed")
+    resolve_equipment(&building, defaults, &json!({})).expect("resolve_equipment should succeed")
 }
 
 fn repo_defaults() -> DefaultsStore {
@@ -116,10 +115,7 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
     }
 }
 
-fn init_equipment(
-    spec: &hares_io::EquipmentSpec,
-    env: &EnvironmentState,
-) -> Box<dyn Equipment> {
+fn init_equipment(spec: &hares_io::EquipmentSpec, env: &EnvironmentState) -> Box<dyn Equipment> {
     let registry = EquipmentRegistry::new();
     let cfg = spec
         .typed_config

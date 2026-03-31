@@ -1,8 +1,7 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{FixedOffset, TimeZone};
-use hares_equipment::{Equipment, EquipmentConfig, battery::Battery, config::ConfigValue};
+use hares_equipment::{BatteryConfig, Equipment, EquipmentConfig, battery::Battery};
 use hares_types::{
     ControlSignal, EnvironmentState, GridState, PortContribution, PortSlots, WeatherState, ZoneId,
     ZoneState,
@@ -60,21 +59,49 @@ fn base_env() -> EnvironmentState {
     }
 }
 
-fn battery_config() -> EquipmentConfig {
-    let mut raw = HashMap::new();
-    raw.insert("capacity_kwh".to_string(), ConfigValue::Float(13.5));
-    raw.insert("max_charge_kw".to_string(), ConfigValue::Float(5.0));
-    raw.insert("max_discharge_kw".to_string(), ConfigValue::Float(5.0));
-    raw.insert("initial_soc".to_string(), ConfigValue::Float(0.5));
-    raw.insert("min_soc".to_string(), ConfigValue::Float(0.15));
-    raw.insert("max_soc".to_string(), ConfigValue::Float(0.95));
-    raw.insert("inverter_efficiency".to_string(), ConfigValue::Float(0.97));
-    raw.insert("standby_power_w".to_string(), ConfigValue::Float(0.0));
-    EquipmentConfig {
-        name: "Battery".to_string(),
-        ochre_class: "Battery".to_string(),
-        payload: hares_equipment::ConfigPayload::Raw { data: raw },
+fn base_battery_config() -> BatteryConfig {
+    BatteryConfig {
+        equipment_id: None,
+        zone_id: None,
+        capacity_kwh: 13.5,
+        max_charge_kw: 5.0,
+        max_discharge_kw: 5.0,
+        n_series: None,
+        n_parallel: None,
+        ah_cell: None,
+        v_cell: None,
+        cell_resistance_ohm: None,
+        pack_voltage_v: None,
+        chemistry: None,
+        standby_power_w: Some(0.0),
+        self_discharge_pct_per_day: None,
+        min_soc: Some(0.15),
+        max_soc: Some(0.95),
+        initial_soc: Some(0.5),
+        import_limit_w: None,
+        export_limit_w: None,
+        heater_power_w: None,
+        heater_threshold_c: None,
+        heater_on_discharge: None,
+        min_discharge_temp_c: None,
+        full_power_temp_c: None,
+        min_charge_temp_c: None,
+        cell_thermal_mass_j_per_k: None,
+        cell_ua_w_per_k: None,
+        inverter_efficiency: Some(0.97),
+        charge_efficiency: None,
+        discharge_efficiency: None,
+        bms_mode: None,
+        grid_export_rule: None,
     }
+}
+
+fn battery_config() -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        "Battery".to_string(),
+        "Battery".to_string(),
+        base_battery_config(),
+    )
 }
 
 /// Initialize a battery with default test config and return it ready to step.
@@ -166,19 +193,14 @@ fn soc_clamped_at_min_max() {
 
     // Discharge from a low initial SOC — SOC must not fall below min_soc.
     {
-        let mut raw = HashMap::new();
-        raw.insert("capacity_kwh".to_string(), ConfigValue::Float(13.5));
-        raw.insert("max_charge_kw".to_string(), ConfigValue::Float(5.0));
-        raw.insert("max_discharge_kw".to_string(), ConfigValue::Float(5.0));
-        raw.insert("initial_soc".to_string(), ConfigValue::Float(0.16));
-        raw.insert("min_soc".to_string(), ConfigValue::Float(0.15));
-        raw.insert("max_soc".to_string(), ConfigValue::Float(0.95));
-        raw.insert("standby_power_w".to_string(), ConfigValue::Float(0.0));
-        let config = EquipmentConfig {
-            name: "Battery".to_string(),
-            ochre_class: "Battery".to_string(),
-            payload: hares_equipment::ConfigPayload::Raw { data: raw },
-        };
+        let config = EquipmentConfig::from_typed(
+            "Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                initial_soc: Some(0.16),
+                ..base_battery_config()
+            },
+        );
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");
         bat.apply_control(&ControlSignal::PowerSetpoint {
@@ -202,19 +224,14 @@ fn soc_clamped_at_min_max() {
 
     // Charge from a high initial SOC — SOC must not exceed max_soc.
     {
-        let mut raw = HashMap::new();
-        raw.insert("capacity_kwh".to_string(), ConfigValue::Float(13.5));
-        raw.insert("max_charge_kw".to_string(), ConfigValue::Float(5.0));
-        raw.insert("max_discharge_kw".to_string(), ConfigValue::Float(5.0));
-        raw.insert("initial_soc".to_string(), ConfigValue::Float(0.94));
-        raw.insert("min_soc".to_string(), ConfigValue::Float(0.15));
-        raw.insert("max_soc".to_string(), ConfigValue::Float(0.95));
-        raw.insert("standby_power_w".to_string(), ConfigValue::Float(0.0));
-        let config = EquipmentConfig {
-            name: "Battery".to_string(),
-            ochre_class: "Battery".to_string(),
-            payload: hares_equipment::ConfigPayload::Raw { data: raw },
-        };
+        let config = EquipmentConfig::from_typed(
+            "Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                initial_soc: Some(0.94),
+                ..base_battery_config()
+            },
+        );
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");
         bat.apply_control(&ControlSignal::PowerSetpoint {
