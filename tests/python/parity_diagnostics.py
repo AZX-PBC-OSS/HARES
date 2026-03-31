@@ -4,7 +4,8 @@ Usage:
     UV_CACHE_DIR=/tmp/uvcache MPLCONFIGDIR=/tmp/mplconfig \
     uv run --no-sync --group ochre python tests/python/parity_diagnostics.py \
       --fixture tests/fixtures/parity/cz4a_ashp_hpwh \
-      --out-dir /tmp/parity_diag_ashp
+      --out-dir /tmp/parity_diag_ashp \
+      --use-live-ochre
 """
 
 from __future__ import annotations
@@ -124,6 +125,19 @@ ENVELOPE_GAIN_KEYS: tuple[str, ...] = (
 )
 
 
+def _first_present(df: pd.DataFrame, names: tuple[str, ...]) -> str | None:
+    for name in names:
+        if name in df.columns:
+            return name
+    return None
+
+
+def _column_or_nan(df: pd.DataFrame, name: str | None) -> pd.Series:
+    if name is None:
+        return pd.Series(index=df.index, dtype=float)
+    return df[name].astype(float)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -149,6 +163,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional OCHRE reference parquet path; defaults to fixture/reference_output.parquet.",
+    )
+    parser.add_argument(
+        "--use-live-ochre",
+        action="store_true",
+        help="Run vendor OCHRE directly instead of reading reference parquet baseline.",
     )
     return parser.parse_args()
 
@@ -195,7 +214,16 @@ def load_reference_parquet(reference_parquet: Path, sim_cfg: dict) -> pd.DataFra
     return _normalize_time_index(df, sim_cfg["start_time"])
 
 
-def run_ochre(fixture_dir: Path, sim_cfg: dict, reference_parquet: Path | None) -> pd.DataFrame:
+def run_ochre(
+    fixture_dir: Path,
+    sim_cfg: dict,
+    reference_parquet: Path | None,
+    use_live_ochre: bool,
+) -> pd.DataFrame:
+    if not use_live_ochre:
+        parquet = reference_parquet or (fixture_dir / "reference_output.parquet")
+        return load_reference_parquet(parquet, sim_cfg)
+
     try:
         sys.path.insert(0, str(Path("vendors/OCHRE").resolve()))
         from ochre import Dwelling as OchreDwelling
@@ -310,14 +338,14 @@ def run_hares(
     return pdf, obs_df
 
 
-def _from_columns_or_components(df: pd.DataFrame, primary: str, components: tuple[str, ...]) -> pd.Series:
+def _from_columns_or_components(df: pd.DataFrame, primary: str, components: tuple[str, ...]) -> tuple[pd.Series, bool]:
     if primary in df.columns:
-        return df[primary].astype(float)
+        return df[primary].astype(float), True
 
     present = [col for col in components if col in df.columns]
     if not present:
-        return pd.Series(index=df.index, dtype=float).fillna(0.0)
-    return df[present].astype(float).sum(axis=1)
+        return pd.Series(index=df.index, dtype=float), False
+    return df[present].astype(float).sum(axis=1), True
 
 
 def align_channels(ochre_df: pd.DataFrame, hares_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -328,10 +356,25 @@ def align_channels(ochre_df: pd.DataFrame, hares_df: pd.DataFrame) -> tuple[pd.D
     metrics_rows: list[dict[str, float | str]] = []
     series = pd.DataFrame(index=index)
     for spec in CHANNEL_SPECS:
-        ochre_series = _from_columns_or_components(ochre_df, spec.ochre_primary, spec.ochre_components)
-        hares_series = _from_columns_or_components(hares_df, spec.hares_primary, spec.hares_components)
+        ochre_series, ochre_present = _from_columns_or_components(ochre_df, spec.ochre_primary, spec.ochre_components)
+        hares_series, hares_present = _from_columns_or_components(hares_df, spec.hares_primary, spec.hares_components)
         ochre_series = ochre_series.reindex(index)
         hares_series = hares_series.reindex(index)
+        if not (ochre_present and hares_present):
+            metrics_rows.append(
+                {
+                    "channel": spec.label,
+                    "unit": spec.native_unit,
+                    "ochre_primary": spec.ochre_primary,
+                    "ochre_components": ", ".join(spec.ochre_components),
+                    "hares_primary": spec.hares_primary,
+                    "hares_components": ", ".join(spec.hares_components),
+                    "ochre_present": bool(ochre_present),
+                    "hares_present": bool(hares_present),
+                    "status": "missing_channel",
+                }
+            )
+            continue
         diff = hares_series - ochre_series
         mean_abs_ref = max(float(ochre_series.abs().mean()), 1e-9)
         metrics_rows.append(
@@ -342,6 +385,9 @@ def align_channels(ochre_df: pd.DataFrame, hares_df: pd.DataFrame) -> tuple[pd.D
                 "ochre_components": ", ".join(spec.ochre_components),
                 "hares_primary": spec.hares_primary,
                 "hares_components": ", ".join(spec.hares_components),
+                "ochre_present": True,
+                "hares_present": True,
+                "status": "ok",
                 "mae": float(diff.abs().mean()),
                 "rmse": float((diff.pow(2).mean()) ** 0.5),
                 "bias": float(diff.mean()),
@@ -353,7 +399,9 @@ def align_channels(ochre_df: pd.DataFrame, hares_df: pd.DataFrame) -> tuple[pd.D
         series[f"{spec.label}_hares"] = hares_series
         series[f"{spec.label}_diff"] = diff
 
-    metrics = pd.DataFrame(metrics_rows).sort_values(by="mae", ascending=False)
+    metrics = pd.DataFrame(metrics_rows)
+    if "mae" in metrics.columns:
+        metrics = metrics.sort_values(by="mae", ascending=False, na_position="last")
     return metrics, series
 
 
@@ -399,8 +447,14 @@ def plot_key_channels(series: pd.DataFrame, out_dir: Path) -> None:
     ]
     fig, axes = plt.subplots(len(plot_specs), 1, figsize=(14, 16), sharex=True)
     for ax, (title, prefix) in zip(axes, plot_specs):
-        ax.plot(series.index, series[f"{prefix}_ochre"], label="OCHRE")
-        ax.plot(series.index, series[f"{prefix}_hares"], label="HARES")
+        ochre_col = f"{prefix}_ochre"
+        hares_col = f"{prefix}_hares"
+        if ochre_col not in series.columns or hares_col not in series.columns:
+            ax.set_title(f"{title} (missing channel)")
+            ax.grid(True, alpha=0.3)
+            continue
+        ax.plot(series.index, series[ochre_col], label="OCHRE")
+        ax.plot(series.index, series[hares_col], label="HARES")
         ax.set_title(title)
         ax.grid(True, alpha=0.3)
         ax.legend()
@@ -453,6 +507,136 @@ def plot_observer_envelope(obs_df: pd.DataFrame, out_dir: Path) -> None:
     plt.close(fig)
 
 
+def _switch_events(
+    df: pd.DataFrame,
+    label: str,
+    heat_col: str | None,
+    indoor_col: str | None,
+    setpoint_col: str | None,
+    mode_col: str | None,
+    eps_kw: float = 1e-6,
+) -> pd.DataFrame:
+    if heat_col is None:
+        return pd.DataFrame(columns=["timestamp", "engine", "event", "heat_kw", "indoor_c", "setpoint_c", "delta_sp_c", "mode"])
+
+    heat = df[heat_col].astype(float)
+    active = heat > eps_kw
+    prev = active.shift(1, fill_value=False)
+    on_events = active & ~prev
+    off_events = ~active & prev
+
+    indoor = _column_or_nan(df, indoor_col)
+    setpoint = _column_or_nan(df, setpoint_col)
+    mode = _column_or_nan(df, mode_col)
+    rows: list[dict[str, Any]] = []
+    for ts in df.index[on_events]:
+        rows.append(
+            {
+                "timestamp": ts,
+                "engine": label,
+                "event": "heat_on",
+                "heat_kw": float(heat.loc[ts]),
+                "indoor_c": float(indoor.loc[ts]) if ts in indoor.index else float("nan"),
+                "setpoint_c": float(setpoint.loc[ts]) if ts in setpoint.index else float("nan"),
+                "delta_sp_c": float(setpoint.loc[ts] - indoor.loc[ts]) if ts in setpoint.index and ts in indoor.index else float("nan"),
+                "mode": float(mode.loc[ts]) if ts in mode.index else float("nan"),
+            }
+        )
+    for ts in df.index[off_events]:
+        rows.append(
+            {
+                "timestamp": ts,
+                "engine": label,
+                "event": "heat_off",
+                "heat_kw": float(heat.loc[ts]),
+                "indoor_c": float(indoor.loc[ts]) if ts in indoor.index else float("nan"),
+                "setpoint_c": float(setpoint.loc[ts]) if ts in setpoint.index else float("nan"),
+                "delta_sp_c": float(setpoint.loc[ts] - indoor.loc[ts]) if ts in setpoint.index and ts in indoor.index else float("nan"),
+                "mode": float(mode.loc[ts]) if ts in mode.index else float("nan"),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["timestamp", "engine", "event"])
+
+
+def write_hvac_control_diagnostics(ochre_df: pd.DataFrame, hares_df: pd.DataFrame, out_dir: Path) -> None:
+    idx = ochre_df.index.intersection(hares_df.index)
+    if idx.empty:
+        return
+    o = ochre_df.reindex(idx)
+    h = hares_df.reindex(idx)
+
+    o_heat = _first_present(o, ("HVAC Heating Electric Power (kW)",))
+    h_heat = _first_present(h, ("HVAC Heating Electric Power (kW)", "ASHP Heater Electric Power (kW)"))
+
+    o_indoor = _first_present(o, ("Temperature - Indoor (C)",))
+    h_indoor = _first_present(h, ("Temperature - Indoor (C)",))
+
+    o_outdoor = _first_present(o, ("Temperature - Outdoor (C)", "Outdoor Dry Bulb (C)"))
+    h_outdoor = _first_present(h, ("Temperature - Outdoor (C)", "Outdoor Dry Bulb (C)"))
+
+    o_sp = _first_present(o, ("HVAC Heating Setpoint (C)", "ASHP Heater Setpoint (C)"))
+    h_sp = _first_present(h, ("HVAC Heating Setpoint (C)", "ASHP Heater Setpoint (C)"))
+
+    o_mode = _first_present(o, ("HVAC Heating Mode (-)", "ASHP Heater Mode (-)"))
+    h_mode = _first_present(h, ("HVAC Heating Mode (-)", "ASHP Heater Mode (-)"))
+
+    control = pd.DataFrame(index=idx)
+    control["ochre_heat_kw"] = _column_or_nan(o, o_heat).reindex(idx)
+    control["hares_heat_kw"] = _column_or_nan(h, h_heat).reindex(idx)
+    control["ochre_indoor_c"] = _column_or_nan(o, o_indoor).reindex(idx)
+    control["hares_indoor_c"] = _column_or_nan(h, h_indoor).reindex(idx)
+    control["ochre_outdoor_c"] = _column_or_nan(o, o_outdoor).reindex(idx)
+    control["hares_outdoor_c"] = _column_or_nan(h, h_outdoor).reindex(idx)
+    control["ochre_setpoint_c"] = _column_or_nan(o, o_sp).reindex(idx)
+    control["hares_setpoint_c"] = _column_or_nan(h, h_sp).reindex(idx)
+    control["ochre_mode"] = _column_or_nan(o, o_mode).reindex(idx)
+    control["hares_mode"] = _column_or_nan(h, h_mode).reindex(idx)
+
+    control["ochre_delta_sp_c"] = control["ochre_setpoint_c"] - control["ochre_indoor_c"]
+    control["hares_delta_sp_c"] = control["hares_setpoint_c"] - control["hares_indoor_c"]
+    control["delta_heat_kw"] = control["hares_heat_kw"] - control["ochre_heat_kw"]
+    control["delta_indoor_c"] = control["hares_indoor_c"] - control["ochre_indoor_c"]
+    control.to_csv(out_dir / "hvac_control_timeseries.csv", index_label="Time")
+
+    events = pd.concat(
+        [
+            _switch_events(o, "ochre", o_heat, o_indoor, o_sp, o_mode),
+            _switch_events(h, "hares", h_heat, h_indoor, h_sp, h_mode),
+        ],
+        ignore_index=True,
+    )
+    if not events.empty:
+        events.to_csv(out_dir / "hvac_heating_switch_events.csv", index=False)
+
+    summary: dict[str, Any] = {}
+    for label, frame, heat_col, indoor_col, setpoint_col in (
+        ("ochre", o, o_heat, o_indoor, o_sp),
+        ("hares", h, h_heat, h_indoor, h_sp),
+    ):
+        if heat_col is None:
+            summary[f"{label}_heat_col_present"] = False
+            continue
+        heat = frame[heat_col].astype(float)
+        active = heat > 1e-6
+        summary[f"{label}_heat_col_present"] = True
+        summary[f"{label}_heat_nonzero_steps"] = int(active.sum())
+        summary[f"{label}_heat_peak_kw"] = float(heat.max())
+        summary[f"{label}_heat_peak_timestamp"] = str(heat.idxmax())
+        if active.any():
+            first_on = active.idxmax()
+            summary[f"{label}_first_heat_on_timestamp"] = str(first_on)
+            if indoor_col is not None:
+                summary[f"{label}_first_heat_on_indoor_c"] = float(frame.loc[first_on, indoor_col])
+            if setpoint_col is not None:
+                summary[f"{label}_first_heat_on_setpoint_c"] = float(frame.loc[first_on, setpoint_col])
+                if indoor_col is not None:
+                    summary[f"{label}_first_heat_on_delta_sp_c"] = float(
+                        frame.loc[first_on, setpoint_col] - frame.loc[first_on, indoor_col]
+                    )
+
+    (out_dir / "hvac_control_summary.json").write_text(json.dumps(summary, indent=2))
+
+
 def main() -> None:
     args = parse_args()
     fixture_dir = args.fixture.resolve()
@@ -463,7 +647,7 @@ def main() -> None:
     reference_parquet = args.reference_parquet.resolve() if args.reference_parquet else None
     actual_parquet = args.actual_parquet.resolve() if args.actual_parquet else None
 
-    ochre_df = run_ochre(fixture_dir, sim_cfg, reference_parquet)
+    ochre_df = run_ochre(fixture_dir, sim_cfg, reference_parquet, args.use_live_ochre)
     hares_df, obs_df = run_hares(fixture_dir, sim_cfg, actual_parquet)
 
     metrics, series = align_channels(ochre_df, hares_df)
@@ -479,10 +663,26 @@ def main() -> None:
     plot_key_channels(series, out_dir)
     plot_group_diff(series, out_dir)
     plot_observer_envelope(obs_df, out_dir)
+    write_hvac_control_diagnostics(ochre_df, hares_df, out_dir)
 
     print(f"wrote diagnostics to: {out_dir}")
     print("top channel errors:")
-    print(metrics[["channel", "mae", "rmse", "bias", "mae_rel_pct_of_ref_mean"]].head(10).to_string(index=False))
+    print(
+        metrics[
+            [
+                "channel",
+                "status",
+                "ochre_present",
+                "hares_present",
+                "mae",
+                "rmse",
+                "bias",
+                "mae_rel_pct_of_ref_mean",
+            ]
+        ]
+        .head(10)
+        .to_string(index=False)
+    )
 
 
 if __name__ == "__main__":
