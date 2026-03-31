@@ -1,323 +1,489 @@
+"""Generate HARES-vs-OCHRE parity diagnostics with metrics and charts.
+
+Usage:
+    UV_CACHE_DIR=/tmp/uvcache MPLCONFIGDIR=/tmp/mplconfig \
+    uv run --no-sync --group ochre python tests/python/parity_diagnostics.py \
+      --fixture tests/fixtures/parity/cz4a_ashp_hpwh \
+      --out-dir /tmp/parity_diag_ashp
+"""
+
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 import json
-import math
 import sys
+import tomllib
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 
 
-ROOT = Path(__file__).resolve().parents[2]
-VENDOR_OCHRE = ROOT / 'vendors' / 'OCHRE'
-DEFAULTS = ROOT / 'defaults'
+@dataclass(frozen=True)
+class ChannelSpec:
+    label: str
+    ochre_primary: str
+    ochre_components: tuple[str, ...]
+    hares_primary: str
+    hares_components: tuple[str, ...]
+    native_unit: str = ""
+
+
+CHANNEL_SPECS: tuple[ChannelSpec, ...] = (
+    ChannelSpec(
+        "total_electric_kw",
+        "Total Electric Power (kW)",
+        (),
+        "Total Electric Power (kW)",
+        (),
+        native_unit="kW",
+    ),
+    ChannelSpec(
+        "hvac_heat_kw",
+        "HVAC Heating Electric Power (kW)",
+        (),
+        "HVAC Heating Electric Power (kW)",
+        ("ASHP Heater Electric Power (kW)",),
+        native_unit="kW",
+    ),
+    ChannelSpec(
+        "hvac_cool_kw",
+        "HVAC Cooling Electric Power (kW)",
+        (),
+        "HVAC Cooling Electric Power (kW)",
+        ("ASHP Cooler Electric Power (kW)", "Room AC Electric Power (kW)"),
+        native_unit="kW",
+    ),
+    ChannelSpec(
+        "water_heat_kw",
+        ochre_primary="Water Heating Electric Power (kW)",
+        ochre_components=(),
+        hares_primary="Water Heating Electric Power (kW)",
+        hares_components=("Heat Pump Water Heater Electric Power (kW)",),
+        native_unit="kW",
+    ),
+    ChannelSpec(
+        "ventilation_kw",
+        "Ventilation Fan Electric Power (kW)",
+        (),
+        "Ventilation Fan Electric Power (kW)",
+        (),
+        native_unit="kW",
+    ),
+    ChannelSpec(
+        "lighting_kw",
+        "Lighting Electric Power (kW)",
+        (),
+        "Lighting Electric Power (kW)",
+        (
+            "Indoor Lighting Electric Power (kW)",
+            "Exterior Lighting Electric Power (kW)",
+            "Garage Lighting Electric Power (kW)",
+        ),
+        native_unit="kW",
+    ),
+    ChannelSpec(
+        "other_kw",
+        "Other Electric Power (kW)",
+        (),
+        "Other Electric Power (kW)",
+        ("Occupancy Electric Power (kW)",),
+        native_unit="kW",
+    ),
+    ChannelSpec(
+        "indoor_temp_c",
+        "Temperature - Indoor (C)",
+        (),
+        "Temperature - Indoor (C)",
+        (),
+        native_unit="C",
+    ),
+    ChannelSpec(
+        "outdoor_temp_c",
+        "Temperature - Outdoor (C)",
+        ("Outdoor Dry Bulb (C)",),
+        "Temperature - Outdoor (C)",
+        ("Outdoor Dry Bulb (C)",),
+        native_unit="C",
+    ),
+)
+
+HARES_ELECTRIC_COL_SUFFIX = "Electric Power (kW)"
+ENVELOPE_GAIN_KEYS: tuple[str, ...] = (
+    "window_solar_w",
+    "opaque_solar_lwr_w",
+    "interior_lwr_w",
+    "infiltration_w",
+    "ventilation_w",
+    "natural_ventilation_w",
+    "port_sensible_w",
+    "internal_gain_w",
+)
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description='HARES vs OCHRE parity diagnostics with plots')
-    p.add_argument('--fixture', default='tests/fixtures/parity/cz4a_ashp_hpwh', help='Path to parity fixture dir')
-    p.add_argument('--verbosity', type=int, default=9, help='Output verbosity for both engines')
-    p.add_argument('--out', default='artifacts/parity_diagnostics', help='Output directory root')
-    return p.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fixture",
+        type=Path,
+        default=Path("tests/fixtures/parity/cz4a_ashp_hpwh"),
+        help="Parity fixture directory (contains building.xml/schedule.csv/weather.epw/config.toml).",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("/tmp/parity_diagnostics"),
+        help="Output directory for report artifacts.",
+    )
+    parser.add_argument(
+        "--actual-parquet",
+        type=Path,
+        default=None,
+        help="Optional precomputed HARES parquet path; skips running ochre_next when provided.",
+    )
+    parser.add_argument(
+        "--reference-parquet",
+        type=Path,
+        default=None,
+        help="Optional OCHRE reference parquet path; defaults to fixture/reference_output.parquet.",
+    )
+    return parser.parse_args()
 
 
-def load_fixture_config(fixture_dir: Path) -> dict:
-    import tomllib
-
-    with (fixture_dir / 'config.toml').open('rb') as f:
-        cfg = tomllib.load(f)
-    sim = cfg['simulation']
+def load_sim_config(fixture_dir: Path) -> dict:
+    config_path = fixture_dir / "config.toml"
+    cfg = tomllib.loads(config_path.read_text())
+    simulation = cfg["simulation"]
+    start = dt.datetime.fromisoformat(simulation["start_time"])
     return {
-        'start_time': sim['start_time'],
-        'duration_s': int(sim['duration']),
-        'time_res_s': int(sim['time_res']),
-        'master_seed': int(sim.get('master_seed', 0)),
+        "start_time": start,
+        "start_time_iso": simulation["start_time"],
+        "duration_s": int(simulation["duration"]),
+        "time_res_s": int(simulation["time_res"]),
+        "output_verbosity": int(simulation["output_verbosity"]),
+        "master_seed": int(simulation.get("master_seed", 0)),
     }
 
 
-def to_pandas(df_obj):
-    if hasattr(df_obj, 'to_pandas'):
-        return df_obj.to_pandas()
-    if isinstance(df_obj, pd.DataFrame):
-        return df_obj
-    return pd.DataFrame(df_obj)
+def _normalize_time_index(df: pd.DataFrame, start_time: dt.datetime) -> pd.DataFrame:
+    offset = start_time.utcoffset()
+    if offset is None:
+        raise ValueError("fixture simulation.start_time must include a timezone offset")
 
-
-def run_hares(fixture_dir: Path, cfg: dict, verbosity: int) -> pd.DataFrame:
-    from ochre_next import Dwelling as HaresDwelling
-
-    dw = HaresDwelling.from_hpxml(
-        str(fixture_dir / 'building.xml'),
-        str(fixture_dir / 'schedule.csv'),
-        str(fixture_dir / 'weather.epw'),
-        start_time=cfg['start_time'],
-        time_res_s=cfg['time_res_s'],
-        duration_s=cfg['duration_s'],
-        output_verbosity=verbosity,
-        defaults_path=str(DEFAULTS),
-        master_seed=cfg['master_seed'],
-    )
-    df = to_pandas(dw.simulate())
-    return df
-
-
-def run_ochre(fixture_dir: Path, cfg: dict, verbosity: int) -> pd.DataFrame:
-    if str(VENDOR_OCHRE) not in sys.path:
-        sys.path.insert(0, str(VENDOR_OCHRE))
-
-    from ochre import Dwelling as OchreDwelling
-
-    start_local = dt.datetime.fromisoformat(cfg['start_time']).replace(tzinfo=None)
-    dw = OchreDwelling(
-        name='parity_diag',
-        start_time=start_local,
-        time_res=dt.timedelta(seconds=cfg['time_res_s']),
-        duration=dt.timedelta(seconds=cfg['duration_s']),
-        hpxml_file=str(fixture_dir / 'building.xml'),
-        hpxml_schedule_file=str(fixture_dir / 'schedule.csv'),
-        weather_file=str(fixture_dir / 'weather.epw'),
-        verbosity=verbosity,
-        save_results=False,
-    )
-    df, _metrics, _hourly = dw.simulate()
-    return to_pandas(df)
-
-
-def ensure_time_col(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    if 'Time' in out.columns:
-        out['Time'] = pd.to_datetime(out['Time'])
+    if "Time" in out.columns:
+        out["Time"] = pd.to_datetime(out["Time"])
+        idx = pd.DatetimeIndex(out["Time"])
+        out = out.drop(columns=["Time"])
     else:
-        out['Time'] = pd.RangeIndex(len(out))
+        idx = pd.DatetimeIndex(pd.to_datetime(out.index))
+
+    if idx.tz is None:
+        idx = idx.tz_localize(dt.timezone(offset))
+    out.index = idx
+    out.index.name = "Time"
     return out
 
 
-def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return None
+def load_reference_parquet(reference_parquet: Path, sim_cfg: dict) -> pd.DataFrame:
+    if not reference_parquet.exists():
+        raise FileNotFoundError(f"reference parquet not found: {reference_parquet}")
+    df = pd.read_parquet(reference_parquet)
+    return _normalize_time_index(df, sim_cfg["start_time"])
 
 
-def sum_cols(df: pd.DataFrame, candidates: list[str]) -> pd.Series:
-    existing = [c for c in candidates if c in df.columns]
-    if not existing:
-        return pd.Series([0.0] * len(df), index=df.index)
-    return df[existing].sum(axis=1)
+def run_ochre(fixture_dir: Path, sim_cfg: dict, reference_parquet: Path | None) -> pd.DataFrame:
+    try:
+        sys.path.insert(0, str(Path("vendors/OCHRE").resolve()))
+        from ochre import Dwelling as OchreDwelling
+    except Exception:
+        parquet = reference_parquet or (fixture_dir / "reference_output.parquet")
+        return load_reference_parquet(parquet, sim_cfg)
+
+    start_local = sim_cfg["start_time"].replace(tzinfo=None)
+    df, _metrics, _hourly = OchreDwelling(
+        name="parity_diag_ochre",
+        start_time=start_local,
+        time_res=dt.timedelta(seconds=sim_cfg["time_res_s"]),
+        duration=dt.timedelta(seconds=sim_cfg["duration_s"]),
+        hpxml_file=str((fixture_dir / "building.xml").resolve()),
+        hpxml_schedule_file=str((fixture_dir / "schedule.csv").resolve()),
+        weather_file=str((fixture_dir / "weather.epw").resolve()),
+        verbosity=sim_cfg["output_verbosity"],
+        save_results=False,
+    ).simulate()
+
+    return _normalize_time_index(df, sim_cfg["start_time"])
 
 
-def aligned_frames(h: pd.DataFrame, o: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    h2 = ensure_time_col(h)
-    o2 = ensure_time_col(o)
-    n = min(len(h2), len(o2))
-    h2 = h2.iloc[:n].reset_index(drop=True)
-    o2 = o2.iloc[:n].reset_index(drop=True)
-    return h2, o2
+def _extract_solver_gain_map(snapshot: dict[str, Any]) -> dict[str, float]:
+    solver = snapshot.get("post_solvers") or {}
+    if not isinstance(solver, dict):
+        raise ValueError("observer snapshot post_solvers must be a dict")
+    out: dict[str, float] = {}
+    for key in ENVELOPE_GAIN_KEYS:
+        if key not in solver:
+            raise KeyError(f"observer post_solvers missing required key: {key}")
+        value = solver[key]
+        out[key] = float(value) if value is not None else 0.0
+    return out
 
 
-def metrics_summary(h: pd.Series, o: pd.Series) -> dict[str, float]:
-    d = h - o
-    mae = float(d.abs().mean())
-    rmse = float(math.sqrt((d * d).mean()))
-    max_abs = float(d.abs().max())
-    mean = float(d.mean())
-    o_peak = float(o.max())
-    h_peak = float(h.max())
-    peak_rel_pct = float((h_peak - o_peak) / o_peak * 100.0) if abs(o_peak) > 1e-9 else float('nan')
-    return {
-        'mae': mae,
-        'rmse': rmse,
-        'max_abs': max_abs,
-        'mean_bias': mean,
-        'ochre_peak': o_peak,
-        'hares_peak': h_peak,
-        'peak_rel_pct': peak_rel_pct,
+def _extract_equipment_thermal(snapshot: dict[str, Any]) -> dict[str, float]:
+    totals: dict[str, float] = {
+        "hvac_thermal_equipment_sensible_w": 0.0,
+        "hvac_thermal_equipment_latent_w": 0.0,
+        "nonthermal_equipment_sensible_w": 0.0,
+        "nonthermal_equipment_latent_w": 0.0,
     }
+    for phase_name, sensible_key, latent_key in (
+        ("post_thermal_equipment", "hvac_thermal_equipment_sensible_w", "hvac_thermal_equipment_latent_w"),
+        ("post_nonthermal_equipment", "nonthermal_equipment_sensible_w", "nonthermal_equipment_latent_w"),
+    ):
+        phase = snapshot.get(phase_name) or {}
+        equipment = phase.get("equipment", []) if isinstance(phase, dict) else []
+        for obs in equipment:
+            telemetry = obs.get("telemetry", {}) if isinstance(obs, dict) else {}
+            totals[sensible_key] += float(telemetry.get("sensible_gain_w", 0.0) or 0.0)
+            totals[latent_key] += float(telemetry.get("latent_gain_w", 0.0) or 0.0)
+    return totals
 
 
-def plot_core(out_dir: Path, h: pd.DataFrame, o: pd.DataFrame, channels: dict[str, tuple[pd.Series, pd.Series]]):
-    fig, axes = plt.subplots(4, 1, figsize=(14, 14), sharex=True)
+def run_hares(
+    fixture_dir: Path,
+    sim_cfg: dict,
+    actual_parquet: Path | None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if actual_parquet is not None:
+        pdf = pd.read_parquet(actual_parquet)
+        return _normalize_time_index(pdf, sim_cfg["start_time"]), pd.DataFrame()
 
-    for ax, (name, (hs, os_)) in zip(axes, channels.items()):
-        ax.plot(os_.values, label='OCHRE', linewidth=1.4)
-        ax.plot(hs.values, label='HARES', linewidth=1.2)
-        ax.set_ylabel(name)
-        ax.grid(alpha=0.25)
-        ax.legend(loc='upper right')
+    import ochre_next
 
-    axes[-1].set_xlabel('Timestep')
-    fig.suptitle('HARES vs OCHRE Core Time Series')
-    fig.tight_layout()
-    fig.savefig(out_dir / 'core_timeseries.png', dpi=150)
-    plt.close(fig)
+    dwelling_sim = ochre_next.Dwelling.from_hpxml(
+        str((fixture_dir / "building.xml").resolve()),
+        str((fixture_dir / "schedule.csv").resolve()),
+        str((fixture_dir / "weather.epw").resolve()),
+        start_time=sim_cfg["start_time_iso"],
+        time_res_s=sim_cfg["time_res_s"],
+        duration_s=sim_cfg["duration_s"],
+        output_verbosity=sim_cfg["output_verbosity"],
+        defaults_path=str(Path("defaults").resolve()),
+        master_seed=sim_cfg["master_seed"],
+    )
+    pdf = dwelling_sim.simulate().to_pandas()
+    pdf = _normalize_time_index(pdf, sim_cfg["start_time"])
+
+    dwelling_obs = ochre_next.Dwelling.from_hpxml(
+        str((fixture_dir / "building.xml").resolve()),
+        str((fixture_dir / "schedule.csv").resolve()),
+        str((fixture_dir / "weather.epw").resolve()),
+        start_time=sim_cfg["start_time_iso"],
+        time_res_s=sim_cfg["time_res_s"],
+        duration_s=sim_cfg["duration_s"],
+        output_verbosity=sim_cfg["output_verbosity"],
+        defaults_path=str(Path("defaults").resolve()),
+        master_seed=sim_cfg["master_seed"],
+    )
+
+    obs_rows: list[dict[str, Any]] = []
+    steps = sim_cfg["duration_s"] // sim_cfg["time_res_s"]
+    has_observer = hasattr(dwelling_obs, "enable_observer") and hasattr(dwelling_obs, "drain_observations")
+    if has_observer:
+        dwelling_obs.enable_observer(int(steps) + 2)
+
+    for _ in range(int(steps)):
+        step_row = dwelling_obs.step()
+        if has_observer:
+            snapshots = dwelling_obs.drain_observations()
+            if snapshots:
+                snap = snapshots[-1]
+                obs = {"Time": pd.to_datetime(step_row["timestamp"])}
+                obs.update(_extract_solver_gain_map(snap))
+                obs.update(_extract_equipment_thermal(snap))
+                obs_rows.append(obs)
+
+    obs_df = pd.DataFrame(obs_rows).set_index("Time") if obs_rows else pd.DataFrame(index=pdf.index)
+    return pdf, obs_df
 
 
-def plot_gains(out_dir: Path, h: pd.DataFrame, o: pd.DataFrame):
-    gain_cols = [
-        'Net Sensible Heat Gain - Indoor (W)',
-        'Infiltration Heat Gain - Indoor (W)',
-        'Forced Ventilation Heat Gain - Indoor (W)',
-        'Natural Ventilation Heat Gain - Indoor (W)',
-        'Internal Heat Gain - Indoor (W)',
-        'Window Transmitted Solar Gain (W)',
-        'Radiation Heat Gain - Indoor (W)',
-        'Roof Heat Gain - Indoor (W)',
-        'Wall Heat Gain - Indoor (W)',
-        'Floor Heat Gain - Indoor (W)',
-        'Window Heat Gain - Indoor (W)',
+def _from_columns_or_components(df: pd.DataFrame, primary: str, components: tuple[str, ...]) -> pd.Series:
+    if primary in df.columns:
+        return df[primary].astype(float)
+
+    present = [col for col in components if col in df.columns]
+    if not present:
+        return pd.Series(index=df.index, dtype=float).fillna(0.0)
+    return df[present].astype(float).sum(axis=1)
+
+
+def align_channels(ochre_df: pd.DataFrame, hares_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    index = ochre_df.index.intersection(hares_df.index)
+    if index.empty:
+        raise ValueError("No overlapping timestamps between OCHRE and HARES results")
+
+    metrics_rows: list[dict[str, float | str]] = []
+    series = pd.DataFrame(index=index)
+    for spec in CHANNEL_SPECS:
+        ochre_series = _from_columns_or_components(ochre_df, spec.ochre_primary, spec.ochre_components)
+        hares_series = _from_columns_or_components(hares_df, spec.hares_primary, spec.hares_components)
+        ochre_series = ochre_series.reindex(index)
+        hares_series = hares_series.reindex(index)
+        diff = hares_series - ochre_series
+        mean_abs_ref = max(float(ochre_series.abs().mean()), 1e-9)
+        metrics_rows.append(
+            {
+                "channel": spec.label,
+                "unit": spec.native_unit,
+                "ochre_primary": spec.ochre_primary,
+                "ochre_components": ", ".join(spec.ochre_components),
+                "hares_primary": spec.hares_primary,
+                "hares_components": ", ".join(spec.hares_components),
+                "mae": float(diff.abs().mean()),
+                "rmse": float((diff.pow(2).mean()) ** 0.5),
+                "bias": float(diff.mean()),
+                "peak_abs_diff": float(diff.abs().max()),
+                "mae_rel_pct_of_ref_mean": float((diff.abs().mean() / mean_abs_ref) * 100.0),
+            }
+        )
+        series[f"{spec.label}_ochre"] = ochre_series
+        series[f"{spec.label}_hares"] = hares_series
+        series[f"{spec.label}_diff"] = diff
+
+    metrics = pd.DataFrame(metrics_rows).sort_values(by="mae", ascending=False)
+    return metrics, series
+
+
+def equipment_power_frame(hares_df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        col
+        for col in hares_df.columns
+        if col.endswith(HARES_ELECTRIC_COL_SUFFIX) and col != "Total Electric Power (kW)"
     ]
+    if not cols:
+        return pd.DataFrame(index=hares_df.index)
+    return hares_df[cols].copy()
 
-    shared = [c for c in gain_cols if c in h.columns and c in o.columns]
-    if not shared:
-        return
 
-    n = min(6, len(shared))
-    fig, axes = plt.subplots(n, 1, figsize=(14, 2.6 * n), sharex=True)
-    if n == 1:
-        axes = [axes]
+def write_top_contributors(series: pd.DataFrame, equip_df: pd.DataFrame, out_dir: Path) -> None:
+    total_diff = series["total_electric_kw_diff"]
+    peak_ts = total_diff.abs().idxmax()
+    rows: list[dict[str, float | str]] = []
+    if not equip_df.empty and peak_ts in equip_df.index:
+        row = equip_df.loc[peak_ts]
+        for col, value in row.items():
+            rows.append({"timestamp": str(peak_ts), "column": col, "value_kw": float(value)})
+    if rows:
+        pd.DataFrame(rows).sort_values("value_kw", ascending=False).to_csv(
+            out_dir / "hares_equipment_at_peak_diff.csv", index=False
+        )
 
-    for ax, c in zip(axes, shared[:n]):
-        ax.plot(o[c].values, label='OCHRE', linewidth=1.3)
-        ax.plot(h[c].values, label='HARES', linewidth=1.2)
-        ax.set_ylabel(c.replace(' (W)', ''))
-        ax.grid(alpha=0.25)
-        ax.legend(loc='upper right')
+    summary = {
+        "peak_abs_total_diff_timestamp": str(peak_ts),
+        "peak_abs_total_diff_kw": float(total_diff.abs().max()),
+        "peak_signed_total_diff_kw": float(total_diff.loc[peak_ts]),
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
-    axes[-1].set_xlabel('Timestep')
-    fig.suptitle('Envelope/Indoor Gain Drivers (W)')
+
+def plot_key_channels(series: pd.DataFrame, out_dir: Path) -> None:
+    plot_specs = [
+        ("Total Electric (kW)", "total_electric_kw"),
+        ("HVAC Heating Electric (kW)", "hvac_heat_kw"),
+        ("HVAC Cooling Electric (kW)", "hvac_cool_kw"),
+        ("Indoor Temperature (C)", "indoor_temp_c"),
+        ("Outdoor Temperature (C)", "outdoor_temp_c"),
+    ]
+    fig, axes = plt.subplots(len(plot_specs), 1, figsize=(14, 16), sharex=True)
+    for ax, (title, prefix) in zip(axes, plot_specs):
+        ax.plot(series.index, series[f"{prefix}_ochre"], label="OCHRE")
+        ax.plot(series.index, series[f"{prefix}_hares"], label="HARES")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
     fig.tight_layout()
-    fig.savefig(out_dir / 'gain_drivers_timeseries.png', dpi=150)
+    fig.savefig(out_dir / "timeseries_overlay.png", dpi=160)
     plt.close(fig)
 
 
-def plot_equipment_breakdown(out_dir: Path, h: pd.DataFrame, o: pd.DataFrame):
-    # End-use comparable channels
-    h_hvac_heat = sum_cols(h, ['ASHP Heater Electric Power (kW)', 'MSHP Heater Electric Power (kW)', 'Gas Furnace Electric Power (kW)', 'Electric Furnace Electric Power (kW)'])
-    o_hvac_heat = sum_cols(o, ['HVAC Heating Electric Power (kW)'])
-
-    h_hvac_cool = sum_cols(h, ['ASHP Cooler Electric Power (kW)', 'MSHP Cooler Electric Power (kW)', 'Air Conditioner Electric Power (kW)', 'Room AC Electric Power (kW)'])
-    o_hvac_cool = sum_cols(o, ['HVAC Cooling Electric Power (kW)'])
-
-    h_wh = sum_cols(h, ['Heat Pump Water Heater Electric Power (kW)', 'Water Heating Electric Power (kW)', 'Resistance Water Heater Electric Power (kW)', 'Gas Water Heater Electric Power (kW)'])
-    o_wh = sum_cols(o, ['Water Heating Electric Power (kW)'])
-
-    h_light = sum_cols(h, ['Indoor Lighting Electric Power (kW)', 'Exterior Lighting Electric Power (kW)'])
-    o_light = sum_cols(o, ['Lighting Electric Power (kW)', 'Indoor Lighting Electric Power (kW)', 'Exterior Lighting Electric Power (kW)'])
-
-    h_other = sum_cols(h, ['Other Electric Power (kW)', 'MELs Electric Power (kW)', 'TV Electric Power (kW)', 'Refrigerator Electric Power (kW)', 'Ventilation Fan Electric Power (kW)'])
-    o_other = sum_cols(o, ['Other Electric Power (kW)'])
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-    axes[0].plot(o_hvac_heat.values, label='OCHRE HVAC Heat', linewidth=1.4)
-    axes[0].plot(h_hvac_heat.values, label='HARES HVAC Heat', linewidth=1.2)
-    axes[0].plot(o_hvac_cool.values, label='OCHRE HVAC Cool', linewidth=1.4)
-    axes[0].plot(h_hvac_cool.values, label='HARES HVAC Cool', linewidth=1.2)
-    axes[0].plot(o_wh.values, label='OCHRE WH', linewidth=1.2)
-    axes[0].plot(h_wh.values, label='HARES WH', linewidth=1.2)
-    axes[0].set_ylabel('kW')
-    axes[0].set_title('Major End-Use Power Channels')
-    axes[0].grid(alpha=0.25)
-    axes[0].legend(loc='upper right', ncol=3)
-
-    axes[1].plot((h_hvac_heat - o_hvac_heat).values, label='HVAC Heat Δ (H-O)')
-    axes[1].plot((h_hvac_cool - o_hvac_cool).values, label='HVAC Cool Δ (H-O)')
-    axes[1].plot((h_wh - o_wh).values, label='WH Δ (H-O)')
-    axes[1].plot((h_light - o_light).values, label='Lighting Δ (H-O)')
-    axes[1].plot((h_other - o_other).values, label='Other Δ (H-O)')
-    axes[1].axhline(0.0, color='black', linewidth=0.8)
-    axes[1].set_ylabel('kW')
-    axes[1].set_xlabel('Timestep')
-    axes[1].set_title('Channel Difference Signals')
-    axes[1].grid(alpha=0.25)
-    axes[1].legend(loc='upper right', ncol=3)
-
+def plot_group_diff(series: pd.DataFrame, out_dir: Path) -> None:
+    diff_cols = [col for col in series.columns if col.endswith("_diff")]
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for col in diff_cols:
+        ax.plot(series.index, series[col], label=col.removesuffix("_diff"))
+    ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.6)
+    ax.set_title("HARES - OCHRE Channel Differences")
+    ax.set_ylabel("Difference (native units)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(ncol=3, fontsize=8)
     fig.tight_layout()
-    fig.savefig(out_dir / 'equipment_breakdown.png', dpi=150)
+    fig.savefig(out_dir / "channel_differences.png", dpi=160)
+    plt.close(fig)
+
+
+def plot_observer_envelope(obs_df: pd.DataFrame, out_dir: Path) -> None:
+    if obs_df.empty:
+        return
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    for key in ENVELOPE_GAIN_KEYS:
+        if key in obs_df.columns:
+            axes[0].plot(obs_df.index, obs_df[key], label=key)
+    axes[0].set_title("HARES Envelope Gain Components")
+    axes[0].set_ylabel("W")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend(ncol=2, fontsize=8)
+
+    for key in (
+        "hvac_thermal_equipment_sensible_w",
+        "nonthermal_equipment_sensible_w",
+        "hvac_thermal_equipment_latent_w",
+        "nonthermal_equipment_latent_w",
+    ):
+        if key in obs_df.columns:
+            axes[1].plot(obs_df.index, obs_df[key], label=key)
+    axes[1].set_title("HARES Equipment Thermal Contributions")
+    axes[1].set_ylabel("W")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(ncol=2, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_dir / "hares_observer_envelope_and_equipment.png", dpi=160)
     plt.close(fig)
 
 
 def main() -> None:
     args = parse_args()
-    fixture_dir = (ROOT / args.fixture).resolve() if not Path(args.fixture).is_absolute() else Path(args.fixture)
-    fixture_name = fixture_dir.name
-    out_dir = (ROOT / args.out / fixture_name).resolve()
+    fixture_dir = args.fixture.resolve()
+    out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = load_fixture_config(fixture_dir)
+    sim_cfg = load_sim_config(fixture_dir)
+    reference_parquet = args.reference_parquet.resolve() if args.reference_parquet else None
+    actual_parquet = args.actual_parquet.resolve() if args.actual_parquet else None
 
-    print(f'[diag] fixture={fixture_name} verbosity={args.verbosity}')
-    h_df = run_hares(fixture_dir, cfg, args.verbosity)
-    o_df = run_ochre(fixture_dir, cfg, args.verbosity)
-    h, o = aligned_frames(h_df, o_df)
+    ochre_df = run_ochre(fixture_dir, sim_cfg, reference_parquet)
+    hares_df, obs_df = run_hares(fixture_dir, sim_cfg, actual_parquet)
 
-    # Core comparable channels
-    channels: dict[str, tuple[pd.Series, pd.Series]] = {}
-    t_col_h = pick_col(h, ['Temperature - Indoor (C)', 'Indoor Temperature (C)'])
-    t_col_o = pick_col(o, ['Temperature - Indoor (C)', 'Indoor Temperature (C)'])
-    if t_col_h and t_col_o:
-        channels['Indoor Temp (C)'] = (h[t_col_h], o[t_col_o])
+    metrics, series = align_channels(ochre_df, hares_df)
+    metrics.to_csv(out_dir / "channel_metrics.csv", index=False)
+    series.to_csv(out_dir / "aligned_series.csv")
 
-    h_heat = sum_cols(h, ['ASHP Heater Electric Power (kW)', 'MSHP Heater Electric Power (kW)', 'HVAC Heating Electric Power (kW)', 'Gas Furnace Electric Power (kW)', 'Electric Furnace Electric Power (kW)'])
-    o_heat = sum_cols(o, ['HVAC Heating Electric Power (kW)'])
-    channels['HVAC Heat Elec (kW)'] = (h_heat, o_heat)
+    equip_df = equipment_power_frame(hares_df).reindex(series.index)
+    if not equip_df.empty:
+        equip_df.to_csv(out_dir / "hares_equipment_power_series.csv")
+    if not obs_df.empty:
+        obs_df.to_csv(out_dir / "hares_observer_components.csv")
+    write_top_contributors(series, equip_df, out_dir)
+    plot_key_channels(series, out_dir)
+    plot_group_diff(series, out_dir)
+    plot_observer_envelope(obs_df, out_dir)
 
-    h_cool = sum_cols(h, ['ASHP Cooler Electric Power (kW)', 'MSHP Cooler Electric Power (kW)', 'HVAC Cooling Electric Power (kW)', 'Air Conditioner Electric Power (kW)', 'Room AC Electric Power (kW)'])
-    o_cool = sum_cols(o, ['HVAC Cooling Electric Power (kW)'])
-    channels['HVAC Cool Elec (kW)'] = (h_cool, o_cool)
-
-    if 'Total Electric Power (kW)' in h.columns and 'Total Electric Power (kW)' in o.columns:
-        channels['Total Electric (kW)'] = (h['Total Electric Power (kW)'], o['Total Electric Power (kW)'])
-
-    # Summaries
-    summary = {
-        name: metrics_summary(hs, os_)
-        for name, (hs, os_) in channels.items()
-    }
-
-    # Top timestep diagnostics for HVAC heat difference
-    delta_heat = (h_heat - o_heat).abs()
-    top_idx = delta_heat.sort_values(ascending=False).head(15).index.tolist()
-    top_rows = []
-    for i in top_idx:
-        row = {
-            'step': int(i),
-            'hares_hvac_heat_kw': float(h_heat.iloc[i]),
-            'ochre_hvac_heat_kw': float(o_heat.iloc[i]),
-            'delta_kw': float(h_heat.iloc[i] - o_heat.iloc[i]),
-        }
-        if t_col_h and t_col_o:
-            row['hares_indoor_c'] = float(h[t_col_h].iloc[i])
-            row['ochre_indoor_c'] = float(o[t_col_o].iloc[i])
-            row['delta_indoor_c'] = float(h[t_col_h].iloc[i] - o[t_col_o].iloc[i])
-        top_rows.append(row)
-
-    pd.DataFrame(top_rows).to_csv(out_dir / 'top_hvac_heat_delta_steps.csv', index=False)
-
-    # Full aligned channels dump for ad-hoc analysis
-    dump = pd.DataFrame({'step': range(len(h))})
-    for name, (hs, os_) in channels.items():
-        key = name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('/', '_')
-        dump[f'{key}_hares'] = hs.values
-        dump[f'{key}_ochre'] = os_.values
-        dump[f'{key}_delta'] = hs.values - os_.values
-    dump.to_csv(out_dir / 'aligned_core_channels.csv', index=False)
-
-    with (out_dir / 'summary.json').open('w', encoding='utf-8') as f:
-        json.dump({'fixture': fixture_name, 'verbosity': args.verbosity, 'metrics': summary}, f, indent=2)
-
-    plot_core(out_dir, h, o, channels)
-    plot_gains(out_dir, h, o)
-    plot_equipment_breakdown(out_dir, h, o)
-
-    print(f'[diag] wrote diagnostics to {out_dir}')
-    print('[diag] files: summary.json, aligned_core_channels.csv, top_hvac_heat_delta_steps.csv, core_timeseries.png, gain_drivers_timeseries.png, equipment_breakdown.png')
+    print(f"wrote diagnostics to: {out_dir}")
+    print("top channel errors:")
+    print(metrics[["channel", "mae", "rmse", "bias", "mae_rel_pct_of_ref_mean"]].head(10).to_string(index=False))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

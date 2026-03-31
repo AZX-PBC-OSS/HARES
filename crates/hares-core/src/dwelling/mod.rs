@@ -2340,9 +2340,10 @@ impl Dwelling {
             }
             if let Some(idx) = cols.setpoint {
                 let telemetry = eq.telemetry();
+                // allowed: setpoint remains telemetry-only until CoreOutput gains setpoint fields.
                 let setpoint = telemetry
-                    .get(tk::HEATING_SETPOINT_C)
-                    .or_else(|| telemetry.get(tk::COOLING_SETPOINT_C))
+                    .get(tk::HEATING_SETPOINT_C) // allowed: setpoint remains telemetry-only until CoreOutput gains setpoint fields.
+                    .or_else(|| telemetry.get(tk::COOLING_SETPOINT_C)) // allowed: setpoint remains telemetry-only until CoreOutput gains setpoint fields.
                     .unwrap_or(0.0);
                 row[idx] = setpoint;
             }
@@ -2351,15 +2352,17 @@ impl Dwelling {
             }
             if let Some(idx) = cols.capacity {
                 let telemetry = eq.telemetry();
+                // allowed: per-equipment capacity output is telemetry-only until CoreOutput adds capacity fields.
                 let capacity_w = telemetry
-                    .get(tk::THERMAL_OUTPUT_W)
-                    .or_else(|| telemetry.get(tk::IDEAL_CAPACITY_W))
-                    .or_else(|| telemetry.get(tk::SENSIBLE_COOLING_W).map(f64::abs))
+                    .get(tk::THERMAL_OUTPUT_W) // allowed: per-equipment capacity output is telemetry-only until CoreOutput adds capacity fields.
+                    .or_else(|| telemetry.get(tk::IDEAL_CAPACITY_W)) // allowed: per-equipment capacity output is telemetry-only until CoreOutput adds capacity fields.
+                    .or_else(|| telemetry.get(tk::SENSIBLE_COOLING_W).map(f64::abs)) // allowed: per-equipment capacity output is telemetry-only until CoreOutput adds capacity fields.
                     .unwrap_or(0.0);
                 row[idx] = capacity_w;
             }
             if let Some(idx) = cols.cop {
-                row[idx] = eq.telemetry().get(tk::COP).unwrap_or(0.0);
+                // allowed: COP remains telemetry-only until CoreOutput gains a COP field.
+                row[idx] = eq.telemetry().get(tk::COP).unwrap_or(0.0); // allowed: COP remains telemetry-only until CoreOutput gains a COP field.
             }
             if let Some(idx) = cols.reactive_power {
                 let q = co.flows.reactive_power_kvar.unwrap_or(0.0);

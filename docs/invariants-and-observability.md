@@ -253,6 +253,59 @@ Extended fields (populated when available):
 2. Inspect latent gains in equipment contributions
 3. Check infiltration moisture via `humidity_update`
 
+### OCHRE Parity Drift Breakdown
+
+Use the dedicated diagnostics script to generate aligned HARES-vs-OCHRE
+timeseries, ranked channel errors, and observer-derived envelope/equipment
+gain breakdowns:
+
+```bash
+UV_CACHE_DIR=/tmp/uvcache MPLCONFIGDIR=/tmp/mplconfig \
+uv run --no-sync --group ochre python tests/python/parity_diagnostics.py \
+  --fixture tests/fixtures/parity/cz4a_ashp_hpwh \
+  --out-dir /tmp/parity_diag_ashp
+```
+
+Artifacts include:
+- `channel_metrics.csv` (MAE/RMSE/bias by mapped channel)
+- `aligned_series.csv` (aligned OCHRE/HARES/diff timeseries)
+- `hares_observer_components.csv` (observer gains and equipment thermal sums)
+- `timeseries_overlay.png`, `channel_differences.png`,
+  `hares_observer_envelope_and_equipment.png`
+
+Observer contract for this workflow: envelope gain keys are read directly from
+`StepSnapshot.post_solvers` (flattened shape), not from a nested
+`envelope_gains` object.
+
+### OCHRE Parity Drift (HVAC)
+
+When parity fails but simulation status is healthy, debug from output contracts
+first, then physics.
+
+1. Validate output schema level:
+   - Runtime state fields (`Setpoint (C)`, `Capacity (W)`, `COP (-)`) require
+     high verbosity (`>= 8`) and must not be asserted at low verbosity fixtures.
+2. Run ASHP peak parity oracle:
+   - `cargo test -p hares-core --test alignment_oracles_regressions ochre_ashp_fixture_peak_hvac_power_aligns -- --nocapture`
+3. Dump peak-row runtime channels:
+   - `cargo test -p hares-core --test alignment_oracles_regressions debug_ashp_peak_columns_observe -- --ignored --nocapture`
+4. Dump channel-level timestep deltas (HARES vs reference):
+   - `cargo test -p hares-core --test alignment_oracles_regressions debug_ashp_channel_delta_report -- --ignored --nocapture`
+
+These diagnostics separate two failure classes:
+- Output/telemetry wiring defects (columns missing, all zeros, wrong verbosity gate).
+- Physics/control mismatches (peaks, MAE/RMSE drift with correctly populated channels).
+
+### Output Contract Guardrails
+
+For per-equipment columns in recorder output (`Dwelling::record_step`):
+
+- `Setpoint (C)` must come from telemetry setpoint keys, not defaults.
+- `SOC (-)` must come from `CoreOutput.state.soc`.
+- `COP (-)` must come from equipment telemetry COP key.
+- Capacity-like columns must use physically meaningful telemetry/state values only
+  (no synthetic fallback constants).
+
 ---
 
 ## Source Files
