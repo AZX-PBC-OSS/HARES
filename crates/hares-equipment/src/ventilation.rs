@@ -62,6 +62,38 @@ impl EquipmentTypedConfig for VentilationConfig {
     }
 }
 
+impl VentilationConfig {
+    /// Validate fields for physical plausibility.
+    pub fn validate(&self) -> crate::Result<()> {
+        if !self.flow_rate_m3_s.is_finite() || self.flow_rate_m3_s < 0.0 {
+            return Err(HaresError::Equipment(
+                "ventilation flow_rate_m3_s must be finite and >= 0".to_string(),
+            ));
+        }
+        if let Some(power) = self.fan_power_w {
+            if !power.is_finite() || power < 0.0 {
+                return Err(HaresError::Equipment(
+                    "ventilation fan_power_w must be finite and >= 0".to_string(),
+                ));
+            }
+        }
+        for (name, val) in [
+            ("sensible_effectiveness", self.sensible_effectiveness),
+            ("latent_effectiveness", self.latent_effectiveness),
+            ("defrost_effectiveness_fraction", self.defrost_effectiveness_fraction),
+        ] {
+            if let Some(v) = val {
+                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                    return Err(HaresError::Equipment(format!(
+                        "ventilation {name} must be finite and within [0, 1]"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
 const KEY_ZONE_ID: &str = "zone_id";
 const KEY_FAN_POWER_W: &str = "fan_power_w";
@@ -956,5 +988,77 @@ mod tests {
             "half-schedule should halve electrical draw: got {elec_half}, expected {}",
             elec_full * 0.5
         );
+    }
+
+    // VentilationConfig typed round-trip and validation tests
+
+    fn minimal_ventilation_config() -> VentilationConfig {
+        VentilationConfig {
+            flow_rate_m3_s: 0.035,
+            fan_power_w: None,
+            sensible_effectiveness: None,
+            latent_effectiveness: None,
+            bypass_temp_min_c: None,
+            bypass_temp_max_c: None,
+            defrost_temp_c: None,
+            defrost_effectiveness_fraction: None,
+            ventilation_type: None,
+            schedule_source: None,
+            schedule_constant: None,
+        }
+    }
+
+    #[test]
+    fn ventilation_config_round_trips_via_equipment_config() {
+        let cfg = minimal_ventilation_config();
+        let ec = EquipmentConfig::from_typed(
+            "test_vent".to_string(),
+            "VentilationFan".to_string(),
+            cfg.clone(),
+        )
+        .unwrap();
+        assert!(ec.is_typed());
+        let recovered: VentilationConfig = ec.typed().unwrap();
+        assert_eq!(recovered.flow_rate_m3_s, cfg.flow_rate_m3_s);
+    }
+
+    #[test]
+    fn ventilation_config_rejects_unknown_fields() {
+        let json = serde_json::json!({
+            "flow_rate_m3_s": 0.035,
+            "mystery_key": 99
+        });
+        let ec = EquipmentConfig {
+            name: "vent".to_string(),
+            ochre_class: "VentilationFan".to_string(),
+            payload: ConfigPayload::Typed {
+                type_name: "VentilationFan".to_string(),
+                version: 1,
+                data: json,
+            },
+        };
+        let result: crate::Result<VentilationConfig> = ec.typed();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn ventilation_config_validate_rejects_negative_flow_rate() {
+        let mut cfg = minimal_ventilation_config();
+        cfg.flow_rate_m3_s = -0.01;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn ventilation_config_validate_rejects_out_of_range_effectiveness() {
+        let mut cfg = minimal_ventilation_config();
+        cfg.sensible_effectiveness = Some(1.5);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn ventilation_config_validate_passes_for_valid_config() {
+        let cfg = minimal_ventilation_config();
+        assert!(cfg.validate().is_ok());
     }
 }

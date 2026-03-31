@@ -60,6 +60,52 @@ impl EquipmentTypedConfig for GeneratorConfig {
     }
 }
 
+impl GeneratorConfig {
+    /// Validate fields for physical plausibility.
+    pub fn validate(&self) -> crate::Result<()> {
+        if !self.rated_power_kw.is_finite() || self.rated_power_kw <= 0.0 {
+            return Err(HaresError::Equipment(
+                "generator rated_power_kw must be finite and > 0".to_string(),
+            ));
+        }
+        for (name, val) in [
+            ("eta_electric", self.eta_electric),
+            ("eta_thermal", self.eta_thermal),
+        ] {
+            if let Some(v) = val {
+                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                    return Err(HaresError::Equipment(format!(
+                        "generator {name} must be finite and within [0, 1]"
+                    )));
+                }
+            }
+        }
+        if let (Some(eta_e), Some(eta_t)) = (self.eta_electric, self.eta_thermal) {
+            if eta_e + eta_t > 1.0 + f64::EPSILON {
+                return Err(HaresError::Equipment(
+                    "generator eta_electric + eta_thermal must not exceed 1.0".to_string(),
+                ));
+            }
+        }
+        if let Some(ramp) = self.delta_kw_per_s {
+            if !ramp.is_finite() || ramp <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "generator delta_kw_per_s must be finite and > 0".to_string(),
+                ));
+            }
+        }
+        if let Some(min_kw) = self.capacity_min_kw {
+            if !min_kw.is_finite() || min_kw < 0.0 || min_kw > self.rated_power_kw {
+                return Err(HaresError::Equipment(
+                    "generator capacity_min_kw must be finite, >= 0, and <= rated_power_kw"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Config keys
 // ---------------------------------------------------------------------------
@@ -2386,5 +2432,82 @@ mod tests {
             "FuelCell at cr=0.25 should use curve efficiency (eta≈0.475), got {eta}. \
              This indicates the default is Constant rather than Curve."
         );
+    }
+
+    // GeneratorConfig typed round-trip and validation tests
+
+    fn minimal_generator_config() -> GeneratorConfig {
+        GeneratorConfig {
+            rated_power_kw: 10.0,
+            eta_electric: None,
+            eta_thermal: None,
+            efficiency_type: None,
+            delta_kw_per_s: None,
+            capacity_min_kw: None,
+            grid_import_limit_kw: None,
+            export_limit_kw: None,
+            loop_id: None,
+            flow_rate_kg_s: None,
+            supply_temp_c: None,
+            return_temp_c: None,
+        }
+    }
+
+    #[test]
+    fn generator_config_round_trips_via_equipment_config() {
+        let cfg = minimal_generator_config();
+        let ec = EquipmentConfig::from_typed(
+            "test_gen".to_string(),
+            "GasGenerator".to_string(),
+            cfg.clone(),
+        )
+        .unwrap();
+        assert!(ec.is_typed());
+        let recovered: GeneratorConfig = ec.typed().unwrap();
+        assert_eq!(recovered.rated_power_kw, cfg.rated_power_kw);
+    }
+
+    #[test]
+    fn generator_config_rejects_unknown_fields() {
+        use crate::config::ConfigPayload;
+        let json = serde_json::json!({
+            "rated_power_kw": 10.0,
+            "mystery_field": "oops"
+        });
+        let ec = EquipmentConfig {
+            name: "gen".to_string(),
+            ochre_class: "GasGenerator".to_string(),
+            payload: ConfigPayload::Typed {
+                type_name: "GasGenerator".to_string(),
+                version: 1,
+                data: json,
+            },
+        };
+        let result: crate::Result<GeneratorConfig> = ec.typed();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn generator_config_validate_rejects_zero_rated_power() {
+        let mut cfg = minimal_generator_config();
+        cfg.rated_power_kw = 0.0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn generator_config_validate_rejects_efficiency_sum_exceeding_1() {
+        let mut cfg = minimal_generator_config();
+        cfg.eta_electric = Some(0.7);
+        cfg.eta_thermal = Some(0.5);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn generator_config_validate_passes_for_valid_chp() {
+        let mut cfg = minimal_generator_config();
+        cfg.eta_electric = Some(0.35);
+        cfg.eta_thermal = Some(0.45);
+        assert!(cfg.validate().is_ok());
     }
 }

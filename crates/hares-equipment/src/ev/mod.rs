@@ -22,6 +22,7 @@ mod config;
 mod telemetry;
 
 pub use charging_curve::{ChargingCurveLut, parse_pybamm_lut_csv};
+pub use config::EvConfig;
 
 use checkpoint::EvCheckpoint;
 use config::*;
@@ -733,6 +734,117 @@ impl Ev {
     }
 }
 
+impl Ev {
+    fn init_typed(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        let c: EvConfig = config.typed()?;
+        c.validate()?;
+
+        self.battery_capacity_kwh = c.battery_capacity_kwh;
+
+        let level_str = c.charging_level.as_deref().unwrap_or("L2");
+        self.charging_level = match level_str.trim().replace(' ', "").to_ascii_lowercase().as_str() {
+            "l1" | "level1" => ChargingLevel::L1,
+            _ => ChargingLevel::L2,
+        };
+
+        self.charging_efficiency = c.charging_efficiency.unwrap_or(DEFAULT_EFFICIENCY);
+        self.l1_current_a = c.l1_current_a;
+        self.l1_voltage_v = c.l1_voltage_v.unwrap_or(DEFAULT_L1_VOLTAGE_V);
+        self.soc_max = c.soc_max.unwrap_or(DEFAULT_SOC_MAX);
+
+        // Derive rated power from explicit max_charging_power_kw or level defaults.
+        self.rated_power_kw = if let Some(power_kw) = c.max_charging_power_kw {
+            match self.charging_level {
+                ChargingLevel::L1 => power_kw.clamp(L1_MIN_POWER_KW, L1_MAX_POWER_KW),
+                ChargingLevel::L2 => power_kw.clamp(L2_MIN_POWER_KW, L2_MAX_POWER_KW),
+            }
+        } else {
+            match self.charging_level {
+                ChargingLevel::L1 => L1_CHARGING_POWER_KW,
+                ChargingLevel::L2 => L2_MAX_POWER_KW,
+            }
+        };
+
+        self.min_charge_temp_c = c.min_charge_temp_c.unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
+        self.full_power_temp_c = c.full_power_temp_c.unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
+        self.heater_power_w = c.heater_power_w.unwrap_or(DEFAULT_HEATER_POWER_W);
+        self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
+        self.thermal_mass_j_per_k = c.thermal_mass_j_per_k.unwrap_or(DEFAULT_THERMAL_MASS_J_PER_K);
+        self.ua_w_per_k = c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K);
+
+        self.v2l_enabled = c.v2l_enabled.unwrap_or(false);
+        self.v2l_soc_reserve = c.v2l_soc_reserve.unwrap_or(DEFAULT_V2L_SOC_RESERVE);
+        self.v2l_max_discharge_kw = c.v2l_max_discharge_kw.unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW);
+        self.v2g_enabled = c.v2g_enabled.unwrap_or(false);
+        self.v2g_soc_reserve = c.v2g_soc_reserve.unwrap_or(DEFAULT_V2G_SOC_RESERVE);
+        self.v2g_max_discharge_kw = c.v2g_max_discharge_kw.unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW);
+
+        self.chemistry = c
+            .chemistry
+            .as_deref()
+            .and_then(|s| s.parse::<BatteryChemistry>().ok())
+            .unwrap_or(BatteryChemistry::Nmc);
+        if !self.custom_ocv {
+            self.ocv_table = OcvTable::for_chemistry(self.chemistry);
+        }
+        if !self.custom_u_neg {
+            self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
+        }
+
+        self.fuel_economy_kwh_per_mi = c
+            .fuel_economy_kwh_per_mi
+            .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
+        self.ready_soc = c.ready_soc.unwrap_or(self.soc_max);
+        self.power_limit_kw = c.power_limit_kw;
+
+        self.connection_state = c
+            .initial_connection_state
+            .as_deref()
+            .and_then(|s| s.parse::<EvConnectionState>().ok())
+            .unwrap_or(EvConnectionState::HomePluggedIn);
+
+        let initial_soc = c.initial_soc.unwrap_or(DEFAULT_SOC);
+        self.soc = initial_soc.clamp(0.0, 1.0);
+
+        self.battery_temp_c = c
+            .battery_temp_c
+            .unwrap_or(env.weather.outdoor_temp_c);
+
+        if let Some(strat_str) = c.charging_strategy.as_deref() {
+            self.charging_strategy = serde_json::from_str(strat_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid charging_strategy: {e}")))?;
+        } else {
+            self.charging_strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
+        }
+
+        if let Some(policy_str) = c.plug_in_policy.as_deref() {
+            self.plug_in_policy = serde_json::from_str(policy_str)
+                .map_err(|e| HaresError::Equipment(format!("invalid plug_in_policy: {e}")))?;
+        } else {
+            self.plug_in_policy = PlugInPolicy::Always;
+        }
+
+        // Reset transient state
+        self.charging_curve_lut = None;
+        self.ready_by_hour = None;
+        self.ready_by_soc = None;
+        self.away_charger_power_kw = 0.0;
+        self.away_charge_actual_kw = 0.0;
+        self.heater_active = false;
+        self.active_power_kw = 0.0;
+        self.v2l_active = false;
+        self.v2l_power_kw = 0.0;
+        self.power_setpoint_kw = None;
+        self.soc_target = None;
+        self.soc_target_min = None;
+        self.soc_target_max = None;
+        self.telemetry = default_telemetry(self.charging_level);
+        self.write_telemetry();
+
+        Ok(())
+    }
+}
+
 impl Equipment for Ev {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
@@ -743,6 +855,10 @@ impl Equipment for Ev {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
+        if config.is_typed() {
+            return self.init_typed(config, env);
+        }
+
         let explicit_temp = config.get_f64(KEY_BATTERY_TEMP_C);
         self.init_from_config(config)?;
 

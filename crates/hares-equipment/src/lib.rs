@@ -48,6 +48,7 @@ pub enum ActorSeed {
 pub use battery::{BatteryConfig, BatteryLutType, OcvTable, UNegTable};
 pub use config::{ConfigPayload, EquipmentConfig, EquipmentTypedConfig};
 pub use ev::ChargingCurveLut;
+pub use ev::EvConfig;
 pub use generator::GeneratorConfig;
 pub use pv::PvConfig;
 pub use ventilation::VentilationConfig;

@@ -2515,3 +2515,126 @@ fn ev_departure_at_step_boundary() {
     );
     assert!(ev.soc <= 1.0, "SOC must not exceed 1.0, got {}", ev.soc);
 }
+
+// EvConfig typed round-trip and validation tests
+
+fn minimal_ev_config() -> EvConfig {
+    EvConfig {
+        battery_capacity_kwh: 75.0,
+        charging_level: None,
+        max_charging_power_kw: None,
+        charging_efficiency: None,
+        l1_current_a: None,
+        l1_voltage_v: None,
+        soc_max: None,
+        initial_soc: None,
+        battery_temp_c: None,
+        min_charge_temp_c: None,
+        full_power_temp_c: None,
+        heater_power_w: None,
+        heater_threshold_c: None,
+        thermal_mass_j_per_k: None,
+        ua_w_per_k: None,
+        v2l_enabled: None,
+        v2l_soc_reserve: None,
+        v2l_max_discharge_kw: None,
+        v2g_enabled: None,
+        v2g_soc_reserve: None,
+        v2g_max_discharge_kw: None,
+        chemistry: None,
+        fuel_economy_kwh_per_mi: None,
+        ready_soc: None,
+        charging_strategy: None,
+        plug_in_policy: None,
+        power_limit_kw: None,
+        initial_connection_state: None,
+    }
+}
+
+#[test]
+fn ev_config_round_trips_via_equipment_config() {
+    let cfg = minimal_ev_config();
+    let ec = crate::EquipmentConfig::from_typed(
+        "test_ev".to_string(),
+        "EV".to_string(),
+        cfg.clone(),
+    )
+    .unwrap();
+    assert!(ec.is_typed());
+    let recovered: EvConfig = ec.typed().unwrap();
+    assert_eq!(recovered.battery_capacity_kwh, cfg.battery_capacity_kwh);
+}
+
+#[test]
+fn ev_config_rejects_unknown_fields() {
+    use crate::config::ConfigPayload;
+    let json = serde_json::json!({
+        "battery_capacity_kwh": 75.0,
+        "unexpected_key": "bad"
+    });
+    let ec = crate::EquipmentConfig {
+        name: "ev".to_string(),
+        ochre_class: "EV".to_string(),
+        payload: ConfigPayload::Typed {
+            type_name: "EV".to_string(),
+            version: 1,
+            data: json,
+        },
+    };
+    let result: crate::Result<EvConfig> = ec.typed();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("unknown field"));
+}
+
+#[test]
+fn ev_config_validate_rejects_zero_capacity() {
+    let mut cfg = minimal_ev_config();
+    cfg.battery_capacity_kwh = 0.0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn ev_config_validate_rejects_out_of_range_soc_max() {
+    let mut cfg = minimal_ev_config();
+    cfg.soc_max = Some(1.5);
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn ev_config_validate_rejects_out_of_range_efficiency() {
+    let mut cfg = minimal_ev_config();
+    cfg.charging_efficiency = Some(1.5);
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn ev_config_validate_passes_for_valid_config() {
+    let cfg = minimal_ev_config();
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn ev_init_typed_sets_fields_from_ev_config() {
+    let cfg = EvConfig {
+        battery_capacity_kwh: 60.0,
+        charging_level: Some("L2".to_string()),
+        max_charging_power_kw: Some(7.2),
+        charging_efficiency: Some(0.92),
+        initial_soc: Some(0.5),
+        ..minimal_ev_config()
+    };
+    let ec = crate::EquipmentConfig::from_typed(
+        "test_ev".to_string(),
+        "EV".to_string(),
+        cfg,
+    )
+    .unwrap();
+    let mut ev = Ev::new(ec.clone());
+    let env = sample_env();
+    ev.init(&ec, &env).unwrap();
+    assert_eq!(ev.battery_capacity_kwh, 60.0);
+    assert!((ev.charging_efficiency - 0.92).abs() < 1e-9);
+    assert!((ev.soc - 0.5).abs() < 1e-9);
+    assert_eq!(ev.charging_level, ChargingLevel::L2);
+    assert!((ev.rated_power_kw - 7.2).abs() < 1e-9);
+}

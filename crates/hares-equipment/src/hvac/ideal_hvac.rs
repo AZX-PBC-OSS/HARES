@@ -24,7 +24,10 @@ use super::thermostat::{
 };
 use super::{
     RuntimeSetpointOverride, ScheduleSetpoints, ThermalSetpoints,
-    helpers::{equipment_id_from_config, first_f64, operating_mode_code, zone_id_from_config},
+    helpers::{
+        equipment_id_from_config, first_f64, operating_mode_code, parse_fuel_type,
+        zone_id_from_config,
+    },
 };
 
 pub struct IdealHvac {
@@ -52,6 +55,10 @@ pub struct IdealHvac {
     use_ideal_cached: bool,
     load_fraction: f64,
     last_sim_time: Option<DateTime<FixedOffset>>,
+    /// Cooling sensible heat ratio (fraction of capacity that is sensible).
+    /// Used to split ideal cooling capacity into sensible and latent components.
+    /// Defaults to 1.0 (no latent); set from config "shr" key.
+    shr: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -115,6 +122,7 @@ impl IdealHvac {
             use_ideal_cached: true,
             load_fraction: 1.0,
             last_sim_time: None,
+            shr: 1.0,
         }
     }
 
@@ -378,6 +386,13 @@ impl Equipment for IdealHvac {
             self.is_variable_speed = n >= 4.0;
         }
 
+        if let Some(shr) = first_f64(config, &["shr", "sensible_heat_ratio"]) {
+            self.shr = shr.clamp(0.0, 1.0);
+        }
+        if let Some(fuel) = parse_fuel_type(config.get_str("fuel")) {
+            self.descriptor.fuel = fuel;
+        }
+
         self.heating_setpoint_source = build_setpoint_source(config, "heating");
         self.cooling_setpoint_source = build_setpoint_source(config, "cooling");
 
@@ -433,16 +448,27 @@ impl Equipment for IdealHvac {
             ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction,
         };
 
+        // Update end_use to reflect actual operating mode (D4: was hardcoded to HVAC_HEATING).
+        self.descriptor.end_use = if capacity_w >= 0.0 {
+            EndUse::HVAC_HEATING
+        } else {
+            EndUse::HVAC_COOLING
+        };
+
         if capacity_w.abs() > 0.0 {
-            let category = if capacity_w > 0.0 {
-                ThermalCategory::HvacHeating
+            let (sensible_w, latent_w, category) = if capacity_w > 0.0 {
+                // Heating: all sensible, no latent.
+                (capacity_w, 0.0, ThermalCategory::HvacHeating)
             } else {
-                ThermalCategory::HvacCooling
+                // Cooling: split by SHR. Latent removes moisture (negative = cooling).
+                let sensible = capacity_w * self.shr;
+                let latent = capacity_w * (1.0 - self.shr);
+                (sensible, latent, ThermalCategory::HvacCooling)
             };
             ports.accumulate(&PortContribution::Thermal {
                 zone: self.zone_id,
-                sensible_gain_w: capacity_w,
-                latent_gain_w: 0.0,
+                sensible_gain_w: sensible_w,
+                latent_gain_w: latent_w,
                 category,
             })?;
         }

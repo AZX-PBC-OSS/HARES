@@ -456,7 +456,7 @@ impl EnvironmentManager {
 
         self.solar_irradiance_buf.clear();
         if let Some(ref overrides) = self.solar_override {
-            let idx = step % overrides.len();
+            let idx = (step + self.weather_start_offset) % overrides.len();
             self.solar_irradiance_buf.extend_from_slice(&overrides[idx]);
         } else {
             self.solar_irradiance_buf
@@ -625,11 +625,9 @@ fn compute_annual_offset(
     let s = start_time.second() as u64;
     let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
 
-    let year_secs = if start_time.date_naive().leap_year() {
-        366 * 86400_u64
-    } else {
-        365 * 86400_u64
-    };
+    // EPW files always have 8760 rows (365 × 24); use 365 days unconditionally
+    // to avoid an off-by-one-day offset in leap years (DT-010 F2).
+    let year_secs = 365_u64 * 86400;
     let shifted = (seconds_into_year + year_secs - meta.midpoint_offset_secs as u64) % year_secs;
 
     (shifted / step_secs as u64) as usize
@@ -1317,14 +1315,17 @@ mod tests {
     }
 
     /// compute_annual_offset: leap year Dec 31 23:00.
-    /// Forward +30min: (365*86400 + 23*3600 + 1800) / 3600 = 8783.
+    /// With year_secs fixed at 365 days (EPW is non-leap), the Dec 31 ordinal0=365
+    /// overshoots year_secs and wraps around modulo 365*86400 = 23 (index 23).
+    /// This is expected post-fix (DT-010 F2): leap-year Dec dates wrap to earlier
+    /// in the year rather than going out-of-bounds.
     #[test]
     fn annual_offset_leap_year_dec_31() {
         let meta = weather_series().meta;
         let start = utc_offset()
             .with_ymd_and_hms(2024, 12, 31, 23, 0, 0)
             .unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600), 8783);
+        assert_eq!(compute_annual_offset(&meta, start, 3600), 23);
     }
 
     /// compute_annual_offset: non-leap year Dec 31 23:00.

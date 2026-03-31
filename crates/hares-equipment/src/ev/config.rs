@@ -1,6 +1,8 @@
 use hares_types::HaresError;
+use serde::{Deserialize, Serialize};
 
 use crate::EquipmentConfig;
+use crate::config::EquipmentTypedConfig;
 
 use hares_types::ChargingLevel;
 
@@ -151,4 +153,172 @@ pub(super) fn validate_optional_hour(field_name: &str, value: Option<f64>) -> cr
         )));
     }
     Ok(())
+}
+
+/// Typed configuration for an electric vehicle charger.
+///
+/// All power values are in kW, energy in kWh, temperatures in °C.
+/// `charging_efficiency` is the AC→DC onboard charger efficiency as a fraction in (0, 1].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvConfig {
+    /// Battery pack capacity (kWh).
+    pub battery_capacity_kwh: f64,
+    /// EVSE charging level: "L1" or "L2".
+    pub charging_level: Option<String>,
+    /// Maximum charging power (kW). Clamped to level-appropriate bounds.
+    ///
+    /// Callers should always set this field explicitly. The fallback default
+    /// (11.5 kW for L2) is not vehicle-size-aware and will overstate charging
+    /// capacity for most residential vehicles.
+    pub max_charging_power_kw: Option<f64>,
+    /// AC→DC onboard charger efficiency [0, 1].
+    pub charging_efficiency: Option<f64>,
+    /// L1 circuit current (A). Only used when charging_level = "L1".
+    pub l1_current_a: Option<f64>,
+    /// L1 circuit voltage (V). Defaults to 120 V.
+    pub l1_voltage_v: Option<f64>,
+    /// Maximum state-of-charge for regular charging [0, 1].
+    pub soc_max: Option<f64>,
+    /// Initial SOC [0, 1].
+    pub initial_soc: Option<f64>,
+    /// Initial battery temperature (°C). Defaults to outdoor ambient.
+    pub battery_temp_c: Option<f64>,
+    /// Minimum temperature for charging (°C).
+    pub min_charge_temp_c: Option<f64>,
+    /// Temperature above which full charge power is available (°C).
+    pub full_power_temp_c: Option<f64>,
+    /// Battery heater power (W).
+    pub heater_power_w: Option<f64>,
+    /// Temperature threshold to activate battery heater (°C).
+    pub heater_threshold_c: Option<f64>,
+    /// Battery pack thermal mass (J/K).
+    pub thermal_mass_j_per_k: Option<f64>,
+    /// Pack-to-ambient heat transfer coefficient (W/K).
+    pub ua_w_per_k: Option<f64>,
+    /// Enable vehicle-to-load (V2L) discharge.
+    pub v2l_enabled: Option<bool>,
+    /// Minimum SOC to retain for V2L [0, 1].
+    pub v2l_soc_reserve: Option<f64>,
+    /// Maximum V2L discharge power (kW).
+    pub v2l_max_discharge_kw: Option<f64>,
+    /// Enable vehicle-to-grid (V2G) discharge.
+    pub v2g_enabled: Option<bool>,
+    /// Minimum SOC to retain for V2G [0, 1].
+    pub v2g_soc_reserve: Option<f64>,
+    /// Maximum V2G discharge power (kW).
+    pub v2g_max_discharge_kw: Option<f64>,
+    /// Battery chemistry string, e.g. "NMC".
+    pub chemistry: Option<String>,
+    /// Fuel economy (kWh/mile) for range estimation.
+    pub fuel_economy_kwh_per_mi: Option<f64>,
+    /// SOC target when the vehicle must be ready.
+    pub ready_soc: Option<f64>,
+    /// Charging strategy JSON blob.
+    pub charging_strategy: Option<String>,
+    /// Plug-in policy JSON blob.
+    pub plug_in_policy: Option<String>,
+    /// Hard power limit from external source (kW).
+    pub power_limit_kw: Option<f64>,
+    /// Initial connection state string.
+    pub initial_connection_state: Option<String>,
+}
+
+impl EquipmentTypedConfig for EvConfig {
+    fn equipment_type_name() -> &'static str {
+        "EV"
+    }
+}
+
+impl EvConfig {
+    /// Validate all fields for physical plausibility.
+    pub fn validate(&self) -> crate::Result<()> {
+        if !self.battery_capacity_kwh.is_finite() || self.battery_capacity_kwh <= 0.0 {
+            return Err(HaresError::Equipment(
+                "EV battery_capacity_kwh must be finite and > 0".to_string(),
+            ));
+        }
+        if let Some(eff) = self.charging_efficiency {
+            if eff <= 0.0 || eff > 1.0 || !eff.is_finite() {
+                return Err(HaresError::Equipment(
+                    "EV charging_efficiency must be finite and within (0, 1]".to_string(),
+                ));
+            }
+        }
+        if let Some(soc_max) = self.soc_max {
+            if !soc_max.is_finite() || !(0.0..=1.0).contains(&soc_max) {
+                return Err(HaresError::Equipment(
+                    "EV soc_max must be finite and within [0, 1]".to_string(),
+                ));
+            }
+        }
+        if let Some(soc) = self.initial_soc {
+            if !soc.is_finite() || !(0.0..=1.0).contains(&soc) {
+                return Err(HaresError::Equipment(
+                    "EV initial_soc must be finite and within [0, 1]".to_string(),
+                ));
+            }
+        }
+        if let Some(current) = self.l1_current_a {
+            if !current.is_finite() || current <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "EV l1_current_a must be finite and > 0".to_string(),
+                ));
+            }
+        }
+        if let Some(voltage) = self.l1_voltage_v {
+            if !voltage.is_finite() || voltage <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "EV l1_voltage_v must be finite and > 0".to_string(),
+                ));
+            }
+        }
+        if let Some(power_w) = self.heater_power_w {
+            if !power_w.is_finite() || power_w < 0.0 {
+                return Err(HaresError::Equipment(
+                    "EV heater_power_w must be finite and >= 0".to_string(),
+                ));
+            }
+        }
+        if let Some(mass) = self.thermal_mass_j_per_k {
+            if !mass.is_finite() || mass <= 0.0 {
+                return Err(HaresError::Equipment(
+                    "EV thermal_mass_j_per_k must be finite and > 0".to_string(),
+                ));
+            }
+        }
+        if let Some(ua) = self.ua_w_per_k {
+            if !ua.is_finite() || ua < 0.0 {
+                return Err(HaresError::Equipment(
+                    "EV ua_w_per_k must be finite and >= 0".to_string(),
+                ));
+            }
+        }
+        for (name, val) in [
+            ("v2l_soc_reserve", self.v2l_soc_reserve),
+            ("v2g_soc_reserve", self.v2g_soc_reserve),
+            ("ready_soc", self.ready_soc),
+        ] {
+            if let Some(v) = val {
+                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                    return Err(HaresError::Equipment(format!(
+                        "EV {name} must be finite and within [0, 1]"
+                    )));
+                }
+            }
+        }
+        for (name, val) in [
+            ("v2l_max_discharge_kw", self.v2l_max_discharge_kw),
+            ("v2g_max_discharge_kw", self.v2g_max_discharge_kw),
+        ] {
+            if let Some(v) = val {
+                if !v.is_finite() || v < 0.0 {
+                    return Err(HaresError::Equipment(format!(
+                        "EV {name} must be finite and >= 0"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
