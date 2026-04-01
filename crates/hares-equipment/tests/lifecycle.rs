@@ -814,6 +814,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
                 conversion_efficiency: None,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             },
         ),
         "Resistance Water Heater" | "Electric Resistance Water Heater" => typed_alias_config(
@@ -844,6 +846,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
                 jacket_r_value_m2_k_w: None,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             },
         ),
         "Tankless Water Heater" => typed_alias_config(
@@ -927,6 +931,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 zone_type: None,
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
+                fixture_delivery_temp_c: None,
             },
         ),
         "Battery" => typed_alias_config(

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-use super::tank::{StratifiedTank, StratifiedTankConfig};
+use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
     WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
     weighted_average_tank_temp,
@@ -97,6 +97,9 @@ pub struct GasWH {
     ctrl_load_fraction: f64,
     // --- ZIP voltage model ---
     zip: WaterHeaterZip,
+    // --- TMV tempered draw ---
+    fixture_delivery_temp_c: f64,
+    hot_draw_temp_c: Option<f64>,
 }
 
 impl GasWH {
@@ -187,6 +190,8 @@ impl GasWH {
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
             zip: WaterHeaterZip::default(),
+            fixture_delivery_temp_c: 40.6,
+            hot_draw_temp_c: None,
         }
     }
 
@@ -304,6 +309,8 @@ impl GasWH {
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
         self.zip = WaterHeaterZip::default();
+        self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
+        self.hot_draw_temp_c = c.hot_draw_temp_c;
 
         self.flue_loss_fraction = c.flue_loss_fraction.unwrap_or(DEFAULT_FLUE_LOSS_FRACTION);
         self.burner_efficiency_constant = c.conversion_efficiency.unwrap_or_else(|| {
@@ -457,12 +464,21 @@ impl Equipment for GasWH {
         );
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
         let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
-        let draw_volume_m3 = total_draw_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
-        let draw = self.tank.step(
+        let hot_draw_temp_c = self.hot_draw_temp_c.unwrap_or(self.setpoint_c);
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: self.fixture_delivery_temp_c,
+            hot_draw_temp_c,
+            setpoint_temp_c: self.setpoint_c,
+        };
+        let tempered_flow_m3_s = draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3;
+        let hot_flow_m3_s = appliance_demand_kg_s / WATER_DENSITY_KG_PER_M3;
+        let draw = self.tank.step_tempered(
             ambient_c,
-            draw_volume_m3,
+            tempered_flow_m3_s,
+            hot_flow_m3_s,
             mains_temp_c,
             &heat_injections,
+            tmv,
             dt,
         )?;
 
@@ -523,6 +539,7 @@ impl Equipment for GasWH {
         self.telemetry.set(tk::SKIN_LOSS_W, skin_loss_to_zone_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
+        self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(
             tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {
@@ -727,6 +744,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::FLUE_LOSS_W, 0.0);
     telemetry.insert(tk::FAN_ELECTRIC_W, 0.0);
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
+    telemetry.insert(tk::UNMET_LOAD_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
 }
@@ -777,6 +795,11 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
             unit: "kg/s".to_string(),
             description: "Domestic hot water draw flow rate".to_string(),
+        },
+        TelemetryField {
+            name: tk::UNMET_LOAD_W.to_string(),
+            unit: "W".to_string(),
+            description: "Unmet fixture load when tank below delivery temp".to_string(),
         },
         TelemetryField {
             name: tk::OPERATING_MODE.to_string(),
@@ -901,6 +924,8 @@ mod tests {
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
                 conversion_efficiency: None,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             },
         )
     }
@@ -1445,6 +1470,8 @@ mod tests {
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
                 conversion_efficiency: Some(0.80),
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             },
         );
         let mut eq = GasWH::new(cfg.clone());
@@ -1497,6 +1524,8 @@ mod tests {
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
                 conversion_efficiency: Some(eta_c),
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             },
         );
         let mut eq = GasWH::new(cfg.clone());

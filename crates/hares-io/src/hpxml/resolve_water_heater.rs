@@ -121,6 +121,8 @@ pub(super) fn resolve_water_heaters(
                     first_hour_rating_m3,
                     jacket_r_value_m2_k_w,
                     conversion_efficiency,
+                    fixture_delivery_temp_c: None,
+                    hot_draw_temp_c: None,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -151,6 +153,8 @@ pub(super) fn resolve_water_heaters(
                     element_priority_mode: None,
                     max_setpoint_ramp_rate_c_per_min: None,
                     jacket_r_value_m2_k_w,
+                    fixture_delivery_temp_c: None,
+                    hot_draw_temp_c: None,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -227,6 +231,7 @@ pub(super) fn resolve_water_heaters(
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
                     jacket_r_value_m2_k_w,
+                    fixture_delivery_temp_c: None,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }

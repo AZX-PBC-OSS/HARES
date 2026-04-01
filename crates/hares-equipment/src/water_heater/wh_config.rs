@@ -63,6 +63,15 @@ pub struct GasWaterHeaterConfig {
     pub jacket_r_value_m2_k_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversion_efficiency: Option<f64>,
+    /// TMV fixture delivery temperature (°C). When set, `step_tempered` is used
+    /// instead of `step`, mixing hot tank water with cold mains to deliver at
+    /// this temperature. Default: 40.6°C (≈ 105°F) per OCHRE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_delivery_temp_c: Option<f64>,
+    /// Hot-draw delivery temperature (°C) for appliances like dishwashers.
+    /// When `None`, defaults to the tank setpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_draw_temp_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GasWaterHeaterConfig {
@@ -157,6 +166,18 @@ impl GasWaterHeaterConfig {
             0.01,
             1.0,
         )?;
+        check_finite(
+            "gas_wh: fixture_delivery_temp_c",
+            self.fixture_delivery_temp_c,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "gas_wh: hot_draw_temp_c",
+            self.hot_draw_temp_c,
+            0.0,
+            false,
+        )?;
         Ok(())
     }
 }
@@ -190,6 +211,12 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub element_priority_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jacket_r_value_m2_k_w: Option<f64>,
+    /// TMV fixture delivery temperature (°C). Default: 40.6°C (≈ 105°F) per OCHRE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_delivery_temp_c: Option<f64>,
+    /// Hot-draw delivery temperature (°C). When `None`, defaults to tank setpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_draw_temp_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for ElectricResistanceWaterHeaterConfig {
@@ -284,6 +311,18 @@ impl ElectricResistanceWaterHeaterConfig {
         check_finite(
             "resistance_wh: jacket_r_value_m2_k_w",
             self.jacket_r_value_m2_k_w,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "resistance_wh: fixture_delivery_temp_c",
+            self.fixture_delivery_temp_c,
+            0.0,
+            false,
+        )?;
+        check_finite(
+            "resistance_wh: hot_draw_temp_c",
+            self.hot_draw_temp_c,
             0.0,
             false,
         )?;
@@ -426,6 +465,9 @@ pub struct HeatPumpWaterHeaterConfig {
     pub first_hour_rating_m3: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jacket_r_value_m2_k_w: Option<f64>,
+    /// TMV fixture delivery temperature (°C). Default: 40.6°C (≈ 105°F) per OCHRE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_delivery_temp_c: Option<f64>,
 }
 
 impl EquipmentTypedConfig for HeatPumpWaterHeaterConfig {
@@ -536,6 +578,12 @@ impl HeatPumpWaterHeaterConfig {
             0.0,
             false,
         )?;
+        check_finite(
+            "hpwh: fixture_delivery_temp_c",
+            self.fixture_delivery_temp_c,
+            0.0,
+            false,
+        )?;
         Ok(())
     }
 }
@@ -576,6 +624,8 @@ mod tests {
             first_hour_rating_m3: Some(0.2),
             jacket_r_value_m2_k_w: None,
             conversion_efficiency: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         };
         let ec = EquipmentConfig::from_typed(
             "gas".to_string(),
@@ -629,6 +679,8 @@ mod tests {
             max_setpoint_ramp_rate_c_per_min: Some(3.0),
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         };
         let ec = EquipmentConfig::from_typed(
             "resistance".to_string(),
@@ -737,6 +789,7 @@ mod tests {
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
         };
         let ec = EquipmentConfig::from_typed(
             "hpwh".to_string(),

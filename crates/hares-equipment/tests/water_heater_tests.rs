@@ -106,6 +106,8 @@ fn resistance_config(
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         },
     )
 }
@@ -148,6 +150,8 @@ fn gas_config(
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
             conversion_efficiency: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         },
     )
 }
@@ -538,6 +542,8 @@ fn energy_conservation_over_draw_cycle() {
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         },
     );
 
@@ -693,6 +699,8 @@ fn max_tank_temp_safety_limit() {
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         },
     );
 
@@ -907,6 +915,8 @@ fn resistance_config_with_ramp(
             max_setpoint_ramp_rate_c_per_min: Some(ramp_rate_c_per_min),
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         },
     )
 }
@@ -1123,5 +1133,128 @@ fn dr_setpoint_offset_bypasses_ramp() {
     assert_eq!(
         upper_power, 0.0,
         "DR offset should bypass ramp and immediately lower effective setpoint"
+    );
+}
+
+/// TMV reduces draw volume when tank is above fixture delivery temperature.
+/// A 52°C tank with 15°C mains and 40.6°C fixture temp means only a fraction
+/// of the requested flow is drawn from the tank as hot water.
+#[test]
+fn tmv_reduces_draw_volume_for_hot_tank() {
+    let env = make_env(21.0);
+    let fixture_temp_c = 40.6_f64;
+    let mains_temp_c = 15.0_f64;
+    let tank_temp_c = 52.0_f64;
+
+    let cfg = EquipmentConfig::from_typed(
+        "RWH".to_string(),
+        "Resistance Water Heater".to_string(),
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: Some(0.0),
+            setpoint_c: Some(tank_temp_c),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(tank_temp_c),
+            tank_nodes: Some(1),
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.1),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: Some(fixture_temp_c),
+            hot_draw_temp_c: None,
+        },
+    );
+
+    let mut wh = ResistanceWH::new(cfg.clone());
+    wh.init(&cfg, &env).unwrap();
+    let mut ports = PortSlots::from_declarations(wh.ports());
+    wh.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    // With TMV: outlet_est = 52 > fixture_temp 40.6 → vol_ratio = (40.6 - 15) / (52 - 15) ≈ 0.692
+    // So less hot water is drawn from the tank. The tank should cool less than if
+    // the full draw volume were taken.
+    let tank_temp_after = wh
+        .telemetry()
+        .get("tank_avg_temp_c")
+        .expect("tank_avg_temp_c");
+    // With TMV reducing the actual draw, tank should stay warmer than if full draw happened.
+    // The full draw of 0.1 kg/s for 60s = 6 kg = 0.006 m³ would cool significantly.
+    // TMV ratio ~0.692 means only ~4.2 kg drawn instead of 6 kg.
+    assert!(
+        tank_temp_after > 49.0,
+        "TMV should reduce draw; tank temp {tank_temp_after:.2} should stay above 49°C"
+    );
+}
+
+/// When tank temperature is below fixture delivery temp, TMV draws full volume
+/// and reports unmet load.
+#[test]
+fn tmv_unmet_load_when_tank_cold() {
+    let env = make_env(21.0);
+    let fixture_temp_c = 40.6_f64;
+    let tank_temp_c = 30.0_f64;
+
+    let cfg = EquipmentConfig::from_typed(
+        "RWH".to_string(),
+        "Resistance Water Heater".to_string(),
+        ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: Some(0.0),
+            setpoint_c: Some(52.0),
+            deadband_c: Some(2.0),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(tank_temp_c),
+            tank_nodes: Some(1),
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.1),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: Some(fixture_temp_c),
+            hot_draw_temp_c: None,
+        },
+    );
+
+    let mut wh = ResistanceWH::new(cfg.clone());
+    wh.init(&cfg, &env).unwrap();
+    let mut ports = PortSlots::from_declarations(wh.ports());
+    wh.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    // Tank at 30°C < fixture 40.6°C → full draw volume used, unmet load > 0.
+    let unmet = wh
+        .telemetry()
+        .get("unmet_load_w")
+        .expect("unmet_load_w telemetry");
+    assert!(
+        unmet > 0.0,
+        "cold tank should report unmet load, got {unmet:.2}"
     );
 }

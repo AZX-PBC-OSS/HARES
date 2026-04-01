@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
-use super::tank::{StratifiedTank, StratifiedTankConfig};
+use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::{
     WaterHeaterZip, hysteresis_call, parse_usize, resolve_storage_step_inputs,
     weighted_average_tank_temp,
@@ -94,6 +94,11 @@ pub struct ResistanceWH {
     // --- Setpoint ramp rate ---
     target_setpoint_c: f64,
     setpoint_ramp_rate_c_per_s: Option<f64>,
+    // --- TMV tempered draw ---
+    /// Fixture delivery temperature for TMV blending (°C). Default 40.6°C.
+    fixture_delivery_temp_c: f64,
+    /// Hot-draw delivery temperature (°C). Defaults to setpoint.
+    hot_draw_temp_c: Option<f64>,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
@@ -184,6 +189,8 @@ impl ResistanceWH {
             zip: WaterHeaterZip::default(),
             target_setpoint_c: DEFAULT_SETPOINT_C,
             setpoint_ramp_rate_c_per_s: None,
+            fixture_delivery_temp_c: 40.6,
+            hot_draw_temp_c: None,
             dr_setpoint_offset_c: 0.0,
             dr_load_fraction: 1.0,
             dr_duration_remaining_s: None,
@@ -318,6 +325,9 @@ impl ResistanceWH {
         self.setpoint_ramp_rate_c_per_s =
             c.max_setpoint_ramp_rate_c_per_min.map(|rate| rate / 60.0);
         self.target_setpoint_c = self.setpoint_c;
+
+        self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
+        self.hot_draw_temp_c = c.hot_draw_temp_c;
 
         self.dr_setpoint_offset_c = 0.0;
         self.dr_load_fraction = 1.0;
@@ -482,12 +492,23 @@ impl Equipment for ResistanceWH {
         );
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
         let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
-        let draw_volume_m3 = total_draw_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
-        let draw = self.tank.step(
+        // Use step_tempered: TMV mixes hot tank water with cold mains to deliver
+        // at fixture_delivery_temp_c, reducing the actual hot-water withdrawal.
+        let hot_draw_temp_c = self.hot_draw_temp_c.unwrap_or(self.setpoint_c);
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: self.fixture_delivery_temp_c,
+            hot_draw_temp_c,
+            setpoint_temp_c: self.setpoint_c,
+        };
+        let tempered_flow_m3_s = draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3;
+        let hot_flow_m3_s = appliance_demand_kg_s / WATER_DENSITY_KG_PER_M3;
+        let draw = self.tank.step_tempered(
             self.ambient_temp_c(env),
-            draw_volume_m3,
+            tempered_flow_m3_s,
+            hot_flow_m3_s,
             mains_temp_c,
             heat_injections,
+            tmv,
             dt,
         )?;
 
@@ -535,6 +556,7 @@ impl Equipment for ResistanceWH {
             .set(tk::ELEMENT_KW, electric_power_w / 1_000.0);
         self.telemetry.set(tk::ELECTRIC_POWER_W, electric_power_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
+        self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(
             tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {
@@ -744,6 +766,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::ELEMENT_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
+    telemetry.insert(tk::UNMET_LOAD_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry
 }
@@ -784,6 +807,11 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
             unit: "kg/s".to_string(),
             description: "Domestic hot water draw flow rate".to_string(),
+        },
+        TelemetryField {
+            name: tk::UNMET_LOAD_W.to_string(),
+            unit: "W".to_string(),
+            description: "Unmet fixture load when tank below delivery temp".to_string(),
         },
         TelemetryField {
             name: tk::OPERATING_MODE.to_string(),
@@ -894,6 +922,8 @@ mod tests {
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         }
     }
 
@@ -1391,6 +1421,8 @@ mod tests {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
                 jacket_r_value_m2_k_w: jacket,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             })
         };
 
@@ -1568,6 +1600,8 @@ mod element_priority_tests {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: Some(mode.to_string()),
                 jacket_r_value_m2_k_w: None,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             },
         )
     }

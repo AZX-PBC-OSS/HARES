@@ -420,6 +420,8 @@ mod tests {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
                 jacket_r_value_m2_k_w: None,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             },
         )
     }
@@ -751,6 +753,8 @@ mod dhw_integration_tests {
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
                 jacket_r_value_m2_k_w: None,
+                fixture_delivery_temp_c: None,
+                hot_draw_temp_c: None,
             },
         )
     }

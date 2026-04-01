@@ -12,13 +12,13 @@ nalgebra = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
+chrono.workspace = true
 
 [features]
 observe_detailed = []
 
 [dev-dependencies]
 approx = "0.5"
-chrono = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]

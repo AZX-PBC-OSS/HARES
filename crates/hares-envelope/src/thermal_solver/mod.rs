@@ -3720,4 +3720,177 @@ mod tests {
             "quadrature should give ~1.414×: inf={cooling_inf:.6}, combined={cooling_combined:.6}"
         );
     }
+
+    /// Per ANSI/RESNET 301, winter months (Oct–Apr) must use winter_transmittance and
+    /// winter_shgc; summer months (May–Sep) must use the summer values.
+    ///
+    /// Window has transmittance=0.30 (summer) and winter_transmittance=0.40 (winter).
+    /// The zone temperature delta is proportional to transmitted solar, so January
+    /// must produce a larger delta than July, and the ratio must match the
+    /// transmittance ratio exactly (0.40/0.30 ≈ 1.333).
+    #[test]
+    fn winter_shading_uses_winter_transmittance() {
+        let zone_temp = 20.0_f64;
+        let outdoor_temp = zone_temp; // no conduction load, isolate solar effect
+
+        let r = 10.0_f64;
+        let c = 50_000.0_f64;
+        // 1R1C: inputs = [outdoor_temp, sensible_gain, solar_gain]
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 3, &[1.0 / (r * c), 1.0 / c, 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let window_surface_id: u32 = 77;
+        let summer_transmittance = 0.30_f64;
+        let winter_transmittance = 0.40_f64;
+        let summer_shgc = 0.35_f64;
+        let winter_shgc = 0.46_f64;
+        let radiation_frac = 0.15_f64;
+
+        let win_props = WindowSolarProperties {
+            shgc: summer_shgc,
+            winter_shgc,
+            u_factor_w_m2_k: 1.8,
+            area_m2: 2.0,
+            transmittance: summer_transmittance,
+            winter_transmittance,
+            radiation_frac,
+            glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, summer_shgc),
+        };
+
+        let make_env = |year_month: (i32, u32)| -> EnvironmentState {
+            let (year, month) = year_month;
+            EnvironmentState {
+                zones: vec![ZoneState {
+                    id: ZoneId(1),
+                    temperature_c: zone_temp,
+                    humidity_ratio: 0.008,
+                    relative_humidity: 0.45,
+                    wet_bulb_c: zone_temp - 5.0,
+                    volume_m3: 200.0,
+                }],
+                weather: WeatherState {
+                    outdoor_temp_c: outdoor_temp,
+                    outdoor_humidity_ratio: 0.004,
+                    wind_speed_m_s: 0.0,
+                    wind_dir_deg: 0.0,
+                    ground_temp_c: outdoor_temp,
+                    sky_temp_c: outdoor_temp - 5.0,
+                    pressure_kpa: 101.325,
+                    solar_irradiance: vec![SurfaceIrradiance {
+                        surface_id: window_surface_id,
+                        direct_w_m2: 500.0,
+                        diffuse_w_m2: 0.0,
+                        reflected_w_m2: 0.0,
+                        angle_of_incidence_rad: 0.0,
+                    }],
+                    outdoor_wet_bulb_c: 0.0,
+                    outdoor_enthalpy_j_kg: 0.0,
+                    ghi_w_m2: 0.0,
+                    dni_w_m2: 0.0,
+                    dhi_w_m2: 0.0,
+                    solar_altitude_deg: 0.0,
+                    solar_azimuth_deg: 180.0,
+                    mains_temp_c: 15.0,
+                    rainfall_m: 0.0,
+                    ground_albedo: 0.2,
+                },
+                grid: GridState {
+                    voltage_pu: 1.0,
+                    frequency_hz: 60.0,
+                },
+                custom_domains: vec![],
+                equipment_telemetry: std::collections::HashMap::new(),
+                current_time: FixedOffset::east_opt(0)
+                    .unwrap()
+                    .with_ymd_and_hms(year, month, 15, 12, 0, 0)
+                    .single()
+                    .unwrap(),
+                time_res: chrono::Duration::seconds(60),
+                price_signal: Default::default(),
+                electrical: Default::default(),
+                equipment_core: Default::default(),
+            }
+        };
+
+        let make_solver = |env: &EnvironmentState| -> ThermalSolver {
+            let wiring = StateSpaceWiring {
+                zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+                outdoor_temp_input_indices: vec![0],
+                ground_temp_input_indices: vec![],
+                indoor_temp_input_indices: vec![],
+                solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
+            };
+            let cfg = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
+                window_properties: HashMap::from([(window_surface_id, win_props)]),
+                window_zone_ids: HashMap::new(),
+                exterior_surfaces: vec![],
+                interior_lwr_zones: vec![],
+                infiltration: vec![],
+                ventilation_flow_m3_s: 0.0,
+                ventilation: MechanicalVentilationParams::default(),
+                natural_ventilation: None,
+                supply_duct_leakage_m3_s: 0.0,
+                return_duct_leakage_m3_s: 0.0,
+                boundary_diagnostics: Vec::new(),
+            };
+            let mut s =
+                ThermalSolver::new(model.clone(), wiring.clone(), cfg, 60.0, env, zone_temp)
+                    .unwrap();
+            s.x[0] = zone_temp;
+            s
+        };
+
+        let ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let env_jan = make_env((2026, 1));
+        let env_jul = make_env((2026, 7));
+
+        let t_jan = make_solver(&env_jan)
+            .resolve(&ports, &env_jan, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        let t_jul = make_solver(&env_jul)
+            .resolve(&ports, &env_jul, Duration::from_secs(60))
+            .zone_temperatures_c[0]
+            .1;
+
+        // January (winter): winter_transmittance=0.40 → more solar gain → higher T.
+        // July (summer): transmittance=0.30 → less solar gain → lower T.
+        assert!(
+            t_jan > t_jul,
+            "January (winter transmittance=0.40) must produce higher zone temp than July (summer transmittance=0.30): t_jan={t_jan:.6}, t_jul={t_jul:.6}"
+        );
+
+        // The temperature rise above zone_temp is proportional to transmitted solar.
+        // Ratio of gains = winter_transmittance / summer_transmittance = 0.40/0.30 ≈ 1.333.
+        let delta_jan = t_jan - zone_temp;
+        let delta_jul = t_jul - zone_temp;
+        assert!(
+            delta_jan > 0.0,
+            "January solar must raise zone temperature: delta={delta_jan:.6}"
+        );
+        assert!(
+            delta_jul > 0.0,
+            "July solar must raise zone temperature: delta={delta_jul:.6}"
+        );
+        let ratio = delta_jan / delta_jul;
+        let expected_ratio = winter_transmittance / summer_transmittance;
+        assert!(
+            (ratio - expected_ratio).abs() < 0.02,
+            "gain ratio must match transmittance ratio ({expected_ratio:.4}): actual={ratio:.4}"
+        );
+    }
 }

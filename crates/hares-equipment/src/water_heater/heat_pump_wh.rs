@@ -24,7 +24,7 @@ use super::hpwh_compressor::{
     DEFAULT_PARASITIC_POWER_W, DEFAULT_RATED_COP, DEFAULT_SHR, DEFAULT_TANK_TEMP_BOUNDS_C,
     DEFAULT_ZONE_TEMP_BOUNDS_C,
 };
-use super::tank::{StratifiedTank, StratifiedTankConfig};
+use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig};
 use super::wh_config::HeatPumpWaterHeaterConfig;
 use super::{WaterHeaterZip, hysteresis_call, parse_usize, weighted_average_tank_temp};
 use crate::hvac::helpers::{equipment_id_from_config, loop_id_from_config, zone_id_from_config};
@@ -111,10 +111,12 @@ pub struct HeatPumpWH {
     /// by computing scale = cop_rated / cop_curve(rated_conditions).
     /// Defaults to 1.0 (no scaling; pure curve output).
     cop_scale: f64,
-    /// Tempering valve delivery temperature (°C). When set, the Fluid port reports this
-    /// as the outlet temperature (cold water is mixed in at the valve) instead of the
-    /// raw tank outlet.  Typically 51.67°C (125°F); `None` means no valve present.
+    /// Tempering valve delivery temperature (°C) for hot draws (e.g. dishwasher).
+    /// Maps to `hot_draw_temp_c` in the TMV logic. Typically 51.67°C (125°F);
+    /// `None` means no valve present (defaults to tank setpoint).
     tempering_valve_setpoint_c: Option<f64>,
+    /// Fixture delivery temperature for TMV blending (°C). Default 40.6°C.
+    fixture_delivery_temp_c: f64,
     capacity_curve: BiquadraticCurve,
     min_ambient_temp_c: f64,
     max_ambient_temp_c: f64,
@@ -243,6 +245,7 @@ impl HeatPumpWH {
             },
             cop_scale: 1.0,
             tempering_valve_setpoint_c: None,
+            fixture_delivery_temp_c: 40.6,
             capacity_curve: BiquadraticCurve {
                 coeffs: DEFAULT_CAPACITY_CURVE,
                 x1_bounds: DEFAULT_ZONE_TEMP_BOUNDS_C,
@@ -417,6 +420,7 @@ impl HeatPumpWH {
         self.cop_scale = (cop_rated / cop_at_ref).max(0.1);
 
         self.tempering_valve_setpoint_c = c.tempering_valve_setpoint_c.filter(|&t| t > 0.0);
+        self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
         self.capacity_curve = BiquadraticCurve {
             coeffs: c
                 .capacity_biquadratic_coeffs
@@ -671,12 +675,21 @@ impl Equipment for HeatPumpWH {
 
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
         let total_draw_kg_s = self.draw_flow_rate_kg_s + appliance_demand_kg_s;
-        let draw_volume_m3 = total_draw_kg_s / WATER_DENSITY_KG_PER_M3 * dt.as_secs_f64();
-        let draw = self.tank.step(
+        let hot_draw_temp_c = self.tempering_valve_setpoint_c.unwrap_or(self.setpoint_c);
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: self.fixture_delivery_temp_c,
+            hot_draw_temp_c,
+            setpoint_temp_c: self.setpoint_c,
+        };
+        let tempered_flow_m3_s = self.draw_flow_rate_kg_s / WATER_DENSITY_KG_PER_M3;
+        let hot_flow_m3_s = appliance_demand_kg_s / WATER_DENSITY_KG_PER_M3;
+        let draw = self.tank.step_tempered(
             self.ambient_temp_c(env),
-            draw_volume_m3,
+            tempered_flow_m3_s,
+            hot_flow_m3_s,
             self.mains_temp_c,
             &heat_injections,
+            tmv,
             dt,
         )?;
 
@@ -755,17 +768,12 @@ impl Equipment for HeatPumpWH {
         }
 
         if total_draw_kg_s > 0.0 {
-            // Apply tempering valve: cold mains water is mixed with hot tank water to cap
-            // delivery temperature at tempering_valve_setpoint_c. The mixed outlet never
-            // exceeds the valve setpoint, and never drops below it when tank is cooler.
-            let delivery_temp_c = match self.tempering_valve_setpoint_c {
-                Some(valve_sp) => draw.outlet_temp_c.min(valve_sp),
-                None => draw.outlet_temp_c,
-            };
+            // TMV blending is handled inside step_tempered; outlet_temp_c already
+            // reflects the delivered temperature after mixing-valve adjustment.
             ports.accumulate(&PortContribution::Fluid {
                 loop_id: self.loop_id,
                 flow_rate_kg_s: total_draw_kg_s,
-                supply_temp_c: delivery_temp_c,
+                supply_temp_c: draw.outlet_temp_c,
                 return_temp_c: self.mains_temp_c,
                 fluid_type: self.fluid_type,
             })?;
@@ -1246,6 +1254,7 @@ mod tests {
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
         }
     }
 
@@ -1300,6 +1309,7 @@ mod tests {
             zone_type: None,
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
         };
         let config = equipment_config(typed);
         let env = env(20.0);
@@ -1385,6 +1395,7 @@ mod tests {
             zone_type: None,
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
         };
         let config = equipment_config(typed);
         let e = env(20.0);
@@ -1436,6 +1447,7 @@ mod tests {
             zone_type: None,
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
         };
         let config = equipment_config(typed);
         let e = env(20.0);
@@ -2950,6 +2962,7 @@ mod new_feature_tests {
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
         };
         let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());

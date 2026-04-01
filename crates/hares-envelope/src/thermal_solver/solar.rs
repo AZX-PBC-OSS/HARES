@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use hares_physics::solar::window_iam;
 use hares_types::{EnvironmentState, ZoneId};
 use nalgebra::DVector;
@@ -11,6 +12,10 @@ const BEAM_FLOOR_FRACTION: f64 = 0.60;
 
 impl ThermalSolver {
     pub(super) fn apply_solar_inputs(&mut self, u: &mut DVector<f64>, env: &EnvironmentState) {
+        let month = env.current_time.month();
+        // ANSI/RESNET 301: winter = October through April (months 10–4).
+        let is_winter = month >= 10 || month <= 4;
+
         for irr in &env.weather.solar_irradiance {
             let Some(&idx) = self.wiring.solar_input_indices.get(&irr.surface_id) else {
                 continue;
@@ -28,20 +33,27 @@ impl ThermalSolver {
                 let poa_diffuse = (irr.diffuse_w_m2 + irr.reflected_w_m2) * iam_diffuse;
                 let poa_w_m2 = poa_beam + poa_diffuse;
 
-                let transmitted_beam_w = win.area_m2 * win.transmittance * poa_beam;
-                let transmitted_diffuse_w = win.area_m2 * win.transmittance * poa_diffuse;
+                let transmittance = if is_winter {
+                    win.winter_transmittance
+                } else {
+                    win.transmittance
+                };
+                let shgc = if is_winter { win.winter_shgc } else { win.shgc };
+
+                let transmitted_beam_w = win.area_m2 * transmittance * poa_beam;
+                let transmitted_diffuse_w = win.area_m2 * transmittance * poa_diffuse;
                 let transmitted_total_w = transmitted_beam_w + transmitted_diffuse_w;
 
                 assert!(
-                    win.shgc >= win.transmittance - 1e-6,
+                    shgc >= transmittance - 1e-6,
                     "SHGC ({}) < transmittance ({}): check window config",
-                    win.shgc,
-                    win.transmittance
+                    shgc,
+                    transmittance
                 );
-                let absorbed_inward = (win.shgc - win.transmittance).max(0.0) * win.radiation_frac;
+                let absorbed_inward = (shgc - transmittance).max(0.0) * win.radiation_frac;
                 let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
 
-                let _shgc = win.shgc;
+                let _shgc = shgc;
                 let zone_id = self.config.window_zone_ids.get(&irr.surface_id).copied();
                 let air_idx = zone_id
                     .and_then(|zid| self.wiring.zone_sensible_input_indices.get(&zid).copied())
