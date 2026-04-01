@@ -861,12 +861,24 @@ impl HeatPumpHeaterCore {
 
         // Capacity biquadratic: evaluate first — needed to derive PLR from
         // solver-provided ideal capacity at current conditions.
-        let (_, cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
-            0,
+        let (_, mut cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
+            speed_index * 2,
             zone.temperature_c,
             env.weather.outdoor_temp_c,
             1.0,
         );
+        // OCHRE HVAC.py:1044-1050 — interpolate biquadratic between bracket stages.
+        if self.hvac.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
+            && speed_frac > 0.0
+        {
+            let (_, cap_ratio_high) = self.hvac.evaluate_biquadratic_with_flow(
+                (speed_index + 1) * 2,
+                zone.temperature_c,
+                env.weather.outdoor_temp_c,
+                1.0,
+            );
+            cap_ratio = cap_ratio * (1.0 - speed_frac) + cap_ratio_high * speed_frac;
+        }
 
         // Derive PLR: from solver's ideal capacity (coarse timestep) or
         // thermostat duty cycle (fine timestep).
@@ -900,12 +912,25 @@ impl HeatPumpHeaterCore {
         let plf = self.hvac.part_load_factor(plr);
 
         // EIR curve: divide by PLF — cycling reduces efficiency.
-        let (_, eir_ratio_base) = self.hvac.evaluate_biquadratic_with_flow(
-            1,
+        let (_, mut eir_ratio_base) = self.hvac.evaluate_biquadratic_with_flow(
+            speed_index * 2 + 1,
             zone.temperature_c,
             env.weather.outdoor_temp_c,
             1.0,
         );
+        // OCHRE HVAC.py:1044-1050 — interpolate EIR biquadratic between bracket stages.
+        if self.hvac.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
+            && speed_frac > 0.0
+        {
+            let (_, eir_ratio_high) = self.hvac.evaluate_biquadratic_with_flow(
+                (speed_index + 1) * 2 + 1,
+                zone.temperature_c,
+                env.weather.outdoor_temp_c,
+                1.0,
+            );
+            eir_ratio_base =
+                eir_ratio_base * (1.0 - speed_frac) + eir_ratio_high * speed_frac;
+        }
         let eir_ratio = if plf > 0.0 {
             eir_ratio_base / plf
         } else {
@@ -1254,7 +1279,7 @@ impl HeatPumpHeaterCore {
                     )
                 };
                 let (_, cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
-                    0,
+                    speed.speed_index * 2,
                     zone.temperature_c,
                     env.weather.outdoor_temp_c,
                     1.0,
@@ -1637,7 +1662,6 @@ mod tests {
             cooling_eir: None,
             stage_cooling_capacities_w: None,
             stage_cooling_eirs: None,
-            stage_shrs: None,
             fraction_cooling_load_served: None,
             number_of_speeds: 1,
             is_mini_split: false,
@@ -4460,7 +4484,6 @@ mod ideal_capacity_tests {
                 cooling_eir: None,
                 stage_cooling_capacities_w: None,
                 stage_cooling_eirs: None,
-                stage_shrs: None,
                 fraction_cooling_load_served: None,
                 number_of_speeds: 1,
                 is_mini_split: false,
@@ -4654,7 +4677,6 @@ mod ideal_capacity_tests {
                 cooling_eir: None,
                 stage_cooling_capacities_w: None,
                 stage_cooling_eirs: None,
-                stage_shrs: None,
                 fraction_cooling_load_served: None,
                 number_of_speeds: 1,
                 is_mini_split: false,
@@ -4794,7 +4816,6 @@ mod ideal_capacity_tests {
                 cooling_eir: None,
                 stage_cooling_capacities_w: None,
                 stage_cooling_eirs: None,
-                stage_shrs: None,
                 fraction_cooling_load_served: None,
                 number_of_speeds: 1,
                 is_mini_split: false,
@@ -4884,7 +4905,6 @@ mod ideal_capacity_tests {
                 cooling_eir: None,
                 stage_cooling_capacities_w: None,
                 stage_cooling_eirs: None,
-                stage_shrs: None,
                 fraction_cooling_load_served: None,
                 number_of_speeds: 2,
                 // is_mini_split forces VariableSpeedIdeal mode regardless of number_of_speeds.

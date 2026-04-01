@@ -487,7 +487,7 @@ impl Equipment for ResistanceWH {
             self.ambient_temp_c(env),
             draw_volume_m3,
             mains_temp_c,
-            &heat_injections,
+            heat_injections,
             dt,
         )?;
 

@@ -608,7 +608,7 @@ impl Equipment for ScheduledLoad {
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::LoadFraction { fraction } => {
-                self.load_fraction = *fraction;
+                self.load_fraction = fraction.max(0.0);
                 Ok(())
             }
             ControlSignal::ModeOverride { mode } => {
@@ -2151,6 +2151,27 @@ mod tests {
         assert_eq!(
             telemetry_kvar, 0.0,
             "reactive_power_kvar telemetry must be 0.0 when no ZIP coefficients configured"
+        );
+    }
+
+    #[test]
+    fn load_fraction_negative_is_clamped_to_zero() {
+        let config = config_with_schedule("s", "Lighting", &[2.0]);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+        eq.apply_control(&ControlSignal::LoadFraction { fraction: -0.5 })
+            .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.net_active_kw(),
+            0.0,
+            "negative load fraction must be clamped to 0, producing zero power"
         );
     }
 }

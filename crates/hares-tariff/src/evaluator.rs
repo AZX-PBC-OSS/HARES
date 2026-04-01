@@ -2,7 +2,7 @@ use chrono::{DateTime, Datelike, Duration, Timelike};
 use chrono_tz::Tz;
 use hares_types::HaresError;
 
-use crate::billing::{BillingPeriodSummary, BillingState};
+use crate::billing::{compute_tiered_energy_cost, BillingPeriodSummary, BillingState};
 use crate::types::{ElectricTariff, ExportMode};
 
 pub struct TariffEvaluator {
@@ -265,7 +265,7 @@ impl TariffEvaluator {
         }
     }
 
-    pub fn tier_multiplier(&self, cumulative_kwh: f64) -> f64 {
+    pub fn tier_rate_at(&self, cumulative_kwh: f64) -> f64 {
         let ci = self.clamped_index();
         let month = self.months[ci];
 
@@ -328,7 +328,12 @@ impl TariffEvaluator {
             let fixed_charge = self.tariff.fixed_charges.monthly_usd
                 + self.tariff.fixed_charges.daily_usd * days_in_period;
 
-            let energy_charge = self.billing_state.cumulative_energy_cost_usd;
+            let energy_charge = compute_tiered_energy_cost(
+                self.billing_state.cumulative_import_kwh,
+                &self.tariff.tiered_rates,
+                month,
+                self.billing_state.cumulative_energy_cost_usd,
+            );
             let export_credit = self.billing_state.cumulative_export_credit_usd;
 
             let summary = BillingPeriodSummary::new(
@@ -339,6 +344,7 @@ impl TariffEvaluator {
                 fixed_charge,
                 export_credit,
                 self.tariff.minimum_charge,
+                self.tariff.minimum_charge_excludes_export,
                 self.billing_state.peak_demand_kw,
                 self.billing_state.cumulative_import_kwh,
                 self.billing_state.cumulative_export_kwh,
@@ -431,7 +437,12 @@ impl TariffEvaluator {
         let fixed_charge = self.tariff.fixed_charges.monthly_usd
             + self.tariff.fixed_charges.daily_usd * elapsed_days;
 
-        let energy_charge = self.billing_state.cumulative_energy_cost_usd();
+        let energy_charge = compute_tiered_energy_cost(
+            self.billing_state.cumulative_import_kwh(),
+            &self.tariff.tiered_rates,
+            month,
+            self.billing_state.cumulative_energy_cost_usd(),
+        );
         let export_credit = self.billing_state.cumulative_export_credit_usd();
         let peak = self.billing_state.peak_demand_kw();
         let import = self.billing_state.cumulative_import_kwh();
@@ -447,6 +458,7 @@ impl TariffEvaluator {
             fixed_charge,
             export_credit,
             self.tariff.minimum_charge,
+            self.tariff.minimum_charge_excludes_export,
             peak,
             import,
             export,
@@ -609,19 +621,19 @@ mod tests {
     }
 
     #[test]
-    fn evaluator_tier_multiplier_first_tier() {
+    fn evaluator_tier_rate_at_first_tier() {
         let start = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
         let ev = make_evaluator(test_tariff(), start, start + Duration::hours(1), 3600);
-        assert_eq!(ev.tier_multiplier(0.0), 0.10);
-        assert_eq!(ev.tier_multiplier(499.9), 0.10);
+        assert_eq!(ev.tier_rate_at(0.0), 0.10);
+        assert_eq!(ev.tier_rate_at(499.9), 0.10);
     }
 
     #[test]
-    fn evaluator_tier_multiplier_second_tier() {
+    fn evaluator_tier_rate_at_second_tier() {
         let start = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
         let ev = make_evaluator(test_tariff(), start, start + Duration::hours(1), 3600);
-        assert_eq!(ev.tier_multiplier(500.0), 0.20);
-        assert_eq!(ev.tier_multiplier(1000.0), 0.20);
+        assert_eq!(ev.tier_rate_at(500.0), 0.20);
+        assert_eq!(ev.tier_rate_at(1000.0), 0.20);
     }
 
     #[test]
@@ -1088,18 +1100,18 @@ mod tests {
     }
 
     #[test]
-    fn evaluator_tier_multiplier_no_tiers_returns_price() {
+    fn evaluator_tier_rate_at_no_tiers_returns_price() {
         let start = New_York.with_ymd_and_hms(2025, 7, 7, 12, 0, 0).unwrap();
         let tariff = flat_tariff(0.12);
         let ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         assert!(
-            (ev.tier_multiplier(0.0) - 0.12).abs() < 1e-10,
-            "with no tiers, tier_multiplier should return current_price (0.12), got {}",
-            ev.tier_multiplier(0.0)
+            (ev.tier_rate_at(0.0) - 0.12).abs() < 1e-10,
+            "with no tiers, tier_rate_at should return current_price (0.12), got {}",
+            ev.tier_rate_at(0.0)
         );
         assert!(
-            (ev.tier_multiplier(999.0) - 0.12).abs() < 1e-10,
-            "with no tiers, tier_multiplier should return current_price regardless of kwh"
+            (ev.tier_rate_at(999.0) - 0.12).abs() < 1e-10,
+            "with no tiers, tier_rate_at should return current_price regardless of kwh"
         );
     }
 
@@ -1378,7 +1390,7 @@ mod tests {
         assert_eq!(ev.current_price(), 0.12);
         assert_eq!(ev.current_export_price(), 0.0);
         assert_eq!(ev.current_period_name(), "flat");
-        let _ = ev.tier_multiplier(0.0);
+        let _ = ev.tier_rate_at(0.0);
         assert!(ev.is_finished());
     }
 
@@ -1407,7 +1419,7 @@ mod tests {
         assert_eq!(ev.current_price(), 0.12);
         assert_eq!(ev.current_export_price(), 0.0);
         let _ = ev.current_period_name();
-        let _ = ev.tier_multiplier(100.0);
+        let _ = ev.tier_rate_at(100.0);
     }
 
     #[test]
@@ -1527,5 +1539,135 @@ mod tests {
         assert!(!ev.is_finished());
         let _ = ev.finalize(end);
         assert!(ev.is_finished(), "finalize should set finished = true");
+    }
+
+    #[test]
+    fn evaluator_tiered_billing_blended_cost_at_period_close() {
+        // Tiered tariff: 0-500 kWh at $0.10/kWh, 500+ at $0.20/kWh.
+        // Flat TOU rate is $0.15 (used step-by-step but overridden at close).
+        // Run a full January month at constant 1 kW = 744 kWh total.
+        // Expected tiered cost: 500*0.10 + 244*0.20 = 50.00 + 48.80 = $98.80
+        use hares_types::SeasonalSplit;
+
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+
+        let tariff = ElectricTariff {
+            name: Some("tiered-test".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.15,
+            }],
+            tiered_rates: vec![TieredBlock {
+                season: SeasonFilter::Winter,
+                thresholds_kwh: vec![500.0],
+                rates_per_kwh: vec![0.10, 0.20],
+            }],
+            seasonal_split: Some(SeasonalSplit::new(6, 9).unwrap()),
+            ..Default::default()
+        };
+
+        let mut ev = make_evaluator(tariff, start, end, interval);
+        let summaries = run_all_steps(&mut ev, |_| 1.0);
+
+        assert_eq!(summaries.len(), 1, "expected 1 billing period");
+        let s = &summaries[0];
+
+        // January has 744 hours, constant 1 kW = 744 kWh
+        assert!(
+            (s.total_import_kwh - 744.0).abs() < 1e-6,
+            "expected 744 kWh, got {}",
+            s.total_import_kwh
+        );
+
+        // Tiered: 500 * 0.10 + 244 * 0.20 = 50 + 48.80 = 98.80
+        let expected = 500.0 * 0.10 + 244.0 * 0.20;
+        assert!(
+            (s.energy_charge_usd - expected).abs() < 1e-6,
+            "expected tiered energy charge ${expected:.2}, got ${:.2}",
+            s.energy_charge_usd
+        );
+    }
+
+    #[test]
+    fn evaluator_minimum_charge_excludes_export_true() {
+        // Net-exporting customer: metered charges below minimum, large export credit.
+        // With excludes_export=true: net = max(metered, min) - export_credit
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+
+        let mut tariff = flat_tariff(0.12);
+        tariff.minimum_charge = Some(50.0);
+        tariff.minimum_charge_excludes_export = true;
+        tariff.export_rate = ExportRate {
+            mode: ExportMode::NetMetering,
+            tou_credits: vec![],
+        };
+
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        // Alternate: import 0.05 kW for some hours, export -5 kW for others
+        // to get low metered charges but high export credit.
+        let summaries = run_all_steps(&mut ev, |i| if i % 3 == 0 { 0.05 } else { -5.0 });
+
+        let s = summaries.into_iter().next().expect("billing period should close");
+        let metered = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd;
+
+        // metered < 50 since import is tiny, so floor applies:
+        // net = max(metered, 50.0) - export_credit = 50.0 - export_credit
+        assert!(
+            metered < 50.0,
+            "metered charges should be below minimum for this test, got {metered}"
+        );
+        let expected = 50.0_f64.max(metered) - s.export_credit_usd;
+        assert!(
+            (s.net_bill_usd - expected).abs() < 1e-6,
+            "excludes_export=true: expected ${expected:.2}, got ${:.2}",
+            s.net_bill_usd
+        );
+    }
+
+    #[test]
+    fn evaluator_minimum_charge_excludes_export_false() {
+        // Same scenario but with excludes_export=false:
+        // net = max(metered - export_credit, min)
+        let start = make_start(2025, 1, 1);
+        let end = make_start(2025, 2, 1);
+        let interval = 3600u32;
+
+        let mut tariff = flat_tariff(0.12);
+        tariff.minimum_charge = Some(50.0);
+        tariff.minimum_charge_excludes_export = false;
+        tariff.export_rate = ExportRate {
+            mode: ExportMode::NetMetering,
+            tou_credits: vec![],
+        };
+
+        let mut ev = make_evaluator(tariff, start, end, interval);
+
+        let summaries = run_all_steps(&mut ev, |i| if i % 3 == 0 { 0.05 } else { -5.0 });
+
+        let s = summaries.into_iter().next().expect("billing period should close");
+        let metered = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd;
+        let raw_net = metered - s.export_credit_usd;
+
+        // With large export, raw_net should be negative or well below min.
+        assert!(
+            raw_net < 50.0,
+            "raw net should be below minimum for this test, got {raw_net}"
+        );
+        assert!(
+            (s.net_bill_usd - 50.0).abs() < 1e-6,
+            "excludes_export=false: net should be floored to $50.00, got ${:.2}",
+            s.net_bill_usd
+        );
     }
 }

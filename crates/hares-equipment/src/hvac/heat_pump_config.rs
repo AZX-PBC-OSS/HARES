@@ -57,9 +57,6 @@ pub struct HeatPumpHeaterConfig {
     /// Per-stage cooling EIRs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_cooling_eirs: Option<Vec<f64>>,
-    /// Per-stage sensible heat ratios.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stage_shrs: Option<Vec<f64>>,
     /// Fraction of cooling load served.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_cooling_load_served: Option<f64>,
@@ -158,7 +155,6 @@ impl Default for HeatPumpHeaterConfig {
             cooling_eir: None,
             stage_cooling_capacities_w: None,
             stage_cooling_eirs: None,
-            stage_shrs: None,
             fraction_cooling_load_served: None,
             number_of_speeds: 1,
             is_mini_split: false,
@@ -540,7 +536,6 @@ mod tests {
             cooling_eir: Some(16.0),
             stage_cooling_capacities_w: Some(vec![6_000.0, 12_000.0]),
             stage_cooling_eirs: Some(vec![0.25, 0.22]),
-            stage_shrs: Some(vec![0.78, 0.72]),
             fraction_cooling_load_served: Some(1.0),
             number_of_speeds: 1,
             is_mini_split: true,
@@ -572,7 +567,6 @@ mod tests {
         let recovered: HeatPumpHeaterConfig = ec.typed().unwrap();
         assert!((recovered.cooling_eir.unwrap() - cfg.cooling_eir.unwrap()).abs() < 1e-12);
         assert!(recovered.is_mini_split);
-        assert_eq!(recovered.stage_shrs, cfg.stage_shrs);
         assert_eq!(recovered.biquadratic_x1_min, cfg.biquadratic_x1_min);
         assert_eq!(recovered.ff_min, cfg.ff_min);
     }

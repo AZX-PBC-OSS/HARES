@@ -4,7 +4,7 @@ use chrono::{DateTime, Datelike, Duration, TimeZone};
 use chrono_tz::Tz;
 use hares_types::BillingCycle;
 
-use crate::types::RatchetConfig;
+use crate::types::{RatchetConfig, TieredBlock};
 
 struct DemandWindow {
     samples: Box<[f64]>,
@@ -271,6 +271,46 @@ impl BillingState {
     }
 }
 
+/// Compute the total energy cost for a billing period using tiered block rates.
+///
+/// Walks the `TieredBlock` entries, selecting the first block whose season matches
+/// `month`. Usage in each tier band is charged at that band's rate, producing a
+/// correctly blended cost.
+///
+/// If no tiered block matches the month, returns `fallback_flat_cost` (the
+/// step-accumulated energy cost from the billing state).
+pub fn compute_tiered_energy_cost(
+    import_kwh: f64,
+    blocks: &[TieredBlock],
+    month: u8,
+    fallback_flat_cost: f64,
+) -> f64 {
+    let block = blocks.iter().find(|b| b.season.contains_month(month));
+    let block = match block {
+        Some(b) => b,
+        None => return fallback_flat_cost,
+    };
+
+    let mut cost = 0.0;
+    let mut remaining = import_kwh;
+    let mut prev_threshold = 0.0;
+
+    for (i, threshold) in block.thresholds_kwh.iter().enumerate() {
+        let band_width = threshold - prev_threshold;
+        let usage_in_band = remaining.min(band_width);
+        cost += usage_in_band * block.rates_per_kwh[i];
+        remaining -= usage_in_band;
+        prev_threshold = *threshold;
+        if remaining <= 0.0 {
+            return cost;
+        }
+    }
+
+    // All remaining usage is in the final (unbounded) tier.
+    cost += remaining * block.rates_per_kwh[block.thresholds_kwh.len()];
+    cost
+}
+
 pub struct BillingPeriodSummary {
     pub period_start: DateTime<Tz>,
     pub period_end: DateTime<Tz>,
@@ -294,14 +334,22 @@ impl BillingPeriodSummary {
         fixed_charge_usd: f64,
         export_credit_usd: f64,
         minimum_charge: Option<f64>,
+        minimum_charge_excludes_export: bool,
         peak_demand_kw: f64,
         total_import_kwh: f64,
         total_export_kwh: f64,
     ) -> Self {
-        let raw = energy_charge_usd + demand_charge_usd + fixed_charge_usd - export_credit_usd;
+        let metered = energy_charge_usd + demand_charge_usd + fixed_charge_usd;
         let net_bill_usd = match minimum_charge {
-            Some(min) if raw < min => min,
-            _ => raw,
+            Some(min) if minimum_charge_excludes_export => {
+                // Floor metered charges, then subtract export credit.
+                metered.max(min) - export_credit_usd
+            }
+            Some(min) => {
+                // Floor the net bill (after export credit).
+                (metered - export_credit_usd).max(min)
+            }
+            None => metered - export_credit_usd,
         };
         Self {
             period_start,
@@ -338,6 +386,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use chrono_tz::America::New_York;
+    use hares_types::SeasonFilter;
 
     fn make_dt(year: i32, month: u32, day: u32) -> DateTime<Tz> {
         New_York
@@ -643,6 +692,7 @@ mod tests {
             12.50,
             5.0,
             None,
+            true,
             8.0,
             500.0,
             100.0,
@@ -652,5 +702,126 @@ mod tests {
                 - summary.export_credit_usd;
         assert!((summary.net_bill_usd - expected_net).abs() < 1e-10);
         assert!((summary.net_bill_usd - 82.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn compute_tiered_energy_cost_blended_across_boundary() {
+        // Two tiers: 0-500 kWh at $0.10, 500+ kWh at $0.20
+        let blocks = vec![TieredBlock {
+            season: SeasonFilter::Summer,
+            thresholds_kwh: vec![500.0],
+            rates_per_kwh: vec![0.10, 0.20],
+        }];
+
+        // 750 kWh in July (summer, month 7):
+        //   500 * 0.10 = $50.00
+        //   250 * 0.20 = $50.00
+        //   total = $100.00
+        let cost = compute_tiered_energy_cost(750.0, &blocks, 7, 999.0);
+        assert!(
+            (cost - 100.0).abs() < 1e-10,
+            "expected $100.00, got {cost}"
+        );
+    }
+
+    #[test]
+    fn compute_tiered_energy_cost_three_tiers() {
+        // Three tiers: 0-300 at $0.08, 300-800 at $0.12, 800+ at $0.25
+        let blocks = vec![TieredBlock {
+            season: SeasonFilter::All,
+            thresholds_kwh: vec![300.0, 800.0],
+            rates_per_kwh: vec![0.08, 0.12, 0.25],
+        }];
+
+        // 1000 kWh:
+        //   300 * 0.08 = $24.00
+        //   500 * 0.12 = $60.00
+        //   200 * 0.25 = $50.00
+        //   total = $134.00
+        let cost = compute_tiered_energy_cost(1000.0, &blocks, 1, 999.0);
+        assert!(
+            (cost - 134.0).abs() < 1e-10,
+            "expected $134.00, got {cost}"
+        );
+    }
+
+    #[test]
+    fn compute_tiered_energy_cost_within_first_tier() {
+        let blocks = vec![TieredBlock {
+            season: SeasonFilter::All,
+            thresholds_kwh: vec![500.0],
+            rates_per_kwh: vec![0.10, 0.20],
+        }];
+
+        // 200 kWh: entirely in first tier = 200 * 0.10 = $20.00
+        let cost = compute_tiered_energy_cost(200.0, &blocks, 1, 999.0);
+        assert!(
+            (cost - 20.0).abs() < 1e-10,
+            "expected $20.00, got {cost}"
+        );
+    }
+
+    #[test]
+    fn compute_tiered_energy_cost_no_matching_season_returns_fallback() {
+        // Summer-only block, but month is January (winter).
+        let blocks = vec![TieredBlock {
+            season: SeasonFilter::Summer,
+            thresholds_kwh: vec![500.0],
+            rates_per_kwh: vec![0.10, 0.20],
+        }];
+
+        let cost = compute_tiered_energy_cost(750.0, &blocks, 1, 42.0);
+        assert!(
+            (cost - 42.0).abs() < 1e-10,
+            "expected fallback $42.00, got {cost}"
+        );
+    }
+
+    #[test]
+    fn minimum_charge_excludes_export_true() {
+        // metered = 20 + 5 + 10 = $35; min = $50; export = $30
+        // excludes_export=true: net = max(35, 50) - 30 = 50 - 30 = $20
+        let summary = BillingPeriodSummary::new(
+            make_dt(2025, 1, 1),
+            make_dt(2025, 2, 1),
+            20.0,  // energy
+            5.0,   // demand
+            10.0,  // fixed
+            30.0,  // export credit
+            Some(50.0),
+            true,  // minimum_charge_excludes_export
+            5.0,
+            500.0,
+            400.0,
+        );
+        assert!(
+            (summary.net_bill_usd - 20.0).abs() < 1e-10,
+            "expected $20.00 (floor metered then subtract export), got {}",
+            summary.net_bill_usd
+        );
+    }
+
+    #[test]
+    fn minimum_charge_excludes_export_false() {
+        // metered = 20 + 5 + 10 = $35; export = $30; raw_net = 35 - 30 = $5; min = $50
+        // excludes_export=false: net = max(5, 50) = $50
+        let summary = BillingPeriodSummary::new(
+            make_dt(2025, 1, 1),
+            make_dt(2025, 2, 1),
+            20.0,
+            5.0,
+            10.0,
+            30.0,
+            Some(50.0),
+            false,
+            5.0,
+            500.0,
+            400.0,
+        );
+        assert!(
+            (summary.net_bill_usd - 50.0).abs() < 1e-10,
+            "expected $50.00 (floor applied to net bill), got {}",
+            summary.net_bill_usd
+        );
     }
 }

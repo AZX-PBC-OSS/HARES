@@ -90,7 +90,11 @@ pub(super) fn resolve_scheduled_loads(
                     "Freezer" => Some(319.8),
                     _ => None,
                 };
-                let rated_kwh = child_f64(node, "RatedAnnualkWh").or(default_kwh);
+                let rated_kwh = node
+                    .child("extension")
+                    .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
+                    .or_else(|| child_f64(node, "RatedAnnualkWh"))
+                    .or(default_kwh);
                 if let Some(kwh) = rated_kwh {
                     params.insert("annual_electric_kwh".to_string(), json!(kwh));
                 }
@@ -334,6 +338,24 @@ pub(super) fn resolve_scheduled_loads(
                 for (k, v) in parse_schedule_extension_params(node, "") {
                     params.insert(k, v);
                 }
+
+                // OCHRE hpxml.py:1397-1406: refrigerators in non-conditioned space
+                // (garage, basement, etc.) contribute zero zone gain. Primary
+                // refrigerators default to "Indoor" (conditioned); non-primary
+                // default to non-conditioned.
+                if tag == "Refrigerator" {
+                    let is_primary = child_text(node, "PrimaryIndicator")
+                        .map(|v| v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(true);
+                    let default_loc = if is_primary { "conditioned space" } else { "" };
+                    let location = child_text(node, "Location")
+                        .unwrap_or_else(|| default_loc.to_string());
+                    if !is_conditioned_location(&location) {
+                        params.insert("sensible_gain_fraction".to_string(), json!(0.0));
+                        params.insert("latent_gain_fraction".to_string(), json!(0.0));
+                    }
+                }
+
                 let mut spec = build_spec(name.to_string(), fuel, params, defaults);
                 if tag == "Dehumidifier" {
                     let cfg = DehumidifierConfig {
@@ -666,7 +688,7 @@ pub(super) fn resolve_ventilation(
             "energy recovery ventilator" | "heat recovery ventilator" | "balanced"
         );
         let ventilation_type = match fan_type_lower.as_str() {
-            "exhaust only" | "supply only" => "exhaust_fan",
+            "exhaust only" | "supply only" | "whole house fan" => "exhaust_fan",
             "energy recovery ventilator" => "erv",
             "heat recovery ventilator" | "balanced" => "hrv",
             _ => "hrv",
@@ -698,6 +720,15 @@ pub(super) fn resolve_ventilation(
     }
 }
 
+/// Returns `true` when an HPXML `Location` string maps to the conditioned
+/// (indoor) zone. Mirrors OCHRE `parse_zone_name` returning `"Indoor"`.
+fn is_conditioned_location(location: &str) -> bool {
+    matches!(
+        location.to_ascii_lowercase().as_str(),
+        "conditioned space" | "living space" | "indoor"
+    )
+}
+
 /// Default sensible and latent gain fractions per equipment name.
 /// Returns (sensible_fraction, latent_fraction) of equipment power entering the zone.
 pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<(f64, f64)> {
@@ -713,7 +744,9 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
         "Clothes Washer" => Some((0.27, 0.03)),
         "Dishwasher" => Some((0.30, 0.30)),
         "Refrigerator" => Some((1.00, 0.00)),
-        // OCHRE: freezer gain_frac=0 (typically in garage/basement, not conditioned zone).
+        // 0.00 matches OCHRE (freezers are typically in unconditioned space).
+        // ASHRAE would use sensible=1.0 for indoor freezers — location-based
+        // override not yet implemented.
         "Freezer" => Some((0.00, 0.00)),
         // OCHRE parse_mel: "other" plug loads → (0.855, 0.045).
         "MELs" | "Plug Loads" => Some((0.855, 0.045)),
@@ -727,9 +760,9 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
         // OCHRE: ceiling fan → 0 zone gain (parse_mel default for non-"other").
         "Ceiling Fan" => Some((0.00, 0.00)),
         "Ventilation Fan" => Some((1.00, 0.00)),
-        // Outdoor equipment: well pump, grill, pool/hot tub.
+        // Outdoor equipment: well pump, grill, pool/hot tub, spa.
         "Well Pump" | "Gas Grill" | "Pool Heater" | "Hot Tub Heater" | "Pool Pump"
-        | "Hot Tub Pump" => Some((0.00, 0.00)),
+        | "Hot Tub Pump" | "Spa Pump" | "Spa Heater" => Some((0.00, 0.00)),
         // OCHRE: gas fireplace → (0.50, 0.10).
         "Gas Fireplace" => Some((0.50, 0.10)),
         _ => None,
@@ -945,5 +978,63 @@ mod tests {
             month_count, 1,
             "month_multipliers should appear exactly once in output, found {month_count}"
         );
+    }
+
+    #[test]
+    fn is_conditioned_location_matches_ochre_zone_names() {
+        assert!(is_conditioned_location("conditioned space"));
+        assert!(is_conditioned_location("living space"));
+        assert!(is_conditioned_location("Indoor"));
+        assert!(!is_conditioned_location("garage"));
+        assert!(!is_conditioned_location("basement - unconditioned"));
+        assert!(!is_conditioned_location("crawlspace - vented"));
+        assert!(!is_conditioned_location(""));
+    }
+
+    #[test]
+    fn gain_fractions_spa_pump_and_heater_are_zero() {
+        assert_eq!(
+            default_gain_fractions("Spa Pump", FuelType::Electric),
+            Some((0.0, 0.0))
+        );
+        assert_eq!(
+            default_gain_fractions("Spa Heater", FuelType::Electric),
+            Some((0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn refrigerator_adjusted_annual_kwh_preferred() {
+        let xml = r#"<Refrigerator>
+          <RatedAnnualkWh>500</RatedAnnualkWh>
+          <extension>
+            <AdjustedAnnualkWh>420</AdjustedAnnualkWh>
+          </extension>
+        </Refrigerator>"#;
+        let node = parse_xml_document(xml).expect("parse");
+        let ext = node.child("extension").unwrap();
+        let adjusted = child_f64(ext, "AdjustedAnnualkWh");
+        assert_eq!(adjusted, Some(420.0));
+        let rated = child_f64(&node, "RatedAnnualkWh");
+        assert_eq!(rated, Some(500.0));
+        // The combined lookup should prefer adjusted.
+        let result = node
+            .child("extension")
+            .and_then(|e| child_f64(e, "AdjustedAnnualkWh"))
+            .or_else(|| child_f64(&node, "RatedAnnualkWh"));
+        assert_eq!(result, Some(420.0));
+    }
+
+    #[test]
+    fn refrigerator_falls_back_to_rated_kwh() {
+        let xml = r#"<Refrigerator>
+          <RatedAnnualkWh>500</RatedAnnualkWh>
+        </Refrigerator>"#;
+        let node = parse_xml_document(xml).expect("parse");
+        let result = node
+            .child("extension")
+            .and_then(|e| child_f64(e, "AdjustedAnnualkWh"))
+            .or_else(|| child_f64(&node, "RatedAnnualkWh"));
+        assert_eq!(result, Some(500.0));
     }
 }

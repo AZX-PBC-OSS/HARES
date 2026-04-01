@@ -320,6 +320,12 @@ pub struct RoomAcConfig {
     /// Part-load fraction (PLF) upper clamp bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plf_max: Option<f64>,
+    /// Sensible heat ratio at rated conditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shr: Option<f64>,
+    /// Startup capacity degradation coefficient (Cd).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_cd: Option<f64>,
     /// Crankcase heater rated power [kW].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_kw: Option<f64>,
@@ -827,6 +833,8 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            shr: None,
+            startup_cd: None,
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
@@ -859,6 +867,8 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            shr: None,
+            startup_cd: None,
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
@@ -887,6 +897,8 @@ mod tests {
             ff_max: None,
             plf_min: None,
             plf_max: None,
+            shr: None,
+            startup_cd: None,
             crankcase_heater_kw: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,

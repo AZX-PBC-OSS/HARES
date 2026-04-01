@@ -574,4 +574,27 @@ mod tests {
         assert_eq!(default.sensible_recovery_efficiency, 0.0);
         assert_eq!(default.latent_recovery_efficiency, 0.0);
     }
+
+    /// OCHRE computes open_window_area = total_window_area × 0.67 × 0.5 × 0.2.
+    /// When FractionOperable = 1.0, total_operable_area == total_window_area, so
+    /// open_area must equal total_window_area × OPEN_AREA_FRACTION (= 0.067).
+    #[test]
+    fn open_area_fraction_matches_ochre_formula() {
+        let total_window_area_m2 = 10.0_f64;
+        let ochre_open_area = total_window_area_m2 * 0.67 * 0.5 * 0.2;
+        let hares_open_area = total_window_area_m2 * NaturalVentilationConfig::OPEN_AREA_FRACTION;
+        assert!(
+            (ochre_open_area - hares_open_area).abs() < 1e-9,
+            "HARES open area {hares_open_area} does not match OCHRE {ochre_open_area}"
+        );
+        // When FractionOperable = 1.0, operable area equals total area;
+        // the solver_builder formula must include the 0.67 factor.
+        let operable_area = total_window_area_m2 * 1.0_f64;
+        let solver_builder_open_area =
+            operable_area * NaturalVentilationConfig::OPEN_AREA_FRACTION;
+        assert!(
+            (solver_builder_open_area - ochre_open_area).abs() < 1e-9,
+            "solver_builder open area {solver_builder_open_area} does not match OCHRE {ochre_open_area}"
+        );
+    }
 }

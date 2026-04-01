@@ -454,6 +454,41 @@ fn seasonal_cooling_fan_is_emitted() {
     );
 }
 
+#[test]
+fn whole_house_fan_type_resolves_to_exhaust_fan_not_hrv() {
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><MechanicalVentilation><VentilationFans>
+            <VentilationFan>
+                <UsedForWholeBuildingVentilation>true</UsedForWholeBuildingVentilation>
+                <FanType>whole house fan</FanType>
+                <RatedFlowRate>200</RatedFlowRate>
+                <FanPower>300</FanPower>
+            </VentilationFan>
+        </VentilationFans></MechanicalVentilation></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment");
+
+    let fan = specs
+        .iter()
+        .find(|s| s.name == "Ventilation Fan")
+        .expect("whole house fan should be emitted");
+    let typed: hares_equipment::VentilationConfig = fan
+        .typed_config
+        .as_ref()
+        .expect("ventilation fan should carry typed config")
+        .typed()
+        .expect("ventilation typed config");
+
+    assert_eq!(
+        typed.ventilation_type.as_deref(),
+        Some("exhaust_fan"),
+        "whole house fan must resolve to exhaust_fan, not hrv"
+    );
+    assert_eq!(typed.sensible_effectiveness, None);
+}
+
 // ===========================================================================
 // 5. EPW time gap validation
 // ===========================================================================

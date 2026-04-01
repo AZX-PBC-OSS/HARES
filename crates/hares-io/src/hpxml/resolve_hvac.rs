@@ -822,6 +822,8 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
         ff_max: curve_bounds.ff_max,
         plf_min: curve_bounds.plf_min,
         plf_max: curve_bounds.plf_max,
+        shr: None,
+        startup_cd: None,
         crankcase_heater_kw: None,
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
@@ -937,7 +939,6 @@ fn try_build_heat_pump_heater_config(
         cooling_eir,
         stage_cooling_capacities_w: extract_stage_values(params, "cooling_capacity_w_stage"),
         stage_cooling_eirs: extract_stage_values(params, "cooling_eir_stage"),
-        stage_shrs: extract_stage_values(params, "shr"),
         fraction_cooling_load_served,
         number_of_speeds: n_speeds,
         is_mini_split,
@@ -1894,6 +1895,34 @@ fn apply_multispeed_furnace_parameters(
     }
 }
 
+/// OCHRE MinisplitHVAC 10-to-4 speed remap: when the defaults CSV provides
+/// exactly 10 entries and the equipment needs 4 speeds, subsample at
+/// indices [1, 3, 5, 9] (0-indexed).  Applied to capacity_ratios, COPs,
+/// and SHRs identically.
+fn remap_minisplit_stages(
+    capacity_ratios: &[f64],
+    cops: &[f64],
+    shrs: &[f64],
+    n_speeds: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    const REMAP_INDICES: [usize; 4] = [1, 3, 5, 9];
+    if n_speeds == 4 && capacity_ratios.len() == 10 {
+        let pick = |src: &[f64]| -> Vec<f64> {
+            REMAP_INDICES
+                .iter()
+                .filter_map(|&i| src.get(i).copied())
+                .collect()
+        };
+        (pick(capacity_ratios), pick(cops), pick(shrs))
+    } else {
+        (
+            capacity_ratios.to_vec(),
+            cops.to_vec(),
+            shrs.to_vec(),
+        )
+    }
+}
+
 fn apply_multispeed_parameters(
     params: &mut Map<String, Value>,
     defaults: &DefaultsStore,
@@ -1907,6 +1936,8 @@ fn apply_multispeed_parameters(
     if n_speeds <= 1 {
         return;
     }
+
+    let is_mshp = matches!(equipment_name, "MSHP Heater" | "MSHP Cooler");
 
     let (eff_key, eff_kind, cap_key, stage_cap_prefix, stage_eir_prefix, curves) = if is_heating {
         (
@@ -1941,22 +1972,31 @@ fn apply_multispeed_parameters(
         return;
     };
 
-    let stage_count = multispeed
-        .capacity_ratios
+    let (capacity_ratios, cops, shrs) = if is_mshp {
+        remap_minisplit_stages(&multispeed.capacity_ratios, &multispeed.cops, &multispeed.shrs, n_speeds)
+    } else {
+        (
+            multispeed.capacity_ratios.clone(),
+            multispeed.cops.clone(),
+            multispeed.shrs.clone(),
+        )
+    };
+
+    let stage_count = capacity_ratios
         .len()
-        .min(multispeed.cops.len())
+        .min(cops.len())
         .min(n_speeds);
     if stage_count == 0 {
         return;
     }
 
     for i in 0..stage_count {
-        let cap_w = rated_capacity_w * multispeed.capacity_ratios[i];
+        let cap_w = rated_capacity_w * capacity_ratios[i];
         params.insert(format!("{stage_cap_prefix}_{i}"), json!(cap_w));
-        let cop = multispeed.cops[i].max(1e-6);
+        let cop = cops[i].max(1e-6);
         params.insert(format!("{stage_eir_prefix}_{i}"), json!(1.0 / cop));
-        if !is_heating && i < multispeed.shrs.len() {
-            params.insert(format!("shr_{i}"), json!(multispeed.shrs[i]));
+        if !is_heating && i < shrs.len() {
+            params.insert(format!("shr_{i}"), json!(shrs[i]));
         }
     }
 
@@ -3730,5 +3770,87 @@ mod tests {
             (aux_w - 100.0).abs() < 1e-6,
             "ElectricAuxiliaryEnergy=876 kWh/year must yield 100.0 W, got {aux_w}"
         );
+    }
+
+    // ---- Task 1: remap_minisplit_stages ----
+
+    #[test]
+    fn remap_minisplit_stages_subsamples_10_to_4() {
+        let ratios: Vec<f64> = (0..10).map(|i| (i + 1) as f64 * 0.1).collect();
+        let cops: Vec<f64> = (0..10).map(|i| 2.0 + i as f64 * 0.5).collect();
+        let shrs: Vec<f64> = (0..10).map(|i| 0.70 + i as f64 * 0.01).collect();
+
+        let (r, c, s) = remap_minisplit_stages(&ratios, &cops, &shrs, 4);
+
+        assert_eq!(r, vec![ratios[1], ratios[3], ratios[5], ratios[9]]);
+        assert_eq!(c, vec![cops[1], cops[3], cops[5], cops[9]]);
+        assert_eq!(s, vec![shrs[1], shrs[3], shrs[5], shrs[9]]);
+    }
+
+    #[test]
+    fn remap_minisplit_stages_passthrough_when_not_10() {
+        let ratios = vec![0.5, 0.75, 1.0, 1.2];
+        let cops = vec![3.0, 3.5, 4.0, 4.5];
+        let shrs = vec![0.78, 0.76, 0.74, 0.72];
+
+        let (r, c, s) = remap_minisplit_stages(&ratios, &cops, &shrs, 4);
+        assert_eq!(r, ratios);
+        assert_eq!(c, cops);
+        assert_eq!(s, shrs);
+    }
+
+    #[test]
+    fn remap_minisplit_stages_passthrough_when_not_4_speeds() {
+        let ratios: Vec<f64> = (0..10).map(|i| (i + 1) as f64 * 0.1).collect();
+        let cops: Vec<f64> = (0..10).map(|i| 2.0 + i as f64 * 0.5).collect();
+        let shrs: Vec<f64> = (0..10).map(|i| 0.70 + i as f64 * 0.01).collect();
+
+        let (r, c, s) = remap_minisplit_stages(&ratios, &cops, &shrs, 2);
+        assert_eq!(r, ratios);
+        assert_eq!(c, cops);
+        assert_eq!(s, shrs);
+    }
+
+    // ---- Task 2: MSHP resolver-level speed forcing ----
+
+    #[test]
+    fn mshp_heater_forces_four_speeds_with_no_compressor_type() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(10_000.0));
+        params.insert("efficiency_hspf".to_string(), json!(9.0));
+        // No CompressorType → n_speeds from defaults should be 1, but MSHP forces 4.
+        let ec = try_build_heat_pump_heater_config(
+            "MSHP Heater",
+            &params,
+            &DuctDseParams::default(),
+            true,
+        )
+        .expect("MSHP heater typed config should be built");
+
+        use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
+        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
+        assert!(cfg.is_mini_split);
+        assert_eq!(cfg.number_of_speeds, 4);
+    }
+
+    #[test]
+    fn mshp_heater_forces_four_speeds_even_with_single_stage_compressor_type() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(10_000.0));
+        params.insert("efficiency_hspf".to_string(), json!(9.0));
+        params.insert("number_of_speeds".to_string(), json!(1));
+        // Even if CompressorType says single_stage → MSHP still forces 4.
+        let ec = try_build_heat_pump_heater_config(
+            "MSHP Heater",
+            &params,
+            &DuctDseParams::default(),
+            true,
+        )
+        .expect("MSHP heater typed config should be built");
+
+        use hares_equipment::hvac::heat_pump_config::HeatPumpHeaterConfig;
+        let cfg: HeatPumpHeaterConfig = ec.typed().expect("typed heater config");
+        assert!(cfg.is_mini_split);
+        assert_eq!(cfg.number_of_speeds, 4);
     }
 }

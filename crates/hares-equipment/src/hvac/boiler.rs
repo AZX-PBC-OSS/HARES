@@ -209,8 +209,8 @@ impl Equipment for ElectricBoiler {
     ) -> std::result::Result<(), HaresError> {
         let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.space_fraction;
-        let thermal_output_w = self.rated_capacity_w * duty;
-        let electric_kw = thermal_output_w * self.eir / 1_000.0 * sf;
+        let thermal_output_w = self.rated_capacity_w * duty * sf;
+        let electric_kw = thermal_output_w * self.eir / 1_000.0;
 
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
@@ -454,7 +454,8 @@ impl Equipment for GasBoiler {
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let plr = self.hvac.duty_cycle.clamp(0.0, 1.0);
-        let thermal_output_w = self.rated_capacity_w * plr;
+        let sf = self.hvac.space_fraction;
+        let thermal_output_w = self.rated_capacity_w * plr * sf;
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
         // Condensing EIR polynomial uses zone air temperature (OCHRE HVAC.py:651:
@@ -470,8 +471,7 @@ impl Equipment for GasBoiler {
         } else {
             self.eir_max
         };
-        let sf = self.hvac.space_fraction;
-        let fuel_input_w = thermal_output_w * eir * sf;
+        let fuel_input_w = thermal_output_w * eir;
 
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * CP_LIQUID_WATER_J_KG_K)
@@ -511,10 +511,7 @@ impl Equipment for GasBoiler {
         // Jacket loss: fuel energy minus useful thermal output, plus pump electrical.
         // For condensing boilers (EIR < 1), jacket loss is zero — the extra output
         // comes from latent heat recovery, not from the room.
-        // space_fraction scales the fuel input; thermal_output_w is the fraction this
-        // boiler serves, so both sides must be in the same frame.
-        let thermal_output_sf_w = thermal_output_w * sf;
-        let jacket_loss_w = (fuel_input_w + electric_kw * 1e3 - thermal_output_sf_w).max(0.0);
+        let jacket_loss_w = (fuel_input_w + electric_kw * 1e3 - thermal_output_w).max(0.0);
         if let Some(zone) = self.descriptor.zone {
             if jacket_loss_w > 0.0 {
                 ports.accumulate(&PortContribution::Thermal {
@@ -1159,6 +1156,104 @@ mod tests {
             .create("Gas Boiler", gb_config(10_000.0, 0.80))
             .unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
+    }
+
+    #[test]
+    fn electric_boiler_space_fraction_halves_thermal_and_electrical_output() {
+        const CAPACITY_W: f64 = 8_000.0;
+        const EIR: f64 = 1.0;
+
+        let cfg = eb_config(CAPACITY_W, EIR);
+        let env = env(18.0);
+
+        let mut eq_full = ElectricBoiler::new(cfg.clone());
+        eq_full.init(&cfg, &env).unwrap();
+
+        let mut eq_half = ElectricBoiler::new(cfg.clone());
+        eq_half.init(&cfg, &env).unwrap();
+        eq_half.hvac.space_fraction = 0.5;
+
+        let mut ports_full = PortSlots {
+            fluid: vec![hares_types::FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            ..PortSlots::default()
+        };
+        let mut ports_half = PortSlots {
+            fluid: vec![hares_types::FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            ..PortSlots::default()
+        };
+
+        eq_full.update_control(&env);
+        eq_full
+            .step(&env, Duration::from_secs(60), &mut ports_full)
+            .unwrap();
+        eq_half.update_control(&env);
+        eq_half
+            .step(&env, Duration::from_secs(60), &mut ports_half)
+            .unwrap();
+
+        let thermal_full = eq_full.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let thermal_half = eq_half.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        assert!(
+            (thermal_half - thermal_full * 0.5).abs() < 1e-6,
+            "space_fraction=0.5 must halve thermal output: full={thermal_full}, half={thermal_half}"
+        );
+
+        let elec_full = ports_full.electrical.net_active_kw();
+        let elec_half = ports_half.electrical.net_active_kw();
+        assert!(
+            (elec_half - elec_full * 0.5).abs() < 1e-6,
+            "space_fraction=0.5 must halve electrical consumption: full={elec_full}, half={elec_half}"
+        );
+    }
+
+    #[test]
+    fn gas_boiler_space_fraction_halves_thermal_and_fuel_output() {
+        const CAPACITY_W: f64 = 10_000.0;
+        const AFUE: f64 = 0.80;
+
+        let cfg = gb_config(CAPACITY_W, AFUE);
+        let env = env(18.0);
+
+        let mut eq_full = GasBoiler::new(cfg.clone());
+        eq_full.init(&cfg, &env).unwrap();
+
+        let mut eq_half = GasBoiler::new(cfg.clone());
+        eq_half.init(&cfg, &env).unwrap();
+        eq_half.hvac.space_fraction = 0.5;
+
+        let mut ports_full = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            ..PortSlots::default()
+        };
+        let mut ports_half = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            ..PortSlots::default()
+        };
+
+        eq_full.update_control(&env);
+        eq_full
+            .step(&env, Duration::from_secs(60), &mut ports_full)
+            .unwrap();
+        eq_half.update_control(&env);
+        eq_half
+            .step(&env, Duration::from_secs(60), &mut ports_half)
+            .unwrap();
+
+        let thermal_full = eq_full.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        let thermal_half = eq_half.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+        assert!(
+            (thermal_half - thermal_full * 0.5).abs() < 1e-6,
+            "space_fraction=0.5 must halve thermal output: full={thermal_full}, half={thermal_half}"
+        );
+
+        let fuel_full = eq_full.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        let fuel_half = eq_half.telemetry().get(tk::FUEL_INPUT_W).unwrap();
+        assert!(
+            (fuel_half - fuel_full * 0.5).abs() < 1e-6,
+            "space_fraction=0.5 must halve fuel consumption: full={fuel_full}, half={fuel_half}"
+        );
     }
 
     #[test]

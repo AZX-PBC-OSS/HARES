@@ -533,8 +533,10 @@ impl CoolingCore {
             self.hvac.airflow_m3_s_per_w = cfg
                 .airflow_m3_s_per_w
                 .unwrap_or(super::hvac_core::AIRFLOW_ROOM_AC_M3_S_PER_W);
-            self.hvac.plf_cooling_degradation_coeff = 0.22;
-            self.hvac.startup.c_d = 0.22;
+            self.rated_shr = cfg.shr.unwrap_or(0.75).clamp(0.0, 1.0);
+            let cd = cfg.startup_cd.unwrap_or(0.22);
+            self.hvac.plf_cooling_degradation_coeff = cd;
+            self.hvac.startup.c_d = cd;
         } else {
             let cfg = config.require_typed::<CentralAirConditionerConfig>("Air Conditioner")?;
             cfg.validate()?;
@@ -961,6 +963,7 @@ impl CoolingCore {
 
         fn curve_inputs(
             stage_capacity_w: f64,
+            speed_index: usize,
             hvac: &HvacEquipment,
             zone: &hares_types::ZoneState,
             env: &EnvironmentState,
@@ -999,13 +1002,13 @@ impl CoolingCore {
                 zone.wet_bulb_c
             };
             let (_, cap_ratio) = hvac.evaluate_biquadratic_with_flow(
-                0,
+                speed_index * 2,
                 coil_entering_wb_c,
                 outdoor_c,
                 flow_fraction_correction,
             );
             let (_, eir_ratio_base) = hvac.evaluate_biquadratic_with_flow(
-                1,
+                speed_index * 2 + 1,
                 coil_entering_wb_c,
                 outdoor_c,
                 flow_fraction_correction,
@@ -1027,12 +1030,30 @@ impl CoolingCore {
             mut eir_ratio_base,
         ) = curve_inputs(
             stage_cap_w,
+            speed_index,
             &self.hvac,
             zone,
             env,
             outdoor_c,
             self.flow_fraction_correction,
         );
+
+        // OCHRE HVAC.py:1044-1050 — interpolate biquadratic between bracket stages.
+        if self.hvac.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
+            && speed_frac > 0.0
+        {
+            let (_, _, _, cap_ratio_high, eir_ratio_high) = curve_inputs(
+                stage_cap_w,
+                speed_index + 1,
+                &self.hvac,
+                zone,
+                env,
+                outdoor_c,
+                self.flow_fraction_correction,
+            );
+            cap_ratio = cap_ratio * (1.0 - speed_frac) + cap_ratio_high * speed_frac;
+            eir_ratio_base = eir_ratio_base * (1.0 - speed_frac) + eir_ratio_high * speed_frac;
+        }
 
         if is_variable_speed && self.use_ideal && self.ideal_capacity_w.abs() > f64::EPSILON {
             let max_capacity_w = self
@@ -1055,6 +1076,7 @@ impl CoolingCore {
                 eir_ratio_base,
             ) = curve_inputs(
                 stage_cap_w,
+                speed_index,
                 &self.hvac,
                 zone,
                 env,
@@ -1434,7 +1456,7 @@ mod tests {
         ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
-    use super::{AirConditioner, RoomAC, SpeedControlMode};
+    use super::{AirConditioner, CoolingCore, RoomAC, SpeedControlMode};
 
     use crate::{
         CentralAirConditionerConfig, Equipment, EquipmentConfig, EquipmentRegistry, RoomAcConfig,
@@ -1514,6 +1536,8 @@ mod tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                shr: None,
+                startup_cd: None,
                 crankcase_heater_kw: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
@@ -2344,7 +2368,7 @@ mod tests {
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();
         eq.apply_control(&ControlSignal::IdealCapacity {
-            capacity_w: -4_000.0,
+            capacity_w: -5_000.0,
         })
         .unwrap();
         eq.update_control(&environment);
@@ -2358,10 +2382,12 @@ mod tests {
         let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
         let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0);
 
+        // 5000W = 62.5% of 8000W max — falls between stage 1 (50%) and stage 2 (75%),
+        // so stage 1 is selected (lo index in the interpolation range).
         assert_eq!(eq.core.hvac.last_speed_index, 1);
         assert!(
             compressor_kw > 0.0,
-            "IdealCapacity=-4 kW on a 4-speed ladder must energize the second stage, got compressor_kw={compressor_kw}"
+            "IdealCapacity=-5 kW on a 4-speed ladder must energize the second stage, got compressor_kw={compressor_kw}"
         );
         assert!(
             (rtf - 1.0).abs() < 1e-9,
@@ -2438,6 +2464,85 @@ mod tests {
             speed_index.unwrap(),
             eq.core.hvac.last_speed_index as f64,
             "SPEED_INDEX telemetry must match hvac.last_speed_index"
+        );
+    }
+
+    #[test]
+    fn multi_speed_stage1_uses_second_biquadratic_pair() {
+        // Directly verify that calculate_performance uses biquadratic pair N*2 for
+        // cap and N*2+1 for EIR when last_speed_index=N.  Stage 0 curves have c0=1.0
+        // (cap_ratio≈1.0); stage 1 cap curve has c0=2.0 (cap_ratio≈2.0).
+        // When stage 1 is set, sensible_w must exceed the rated 4 kW capacity.
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 1;
+            typed.stage_capacities_w = Some(vec![4_000.0]);
+            typed.stage_eirs = Some(vec![0.33]);
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = Some(0.0);
+            typed.hysteresis_c = Some(0.0);
+        });
+        let environment = env(26.0, 0.010, 19.0, 35.0);
+
+        let mut core = CoolingCore::new(cfg.clone(), false);
+        core.init(&cfg, &environment).unwrap();
+
+        core.hvac.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        core.operating_mode = OperatingMode::Cooling;
+        core.hvac.duty_cycle = 1.0;
+        core.hvac.last_speed_index = 1;
+
+        let perf = core.calculate_performance(&environment, 15.0).unwrap();
+
+        assert!(
+            perf.sensible_cooling_w > 4_000.0,
+            "stage-1 biquadratic (c0=2.0) must double cap_ratio; got sensible_w={}",
+            perf.sensible_cooling_w
+        );
+    }
+
+    #[test]
+    fn room_ac_explicit_shr_reaches_rated_shr() {
+        let cfg = EquipmentConfig::from_typed(
+            "RAC".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 3.412_141_633 / 10.0,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                airflow_m3_s_per_w: None,
+                shr: Some(0.65),
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+            },
+        );
+        let environment = env(27.0, 0.010, 19.0, 35.0);
+        let mut eq = RoomAC::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        assert!(
+            (eq.core.rated_shr - 0.65).abs() < 1e-12,
+            "rated_shr must be 0.65 after init with shr=Some(0.65), got {}",
+            eq.core.rated_shr
         );
     }
 }
@@ -3454,7 +3559,7 @@ mod defaults_tests {
         telemetry_keys as tk,
     };
 
-    use super::{AirConditioner, RoomAC};
+    use super::{AirConditioner, CoolingCore, RoomAC};
     use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, RoomAcConfig};
 
     fn make_env(zone_temp_c: f64) -> EnvironmentState {
@@ -3674,6 +3779,8 @@ mod defaults_tests {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
+                shr: None,
+                startup_cd: None,
                 crankcase_heater_kw: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,

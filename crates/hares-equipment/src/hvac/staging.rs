@@ -95,10 +95,11 @@ impl HvacEquipment {
                     self.time_at_current_speed_s = 0.0;
                 }
                 let low_cap = self.low_speed_capacity_fraction.clamp(0.01, 0.999);
+                let high_cap = 1.0; // high speed = full capacity fraction
                 if desired_index == 1 {
                     SpeedSelection {
                         speed_index: 1,
-                        part_load_ratio: load_fraction,
+                        part_load_ratio: (load_fraction / high_cap).clamp(0.0, 1.0),
                         speed_frac: 1.0,
                     }
                 } else {
@@ -110,11 +111,7 @@ impl HvacEquipment {
                 }
             }
             SpeedControlMode::MultiSpeedInterpolated => self.select_multi_speed(load_fraction),
-            SpeedControlMode::VariableSpeedIdeal => SpeedSelection {
-                speed_index: 0,
-                part_load_ratio: 1.0,
-                speed_frac: load_fraction,
-            },
+            SpeedControlMode::VariableSpeedIdeal => self.select_multi_speed(load_fraction),
         };
         self.last_speed_index = selection.speed_index;
         self.last_speed_frac = selection.speed_frac;

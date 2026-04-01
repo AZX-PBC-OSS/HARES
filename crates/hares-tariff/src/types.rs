@@ -216,6 +216,14 @@ pub struct ElectricTariff {
     pub fixed_charges: FixedCharges,
     /// Minimum monthly charge ($/month floor).
     pub minimum_charge: Option<f64>,
+    /// When `true` (default), the minimum charge floor is applied to metered
+    /// charges (energy + demand + fixed) *before* subtracting export credit:
+    ///   `net = max(metered, min_charge) - export_credit`
+    /// When `false`, the minimum charge floor is applied to the net bill
+    /// *after* subtracting export credit:
+    ///   `net = max(metered - export_credit, min_charge)`
+    #[serde(default = "default_true")]
+    pub minimum_charge_excludes_export: bool,
     pub billing_cycle: BillingCycle,
     pub seasonal_split: Option<SeasonalSplit>,
     /// Demand averaging window in minutes. Defaults to 15 (standard US FERC/NERC).
@@ -226,6 +234,10 @@ pub struct ElectricTariff {
 
 fn default_demand_window_minutes() -> u32 {
     15
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ElectricTariff {
@@ -240,6 +252,7 @@ impl Default for ElectricTariff {
             export_rate: ExportRate::default(),
             fixed_charges: FixedCharges::default(),
             minimum_charge: None,
+            minimum_charge_excludes_export: true,
             billing_cycle: BillingCycle::default(),
             seasonal_split: None,
             demand_window_minutes: 15,
@@ -461,6 +474,7 @@ mod tests {
                 daily_usd: 0.0,
             },
             minimum_charge: Some(10.0),
+            minimum_charge_excludes_export: true,
             billing_cycle: BillingCycle::Monthly,
             seasonal_split: Some(SeasonalSplit::new(6, 9).unwrap()),
             demand_tou_schedule: Vec::new(),

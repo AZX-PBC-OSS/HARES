@@ -1010,8 +1010,10 @@ pub(crate) fn build_default_solvers(
     }
 
     // --- Natural ventilation through operable windows ---
-    // Compute effective open window area from per-window FractionOperable.
-    // Formula: Σ(window_area × fraction_operable) × 0.5 (open fraction) × 0.2 (flow fraction).
+    // OCHRE formula: total_window_area × 0.67 × 0.5 × 0.2 = total_window_area × 0.067.
+    // The 0.67 factor accounts for only ~67% of operable window area being openable at once;
+    // HPXML FractionOperable indicates window type (operable vs fixed), not instantaneous
+    // open state, so the 0.67 factor must be applied on top of FractionOperable.
     {
         use hares_envelope::NaturalVentilationConfig;
         let default_ceiling_height_m = building.ceiling_height_m.unwrap_or(2.5);
@@ -1038,7 +1040,7 @@ pub(crate) fn build_default_solvers(
             .map(|w| w.area_m2 * w.fraction_operable)
             .sum();
         if total_operable_area > 0.0 {
-            let open_area = total_operable_area * 0.5 * 0.2;
+            let open_area = total_operable_area * NaturalVentilationConfig::OPEN_AREA_FRACTION;
             let (stack, wind) = natural_ventilation_coefficients(&thermal_cfg, building_height_m);
             // Natural ventilation should use conditioned-zone ELA coefficients.
             // Prefer explicit indoor ELA coefficients when available; otherwise

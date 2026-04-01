@@ -234,6 +234,7 @@ pub struct PyTariffBuilder {
     export_rate: ExportRate,
     fixed_charges: FixedCharges,
     minimum_charge: Option<f64>,
+    minimum_charge_excludes_export: bool,
     billing_cycle: BillingCycle,
     seasonal_split: Option<SeasonalSplit>,
     demand_window_minutes: u32,
@@ -251,6 +252,7 @@ impl PyTariffBuilder {
             export_rate: ExportRate::default(),
             fixed_charges: FixedCharges::default(),
             minimum_charge: None,
+            minimum_charge_excludes_export: true,
             billing_cycle: BillingCycle::Monthly,
             seasonal_split: None,
             demand_window_minutes: 15,
@@ -471,6 +473,15 @@ impl PyTariffBuilder {
         Ok(slf)
     }
 
+    fn set_minimum_charge_excludes_export(
+        slf: Py<Self>,
+        py: Python<'_>,
+        excludes_export: bool,
+    ) -> Py<Self> {
+        slf.borrow_mut(py).minimum_charge_excludes_export = excludes_export;
+        slf
+    }
+
     /// Add a demand-specific TOU period (separate from energy TOU periods).
     /// If no demand TOU periods are added, demand charges use energy TOU periods.
     fn add_demand_tou_period(
@@ -528,6 +539,7 @@ impl PyTariffBuilder {
             export_rate: self.export_rate.clone(),
             fixed_charges: self.fixed_charges.clone(),
             minimum_charge: self.minimum_charge,
+            minimum_charge_excludes_export: self.minimum_charge_excludes_export,
             billing_cycle: self.billing_cycle,
             seasonal_split: self.seasonal_split,
             demand_window_minutes: self.demand_window_minutes,

@@ -604,6 +604,7 @@ pub fn parse(json: &str) -> Result<ElectricTariff, UrdbParseError> {
         export_rate,
         fixed_charges,
         minimum_charge,
+        minimum_charge_excludes_export: true,
         billing_cycle: BillingCycle::Monthly,
         seasonal_split,
         demand_window_minutes: 15,
