@@ -470,6 +470,15 @@ impl HeatPumpHeaterCore {
             vec![DEFAULT_HEATING_CAPACITY_W]
         };
 
+        let n_speeds = cfg.effective_number_of_speeds() as usize;
+        if n_speeds >= 2 && self.hvac.heating_capacities_w.len() < n_speeds {
+            return Err(hares_types::HaresError::Equipment(format!(
+                "Heat pump heater init: number_of_speeds={n_speeds} but only {} heating capacity value(s) provided; supply stage_heating_capacities_w with {} elements",
+                self.hvac.heating_capacities_w.len(),
+                n_speeds,
+            )));
+        }
+
         let default_eir = cfg
             .heating_eir
             .or_else(|| {
@@ -1207,9 +1216,9 @@ impl HeatPumpHeaterCore {
         let er_allowed_by_cycle = self.er_cycle_ready(env.current_time);
         let er_allowed_by_lockout = er_allowed_by_hard_lockout && !self.er_soft_lockout;
 
-        // ER thermostat thresholds relative to the active heating setpoint.
-        // Engage when zone drops below (setpoint - er_offset) and hold ER on
-        // until setpoint is reached to avoid short-cycling in the shoulder band.
+        // ER thermostat hysteresis band (matches OCHRE temp_turn_on / temp_turn_off).
+        // Turn on:  zone <= setpoint - er_offset
+        // Turn off: zone > er_turn_on + deadband
         let er_turn_on_c = setpoint - self.er_setpoint_offset_c;
         let er_turn_off_c = er_turn_on_c + self.hvac.thermostat.hysteresis_c;
         let er_thermostat_call = if self.er_was_on {
@@ -1441,6 +1450,7 @@ impl HeatPumpHeaterCore {
         self.dr_duty_cycle = decoded.dr_duty_cycle;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.hp_available = decoded.hp_available;
+        self.max_oat_supplemental_c = decoded.max_oat_supplemental_c;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
@@ -4932,6 +4942,39 @@ mod ideal_capacity_tests {
         assert!(
             (er_w - EXPECTED_ER_W).abs() < 1.0,
             "ER must fill only the residual ({EXPECTED_ER_W:.0} W); got {er_w:.1} W"
+        );
+    }
+
+    #[test]
+    fn two_speed_with_single_capacity_errors() {
+        let cfg = heater_config_with(|typed| {
+            typed.number_of_speeds = 2;
+            typed.heating_capacity_w = Some(8_000.0);
+            typed.stage_heating_capacities_w = None;
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 5.0, 0.003);
+        let result = eq.init(&cfg, &environment);
+        assert!(
+            result.is_err(),
+            "number_of_speeds=2 with only a single heating_capacity_w must return an error"
+        );
+    }
+
+    #[test]
+    fn two_speed_with_matching_stage_vec_succeeds() {
+        let cfg = heater_config_with(|typed| {
+            typed.number_of_speeds = 2;
+            typed.heating_capacity_w = None;
+            typed.stage_heating_capacities_w = Some(vec![4_000.0, 8_000.0]);
+            typed.stage_heating_eirs = Some(vec![0.33, 0.33]);
+            typed.backup_capacity_w = Some(0.0);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 5.0, 0.003);
+        assert!(
+            eq.init(&cfg, &environment).is_ok(),
+            "number_of_speeds=2 with a matching 2-element stage_heating_capacities_w must succeed"
         );
     }
 

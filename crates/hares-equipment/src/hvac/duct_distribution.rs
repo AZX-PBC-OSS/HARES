@@ -3,7 +3,7 @@
 //! Extracted from `hvac_core.rs` to isolate zone heat routing from speed
 //! staging and thermostat control. No speed or staging knowledge here.
 
-use hares_types::{PortContribution, PortDeclaration, PortSlots, ThermalCategory, ZoneId};
+use hares_types::{HaresError, PortContribution, PortDeclaration, PortSlots, ThermalCategory, ZoneId};
 use tracing::warn;
 
 use super::hvac_core::HvacEquipment;
@@ -89,17 +89,13 @@ impl HvacEquipment {
         latent_gain_w: f64,
         category: ThermalCategory,
     ) -> crate::Result<()> {
-        debug_assert!(
-            !self.zone_heat_fractions.is_empty(),
-            "zone_heat_fractions must be populated before write_zone_thermal_contributions; \
-             call update_zone_heat_fractions() during init"
-        );
+        if self.zone_heat_fractions.is_empty() {
+            return Err(HaresError::Equipment(
+                "write_zone_thermal_contributions called before update_zone_heat_fractions".into(),
+            ));
+        }
 
-        let fractions: &[(ZoneId, f64)] = if self.zone_heat_fractions.is_empty() {
-            &[(self.zone_id, 1.0)]
-        } else {
-            &self.zone_heat_fractions
-        };
+        let fractions: &[(ZoneId, f64)] = &self.zone_heat_fractions;
 
         for &(zone, fraction) in fractions {
             if fraction > 0.0 {
@@ -471,6 +467,66 @@ mod tests {
         assert!(
             (total - 1.0).abs() < 1e-9,
             "fractions must sum to 1.0, got {total}"
+        );
+    }
+
+    /// When basement_zone == duct_zone (both ZoneId(2)), the merged entry receives
+    /// the correct total watts. The entire merged contribution is tagged DuctLoss
+    /// because the zone matches duct_zone_id and is != conditioned zone. This is
+    /// accepted behavior: the watts are physically correct regardless of category.
+    #[test]
+    fn basement_equals_duct_zone_write_zone_contributions() {
+        use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
+
+        let mut hvac = make_hvac(); // conditioned = ZoneId(1)
+        hvac.duct_dse = 0.8;
+        hvac.basement_heat_frac = 0.2;
+        hvac.basement_zone_id = Some(ZoneId(2));
+        hvac.duct_zone_id = Some(ZoneId(2)); // same as basement
+        hvac.update_zone_heat_fractions();
+
+        // conditioned: 0.8 * 0.8 = 0.64
+        // merged zone 2: basement(0.8*0.2=0.16) + duct(0.2) = 0.36
+        let mut ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator::new(ZoneId(1)),
+                ThermalAccumulator::new(ZoneId(2)),
+            ],
+            ..Default::default()
+        };
+
+        let gross_w = 10_000.0;
+        hvac.write_zone_thermal_contributions(
+            &mut ports,
+            gross_w,
+            0.0,
+            ThermalCategory::HvacHeating,
+        )
+        .expect("write must succeed");
+
+        // Conditioned zone: 10000 * 0.64 = 6400 W as HvacHeating
+        let cond = ports.thermal.iter().find(|a| a.zone == ZoneId(1)).unwrap();
+        assert!(
+            (cond.sensible_for_category(ThermalCategory::HvacHeating) - 6_400.0).abs() < 1e-9,
+            "conditioned zone must receive 6400 W HvacHeating, got {}",
+            cond.sensible_for_category(ThermalCategory::HvacHeating)
+        );
+
+        // Merged zone 2: 10000 * 0.36 = 3600 W tagged DuctLoss (because zone ==
+        // duct_zone_id and zone != conditioned_zone; the basement portion is also
+        // tagged DuctLoss since we only have one merged fraction entry).
+        let merged = ports.thermal.iter().find(|a| a.zone == ZoneId(2)).unwrap();
+        assert!(
+            (merged.sensible_for_category(ThermalCategory::DuctLoss) - 3_600.0).abs() < 1e-9,
+            "merged zone 2 must receive 3600 W as DuctLoss, got {}",
+            merged.sensible_for_category(ThermalCategory::DuctLoss)
+        );
+
+        // Total watts are physically correct: 6400 + 3600 = 10000
+        let total = cond.sensible_gain_w + merged.sensible_gain_w;
+        assert!(
+            (total - gross_w).abs() < 1e-9,
+            "total watts must equal gross capacity {gross_w}, got {total}"
         );
     }
 

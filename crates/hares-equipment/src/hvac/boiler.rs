@@ -186,6 +186,8 @@ impl Equipment for ElectricBoiler {
             )));
         }
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
+        self.hvac.update_zone_heat_fractions();
+        self.hvac.rebuild_thermal_ports(&mut self.ports);
         self.ports[1].loop_id = Some(self.loop_id);
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
@@ -430,6 +432,8 @@ impl Equipment for GasBoiler {
         self.condensing_eir_coeffs = DEFAULT_CONDENSING_EIR_COEFFS;
         self.non_condensing_eir_coeffs = DEFAULT_NON_CONDENSING_EIR_COEFFS;
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
+        self.hvac.update_zone_heat_fractions();
+        self.hvac.rebuild_thermal_ports(&mut self.ports);
         self.ports[3].loop_id = Some(self.loop_id);
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
