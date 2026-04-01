@@ -958,6 +958,10 @@ impl HeatPumpHeaterCore {
             // Set load_ratio=1.0 as placeholder; actual PLR derived from
             // biquadratic-corrected capacity in compute_step.
             1.0
+        } else if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed {
+            // Single-speed compressor physics: thermostat Heating call implies
+            // full-stage runtime for the step (on/off cycling only).
+            1.0
         } else {
             let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
             load_ratio_raw.clamp(0.0, 1.0)
@@ -2660,6 +2664,31 @@ mod ideal_capacity_tests {
         assert!(
             (rtf - 1.0).abs() < 1e-9,
             "FSM Heating at 60 s must ignore IdealCapacity and produce RTF=1.0, got {rtf}"
+        );
+    }
+
+    #[test]
+    fn single_speed_heating_call_uses_full_duty_cycle_while_mode_is_heating() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // Step 1: force entry into Heating mode.
+        let env_cold = make_env(19.0, 60);
+        eq.init(&cfg, &env_cold).unwrap();
+        eq.update_control(&env_cold);
+        eq.step(&env_cold, Duration::from_secs(60), &mut make_ports())
+            .unwrap();
+
+        // Step 2: keep zone between turn-on and turn-off thresholds so FSM
+        // remains in Heating hold; single-speed runtime must stay at full duty.
+        let env_hold = make_env(20.9, 60);
+        eq.update_control(&env_hold);
+        eq.step(&env_hold, Duration::from_secs(60), &mut make_ports())
+            .unwrap();
+
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
+        assert!(
+            (rtf - 1.0).abs() < 1e-9,
+            "single-speed heating call must run full duty while Heating mode is held; got {rtf}"
         );
     }
 
