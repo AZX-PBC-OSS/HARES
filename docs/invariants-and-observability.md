@@ -221,6 +221,19 @@ Extended fields (populated when available):
 
 ---
 
+## HVAC Control Notes (Physics-First)
+
+- Single-speed compressor equipment (ASHP heater and AC cooler) now runs binary
+  on/off per timestep when thermostat is calling, rather than synthetic partial
+  modulation from setpoint error.
+- Mini-split multi-speed cooling keeps fractional runtime behavior near
+  setpoint; this path is intentionally preserved.
+- ASHP HP lockout now uses a small hysteresis band (default 0.5 C) to avoid
+  threshold chatter and nonphysical HP/ER spikes when minute-level weather
+  interpolation crosses the lockout threshold.
+
+---
+
 ## Debugging Workflows
 
 ### Thermal Runaway

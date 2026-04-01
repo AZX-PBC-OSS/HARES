@@ -251,6 +251,9 @@ fn debug_ashp_peak_columns_observe() {
             "ASHP Heater Max Capacity (W)",
             "Temperature - Indoor (C)",
             "Temperature - Outdoor (C)",
+            "Outdoor Dry Bulb (C)",
+            "ASHP Heater Main Power (kW)",
+            "ASHP Heater ER Power (kW)",
         ] {
             if let Some(col) = actual.get(name)
                 && let Some(v) = col.get(idx)

@@ -32,6 +32,9 @@ pub const TIMED_DEFROST_PWR_MULT_SLOPE: f64 = 36.45;
 pub const DEFROST_EIR_CURVE_TEMP_MIN_C: f64 = 15.555;
 
 pub const DEFAULT_HP_LOCKOUT_TEMP_C: f64 = -17.78;
+/// Compressor lockout hysteresis band width [°C].
+/// Prevents rapid HP enable/disable chatter near the lockout threshold.
+pub const DEFAULT_HP_LOCKOUT_HYSTERESIS_C: f64 = 0.5;
 pub const DEFAULT_ER_LOCKOUT_TEMP_C: f64 = 4.44;
 /// OCHRE default has no minimum backup-strip off-time unless explicitly set.
 pub const DEFAULT_MIN_ER_CYCLE_TIME_S: f64 = 0.0;

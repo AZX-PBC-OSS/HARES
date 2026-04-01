@@ -27,7 +27,8 @@ use super::constants::{
     DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR, DEFAULT_EQUIPMENT_ID,
     DEFAULT_ER_HARD_LOCKOUT_TIME_S, DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
     DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
-    DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S, DEFAULT_ZONE_ID,
+    DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S,
+    DEFAULT_ZONE_ID,
     MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
 use super::defrost::{DefrostConfig, evaluate_defrost};
@@ -58,6 +59,8 @@ struct HeatPumpHeaterCore {
     operating_mode: OperatingMode,
     defrost_config: DefrostConfig,
     hp_lockout_temp_c: f64,
+    hp_lockout_hysteresis_c: f64,
+    hp_available: bool,
     er_lockout_temp_c: f64,
     /// EnergyPlus supplemental-ER upper OAT bound. ER is blocked when OAT exceeds
     /// this threshold; the heat pump alone is deemed sufficient. Hard cap: 21°C.
@@ -168,6 +171,7 @@ struct HeaterState {
     dr_duty_cycle: f64,
     dr_duration_remaining_s: Option<f64>,
     max_oat_supplemental_c: f64,
+    hp_available: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -324,6 +328,8 @@ impl HeatPumpHeaterCore {
             operating_mode: OperatingMode::Off,
             defrost_config: DefrostConfig::on_demand(1.0, 0.0),
             hp_lockout_temp_c: DEFAULT_HP_LOCKOUT_TEMP_C,
+            hp_lockout_hysteresis_c: DEFAULT_HP_LOCKOUT_HYSTERESIS_C,
+            hp_available: false,
             er_lockout_temp_c: DEFAULT_ER_LOCKOUT_TEMP_C,
             max_oat_supplemental_c: MAX_OAT_SUPPLEMENTAL_C,
             er_setpoint_offset_c: 0.0,
@@ -378,6 +384,8 @@ impl HeatPumpHeaterCore {
         self.er_lockout_remaining_s = 0.0;
         self.prev_zone_temp_c = f64::NAN;
         self.er_soft_lockout = false;
+        let half = 0.5 * self.hp_lockout_hysteresis_c.max(0.0);
+        self.hp_available = env.weather.outdoor_temp_c > self.hp_lockout_temp_c + half;
         self.last_heating_rtf = 0.0;
         self.run_time_s = 0.0;
         self.cycle_on_steps = 0;
@@ -492,6 +500,7 @@ impl HeatPumpHeaterCore {
             .max(0.0);
         self.backup_eir = cfg.backup_eir.unwrap_or(DEFAULT_BACKUP_EIR).max(0.0);
         self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
+        self.hp_lockout_hysteresis_c = DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
         self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
         self.max_oat_supplemental_c = cfg
             .max_oat_supplemental_c
@@ -949,11 +958,6 @@ impl HeatPumpHeaterCore {
             // Set load_ratio=1.0 as placeholder; actual PLR derived from
             // biquadratic-corrected capacity in compute_step.
             1.0
-        } else if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed {
-            // Single-speed compressor physics: when thermostat calls for heat,
-            // the compressor runs at full stage and cycles on/off across steps.
-            // Do not synthesize intra-step modulation from setpoint error.
-            1.0
         } else {
             let load_ratio_raw = (setpoint - zone.temperature_c) / deadband;
             load_ratio_raw.clamp(0.0, 1.0)
@@ -963,7 +967,7 @@ impl HeatPumpHeaterCore {
                 .select_speed_with_zone_temp(load_ratio, Some(zone.temperature_c), true);
         self.hvac.update_prev_zone_temp(Some(zone.temperature_c));
 
-        let hp_available = env.weather.outdoor_temp_c >= self.hp_lockout_temp_c;
+        let hp_available = self.update_hp_availability(env.weather.outdoor_temp_c);
         // OCHRE HVAC.py aggressive lockout: ER off above er_lockout_temp_c (default 4.44°C).
         // EnergyPlus hard cap: ER off above max_oat_supplemental_c (default 21°C).
         // Both conditions must pass; in practice the OCHRE threshold is more restrictive
@@ -992,6 +996,18 @@ impl HeatPumpHeaterCore {
             speed_index: speed.speed_index,
             duty_cycle: speed.part_load_ratio,
         })
+    }
+
+    fn update_hp_availability(&mut self, outdoor_temp_c: f64) -> bool {
+        let half = 0.5 * self.hp_lockout_hysteresis_c.max(0.0);
+        if self.hp_available {
+            if outdoor_temp_c < self.hp_lockout_temp_c - half {
+                self.hp_available = false;
+            }
+        } else if outdoor_temp_c > self.hp_lockout_temp_c + half {
+            self.hp_available = true;
+        }
+        self.hp_available
     }
 
     fn er_cycle_ready(&self, now: DateTime<FixedOffset>) -> bool {
@@ -1071,6 +1087,7 @@ impl HeatPumpHeaterCore {
             dr_duty_cycle: self.dr_duty_cycle,
             dr_duration_remaining_s: self.dr_duration_remaining_s,
             max_oat_supplemental_c: self.max_oat_supplemental_c,
+            hp_available: self.hp_available,
         })
     }
 
@@ -1104,6 +1121,7 @@ impl HeatPumpHeaterCore {
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duty_cycle = decoded.dr_duty_cycle;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        self.hp_available = decoded.hp_available;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
