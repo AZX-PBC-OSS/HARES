@@ -2548,6 +2548,7 @@ mod tests {
             typed.er_lockout_temp_c = Some(100.0);
             typed.er_setpoint_offset_c = Some(1.6);
             typed.er_hard_lockout_time_s = Some(0.0);
+            typed.hysteresis_c = Some(1.0);
         });
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -2570,8 +2571,8 @@ mod tests {
             "ER must remain on between turn-on and turn-off thresholds"
         );
 
-        // Step 3: above turn-off threshold => ER must turn off.
-        let mode3 = eq.update_control(&make_env(20.5, 0.0, 120));
+        // Step 3: above turn-off threshold (setpoint=21C) => ER must turn off.
+        let mode3 = eq.update_control(&make_env(21.1, 0.0, 120));
         assert_eq!(
             mode3,
             OperatingMode::Off,
@@ -3050,6 +3051,36 @@ mod ideal_capacity_tests {
         assert!(
             (rtf - 0.5).abs() < 0.05,
             "IdealCapacity=4000 W at 900 s (half rated) must produce RTF ≈ 0.5, got {rtf}"
+        );
+    }
+
+    // At 900 s timestep, ideal-capacity control must be able to engage heating
+    // from thermostat deadband. This prevents a control deadlock where mode
+    // stays Deadband and ideal capacity never gets applied.
+    #[test]
+    fn coarse_timestep_ideal_signal_engages_from_deadband_band() {
+        let cfg = heater_config();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // 20.5C is above turn-on (20.0C) and below setpoint (21.0C): FSM deadband.
+        let env = make_env(20.5, 900);
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 4_000.0,
+        })
+        .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let mode = eq.telemetry().get(tk::OPERATING_MODE).unwrap_or(-1.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
+        assert!(
+            mode > 0.0,
+            "ideal-capacity signal at coarse timestep must activate heating from deadband; mode={mode}"
+        );
+        assert!(
+            rtf > 0.0,
+            "ideal-capacity signal at coarse timestep must produce nonzero runtime from deadband; rtf={rtf}"
         );
     }
 

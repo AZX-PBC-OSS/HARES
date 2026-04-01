@@ -852,6 +852,12 @@ fn debug_minisplit_channel_delta_report() {
             "minisplit actual indoor first 12: {:?}",
             &a_temp[..12.min(a_temp.len())]
         );
+        if let Some(outdoor) = actual.get("Temperature - Outdoor (C)") {
+            println!(
+                "minisplit actual outdoor first 20: {:?}",
+                &outdoor[..20.min(outdoor.len())]
+            );
+        }
         println!(
             "minisplit reference indoor first 12: {:?}",
             &r_temp[..12.min(r_temp.len())]
