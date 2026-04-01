@@ -20,6 +20,12 @@ pub struct GasFurnaceConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
+    /// Per-stage heating capacities [W]. Overrides `capacity_w` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_heating_capacities_w: Option<Vec<f64>>,
+    /// Per-stage energy input ratios (EIR = 1/AFUE per stage). Overrides `afue` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_heating_eirs: Option<Vec<f64>>,
     #[serde(flatten)]
     pub ducts: DuctConfig,
 }
@@ -39,6 +45,8 @@ impl Default for GasFurnaceConfig {
             afue: 0.80,
             fan_power_w: None,
             number_of_speeds: 1,
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
             ducts: DuctConfig::default(),
         }
     }

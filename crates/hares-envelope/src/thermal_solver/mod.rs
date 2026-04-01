@@ -12,8 +12,8 @@ pub(crate) use config::Result;
 pub use config::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
     ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig, InteriorSurfaceInfo,
-    NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig, ThermalSolverError,
-    VentilationConfig, WindowSolarProperties,
+    MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolverConfig,
+    ThermalSolverError, WindowSolarProperties,
 };
 
 use std::collections::HashMap;
@@ -580,8 +580,8 @@ mod tests {
     use crate::state_space::{OutputMapping, StateSpaceModel};
     use crate::thermal_solver::{
         DrivingTemp, ExteriorSurfaceInfo, InfiltrationMethod, InteriorLwrZoneConfig,
-        InteriorSurfaceInfo, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
-        ThermalSolverConfig, VentilationConfig, WindowSolarProperties,
+        InteriorSurfaceInfo, MechanicalVentilationParams, NaturalVentilationConfig,
+        StateSpaceWiring, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
     };
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
@@ -668,7 +668,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -747,7 +747,7 @@ mod tests {
             interior_lwr_zones: vec![interior_lwr_zone],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -875,7 +875,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -964,7 +964,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -1415,7 +1415,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![(ZoneId(1), method)],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -1460,7 +1460,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![(ZoneId(1), method)],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -1628,7 +1628,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -1691,7 +1691,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -1738,7 +1738,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -1789,7 +1789,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -1922,7 +1922,7 @@ mod tests {
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
-                ventilation: VentilationConfig::default(),
+                ventilation: MechanicalVentilationParams::default(),
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
@@ -2067,7 +2067,7 @@ mod tests {
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
-                ventilation: VentilationConfig::default(),
+                ventilation: MechanicalVentilationParams::default(),
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
@@ -2223,7 +2223,7 @@ mod tests {
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
-                ventilation: VentilationConfig::default(),
+                ventilation: MechanicalVentilationParams::default(),
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
@@ -2564,7 +2564,7 @@ mod tests {
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
-                ventilation: VentilationConfig::default(),
+                ventilation: MechanicalVentilationParams::default(),
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
@@ -2671,7 +2671,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: Some(NaturalVentilationConfig::from_window_area(
                 12.0,      // 12 m² total window area
                 0.000_106, // ELA stack coeff
@@ -2752,7 +2752,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: Some(NaturalVentilationConfig::from_window_area(
                 12.0, 0.000_106, 0.000_143,
             )),
@@ -2844,7 +2844,7 @@ mod tests {
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
-                ventilation: VentilationConfig::default(),
+                ventilation: MechanicalVentilationParams::default(),
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
@@ -2989,7 +2989,7 @@ mod tests {
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
                 ventilation_flow_m3_s: 0.0,
-                ventilation: VentilationConfig::default(),
+                ventilation: MechanicalVentilationParams::default(),
                 natural_ventilation: None,
                 supply_duct_leakage_m3_s: 0.0,
                 return_duct_leakage_m3_s: 0.0,
@@ -3098,7 +3098,7 @@ mod tests {
                     interior_lwr_zones: vec![],
                     infiltration: vec![],
                     ventilation_flow_m3_s: 0.0,
-                    ventilation: VentilationConfig::default(),
+                    ventilation: MechanicalVentilationParams::default(),
                     natural_ventilation: None,
                     supply_duct_leakage_m3_s: 0.0,
                     return_duct_leakage_m3_s: 0.0,
@@ -3434,7 +3434,7 @@ mod tests {
             interior_lwr_zones: vec![lwr_zone.clone()],
             infiltration: vec![],
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
@@ -3465,7 +3465,7 @@ mod tests {
 
     fn solver_with_ventilation(
         env: &EnvironmentState,
-        vent: VentilationConfig,
+        vent: MechanicalVentilationParams,
         vent_flow_m3_s: f64,
     ) -> ThermalSolver {
         let r = 2.0;
@@ -3524,7 +3524,7 @@ mod tests {
         // No recovery
         let mut solver_no_recovery = solver_with_ventilation(
             &env,
-            VentilationConfig {
+            MechanicalVentilationParams {
                 balanced: false,
                 ..Default::default()
             },
@@ -3538,7 +3538,7 @@ mod tests {
         // HRV with 70% sensible recovery
         let mut solver_hrv = solver_with_ventilation(
             &env,
-            VentilationConfig {
+            MechanicalVentilationParams {
                 balanced: true,
                 sensible_recovery_efficiency: 0.70,
                 latent_recovery_efficiency: 0.0,
@@ -3593,14 +3593,14 @@ mod tests {
         };
 
         // No recovery
-        let mut solver_no = solver_with_ventilation(&env, VentilationConfig::default(), vent_flow);
+        let mut solver_no = solver_with_ventilation(&env, MechanicalVentilationParams::default(), vent_flow);
         let update_no = solver_no.resolve(&ports, &env, Duration::from_secs(60));
         let latent_no = extract_latent(&update_no);
 
         // ERV: 70% sensible, 30% latent recovery
         let mut solver_erv = solver_with_ventilation(
             &env,
-            VentilationConfig {
+            MechanicalVentilationParams {
                 balanced: true,
                 sensible_recovery_efficiency: 0.70,
                 latent_recovery_efficiency: 0.30,
@@ -3673,7 +3673,7 @@ mod tests {
             interior_lwr_zones: vec![],
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.5 })],
             ventilation_flow_m3_s: forced_flow,
-            ventilation: VentilationConfig {
+            ventilation: MechanicalVentilationParams {
                 balanced: false,
                 ..Default::default()
             },

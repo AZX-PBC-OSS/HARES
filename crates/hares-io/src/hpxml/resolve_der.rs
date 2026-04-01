@@ -25,12 +25,16 @@ pub(super) fn resolve_pv(
     };
 
     let mut inverter_eff_by_id: HashMap<String, f64> = HashMap::new();
+    let mut inverter_cap_kw_by_id: HashMap<String, f64> = HashMap::new();
     for inverter in photovoltaics.children_named("Inverter") {
-        if let (Some(id), Some(eff)) = (
-            element_id(inverter),
-            child_f64(inverter, "InverterEfficiency"),
-        ) {
-            inverter_eff_by_id.insert(id, eff);
+        let Some(id) = element_id(inverter) else {
+            continue;
+        };
+        if let Some(eff) = child_f64(inverter, "InverterEfficiency") {
+            inverter_eff_by_id.insert(id.clone(), eff);
+        }
+        if let Some(max_power_w) = child_f64(inverter, "MaxPowerOutput") {
+            inverter_cap_kw_by_id.insert(id, max_power_w / 1000.0);
         }
     }
 
@@ -45,10 +49,14 @@ pub(super) fn resolve_pv(
             }
         }
 
-        let inverter_eff = pv
+        let inverter_id = pv
             .child("AttachedToInverter")
-            .and_then(|n| n.attrs.get("idref"))
+            .and_then(|n| n.attrs.get("idref"));
+        let inverter_eff = inverter_id
             .and_then(|id| inverter_eff_by_id.get(id))
+            .copied();
+        let inverter_capacity_kw = inverter_id
+            .and_then(|id| inverter_cap_kw_by_id.get(id))
             .copied();
 
         let cfg = PvConfig {
@@ -63,7 +71,7 @@ pub(super) fn resolve_pv(
             noct_c: None,
             system_losses_fraction: child_f64(pv, "SystemLossesFraction"),
             inverter_efficiency: inverter_eff,
-            inverter_capacity_kw: None,
+            inverter_capacity_kw,
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,

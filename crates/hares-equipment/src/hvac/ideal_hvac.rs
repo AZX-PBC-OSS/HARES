@@ -703,8 +703,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlCapabilities, DomainUpdate, EnvironmentState, GridState, PortSlots,
-        SCHEDULE_DOMAIN_ID, ScheduleSource, SurfaceIrradiance, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState,
+        SCHEDULE_DOMAIN_ID, ScheduleSource, SurfaceIrradiance,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
     use super::IdealHvac;
@@ -1382,26 +1382,24 @@ mod tests {
         heating_weekday[8] = 18.33;
         let cooling_weekday = [26.0f64; 24];
 
-        let mut cfg = config("IH");
-        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
-        cfg.test_extras_mut()
-            .insert("ideal_capacity_mode".into(), "on".into());
-        cfg.test_extras_mut().insert(
-            "heating_weekday_setpoints_c".into(),
-            heating_weekday.to_vec().into(),
-        );
-        cfg.test_extras_mut().insert(
-            "heating_weekend_setpoints_c".into(),
-            heating_weekday.to_vec().into(),
-        );
-        cfg.test_extras_mut().insert(
-            "cooling_weekday_setpoints_c".into(),
-            cooling_weekday.to_vec().into(),
-        );
-        cfg.test_extras_mut().insert(
-            "cooling_weekend_setpoints_c".into(),
-            cooling_weekday.to_vec().into(),
-        );
+        let typed = crate::IdealHvacConfig {
+            zone_id: Some(1),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                weekday: heating_weekday,
+                weekend: heating_weekday,
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            }),
+            cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                weekday: cooling_weekday,
+                weekend: cooling_weekday,
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            }),
+            ..crate::IdealHvacConfig::default()
+        };
+        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
 
         // Zone at 15°C — well below both setpoints, always triggers Heating.
         // hysteresis=1.0, deadband_offset=0.2 → heat turn-on at setpoint-0.8
@@ -1478,24 +1476,23 @@ mod tests {
         heating_weekday[8] = 18.0;
         cooling_weekday[8] = 22.0;
 
-        let mut cfg = config("IH");
-        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
-        cfg.test_extras_mut().insert(
-            "heating_weekday_setpoints_c".into(),
-            heating_weekday.to_vec().into(),
-        );
-        cfg.test_extras_mut().insert(
-            "heating_weekend_setpoints_c".into(),
-            heating_weekday.to_vec().into(),
-        );
-        cfg.test_extras_mut().insert(
-            "cooling_weekday_setpoints_c".into(),
-            cooling_weekday.to_vec().into(),
-        );
-        cfg.test_extras_mut().insert(
-            "cooling_weekend_setpoints_c".into(),
-            cooling_weekday.to_vec().into(),
-        );
+        let typed = crate::IdealHvacConfig {
+            zone_id: Some(1),
+            heating_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                weekday: heating_weekday,
+                weekend: heating_weekday,
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            }),
+            cooling_setpoint_source: Some(hares_types::ScheduleSourceConfig::DailyProfile {
+                weekday: cooling_weekday,
+                weekend: cooling_weekday,
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            }),
+            ..crate::IdealHvacConfig::default()
+        };
+        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
 
         // Midpoint = 22.0 at hour 0
         let env_h0 = env(22.0, 60, 0);

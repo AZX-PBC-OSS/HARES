@@ -800,7 +800,7 @@ mod tests {
             indoor_zone_id: ZoneId(1),
             infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach })],
             ventilation_flow_m3_s: forced_m3_s,
-            ventilation: crate::thermal_solver::config::VentilationConfig {
+            ventilation: crate::thermal_solver::config::MechanicalVentilationParams {
                 balanced: true,
                 sensible_recovery_efficiency: sens_recovery,
                 latent_recovery_efficiency: 0.0,

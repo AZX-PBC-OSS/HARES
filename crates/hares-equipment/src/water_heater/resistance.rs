@@ -177,7 +177,7 @@ impl ResistanceWH {
             lower_element_on: false,
             loop_id,
             fluid_type: FluidType::Water,
-            mains_temp_c: 15.0,
+            mains_temp_c: 10.0,
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
@@ -275,7 +275,12 @@ impl ResistanceWH {
             n_nodes,
             height_m,
             diameter_m,
-            ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
+            ua_w_per_k: super::apply_jacket_r_value(
+                c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
+                height_m,
+                diameter_m,
+                c.jacket_r_value_m2_k_w,
+            ),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
             initial_temp_c: c
                 .initial_tank_temp_c
@@ -877,6 +882,7 @@ mod tests {
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         }
     }
 
@@ -1068,19 +1074,17 @@ mod tests {
     }
 
     // --- DR and control signal tests ---
-
-    // DR Moderate: setpoint offset = -3°C. Tank at 50°C with setpoint 52°C — normally
-    // calling for heat. After Moderate, effective setpoint = 49°C < 50°C → no call.
-    #[test]
+    //
+    // DR Moderate: setpoint offset = -3°C. Tank at 49°C with setpoint 52°C — normally
+    // calling for heat (49 < 52 - 2 = 50). After Moderate, effective setpoint = 49°C; tank at
+    // 49°C is not below 49 - 2 = 47, so no call from Off state.    #[test]
     fn wh_dr_moderate_reduces_setpoint() {
-        // Start with tank just below setpoint so there is a call for heat.
         let mut typed = typed_config();
-        typed.initial_tank_temp_c = Some(50.0); // setpoint=52, deadband=2
+        typed.initial_tank_temp_c = Some(49.0);
         let cfg = config_from_typed(typed);
-
         let e = env(21.0);
 
-        // Baseline: tank at 50°C is within deadband below setpoint 52°C → heating.
+        // Baseline: tank at 49°C < setpoint - deadband = 50°C → heating from Off.
         let mut eq_base = ResistanceWH::new(cfg.clone());
         eq_base.init(&cfg, &e).unwrap();
         let mode_base = eq_base.update_control(&e);
@@ -1089,7 +1093,8 @@ mod tests {
             "baseline must be heating; got {mode_base:?}"
         );
 
-        // DR Moderate: effective setpoint = 52 + (-3) = 49°C. Tank at 50°C > 49°C → no call.
+        // DR Moderate: effective setpoint = 52 + (-3) = 49°C.
+        // From Off: fires if tank < 49 - 2 = 47. Tank at 49°C → no call.
         let mut eq_dr = ResistanceWH::new(cfg.clone());
         eq_dr.init(&cfg, &e).unwrap();
         eq_dr
@@ -1338,6 +1343,77 @@ mod tests {
             "effective load with dr=0.5 and ctrl=0.5 must be 25% of baseline; ratio={ratio:.3}"
         );
     }
+
+    /// A jacket R-value applied at init must reduce the effective tank UA so
+    /// that the standby skin loss after one step is strictly lower than without
+    /// the jacket.
+    ///
+    /// No draw is configured and the initial tank temp is above setpoint so
+    /// elements never fire, isolating the standby-loss signal.
+    #[test]
+    fn jacket_r_value_reduces_standby_skin_loss() {
+        let make_cfg = |jacket: Option<f64>| {
+            config_from_typed(ElectricResistanceWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: None,
+                loop_id: None,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                energy_factor: None,
+                uniform_energy_factor: None,
+                heating_capacity_w: None,
+                ua_w_per_k: Some(3.0),
+                setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: Some(300.0),
+                initial_tank_temp_c: Some(55.0),
+                tank_nodes: None,
+                avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: Some(0.0),
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+                element_power_w: None,
+                max_setpoint_ramp_rate_c_per_min: None,
+                element_priority_mode: None,
+                jacket_r_value_m2_k_w: jacket,
+            })
+        };
+
+        let e = env(20.0);
+
+        let cfg_no_jacket = make_cfg(None);
+        let mut wh_no_jacket = ResistanceWH::new(cfg_no_jacket.clone());
+        wh_no_jacket.init(&cfg_no_jacket, &e).unwrap();
+        let mut p1 = ports();
+        wh_no_jacket
+            .step(&e, Duration::from_secs(60), &mut p1)
+            .unwrap();
+        let loss_no_jacket = wh_no_jacket.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
+
+        // jacket_r_value_m2_k_w = 1.761 m²·K/W ≈ 10 hr·ft²·°F/BTU — a
+        // substantial insulation blanket that should cut losses measurably.
+        let cfg_with_jacket = make_cfg(Some(1.761_101_84));
+        let mut wh_with_jacket = ResistanceWH::new(cfg_with_jacket.clone());
+        wh_with_jacket.init(&cfg_with_jacket, &e).unwrap();
+        let mut p2 = ports();
+        wh_with_jacket
+            .step(&e, Duration::from_secs(60), &mut p2)
+            .unwrap();
+        let loss_with_jacket = wh_with_jacket.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
+
+        assert!(
+            loss_no_jacket > 0.0,
+            "expected positive skin loss without jacket, got {loss_no_jacket}"
+        );
+        assert!(
+            loss_with_jacket < loss_no_jacket,
+            "jacket insulation must reduce standby skin loss: \
+             with_jacket={loss_with_jacket:.4} W must be < no_jacket={loss_no_jacket:.4} W"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1427,6 +1503,7 @@ mod element_priority_tests {
                 element_power_w: None,
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: Some(mode.to_string()),
+                jacket_r_value_m2_k_w: None,
             },
         )
     }

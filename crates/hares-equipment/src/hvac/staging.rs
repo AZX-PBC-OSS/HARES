@@ -10,7 +10,8 @@ use super::speed_control::{SpeedControlMode, SpeedSelection};
 use super::thermostat::ThermostatMode;
 
 /// Default low-speed capacity fraction for two-speed equipment.
-pub(super) const DEFAULT_LOW_SPEED_CAPACITY_FRACTION: f64 = 0.5;
+/// Matches OCHRE/AHRI lookup table: 0.72 for 2-speed AC and ASHP coolers.
+pub(super) const DEFAULT_LOW_SPEED_CAPACITY_FRACTION: f64 = 0.72;
 
 /// Default part-load factor degradation coefficient (Cd).
 /// AHRI Standard 210/240-2023, S6.6.3 default when no test data available.

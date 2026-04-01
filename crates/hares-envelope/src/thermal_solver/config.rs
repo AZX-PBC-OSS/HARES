@@ -79,21 +79,24 @@ impl Default for InfiltrationMethod {
     }
 }
 
+/// Runtime parameters for the thermal solver's ventilation/infiltration calculation.
+///
+/// Distinct from the equipment-level `VentilationConfig` in `hares-equipment`, which owns
+/// the full ERV/HRV specification. This struct holds only the parameters the infiltration
+/// solver needs: flow distribution per zone, whether the system is balanced, and recovery
+/// efficiencies.
 #[derive(Debug, Clone, Default)]
-pub struct VentilationConfig {
+pub struct MechanicalVentilationParams {
     pub zone_flow_m3_s: HashMap<ZoneId, f64>,
     /// Whether the ventilation system is balanced (ERV, HRV, or balanced fan).
     /// Recovery efficiencies are only applied for balanced systems.
     /// Unbalanced fans use quadrature combination with infiltration.
-    /// OCHRE Envelope.py:59-87 and hpxml.py:556.
     pub balanced: bool,
     /// Sensible heat recovery efficiency [0.0–1.0].
     /// Reduces the sensible ventilation load for balanced systems.
-    /// Parsed from HPXML `SensibleRecoveryEfficiency`.
     pub sensible_recovery_efficiency: f64,
     /// Latent heat recovery efficiency [0.0–1.0].
     /// Reduces the latent ventilation load for balanced systems.
-    /// Derived as `TotalRecoveryEfficiency - SensibleRecoveryEfficiency` (OCHRE hpxml.py:560).
     pub latent_recovery_efficiency: f64,
 }
 
@@ -379,7 +382,7 @@ pub struct ThermalSolverConfig {
     /// no duct adjustment is applied.
     pub return_duct_leakage_m3_s: f64,
     pub ventilation_flow_m3_s: f64,
-    pub ventilation: VentilationConfig,
+    pub ventilation: MechanicalVentilationParams,
     /// Natural ventilation through operable windows. `None` disables the feature (default).
     pub natural_ventilation: Option<NaturalVentilationConfig>,
     /// Per-boundary conduction diagnostics for BESTEST per-component heat gain tracking.
@@ -398,7 +401,7 @@ impl Default for ThermalSolverConfig {
             supply_duct_leakage_m3_s: 0.0,
             return_duct_leakage_m3_s: 0.0,
             ventilation_flow_m3_s: 0.0,
-            ventilation: VentilationConfig::default(),
+            ventilation: MechanicalVentilationParams::default(),
             natural_ventilation: None,
             boundary_diagnostics: Vec::new(),
         }
@@ -545,4 +548,30 @@ pub struct WindowSolarDiag {
     pub absorbed_zone_w: f64,
     /// SHGC used for this window.
     pub shgc: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mechanical_ventilation_params_fields_accessible() {
+        let params = MechanicalVentilationParams {
+            zone_flow_m3_s: HashMap::from([(ZoneId(1), 0.035)]),
+            balanced: true,
+            sensible_recovery_efficiency: 0.75,
+            latent_recovery_efficiency: 0.50,
+        };
+
+        assert_eq!(params.zone_flow_m3_s[&ZoneId(1)], 0.035);
+        assert!(params.balanced);
+        assert_eq!(params.sensible_recovery_efficiency, 0.75);
+        assert_eq!(params.latent_recovery_efficiency, 0.50);
+
+        let default = MechanicalVentilationParams::default();
+        assert!(default.zone_flow_m3_s.is_empty());
+        assert!(!default.balanced);
+        assert_eq!(default.sensible_recovery_efficiency, 0.0);
+        assert_eq!(default.latent_recovery_efficiency, 0.0);
+    }
 }

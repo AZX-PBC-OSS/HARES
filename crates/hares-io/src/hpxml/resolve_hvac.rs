@@ -517,6 +517,8 @@ fn try_build_gas_furnace_config(
         number_of_speeds: n_speeds,
         fan_power_w,
         ducts,
+        stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
+        stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -646,10 +648,14 @@ fn try_build_electric_baseboard_config(
     params: &Map<String, Value>,
 ) -> Option<EquipmentConfig> {
     let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+    let zone_id = params
+        .get("zone_id")
+        .and_then(Value::as_u64)
+        .map(|v| v as u16);
 
     let cfg = ElectricBaseboardConfig {
         equipment_id: None,
-        zone_id: None,
+        zone_id,
         capacity_w,
         eir: 1.0,
     };
@@ -1177,6 +1183,14 @@ fn compute_basement_params(building: &Building) -> Map<String, Value> {
     params
 }
 
+fn conditioned_zone_id(building: &Building) -> Option<u16> {
+    let idx = building
+        .zones
+        .iter()
+        .position(|z| matches!(z.zone_type, ZoneType::Conditioned))?;
+    Some((idx as u16) + 1)
+}
+
 pub(super) fn resolve_hvac(
     building: &Building,
     defaults: &DefaultsStore,
@@ -1258,6 +1272,14 @@ pub(super) fn resolve_hvac(
         // not for furnaces, boilers, or baseboard.
         if matches!(name.as_str(), "ASHP Heater" | "MSHP Heater") {
             insert_startup_degradation(&mut params, &name, true);
+        }
+        if name == "Electric Baseboard" {
+            if let Some(zone_id) = conditioned_zone_id(building) {
+                params.insert("zone_id".to_string(), json!(zone_id));
+            }
+        }
+        if name == "Gas Furnace" {
+            apply_multispeed_furnace_parameters(&mut params, defaults, &name);
         }
         let typed_config = match name.as_str() {
             "Gas Furnace" => try_build_gas_furnace_config(&name, &params, &duct_params),
@@ -1829,6 +1851,42 @@ fn apply_multispeed_heating_parameters(
     equipment_name: &str,
 ) {
     apply_multispeed_parameters(params, defaults, equipment_name, true);
+}
+
+fn apply_multispeed_furnace_parameters(
+    params: &mut Map<String, Value>,
+    defaults: &DefaultsStore,
+    equipment_name: &str,
+) {
+    let n_speeds = params
+        .get("number_of_speeds")
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    if n_speeds <= 1 {
+        return;
+    }
+    let Some(rated_capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
+        return;
+    };
+    let Some(afue) = params.get("efficiency_afue").and_then(Value::as_f64) else {
+        return;
+    };
+    let Some(multispeed) =
+        defaults.hvac_multispeed_parameters(equipment_name, "AFUE", n_speeds, afue * 100.0)
+    else {
+        return;
+    };
+    let stage_count = multispeed
+        .capacity_ratios
+        .len()
+        .min(multispeed.cops.len())
+        .min(n_speeds);
+    for i in 0..stage_count {
+        let cap_w = rated_capacity_w * multispeed.capacity_ratios[i];
+        params.insert(format!("heating_capacity_w_stage_{i}"), json!(cap_w));
+        let cop = multispeed.cops[i].max(1e-6);
+        params.insert(format!("heating_eir_stage_{i}"), json!(1.0 / cop));
+    }
 }
 
 fn apply_multispeed_parameters(
@@ -3137,6 +3195,52 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // try_build_electric_baseboard_config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn electric_baseboard_builder_populates_zone_id_from_params() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(3_000.0));
+        params.insert("zone_id".to_string(), json!(1u16));
+
+        let ec = try_build_electric_baseboard_config("Electric Baseboard", &params)
+            .expect("builder must succeed with capacity and zone_id");
+        use hares_equipment::hvac::heating_config::ElectricBaseboardConfig;
+        let cfg: ElectricBaseboardConfig = ec.typed().expect("must deserialize to ElectricBaseboardConfig");
+        assert_eq!(cfg.zone_id, Some(1), "zone_id must be populated from params");
+        assert!((cfg.capacity_w - 3_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn electric_baseboard_builder_zone_id_none_when_param_absent() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(3_000.0));
+
+        let ec = try_build_electric_baseboard_config("Electric Baseboard", &params)
+            .expect("builder must succeed with capacity only");
+        use hares_equipment::hvac::heating_config::ElectricBaseboardConfig;
+        let cfg: ElectricBaseboardConfig = ec.typed().expect("must deserialize to ElectricBaseboardConfig");
+        assert_eq!(cfg.zone_id, None, "zone_id must be None when param is absent");
+    }
+
+    #[test]
+    fn conditioned_zone_id_returns_correct_zone_id() {
+        let b = empty_building(vec![conditioned_zone(), foundation_zone(false)]);
+        assert_eq!(
+            conditioned_zone_id(&b),
+            Some(1),
+            "Conditioned zone at index 0 → ZoneId 1"
+        );
+    }
+
+    #[test]
+    fn conditioned_zone_id_returns_none_when_no_conditioned_zone() {
+        let b = empty_building(vec![foundation_zone(false)]);
+        assert_eq!(conditioned_zone_id(&b), None);
+    }
+
+    // -----------------------------------------------------------------------
     // End-to-end AFUE / SEER propagation tests
     // -----------------------------------------------------------------------
 
@@ -3350,5 +3454,70 @@ mod tests {
 
         let result = fan_power_from_params(&params);
         assert_eq!(result, Some(300.0), "fan_power_w must take precedence over auxiliary_power_w");
+    }
+
+    fn repo_defaults() -> DefaultsStore {
+        let defaults_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        DefaultsStore::load(&defaults_dir).expect("load defaults")
+    }
+
+    #[test]
+    fn gas_furnace_multispeed_csv_stage_capacities_and_eirs_are_applied() {
+        let defaults = repo_defaults();
+
+        // CSV row: Gas Furnace, 90 AFUE, 2 speeds → capacity ratios [0.65, 1.0], COPs [0.88, 0.90]
+        let rated_capacity_w = 10_000.0_f64;
+        let afue = 0.90_f64;
+        let mut params = Map::new();
+        params.insert("efficiency_afue".to_string(), json!(afue));
+        params.insert("heating_capacity_w".to_string(), json!(rated_capacity_w));
+        params.insert("number_of_speeds".to_string(), json!(2u64));
+
+        apply_multispeed_furnace_parameters(&mut params, &defaults, "Gas Furnace");
+
+        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
+            .expect("must build config for 2-speed gas furnace");
+
+        use hares_equipment::hvac::heating_config::GasFurnaceConfig;
+        let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
+
+        let stage_caps = cfg
+            .stage_heating_capacities_w
+            .expect("2-speed furnace must have stage_heating_capacities_w");
+        let stage_eirs = cfg
+            .stage_heating_eirs
+            .expect("2-speed furnace must have stage_heating_eirs");
+
+        assert_eq!(stage_caps.len(), 2, "must have exactly 2 stage capacities");
+        assert_eq!(stage_eirs.len(), 2, "must have exactly 2 stage EIRs");
+
+        // Stage 0: ratio 0.65 → 6500 W; EIR = 1/0.88
+        assert!(
+            (stage_caps[0] - rated_capacity_w * 0.65).abs() < 1.0,
+            "low stage capacity must be capacity×0.65, got {}",
+            stage_caps[0]
+        );
+        assert!(
+            (stage_eirs[0] - 1.0 / 0.88).abs() < 1e-6,
+            "low stage EIR must be 1/0.88, got {}",
+            stage_eirs[0]
+        );
+
+        // Stage 1: ratio 1.0 → 10 000 W; EIR = 1/0.90
+        assert!(
+            (stage_caps[1] - rated_capacity_w * 1.0).abs() < 1.0,
+            "high stage capacity must equal rated capacity, got {}",
+            stage_caps[1]
+        );
+        assert!(
+            (stage_eirs[1] - 1.0 / 0.90).abs() < 1e-6,
+            "high stage EIR must be 1/0.90, got {}",
+            stage_eirs[1]
+        );
     }
 }

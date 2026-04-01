@@ -299,7 +299,7 @@ impl HvacEquipment {
     pub fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.thermostat = ThermostatConfig {
             hysteresis_c: extract_numeric(config, "hysteresis_c").unwrap_or(1.0),
-            cutout_ratio: DEFAULT_CUTOUT_RATIO,
+            cutout_ratio: extract_numeric(config, "cutout_ratio").unwrap_or(DEFAULT_CUTOUT_RATIO),
             min_cycle_time_s: extract_numeric(config, "min_cycle_time_s")
                 .unwrap_or(DEFAULT_MIN_CYCLE_TIME_S),
             use_ideal_capacity: extract_bool(config, "use_ideal_capacity").unwrap_or(false),

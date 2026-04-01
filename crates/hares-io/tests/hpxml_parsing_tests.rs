@@ -841,3 +841,54 @@ fn water_heater_setpoint_equipment_resolution_stores_celsius() {
         "setpoint should be ~51.67°C, got {setpoint_c:.3}"
     );
 }
+
+// ===========================================================================
+// 10. PV inverter MaxPowerOutput W → kW
+// ===========================================================================
+
+#[test]
+fn pv_inverter_max_power_output_w_converted_to_kw() {
+    let xml = minimal_xml_with_systems(
+        r#"<Systems><Photovoltaics>
+            <PVSystem>
+                <SystemIdentifier id='PV1'/>
+                <MaxPowerOutput>6000.0</MaxPowerOutput>
+                <ArrayTilt>20</ArrayTilt>
+                <ArrayAzimuth>180</ArrayAzimuth>
+                <ModuleType>Standard</ModuleType>
+                <AttachedToInverter idref='Inv1'/>
+            </PVSystem>
+            <Inverter>
+                <SystemIdentifier id='Inv1'/>
+                <InverterEfficiency>0.97</InverterEfficiency>
+                <MaxPowerOutput>5000.0</MaxPowerOutput>
+            </Inverter>
+        </Photovoltaics></Systems>"#,
+    );
+
+    let building = parse_building(&xml).expect("should parse");
+    let defaults = DefaultsStore::default();
+    let specs = resolve_equipment(&building, &defaults, &serde_json::Value::Null)
+        .expect("should resolve equipment");
+
+    let pv = specs
+        .iter()
+        .find(|s| s.name == "PV")
+        .expect("should emit PV spec");
+
+    let cap_kw = pv.parameters["inverter_capacity_kw"]
+        .as_f64()
+        .expect("inverter_capacity_kw should be present");
+    assert!(
+        (cap_kw - 5.0).abs() < 1e-9,
+        "5000 W inverter should be 5.0 kW, got {cap_kw}"
+    );
+
+    let eff = pv.parameters["inverter_efficiency"]
+        .as_f64()
+        .expect("inverter_efficiency should be present");
+    assert!(
+        (eff - 0.97).abs() < 1e-9,
+        "inverter_efficiency should be 0.97, got {eff}"
+    );
+}

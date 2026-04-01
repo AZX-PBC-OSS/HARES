@@ -105,6 +105,7 @@ fn resistance_config(
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         },
     )
 }
@@ -145,6 +146,7 @@ fn gas_config(
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
         },
     )
 }
@@ -170,6 +172,7 @@ fn tankless_config(
             heating_capacity_w: Some(20_000.0),
             setpoint_c: Some(setpoint_c),
             parasitic_power_w: Some(0.0),
+            number_of_bedrooms: None,
             performance_adjustment: Some(1.0),
             inlet_temp_c: Some(inlet_temp_c),
             draw_flow_rate_kg_s: Some(draw_flow_rate_kg_s),
@@ -533,6 +536,7 @@ fn energy_conservation_over_draw_cycle() {
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         },
     );
 
@@ -687,6 +691,7 @@ fn max_tank_temp_safety_limit() {
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         },
     );
 
@@ -900,6 +905,7 @@ fn resistance_config_with_ramp(
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: Some(ramp_rate_c_per_min),
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         },
     )
 }

@@ -127,7 +127,10 @@ impl CentralAirConditionerConfig {
             SpeedControlMode::TwoSpeedSetpoint
             | SpeedControlMode::TwoSpeedTime
             | SpeedControlMode::TwoSpeedAlternating => Some(0.11),
-            SpeedControlMode::SingleSpeed | SpeedControlMode::MultiSpeedInterpolated => None,
+            SpeedControlMode::SingleSpeed | SpeedControlMode::MultiSpeedInterpolated => {
+                let seer = 3.412_141_633 / self.eir.max(1e-6);
+                Some(if seer < 13.0 { 0.20 } else { 0.07 })
+            }
         })
     }
 
@@ -741,6 +744,66 @@ mod tests {
             SpeedControlMode::VariableSpeedIdeal
         );
         assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.0));
+    }
+
+    #[test]
+    fn single_speed_ac_cd_derived_from_seer() {
+        fn make_single_speed(eir: f64) -> CentralAirConditionerConfig {
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: None,
+                capacity_w: 10_000.0,
+                eir,
+                shr: None,
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: None,
+                heating_setpoint_c: None,
+                hysteresis_c: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                airflow_m3_s_per_w: None,
+                fraction_load_served: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            }
+        }
+
+        // SEER 13 → eir = 3.412141633 / 13 ≈ 0.2624
+        let eir_seer13 = 3.412_141_633 / 13.0;
+        let cfg_13 = make_single_speed(eir_seer13);
+        assert_eq!(cfg_13.derived_cooling_startup_cd(), Some(0.07));
+
+        // SEER 16 (high efficiency) → c_d = 0.07
+        let eir_seer16 = 3.412_141_633 / 16.0;
+        let cfg_16 = make_single_speed(eir_seer16);
+        assert_eq!(cfg_16.derived_cooling_startup_cd(), Some(0.07));
+
+        // SEER 10 (older unit) → c_d = 0.20
+        let eir_seer10 = 3.412_141_633 / 10.0;
+        let cfg_10 = make_single_speed(eir_seer10);
+        assert_eq!(cfg_10.derived_cooling_startup_cd(), Some(0.20));
+
+        // Explicit startup_cd overrides the SEER-derived default.
+        let mut cfg_override = make_single_speed(eir_seer16);
+        cfg_override.startup_cd = Some(0.15);
+        assert_eq!(cfg_override.derived_cooling_startup_cd(), Some(0.15));
     }
 
     #[test]

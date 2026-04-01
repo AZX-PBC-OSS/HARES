@@ -66,6 +66,7 @@ struct FurnaceState {
     electric_kw: f64,
     thermal_output_w: f64,
     fuel_input_w: f64,
+    speed_index: f64,
 }
 
 impl ElectricFurnace {
@@ -134,6 +135,7 @@ impl Equipment for ElectricFurnace {
         self.hvac.update_zone_heat_fractions();
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
         self.hvac.eir_by_stage = vec![self.eir];
+        self.hvac.startup.c_d = 0.0;
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = electric_furnace_default_telemetry();
@@ -228,6 +230,7 @@ impl Equipment for ElectricFurnace {
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
             thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
             fuel_input_w: 0.0,
+            speed_index: 0.0,
         })
     }
 
@@ -327,8 +330,24 @@ impl Equipment for GasFurnace {
             )));
         }
         self.hvac.update_zone_heat_fractions();
-        self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
-        self.hvac.eir_by_stage = vec![1.0 / self.fuel_efficiency];
+        self.hvac.heating_capacities_w = if let Some(stages) = &typed.stage_heating_capacities_w {
+            stages.clone()
+        } else {
+            vec![self.rated_capacity_w]
+        };
+        let default_eir = 1.0 / self.fuel_efficiency;
+        let stage_count = self.hvac.heating_capacities_w.len();
+        self.hvac.eir_by_stage = if let Some(stages) = &typed.stage_heating_eirs {
+            stages.clone()
+        } else {
+            vec![default_eir; stage_count]
+        };
+        if self.hvac.heating_capacities_w.len() != self.hvac.eir_by_stage.len() {
+            return Err(HaresError::Equipment(
+                "heating capacity and EIR stage counts must match".to_string(),
+            ));
+        }
+        self.hvac.startup.c_d = 0.0;
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
         self.telemetry = gas_furnace_default_telemetry();
@@ -403,6 +422,8 @@ impl Equipment for GasFurnace {
             .set(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
+        self.telemetry
+            .set(tk::SPEED_INDEX, self.hvac.last_speed_index as f64);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
@@ -440,6 +461,7 @@ impl Equipment for GasFurnace {
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
             thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
             fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
+            speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
         })
     }
 
@@ -451,6 +473,7 @@ impl Equipment for GasFurnace {
         self.hvac.runtime_setpoints = decoded.runtime_setpoints;
         self.operating_mode = decoded.operating_mode;
         self.run_time_s = decoded.run_time_s;
+        self.hvac.last_speed_index = decoded.speed_index as usize;
 
         self.telemetry.insert(tk::FAN_KW, decoded.electric_kw);
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
@@ -464,6 +487,7 @@ impl Equipment for GasFurnace {
         );
         self.telemetry
             .insert(tk::SUPPLY_AIR_TEMP_C, self.hvac.supply_air_temp_c);
+        self.telemetry.insert(tk::SPEED_INDEX, decoded.speed_index);
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -499,7 +523,7 @@ fn electric_furnace_default_telemetry() -> Telemetry {
 }
 
 fn gas_furnace_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(8);
+    let mut telemetry = Telemetry::with_capacity(9);
     telemetry.insert(tk::FAN_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
@@ -508,6 +532,7 @@ fn gas_furnace_default_telemetry() -> Telemetry {
     telemetry.insert(tk::SUPPLY_AIR_TEMP_C, 0.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
     telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::SPEED_INDEX, 0.0);
     telemetry
 }
 
@@ -590,6 +615,11 @@ fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::SUPPLY_AIR_TEMP_C.to_string(),
             unit: "C".to_string(),
             description: "Configured furnace supply-air temperature".to_string(),
+        },
+        TelemetryField {
+            name: tk::SPEED_INDEX.to_string(),
+            unit: "-".to_string(),
+            description: "Active heating speed stage index (0-based)".to_string(),
         },
     ];
     fields.extend(setpoint_telemetry_fields());
@@ -1048,6 +1078,155 @@ mod tests {
         assert!(
             fields.iter().any(|f| f.name == tk::FAN_KW),
             "electric furnace telemetry_fields must declare FAN_KW"
+        );
+    }
+
+    /// Gas furnaces and electric furnaces have no compressor startup transient.
+    /// OCHRE only applies startup capacity degradation (c_d) to heat pumps and
+    /// cooling equipment; furnaces must have c_d == 0.0 after init.
+    #[test]
+    fn furnaces_have_no_startup_capacity_degradation() {
+        let gas_cfg = EquipmentConfig::from_typed(
+            "GF".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                afue: 0.8,
+                capacity_w: 10_000.0,
+                fan_power_w: Some(0.0),
+                zone_id: Some(1),
+                ..GasFurnaceConfig::default()
+            },
+        );
+        let mut gas_eq = GasFurnace::new(gas_cfg.clone());
+        gas_eq.init(&gas_cfg, &env(18.0)).unwrap();
+        assert_eq!(
+            gas_eq.hvac.startup.c_d, 0.0,
+            "gas furnace must have startup c_d == 0.0 after init"
+        );
+
+        let elec_cfg = EquipmentConfig::from_typed(
+            "EF".to_string(),
+            "Electric Furnace".to_string(),
+            ElectricFurnaceConfig {
+                eir: 1.0,
+                capacity_w: 8_000.0,
+                fan_power_w: Some(0.0),
+                zone_id: Some(1),
+                ..ElectricFurnaceConfig::default()
+            },
+        );
+        let mut elec_eq = ElectricFurnace::new(elec_cfg.clone());
+        elec_eq.init(&elec_cfg, &env(18.0)).unwrap();
+        assert_eq!(
+            elec_eq.hvac.startup.c_d, 0.0,
+            "electric furnace must have startup c_d == 0.0 after init"
+        );
+    }
+
+    #[test]
+    fn gas_furnace_two_speed_stage_capacities_and_eirs_are_wired() {
+        let low_cap_w = 6_500.0;
+        let high_cap_w = 10_000.0;
+        let low_eir = 1.0 / 0.78;
+        let high_eir = 1.0 / 0.80;
+        let cfg = EquipmentConfig::from_typed(
+            "GF".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                afue: 0.80,
+                capacity_w: high_cap_w,
+                fan_power_w: Some(0.0),
+                zone_id: Some(1),
+                number_of_speeds: 2,
+                stage_heating_capacities_w: Some(vec![low_cap_w, high_cap_w]),
+                stage_heating_eirs: Some(vec![low_eir, high_eir]),
+                ..GasFurnaceConfig::default()
+            },
+        );
+        let mut eq = GasFurnace::new(cfg.clone());
+        eq.init(&cfg, &env(18.0)).unwrap();
+
+        assert_eq!(
+            eq.hvac.heating_capacities_w.len(),
+            2,
+            "two-speed furnace must have two capacity stages"
+        );
+        assert!(
+            (eq.hvac.heating_capacities_w[0] - low_cap_w).abs() < 1e-9,
+            "low stage capacity must match stage_heating_capacities_w[0]"
+        );
+        assert!(
+            (eq.hvac.heating_capacities_w[1] - high_cap_w).abs() < 1e-9,
+            "high stage capacity must match stage_heating_capacities_w[1]"
+        );
+        assert_eq!(
+            eq.hvac.eir_by_stage.len(),
+            2,
+            "two-speed furnace must have two EIR stages"
+        );
+        assert!(
+            (eq.hvac.eir_by_stage[0] - low_eir).abs() < 1e-9,
+            "low stage EIR must match stage_heating_eirs[0]"
+        );
+        assert!(
+            (eq.hvac.eir_by_stage[1] - high_eir).abs() < 1e-9,
+            "high stage EIR must match stage_heating_eirs[1]"
+        );
+    }
+
+    #[test]
+    fn gas_furnace_two_speed_mismatched_stage_counts_are_rejected() {
+        let cfg = EquipmentConfig::from_typed(
+            "GF".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                afue: 0.80,
+                capacity_w: 10_000.0,
+                fan_power_w: Some(0.0),
+                zone_id: Some(1),
+                number_of_speeds: 2,
+                stage_heating_capacities_w: Some(vec![6_500.0, 10_000.0]),
+                stage_heating_eirs: Some(vec![1.25]),
+                ..GasFurnaceConfig::default()
+            },
+        );
+        let mut eq = GasFurnace::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env(18.0))
+            .expect_err("mismatched stage counts must be rejected");
+        assert!(
+            err.to_string().contains("stage counts must match"),
+            "error must describe the mismatch; got: {err}"
+        );
+    }
+
+    #[test]
+    fn gas_furnace_speed_index_telemetry_present_after_step() {
+        let cfg = gf_config(10_000.0, 0.80);
+        let mut eq = GasFurnace::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            eq.telemetry().get(tk::SPEED_INDEX).is_some(),
+            "SPEED_INDEX must be present in gas furnace telemetry after a heating step"
+        );
+    }
+
+    #[test]
+    fn gas_furnace_speed_index_in_telemetry_fields() {
+        use super::gas_furnace_telemetry_fields;
+        let fields = gas_furnace_telemetry_fields();
+        assert!(
+            fields.iter().any(|f| f.name == tk::SPEED_INDEX),
+            "gas_furnace_telemetry_fields must declare SPEED_INDEX"
         );
     }
 }

@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-use hares_equipment::{EvConfig, VentilationConfig};
+use hares_equipment::hvac::cooling_config::DehumidifierConfig;
+use hares_equipment::{EquipmentConfig, EvConfig, VentilationConfig};
 use hares_types::FuelType;
 
 use super::building::{Building, XmlNode, ZoneType};
@@ -75,6 +76,7 @@ pub(super) fn resolve_scheduled_loads(
             ("Refrigerator", "Refrigerator"),
             ("Freezer", "Freezer"),
             ("CookingRange", "Cooking Range"),
+            ("Dehumidifier", "Dehumidifier"),
         ] {
             for node in appliances.children_named(tag) {
                 let mut params = Map::new();
@@ -298,13 +300,70 @@ pub(super) fn resolve_scheduled_loads(
                             }
                         }
                     }
+                    "Dehumidifier" => {
+                        if let Some(cap_pints_day) = child_f64(node, "Capacity") {
+                            params.insert(
+                                "capacity_liters_per_day".to_string(),
+                                json!(cap_pints_day * 0.473_176_473),
+                            );
+                        }
+                        if let Some(ef) = child_f64(node, "EnergyFactor") {
+                            params.insert("energy_factor".to_string(), json!(ef));
+                        }
+                        if let Some(ief) = child_f64(node, "IntegratedEnergyFactor") {
+                            params.insert("integrated_energy_factor".to_string(), json!(ief));
+                        }
+                        if let Some(frac) =
+                            child_f64(node, "FractionDehumidificationLoadServed")
+                                .or_else(|| child_f64(node, "FractionLoadServed"))
+                        {
+                            params.insert("fraction_served".to_string(), json!(frac));
+                        }
+                        if let Some(setpoint) = child_f64(node, "DehumidistatSetpoint") {
+                            let target_rh = if setpoint > 1.0 {
+                                setpoint / 100.0
+                            } else {
+                                setpoint
+                            };
+                            params.insert("target_rh".to_string(), json!(target_rh));
+                        }
+                    }
                     _ => {}
                 }
 
                 for (k, v) in parse_schedule_extension_params(node, "") {
                     params.insert(k, v);
                 }
-                specs.push(build_spec(name.to_string(), fuel, params, defaults));
+                let mut spec = build_spec(name.to_string(), fuel, params, defaults);
+                if tag == "Dehumidifier" {
+                    let cfg = DehumidifierConfig {
+                        equipment_id: None,
+                        zone_id: None,
+                        capacity_liters_per_day: spec
+                            .parameters
+                            .get("capacity_liters_per_day")
+                            .and_then(Value::as_f64),
+                        energy_factor: spec
+                            .parameters
+                            .get("energy_factor")
+                            .and_then(Value::as_f64),
+                        integrated_energy_factor: spec
+                            .parameters
+                            .get("integrated_energy_factor")
+                            .and_then(Value::as_f64),
+                        fraction_served: spec
+                            .parameters
+                            .get("fraction_served")
+                            .and_then(Value::as_f64),
+                        target_rh: spec
+                            .parameters
+                            .get("target_rh")
+                            .and_then(Value::as_f64),
+                    };
+                    spec.typed_config =
+                        Some(EquipmentConfig::from_typed("Dehumidifier".to_string(), "Dehumidifier".to_string(), cfg));
+                }
+                specs.push(spec);
             }
         }
     }

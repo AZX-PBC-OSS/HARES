@@ -27,6 +27,18 @@ const DEFAULT_MAX_THERMAL_POWER_W: f64 = 20_000.0;
 /// Formula: 5.0 + 60.0 * on_time_frac; default 7.38 W = 3 bedrooms at typical usage.
 const DEFAULT_GAS_PARASITIC_POWER_W: f64 = 7.38;
 
+/// OCHRE/ANSI RESNET 301 on-time fractions indexed by bedroom count (1–5).
+const ON_TIME_FRACS: [f64; 5] = [0.0269, 0.0333, 0.0397, 0.0462, 0.0529];
+
+/// Compute gas tankless parasitic power (W) from bedroom count.
+///
+/// Formula: `5 + 60 * on_time_frac` where `on_time_frac` is from the RESNET 301 table.
+/// Bedroom count is rounded to nearest integer and clamped to [1, 5].
+fn gas_parasitic_from_bedrooms(n_bedrooms: f64) -> f64 {
+    let idx = (n_bedrooms.round() as usize).clamp(1, 5) - 1;
+    5.0 + 60.0 * ON_TIME_FRACS[idx]
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TanklessState {
     setpoint_c: f64,
@@ -117,7 +129,7 @@ impl TanklessWH {
             parasitic_power_w: DEFAULT_GAS_PARASITIC_POWER_W,
             duty_cycle: 1.0,
             mode_override: None,
-            inlet_temp_c: 15.0,
+            inlet_temp_c: 10.0,
             draw_flow_rate_kg_s: 0.0,
             draw_flow_rate_kg_s_source: None,
             mains_temp_c_source: None,
@@ -199,14 +211,15 @@ impl TanklessWH {
             .unwrap_or(DEFAULT_MAX_THERMAL_POWER_W)
             .max(0.0);
         self.power_limit_w = None;
-        self.parasitic_power_w = c
-            .parasitic_power_w
-            .unwrap_or(if self.fuel_type == FuelType::Gas {
-                DEFAULT_GAS_PARASITIC_POWER_W
-            } else {
-                0.0
-            })
-            .max(0.0);
+        self.parasitic_power_w = if let Some(explicit) = c.parasitic_power_w {
+            explicit.max(0.0)
+        } else if self.fuel_type == FuelType::Gas {
+            c.number_of_bedrooms
+                .map(gas_parasitic_from_bedrooms)
+                .unwrap_or(DEFAULT_GAS_PARASITIC_POWER_W)
+        } else {
+            0.0
+        };
         self.duty_cycle = 1.0;
         self.mode_override = None;
         self.inlet_temp_c = if let Some(inlet_temp_c) = c.inlet_temp_c {
@@ -623,6 +636,7 @@ mod tests {
                 dni_w_m2: 0.0,
                 dhi_w_m2: 0.0,
                 solar_altitude_deg: 0.0,
+                mains_temp_c: 20.0,
                 ..Default::default()
             },
             grid: GridState {
@@ -662,6 +676,7 @@ mod tests {
             heating_capacity_w: Some(30_000.0),
             setpoint_c: Some(50.0),
             parasitic_power_w: None,
+            number_of_bedrooms: None,
             performance_adjustment: None,
             inlet_temp_c: Some(20.0),
             draw_flow_rate_kg_s: Some(0.2),
@@ -1472,6 +1487,91 @@ mod tests {
         assert!(
             (thermal_warm - expected_warm).abs() < 1.0,
             "thermal output with 25°C inlet must be ≈{expected_warm:.1}W, got {thermal_warm:.1}W"
+        );
+    }
+
+    /// The serde default for `WeatherState.mains_temp_c` must be 10°C (ASHRAE/EnergyPlus US annual
+    /// average), not 15°C.  When deserializing a JSON object that omits `mains_temp_c`, the field
+    /// must default to 10.0.
+    #[test]
+    fn default_mains_temp_c_is_10() {
+        let json = serde_json::json!({
+            "outdoor_temp_c": 5.0,
+            "outdoor_humidity_ratio": 0.005,
+            "outdoor_wet_bulb_c": 3.0,
+            "outdoor_enthalpy_j_kg": 15000.0,
+            "wind_speed_m_s": 2.0,
+            "wind_dir_deg": 180.0,
+            "ground_temp_c": 8.0,
+            "sky_temp_c": 2.0,
+            "pressure_kpa": 101.3,
+            "solar_irradiance": [],
+            "ghi_w_m2": 0.0,
+            "dni_w_m2": 0.0,
+            "dhi_w_m2": 0.0
+        });
+        let w: hares_types::WeatherState =
+            serde_json::from_value(json).expect("deserialize WeatherState without mains_temp_c");
+        assert!(
+            (w.mains_temp_c - 10.0).abs() < f64::EPSILON,
+            "WeatherState serde default mains_temp_c must be 10.0, got {}",
+            w.mains_temp_c
+        );
+    }
+
+    /// Gas parasitic power is computed from bedroom count using the OCHRE/RESNET 301 formula
+    /// `5 + 60 * on_time_frac`.  Values for bedrooms 1–5 must match the published table.
+    #[test]
+    fn gas_parasitic_computed_from_bedroom_count() {
+        // (bedrooms, expected_parasitic_w) from OCHRE on_time_frac table.
+        let cases = [
+            (1, 5.0 + 60.0 * 0.0269_f64),
+            (2, 5.0 + 60.0 * 0.0333_f64),
+            (3, 5.0 + 60.0 * 0.0397_f64),
+            (4, 5.0 + 60.0 * 0.0462_f64),
+            (5, 5.0 + 60.0 * 0.0529_f64),
+        ];
+        for (beds, expected_w) in cases {
+            let mut typed = typed_config();
+            typed.fuel_type = FuelType::Gas;
+            typed.parasitic_power_w = None;
+            typed.number_of_bedrooms = Some(beds as f64);
+            typed.draw_flow_rate_kg_s = Some(0.0);
+            let cfg = config_from_typed(typed);
+
+            let mut eq = TanklessWH::new(cfg.clone());
+            eq.init(&cfg, &env()).unwrap();
+
+            // With no draw, the burner is off; only parasitic electric should appear.
+            let ports = step_once(&mut eq);
+
+            assert!(
+                (ports.electrical.load_power_kw - expected_w / 1_000.0).abs() < 1e-9,
+                "parasitic for {beds} bedrooms must be {expected_w:.3} W, got {} W",
+                ports.electrical.load_power_kw * 1_000.0
+            );
+        }
+    }
+
+    /// When `parasitic_power_w` is set explicitly it overrides `number_of_bedrooms`.
+    #[test]
+    fn explicit_parasitic_overrides_bedroom_count() {
+        let mut typed = typed_config();
+        typed.fuel_type = FuelType::Gas;
+        typed.parasitic_power_w = Some(10.0);
+        typed.number_of_bedrooms = Some(3.0);
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        let ports = step_once(&mut eq);
+
+        assert!(
+            (ports.electrical.load_power_kw - 10.0 / 1_000.0).abs() < 1e-9,
+            "explicit parasitic_power_w=10W must override bedroom count, got {} W",
+            ports.electrical.load_power_kw * 1_000.0
         );
     }
 }

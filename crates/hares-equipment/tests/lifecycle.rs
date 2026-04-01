@@ -382,6 +382,8 @@ fn lifecycle_gas_furnace() {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
         },
     );
 
@@ -553,6 +555,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 number_of_speeds: 1,
                 fan_power_w: Some(0.0),
                 ducts: DuctConfig::default(),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
             },
         ),
         "Electric Furnace" => typed_alias_config(
@@ -807,6 +811,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
+                jacket_r_value_m2_k_w: None,
             },
         ),
         "Resistance Water Heater" | "Electric Resistance Water Heater" => typed_alias_config(
@@ -836,6 +841,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 element_power_w: None,
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
+                jacket_r_value_m2_k_w: None,
             },
         ),
         "Tankless Water Heater" => typed_alias_config(
@@ -850,6 +856,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 heating_capacity_w: Some(12_000.0),
                 setpoint_c: Some(50.0),
                 parasitic_power_w: Some(5.0),
+                number_of_bedrooms: None,
                 performance_adjustment: Some(0.92),
                 inlet_temp_c: None,
                 draw_flow_rate_kg_s: Some(0.2),
@@ -870,6 +877,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 heating_capacity_w: Some(20_000.0),
                 setpoint_c: Some(50.0),
                 parasitic_power_w: Some(5.0),
+                number_of_bedrooms: None,
                 performance_adjustment: Some(0.92),
                 inlet_temp_c: None,
                 draw_flow_rate_kg_s: Some(0.2),
@@ -916,6 +924,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
+                jacket_r_value_m2_k_w: None,
             },
         ),
         "Battery" => typed_alias_config(

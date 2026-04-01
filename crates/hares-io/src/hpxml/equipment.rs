@@ -910,13 +910,25 @@ mod tests {
       <Systems>
         <HVAC>
           <HVACDistribution>
-            <DuctSystem>
-              <SystemIdentifier id="Duct1"/>
-              <LeakageFraction>0.10</LeakageFraction>
-              <DuctInsulationRValue units="hr-ft2-F/BTU">6</DuctInsulationRValue>
-              <DuctSurfaceArea units="ft2">150</DuctSurfaceArea>
-              <DuctLocation>attic vented</DuctLocation>
-            </DuctSystem>
+            <DistributionSystemType>
+              <AirDistribution>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="LeakSupply"/>
+                  <DuctType>supply</DuctType>
+                  <DuctLeakage>
+                    <Value>10</Value>
+                    <Units>Percent</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
+                <Ducts>
+                  <SystemIdentifier id="SupplyDuct1"/>
+                  <DuctType>supply</DuctType>
+                  <DuctInsulationRValue units="hr-ft2-F/BTU">6</DuctInsulationRValue>
+                  <DuctSurfaceArea units="ft2">150</DuctSurfaceArea>
+                  <DuctLocation>attic vented</DuctLocation>
+                </Ducts>
+              </AirDistribution>
+            </DistributionSystemType>
           </HVACDistribution>
           {hvac_inner}
         </HVAC>
@@ -1389,6 +1401,46 @@ mod tests {
             "capacity_w must be ~{expected_w:.1} W, got {}",
             cfg.capacity_w
         );
+    }
+
+    #[test]
+    fn dehumidifier_in_appliances_section_produces_typed_config() {
+        let xml = minimal_appliance_xml(
+            r#"<Dehumidifier>
+              <Capacity>30</Capacity>
+              <IntegratedEnergyFactor>2.0</IntegratedEnergyFactor>
+              <DehumidistatSetpoint>50</DehumidistatSetpoint>
+              <FractionDehumidificationLoadServed>1.0</FractionDehumidificationLoadServed>
+            </Dehumidifier>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+            .expect("resolve_equipment");
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Dehumidifier")
+            .expect("Dehumidifier spec must be present");
+
+        let typed: hares_equipment::hvac::cooling_config::DehumidifierConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("Dehumidifier spec must carry typed config")
+            .typed()
+            .expect("typed DehumidifierConfig");
+
+        let expected_l_per_day = 30.0 * 0.473_176_473;
+        assert!(
+            (typed.capacity_liters_per_day.expect("capacity must be set") - expected_l_per_day)
+                .abs()
+                < 1e-9,
+            "capacity_liters_per_day mismatch"
+        );
+        assert_eq!(typed.integrated_energy_factor, Some(2.0));
+        assert!(
+            (typed.target_rh.expect("target_rh must be set") - 0.5).abs() < 1e-9,
+            "target_rh must be normalized from 50 percent to 0.5"
+        );
+        assert_eq!(typed.fraction_served, Some(1.0));
     }
 
     /// HPXML Generator: gas generator with ElectricalPowerOutput and annual energy figures

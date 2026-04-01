@@ -113,6 +113,7 @@ fn resistance_cfg(
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         },
     )
 }
@@ -194,6 +195,7 @@ fn hpwh_cfg_with(
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
         },
     )
 }
@@ -313,6 +315,7 @@ fn element_cycling_deadband_matches_ochre_default() {
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         },
     );
 
@@ -405,6 +408,7 @@ fn gas_wh_fuel_not_electricity() {
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
         },
     );
 
@@ -520,6 +524,7 @@ fn standby_loss_ua_magnitude() {
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         },
     );
 
@@ -620,6 +625,7 @@ fn hpwh_cop_at_multiple_ambient_temps() {
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
+                jacket_r_value_m2_k_w: None,
             },
         );
 
@@ -706,6 +712,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                     performance_adjustment: None,
                     zone_type: None,
                     first_hour_rating_m3: None,
+                    jacket_r_value_m2_k_w: None,
                 },
             ),
             FuelType::Gas,
@@ -765,6 +772,7 @@ fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
                     performance_adjustment: None,
                     zone_type: None,
                     first_hour_rating_m3: None,
+                    jacket_r_value_m2_k_w: None,
                 },
             )
         };
@@ -983,6 +991,7 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
         performance_adjustment: None,
         zone_type: None,
         first_hour_rating_m3: None,
+        jacket_r_value_m2_k_w: None,
     };
     let cfg0 = EquipmentConfig::from_typed(
         "HPWH0".to_string(),

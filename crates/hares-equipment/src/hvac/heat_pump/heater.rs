@@ -28,7 +28,8 @@ use super::constants::{
     DEFAULT_ER_HARD_LOCKOUT_TIME_S, DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
     DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
     DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_ER_CYCLE_TIME_S,
-    DEFAULT_ZONE_ID, MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
+    DEFAULT_ZONE_ID, MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_KW,
+    MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
 use super::defrost::{DefrostConfig, evaluate_defrost};
 use super::heater_config::{
@@ -105,6 +106,10 @@ struct HeatPumpHeaterCore {
     prev_zone_temp_c: f64,
     /// Whether the ER soft lockout is currently active.
     er_soft_lockout: bool,
+    /// Elapsed time [s] that the soft lockout has been continuously active.
+    /// Used to force-release the soft lockout after `er_hard_lockout_time_s * 2`
+    /// to prevent it from holding indefinitely.
+    soft_lockout_elapsed_s: f64,
     /// Runtime fraction (PLR) of the heating coil from the most recent step.
     /// Exposed so the HP system coordinator can pass it to the companion cooler
     /// for crankcase heater power accounting.
@@ -165,6 +170,7 @@ struct HeaterState {
     er_lockout_remaining_s: f64,
     prev_zone_temp_c: f64,
     er_soft_lockout: bool,
+    soft_lockout_elapsed_s: f64,
     // --- Sticky control signals ---
     ctrl_duty_cycle: f64,
     /// None means unlimited; f64::INFINITY does not serialize cleanly with postcard.
@@ -206,6 +212,11 @@ struct HeaterStep {
     /// Compressor-only electric power [kW], excluding fan, ER backup, and pan heater.
     /// Used for COP per AHRI/SEER convention.
     compressor_kw: f64,
+    fan_kw: f64,
+    backup_er_kw: f64,
+    pan_heater_kw: f64,
+    hp_capacity_w: f64,
+    er_capacity_w: f64,
     defrost_active: bool,
     defrost_time_fraction: f64,
 }
@@ -374,6 +385,7 @@ impl HeatPumpHeaterCore {
             er_hard_lockout_time_s: DEFAULT_ER_HARD_LOCKOUT_TIME_S,
             prev_zone_temp_c: f64::NAN,
             er_soft_lockout: false,
+            soft_lockout_elapsed_s: 0.0,
             last_heating_rtf: 0.0,
             use_ideal: false,
             ideal_capacity_w: 0.0,
@@ -405,6 +417,7 @@ impl HeatPumpHeaterCore {
         self.er_lockout_remaining_s = 0.0;
         self.prev_zone_temp_c = f64::NAN;
         self.er_soft_lockout = false;
+        self.soft_lockout_elapsed_s = 0.0;
         self.hp_available = env.weather.outdoor_temp_c >= self.hp_lockout_temp_c;
         self.last_heating_rtf = 0.0;
         self.run_time_s = 0.0;
@@ -480,6 +493,7 @@ impl HeatPumpHeaterCore {
                 self.hvac.eir_by_stage = vec![base_eir; 4];
             }
             self.hvac.duct_dse = 1.0;
+            self.pan_heater_kw = MSHP_PAN_HEATER_DEFAULT_KW;
         } else {
             self.hvac.speed_control_mode = match cfg.number_of_speeds {
                 0 | 1 => SpeedControlMode::SingleSpeed,
@@ -557,6 +571,18 @@ impl HeatPumpHeaterCore {
                 .equipment_type
                 .default_supply_air_temp_c(env.weather.outdoor_temp_c);
         }
+
+        self.telemetry
+            .set(tk::HP_LOCKOUT_TEMP_C, self.hp_lockout_temp_c);
+        self.telemetry
+            .set(tk::ER_LOCKOUT_TEMP_C, self.er_lockout_temp_c);
+        self.telemetry
+            .set(tk::ER_SETPOINT_OFFSET_C, self.er_setpoint_offset_c);
+        self.telemetry
+            .set(tk::ER_HARD_LOCKOUT_TIME_S, self.er_hard_lockout_time_s);
+        self.telemetry
+            .set(tk::BACKUP_CAPACITY_W, self.backup_capacity_w);
+        self.telemetry.set(tk::BACKUP_EIR, self.backup_eir);
 
         Ok(())
     }
@@ -723,6 +749,16 @@ impl HeatPumpHeaterCore {
             sp.heating_c + self.dr_setpoint_offset_c,
         );
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
+        self.telemetry
+            .set(tk::FAN_KW, step.fan_kw * self.hvac.space_fraction);
+        self.telemetry
+            .set(tk::BACKUP_ER_KW, step.backup_er_kw * self.hvac.space_fraction);
+        self.telemetry.set(
+            tk::PAN_HEATER_KW,
+            step.pan_heater_kw * self.hvac.space_fraction,
+        );
+        self.telemetry.set(tk::HP_CAPACITY_W, step.hp_capacity_w);
+        self.telemetry.set(tk::ER_CAPACITY_W, step.er_capacity_w);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(scaled_electric_kw.max(0.0))),
@@ -843,10 +879,7 @@ impl HeatPumpHeaterCore {
         let mut defrost_active = false;
         let mut defrost_time_fraction = 0.0;
 
-        if er_on {
-            self.hvac.supply_air_temp_c = HvacEquipmentType::AshpHeatPumpAux
-                .default_supply_air_temp_c(env.weather.outdoor_temp_c);
-        } else if hp_on {
+        if hp_on {
             let max_capacity_w = self
                 .hvac
                 .heating_capacities_w
@@ -878,12 +911,20 @@ impl HeatPumpHeaterCore {
 
                 hp_electric_w = hp_electric_w * defrost.power_multiplier + defrost.extra_power_w;
             }
+
+            if er_on {
+                self.hvac.supply_air_temp_c = HvacEquipmentType::AshpHeatPumpAux
+                    .default_supply_air_temp_c(env.weather.outdoor_temp_c);
+            }
+        } else if er_on {
+            self.hvac.supply_air_temp_c = HvacEquipmentType::AshpHeatPumpAux
+                .default_supply_air_temp_c(env.weather.outdoor_temp_c);
+            hp_capacity_w = 0.0;
+            hp_electric_w = 0.0;
         } else {
             hp_capacity_w = 0.0;
             hp_electric_w = 0.0;
-            if !er_on {
-                fan_power_w = 0.0;
-            }
+            fan_power_w = 0.0;
         }
 
         let er_capacity_w = if er_on {
@@ -895,7 +936,8 @@ impl HeatPumpHeaterCore {
 
         self.pan_heater_on = matches!(self.variant, HeaterVariant::Minisplit)
             && env.weather.outdoor_temp_c < self.pan_heater_temp_c
-            && self.pan_heater_kw > 0.0;
+            && self.pan_heater_kw > 0.0
+            && hp_on;
         let pan_heater_w = if self.pan_heater_on {
             self.pan_heater_kw * 1000.0
         } else {
@@ -910,25 +952,56 @@ impl HeatPumpHeaterCore {
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Track compressor-only kW separately so scaling stays consistent with electric_kw.
         let mut compressor_kw = hp_electric_w / 1000.0;
+        let mut fan_kw = fan_power_w / 1000.0;
+        let mut backup_er_kw = er_power_w / 1000.0;
+        let mut step_pan_heater_kw = pan_heater_w / 1000.0;
+        let mut step_hp_capacity_w = hp_capacity_w;
+        let mut step_er_capacity_w = er_capacity_w;
 
         // Apply control multipliers: DutyCycle (sticky) × LoadFraction (transient)
         // × DR load fraction × DR duty cycle.
+        // ER is on/off — not modulatable — so only compressor and fan are scaled.
         let effective_load = self.ctrl_duty_cycle
             * self.ctrl_load_fraction
             * self.dr_load_fraction
             * self.dr_duty_cycle;
         if effective_load < 1.0 {
-            thermal_output_w *= effective_load;
-            electric_kw *= effective_load;
+            let hp_thermal = hp_capacity_w + fan_power_w;
+            let er_thermal = er_capacity_w;
+            thermal_output_w = hp_thermal * effective_load + er_thermal;
+            let hp_electric = (hp_electric_w + fan_power_w + pan_heater_w) / 1000.0;
+            let er_electric = er_power_w / 1000.0;
+            electric_kw = hp_electric * effective_load + er_electric;
             compressor_kw *= effective_load;
+            fan_kw *= effective_load;
+            step_pan_heater_kw *= effective_load;
+            step_hp_capacity_w *= effective_load;
+            // backup_er_kw and step_er_capacity_w are not scaled (ER is not modulatable)
         }
 
-        // Apply PowerLimit (sticky): clamp power and reduce thermal proportionally.
+        // Apply PowerLimit (sticky): shed ER first (it is on/off, not modulatable),
+        // then scale HP+fan proportionally only if still over limit after shedding ER.
         if self.ctrl_power_limit_kw.is_finite() && electric_kw > self.ctrl_power_limit_kw {
-            let ratio = self.ctrl_power_limit_kw / electric_kw.max(f64::MIN_POSITIVE);
-            electric_kw = self.ctrl_power_limit_kw;
-            thermal_output_w *= ratio;
-            compressor_kw *= ratio;
+            let total_without_er = electric_kw - backup_er_kw;
+            if total_without_er <= self.ctrl_power_limit_kw {
+                // Shedding ER alone is sufficient.
+                electric_kw = total_without_er;
+                thermal_output_w -= step_er_capacity_w;
+                backup_er_kw = 0.0;
+                step_er_capacity_w = 0.0;
+            } else {
+                // Still over limit after shedding ER; scale HP+fan+pan proportionally.
+                let er_thermal = step_er_capacity_w;
+                backup_er_kw = 0.0;
+                step_er_capacity_w = 0.0;
+                let ratio = self.ctrl_power_limit_kw / total_without_er.max(f64::MIN_POSITIVE);
+                electric_kw = self.ctrl_power_limit_kw;
+                thermal_output_w = (thermal_output_w - er_thermal) * ratio;
+                compressor_kw *= ratio;
+                fan_kw *= ratio;
+                step_pan_heater_kw *= ratio;
+                step_hp_capacity_w *= ratio;
+            }
         }
 
         if er_on && hp_on {
@@ -942,6 +1015,11 @@ impl HeatPumpHeaterCore {
             thermal_output_w,
             electric_kw,
             compressor_kw: compressor_kw.max(0.0),
+            fan_kw: fan_kw.max(0.0),
+            backup_er_kw: backup_er_kw.max(0.0),
+            pan_heater_kw: step_pan_heater_kw.max(0.0),
+            hp_capacity_w: step_hp_capacity_w.max(0.0),
+            er_capacity_w: step_er_capacity_w.max(0.0),
             defrost_active,
             defrost_time_fraction,
         })
@@ -965,7 +1043,8 @@ impl HeatPumpHeaterCore {
         // resistance heating when the heat pump can handle the ramp.
         // Reference: ResStock/BEopt thermostat modeling documentation.
         // Compare against the BASE setpoint only — DR offset changes are excluded.
-        if base_setpoint > self.prev_base_setpoint + 0.1 {
+        // Skip lockout on the very first call (prev == NEG_INFINITY means uninitialized).
+        if self.prev_base_setpoint.is_finite() && base_setpoint > self.prev_base_setpoint + 0.1 {
             self.er_lockout_remaining_s = self.er_hard_lockout_time_s;
         }
         self.prev_base_setpoint = base_setpoint;
@@ -977,16 +1056,29 @@ impl HeatPumpHeaterCore {
 
         // OCHRE HVAC.py: two-stage lockout — after hard lockout expires, ER stays
         // off while zone temp is still rising (heat pump is winning the load).
+        // Time-based safety release: if soft lockout has been active longer than
+        // er_hard_lockout_time_s * 2 it releases regardless of zone temp trend.
         let zone_rising =
             self.prev_zone_temp_c.is_finite() && zone.temperature_c > self.prev_zone_temp_c;
+        let soft_lockout_max_s = self.er_hard_lockout_time_s * 2.0;
+        let soft_lockout_timeout =
+            soft_lockout_max_s > 0.0 && self.soft_lockout_elapsed_s >= soft_lockout_max_s;
         if !er_allowed_by_hard_lockout {
             // Hard lockout active; soft lockout mirrors hard lockout state.
             self.er_soft_lockout = true;
-        } else if self.er_soft_lockout && zone_rising {
-            // Hard lockout just expired; keep soft lockout while temp is rising.
+            self.soft_lockout_elapsed_s += dt_s;
+        } else if self.er_soft_lockout && zone_rising && !soft_lockout_timeout {
+            // Hard lockout just expired; keep soft lockout while temp is rising
+            // and the timeout has not been reached.
             self.er_soft_lockout = true;
+            self.soft_lockout_elapsed_s += dt_s;
         } else {
             self.er_soft_lockout = false;
+            // Only reset elapsed when zone stopped rising (natural release).
+            // After timeout release, keep elapsed high to prevent re-arm.
+            if !soft_lockout_timeout {
+                self.soft_lockout_elapsed_s = 0.0;
+            }
         }
         self.prev_zone_temp_c = zone.temperature_c;
 
@@ -1047,8 +1139,7 @@ impl HeatPumpHeaterCore {
             && er_allowed_by_temp
             && er_allowed_by_cycle
             && er_allowed_by_lockout
-            && er_thermostat_call
-            && !hp_on;
+            && er_thermostat_call;
 
         if std::env::var("HARES_DEBUG_ASHP_CONTROL").is_ok()
             && matches!(self.variant, HeaterVariant::Ashp)
@@ -1086,7 +1177,11 @@ impl HeatPumpHeaterCore {
     }
 
     fn update_hp_availability(&mut self, outdoor_temp_c: f64) -> bool {
-        self.hp_available = outdoor_temp_c >= self.hp_lockout_temp_c;
+        self.hp_available = if self.hp_available {
+            outdoor_temp_c >= self.hp_lockout_temp_c - self.hp_lockout_hysteresis_c
+        } else {
+            outdoor_temp_c >= self.hp_lockout_temp_c
+        };
         self.hp_available
     }
 
@@ -1183,6 +1278,7 @@ impl HeatPumpHeaterCore {
             er_lockout_remaining_s: self.er_lockout_remaining_s,
             prev_zone_temp_c: self.prev_zone_temp_c,
             er_soft_lockout: self.er_soft_lockout,
+            soft_lockout_elapsed_s: self.soft_lockout_elapsed_s,
             ctrl_duty_cycle: self.ctrl_duty_cycle,
             ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
                 Some(self.ctrl_power_limit_kw)
@@ -1246,6 +1342,7 @@ impl HeatPumpHeaterCore {
         self.er_lockout_remaining_s = decoded.er_lockout_remaining_s;
         self.prev_zone_temp_c = decoded.prev_zone_temp_c;
         self.er_soft_lockout = decoded.er_soft_lockout;
+        self.soft_lockout_elapsed_s = decoded.soft_lockout_elapsed_s;
         self.core_output = CoreOutput::default();
 
         Ok(())
@@ -2978,6 +3075,806 @@ mod tests {
             "gas backup EIR=1/0.80 should produce {expected_kw:.6} kW, got {electric_kw:.6} kW"
         );
     }
+
+    // Bug 1: HP lockout hysteresis prevents chatter when OAT oscillates near threshold.
+    // Once HP is available (OAT >= lockout_temp), it must stay available until OAT drops
+    // below (lockout_temp - hysteresis), not just below lockout_temp.
+    #[test]
+    fn hp_lockout_hysteresis_prevents_chatter() {
+        use super::super::constants::DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
+        let lockout_c = -10.0_f64;
+        let cfg = heater_config_with(|typed| typed.hp_lockout_temp_c = Some(lockout_c));
+
+        // Start HP available: OAT above lockout.
+        let e_above = env(18.0, lockout_c + 1.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &e_above).unwrap();
+        assert!(eq.core.hp_available, "HP must be available above lockout");
+
+        // Drop OAT to just below lockout (within hysteresis band): HP must still be available.
+        let oat_in_band = lockout_c - DEFAULT_HP_LOCKOUT_HYSTERESIS_C * 0.5;
+        let e_in_band = env(18.0, oat_in_band, 0.003);
+        eq.update_control(&e_in_band);
+        assert!(
+            eq.core.hp_available,
+            "HP must remain available when OAT ({oat_in_band:.2}°C) is within hysteresis band \
+             (lockout {lockout_c:.2}°C - hysteresis {DEFAULT_HP_LOCKOUT_HYSTERESIS_C:.2}°C)"
+        );
+
+        // Drop OAT below the full hysteresis band: HP must now lock out.
+        let oat_below = lockout_c - DEFAULT_HP_LOCKOUT_HYSTERESIS_C - 0.1;
+        let e_below = env(18.0, oat_below, 0.003);
+        eq.update_control(&e_below);
+        assert!(
+            !eq.core.hp_available,
+            "HP must lock out when OAT ({oat_below:.2}°C) is below \
+             lockout - hysteresis ({:.2}°C)",
+            lockout_c - DEFAULT_HP_LOCKOUT_HYSTERESIS_C
+        );
+    }
+
+    // Bug 2: Pan heater must only run when compressor (HP) is active.
+    // In ER-only mode the compressor is off; pan heater must be off.
+    #[test]
+    fn pan_heater_off_in_er_only_mode() {
+        let cfg = mshp_config_with(|typed| {
+            typed.backup_capacity_w = Some(3_000.0);
+            typed.er_lockout_temp_c = Some(10.0);
+            // Force HP lockout so only ER runs.
+            typed.hp_lockout_temp_c = Some(50.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+        });
+
+        // OAT cold enough to trigger pan heater but below HP lockout → ER-only.
+        let e = env(18.0, -5.0, 0.003);
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+        // Give the MSHP a non-zero pan heater so it would fire if the bug were present.
+        eq.core.pan_heater_kw = 0.1;
+        eq.core.pan_heater_temp_c = 5.0; // OAT -5°C is below this
+
+        let mode = eq.update_control(&e);
+        assert_eq!(mode, OperatingMode::HeatingER, "must be ER-only mode");
+
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            !eq.core.pan_heater_on,
+            "pan heater must be off when compressor is not running (ER-only mode)"
+        );
+    }
+
+    // Bug 3: ER soft lockout must release after er_hard_lockout_time_s * 2
+    // even if zone temperature keeps rising indefinitely.
+    #[test]
+    fn er_soft_lockout_releases_after_timeout() {
+        let lockout_s = 60.0_f64;
+        let cfg = heater_config_with(|typed| {
+            typed.er_hard_lockout_time_s = Some(lockout_s);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.heating_setpoint_c = Some(18.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &make_env(15.0, 0.0, 0)).unwrap();
+
+        // Raise setpoint to arm the hard lockout.
+        eq.core
+            .hvac
+            .apply_control_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                deadband_c: None,
+            });
+
+        // Steps: keep zone rising each step so soft lockout would normally hold.
+        // At t = lockout_s * 2 + some steps, the timeout must release it.
+        let max_steps = (lockout_s * 3.0 / 60.0) as i64 + 5;
+        let mut released = false;
+        for step in 0..max_steps {
+            // Zone keeps rising: 15 + 0.05 * step to simulate HP winning.
+            let zone_c = 15.0 + 0.05 * step as f64;
+            let t = make_env(zone_c, 0.0, step * 60);
+            let mode = eq.update_control(&t);
+            if matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER) {
+                released = true;
+                break;
+            }
+        }
+        assert!(
+            released,
+            "ER soft lockout must release after er_hard_lockout_time_s * 2 ({:.0}s) \
+             even when zone temperature keeps rising",
+            lockout_s * 2.0,
+        );
+    }
+
+    // Bug 4: effective_load scaling must not scale ER power; ER is on/off only.
+    // With a DutyCycle=0.5 control signal, HP power should halve but ER power stays full.
+    #[test]
+    fn duty_cycle_scaling_does_not_reduce_er_power() {
+        let backup_capacity_w = 4_000.0_f64;
+        let backup_eir = 1.0_f64;
+        let er_full_kw = backup_capacity_w * backup_eir / 1000.0;
+
+        // Force ER-only mode: HP locked out, ER allowed.
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0);
+            typed.er_lockout_temp_c = Some(5.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.backup_capacity_w = Some(backup_capacity_w);
+            typed.backup_eir = Some(backup_eir);
+            typed.fan_power_w = Some(0.0);
+        });
+
+        let e = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+        let mode = eq.update_control(&e);
+        assert_eq!(mode, OperatingMode::HeatingER, "must be ER-only");
+
+        // Apply 50% duty cycle — this should NOT scale ER.
+        eq.apply_control(&ControlSignal::DutyCycle {
+            on_fraction: 0.5,
+            period_s: None,
+            component: None,
+        })
+        .unwrap();
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert!(
+            (electric_kw - er_full_kw).abs() < 0.01,
+            "ER power must remain full ({er_full_kw:.3} kW) even with 50% duty cycle; \
+             got {electric_kw:.3} kW"
+        );
+    }
+
+    // Bug 5: first call to update_control must never trigger ER hard lockout
+    // even when new() initializes prev_base_setpoint to NEG_INFINITY.
+    #[test]
+    fn first_call_does_not_trigger_spurious_er_lockout() {
+        let cfg = heater_config_with(|typed| {
+            typed.er_hard_lockout_time_s = Some(600.0);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+        });
+
+        // Do NOT call init() — use new() directly so prev_base_setpoint = NEG_INFINITY.
+        // Then call init() which sets it to the actual setpoint, then update_control.
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let e = make_env(16.0, 0.0, 0);
+        eq.init(&cfg, &e).unwrap();
+
+        // First control call — must not trigger lockout.
+        let mode = eq.update_control(&e);
+        assert!(
+            eq.core.er_lockout_remaining_s <= 0.0,
+            "first update_control must not trigger ER hard lockout (prev_base_setpoint \
+             initialized to NEG_INFINITY); remaining={:.1}",
+            eq.core.er_lockout_remaining_s,
+        );
+        assert!(
+            matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER),
+            "ER must be allowed on first call; got {mode:?}"
+        );
+    }
+
+    // PowerLimit must shed ER (on/off) before scaling the compressor (modulatable).
+    // With HP+ER both running (forced via ModeOverride), a limit below total but
+    // above HP+fan must zero ER and leave compressor power unchanged.
+    #[test]
+    fn power_limit_sheds_er_before_scaling_compressor() {
+        let backup_capacity_w = 4_000.0_f64;
+        let backup_eir = 1.0_f64;
+
+        let cfg = heater_config_with(|typed| {
+            typed.backup_capacity_w = Some(backup_capacity_w);
+            typed.backup_eir = Some(backup_eir);
+            typed.fan_power_w = Some(0.0);
+        });
+
+        let e = env(18.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+
+        // Force HP+ER simultaneously via ModeOverride.
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHPAndER,
+        })
+        .unwrap();
+        let mode = eq.update_control(&e);
+        assert_eq!(mode, OperatingMode::HeatingHPAndER, "setup must produce HP+ER mode");
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let full_electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let full_compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+
+        assert!(full_electric_kw > 0.0, "must have some power draw before limit");
+        assert!(er_kw > 0.0, "ER must be running in baseline step");
+
+        // A limit halfway between (HP-only) and (HP+ER): shedding ER is sufficient.
+        let hp_only_kw = full_electric_kw - er_kw;
+        let limit_kw = hp_only_kw + er_kw * 0.5;
+        assert!(limit_kw < full_electric_kw, "limit must be below total");
+        assert!(limit_kw > hp_only_kw, "limit must be above HP-only draw");
+
+        // Apply PowerLimit below total but above HP-only draw; ER must be shed,
+        // compressor must remain above zero (not scaled away).
+        // Use a fresh heater in the same initial conditions to avoid state drift.
+        let mut eq2 = ASHPHeater::new(cfg.clone());
+        let mut ports2 = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq2.init(&cfg, &e).unwrap();
+        eq2.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHPAndER,
+        })
+        .unwrap();
+        eq2.apply_control(&ControlSignal::PowerLimit {
+            max_power_kw: limit_kw,
+            ramp_rate_kw_per_s: None,
+        })
+        .unwrap();
+        eq2.update_control(&e);
+        eq2.step(&e, Duration::from_secs(60), &mut ports2).unwrap();
+
+        let limited_er_kw = eq2.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(f64::NAN);
+        let limited_compressor_kw = eq2.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let limited_electric_kw = eq2.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+
+        assert!(
+            limited_er_kw.abs() < 1e-9,
+            "ER must be shed to 0 under PowerLimit when limit > HP+fan; got {limited_er_kw:.6} kW"
+        );
+        assert!(
+            limited_compressor_kw > 0.0,
+            "compressor must not be zeroed when ER shedding alone satisfies the limit; \
+             got {limited_compressor_kw:.6} kW"
+        );
+        assert!(
+            (limited_compressor_kw - full_compressor_kw).abs() < 1e-6,
+            "compressor must be identical to no-limit baseline when ER shedding is sufficient; \
+             baseline {full_compressor_kw:.3} kW, limited {limited_compressor_kw:.3} kW"
+        );
+        assert!(
+            limited_electric_kw <= limit_kw + 1e-9,
+            "electric_kw must not exceed limit after ER shed; \
+             electric={limited_electric_kw:.4}, limit={limit_kw:.4}"
+        );
+    }
+
+    // After the soft lockout timeout fires, ER must remain available even if
+    // the zone is still rising — re-arm must not be possible until elapsed resets.
+    #[test]
+    fn soft_lockout_stays_released_after_timeout() {
+        let lockout_s = 60.0_f64;
+        let cfg = heater_config_with(|typed| {
+            typed.er_hard_lockout_time_s = Some(lockout_s);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.heating_setpoint_c = Some(18.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &make_env(15.0, 0.0, 0)).unwrap();
+
+        // Trigger hard lockout via setpoint raise.
+        eq.core
+            .hvac
+            .apply_control_signal(&ControlSignal::ThermalSetpoint {
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                deadband_c: None,
+            });
+
+        // Advance past hard lockout + twice the hard lockout to guarantee timeout fires.
+        // Keep zone rising so soft lockout would re-arm if the bug were present.
+        let max_s = (lockout_s * 4.0) as i64;
+        let mut released_step: Option<i64> = None;
+        for step in 0..=max_s / 60 {
+            let zone_c = 15.0 + 0.1 * step as f64;
+            let t = make_env(zone_c, 0.0, step * 60);
+            let mode = eq.update_control(&t);
+            if matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER) {
+                released_step = Some(step);
+                break;
+            }
+        }
+
+        let released_at = released_step.expect("ER must have been released before max_s");
+
+        // After release, continue with zone still rising. ER must stay available.
+        for step in (released_at + 1)..=(released_at + 5) {
+            let zone_c = 15.0 + 0.1 * step as f64;
+            let t = make_env(zone_c, 0.0, step * 60);
+            let mode = eq.update_control(&t);
+            assert!(
+                matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER),
+                "ER must remain available after timeout release even with rising zone \
+                 (step {step}); got {mode:?}"
+            );
+        }
+    }
+
+    // Sub-consumption telemetry (compressor + fan + ER + pan) must sum to
+    // ELECTRIC_KW within 0.1% relative error.
+    #[test]
+    fn sub_consumption_telemetry_sums_to_electric_kw() {
+        // Use ModeOverride(HeatingHPAndER) so all four sub-consumption channels
+        // are active, which gives the most thorough coverage of the sum invariant.
+        let cfg = heater_config_with(|typed| {
+            typed.fan_power_w = Some(300.0);
+            typed.backup_capacity_w = Some(4_000.0);
+            typed.backup_eir = Some(1.0);
+        });
+
+        let e = env(18.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHPAndER,
+        })
+        .unwrap();
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
+        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let pan_heater_kw = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
+        let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
+
+        assert!(
+            electric_kw > 0.0,
+            "electric_kw must be positive for this configuration"
+        );
+        let rel_err = (sub_sum - electric_kw).abs() / electric_kw.max(f64::MIN_POSITIVE);
+        assert!(
+            rel_err < 0.001,
+            "sub-consumptions sum {sub_sum:.6} kW must equal electric_kw {electric_kw:.6} kW \
+             within 0.1% (rel_err={rel_err:.2e})"
+        );
+    }
+
+    /// Validates that all heat-pump heater constants are within physically
+    /// correct ranges and match OCHRE / EnergyPlus reference values where
+    /// applicable.
+    ///
+    /// Sources:
+    /// - OCHRE HVAC.py lines 1208-1211 (lockout temps, ER setpoint offset)
+    /// - OCHRE HVAC.py line 142 (350 CFM/ton heating airflow)
+    /// - OCHRE MinisplitASHPHeater attrs: pan_heater_kw=0.150, pan_heater_temp=0
+    /// - EnergyPlus Engineering Reference: MaxOATSupplemental default = 21°C
+    #[test]
+    fn test_hp_defaults_are_physically_correct() {
+        use super::super::constants::{
+            DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR, DEFAULT_ER_HARD_LOCKOUT_TIME_S,
+            DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
+            DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W,
+            DEFAULT_HEATING_EIR, DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C,
+            DEFAULT_MIN_ER_CYCLE_TIME_S, MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_KW,
+            MSHP_PAN_HEATER_DEFAULT_TEMP_C,
+        };
+        use crate::hvac::hvac_core::AIRFLOW_HEATING_M3_S_PER_W;
+
+        // --- Lockout temperatures (OCHRE HVAC.py line 1208-1209) ---
+        // HP lockout: 0°F = -17.78°C
+        assert!(
+            (DEFAULT_HP_LOCKOUT_TEMP_C - (-17.78)).abs() < 0.01,
+            "HP lockout must be -17.78°C (0°F); got {DEFAULT_HP_LOCKOUT_TEMP_C}"
+        );
+        // ER lockout: 40°F = 4.44°C
+        assert!(
+            (DEFAULT_ER_LOCKOUT_TEMP_C - 4.44).abs() < 0.01,
+            "ER lockout must be 4.44°C (40°F); got {DEFAULT_ER_LOCKOUT_TEMP_C}"
+        );
+        // HP lockout must be below ER lockout (compressor can run at colder temps than ER)
+        assert!(
+            DEFAULT_HP_LOCKOUT_TEMP_C < DEFAULT_ER_LOCKOUT_TEMP_C,
+            "HP lockout ({DEFAULT_HP_LOCKOUT_TEMP_C}°C) must be colder than ER lockout ({DEFAULT_ER_LOCKOUT_TEMP_C}°C)"
+        );
+
+        // --- ER setpoint offset (OCHRE HVAC.py line 1211: deadband * (1.8 - deadband_offset)) ---
+        // With default deadband=1.0, offset = 1.0 * (1.8 - 0.2) = 1.6°C
+        let computed_offset =
+            1.0 * (DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER - DEFAULT_ER_SETPOINT_DEADBAND_OFFSET);
+        assert!(
+            (computed_offset - 1.6).abs() < 0.01,
+            "ER setpoint offset with deadband=1.0 must be 1.6°C (OCHRE default); got {computed_offset}"
+        );
+        assert!(
+            (DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER - 1.8).abs() < 1e-9,
+            "ER setpoint offset multiplier must be 1.8 (OCHRE); got {DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER}"
+        );
+        assert!(
+            (DEFAULT_ER_SETPOINT_DEADBAND_OFFSET - 0.2).abs() < 1e-9,
+            "ER deadband offset must be 0.2 (OCHRE deadband_offset default); got {DEFAULT_ER_SETPOINT_DEADBAND_OFFSET}"
+        );
+
+        // --- Lockout timers (OCHRE HVAC.py lines 1214, 1229: default 0 minutes) ---
+        assert_eq!(
+            DEFAULT_ER_HARD_LOCKOUT_TIME_S, 0.0,
+            "ER hard lockout must default to 0s (disabled), matching OCHRE"
+        );
+        assert_eq!(
+            DEFAULT_MIN_ER_CYCLE_TIME_S, 0.0,
+            "Minimum ER cycle time must default to 0s (disabled), matching OCHRE"
+        );
+
+        // --- MAX_OAT_SUPPLEMENTAL_C (EnergyPlus default: 21°C / 69.8°F) ---
+        assert!(
+            (MAX_OAT_SUPPLEMENTAL_C - 21.0).abs() < 0.01,
+            "Max OAT supplemental must be 21°C (EnergyPlus default); got {MAX_OAT_SUPPLEMENTAL_C}"
+        );
+        // Must be above ER lockout (otherwise supplemental cap is never reached)
+        assert!(
+            MAX_OAT_SUPPLEMENTAL_C > DEFAULT_ER_LOCKOUT_TEMP_C,
+            "Max OAT supplemental ({MAX_OAT_SUPPLEMENTAL_C}°C) must be above ER lockout ({DEFAULT_ER_LOCKOUT_TEMP_C}°C)"
+        );
+
+        // --- Heating airflow (OCHRE HVAC.py line 142: 350 CFM/ton for heating) ---
+        // 350 CFM/ton × 4.71947443e-4 m³/s/CFM / 3516.85 W/ton ≈ 4.6969e-5 m³/s/W
+        let expected_airflow = 350.0 * 4.719_474_43e-4 / 3516.85;
+        assert!(
+            (AIRFLOW_HEATING_M3_S_PER_W - expected_airflow).abs() < 1e-8,
+            "Heating airflow must match OCHRE 350 CFM/ton = {expected_airflow:.6e} m³/s/W; \
+             got {AIRFLOW_HEATING_M3_S_PER_W:.6e}"
+        );
+
+        // --- ASHP backup defaults ---
+        assert!(
+            DEFAULT_BACKUP_CAPACITY_W > 0.0,
+            "ASHP default backup capacity must be positive; got {DEFAULT_BACKUP_CAPACITY_W}"
+        );
+        assert!(
+            DEFAULT_BACKUP_CAPACITY_W <= 20_000.0,
+            "ASHP default backup capacity ({DEFAULT_BACKUP_CAPACITY_W} W) is implausibly large"
+        );
+        assert!(
+            (DEFAULT_BACKUP_EIR - 1.0).abs() < 1e-9,
+            "Default backup EIR must be 1.0 (electric resistance); got {DEFAULT_BACKUP_EIR}"
+        );
+
+        // --- Heating capacity / EIR fallbacks ---
+        assert!(
+            DEFAULT_HEATING_CAPACITY_W > 0.0 && DEFAULT_HEATING_CAPACITY_W <= 50_000.0,
+            "Default heating capacity must be in [0, 50 kW]; got {DEFAULT_HEATING_CAPACITY_W}"
+        );
+        assert!(
+            DEFAULT_HEATING_EIR > 0.0 && DEFAULT_HEATING_EIR < 1.0,
+            "Default heating EIR must be in (0, 1) (COP > 1); got {DEFAULT_HEATING_EIR}"
+        );
+
+        // --- Hysteresis band: small positive value preventing rapid cycling ---
+        assert!(
+            DEFAULT_HP_LOCKOUT_HYSTERESIS_C > 0.0 && DEFAULT_HP_LOCKOUT_HYSTERESIS_C < 5.0,
+            "HP lockout hysteresis must be in (0, 5)°C; got {DEFAULT_HP_LOCKOUT_HYSTERESIS_C}"
+        );
+
+        // --- MSHP pan heater (OCHRE MinisplitASHPHeater: 0.150 kW @ 0°C) ---
+        assert!(
+            (MSHP_PAN_HEATER_DEFAULT_KW - 0.150).abs() < 1e-9,
+            "MSHP pan heater must be 0.150 kW (OCHRE default); got {MSHP_PAN_HEATER_DEFAULT_KW}"
+        );
+        assert!(
+            (MSHP_PAN_HEATER_DEFAULT_TEMP_C - 0.0).abs() < 1e-9,
+            "MSHP pan heater activation temp must be 0.0°C (OCHRE default); got {MSHP_PAN_HEATER_DEFAULT_TEMP_C}"
+        );
+    }
+
+    #[test]
+    fn hp_lockout_re_enables_when_oat_rises() {
+        // HP lockout temp set to -5°C. Start well below to ensure lockout,
+        // then step above to verify re-enable.
+        let lockout_c = -5.0_f64;
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(lockout_c);
+            typed.er_setpoint_offset_c = Some(0.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let cold_env = env(18.0, lockout_c - 10.0, 0.003);
+        eq.init(&cfg, &cold_env).unwrap();
+
+        // Step 1: OAT well below lockout — HP must be locked out.
+        let mode_cold = eq.update_control(&cold_env);
+        assert!(
+            !matches!(mode_cold, OperatingMode::HeatingHP | OperatingMode::HeatingHPAndER),
+            "HP must be off when OAT is well below lockout ({lockout_c}°C); got {mode_cold:?}"
+        );
+
+        // Step 2: raise OAT above lockout — HP must re-enable.
+        let warm_env = env(18.0, lockout_c + 2.0, 0.003);
+        let mode_warm = eq.update_control(&warm_env);
+        assert_eq!(
+            mode_warm,
+            OperatingMode::HeatingHP,
+            "HP must re-enable once OAT rises above lockout ({lockout_c}°C); got {mode_warm:?}"
+        );
+    }
+
+    #[test]
+    fn sub_consumption_sum_in_er_only_mode() {
+        // HP locked out (OAT below lockout), ER active.
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0);
+            typed.er_lockout_temp_c = Some(5.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.backup_capacity_w = Some(4_000.0);
+            typed.backup_eir = Some(1.0);
+            typed.fan_power_w = Some(300.0);
+        });
+
+        let e = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+        let mode = eq.update_control(&e);
+        assert_eq!(mode, OperatingMode::HeatingER, "must be ER-only mode");
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
+        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let pan_heater_kw = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
+        let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
+
+        assert!(electric_kw > 0.0, "ER-only mode must draw power");
+        let rel_err = (sub_sum - electric_kw).abs() / electric_kw.max(f64::MIN_POSITIVE);
+        assert!(
+            rel_err < 0.001,
+            "sub-consumptions sum {sub_sum:.6} kW must equal electric_kw {electric_kw:.6} kW \
+             within 0.1% in ER-only mode (rel_err={rel_err:.2e})"
+        );
+    }
+
+    #[test]
+    fn sub_consumption_sum_in_hp_only_mode() {
+        // Normal HP operation; OAT above ER lockout so no ER fires.
+        let cfg = heater_config_with(|typed| {
+            typed.backup_capacity_w = Some(4_000.0);
+            typed.backup_eir = Some(1.0);
+            typed.fan_power_w = Some(300.0);
+        });
+
+        // OAT=5°C: above ER lockout (4.44°C) so only HP runs.
+        let e = env(18.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+        let mode = eq.update_control(&e);
+        assert_eq!(mode, OperatingMode::HeatingHP, "must be HP-only mode");
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
+        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let pan_heater_kw = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
+        let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
+
+        assert!(electric_kw > 0.0, "HP-only mode must draw power");
+        assert!(
+            backup_er_kw.abs() < 1e-9,
+            "no ER must fire in HP-only mode; got {backup_er_kw:.6} kW"
+        );
+        let rel_err = (sub_sum - electric_kw).abs() / electric_kw.max(f64::MIN_POSITIVE);
+        assert!(
+            rel_err < 0.001,
+            "sub-consumptions sum {sub_sum:.6} kW must equal electric_kw {electric_kw:.6} kW \
+             within 0.1% in HP-only mode (rel_err={rel_err:.2e})"
+        );
+    }
+
+    #[test]
+    fn defrost_active_adjusts_capacity_and_power() {
+        // OAT around -5°C where defrost should be active (humidity and temperature
+        // conditions trigger on-demand defrost). Compare HP_CAPACITY_W against a
+        // warm-OAT baseline where defrost is inactive.
+        let cfg = heater_config();
+
+        // Warm baseline: OAT=10°C, low humidity — no defrost expected.
+        let env_warm = env(18.0, 10.0, 0.002);
+        let mut eq_warm = ASHPHeater::new(cfg.clone());
+        let mut ports_warm = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq_warm.init(&cfg, &env_warm).unwrap();
+        eq_warm.update_control(&env_warm);
+        eq_warm
+            .step(&env_warm, Duration::from_secs(60), &mut ports_warm)
+            .unwrap();
+        let warm_capacity_w = eq_warm.telemetry().get(tk::HP_CAPACITY_W).unwrap_or(0.0);
+        let warm_defrost = eq_warm.telemetry().get(tk::DEFROST_ACTIVE).unwrap_or(0.0);
+        assert_eq!(warm_defrost, 0.0, "warm OAT must not trigger defrost");
+
+        // Cold defrost case: OAT=-5°C with elevated humidity triggers defrost.
+        let env_cold = env(18.0, -5.0, 0.005);
+        let mut eq_cold = ASHPHeater::new(cfg.clone());
+        let mut ports_cold = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq_cold.init(&cfg, &env_cold).unwrap();
+        eq_cold.update_control(&env_cold);
+        eq_cold
+            .step(&env_cold, Duration::from_secs(60), &mut ports_cold)
+            .unwrap();
+        let cold_defrost = eq_cold.telemetry().get(tk::DEFROST_ACTIVE).unwrap_or(0.0);
+        let cold_capacity_w = eq_cold.telemetry().get(tk::HP_CAPACITY_W).unwrap_or(0.0);
+
+        assert_eq!(
+            cold_defrost, 1.0,
+            "OAT=-5°C with humidity must trigger defrost; got DEFROST_ACTIVE={cold_defrost}"
+        );
+        assert!(
+            cold_capacity_w < warm_capacity_w,
+            "HP_CAPACITY_W during defrost ({cold_capacity_w:.1} W) must be reduced \
+             vs warm-OAT baseline ({warm_capacity_w:.1} W)"
+        );
+    }
+
+    #[test]
+    fn mshp_never_engages_er_without_explicit_backup() {
+        // MSHP default: no backup heat. Even at very cold OAT, ER must never fire.
+        let cfg = mshp_config_with(|_| {});
+
+        // Very cold OAT: below all typical lockouts.
+        let cold_env = env(18.0, -25.0, 0.003);
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &cold_env).unwrap();
+
+        for step in 0..5i64 {
+            let e = env(18.0 - step as f64 * 0.1, -25.0, 0.003);
+            let mode = eq.update_control(&e);
+            assert!(
+                !matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER),
+                "MSHP with no backup must never engage ER at step {step}; got {mode:?}"
+            );
+            ports.zero();
+            eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+        }
+    }
+
+    // When zone temp is well below setpoint (inside the ER supplemental band) and OAT
+    // is within the supplemental range, HP and ER must run simultaneously.
+    #[test]
+    fn hp_and_er_run_simultaneously_in_supplemental_band() {
+        // er_setpoint_offset_c=1.6: ER fires when zone < setpoint(21) - 1.6 = 19.4°C.
+        // er_lockout_temp_c=4.44: ER allowed when OAT < 4.44°C.
+        // hp_lockout_temp_c=-17.78: HP available at OAT=2°C.
+        let cfg = heater_config_with(|typed| {
+            typed.backup_capacity_w = Some(4_000.0);
+            typed.backup_eir = Some(1.0);
+            typed.er_setpoint_offset_c = Some(1.6);
+            typed.er_lockout_temp_c = Some(4.44);
+            typed.hp_lockout_temp_c = Some(-17.78);
+            typed.heating_setpoint_c = Some(21.0);
+            typed.hysteresis_c = Some(1.0);
+        });
+
+        // Zone at 18°C: well below 19.4°C ER threshold. OAT=2°C: HP available, ER allowed.
+        let e = env(18.0, 2.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+
+        let mode = eq.update_control(&e);
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingHPAndER,
+            "zone well below ER threshold with HP available must select HeatingHPAndER; got {mode:?}"
+        );
+
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        assert!(
+            compressor_kw > 0.0,
+            "HP must contribute compressor power in HeatingHPAndER mode; got {compressor_kw:.4} kW"
+        );
+        assert!(
+            backup_er_kw > 0.0,
+            "ER must contribute backup power in HeatingHPAndER mode; got {backup_er_kw:.4} kW"
+        );
+    }
+
+    // When zone temp is just below setpoint but above the ER offset threshold, only the
+    // HP fires — ER must not engage until the zone drops far enough.
+    #[test]
+    fn er_does_not_engage_above_er_setpoint_offset() {
+        // er_setpoint_offset_c=1.6: ER fires when zone < 21 - 1.6 = 19.4°C.
+        // Zone at 20°C is below setpoint(21) but above the 19.4°C ER turn-on threshold.
+        // OAT=2°C: HP available, ER temperature gate passes — only er_thermostat_call blocks it.
+        let cfg = heater_config_with(|typed| {
+            typed.backup_capacity_w = Some(4_000.0);
+            typed.backup_eir = Some(1.0);
+            typed.er_setpoint_offset_c = Some(1.6);
+            typed.er_lockout_temp_c = Some(4.44);
+            typed.hp_lockout_temp_c = Some(-17.78);
+            typed.heating_setpoint_c = Some(21.0);
+            typed.hysteresis_c = Some(1.0);
+        });
+
+        // Zone at 20°C: below setpoint but above ER turn-on (19.4°C). OAT=2°C.
+        let e = env(20.0, 2.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let mode = eq.update_control(&e);
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingHP,
+            "zone above ER threshold must select HeatingHP only; got {mode:?}"
+        );
+    }
+
+    // When OAT is below the HP lockout threshold, HP is unavailable and only ER heats.
+    #[test]
+    fn er_only_when_hp_locked_out() {
+        // hp_lockout_temp_c=-17.78: HP locked out at OAT=-20°C.
+        // er_lockout_temp_c=4.44: ER allowed at OAT=-20°C.
+        // er_setpoint_offset_c=0.0: ER fires any time there is a heating call.
+        let cfg = heater_config_with(|typed| {
+            typed.backup_capacity_w = Some(4_000.0);
+            typed.backup_eir = Some(1.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.er_lockout_temp_c = Some(4.44);
+            typed.hp_lockout_temp_c = Some(-17.78);
+            typed.heating_setpoint_c = Some(21.0);
+            typed.hysteresis_c = Some(1.0);
+        });
+
+        let e = env(18.0, -20.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let mode = eq.update_control(&e);
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingER,
+            "OAT below HP lockout must select HeatingER only; got {mode:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3232,4 +4129,5 @@ mod ideal_capacity_tests {
             "900 s timestep with zone above heating setpoint must produce RTF=0.0, got {rtf}"
         );
     }
+
 }

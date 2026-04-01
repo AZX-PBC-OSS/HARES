@@ -264,7 +264,7 @@ impl HeatPumpWH {
             element_hp_control: ElementHpControlMode::default(),
             loop_id,
             fluid_type: FluidType::Water,
-            mains_temp_c: 15.0,
+            mains_temp_c: 10.0,
             draw_flow_rate_kg_s: 0.0,
             zip: WaterHeaterZip::default(),
             dr_setpoint_offset_c: 0.0,
@@ -371,7 +371,12 @@ impl HeatPumpWH {
             n_nodes,
             height_m,
             diameter_m,
-            ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
+            ua_w_per_k: super::apply_jacket_r_value(
+                c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
+                height_m,
+                diameter_m,
+                c.jacket_r_value_m2_k_w,
+            ),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
             initial_temp_c: initial_tank_temp_c,
             element_nodes: [Some(self.condenser_node), Some(self.thermostat_node)],
@@ -1208,6 +1213,7 @@ mod tests {
             performance_adjustment: Some(1.0),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
         }
     }
 
@@ -1261,6 +1267,7 @@ mod tests {
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
         };
         let config = equipment_config(typed);
         let env = env(20.0);
@@ -2362,7 +2369,7 @@ mod dr_tests {
     /// max_tank_temp_c is high so safety never fires.
     fn config_near_setpoint() -> EquipmentConfig {
         let mut typed = base_typed_config();
-        typed.initial_tank_temp_c = Some(50.0);
+        typed.initial_tank_temp_c = Some(49.0); // 49 < 52 - 2 = 50 → calls for heat from Off
         typed.backup_enable_offset_c = Some(20.0);
         typed.min_on_time_s = Some(0.0);
         equipment_config(typed)
@@ -2390,23 +2397,24 @@ mod dr_tests {
         }
     }
 
-    /// DR Moderate applies a -3°C setpoint offset. A tank at 50°C that would normally
-    /// call for heat (setpoint=52°C) must stop calling after the offset (effective=49°C).
+    /// DR Moderate applies a -3°C setpoint offset. A tank at 49°C that would normally
+    /// call for heat (setpoint=52°C, 49 < 50 deadband floor) must stop calling after the
+    /// offset (effective setpoint=49°C; 49 is not below 49 - 2 = 47).
     #[test]
     fn hpwh_dr_moderate_reduces_setpoint() {
         let cfg = config_near_setpoint();
         let e = env_state();
 
-        // Baseline: tank at 50°C is within deadband below 52°C → heating.
+        // Baseline: tank at 49°C < setpoint - deadband = 50°C → heating from Off.
         let mut eq_base = HeatPumpWH::new(cfg.clone());
         eq_base.init(&cfg, &e).unwrap();
         let mode_base = eq_base.update_control(&e);
         assert!(
             mode_base != OperatingMode::Off,
-            "baseline must be heating with tank at 50°C; got {mode_base:?}"
+            "baseline must be heating with tank at 49°C; got {mode_base:?}"
         );
 
-        // DR Moderate: effective setpoint = 52 + (-3) = 49°C. Tank at 50°C > 49°C → no call.
+        // DR Moderate: effective setpoint = 49°C, deadband floor = 47°C → no call.
         let mut eq_dr = HeatPumpWH::new(cfg.clone());
         eq_dr.init(&cfg, &e).unwrap();
         eq_dr
@@ -2494,14 +2502,14 @@ mod dr_tests {
     }
 
     /// DR Critical applies load_fraction=0.5. When the HPWH is in MutuallyExclusive mode
-    /// and the compressor is already running, backup cannot co-fire (mutual exclusion),
+    /// and the compressor is running, backup cannot co-fire (mutual exclusion),
     /// and compressor power is scaled by the load fraction.
     #[test]
     fn hpwh_dr_critical_with_mutual_exclusion_interaction() {
         let mut typed = base_typed_config();
-        typed.initial_tank_temp_c = Some(40.0);
-        // Large offset: backup only fires when control_temp <= 42°C; tank starts at 40°C
-        // which is right on the boundary. Use very large offset so backup definitely off.
+        // Tank at 30°C: calls for heat under both normal and DR Critical (effective sp=42, floor=40).
+        typed.initial_tank_temp_c = Some(30.0);
+        // Large offset: backup fires only when control_temp <= 22°C; tank at 30°C → compressor only.
         typed.backup_enable_offset_c = Some(30.0);
         typed.min_on_time_s = Some(0.0);
         // Explicit MutuallyExclusive (default, but stated for clarity).
@@ -2780,6 +2788,7 @@ mod new_feature_tests {
             performance_adjustment: Some(1.0),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
         };
         let cfg = equipment_config(typed);
         let mut eq = HeatPumpWH::new(cfg.clone());

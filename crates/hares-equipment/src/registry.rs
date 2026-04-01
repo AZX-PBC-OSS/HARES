@@ -324,6 +324,7 @@ mod tests {
             setpoint_c: Some(51.67),
             performance_adjustment: Some(0.92),
             parasitic_power_w: Some(5.0),
+            number_of_bedrooms: None,
             inlet_temp_c: None,
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,

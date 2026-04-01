@@ -59,6 +59,8 @@ pub struct GasWaterHeaterConfig {
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jacket_r_value_m2_k_w: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GasWaterHeaterConfig {
@@ -141,6 +143,12 @@ impl GasWaterHeaterConfig {
             0.0,
             false,
         )?;
+        check_finite(
+            "gas_wh: jacket_r_value_m2_k_w",
+            self.jacket_r_value_m2_k_w,
+            0.0,
+            false,
+        )?;
         Ok(())
     }
 }
@@ -172,6 +180,8 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub element_power_w: Option<f64>,
     pub max_setpoint_ramp_rate_c_per_min: Option<f64>,
     pub element_priority_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jacket_r_value_m2_k_w: Option<f64>,
 }
 
 impl EquipmentTypedConfig for ElectricResistanceWaterHeaterConfig {
@@ -263,6 +273,12 @@ impl ElectricResistanceWaterHeaterConfig {
             0.0,
             false,
         )?;
+        check_finite(
+            "resistance_wh: jacket_r_value_m2_k_w",
+            self.jacket_r_value_m2_k_w,
+            0.0,
+            false,
+        )?;
         Ok(())
     }
 }
@@ -286,6 +302,13 @@ pub struct TanklessWaterHeaterConfig {
     pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub mains_temp_c_source: Option<ScheduleSourceConfig>,
     pub avg_water_draw_l_per_day: Option<f64>,
+    /// Number of bedrooms (ANSI/RESNET 301 occupancy proxy).
+    /// When provided, gas parasitic power is computed as `5 + 60 * on_time_frac`
+    /// where `on_time_frac = [0.0269, 0.0333, 0.0397, 0.0462, 0.0529][bedrooms - 1]` (clamped 1–5).
+    /// Ignored for electric tankless (no ignition controller).
+    /// Overridden by `parasitic_power_w` if both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_of_bedrooms: Option<f64>,
 }
 
 impl EquipmentTypedConfig for TanklessWaterHeaterConfig {
@@ -345,6 +368,12 @@ impl TanklessWaterHeaterConfig {
             0.0,
             false,
         )?;
+        check_range(
+            "tankless_wh: number_of_bedrooms",
+            self.number_of_bedrooms,
+            0.5,
+            10.0,
+        )?;
         Ok(())
     }
 }
@@ -387,6 +416,8 @@ pub struct HeatPumpWaterHeaterConfig {
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jacket_r_value_m2_k_w: Option<f64>,
 }
 
 impl EquipmentTypedConfig for HeatPumpWaterHeaterConfig {
@@ -491,6 +522,12 @@ impl HeatPumpWaterHeaterConfig {
             0.0,
             false,
         )?;
+        check_finite(
+            "hpwh: jacket_r_value_m2_k_w",
+            self.jacket_r_value_m2_k_w,
+            0.0,
+            false,
+        )?;
         Ok(())
     }
 }
@@ -529,6 +566,7 @@ mod tests {
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
+            jacket_r_value_m2_k_w: None,
         };
         let ec = EquipmentConfig::from_typed(
             "gas".to_string(),
@@ -581,6 +619,7 @@ mod tests {
             element_power_w: Some(4_500.0),
             max_setpoint_ramp_rate_c_per_min: Some(3.0),
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         };
         let ec = EquipmentConfig::from_typed(
             "resistance".to_string(),
@@ -618,6 +657,7 @@ mod tests {
             heating_capacity_w: Some(20_000.0),
             setpoint_c: Some(51.67),
             parasitic_power_w: Some(7.38),
+            number_of_bedrooms: None,
             performance_adjustment: Some(0.92),
             inlet_temp_c: None,
             draw_flow_rate_kg_s: None,
@@ -687,6 +727,7 @@ mod tests {
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
+            jacket_r_value_m2_k_w: None,
         };
         let ec = EquipmentConfig::from_typed(
             "hpwh".to_string(),

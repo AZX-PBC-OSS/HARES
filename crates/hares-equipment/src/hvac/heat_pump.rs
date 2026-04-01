@@ -1,6 +1,6 @@
 //! Air-source and minisplit heat-pump models.
 
-mod constants;
+pub mod constants;
 mod cooler;
 mod defrost;
 mod heater;

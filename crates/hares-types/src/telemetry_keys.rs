@@ -96,6 +96,16 @@ pub const COMPRESSOR_POWER_W: &str = "compressor_power_w";
 pub const FAN_KW: &str = "fan_kw";
 pub const FAN_ELECTRIC_W: &str = "fan_electric_w";
 pub const FAN_POWER_W: &str = "fan_power_w";
+pub const BACKUP_ER_KW: &str = "backup_er_kw";
+pub const PAN_HEATER_KW: &str = "pan_heater_kw";
+pub const HP_CAPACITY_W: &str = "hp_capacity_w";
+pub const ER_CAPACITY_W: &str = "er_capacity_w";
+pub const HP_LOCKOUT_TEMP_C: &str = "hp_lockout_temp_c";
+pub const ER_LOCKOUT_TEMP_C: &str = "er_lockout_temp_c";
+pub const ER_SETPOINT_OFFSET_C: &str = "er_setpoint_offset_c";
+pub const ER_HARD_LOCKOUT_TIME_S: &str = "er_hard_lockout_time_s";
+pub const BACKUP_CAPACITY_W: &str = "backup_capacity_w";
+pub const BACKUP_EIR: &str = "backup_eir";
 
 // ── Water heater ────────────────────────────────────────────────────────────
 pub const DRAW_FLOW_RATE_KG_S: &str = "draw_flow_rate_kg_s";

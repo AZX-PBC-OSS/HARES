@@ -1590,6 +1590,7 @@ mod tests {
                     element_power_w: Some(4_500.0),
                     element_priority_mode: None,
                     max_setpoint_ramp_rate_c_per_min: None,
+                    jacket_r_value_m2_k_w: None,
                 },
             ),
             "Gas Water Heater" => EquipmentConfig::from_typed(
@@ -1622,6 +1623,7 @@ mod tests {
                     performance_adjustment: Some(0.92),
                     zone_type: Some("conditioned".to_string()),
                     first_hour_rating_m3: Some(0.20),
+                    jacket_r_value_m2_k_w: None,
                 },
             ),
             "Heat Pump Water Heater" => EquipmentConfig::from_typed(
@@ -1663,6 +1665,7 @@ mod tests {
                     performance_adjustment: Some(0.92),
                     zone_type: Some("conditioned".to_string()),
                     first_hour_rating_m3: Some(0.20),
+                    jacket_r_value_m2_k_w: None,
                 },
             ),
             other => panic!("unsupported water heater type for schedule test: {other}"),
@@ -1700,6 +1703,7 @@ mod tests {
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
                 avg_water_draw_l_per_day,
+                number_of_bedrooms: None,
             },
         );
         EquipmentSpec {

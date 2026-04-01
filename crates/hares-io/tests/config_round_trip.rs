@@ -48,6 +48,8 @@ fn sample_gas_furnace_config() -> GasFurnaceConfig {
         fan_power_w: Some(450.0),
         number_of_speeds: 2,
         ducts: sample_duct_config(),
+        stage_heating_capacities_w: None,
+        stage_heating_eirs: None,
     }
 }
 
@@ -282,6 +284,7 @@ fn sample_gas_water_heater_config() -> GasWaterHeaterConfig {
         performance_adjustment: Some(0.92),
         zone_type: Some("conditioned".to_string()),
         first_hour_rating_m3: Some(0.20),
+        jacket_r_value_m2_k_w: None,
     }
 }
 
@@ -317,6 +320,7 @@ fn sample_electric_resistance_water_heater_config() -> ElectricResistanceWaterHe
         element_power_w: Some(4_500.0),
         element_priority_mode: None,
         max_setpoint_ramp_rate_c_per_min: None,
+        jacket_r_value_m2_k_w: None,
     }
 }
 
@@ -343,6 +347,7 @@ fn sample_tankless_water_heater_config() -> TanklessWaterHeaterConfig {
             boundary: BoundaryPolicy::Clamp,
         }),
         avg_water_draw_l_per_day: Some(220.0),
+        number_of_bedrooms: None,
     }
 }
 
@@ -383,6 +388,7 @@ fn sample_heat_pump_water_heater_config() -> HeatPumpWaterHeaterConfig {
         performance_adjustment: Some(0.92),
         zone_type: Some("conditioned".to_string()),
         first_hour_rating_m3: Some(0.20),
+        jacket_r_value_m2_k_w: None,
     }
 }
 

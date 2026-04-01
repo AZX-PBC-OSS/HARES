@@ -563,6 +563,8 @@ mod tests {
             afue: 0.82,
             fan_power_w: Some(350.0),
             number_of_speeds: 1,
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
             ducts: DuctConfig::default(),
         };
         let parameters = serde_json::to_value(&typed_cfg)

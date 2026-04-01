@@ -267,6 +267,8 @@ fn gas_furnace_energy_balance() {
             number_of_speeds: 1,
             fan_power_w: Some(FAN_POWER_W),
             ducts: DuctConfig::default(),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -344,6 +346,8 @@ fn gas_furnace_fuel_independent_of_duct_dse() {
                     dse_heat: Some(dse),
                     ..DuctConfig::default()
                 },
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
             },
         );
         let registry = EquipmentRegistry::new();
@@ -886,6 +890,8 @@ fn furnace_thermostat_off_above_setpoint() {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1279,6 +1285,8 @@ fn gas_furnace_first_law_thermal_less_than_fuel() {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1347,6 +1355,8 @@ fn gas_furnace_dse_multi_zone_energy_conservation() {
                 duct_zone_id: Some(2),
                 ..DuctConfig::default()
             },
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1407,6 +1417,8 @@ fn hvac_default_deadband_matrix_matches_ochre_thresholds() {
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
             ducts: DuctConfig::default(),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
         },
     );
     let mut furnace = registry.create("Gas Furnace", furnace_cfg.clone()).unwrap();
@@ -1489,8 +1501,8 @@ fn hvac_default_deadband_matrix_matches_ochre_thresholds() {
 //
 // Staging rule: when the thermostat is already calling, load_fraction below the
 // low-speed capacity fraction should fall back to stage 0 and cycle there.
-// With low_speed_capacity_fraction = 0.5 and load_fraction = 0.4, the expected
-// low-stage PLR is 0.4 / 0.5 = 0.8.
+// With the default low_speed_capacity_fraction = 0.72 and load_fraction = 0.4,
+// the expected low-stage PLR is 0.4 / 0.72 ≈ 0.5556.
 // ---------------------------------------------------------------------------
 #[test]
 fn two_speed_ac_setpoint_matrix_transitions_from_high_to_low_stage() {
@@ -1529,9 +1541,11 @@ fn two_speed_ac_setpoint_matrix_transitions_from_high_to_low_stage() {
         "high-load two-speed call should run full runtime fraction; got {}",
         high.runtime_fraction
     );
+    let expected_low_plr = 0.4_f64 / 0.72_f64;
     assert!(
-        (low.runtime_fraction - 0.8).abs() < 1e-9,
-        "load_fraction 0.4 with low stage fraction 0.5 should cycle stage 0 at PLR=0.8; got {}",
+        (low.runtime_fraction - expected_low_plr).abs() < 1e-9,
+        "load_fraction 0.4 with default low stage fraction 0.72 should cycle stage 0 at \
+         PLR=0.4/0.72≈{expected_low_plr:.4}; got {}",
         low.runtime_fraction
     );
     assert!(

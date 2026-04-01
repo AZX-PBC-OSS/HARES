@@ -89,6 +89,7 @@ fn tankless_schedule_sources_round_trip_and_init() {
             boundary: BoundaryPolicy::Clamp,
         }),
         avg_water_draw_l_per_day: Some(220.0),
+        number_of_bedrooms: None,
     };
 
     let serialized = serde_json::to_value(&cfg).expect("serialize tankless config");

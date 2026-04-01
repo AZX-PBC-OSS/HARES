@@ -23,7 +23,7 @@ pub(super) fn resolve_water_heaters(
     specs: &mut Vec<EquipmentSpec>,
 ) -> std::result::Result<(), super::HpxmlError> {
     // Shared draw parameters parsed once from the WaterHeating section.
-    let avg_water_draw_l_per_day = parse_avg_water_draw_l_per_day(details);
+    let (avg_water_draw_l_per_day, n_bedrooms) = parse_avg_water_draw_and_bedrooms(details);
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
         let fuel = parse_water_heater_fuel(wh)?;
@@ -57,6 +57,12 @@ pub(super) fn resolve_water_heaters(
         let first_hour_rating_m3 = first_hour_rating_gal.map(conv::volume_gal_to_m3);
         let heating_capacity_btu_hr = heating_capacity_input;
         let heating_capacity_w = heating_capacity_input.map(conv::power_btu_h_to_w);
+
+        // HPXML JacketRValue is in hr·ft²·°F/Btu; convert to SI m²·K/W.
+        let jacket_r_value_m2_k_w = wh
+            .path(&["WaterHeaterInsulation", "Jacket"])
+            .and_then(|j| child_f64(j, "JacketRValue"))
+            .map(|r_ip| r_ip * 0.176_110_184);
 
         let category = wh_category(&wh_type, fuel);
         let ua_inputs = UaInputs {
@@ -106,10 +112,11 @@ pub(super) fn resolve_water_heaters(
                     pilot_power_w: child_f64(wh, "PilotPower"),
                     flue_loss_fraction: child_f64(wh, "FlueLossFraction"),
                     skin_loss_fraction: None,
-                    ignition_type: None,
+                    ignition_type: child_text(wh, "IgnitionType"),
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
+                    jacket_r_value_m2_k_w,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -139,6 +146,7 @@ pub(super) fn resolve_water_heaters(
                     element_power_w: heating_capacity_w,
                     element_priority_mode: None,
                     max_setpoint_ramp_rate_c_per_min: None,
+                    jacket_r_value_m2_k_w,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -160,6 +168,7 @@ pub(super) fn resolve_water_heaters(
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
                     avg_water_draw_l_per_day,
+                    number_of_bedrooms: n_bedrooms,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -213,6 +222,7 @@ pub(super) fn resolve_water_heaters(
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
+                    jacket_r_value_m2_k_w,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -228,22 +238,26 @@ pub(super) fn resolve_water_heaters(
     Ok(())
 }
 
-/// Parse the combined average daily hot water draw [L/day] from the `<BuildingDetails>` node.
+/// Parse the combined average daily hot water draw [L/day] and bedroom count from `<BuildingDetails>`.
 ///
 /// Reads `<BuildingSummary>/<BuildingConstruction>/<NumberofBedrooms>`,
 /// `<WaterHeating>/<WaterFixture>/<LowFlow>`, the `<WaterFixturesUsageMultiplier>` extension,
 /// and `<HotWaterDistribution>` to compute the OCHRE/ANSI-RESNET 301 draw estimate.
 ///
-/// Returns `None` when bedroom count is absent (required for the formula).
-fn parse_avg_water_draw_l_per_day(details: &XmlNode) -> Option<f64> {
+/// Returns `(None, None)` when bedroom count is absent (required for both outputs).
+fn parse_avg_water_draw_and_bedrooms(details: &XmlNode) -> (Option<f64>, Option<f64>) {
     // Bedroom count is required; without it the formula cannot be evaluated.
-    let n_bedrooms_raw = details
+    let n_bedrooms_raw = match details
         .path(&[
             "BuildingSummary",
             "BuildingConstruction",
             "NumberofBedrooms",
         ])
-        .and_then(|n| n.text.trim().parse::<f64>().ok())?;
+        .and_then(|n| n.text.trim().parse::<f64>().ok())
+    {
+        Some(v) => v,
+        None => return (None, None),
+    };
 
     // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797).
     let n_occupants = details
@@ -288,12 +302,14 @@ fn parse_avg_water_draw_l_per_day(details: &XmlNode) -> Option<f64> {
     // Distribution system.
     let distribution = parse_distribution_system(details, n_bedrooms);
 
-    Some(combined_daily_hot_water_l(
+    let draw_l_per_day = combined_daily_hot_water_l(
         n_bedrooms,
         fixture_efficiency,
         usage_multiplier,
         &distribution,
-    ))
+    );
+
+    (Some(draw_l_per_day), Some(n_bedrooms))
 }
 
 fn typed_spec<T>(
@@ -517,6 +533,7 @@ mod tests {
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
+            jacket_r_value_m2_k_w: None,
         };
         let spec = typed_spec(
             "Gas Water Heater".to_string(),
@@ -569,6 +586,7 @@ mod tests {
             element_power_w: None,
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
+            jacket_r_value_m2_k_w: None,
         };
         let spec = typed_spec(
             "Electric Resistance Water Heater".to_string(),
@@ -689,6 +707,199 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("unsupported water-heater FuelType")
+        );
+    }
+
+    #[test]
+    fn jacket_r_value_parsed_and_converted_to_si() {
+        // R5 jacket in IP units (hr·ft²·°F/Btu). Conversion: 5 * 0.176_110_184 ≈ 0.880_550_92
+        let r_ip = 5.0_f64;
+        let expected_si = r_ip * 0.176_110_184;
+
+        let xml = format!(
+            r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>electricity</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <TankVolume>50</TankVolume>
+                      <EnergyFactor>0.92</EnergyFactor>
+                      <WaterHeaterInsulation>
+                        <Jacket>
+                          <JacketRValue>{r_ip}</JacketRValue>
+                        </Jacket>
+                      </WaterHeaterInsulation>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#
+        );
+        let root = parse_xml_document(&xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("water heaters must resolve");
+
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Electric Resistance Water Heater")
+            .expect("ERWH spec must be emitted");
+        let cfg: ElectricResistanceWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed ERWH config");
+
+        let jacket_si = cfg
+            .jacket_r_value_m2_k_w
+            .expect("jacket_r_value_m2_k_w must be populated");
+        assert!(
+            (jacket_si - expected_si).abs() < 1e-9,
+            "expected {expected_si} m²·K/W, got {jacket_si}"
+        );
+    }
+
+    #[test]
+    fn jacket_r_value_absent_yields_none() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>electricity</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <TankVolume>50</TankVolume>
+                      <EnergyFactor>0.92</EnergyFactor>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("water heaters must resolve");
+
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Electric Resistance Water Heater")
+            .expect("ERWH spec must be emitted");
+        let cfg: ElectricResistanceWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed ERWH config");
+
+        assert!(
+            cfg.jacket_r_value_m2_k_w.is_none(),
+            "jacket_r_value_m2_k_w must be None when HPXML element is absent"
+        );
+    }
+
+    fn gas_wh_xml_with_ignition(ignition_type: Option<&str>) -> String {
+        let ignition_elem = ignition_type
+            .map(|v| format!("                      <IgnitionType>{v}</IgnitionType>\n"))
+            .unwrap_or_default();
+        format!(
+            r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <TankVolume>40</TankVolume>
+                      <EnergyFactor>0.59</EnergyFactor>
+{ignition_elem}
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#
+        )
+    }
+
+    fn parse_gas_wh_config(xml: &str) -> GasWaterHeaterConfig {
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("water heaters must resolve");
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Gas Water Heater")
+            .expect("Gas Water Heater spec must be emitted");
+        spec.typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed GasWaterHeaterConfig")
+    }
+
+    #[test]
+    fn hpxml_electronic_ignition_type_is_parsed() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_ignition(Some("electronic ignition")));
+        assert_eq!(
+            cfg.ignition_type.as_deref(),
+            Some("electronic ignition"),
+            "IgnitionType 'electronic ignition' must be forwarded to config"
+        );
+    }
+
+    #[test]
+    fn hpxml_standing_pilot_ignition_type_is_parsed() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_ignition(Some("standing pilot")));
+        assert_eq!(
+            cfg.ignition_type.as_deref(),
+            Some("standing pilot"),
+            "IgnitionType 'standing pilot' must be forwarded to config"
+        );
+    }
+
+    #[test]
+    fn hpxml_absent_ignition_type_yields_none() {
+        let cfg = parse_gas_wh_config(&gas_wh_xml_with_ignition(None));
+        assert!(
+            cfg.ignition_type.is_none(),
+            "absent IgnitionType must yield None in config"
         );
     }
 }

@@ -1687,11 +1687,11 @@ mod tests {
     }
 
     /// `WeatherState.mains_temp_c` must be populated from the Burch-Christensen
-    /// model and differ from the static 15°C fallback for a real climate.
+    /// model and differ from the static 10°C fallback for a real climate.
     #[test]
     fn weather_state_mains_temp_c_is_populated_and_not_constant() {
         // 8760-row annual weather with enough seasonal variation to produce
-        // a mains temperature that differs from the 15°C fallback.
+        // a mains temperature that differs from the 10°C fallback.
         let n = 8760;
         let mut weather = weather_series();
         weather.dry_bulb_c = (0..n)
@@ -1733,10 +1733,10 @@ mod tests {
             env.weather.mains_temp_c
         );
         // For a moderate US-like climate the annual average is ~5°C, so mains in
-        // winter (January) will be well below the 15°C fallback default.
+        // winter (January) will be well below the 10°C fallback default.
         assert!(
-            env.weather.mains_temp_c < 15.0,
-            "January mains_temp_c ({}) should be below 15°C fallback for a cold-start climate",
+            env.weather.mains_temp_c < 10.0,
+            "January mains_temp_c ({}) should be below 10°C fallback for a cold-start climate",
             env.weather.mains_temp_c
         );
     }

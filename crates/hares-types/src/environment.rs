@@ -137,7 +137,7 @@ pub struct WeatherState {
     pub solar_azimuth_deg: f64,
     /// Municipal cold-water supply temperature [°C], computed each step using
     /// the Burch-Christensen (2007) model with annual climate statistics.
-    /// Defaults to 15.0 when environment data is unavailable.
+    /// Defaults to 10.0 (US annual average per ASHRAE/EnergyPlus) when environment data is unavailable.
     #[serde(default = "default_mains_temp_c")]
     pub mains_temp_c: f64,
     /// Liquid precipitation depth for this timestep [m].
@@ -152,7 +152,7 @@ pub struct WeatherState {
 }
 
 fn default_mains_temp_c() -> f64 {
-    15.0
+    10.0
 }
 
 fn default_ground_albedo() -> f64 {
@@ -295,7 +295,7 @@ mod tests {
                 dhi_w_m2: 100.0,
                 solar_altitude_deg: 30.0,
                 solar_azimuth_deg: 180.0,
-                mains_temp_c: 15.0,
+                mains_temp_c: 10.0,
                 rainfall_m: 0.0,
                 ground_albedo: 0.2,
             },

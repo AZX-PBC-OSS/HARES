@@ -57,5 +57,8 @@ pub const DEFAULT_HEATING_EIR: f64 = 0.35;
 pub const DEFAULT_BACKUP_CAPACITY_W: f64 = 5_000.0;
 pub const DEFAULT_BACKUP_EIR: f64 = 1.0;
 pub const MSHP_PAN_HEATER_DEFAULT_TEMP_C: f64 = 0.0;
+/// Pan heater rated power for MSHP condensate management [kW].
+/// Per OCHRE MinisplitAHSPHeater class attribute (HVAC.py:1482).
+pub const MSHP_PAN_HEATER_DEFAULT_KW: f64 = 0.150;
 
-pub const HEATER_TELEMETRY_CAPACITY: usize = 11;
+pub const HEATER_TELEMETRY_CAPACITY: usize = 22;

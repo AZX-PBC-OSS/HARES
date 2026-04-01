@@ -160,15 +160,13 @@ pub(super) fn require_mains_temp_c(
 
 /// Apply insulation jacket R-value correction to tank UA.
 /// Shared by resistance, gas, and heat-pump water heater modules.
-#[cfg(test)]
 pub(super) fn apply_jacket_r_value(
     ua_base: f64,
     height_m: f64,
     diameter_m: f64,
-    config: &crate::EquipmentConfig,
+    jacket_r_m2_k_w: Option<f64>,
 ) -> f64 {
-    use crate::hvac::helpers::first_f64;
-    let Some(jacket_r) = first_f64(config, &["jacket_r_value_m2_k_w"]) else {
+    let Some(jacket_r) = jacket_r_m2_k_w else {
         return ua_base;
     };
     if jacket_r <= 0.0 || ua_base <= 0.0 {
@@ -421,6 +419,7 @@ mod tests {
                 element_power_w: None,
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
+                jacket_r_value_m2_k_w: None,
             },
         )
     }
@@ -469,11 +468,7 @@ mod tests {
         let diameter_m = 0.5_f64;
         let jacket_r_m2_k_w = 1.761_101_84_f64; // 10 hr·ft²·°F/BTU
 
-        let mut cfg = base_config();
-        cfg.test_extras_mut()
-            .insert("jacket_r_value_m2_k_w".to_string(), jacket_r_m2_k_w.into());
-
-        let ua_adjusted = apply_jacket_r_value(ua_base, height_m, diameter_m, &cfg);
+        let ua_adjusted = apply_jacket_r_value(ua_base, height_m, diameter_m, Some(jacket_r_m2_k_w));
         let lateral_area_m2 = std::f64::consts::PI * diameter_m * height_m;
         let ua_expected = 1.0 / (1.0 / ua_base + jacket_r_m2_k_w / lateral_area_m2);
 
@@ -492,21 +487,16 @@ mod tests {
         let ua_base = 2.0_f64;
         let height_m = 1.4_f64;
         let diameter_m = 0.55_f64;
-        let cfg = base_config();
 
         // Missing jacket config: no adjustment.
         assert_eq!(
-            apply_jacket_r_value(ua_base, height_m, diameter_m, &cfg),
+            apply_jacket_r_value(ua_base, height_m, diameter_m, None),
             ua_base
         );
 
         // Non-positive jacket R-value: no adjustment.
-        let mut cfg_zero = base_config();
-        cfg_zero
-            .test_extras_mut()
-            .insert("jacket_r_value_m2_k_w".to_string(), 0.0.into());
         assert_eq!(
-            apply_jacket_r_value(ua_base, height_m, diameter_m, &cfg_zero),
+            apply_jacket_r_value(ua_base, height_m, diameter_m, Some(0.0)),
             ua_base
         );
     }
@@ -514,7 +504,7 @@ mod tests {
     #[test]
     fn storage_step_inputs_use_schedule_when_configured() {
         let mut env = env_with_payloads(Some(vec![6.0, 10.0, 999.0]));
-        env.weather.mains_temp_c = 13.0;
+        env.weather.mains_temp_c = f64::NAN;
         let mut draw_source = ScheduleSource::ColumnRef {
             col_idx: 1,
             boundary: BoundaryPolicy::Clamp,
@@ -760,6 +750,7 @@ mod dhw_integration_tests {
                 element_power_w: None,
                 max_setpoint_ramp_rate_c_per_min: None,
                 element_priority_mode: None,
+                jacket_r_value_m2_k_w: None,
             },
         )
     }

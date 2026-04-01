@@ -604,6 +604,14 @@ impl CoolingCore {
             }
 
             self.apply_cooling_startup_cd(cfg.derived_cooling_startup_cd());
+
+            // EnergyPlus residential DX coil defaults (Engineering Reference §16.5).
+            self.latent_degradation = LatentDegradationParams {
+                twet_rated_s: 1500.0,
+                gamma_rated: 1.5,
+                max_cycling_rate: 3.0,
+                latent_time_constant_s: 45.0,
+            };
         }
 
         self.hvac.update_zone_heat_fractions();
@@ -672,38 +680,52 @@ impl CoolingCore {
             .update_mode(env)
             .unwrap_or(ThermostatMode::Deadband);
         if mode == ThermostatMode::Cooling {
-            let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
+            let base_setpoint = self.hvac.effective_setpoints().cooling_c;
+            let setpoint = base_setpoint + self.dr_setpoint_offset_c;
             let zone_temp = lookup_zone(env, self.hvac.zone_id)
                 .map(|z| z.temperature_c)
                 .unwrap_or(setpoint);
-            let deadband = self
-                .hvac
-                .thermostat
-                .hysteresis_c
-                .max(MIN_LOAD_FRACTION_DEADBAND_C);
-            let load_fraction = if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed {
-                1.0
+
+            // When DR raises the effective setpoint above the zone temperature, suppress cooling
+            // even though the base thermostat is calling for it. This only applies when the DR
+            // offset is active (non-zero) and the zone has cooled below the DR-adjusted threshold.
+            let dr_suppressed =
+                self.dr_setpoint_offset_c > 0.0 && zone_temp <= setpoint;
+            if dr_suppressed {
+                self.hvac.duty_cycle = 0.0;
+                self.operating_mode = OperatingMode::Off;
+                self.hvac.update_prev_zone_temp(None);
             } else {
-                ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
-            };
-            self.hvac.update_prev_zone_temp(Some(zone_temp));
-            self.hvac.duty_cycle = match self.hvac.speed_control_mode {
-                SpeedControlMode::VariableSpeedIdeal => {
-                    self.select_variable_speed_cooling(load_fraction)
-                        .part_load_ratio
-                }
-                _ if self.use_ideal => 1.0,
-                _ => {
-                    self.hvac
-                        .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false)
-                        .part_load_ratio
-                }
-            };
-            self.operating_mode = if self.hvac.duty_cycle > 0.0 {
-                OperatingMode::Cooling
-            } else {
-                OperatingMode::Off
-            };
+                let deadband = self
+                    .hvac
+                    .thermostat
+                    .hysteresis_c
+                    .max(MIN_LOAD_FRACTION_DEADBAND_C);
+                let load_fraction = if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed
+                {
+                    1.0
+                } else {
+                    ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
+                };
+                self.hvac.update_prev_zone_temp(Some(zone_temp));
+                self.hvac.duty_cycle = match self.hvac.speed_control_mode {
+                    SpeedControlMode::VariableSpeedIdeal => {
+                        self.select_variable_speed_cooling(load_fraction)
+                            .part_load_ratio
+                    }
+                    _ if self.use_ideal => 1.0,
+                    _ => {
+                        self.hvac
+                            .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false)
+                            .part_load_ratio
+                    }
+                };
+                self.operating_mode = if self.hvac.duty_cycle > 0.0 {
+                    OperatingMode::Cooling
+                } else {
+                    OperatingMode::Off
+                };
+            }
         } else {
             self.hvac.duty_cycle = 0.0;
             self.operating_mode = OperatingMode::Off;
@@ -1930,7 +1952,7 @@ mod tests {
     }
 
     /// Two-speed AC selects the high stage when load fraction exceeds
-    /// `low_speed_capacity_fraction` (default 0.5), and the low stage otherwise.
+    /// `low_speed_capacity_fraction` (default 0.72 per OCHRE/AHRI), and the low stage otherwise.
     /// With `hysteresis_c=0` the thermostat activates at zone_temp > setpoint (24°C)
     /// and `MIN_LOAD_FRACTION_DEADBAND_C=0.5°C` governs the load fraction:
     ///   zone 24.4°C → load_fraction = 0.4/0.5 = 0.8 > 0.5 → stage 1 (8 000 W)
@@ -2459,28 +2481,22 @@ mod dr_tests {
         eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0)
     }
 
-    // DR Moderate: cooling setpoint offset = +1°C → unit is less likely to cool at
-    // zone_temp just above the original setpoint.
+    // DR Moderate: cooling setpoint offset = +1°C → unit turns off when zone is between
+    // the original and the DR-shifted setpoint.
     #[test]
     fn dr_moderate_shifts_cooling_setpoint_up() {
-        // Use non-zero hysteresis so load ratio varies with setpoint shifts.
-        let mut typed = base_config()
-            .typed::<CentralAirConditionerConfig>()
-            .unwrap();
-        typed.hysteresis_c = Some(1.0);
-        let cfg =
-            EquipmentConfig::from_typed("AC".to_string(), "Air Conditioner".to_string(), typed);
-        // Base setpoint is 24°C. Zone at 25.3°C gives cooling demand.
-        // DR Moderate raises effective setpoint to 25°C and should reduce demand.
-        let environment = hot_env(25.3);
+        let cfg = base_config();
+        // Zone at 24.5°C: above base setpoint (24°C) so AC runs normally.
+        // After DR Moderate (+1°C), effective setpoint = 25°C > 24.5°C → AC turns off.
+        let environment = hot_env(24.5);
 
         // Baseline: without DR, AC should be cooling.
         let mut eq_base = AirConditioner::new(cfg.clone());
         eq_base.init(&cfg, &environment).unwrap();
         let kw_no_dr = step_once(&mut eq_base, &environment);
-        assert!(kw_no_dr > 0.0, "AC must be active without DR at 25.3°C");
+        assert!(kw_no_dr > 0.0, "AC must be active without DR at 24.5°C");
 
-        // With DR Moderate: effective setpoint raised to 25°C, zone is below → no cooling.
+        // With DR Moderate: effective setpoint raised to 25°C; zone 24.5°C < 25°C → no cooling.
         let mut eq_dr = AirConditioner::new(cfg.clone());
         eq_dr.init(&cfg, &environment).unwrap();
         eq_dr
@@ -2492,7 +2508,7 @@ mod dr_tests {
         let kw_with_dr = step_once(&mut eq_dr, &environment);
         assert!(
             kw_with_dr < kw_no_dr,
-            "DR Moderate must reduce cooling demand at partial-load conditions; baseline={kw_no_dr:.4} kW, dr={kw_with_dr:.4} kW"
+            "DR Moderate must eliminate cooling demand when zone is between original and DR setpoint; baseline={kw_no_dr:.4} kW, dr={kw_with_dr:.4} kW"
         );
     }
 
@@ -3272,6 +3288,253 @@ mod ideal_capacity_tests {
             rtf, 0.0,
             "900 s timestep with zone below FSM turn-on and no solver signal must \
              produce RTF=0.0, got {rtf}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod defaults_tests {
+    use std::time::Duration;
+
+    use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+    use hares_types::{
+        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        telemetry_keys as tk,
+    };
+
+    use super::{AirConditioner, RoomAC};
+    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, RoomAcConfig};
+
+    fn make_env(zone_temp_c: f64) -> EnvironmentState {
+        EnvironmentState {
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp_c,
+                humidity_ratio: 0.010,
+                relative_humidity: 0.45,
+                wet_bulb_c: 19.0,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 35.0,
+                outdoor_humidity_ratio: 0.012,
+                wind_speed_m_s: 2.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 12.0,
+                sky_temp_c: 8.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                ..Default::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+            },
+            custom_domains: vec![],
+            equipment_telemetry: std::collections::HashMap::new(),
+            equipment_core: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 3, 18, 12, 0, 0)
+                .single()
+                .expect("valid"),
+            time_res: ChronoDuration::minutes(1),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+        }
+    }
+
+    fn two_speed_config() -> EquipmentConfig {
+        let mut cfg = EquipmentConfig::from_typed(
+            "AC".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 10_000.0,
+                eir: 3.412_141_633 / 16.0,
+                shr: Some(0.75),
+                number_of_speeds: 2,
+                stage_capacities_w: Some(vec![7_200.0, 10_000.0]),
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+        cfg.test_extras_mut().insert(
+            "capacity_biquadratic_coeffs".to_string(),
+            "[1,0,0,0,0,0]".into(),
+        );
+        cfg.test_extras_mut()
+            .insert("eir_biquadratic_coeffs".to_string(), "[1,0,0,0,0,0]".into());
+        cfg
+    }
+
+    // Two-speed AC initialised without an explicit low_speed_capacity_fraction must
+    // default to 0.72, matching the OCHRE/AHRI lookup table for 2-speed AC coolers.
+    #[test]
+    fn two_speed_ac_defaults_to_0_72_low_speed_capacity_fraction() {
+        let cfg = two_speed_config();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let env = make_env(28.0);
+        eq.init(&cfg, &env).unwrap();
+
+        assert!(
+            (eq.core.hvac.low_speed_capacity_fraction - 0.72).abs() < 1e-12,
+            "2-speed AC must default to low_speed_capacity_fraction=0.72 (OCHRE/AHRI default), got {}",
+            eq.core.hvac.low_speed_capacity_fraction
+        );
+    }
+
+    // Single-stage AC initialised without explicit latent degradation params must
+    // have the Henderson-Rengarajan model active with EnergyPlus residential DX
+    // defaults (twet=1500 s, gamma=1.5, Nmax=3 cyc/hr, tau=45 s).
+    // At part load (RTF < 1) the model must return SHR > steady-state SHR,
+    // reflecting moisture re-evaporation during the off cycle.
+    #[test]
+    fn central_ac_defaults_latent_degradation_active_and_raises_shr_at_part_load() {
+        let cfg = EquipmentConfig::from_typed(
+            "AC".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                eir: 3.412_141_633 / 16.0,
+                shr: Some(0.75),
+                number_of_speeds: 1,
+                stage_capacities_w: None,
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+
+        let env = make_env(28.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+
+        assert!(
+            eq.core.latent_degradation.is_active(),
+            "latent degradation must be active after init for central AC"
+        );
+        assert!(
+            (eq.core.latent_degradation.twet_rated_s - 1500.0).abs() < 1e-9,
+            "twet_rated_s must be 1500 s (EnergyPlus residential default), got {}",
+            eq.core.latent_degradation.twet_rated_s
+        );
+        assert!(
+            (eq.core.latent_degradation.gamma_rated - 1.5).abs() < 1e-9,
+            "gamma_rated must be 1.5 (EnergyPlus residential default), got {}",
+            eq.core.latent_degradation.gamma_rated
+        );
+
+        // Run the AC at partial load (zone barely above setpoint) so RTF < 1
+        // and the Henderson-Rengarajan model has room to degrade latent capacity.
+        // The reported SHR must be strictly above the rated SHR of 0.75 because
+        // moisture re-evaporation during off cycles raises the effective SHR.
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let reported_shr = eq.telemetry().get(tk::SHR).unwrap_or(0.0);
+        assert!(
+            reported_shr >= 0.75,
+            "SHR with latent degradation at part load must be >= rated SHR 0.75, got {reported_shr:.4}"
+        );
+        assert!(
+            reported_shr <= 1.0,
+            "SHR must be <= 1.0, got {reported_shr:.4}"
+        );
+    }
+
+    #[test]
+    fn room_ac_does_not_have_latent_degradation() {
+        let cfg = EquipmentConfig::from_typed(
+            "RAC".to_string(),
+            "Room AC".to_string(),
+            RoomAcConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 3_500.0,
+                eir: 3.412_141_633 / 10.0,
+                cooling_setpoint_c: Some(24.0),
+                heating_setpoint_c: Some(18.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                airflow_m3_s_per_w: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                crankcase_heater_kw: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+            },
+        );
+
+        let env = make_env(28.0);
+        let mut eq = RoomAC::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+
+        assert!(
+            !eq.core.latent_degradation.is_active(),
+            "Room AC must not have latent degradation active after init"
         );
     }
 }

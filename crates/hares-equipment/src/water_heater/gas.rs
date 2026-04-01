@@ -171,7 +171,7 @@ impl GasWH {
             burner_on: false,
             loop_id,
             fluid_type: FluidType::Water,
-            mains_temp_c: 15.0,
+            mains_temp_c: 10.0,
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
@@ -266,7 +266,12 @@ impl GasWH {
             n_nodes,
             height_m,
             diameter_m,
-            ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
+            ua_w_per_k: super::apply_jacket_r_value(
+                c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
+                height_m,
+                diameter_m,
+                c.jacket_r_value_m2_k_w,
+            ),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
             initial_temp_c: c
                 .initial_tank_temp_c
@@ -283,7 +288,7 @@ impl GasWH {
         self.pilot_power_w = c
             .pilot_power_w
             .unwrap_or(match c.ignition_type.as_deref() {
-                Some("ElectronicIgnition") | Some("electronic") => 0.0,
+                Some("ElectronicIgnition") | Some("electronic") | Some("electronic ignition") => 0.0,
                 _ => 5.0,
             })
             .max(0.0);
@@ -850,6 +855,7 @@ mod tests {
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
+                jacket_r_value_m2_k_w: None,
             },
         )
     }
@@ -1092,9 +1098,11 @@ mod tests {
     /// (effective setpoint = 49°C < 50°C).
     #[test]
     fn gas_wh_dr_moderate_reduces_setpoint() {
-        // Tank at 50°C: within the 2°C deadband below setpoint 52°C → normally heating.
+        // Tank at 49.9°C: strictly below the 50°C lower threshold (setpoint=52, deadband=2) →
+        // normally heating. DR reduces setpoint by 3°C → effective setpoint=49°C, lower
+        // threshold=47°C; 49.9°C > 47°C so burner stays off.
         let cfg = config_with_extras(&[
-            ("initial_tank_temp_c", Some(50.0.into())),
+            ("initial_tank_temp_c", Some(49.9.into())),
             ("max_tank_temp_c", Some(300.0.into())),
         ]);
         let e = env(21.0);
@@ -1105,10 +1113,11 @@ mod tests {
         let mode_base = eq_base.update_control(&e);
         assert!(
             matches!(mode_base, hares_types::OperatingMode::Heating),
-            "baseline must be heating with tank at 50°C; got {mode_base:?}"
+            "baseline must be heating with tank at 49.9°C; got {mode_base:?}"
         );
 
-        // DR Moderate: effective setpoint = 52 + (-3) = 49°C. Tank at 50°C > 49°C → no call.
+        // DR Moderate: effective setpoint = 52 + (-3) = 49°C. Tank at 49.9°C > 47°C lower
+        // threshold → no call.
         let mut eq_dr = GasWH::new(cfg.clone());
         eq_dr.init(&cfg, &e).unwrap();
         eq_dr

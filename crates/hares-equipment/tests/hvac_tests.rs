@@ -7,9 +7,9 @@ use hares_equipment::{
     HeatPumpHeaterConfig,
 };
 use hares_types::{
-    ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
-    GridState, LoopId, OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
-    ZoneState,
+    telemetry_keys as tk, ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator,
+    FluidType, FuelType, GridState, LoopId, OperatingMode, PortSlots, ThermalAccumulator,
+    WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -82,6 +82,8 @@ fn gas_furnace_config(name: &str) -> EquipmentConfig {
             capacity_w: 10_000.0,
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
             ducts: DuctConfig::default(),
         },
     )
@@ -204,6 +206,8 @@ fn gas_furnace_consumes_gas_fuel() {
             capacity_w: 10_000.0,
             number_of_speeds: 1,
             fan_power_w: Some(400.0),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
             ducts: DuctConfig::default(),
         },
     );
@@ -872,5 +876,433 @@ fn simple_heaters_ideal_capacity_scales_output() {
     assert!(
         (baseboard_ports.electrical.net_active_kw() - 1.5).abs() < 1e-6,
         "electric baseboard ideal capacity must scale input power with thermal output at unity EIR"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ashp_sub_consumption_telemetry
+//    ASHP step with fan power enabled: sub-consumption fields are present,
+//    non-negative, and sum (approximately) to ELECTRIC_KW.
+//    Uses HP-only mode (backup_capacity_w=0) so ER and pan-heater stay zero.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ashp_sub_consumption_telemetry() {
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_sub".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(8_000.0),
+            heating_eir: Some(3.412_141_633 / 9.0),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: Some(0.0),
+            backup_eir: None,
+            fraction_heating_load_served: Some(1.0),
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(3.412_141_633 / 14.0),
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            stage_shrs: None,
+            fraction_cooling_load_served: Some(1.0),
+            number_of_speeds: 1,
+            is_mini_split: false,
+            shr: Some(0.75),
+            fan_power_w: Some(300.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            hysteresis_c: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = 7.0;
+    env.weather.outdoor_wet_bulb_c = 5.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let tel = eq.telemetry();
+    let electric_kw = tel.get(tk::ELECTRIC_KW).expect("ELECTRIC_KW must be present");
+    let compressor_kw = tel
+        .get(tk::COMPRESSOR_KW)
+        .expect("COMPRESSOR_KW must be present");
+    let fan_kw = tel.get(tk::FAN_KW).expect("FAN_KW must be present");
+    let backup_er_kw = tel
+        .get(tk::BACKUP_ER_KW)
+        .expect("BACKUP_ER_KW must be present");
+    let pan_heater_kw = tel
+        .get(tk::PAN_HEATER_KW)
+        .expect("PAN_HEATER_KW must be present");
+    let hp_capacity_w = tel
+        .get(tk::HP_CAPACITY_W)
+        .expect("HP_CAPACITY_W must be present");
+    let er_capacity_w = tel
+        .get(tk::ER_CAPACITY_W)
+        .expect("ER_CAPACITY_W must be present");
+
+    assert!(
+        electric_kw > 1e-6,
+        "ASHP must draw power when heating; got {electric_kw:.4} kW"
+    );
+    assert!(compressor_kw >= 0.0, "compressor_kw must be non-negative");
+    assert!(fan_kw >= 0.0, "fan_kw must be non-negative");
+    assert!(backup_er_kw >= 0.0, "backup_er_kw must be non-negative");
+    assert!(pan_heater_kw >= 0.0, "pan_heater_kw must be non-negative");
+    assert!(hp_capacity_w >= 0.0, "hp_capacity_w must be non-negative");
+    assert!(er_capacity_w >= 0.0, "er_capacity_w must be non-negative");
+
+    // HP-only mode: ER and pan heater must be zero.
+    assert!(
+        backup_er_kw < 1e-9,
+        "backup_er_kw must be zero in HP-only mode; got {backup_er_kw:.6}"
+    );
+    assert!(
+        pan_heater_kw < 1e-9,
+        "pan_heater_kw must be zero for ASHP (not minisplit); got {pan_heater_kw:.6}"
+    );
+    assert!(
+        er_capacity_w < 1e-9,
+        "er_capacity_w must be zero in HP-only mode; got {er_capacity_w:.3}"
+    );
+
+    // Fan must carry its configured share.
+    assert!(
+        fan_kw > 1e-6,
+        "fan_kw must be positive with fan_power_w=300W configured; got {fan_kw:.4}"
+    );
+
+    // Sub-consumptions must sum to total within floating-point tolerance.
+    // electric_kw = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw
+    let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
+    assert!(
+        (sub_sum - electric_kw).abs() < electric_kw * 0.001,
+        "sub-consumption sum ({sub_sum:.6} kW) must equal ELECTRIC_KW ({electric_kw:.6} kW) within 0.1%"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ashp_defaults_match_reference
+//   Verifies ASHP default behavior matches OCHRE reference values.
+//
+//   Defaults under test (OCHRE HVAC.py line references):
+//   - hp_lockout_temp_c = -17.78°C (0°F)             — HVAC.py:1208
+//   - er_lockout_temp_c = 4.44°C (40°F)              — HVAC.py:1209
+//   - er_setpoint_offset = deadband*(1.8-0.2) = 1.6°C — HVAC.py:1211
+//   - er_hard_lockout_time = 0 (disabled)             — HVAC.py:1214
+//   - backup_capacity_w = 5000 W (ASHP default)
+//   - No pan heater (ASHP only)
+//
+//   Behavioral approach: exercise lockout behavior rather than reading private
+//   fields, since lockout thresholds are not surfaced in telemetry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ashp_defaults_match_reference() {
+    // Behavioral: HP must be locked out below -17.78°C (default per OCHRE HVAC.py:1208)
+    // Zone calls for heat but OAT is below the lockout threshold.
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_lockout".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            heating_eir: Some(0.35),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: Some(0.0),
+            backup_eir: None,
+            fraction_heating_load_served: None,
+            cooling_capacity_w: None,
+            cooling_eir: None,
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            stage_shrs: None,
+            fraction_cooling_load_served: None,
+            number_of_speeds: 1,
+            is_mini_split: false,
+            shr: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    // Zone is cold (calls for heating), but OAT is below lockout threshold
+    let mut env = env_with_zone_temp(18.0);
+    env.weather.outdoor_temp_c = -20.0; // below -17.78°C lockout
+    env.weather.outdoor_wet_bulb_c = -21.0;
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports = ports_for_zone1();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    assert!(
+        ports.thermal[0].sensible_gain_w < 1e-6,
+        "ASHP must not deliver heat when OAT (-20°C) is below default HP lockout (-17.78°C); got {:.3} W",
+        ports.thermal[0].sensible_gain_w,
+    );
+    assert!(
+        ports.electrical.net_active_kw() < 1e-6,
+        "ASHP must draw no power when below HP lockout; got {:.4} kW",
+        ports.electrical.net_active_kw(),
+    );
+
+    // Behavioral: ASHP has no pan heater — pan_heater_kw must remain 0 after any step
+    let pan_kw = eq
+        .telemetry()
+        .get(tk::PAN_HEATER_KW)
+        .expect("PAN_HEATER_KW telemetry must exist");
+    assert!(
+        pan_kw < 1e-9,
+        "ASHP must never have pan heater power; got {pan_kw:.6} kW"
+    );
+
+    // Behavioral: ER must not fire above er_lockout_temp_c (4.44°C) by default
+    // Even with backup configured, ER should be locked out above 4.44°C.
+    let cfg_with_backup = EquipmentConfig::from_typed(
+        "ashp_er_lockout".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            heating_eir: Some(0.35),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: Some(5_000.0),
+            backup_eir: None,
+            fraction_heating_load_served: None,
+            cooling_capacity_w: None,
+            cooling_eir: None,
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            stage_shrs: None,
+            fraction_cooling_load_served: None,
+            number_of_speeds: 1,
+            is_mini_split: false,
+            shr: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            // Force ER threshold: zone is well below ER setpoint offset so ER would fire
+            // if not locked out by OAT
+            er_setpoint_offset_c: Some(0.5),
+            er_hard_lockout_time_s: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    );
+
+    let mut eq2 = registry
+        .create("ASHP Heater", cfg_with_backup.clone())
+        .unwrap();
+    let mut env_mild = env_with_zone_temp(18.0);
+    env_mild.weather.outdoor_temp_c = 10.0; // above 4.44°C er_lockout_temp_c default
+    env_mild.weather.outdoor_wet_bulb_c = 8.0;
+    eq2.init(&cfg_with_backup, &env_mild).unwrap();
+
+    let mut ports2 = ports_for_zone1();
+    eq2.update_control(&env_mild);
+    eq2.step(&env_mild, Duration::from_secs(60), &mut ports2)
+        .unwrap();
+
+    let backup_er_kw = eq2
+        .telemetry()
+        .get(tk::BACKUP_ER_KW)
+        .expect("BACKUP_ER_KW must be present");
+    assert!(
+        backup_er_kw < 1e-9,
+        "ASHP ER must be locked out when OAT (10°C) > default er_lockout_temp_c (4.44°C); got {backup_er_kw:.6} kW"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// mshp_defaults_match_reference
+//   Verifies MSHP default behavior matches OCHRE reference values.
+//
+//   Defaults under test (OCHRE MinisplitAHSPHeater line references):
+//   - pan_heater_kw = 0.150 kW active when OAT < 0°C  — HVAC.py:1482
+//   - pan_heater_temp = 0°C activation threshold       — HVAC.py:1483
+//   - No backup by default (ductless, no strip heater)
+//   - HP lockout same as ASHP: -17.78°C               — HVAC.py:1208
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mshp_defaults_match_reference() {
+    // Pan heater rated power: 0.150 kW per OCHRE HVAC.py:1482
+    // Pan heater threshold: 0°C (activates when OAT < 0°C) per OCHRE HVAC.py:1483
+    const EXPECTED_PAN_HEATER_KW: f64 = 0.150;
+
+    let cfg = EquipmentConfig::from_typed(
+        "mshp_defaults".to_string(),
+        "MSHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            heating_eir: Some(0.35),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: None,
+            backup_eir: None,
+            fraction_heating_load_served: None,
+            cooling_capacity_w: None,
+            cooling_eir: None,
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            stage_shrs: None,
+            fraction_cooling_load_served: None,
+            number_of_speeds: 4,
+            is_mini_split: true,
+            shr: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("MSHP Heater", cfg.clone()).unwrap();
+
+    // No backup by default (ductless has no strip heater): verify ER power stays zero
+    // even when zone is cold and OAT would normally allow ER
+    let mut env_cold = env_with_zone_temp(18.0);
+    env_cold.weather.outdoor_temp_c = -5.0;
+    env_cold.weather.outdoor_wet_bulb_c = -6.0;
+    eq.init(&cfg, &env_cold).unwrap();
+
+    let mut ports = ports_for_zone1();
+    eq.update_control(&env_cold);
+    eq.step(&env_cold, Duration::from_secs(60), &mut ports)
+        .unwrap();
+
+    let backup_er_kw = eq
+        .telemetry()
+        .get(tk::BACKUP_ER_KW)
+        .expect("BACKUP_ER_KW must be present");
+    assert!(
+        backup_er_kw < 1e-9,
+        "MSHP must have zero backup ER power by default (no strip heater); got {backup_er_kw:.6} kW"
+    );
+
+    // Pan heater must fire when OAT < 0°C and HP is running (OCHRE HVAC.py:1492-1496)
+    let pan_kw_cold = eq
+        .telemetry()
+        .get(tk::PAN_HEATER_KW)
+        .expect("PAN_HEATER_KW must be present");
+    assert!(
+        pan_kw_cold > 1e-6,
+        "MSHP pan heater must be active when OAT=-5°C and HP is running; got {pan_kw_cold:.4} kW"
+    );
+    assert!(
+        (pan_kw_cold - EXPECTED_PAN_HEATER_KW).abs() < 0.001,
+        "MSHP pan heater must draw {EXPECTED_PAN_HEATER_KW} kW per OCHRE HVAC.py:1482; got {pan_kw_cold:.4} kW"
+    );
+
+    // Pan heater must NOT fire when OAT > 0°C (OCHRE HVAC.py:1495: "below 0C")
+    let mut eq2 = registry.create("MSHP Heater", cfg.clone()).unwrap();
+    let mut env_warm = env_with_zone_temp(18.0);
+    env_warm.weather.outdoor_temp_c = 5.0;
+    env_warm.weather.outdoor_wet_bulb_c = 4.0;
+    eq2.init(&cfg, &env_warm).unwrap();
+
+    let mut ports2 = ports_for_zone1();
+    eq2.update_control(&env_warm);
+    eq2.step(&env_warm, Duration::from_secs(60), &mut ports2)
+        .unwrap();
+
+    let pan_kw_warm = eq2
+        .telemetry()
+        .get(tk::PAN_HEATER_KW)
+        .expect("PAN_HEATER_KW must be present");
+    assert!(
+        pan_kw_warm < 1e-9,
+        "MSHP pan heater must be off when OAT=5°C (> 0°C threshold); got {pan_kw_warm:.6} kW"
     );
 }
