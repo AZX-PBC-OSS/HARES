@@ -31,8 +31,8 @@ fn validate_u16_id(raw: f64) -> bool {
 
 pub fn zone_id_from_config(config: &EquipmentConfig) -> Option<ZoneId> {
     let raw = config
-        .get_f64("zone_id")
-        .or_else(|| typed_f64(config, "zone_id"))?;
+        .get_f64(crate::config::KEY_ZONE_ID)
+        .or_else(|| typed_f64(config, crate::config::KEY_ZONE_ID))?;
     if !validate_u16_id(raw) {
         return None;
     }

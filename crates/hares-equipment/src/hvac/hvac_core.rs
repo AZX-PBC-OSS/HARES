@@ -1957,6 +1957,28 @@ mod tests {
             (ports.thermal[1].sensible_gain_w - 3_000.0).abs() < 1e-9,
             "duct zone must get gross * (1-DSE) = 3_000 W"
         );
+        // Conditioned zone keeps the caller's category; duct zone gets DuctLoss.
+        assert!(
+            ports.thermal[0].sensible_for_category(ThermalCategory::HvacHeating) > 0.0,
+            "conditioned zone must be tagged HvacHeating"
+        );
+        assert!(
+            (ports.thermal[0].sensible_for_category(ThermalCategory::DuctLoss)).abs() < 1e-12,
+            "conditioned zone must NOT have DuctLoss category"
+        );
+        assert!(
+            (ports.thermal[1].sensible_for_category(ThermalCategory::DuctLoss) - 3_000.0).abs()
+                < 1e-9,
+            "duct zone must be tagged DuctLoss, got {}",
+            ports.thermal[1].sensible_for_category(ThermalCategory::DuctLoss)
+        );
+        assert!(
+            ports.thermal[1]
+                .sensible_for_category(ThermalCategory::HvacHeating)
+                .abs()
+                < 1e-12,
+            "duct zone must NOT have HvacHeating category"
+        );
     }
 
     #[test]

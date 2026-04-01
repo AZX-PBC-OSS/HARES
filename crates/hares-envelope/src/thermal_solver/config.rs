@@ -456,7 +456,7 @@ pub struct EnvelopeComponentGains {
     /// Equipment jacket/shell losses to the indoor zone [W].
     /// Equals `JacketLoss` category total (water heater skin loss, etc.).
     pub jacket_loss_w: f64,
-    /// Duct distribution losses to the indoor zone [W].
+    /// Duct distribution losses [W] — heat deposited into the duct zone, removed from delivered capacity.
     pub duct_loss_w: f64,
     /// Per-zone infiltration sensible heat gains [W].
     /// `infiltration_w` is the indoor-zone alias for backward compatibility.

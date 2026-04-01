@@ -615,6 +615,7 @@ impl CoolingCore {
         }
 
         self.hvac.update_zone_heat_fractions();
+        self.hvac.rebuild_thermal_ports(&mut self.ports);
         self.hvac.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
         self.compute_coil_ao(self.rated_shr)?;
 

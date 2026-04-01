@@ -414,9 +414,13 @@ impl ThermalSolver {
         let jacket_loss_w = indoor_acc
             .map(|a| a.sensible_for_category(ThermalCategory::JacketLoss))
             .unwrap_or(0.0);
-        let duct_loss_w = indoor_acc
+        // Duct losses are deposited into the duct zone accumulator (e.g. attic),
+        // not the indoor zone. Sum DuctLoss across all zone accumulators.
+        let duct_loss_w: f64 = ports
+            .thermal
+            .iter()
             .map(|a| a.sensible_for_category(ThermalCategory::DuctLoss))
-            .unwrap_or(0.0);
+            .sum();
 
         self.infiltration_by_zone_buf.clear();
         self.infiltration_by_zone_buf.extend(

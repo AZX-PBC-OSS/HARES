@@ -3,7 +3,8 @@
 //! Extracted from `hvac_core.rs` to isolate zone heat routing from speed
 //! staging and thermostat control. No speed or staging knowledge here.
 
-use hares_types::{PortContribution, PortSlots, ThermalCategory, ZoneId};
+use hares_types::{PortContribution, PortDeclaration, PortSlots, ThermalCategory, ZoneId};
+use tracing::warn;
 
 use super::hvac_core::HvacEquipment;
 
@@ -20,6 +21,14 @@ impl HvacEquipment {
         // When ducts are located within the conditioned space, losses loop back to
         // the same zone — effectively DSE = 1.0. Route full gross capacity there.
         let effective_dse = if self.duct_zone_id.is_some_and(|dz| dz == self.zone_id) {
+            if self.duct_dse < 1.0 {
+                warn!(
+                    duct_dse = self.duct_dse,
+                    zone_id = %self.zone_id,
+                    "duct_zone == conditioned_zone with DSE < 1.0; \
+                     treating as DSE=1.0 (losses stay in conditioned space)"
+                );
+            }
             1.0
         } else {
             self.duct_dse.clamp(0.0, 1.0)
@@ -46,6 +55,27 @@ impl HvacEquipment {
                 }
             }
         }
+
+        // Deduplicate zone entries when basement_zone == duct_zone: merge by
+        // summing fractions so downstream code sees exactly one entry per zone.
+        self.deduplicate_zone_heat_fractions();
+    }
+
+    /// Merge zone_heat_fractions entries with the same ZoneId by summing their
+    /// fractions. Preserves order of first occurrence.
+    fn deduplicate_zone_heat_fractions(&mut self) {
+        if self.zone_heat_fractions.len() <= 1 {
+            return;
+        }
+        let mut merged: Vec<(ZoneId, f64)> = Vec::with_capacity(self.zone_heat_fractions.len());
+        for &(zone, frac) in &self.zone_heat_fractions {
+            if let Some(entry) = merged.iter_mut().find(|(z, _)| *z == zone) {
+                entry.1 += frac;
+            } else {
+                merged.push((zone, frac));
+            }
+        }
+        self.zone_heat_fractions = merged;
     }
 
     /// Distribute gross capacity across zones using absolute `zone_heat_fractions`.
@@ -59,29 +89,34 @@ impl HvacEquipment {
         latent_gain_w: f64,
         category: ThermalCategory,
     ) -> crate::Result<()> {
+        debug_assert!(
+            !self.zone_heat_fractions.is_empty(),
+            "zone_heat_fractions must be populated before write_zone_thermal_contributions; \
+             call update_zone_heat_fractions() during init"
+        );
+
         let fractions: &[(ZoneId, f64)] = if self.zone_heat_fractions.is_empty() {
             &[(self.zone_id, 1.0)]
         } else {
             &self.zone_heat_fractions
         };
 
-        if fractions.len() == 1 {
-            let f = fractions[0].1.max(0.0);
-            return ports.accumulate(&PortContribution::Thermal {
-                zone: fractions[0].0,
-                sensible_gain_w: sensible_gain_w * f,
-                latent_gain_w: latent_gain_w * f,
-                category,
-            });
-        }
-
         for &(zone, fraction) in fractions {
             if fraction > 0.0 {
+                // Contributions to the duct zone (and NOT the conditioned zone)
+                // are tagged DuctLoss so the thermal solver can distinguish
+                // delivered capacity from duct losses in its diagnostics.
+                let effective_category =
+                    if self.duct_zone_id.is_some_and(|dz| dz == zone) && zone != self.zone_id {
+                        ThermalCategory::DuctLoss
+                    } else {
+                        category
+                    };
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: sensible_gain_w * fraction,
                     latent_gain_w: latent_gain_w * fraction,
-                    category,
+                    category: effective_category,
                 })?;
             }
         }
@@ -91,6 +126,17 @@ impl HvacEquipment {
     /// Apply duct distribution system efficiency (DSE) to a capacity value.
     pub fn apply_duct_dse(&self, capacity_w: f64) -> f64 {
         capacity_w * self.duct_dse.clamp(0.0, 1.0)
+    }
+
+    /// Rebuild thermal port declarations to include all zones referenced by
+    /// `zone_heat_fractions`. Call after `update_zone_heat_fractions()` in init
+    /// so that the port list matches the zones that will receive contributions.
+    pub fn rebuild_thermal_ports(&self, ports: &mut Vec<PortDeclaration>) {
+        use hares_types::PortType;
+        ports.retain(|p| p.port_type != PortType::Thermal);
+        for &(zone, _) in &self.zone_heat_fractions {
+            ports.push(PortDeclaration::thermal(zone));
+        }
     }
 }
 
@@ -310,6 +356,193 @@ mod tests {
             (acc.latent_gain_w - latent_w).abs() < 1e-9,
             "cooling latent: expected {latent_w} W, got {}",
             acc.latent_gain_w
+        );
+    }
+
+    /// DSE=0.7, duct zone receives DuctLoss category.
+    #[test]
+    fn duct_zone_tagged_duct_loss() {
+        use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
+
+        let mut hvac = make_hvac();
+        hvac.duct_dse = 0.7;
+        hvac.duct_zone_id = Some(ZoneId(2));
+        hvac.update_zone_heat_fractions();
+
+        let mut ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator::new(ZoneId(1)),
+                ThermalAccumulator::new(ZoneId(2)),
+            ],
+            ..Default::default()
+        };
+        hvac.write_zone_thermal_contributions(
+            &mut ports,
+            10_000.0,
+            0.0,
+            ThermalCategory::HvacHeating,
+        )
+        .expect("write ok");
+
+        let duct_acc = ports.thermal.iter().find(|a| a.zone == ZoneId(2)).unwrap();
+        assert!(
+            (duct_acc.sensible_for_category(ThermalCategory::DuctLoss) - 3_000.0).abs() < 1e-9,
+            "duct zone must receive 3_000 W as DuctLoss"
+        );
+        assert!(
+            duct_acc
+                .sensible_for_category(ThermalCategory::HvacHeating)
+                .abs()
+                < 1e-12,
+            "duct zone must NOT have HvacHeating"
+        );
+    }
+
+    /// Conditioned zone keeps the caller's category (HvacHeating), not DuctLoss.
+    #[test]
+    fn conditioned_zone_not_tagged_duct_loss() {
+        use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
+
+        let mut hvac = make_hvac();
+        hvac.duct_dse = 0.7;
+        hvac.duct_zone_id = Some(ZoneId(2));
+        hvac.update_zone_heat_fractions();
+
+        let mut ports = PortSlots {
+            thermal: vec![
+                ThermalAccumulator::new(ZoneId(1)),
+                ThermalAccumulator::new(ZoneId(2)),
+            ],
+            ..Default::default()
+        };
+        hvac.write_zone_thermal_contributions(
+            &mut ports,
+            10_000.0,
+            0.0,
+            ThermalCategory::HvacHeating,
+        )
+        .expect("write ok");
+
+        let cond_acc = ports.thermal.iter().find(|a| a.zone == ZoneId(1)).unwrap();
+        assert!(
+            (cond_acc.sensible_for_category(ThermalCategory::HvacHeating) - 7_000.0).abs() < 1e-9,
+            "conditioned zone must receive 7_000 W as HvacHeating"
+        );
+        assert!(
+            cond_acc
+                .sensible_for_category(ThermalCategory::DuctLoss)
+                .abs()
+                < 1e-12,
+            "conditioned zone must NOT have DuctLoss"
+        );
+    }
+
+    /// When basement_zone == duct_zone, deduplication merges into a single entry.
+    #[test]
+    fn basement_equals_duct_zone_merges() {
+        let mut hvac = make_hvac();
+        hvac.duct_dse = 0.8;
+        hvac.basement_heat_frac = 0.2;
+        hvac.basement_zone_id = Some(ZoneId(2));
+        hvac.duct_zone_id = Some(ZoneId(2)); // same as basement
+        hvac.update_zone_heat_fractions();
+
+        // conditioned: 0.8 * 0.8 = 0.64
+        // basement:    0.8 * 0.2 = 0.16
+        // duct:        0.2
+        // merged zone 2: 0.16 + 0.2 = 0.36
+        assert_eq!(
+            hvac.zone_heat_fractions.len(),
+            2,
+            "basement==duct must produce 2 entries (not 3); got {:?}",
+            hvac.zone_heat_fractions
+        );
+        let merged_frac = hvac
+            .zone_heat_fractions
+            .iter()
+            .find(|&&(z, _)| z == ZoneId(2))
+            .unwrap()
+            .1;
+        assert!(
+            (merged_frac - 0.36).abs() < 1e-9,
+            "merged zone 2 fraction must be 0.36, got {merged_frac}"
+        );
+        let total: f64 = hvac.zone_heat_fractions.iter().map(|(_, f)| f).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "fractions must sum to 1.0, got {total}"
+        );
+    }
+
+    /// Cooling system with finished basement: basement_heat_frac should be 0.0
+    /// (cooling doesn't route to basement). Verify no basement zone entry.
+    #[test]
+    fn cooling_finished_basement_no_basement_frac() {
+        let mut hvac =
+            HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        hvac.duct_dse = 0.85;
+        hvac.basement_heat_frac = 0.0; // cooling systems don't route to basement
+        hvac.basement_zone_id = Some(ZoneId(2));
+        hvac.duct_zone_id = Some(ZoneId(3));
+        hvac.update_zone_heat_fractions();
+
+        let has_basement = hvac
+            .zone_heat_fractions
+            .iter()
+            .any(|&(z, _)| z == ZoneId(2));
+        assert!(
+            !has_basement,
+            "cooling with basement_heat_frac=0 must not route to basement; got {:?}",
+            hvac.zone_heat_fractions
+        );
+        assert_eq!(
+            hvac.zone_heat_fractions.len(),
+            2,
+            "expected conditioned + duct zones only; got {:?}",
+            hvac.zone_heat_fractions
+        );
+    }
+
+    /// After update_zone_heat_fractions with duct zone, rebuild_thermal_ports
+    /// must include the duct zone in port declarations.
+    #[test]
+    fn port_declaration_includes_duct_zone_after_init() {
+        use hares_types::{PortDeclaration, PortType};
+
+        let mut hvac = make_hvac();
+        hvac.duct_dse = 0.8;
+        hvac.duct_zone_id = Some(ZoneId(3));
+        hvac.update_zone_heat_fractions();
+
+        let mut ports = vec![
+            PortDeclaration::electrical(),
+            PortDeclaration::thermal(ZoneId(1)),
+        ];
+        hvac.rebuild_thermal_ports(&mut ports);
+
+        // Should have electrical + thermal(1) + thermal(3)
+        let thermal_ports: Vec<_> = ports
+            .iter()
+            .filter(|p| p.port_type == PortType::Thermal)
+            .collect();
+        assert_eq!(
+            thermal_ports.len(),
+            2,
+            "must have thermal ports for conditioned + duct zone; got {:?}",
+            thermal_ports
+        );
+        assert!(
+            thermal_ports.iter().any(|p| p.zone == Some(ZoneId(1))),
+            "conditioned zone thermal port missing"
+        );
+        assert!(
+            thermal_ports.iter().any(|p| p.zone == Some(ZoneId(3))),
+            "duct zone thermal port missing"
+        );
+        // Non-thermal ports must be preserved.
+        assert!(
+            ports.iter().any(|p| p.port_type == PortType::Electrical),
+            "electrical port must be preserved after rebuild"
         );
     }
 }

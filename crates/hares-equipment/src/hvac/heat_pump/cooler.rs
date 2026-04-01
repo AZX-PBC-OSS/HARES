@@ -207,6 +207,8 @@ impl Equipment for HpCooler {
                 MSHP_CRANKCASE_HEATER_THRESHOLD_C,
             );
         }
+        // Re-sync ports after inner init may have added duct/basement zone thermals.
+        self.ports = self.inner.ports().to_vec();
         Ok(())
     }
 

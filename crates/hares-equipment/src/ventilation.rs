@@ -108,7 +108,7 @@ impl VentilationConfig {
 }
 
 const KEY_EQUIPMENT_ID: &str = "equipment_id";
-const KEY_ZONE_ID: &str = "zone_id";
+use crate::config::KEY_ZONE_ID;
 
 const DEFAULT_FAN_POWER_W: f64 = 50.0;
 const DEFAULT_FLOW_RATE_M3_S: f64 = 0.035; // ~75 CFM, typical residential

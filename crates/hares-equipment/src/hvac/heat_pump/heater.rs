@@ -192,6 +192,7 @@ struct HeaterState {
     dr_duration_remaining_s: Option<f64>,
     max_oat_supplemental_c: f64,
     hp_available: bool,
+    er_was_on: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -546,6 +547,7 @@ impl HeatPumpHeaterCore {
         }
 
         self.hvac.update_zone_heat_fractions();
+        self.hvac.rebuild_thermal_ports(&mut self.ports);
 
         // Backup heating from typed config.
         let default_backup = match self.variant {
@@ -1209,7 +1211,7 @@ impl HeatPumpHeaterCore {
         // Engage when zone drops below (setpoint - er_offset) and hold ER on
         // until setpoint is reached to avoid short-cycling in the shoulder band.
         let er_turn_on_c = setpoint - self.er_setpoint_offset_c;
-        let er_turn_off_c = setpoint;
+        let er_turn_off_c = er_turn_on_c + self.hvac.thermostat.hysteresis_c;
         let er_thermostat_call = if self.er_was_on {
             zone.temperature_c <= er_turn_off_c
         } else {
@@ -1407,6 +1409,7 @@ impl HeatPumpHeaterCore {
             dr_duration_remaining_s: self.dr_duration_remaining_s,
             max_oat_supplemental_c: self.max_oat_supplemental_c,
             hp_available: self.hp_available,
+            er_was_on: self.er_was_on,
         })
     }
 
@@ -1426,10 +1429,7 @@ impl HeatPumpHeaterCore {
         self.defrost_accumulator_s = decoded.defrost_accumulator_s;
         self.pan_heater_on = decoded.pan_heater_on;
         self.last_er_off_at = decoded.last_er_off_at;
-        self.er_was_on = matches!(
-            decoded.operating_mode,
-            OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
-        );
+        self.er_was_on = decoded.er_was_on;
         self.hvac.last_speed_index = decoded.last_speed_index;
         self.hvac.last_speed_frac = decoded.last_speed_frac;
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
@@ -2819,7 +2819,7 @@ mod tests {
             "ER must remain on between turn-on and turn-off thresholds"
         );
 
-        // Step 3: above turn-off threshold (setpoint=21C) => ER must turn off.
+        // Step 3: above turn-off threshold (19.4 + 1.0 = 20.4C) => ER must turn off.
         let mode3 = eq.update_control(&make_env(21.1, 0.0, 120));
         assert_eq!(
             mode3,
@@ -2828,10 +2828,83 @@ mod tests {
         );
     }
 
-    // ER engagement threshold: with default hysteresis_c=1.0 and
-    // er_setpoint_offset = 1.0 * (1.8 - 0.2) = 1.6°C, ER must NOT engage when the
-    // zone temp is only one deadband (1.0°C) below setpoint.  The ER threshold
-    // sits 0.6°C lower than the HP heating threshold.
+    // OCHRE reference: temp_turn_off = temp_turn_on + temp_deadband = 19.4 + 1.0 = 20.4°C.
+    // ER must stay on at 20.0°C (< 20.4) and turn off at 20.5°C (> 20.4).
+    #[test]
+    fn er_turn_off_threshold_matches_ochre() {
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(1.6);
+            typed.er_hard_lockout_time_s = Some(0.0);
+            typed.hysteresis_c = Some(1.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &make_env(18.0, 0.0, 0)).unwrap();
+
+        // Start with ER running: zone=18°C is well below er_turn_on=19.4°C.
+        let mode_start = eq.update_control(&make_env(18.0, 0.0, 0));
+        assert_eq!(
+            mode_start,
+            OperatingMode::HeatingER,
+            "ER must engage at 18°C (below er_turn_on=19.4°C)"
+        );
+
+        // Zone rises to 20.0°C — still below OCHRE turn-off (20.4°C): ER must stay on.
+        let mode_below_off = eq.update_control(&make_env(20.0, 0.0, 60));
+        assert_eq!(
+            mode_below_off,
+            OperatingMode::HeatingER,
+            "ER must stay on at 20.0°C; OCHRE turn-off threshold is 20.4°C (19.4 + 1.0)"
+        );
+
+        // Zone rises to 20.5°C — above OCHRE turn-off (20.4°C): ER must turn off.
+        let mode_above_off = eq.update_control(&make_env(20.5, 0.0, 120));
+        assert_eq!(
+            mode_above_off,
+            OperatingMode::Off,
+            "ER must turn off at 20.5°C; OCHRE turn-off threshold is 20.4°C (19.4 + 1.0)"
+        );
+    }
+
+    #[test]
+    fn er_was_on_survives_checkpoint_restore() {
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(1.6);
+            typed.er_hard_lockout_time_s = Some(0.0);
+            typed.hysteresis_c = Some(1.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &make_env(18.0, 0.0, 0)).unwrap();
+
+        // Engage ER: zone=18°C is below er_turn_on=19.4°C.
+        eq.update_control(&make_env(18.0, 0.0, 0));
+        assert!(eq.core.er_was_on, "er_was_on must be true before checkpoint");
+
+        // Save and restore state.
+        let state = eq.save_state();
+        let mut restored = ASHPHeater::new(cfg.clone());
+        restored.init(&cfg, &make_env(18.0, 0.0, 0)).unwrap();
+        restored.load_state(&state).unwrap();
+
+        assert!(
+            restored.core.er_was_on,
+            "er_was_on must survive checkpoint round-trip"
+        );
+
+        // Restored heater must use the turn-off threshold (20.4°C), not the turn-on
+        // threshold (19.4°C): at zone=20.0°C it must stay on, not turn off.
+        let mode_after_restore = restored.update_control(&make_env(20.0, 0.0, 60));
+        assert_eq!(
+            mode_after_restore,
+            OperatingMode::HeatingER,
+            "restored heater must use turn-off threshold (20.4°C); ER must stay on at 20.0°C"
+        );
+    }
 
     // H2 regression: DR expiry raises effective setpoint back to base, which must
     // NOT trigger the ER hard lockout. Only a genuine user/thermostat base-setpoint
