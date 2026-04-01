@@ -399,6 +399,41 @@ mod tests {
     }
 
     #[test]
+    fn window_solar_includes_ground_reflected() {
+        use hares_physics::solar::{GlazingCurve, window_iam};
+
+        let curve = GlazingCurve::E;
+        let aoi_rad = 0.0_f64;
+        let iam_beam = window_iam(aoi_rad, curve);
+        let iam_diffuse = curve.diffuse_iam();
+
+        let direct_w_m2 = 400.0;
+        let diffuse_w_m2 = 100.0;
+        let reflected_w_m2 = 50.0;
+        let area_m2 = 2.0;
+        let transmittance = 0.4;
+
+        let poa_beam = direct_w_m2 * iam_beam;
+        let poa_diffuse_with = (diffuse_w_m2 + reflected_w_m2) * iam_diffuse;
+        let poa_diffuse_without = diffuse_w_m2 * iam_diffuse;
+
+        let transmitted_with = area_m2 * transmittance * (poa_beam + poa_diffuse_with);
+        let transmitted_without = area_m2 * transmittance * (poa_beam + poa_diffuse_without);
+
+        let expected_extra = area_m2 * transmittance * reflected_w_m2 * iam_diffuse;
+        assert!(
+            (transmitted_with - transmitted_without - expected_extra).abs() < 1e-9,
+            "ground-reflected contribution mismatch: extra={}, expected={}",
+            transmitted_with - transmitted_without,
+            expected_extra,
+        );
+        assert!(
+            transmitted_with > transmitted_without,
+            "transmitted solar with ground-reflected ({transmitted_with}) should exceed without ({transmitted_without})"
+        );
+    }
+
+    #[test]
     fn zero_input_returns_zeros() {
         let surfaces = vec![
             make_surface(40.0, 0.6, true),
