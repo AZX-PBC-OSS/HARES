@@ -7,15 +7,16 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
     DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ZoneId, telemetry_keys as tk,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_postcard};
 
+use super::WaterHeaterZip;
 use super::wh_config::TanklessWaterHeaterConfig;
-use super::{WaterHeaterZip, resolve_mains_temp_c};
-use crate::hvac::helpers::{equipment_id_from_config, parse_fuel_type, zone_id_from_config};
+use crate::hvac::helpers::{equipment_id_from_config, zone_id_from_config};
 
 const WATER_SPECIFIC_HEAT_J_PER_KG_K: f64 = 4183.0;
 const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
@@ -64,6 +65,8 @@ pub struct TanklessWH {
     mode_override: Option<OperatingMode>,
     inlet_temp_c: f64,
     draw_flow_rate_kg_s: f64,
+    draw_flow_rate_kg_s_source: Option<ScheduleSource>,
+    mains_temp_c_source: Option<ScheduleSource>,
     zip: WaterHeaterZip,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
@@ -78,7 +81,10 @@ impl TanklessWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
-        let fuel_type = parse_tankless_fuel_type(config.get_str("FuelType"));
+        let fuel_type = config
+            .require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")
+            .map(|typed| typed.fuel_type)
+            .expect("Tankless Water Heater requires typed FuelType");
 
         let ports = build_ports(fuel_type);
 
@@ -113,6 +119,8 @@ impl TanklessWH {
             mode_override: None,
             inlet_temp_c: 15.0,
             draw_flow_rate_kg_s: 0.0,
+            draw_flow_rate_kg_s_source: None,
+            mains_temp_c_source: None,
             zip: WaterHeaterZip::default(),
             dr_setpoint_offset_c: 0.0,
             dr_load_fraction: 1.0,
@@ -165,7 +173,7 @@ impl TanklessWH {
     fn init_typed(
         &mut self,
         config: &EquipmentConfig,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
     ) -> crate::Result<()> {
         let c = config.require_typed::<TanklessWaterHeaterConfig>("Tankless Water Heater")?;
         c.validate()?;
@@ -201,8 +209,22 @@ impl TanklessWH {
             .max(0.0);
         self.duty_cycle = 1.0;
         self.mode_override = None;
-        self.inlet_temp_c = c.inlet_temp_c.unwrap_or(15.0);
+        self.inlet_temp_c = if let Some(inlet_temp_c) = c.inlet_temp_c {
+            inlet_temp_c
+        } else if let Some(source_cfg) = c.mains_temp_c_source.clone() {
+            let mut source = source_cfg.into_runtime();
+            source
+                .value_at(env)
+                .ok()
+                .filter(|v| v.is_finite())
+                .unwrap_or(super::require_mains_temp_c(env, "Tankless Water Heater")?)
+        } else {
+            super::require_mains_temp_c(env, "Tankless Water Heater")?
+        };
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
+        self.draw_flow_rate_kg_s_source =
+            c.draw_flow_rate_source.map(|source| source.into_runtime());
+        self.mains_temp_c_source = c.mains_temp_c_source.map(|source| source.into_runtime());
         self.zip = WaterHeaterZip::default();
 
         self.dr_setpoint_offset_c = 0.0;
@@ -261,7 +283,15 @@ impl Equipment for TanklessWH {
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
         // DR may offset setpoint; use effective setpoint for thermal calculation.
         let setpoint_c = self.effective_setpoint_c();
-        let inlet_temp_c = resolve_mains_temp_c(env, self.inlet_temp_c);
+        let draw_flow_rate_kg_s_source = self.draw_flow_rate_kg_s_source.as_mut();
+        let mains_temp_c_source = self.mains_temp_c_source.as_mut();
+        let (inlet_temp_c, schedule_draw_kg_s) = super::resolve_storage_step_inputs(
+            env,
+            self.inlet_temp_c,
+            self.draw_flow_rate_kg_s,
+            draw_flow_rate_kg_s_source,
+            mains_temp_c_source,
+        );
         let delta_t_c = (setpoint_c - inlet_temp_c).max(0.0);
         let _ = dt; // dt not used for tankless (on-demand model)
 
@@ -272,7 +302,7 @@ impl Equipment for TanklessWH {
         };
 
         let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = self.draw_flow_rate_kg_s + appliance_demand_kg_s;
+        let total_draw_kg_s = schedule_draw_kg_s + appliance_demand_kg_s;
 
         let (thermal_output_w, outlet_temp_c) =
             if mode == OperatingMode::Heating && total_draw_kg_s > 0.0 {
@@ -484,10 +514,6 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     );
 }
 
-fn parse_tankless_fuel_type(raw: Option<&str>) -> FuelType {
-    parse_fuel_type(raw).unwrap_or(FuelType::Electric)
-}
-
 /// Build port declarations for a tankless water heater.
 ///
 /// Electric: one Electrical port only.
@@ -639,6 +665,8 @@ mod tests {
             performance_adjustment: None,
             inlet_temp_c: Some(20.0),
             draw_flow_rate_kg_s: Some(0.2),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             avg_water_draw_l_per_day: None,
         }
     }
@@ -657,7 +685,7 @@ mod tests {
     #[test]
     fn port_declarations_and_telemetry_contract_match_fuel_type() {
         let gas = TanklessWH::new(config());
-        assert_eq!(gas.ports().len(), 2);
+        assert_eq!(gas.ports().len(), 3);
         assert!(gas.ports().contains(&PortDeclaration::fluid(
             DHW_DEMAND_LOOP,
             hares_types::FluidType::Water
@@ -1356,16 +1384,14 @@ mod tests {
         );
     }
 
-    /// Verify the tankless WH reads mains temp from the environment's custom domain
-    /// rather than the static fallback.
+    /// Verify the tankless WH reads mains temp from canonical weather
+    /// rather than the configured inlet temperature.
     ///
     /// Two environments with different mains temps (5°C vs 25°C) injected via
-    /// MAINS_WATER_DOMAIN_ID must produce different thermal outputs: a colder
+    /// `weather.mains_temp_c` must produce different thermal outputs: a colder
     /// inlet requires more energy to reach setpoint.
     #[test]
     fn tankless_wh_uses_dynamic_mains_temp_from_environment() {
-        use hares_types::{DomainId, DomainUpdate};
-
         fn env_with_mains(mains_c: f64) -> EnvironmentState {
             EnvironmentState {
                 zones: vec![ZoneState {
@@ -1378,17 +1404,14 @@ mod tests {
                 }],
                 weather: WeatherState {
                     outdoor_temp_c: 10.0,
+                    mains_temp_c: mains_c,
                     ..Default::default()
                 },
                 grid: hares_types::GridState {
                     voltage_pu: 1.0,
                     frequency_hz: 60.0,
                 },
-                custom_domains: vec![DomainUpdate {
-                    domain_id: DomainId(u16::MAX - 1),
-                    zone_temperatures_c: vec![],
-                    custom_payload: Some(vec![mains_c]),
-                }],
+                custom_domains: vec![],
                 equipment_telemetry: std::collections::HashMap::new(),
                 equipment_core: std::collections::HashMap::new(),
                 current_time: FixedOffset::east_opt(0)
@@ -1407,7 +1430,7 @@ mod tests {
             typed.heating_capacity_w = Some(60_000.0);
             typed.energy_factor = Some(0.9);
             typed.draw_flow_rate_kg_s = Some(0.2);
-            // inlet_temp_c is the static fallback; the dynamic value should override it.
+            // inlet_temp_c is the configured default; the dynamic value should override it.
             config_from_typed(typed)
         };
 

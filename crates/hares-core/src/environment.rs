@@ -16,6 +16,8 @@ use hares_types::{
     DomainId, EnvironmentState, GridState, SCHEDULE_DOMAIN_ID, SurfaceIrradiance, WeatherState,
     ZoneId, ZoneState,
 };
+use rand::RngExt;
+use rand_chacha::ChaCha8Rng;
 use thiserror::Error;
 
 use crate::SimClock;
@@ -55,6 +57,14 @@ pub enum EnvironmentManagerError {
         "attic zone {zone_idx} is missing volume_m3; provide attic geometry or explicit ventilation data"
     )]
     MissingAtticVolume { zone_idx: usize },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EnvironmentInitOptions<'a> {
+    pub civil_timezone: Option<&'a str>,
+    pub resample_overrides: Option<&'a hares_io::ResampleOverrides>,
+    pub initial_rng: Option<ChaCha8Rng>,
+    pub setpoint_deadband_c: Option<f64>,
 }
 
 /// Produces a complete [`EnvironmentState`] at each timestep.
@@ -124,29 +134,31 @@ impl EnvironmentManager {
             building,
             time_res,
             start_time,
-            civil_timezone,
-            None,
+            EnvironmentInitOptions {
+                civil_timezone,
+                ..EnvironmentInitOptions::default()
+            },
         )
     }
 
     /// Like [`new`] but with optional per-column weather resampling overrides.
     ///
     /// Pass `Some(ResampleOverrides::ochre_compat())` for OCHRE parity testing.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_resample(
         weather: WeatherTimeSeries,
         schedule: ScheduleTimeSeries,
         building: &Building,
         time_res: StdDuration,
         start_time: DateTime<FixedOffset>,
-        civil_timezone: Option<&str>,
-        resample_overrides: Option<&hares_io::ResampleOverrides>,
+        options: EnvironmentInitOptions<'_>,
     ) -> Result<Self, EnvironmentManagerError> {
         let step_secs = u32::try_from(time_res.as_secs()).unwrap_or(u32::MAX);
         if step_secs == 0 {
             return Err(EnvironmentManagerError::ZeroTimeResolution);
         }
 
-        let weather = match resample_overrides {
+        let weather = match options.resample_overrides {
             Some(ov) => weather.resample_with(step_secs, ov)?,
             None => weather.resample(step_secs)?,
         };
@@ -161,7 +173,7 @@ impl EnvironmentManager {
 
         // Parse civil timezone for DST-aware schedule indexing.
         #[cfg(feature = "dst")]
-        let civil_tz: Option<chrono_tz::Tz> = match civil_timezone {
+        let civil_tz: Option<chrono_tz::Tz> = match options.civil_timezone {
             Some(name) => Some(
                 name.parse::<chrono_tz::Tz>()
                     .map_err(|_| EnvironmentManagerError::InvalidTimezone(name.to_owned()))?,
@@ -169,7 +181,7 @@ impl EnvironmentManager {
             None => None,
         };
         #[cfg(not(feature = "dst"))]
-        if civil_timezone.is_some() {
+        if options.civil_timezone.is_some() {
             return Err(EnvironmentManagerError::DstNotEnabled);
         }
 
@@ -208,7 +220,6 @@ impl EnvironmentManager {
             .get(init_offset)
             .copied()
             .unwrap_or(DEFAULT_SETPOINT_C);
-        let start_hour = start_time.hour() as usize;
         let initial_ground_temp_c = weather
             .ground_temp_c
             .get(init_offset)
@@ -218,7 +229,9 @@ impl EnvironmentManager {
             building,
             initial_outdoor_temp_c,
             initial_ground_temp_c,
-            start_hour,
+            start_time,
+            options.initial_rng,
+            options.setpoint_deadband_c,
         )?;
 
         let num_surfaces = surfaces.len();
@@ -744,9 +757,21 @@ fn initial_zones(
     building: &Building,
     outdoor_temp_c: f64,
     ground_temp_c: f64,
-    start_hour: usize,
+    start_time: DateTime<FixedOffset>,
+    initial_rng: Option<ChaCha8Rng>,
+    setpoint_deadband_c: Option<f64>,
 ) -> Result<Vec<ZoneState>, EnvironmentManagerError> {
-    let default_temp = determine_initial_indoor_temp_c(building, outdoor_temp_c, start_hour);
+    let default_temp = determine_initial_indoor_temp_c(
+        building,
+        outdoor_temp_c,
+        start_time.hour() as usize,
+        matches!(
+            start_time.weekday(),
+            chrono::Weekday::Sat | chrono::Weekday::Sun
+        ),
+        initial_rng,
+        setpoint_deadband_c,
+    );
     if building.zones.is_empty() {
         return Ok(vec![ZoneState {
             id: ZoneId(1),
@@ -765,7 +790,7 @@ fn initial_zones(
         .map(
             |(idx, zone)| -> Result<ZoneState, EnvironmentManagerError> {
                 use hares_io::hpxml::ZoneType;
-                // Conditioned zones start at the HVAC setpoint.
+                // Conditioned zones start near the active HVAC setpoint.
                 // Foundation zones start at ground temperature.
                 // Other unconditioned zones (attic, garage) start at outdoor temp.
                 let temp = match zone.zone_type {
@@ -798,6 +823,8 @@ fn initial_zones(
 /// Matches OCHRE's `Envelope.initialize_state()`:
 /// - outdoor > 12°C → cooling setpoint (building is in cooling mode)
 /// - outdoor ≤ 12°C → heating setpoint (building is in heating mode)
+/// - conditioned-zone temperature is randomized within half the deadband
+///   around the selected setpoint
 /// - No setpoints available → 21°C (OCHRE default)
 ///
 /// `start_hour` must be in `[0, 23]` (e.g. from `chrono::DateTime::hour()`).
@@ -805,28 +832,103 @@ fn determine_initial_indoor_temp_c(
     building: &Building,
     outdoor_temp_c: f64,
     start_hour: usize,
+    is_weekend: bool,
+    mut initial_rng: Option<ChaCha8Rng>,
+    setpoint_deadband_c: Option<f64>,
 ) -> f64 {
     debug_assert!(start_hour <= 23, "start_hour out of range: {start_hour}");
-    let heating_sp = building
-        .heating_weekday_setpoints_c
-        .as_ref()
-        .and_then(|v| v.get(start_hour).copied());
-    let cooling_sp = building
-        .cooling_weekday_setpoints_c
-        .as_ref()
-        .and_then(|v| v.get(start_hour).copied());
+    let (heating_sp, cooling_sp) = if is_weekend {
+        (
+            building
+                .heating_weekend_setpoints_c
+                .as_ref()
+                .and_then(|v| v.get(start_hour).copied())
+                .or_else(|| {
+                    building
+                        .heating_weekday_setpoints_c
+                        .as_ref()
+                        .and_then(|v| v.get(start_hour).copied())
+                }),
+            building
+                .cooling_weekend_setpoints_c
+                .as_ref()
+                .and_then(|v| v.get(start_hour).copied())
+                .or_else(|| {
+                    building
+                        .cooling_weekday_setpoints_c
+                        .as_ref()
+                        .and_then(|v| v.get(start_hour).copied())
+                }),
+        )
+    } else {
+        (
+            building
+                .heating_weekday_setpoints_c
+                .as_ref()
+                .and_then(|v| v.get(start_hour).copied())
+                .or_else(|| {
+                    building
+                        .heating_weekend_setpoints_c
+                        .as_ref()
+                        .and_then(|v| v.get(start_hour).copied())
+                }),
+            building
+                .cooling_weekday_setpoints_c
+                .as_ref()
+                .and_then(|v| v.get(start_hour).copied())
+                .or_else(|| {
+                    building
+                        .cooling_weekend_setpoints_c
+                        .as_ref()
+                        .and_then(|v| v.get(start_hour).copied())
+                }),
+        )
+    };
+
+    let deadband_c = setpoint_deadband_c.unwrap_or(1.0);
+
+    let select_with_noise = |setpoint_c: f64, rng: &mut ChaCha8Rng| {
+        let random_delta = (rng.random::<f64>() - 0.5) * deadband_c;
+        setpoint_c + random_delta
+    };
 
     match (heating_sp, cooling_sp) {
         (Some(h), Some(c)) => {
             if outdoor_temp_c > OUTDOOR_HEATING_COOLING_THRESHOLD_C {
-                c
+                if let Some(rng) = initial_rng.as_mut() {
+                    select_with_noise(c, rng)
+                } else {
+                    c
+                }
+            } else {
+                if let Some(rng) = initial_rng.as_mut() {
+                    select_with_noise(h, rng)
+                } else {
+                    h
+                }
+            }
+        }
+        (Some(h), None) => {
+            if let Some(rng) = initial_rng.as_mut() {
+                select_with_noise(h, rng)
             } else {
                 h
             }
         }
-        (Some(h), None) => h,
-        (None, Some(c)) => c,
-        (None, None) => DEFAULT_SETPOINT_C,
+        (None, Some(c)) => {
+            if let Some(rng) = initial_rng.as_mut() {
+                select_with_noise(c, rng)
+            } else {
+                c
+            }
+        }
+        (None, None) => {
+            if let Some(rng) = initial_rng.as_mut() {
+                select_with_noise(DEFAULT_SETPOINT_C, rng)
+            } else {
+                DEFAULT_SETPOINT_C
+            }
+        }
     }
 }
 
@@ -1009,6 +1111,43 @@ mod tests {
         b
     }
 
+    fn building_with_conditioned_foundation_and_garage() -> Building {
+        let mut b = building(Some(21.0));
+        b.zones = vec![
+            Zone {
+                zone_type: ZoneType::Conditioned,
+                floor_area_m2: Some(100.0),
+                volume_m3: Some(250.0),
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            },
+            Zone {
+                zone_type: ZoneType::Foundation,
+                floor_area_m2: Some(50.0),
+                volume_m3: Some(120.0),
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            },
+            Zone {
+                zone_type: ZoneType::Garage,
+                floor_area_m2: Some(40.0),
+                volume_m3: Some(90.0),
+                attached_wall_ids: vec![],
+                duct_systems: vec![],
+                vented: false,
+                ventilation_ach: None,
+                ventilation_sla: None,
+            },
+        ];
+        b
+    }
+
     fn clock() -> SimClock {
         let start = DateTime::parse_from_rfc3339("2024-06-21T12:00:00+00:00").expect("parse");
         SimClock::new(start, Duration::seconds(60), Duration::hours(2))
@@ -1047,6 +1186,32 @@ mod tests {
             err,
             EnvironmentManagerError::MissingAtticVolume { zone_idx: 1 }
         ));
+    }
+
+    #[test]
+    fn initial_zone_temperatures_use_ground_for_foundation_and_outdoor_for_other_unconditioned() {
+        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let mut manager = EnvironmentManager::new(
+            weather_series(),
+            schedule_series(),
+            &building_with_conditioned_foundation_and_garage(),
+            StdDuration::from_secs(60),
+            start,
+            None,
+        )
+        .expect("manager");
+        let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(1));
+        let env = manager.update(&sim_clock, &[]);
+
+        assert_eq!(env.zones.len(), 3);
+        assert!(
+            (env.zones[1].temperature_c - env.weather.ground_temp_c).abs() < 1.0e-9,
+            "foundation zone must initialize from ground temperature"
+        );
+        assert!(
+            (env.zones[2].temperature_c - env.weather.outdoor_temp_c).abs() < 1.0e-9,
+            "garage (unconditioned non-foundation) must initialize from outdoor temperature"
+        );
     }
 
     #[test]

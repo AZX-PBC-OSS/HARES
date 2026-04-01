@@ -16,7 +16,8 @@ use hares_equipment::{
     HeatPumpWaterHeaterConfig,
 };
 use hares_types::{
-    EnvironmentState, FuelType, GridState, PortSlots, WeatherState, ZoneId, ZoneState,
+    EnvironmentState, FuelType, GridState, PortSlots, ThermalCategory, WeatherState, ZoneId,
+    ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,12 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
     }
 }
 
+fn make_env_at_minute(zone_temp_c: f64, minute: i64) -> EnvironmentState {
+    let mut env = make_env(zone_temp_c);
+    env.current_time += chrono::Duration::minutes(minute);
+    env
+}
+
 fn resistance_cfg(
     setpoint_c: f64,
     deadband_c: f64,
@@ -98,6 +105,8 @@ fn resistance_cfg(
             tank_nodes: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(draw_kg_s),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -114,6 +123,79 @@ fn step_wh(wh: &mut dyn hares_equipment::Equipment, env: &EnvironmentState, port
     ports.thermal.iter_mut().for_each(|t| t.zero());
     ports.fluid.iter_mut().for_each(|f| f.zero());
     wh.step(env, Duration::from_secs(60), ports).unwrap();
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HpwhStepSnapshot {
+    mode: hares_types::OperatingMode,
+    compressor_power_w: f64,
+    backup_power_w: f64,
+}
+
+fn hpwh_step_snapshot(
+    wh: &mut dyn hares_equipment::Equipment,
+    env: &EnvironmentState,
+    ports: &mut PortSlots,
+) -> HpwhStepSnapshot {
+    let mode = wh.update_control(env);
+    step_wh(wh, env, ports);
+    HpwhStepSnapshot {
+        mode,
+        compressor_power_w: wh.telemetry().get("compressor_power_w").unwrap_or(0.0),
+        backup_power_w: wh.telemetry().get("backup_element_power_w").unwrap_or(0.0),
+    }
+}
+
+fn hpwh_cfg_with(
+    initial_tank_temp_c: f64,
+    deadband_c: f64,
+    backup_enable_offset_c: f64,
+    min_on_time_s: f64,
+    min_off_time_s: f64,
+    hp_only_mode: bool,
+    element_hp_control_mode: Option<&str>,
+) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        "HPWH".to_string(),
+        "Heat Pump Water Heater".to_string(),
+        HeatPumpWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: Some(2.5),
+            backup_element_power_w: Some(4_500.0),
+            ua_w_per_k: Some(2.0),
+            setpoint_c: Some(52.0),
+            deadband_c: Some(deadband_c),
+            max_tank_temp_c: Some(300.0),
+            initial_tank_temp_c: Some(initial_tank_temp_c),
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: Some(0.0),
+            compressor_power_w: Some(1_200.0),
+            backup_enable_offset_c: Some(backup_enable_offset_c),
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: Some(min_on_time_s),
+            min_off_time_s: Some(min_off_time_s),
+            hp_only_mode: Some(hp_only_mode),
+            element_hp_control_mode: element_hp_control_mode.map(str::to_string),
+            fan_power_w: Some(0.0),
+            parasitic_power_w: Some(0.0),
+            backup_efficiency: Some(1.0),
+            shr: None,
+            lost_heat_fraction: None,
+            wall_heat_fraction: None,
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +305,8 @@ fn element_cycling_deadband_matches_ochre_default() {
             tank_nodes: Some(1),
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -312,6 +396,8 @@ fn gas_wh_fuel_not_electricity() {
             tank_nodes: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             pilot_power_w: Some(0.0),
             flue_loss_fraction: None,
             skin_loss_fraction: None,
@@ -426,6 +512,8 @@ fn standby_loss_ua_magnitude() {
             tank_nodes: Some(1),
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -565,4 +653,390 @@ fn hpwh_cop_at_multiple_ambient_temps() {
             "HPWH COP {cop:.3} unrealistically high at {ambient_c}°C"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Storage water-heater deadband matrix uses the physical hysteresis edges
+//
+// Source-backed thermostat rule:
+//   stay off when tank <= setpoint - deadband and the heater was previously off
+//   turn on only when tank < setpoint - deadband
+//
+// This test checks both electric-resistance and gas storage heaters at the
+// exact deadband floor and just below it.
+// ---------------------------------------------------------------------------
+#[test]
+fn storage_water_heater_deadband_matrix_matches_boundary_rule() {
+    let env = make_env(21.0);
+    let cases = [
+        (
+            "Resistance Water Heater",
+            resistance_cfg(52.0, 2.0, 50.0, 0.0, 0.1),
+            FuelType::Electric,
+        ),
+        (
+            "Gas Water Heater",
+            EquipmentConfig::from_typed(
+                "GWH".to_string(),
+                "Gas Water Heater".to_string(),
+                GasWaterHeaterConfig {
+                    equipment_id: None,
+                    zone_id: None,
+                    loop_id: None,
+                    fuel_type: FuelType::Gas,
+                    tank_volume_m3: None,
+                    tank_height_m: None,
+                    energy_factor: None,
+                    uniform_energy_factor: None,
+                    heating_capacity_w: Some(12_000.0),
+                    ua_w_per_k: Some(0.1),
+                    setpoint_c: Some(52.0),
+                    deadband_c: Some(2.0),
+                    max_tank_temp_c: Some(300.0),
+                    initial_tank_temp_c: Some(50.0),
+                    tank_nodes: None,
+                    avg_water_draw_l_per_day: None,
+                    draw_flow_rate_kg_s: Some(0.0),
+                    draw_flow_rate_source: None,
+                    mains_temp_c_source: None,
+                    pilot_power_w: Some(0.0),
+                    flue_loss_fraction: None,
+                    skin_loss_fraction: None,
+                    ignition_type: None,
+                    performance_adjustment: None,
+                    zone_type: None,
+                    first_hour_rating_m3: None,
+                },
+            ),
+            FuelType::Gas,
+        ),
+    ];
+
+    for (label, at_floor_cfg, fuel_type) in cases {
+        let mut ports;
+        let on_at_floor = if fuel_type == FuelType::Electric {
+            let mut wh = ResistanceWH::new(at_floor_cfg.clone());
+            wh.init(&at_floor_cfg, &env).unwrap();
+            ports = PortSlots::from_declarations(wh.ports());
+            step_wh(&mut wh, &env, &mut ports);
+            ports.electrical.load_power_kw > 0.0
+        } else {
+            let mut wh = GasWH::new(at_floor_cfg.clone());
+            wh.init(&at_floor_cfg, &env).unwrap();
+            ports = PortSlots::from_declarations(wh.ports());
+            step_wh(&mut wh, &env, &mut ports);
+            ports.fuel.get(FuelType::Gas) > 0.0
+        };
+        assert!(
+            !on_at_floor,
+            "{label} must remain off at the exact deadband floor (setpoint-deadband = 50 C)"
+        );
+
+        let below_floor_cfg = if fuel_type == FuelType::Electric {
+            resistance_cfg(52.0, 2.0, 49.9, 0.0, 0.1)
+        } else {
+            EquipmentConfig::from_typed(
+                "GWH".to_string(),
+                "Gas Water Heater".to_string(),
+                GasWaterHeaterConfig {
+                    equipment_id: None,
+                    zone_id: None,
+                    loop_id: None,
+                    fuel_type: FuelType::Gas,
+                    tank_volume_m3: None,
+                    tank_height_m: None,
+                    energy_factor: None,
+                    uniform_energy_factor: None,
+                    heating_capacity_w: Some(12_000.0),
+                    ua_w_per_k: Some(0.1),
+                    setpoint_c: Some(52.0),
+                    deadband_c: Some(2.0),
+                    max_tank_temp_c: Some(300.0),
+                    initial_tank_temp_c: Some(49.9),
+                    tank_nodes: None,
+                    avg_water_draw_l_per_day: None,
+                    draw_flow_rate_kg_s: Some(0.0),
+                    draw_flow_rate_source: None,
+                    mains_temp_c_source: None,
+                    pilot_power_w: Some(0.0),
+                    flue_loss_fraction: None,
+                    skin_loss_fraction: None,
+                    ignition_type: None,
+                    performance_adjustment: None,
+                    zone_type: None,
+                    first_hour_rating_m3: None,
+                },
+            )
+        };
+
+        let on_below_floor = if fuel_type == FuelType::Electric {
+            let mut wh = ResistanceWH::new(below_floor_cfg.clone());
+            wh.init(&below_floor_cfg, &env).unwrap();
+            ports = PortSlots::from_declarations(wh.ports());
+            step_wh(&mut wh, &env, &mut ports);
+            ports.electrical.load_power_kw > 0.0
+        } else {
+            let mut wh = GasWH::new(below_floor_cfg.clone());
+            wh.init(&below_floor_cfg, &env).unwrap();
+            ports = PortSlots::from_declarations(wh.ports());
+            step_wh(&mut wh, &env, &mut ports);
+            ports.fuel.get(FuelType::Gas) > 0.0
+        };
+        assert!(
+            on_below_floor,
+            "{label} must turn on when the tank is just below the deadband floor and previously idle"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 8. HPWH compressor lockout matrix enforces minimum on-time and off-time
+//
+// Real compressor protection requires:
+//   - once started, the compressor cannot stop before min_on_time_s elapses
+//   - once stopped, it cannot restart before min_off_time_s elapses
+//
+// The test uses hp_only_mode to isolate the compressor from backup-element
+// assistance so the state transitions are unambiguous at the trait boundary.
+// ---------------------------------------------------------------------------
+#[test]
+fn hpwh_compressor_lockout_matrix_respects_min_on_and_min_off_times() {
+    use hares_equipment::water_heater::heat_pump_wh::HeatPumpWH;
+
+    let cold_cfg = hpwh_cfg_with(40.0, 2.0, 30.0, 180.0, 120.0, true, Some("Simultaneous"));
+    let mut wh = HeatPumpWH::new(cold_cfg.clone());
+    let mut ports = PortSlots::from_declarations(wh.ports());
+
+    let env0 = make_env_at_minute(21.0, 0);
+    wh.init(&cold_cfg, &env0).unwrap();
+    let start = hpwh_step_snapshot(&mut wh, &env0, &mut ports);
+    assert_eq!(
+        start.mode,
+        hares_types::OperatingMode::HeatPumpWH,
+        "cold tank should start the compressor"
+    );
+    assert!(
+        start.compressor_power_w > 0.0,
+        "compressor power must be positive after startup"
+    );
+
+    wh.apply_control(&hares_types::ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(30.0),
+        cooling_setpoint_c: None,
+        deadband_c: None,
+    })
+    .unwrap();
+
+    for minute in 1..=2 {
+        let env = make_env_at_minute(21.0, minute);
+        let snap = hpwh_step_snapshot(&mut wh, &env, &mut ports);
+        assert_eq!(
+            snap.mode,
+            hares_types::OperatingMode::HeatPumpWH,
+            "compressor must remain on before the 180 s min_on_time expires (minute {minute})"
+        );
+        assert!(
+            snap.compressor_power_w > 0.0,
+            "compressor power must remain positive before min_on_time expires (minute {minute})"
+        );
+    }
+
+    let env3 = make_env_at_minute(21.0, 3);
+    let off = hpwh_step_snapshot(&mut wh, &env3, &mut ports);
+    assert_eq!(
+        off.mode,
+        hares_types::OperatingMode::Off,
+        "compressor should be allowed to stop once min_on_time_s has elapsed"
+    );
+    assert!(
+        off.compressor_power_w.abs() < 1e-9,
+        "compressor power must drop to zero once the call clears after min_on_time"
+    );
+
+    wh.apply_control(&hares_types::ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(52.0),
+        cooling_setpoint_c: None,
+        deadband_c: None,
+    })
+    .unwrap();
+
+    let env4 = make_env_at_minute(21.0, 4);
+    let locked_out = hpwh_step_snapshot(&mut wh, &env4, &mut ports);
+    assert_eq!(
+        locked_out.mode,
+        hares_types::OperatingMode::Off,
+        "compressor must stay off while only 60 s of the 120 s min_off_time has elapsed"
+    );
+    assert!(
+        locked_out.compressor_power_w.abs() < 1e-9,
+        "compressor power must remain zero during min_off_time lockout"
+    );
+
+    let env5 = make_env_at_minute(21.0, 5);
+    let restarted = hpwh_step_snapshot(&mut wh, &env5, &mut ports);
+    assert_eq!(
+        restarted.mode,
+        hares_types::OperatingMode::HeatPumpWH,
+        "compressor must restart once min_off_time_s has elapsed"
+    );
+    assert!(
+        restarted.compressor_power_w > 0.0,
+        "compressor power must be positive after the lockout expires"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9. HPWH control matrix covers compressor/backup coordination modes
+//
+// For a very cold tank below the backup threshold:
+//   - MutuallyExclusive gives compressor priority
+//   - Simultaneous allows both compressor and backup
+//   - hp_only_mode suppresses backup even if Simultaneous is configured
+// ---------------------------------------------------------------------------
+#[test]
+fn hpwh_control_mode_matrix_matches_configured_coordination_rules() {
+    use hares_equipment::water_heater::heat_pump_wh::HeatPumpWH;
+
+    let cases = [
+        (
+            "mutually-exclusive",
+            None,
+            false,
+            hares_types::OperatingMode::HeatPumpWH,
+            false,
+        ),
+        (
+            "simultaneous",
+            Some("Simultaneous"),
+            false,
+            hares_types::OperatingMode::HeatingHPAndER,
+            true,
+        ),
+        (
+            "hp-only",
+            Some("Simultaneous"),
+            true,
+            hares_types::OperatingMode::HeatPumpWH,
+            false,
+        ),
+    ];
+
+    for (label, mode_str, hp_only_mode, expected_mode, expect_backup) in cases {
+        let cfg = hpwh_cfg_with(40.0, 2.0, 8.0, 0.0, 0.0, hp_only_mode, mode_str);
+        let env = make_env(21.0);
+        let mut wh = HeatPumpWH::new(cfg.clone());
+        wh.init(&cfg, &env).unwrap();
+        let mut ports = PortSlots::from_declarations(wh.ports());
+        let snap = hpwh_step_snapshot(&mut wh, &env, &mut ports);
+
+        assert_eq!(snap.mode, expected_mode, "{label} mode mismatch");
+        assert!(
+            snap.compressor_power_w > 0.0,
+            "{label} should keep the compressor active for a cold tank"
+        );
+        assert_eq!(
+            snap.backup_power_w > 0.0,
+            expect_backup,
+            "{label} backup-element expectation mismatch"
+        );
+    }
+}
+
+#[test]
+fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
+    use hares_equipment::water_heater::heat_pump_wh::HeatPumpWH;
+
+    let env = make_env(24.0);
+    let base = HeatPumpWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: None,
+        loop_id: None,
+        tank_volume_m3: None,
+        tank_height_m: None,
+        cop: Some(3.45),
+        backup_element_power_w: None,
+        ua_w_per_k: Some(2.0),
+        setpoint_c: Some(51.7),
+        deadband_c: Some(5.556),
+        max_tank_temp_c: Some(300.0),
+        initial_tank_temp_c: Some(40.0),
+        tank_nodes: None,
+        tempering_valve_setpoint_c: None,
+        avg_water_draw_l_per_day: None,
+        draw_flow_rate_kg_s: Some(0.0),
+        compressor_power_w: None,
+        backup_enable_offset_c: None,
+        min_ambient_temp_c: None,
+        max_ambient_temp_c: None,
+        min_on_time_s: None,
+        min_off_time_s: None,
+        hp_only_mode: None,
+        element_hp_control_mode: None,
+        fan_power_w: None,
+        parasitic_power_w: None,
+        backup_efficiency: None,
+        shr: None,
+        lost_heat_fraction: None,
+        wall_heat_fraction: None,
+        capacity_biquadratic_coeffs: None,
+        cop_biquadratic_coeffs: None,
+        performance_adjustment: None,
+        zone_type: None,
+        first_hour_rating_m3: None,
+    };
+    let cfg0 = EquipmentConfig::from_typed(
+        "HPWH0".to_string(),
+        "Heat Pump Water Heater".to_string(),
+        HeatPumpWaterHeaterConfig {
+            wall_heat_fraction: Some(0.0),
+            ..base.clone()
+        },
+    );
+    let cfg50 = EquipmentConfig::from_typed(
+        "HPWH50".to_string(),
+        "Heat Pump Water Heater".to_string(),
+        HeatPumpWaterHeaterConfig {
+            wall_heat_fraction: Some(0.5),
+            ..base
+        },
+    );
+
+    let mut wh0 = HeatPumpWH::new(cfg0.clone());
+    wh0.init(&cfg0, &env).unwrap();
+    let mut p0 = PortSlots::from_declarations(wh0.ports());
+    step_wh(&mut wh0, &env, &mut p0);
+
+    let mut wh50 = HeatPumpWH::new(cfg50.clone());
+    wh50.init(&cfg50, &env).unwrap();
+    let mut p50 = PortSlots::from_declarations(wh50.ports());
+    step_wh(&mut wh50, &env, &mut p50);
+
+    let sens0 = p0.thermal[0].sensible_gain_w;
+    let sens50 = p50.thermal[0].sensible_gain_w;
+    let internal50 = p50.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
+    let jacket50 = p50.thermal[0].sensible_for_category(ThermalCategory::JacketLoss);
+    let wall_w = wh50
+        .telemetry()
+        .get("wall_sensible_gain_w")
+        .expect("wall_sensible_gain_w must exist");
+
+    assert!(
+        (sens0 - sens50).abs() < 1e-6,
+        "wall fraction must preserve total sensible gain; baseline={sens0:.3}, split={sens50:.3}"
+    );
+    assert!(
+        (internal50 - sens50 * 0.5).abs() < 1.0,
+        "internal gain should receive half of sensible gain; got {internal50:.3} vs {:.3}",
+        sens50 * 0.5
+    );
+    assert!(
+        (jacket50 - sens50 * 0.5).abs() < 1.0,
+        "jacket loss should receive half of sensible gain; got {jacket50:.3} vs {:.3}",
+        sens50 * 0.5
+    );
+    assert!(
+        (wall_w - sens50 * 0.5).abs() < 1.0,
+        "wall_sensible_gain_w telemetry should track the wall share; got {wall_w:.3} vs {:.3}",
+        sens50 * 0.5
+    );
 }

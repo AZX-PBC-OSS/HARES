@@ -7,7 +7,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use hares_equipment::ConfigPayload;
+use hares_equipment::{
+    ConfigPayload, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
+    HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+};
 use hares_types::{BoundaryPolicy, ScheduleSourceConfig, normalize_ascii, parse_trimmed_f64};
 use serde_json::Value;
 use tracing::warn;
@@ -473,11 +476,33 @@ fn set_typed_setpoint_source(spec: &mut EquipmentSpec, prefix: &str, col_idx: us
     }
 }
 
-/// Storage water heater equipment names that consume runtime draw/mains schedule columns.
+fn set_typed_schedule_source(spec: &mut EquipmentSpec, field: &str, col_idx: usize) {
+    let Some(typed) = spec.typed_config.as_mut() else {
+        return;
+    };
+    let ConfigPayload::Typed { data, .. } = &mut typed.payload else {
+        return;
+    };
+    let Some(obj) = data.as_object_mut() else {
+        return;
+    };
+
+    let source = ScheduleSourceConfig::ColumnRef {
+        col_idx,
+        boundary: BoundaryPolicy::Clamp,
+    };
+    if let Ok(json) = serde_json::to_value(source) {
+        obj.insert(field.to_string(), json);
+    }
+}
+
+/// Storage water heater equipment names that consume draw and mains schedule sources.
 const STORAGE_WATER_HEATER_EQUIPMENT: &[&str] = &[
     "Electric Resistance Water Heater",
     "Gas Water Heater",
     "Heat Pump Water Heater",
+    "Tankless Water Heater",
+    "Gas Tankless Water Heater",
 ];
 
 fn inject_water_heater_schedule_columns(
@@ -485,33 +510,10 @@ fn inject_water_heater_schedule_columns(
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
 ) {
-    // ResStock/OCHRE commonly provide fixture draw fractions in `hot_water_fixtures`.
-    // When the input is already pre-scaled in L/min, prefer the explicit SI-to-be-converted
-    // alias `hot_water_delivered_l_min` and convert once to kg/s here.
-    let draw_source = first_present_column(csv_col_map, &["hot_water_delivered_l_min"])
-        .map(|col_idx| (col_idx, WaterHeaterDrawSource::PreScaledLMin))
-        .or_else(|| {
-            first_present_column(
-                csv_col_map,
-                &[
-                    "hot_water_fixtures",
-                    "hot_water_draw",
-                    "hot_water_delivered",
-                ],
-            )
-            .map(|col_idx| (col_idx, WaterHeaterDrawSource::Fraction))
-        });
-    let mains_col = first_present_column(
-        csv_col_map,
-        &[
-            "hot_water_mains_temperature",
-            "mains_temperature",
-            "mains_temp",
-            "water_mains_temp",
-        ],
-    );
+    let draw_col = first_present_column(csv_col_map, &["hot_water_fixtures"]);
+    let mains_col = first_present_column(csv_col_map, &["hot_water_mains_temperature"]);
 
-    if draw_source.is_none() && mains_col.is_none() {
+    if draw_col.is_none() && mains_col.is_none() {
         return;
     }
 
@@ -519,29 +521,11 @@ fn inject_water_heater_schedule_columns(
         if !STORAGE_WATER_HEATER_EQUIPMENT.contains(&spec.name.as_str()) {
             continue;
         }
-        if let Some((col_idx, draw_source)) = draw_source {
+        let has_typed_sources = !matches!(spec.name.as_str(), "Heat Pump Water Heater");
+        if let Some(col_idx) = draw_col {
             let raw_values = schedule.columns[col_idx].clone();
-            let kg_s_series: Vec<f64> = match draw_source {
-                WaterHeaterDrawSource::Fraction => {
-                    // Raw fractions must be normalized to an SI mass-flow series.
-                    let avg_daily_l = spec
-                        .parameters
-                        .get("avg_water_draw_l_per_day")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "water heater spec '{}' missing or invalid avg_water_draw_l_per_day; \
-                                 cannot normalize draw schedule fractions",
-                                spec.name
-                            )
-                        });
-                    normalize_draw_profile(&raw_values, avg_daily_l)
-                }
-                WaterHeaterDrawSource::PreScaledLMin => {
-                    // The alias is already in L/min; convert once to kg/s.
-                    raw_values.iter().map(|&v| (v.max(0.0)) / 60.0).collect()
-                }
-            };
+            let avg_daily_l = water_heater_avg_daily_draw_l(spec);
+            let kg_s_series: Vec<f64> = normalize_draw_profile(&raw_values, avg_daily_l);
 
             let col_name = format!(
                 "hot_water_draw_kg_s_{}_{}",
@@ -550,14 +534,9 @@ fn inject_water_heater_schedule_columns(
             );
             match schedule.append_derived_column(&col_name, kg_s_series, ColumnAggregation::Mean) {
                 Ok(derived_col_idx) => {
-                    spec.parameters.insert(
-                        "draw_rate_schedule_col".to_string(),
-                        Value::from(derived_col_idx as u64),
-                    );
-                    spec.parameters.insert(
-                        "draw_flow_rate_schedule_col".to_string(),
-                        Value::from(derived_col_idx as u64),
-                    );
+                    if has_typed_sources {
+                        set_typed_schedule_source(spec, "draw_flow_rate_source", derived_col_idx);
+                    }
                 }
                 Err(err) => {
                     panic!(
@@ -568,11 +547,98 @@ fn inject_water_heater_schedule_columns(
             }
         }
         if let Some(col_idx) = mains_col {
-            spec.parameters.insert(
-                "mains_temp_schedule_col".to_string(),
-                Value::from(col_idx as u64),
-            );
+            if has_typed_sources {
+                set_typed_schedule_source(spec, "mains_temp_c_source", col_idx);
+            }
         }
+    }
+}
+
+fn tankless_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
+    let typed = spec.typed_config.as_ref().unwrap_or_else(|| {
+        panic!(
+            "tankless water heater '{}' requires typed config",
+            spec.name
+        )
+    });
+    let tankless = typed
+        .typed::<TanklessWaterHeaterConfig>()
+        .unwrap_or_else(|err| {
+            panic!(
+                "tankless water heater '{}' typed config failed to decode: {err}",
+                spec.name
+            )
+        });
+    tankless.avg_water_draw_l_per_day.unwrap_or_else(|| {
+        panic!(
+            "tankless water heater '{}' requires typed avg_water_draw_l_per_day to normalize draw schedule fractions",
+            spec.name
+        )
+    })
+}
+
+fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> f64 {
+    match spec.name.as_str() {
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => tankless_avg_daily_draw_l(spec),
+        "Electric Resistance Water Heater" => {
+            let typed = spec
+                .typed_config
+                .as_ref()
+                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+            let cfg = typed
+                .typed::<ElectricResistanceWaterHeaterConfig>()
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "electric resistance water heater '{}' typed config failed to decode: {err}",
+                        spec.name
+                    )
+                });
+            cfg.avg_water_draw_l_per_day.unwrap_or_else(|| {
+                panic!(
+                    "electric resistance water heater '{}' requires typed avg_water_draw_l_per_day",
+                    spec.name
+                )
+            })
+        }
+        "Gas Water Heater" => {
+            let typed = spec
+                .typed_config
+                .as_ref()
+                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+            let cfg = typed.typed::<GasWaterHeaterConfig>().unwrap_or_else(|err| {
+                panic!(
+                    "gas water heater '{}' typed config failed to decode: {err}",
+                    spec.name
+                )
+            });
+            cfg.avg_water_draw_l_per_day.unwrap_or_else(|| {
+                panic!(
+                    "gas water heater '{}' requires typed avg_water_draw_l_per_day",
+                    spec.name
+                )
+            })
+        }
+        "Heat Pump Water Heater" => {
+            let typed = spec
+                .typed_config
+                .as_ref()
+                .unwrap_or_else(|| panic!("water heater '{}' requires typed config", spec.name));
+            let cfg = typed
+                .typed::<HeatPumpWaterHeaterConfig>()
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "heat pump water heater '{}' typed config failed to decode: {err}",
+                        spec.name
+                    )
+                });
+            cfg.avg_water_draw_l_per_day.unwrap_or_else(|| {
+                panic!(
+                    "heat pump water heater '{}' requires typed avg_water_draw_l_per_day",
+                    spec.name
+                )
+            })
+        }
+        other => panic!("unsupported water heater type for draw normalization: {other}"),
     }
 }
 
@@ -580,12 +646,6 @@ fn first_present_column(csv_col_map: &HashMap<String, usize>, names: &[&str]) ->
     names
         .iter()
         .find_map(|name| csv_col_map.get(*name).copied())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaterHeaterDrawSource {
-    Fraction,
-    PreScaledLMin,
 }
 
 fn inject_power_schedule(
@@ -790,7 +850,7 @@ fn inject_event_schedule(
             return;
         }
 
-        // Always inject the column index for the stochastic fallback path.
+        // Always inject the column index for the stochastic path.
         spec.parameters.insert(
             "event_window_schedule_col".to_string(),
             Value::from(col_idx as u64),
@@ -907,9 +967,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{DateTime, Duration};
-    use hares_equipment::ConfigPayload;
-    use hares_types::BoundaryPolicy;
-    use hares_types::FuelType;
+    use hares_equipment::{
+        ConfigPayload, ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
+        HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+    };
+    use hares_types::{BoundaryPolicy, FuelType, ScheduleSourceConfig};
     use serde_json::{Map, Value};
     use tempfile::tempdir;
     use tracing_subscriber::fmt::MakeWriter;
@@ -1317,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn constant_fallback_injects_compact_constant_keys() {
+    fn constant_injects_compact_constant_keys() {
         let dir = tempdir().expect("create temp dir");
         let mut schedule = make_schedule(24);
         let mut specs = vec![make_spec("Indoor Lighting", 876.0)];
@@ -1499,23 +1561,158 @@ mod tests {
     }
 
     fn make_water_heater_spec(name: &str, avg_water_draw_l_per_day: f64) -> EquipmentSpec {
-        let mut parameters = Map::new();
-        parameters.insert("annual_electric_kwh".to_string(), Value::from(0.0));
-        parameters.insert(
-            "avg_water_draw_l_per_day".to_string(),
-            Value::from(avg_water_draw_l_per_day),
-        );
+        let typed_config = match name {
+            "Electric Resistance Water Heater" => EquipmentConfig::from_typed(
+                "electric".to_string(),
+                "Electric Resistance Water Heater".to_string(),
+                ElectricResistanceWaterHeaterConfig {
+                    equipment_id: None,
+                    zone_id: None,
+                    loop_id: None,
+                    tank_volume_m3: Some(0.19),
+                    tank_height_m: Some(1.4),
+                    energy_factor: Some(0.92),
+                    uniform_energy_factor: Some(0.94),
+                    heating_capacity_w: Some(4_500.0),
+                    ua_w_per_k: Some(3.0),
+                    setpoint_c: Some(51.67),
+                    deadband_c: None,
+                    max_tank_temp_c: None,
+                    initial_tank_temp_c: None,
+                    tank_nodes: None,
+                    avg_water_draw_l_per_day: Some(avg_water_draw_l_per_day),
+                    draw_flow_rate_kg_s: None,
+                    draw_flow_rate_source: None,
+                    mains_temp_c_source: None,
+                    performance_adjustment: Some(0.95),
+                    zone_type: Some("conditioned".to_string()),
+                    first_hour_rating_m3: Some(0.20),
+                    element_power_w: Some(4_500.0),
+                    element_priority_mode: None,
+                    max_setpoint_ramp_rate_c_per_min: None,
+                },
+            ),
+            "Gas Water Heater" => EquipmentConfig::from_typed(
+                "gas".to_string(),
+                "Gas Water Heater".to_string(),
+                GasWaterHeaterConfig {
+                    equipment_id: None,
+                    zone_id: None,
+                    loop_id: None,
+                    fuel_type: FuelType::Gas,
+                    tank_volume_m3: Some(0.19),
+                    tank_height_m: Some(1.4),
+                    energy_factor: Some(0.82),
+                    uniform_energy_factor: Some(0.84),
+                    heating_capacity_w: Some(11_000.0),
+                    ua_w_per_k: Some(3.0),
+                    setpoint_c: Some(51.67),
+                    deadband_c: None,
+                    max_tank_temp_c: None,
+                    initial_tank_temp_c: None,
+                    tank_nodes: None,
+                    avg_water_draw_l_per_day: Some(avg_water_draw_l_per_day),
+                    draw_flow_rate_kg_s: None,
+                    draw_flow_rate_source: None,
+                    mains_temp_c_source: None,
+                    pilot_power_w: Some(5.0),
+                    flue_loss_fraction: Some(0.12),
+                    skin_loss_fraction: None,
+                    ignition_type: None,
+                    performance_adjustment: Some(0.92),
+                    zone_type: Some("conditioned".to_string()),
+                    first_hour_rating_m3: Some(0.20),
+                },
+            ),
+            "Heat Pump Water Heater" => EquipmentConfig::from_typed(
+                "hpwh".to_string(),
+                "Heat Pump Water Heater".to_string(),
+                HeatPumpWaterHeaterConfig {
+                    equipment_id: None,
+                    zone_id: None,
+                    loop_id: None,
+                    tank_volume_m3: Some(0.24),
+                    tank_height_m: Some(1.5),
+                    cop: Some(3.5),
+                    backup_element_power_w: Some(4_500.0),
+                    ua_w_per_k: Some(2.5),
+                    setpoint_c: Some(51.67),
+                    deadband_c: None,
+                    max_tank_temp_c: None,
+                    initial_tank_temp_c: None,
+                    tank_nodes: None,
+                    tempering_valve_setpoint_c: Some(51.67),
+                    avg_water_draw_l_per_day: Some(avg_water_draw_l_per_day),
+                    draw_flow_rate_kg_s: None,
+                    compressor_power_w: None,
+                    backup_enable_offset_c: None,
+                    min_ambient_temp_c: None,
+                    max_ambient_temp_c: None,
+                    min_on_time_s: None,
+                    min_off_time_s: None,
+                    hp_only_mode: None,
+                    element_hp_control_mode: None,
+                    fan_power_w: None,
+                    parasitic_power_w: None,
+                    backup_efficiency: None,
+                    shr: None,
+                    lost_heat_fraction: None,
+                    wall_heat_fraction: None,
+                    capacity_biquadratic_coeffs: None,
+                    cop_biquadratic_coeffs: None,
+                    performance_adjustment: Some(0.92),
+                    zone_type: Some("conditioned".to_string()),
+                    first_hour_rating_m3: Some(0.20),
+                },
+            ),
+            other => panic!("unsupported water heater type for schedule test: {other}"),
+        };
         EquipmentSpec {
             name: name.to_string(),
-            fuel_type: FuelType::Electric,
-            parameters,
+            fuel_type: if name == "Gas Water Heater" {
+                FuelType::Gas
+            } else {
+                FuelType::Electric
+            },
+            parameters: Map::new(),
             zip_params: None,
-            typed_config: None,
+            typed_config: Some(typed_config),
+        }
+    }
+
+    fn make_typed_tankless_spec(avg_water_draw_l_per_day: Option<f64>) -> EquipmentSpec {
+        let typed_config = EquipmentConfig::from_typed(
+            "tankless".to_string(),
+            "Tankless Water Heater".to_string(),
+            TanklessWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: None,
+                loop_id: None,
+                fuel_type: FuelType::Electric,
+                energy_factor: Some(1.0),
+                uniform_energy_factor: None,
+                heating_capacity_w: Some(20_000.0),
+                setpoint_c: Some(60.0),
+                parasitic_power_w: Some(0.0),
+                performance_adjustment: Some(1.0),
+                inlet_temp_c: Some(25.0),
+                draw_flow_rate_kg_s: Some(0.10),
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
+                avg_water_draw_l_per_day,
+            },
+        );
+        EquipmentSpec {
+            name: "Tankless Water Heater".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            zip_params: None,
+            typed_config: Some(typed_config),
         }
     }
 
     #[test]
-    fn storage_water_heaters_receive_draw_and_mains_schedule_columns() {
+    fn water_heaters_receive_draw_and_mains_schedule_columns() {
         let mut schedule = make_schedule_with_water_heater_columns(
             "hot_water_fixtures",
             &[0.2, 0.0],
@@ -1525,58 +1722,69 @@ mod tests {
             make_water_heater_spec("Electric Resistance Water Heater", 200.0),
             make_water_heater_spec("Gas Water Heater", 200.0),
             make_water_heater_spec("Heat Pump Water Heater", 200.0),
-            make_spec("Tankless Water Heater", 0.0),
+            make_typed_tankless_spec(Some(200.0)),
         ];
 
         inject_schedule_into_specs(&mut specs, &mut schedule, None);
 
         for spec in specs.iter().take(3) {
-            let draw_col = spec
-                .parameters
-                .get("draw_flow_rate_schedule_col")
-                .and_then(Value::as_u64);
-            let draw_rate_col = spec
-                .parameters
-                .get("draw_rate_schedule_col")
-                .and_then(Value::as_u64);
-            let mains_col = spec
-                .parameters
-                .get("mains_temp_schedule_col")
-                .and_then(Value::as_u64);
-            assert!(
-                draw_col.is_some(),
-                "{} should receive draw_flow_rate_schedule_col",
-                spec.name
-            );
-            // The draw column should point to a derived column, not the raw fraction column (0).
-            assert!(
-                draw_col.unwrap() >= 2,
-                "{} draw_flow_rate_schedule_col should point to a derived column, got {}",
-                spec.name,
-                draw_col.unwrap()
-            );
-            assert_eq!(
-                draw_rate_col, draw_col,
-                "{} should mirror draw_rate_schedule_col and draw_flow_rate_schedule_col",
-                spec.name
-            );
-            assert_eq!(
-                mains_col,
-                Some(1),
-                "{} should receive mains_temp_schedule_col=1",
-                spec.name
-            );
+            let typed = spec
+                .typed_config
+                .as_ref()
+                .expect("storage water heater should retain typed config");
+            if spec.name == "Heat Pump Water Heater" {
+                let cfg = typed
+                    .typed::<HeatPumpWaterHeaterConfig>()
+                    .expect("typed HPWH config should decode");
+                assert_eq!(cfg.draw_flow_rate_kg_s, None);
+                assert_eq!(cfg.avg_water_draw_l_per_day, Some(200.0));
+            } else if spec.name == "Electric Resistance Water Heater" {
+                let cfg = typed
+                    .typed::<ElectricResistanceWaterHeaterConfig>()
+                    .expect("typed resistance config should decode");
+                assert!(matches!(
+                    cfg.draw_flow_rate_source,
+                    Some(ScheduleSourceConfig::ColumnRef { col_idx, .. }) if col_idx >= 2
+                ));
+                assert!(matches!(
+                    cfg.mains_temp_c_source,
+                    Some(ScheduleSourceConfig::ColumnRef { col_idx: 1, .. })
+                ));
+            } else {
+                let cfg = typed
+                    .typed::<GasWaterHeaterConfig>()
+                    .expect("typed gas water heater config should decode");
+                assert!(matches!(
+                    cfg.draw_flow_rate_source,
+                    Some(ScheduleSourceConfig::ColumnRef { col_idx, .. }) if col_idx >= 2
+                ));
+                assert!(matches!(
+                    cfg.mains_temp_c_source,
+                    Some(ScheduleSourceConfig::ColumnRef { col_idx: 1, .. })
+                ));
+            }
         }
 
+        let tankless = specs[3]
+            .typed_config
+            .as_ref()
+            .expect("tankless should retain typed config");
+        let tankless = tankless
+            .typed::<TanklessWaterHeaterConfig>()
+            .expect("typed tankless config should decode");
         assert!(
-            !specs[3]
-                .parameters
-                .contains_key("draw_flow_rate_schedule_col"),
-            "tankless should not receive storage draw schedule columns"
+            matches!(
+                tankless.draw_flow_rate_source,
+                Some(ScheduleSourceConfig::ColumnRef { col_idx, .. }) if col_idx >= 2
+            ),
+            "tankless draw_flow_rate_source should point at derived schedule column"
         );
         assert!(
-            !specs[3].parameters.contains_key("mains_temp_schedule_col"),
-            "tankless should not receive storage mains schedule columns"
+            matches!(
+                tankless.mains_temp_c_source,
+                Some(ScheduleSourceConfig::ColumnRef { col_idx: 1, .. })
+            ),
+            "tankless mains_temp_c_source should point at the mains schedule column"
         );
     }
 
@@ -1603,11 +1811,15 @@ mod tests {
         inject_schedule_into_specs(&mut specs, &mut schedule, None);
 
         let draw_col_idx = specs[0]
-            .parameters
-            .get("draw_flow_rate_schedule_col")
-            .and_then(Value::as_u64)
-            .expect("draw_flow_rate_schedule_col must be present")
-            as usize;
+            .typed_config
+            .as_ref()
+            .and_then(|typed| typed.typed::<ElectricResistanceWaterHeaterConfig>().ok())
+            .and_then(|cfg| cfg.draw_flow_rate_source)
+            .and_then(|source| match source {
+                ScheduleSourceConfig::ColumnRef { col_idx, .. } => Some(col_idx),
+                _ => None,
+            })
+            .expect("typed draw_flow_rate_source must be present");
 
         let resolved = &schedule.columns[draw_col_idx];
         assert_eq!(resolved.len(), fractions.len());
@@ -1630,47 +1842,15 @@ mod tests {
     }
 
     #[test]
-    fn water_heater_delivered_l_min_converted_once_to_kg_s() {
-        let delivered_l_min = vec![6.0, 12.0, 0.0, 3.0];
-        let mains = vec![12.0; delivered_l_min.len()];
+    #[should_panic(expected = "requires typed avg_water_draw_l_per_day")]
+    fn tankless_draw_fractions_require_typed_avg_water_draw() {
         let mut schedule = make_schedule_with_water_heater_columns(
-            "hot_water_delivered_l_min",
-            &delivered_l_min,
-            &mains,
+            "hot_water_fixtures",
+            &[0.2, 0.0],
+            &[11.0, 12.0],
         );
-        let mut specs = vec![make_water_heater_spec(
-            "Electric Resistance Water Heater",
-            200.0,
-        )];
+        let mut specs = vec![make_typed_tankless_spec(None)];
 
         inject_schedule_into_specs(&mut specs, &mut schedule, None);
-
-        let draw_col_idx = specs[0]
-            .parameters
-            .get("draw_flow_rate_schedule_col")
-            .and_then(Value::as_u64)
-            .expect("draw_flow_rate_schedule_col must be present")
-            as usize;
-
-        let resolved = &schedule.columns[draw_col_idx];
-        assert_eq!(resolved.len(), delivered_l_min.len());
-
-        for (i, &l_min) in delivered_l_min.iter().enumerate() {
-            let expected_kg_s = (l_min.max(0.0)) / 60.0;
-            assert!(
-                (resolved[i] - expected_kg_s).abs() < 1e-12,
-                "timestep {i}: expected {expected_kg_s:.8e} kg/s, got {:.8e}",
-                resolved[i]
-            );
-        }
-
-        assert_eq!(
-            specs[0]
-                .parameters
-                .get("draw_rate_schedule_col")
-                .and_then(Value::as_u64),
-            Some(draw_col_idx as u64),
-            "SI draw column index must be mirrored to draw_rate_schedule_col"
-        );
     }
 }

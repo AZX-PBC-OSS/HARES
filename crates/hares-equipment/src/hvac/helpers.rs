@@ -167,6 +167,26 @@ pub fn apply_heating_control_unchecked(
     Ok(())
 }
 
+/// Apply solver-driven ideal heating capacity for simple heating equipment.
+///
+/// `capacity_w` is interpreted as delivered heating capacity [W]. The control is
+/// converted to a duty-cycle fraction against the rated thermal capacity.
+pub fn apply_simple_heating_ideal_capacity_control(
+    hvac: &mut HvacEquipment,
+    signal: &ControlSignal,
+    rated_capacity_w: f64,
+) {
+    if let ControlSignal::IdealCapacity { capacity_w } = signal {
+        let duty = if rated_capacity_w > 0.0 {
+            capacity_w.max(0.0) / rated_capacity_w
+        } else {
+            0.0
+        };
+        hvac.thermostat.use_ideal_capacity = true;
+        hvac.duty_cycle = duty.clamp(0.0, 1.0);
+    }
+}
+
 /// Resolve duct DSE from equipment config.
 ///
 /// Checks for a direct `duct_dse` override first, then builds ASHRAE 152

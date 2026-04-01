@@ -1,21 +1,17 @@
 //! Water heater resolution from HPXML into canonical equipment specs.
 
 use serde::Serialize;
-#[cfg(test)]
-use serde_json::Value;
 
 use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, EquipmentConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
 };
-use hares_types::FuelType;
+use hares_types::{FuelType, normalize_ascii};
 
 use super::building::XmlNode;
 use super::equipment::EquipmentSpec;
 use super::water_heater_ua::{UaInputs, WhCategory, ua_from_energy_factor};
-use super::xml_helpers::{
-    child_f64, child_temperature_c, child_text, descendants_named, parse_fuel,
-};
+use super::xml_helpers::{child_f64, child_temperature_c, child_text, descendants_named};
 use hares_physics::units as conv;
 
 use crate::defaults::DefaultsStore;
@@ -30,7 +26,7 @@ pub(super) fn resolve_water_heaters(
     let avg_water_draw_l_per_day = parse_avg_water_draw_l_per_day(details);
 
     for wh in descendants_named(details, "WaterHeatingSystem") {
-        let fuel = parse_fuel(child_text(wh, "FuelType").as_deref());
+        let fuel = parse_water_heater_fuel(wh)?;
         let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
         let name = canonical_water_heater_name(&wh_type, fuel)?;
         let setpoint_c = child_temperature_c(wh);
@@ -105,6 +101,8 @@ pub(super) fn resolve_water_heaters(
                     tank_nodes: None,
                     avg_water_draw_l_per_day,
                     draw_flow_rate_kg_s: None,
+                    draw_flow_rate_source: None,
+                    mains_temp_c_source: None,
                     pilot_power_w: child_f64(wh, "PilotPower"),
                     flue_loss_fraction: child_f64(wh, "FlueLossFraction"),
                     skin_loss_fraction: None,
@@ -133,6 +131,8 @@ pub(super) fn resolve_water_heaters(
                     tank_nodes: None,
                     avg_water_draw_l_per_day,
                     draw_flow_rate_kg_s: None,
+                    draw_flow_rate_source: None,
+                    mains_temp_c_source: None,
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
@@ -157,6 +157,8 @@ pub(super) fn resolve_water_heaters(
                     performance_adjustment: Some(perf_adj),
                     inlet_temp_c: None,
                     draw_flow_rate_kg_s: None,
+                    draw_flow_rate_source: None,
+                    mains_temp_c_source: None,
                     avg_water_draw_l_per_day,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
@@ -198,7 +200,7 @@ pub(super) fn resolve_water_heaters(
                     max_ambient_temp_c: None,
                     min_on_time_s: None,
                     min_off_time_s: None,
-                    hp_only_mode: None,
+                    hp_only_mode: Some(low_power),
                     element_hp_control_mode: None,
                     fan_power_w: None,
                     parasitic_power_w: None,
@@ -315,6 +317,21 @@ where
         parameters,
         zip_params: defaults.zip_params(&name).cloned(),
         typed_config: Some(typed_config),
+    }
+}
+
+fn parse_water_heater_fuel(wh: &XmlNode) -> std::result::Result<FuelType, super::HpxmlError> {
+    let raw = child_text(wh, "FuelType").ok_or_else(|| {
+        super::HpxmlError::Parse("WaterHeatingSystem is missing required FuelType".to_string())
+    })?;
+    match normalize_ascii(&raw).as_str() {
+        "electricity" | "electric" | "none" => Ok(FuelType::Electric),
+        "natural gas" | "natural_gas" | "gas" => Ok(FuelType::Gas),
+        "propane" => Ok(FuelType::Propane),
+        "oil" | "fuel oil" | "fuel_oil" => Ok(FuelType::Oil),
+        other => Err(super::HpxmlError::Parse(format!(
+            "unsupported water-heater FuelType '{other}'"
+        ))),
     }
 }
 
@@ -456,6 +473,13 @@ fn canonical_water_heater_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hpxml::parse_xml_document;
+    use serde_json::Value;
+
+    use hares_physics::units as conv;
+    use hares_types::FuelType;
+
+    use crate::defaults::DefaultsStore;
 
     #[test]
     fn propane_storage_water_heater_maps_to_gas_class() {
@@ -484,6 +508,8 @@ mod tests {
             tank_nodes: None,
             avg_water_draw_l_per_day: Some(227.0),
             draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             pilot_power_w: None,
             flue_loss_fraction: None,
             skin_loss_fraction: None,
@@ -513,6 +539,156 @@ mod tests {
                 .get("avg_water_draw_l_per_day")
                 .and_then(Value::as_f64),
             Some(227.0)
+        );
+    }
+
+    #[test]
+    fn typed_spec_preserves_explicit_none_schedule_sources() {
+        let cfg = ElectricResistanceWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            energy_factor: None,
+            uniform_energy_factor: None,
+            heating_capacity_w: None,
+            ua_w_per_k: None,
+            setpoint_c: Some(51.67),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            element_power_w: None,
+            max_setpoint_ramp_rate_c_per_min: None,
+            element_priority_mode: None,
+        };
+        let spec = typed_spec(
+            "Electric Resistance Water Heater".to_string(),
+            FuelType::Electric,
+            cfg,
+            &DefaultsStore::empty(),
+        );
+        assert_eq!(
+            spec.parameters.get("draw_flow_rate_source"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            spec.parameters.get("mains_temp_c_source"),
+            Some(&Value::Null)
+        );
+        let typed_cfg: ElectricResistanceWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed resistance config")
+            .typed()
+            .expect("typed resistance decode");
+        assert!(typed_cfg.draw_flow_rate_source.is_none());
+        assert!(typed_cfg.mains_temp_c_source.is_none());
+    }
+
+    #[test]
+    fn resolve_water_heaters_parses_realistic_tankless_xml() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <extension>
+                      <WaterFixturesUsageMultiplier>1.05</WaterFixturesUsageMultiplier>
+                    </extension>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>electricity</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                      <PerformanceAdjustment>0.93</PerformanceAdjustment>
+                      <Location>attic</Location>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("water heaters must resolve");
+
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Tankless Water Heater")
+            .expect("tankless spec must be emitted");
+        let cfg: TanklessWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed tankless config");
+
+        assert_eq!(cfg.setpoint_c, Some(conv::temperature_f_to_c(120.0)));
+        assert_eq!(cfg.performance_adjustment, Some(0.93));
+        assert!(
+            cfg.avg_water_draw_l_per_day
+                .expect("avg draw should be derived")
+                > 0.0
+        );
+        assert!(cfg.draw_flow_rate_source.is_none());
+        assert!(cfg.mains_temp_c_source.is_none());
+    }
+
+    #[test]
+    fn invalid_water_heater_fuel_is_rejected() {
+        let wh = XmlNode {
+            name: "WaterHeatingSystem".to_string(),
+            attrs: Default::default(),
+            text: String::new(),
+            children: vec![
+                XmlNode {
+                    name: "FuelType".to_string(),
+                    attrs: Default::default(),
+                    text: "mystery-fuel".to_string(),
+                    children: vec![],
+                },
+                XmlNode {
+                    name: "WaterHeaterType".to_string(),
+                    attrs: Default::default(),
+                    text: "storage water heater".to_string(),
+                    children: vec![],
+                },
+            ],
+        };
+
+        let err = parse_water_heater_fuel(&wh).expect_err("invalid fuel must be rejected");
+        assert!(
+            err.to_string()
+                .contains("unsupported water-heater FuelType")
         );
     }
 }

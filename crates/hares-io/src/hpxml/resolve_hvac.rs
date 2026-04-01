@@ -30,14 +30,17 @@ const HSPF2_TO_HSPF_FACTOR: f64 = 1.0 / 0.95;
 fn airflow_defect_multiplier(params: &Map<String, Value>) -> f64 {
     params
         .get("airflow_defect_ratio")
-        .or_else(|| params.get("AirflowDefectRatio"))
         .and_then(Value::as_f64)
         .filter(|v| v.is_finite())
         .map(|v| 1.0 + v)
         .unwrap_or(1.0)
 }
 
-fn airflow_m3_s_per_w_from_explicit_cfm(params: &Map<String, Value>, key: &str, capacity_w: f64) -> Option<f64> {
+fn airflow_m3_s_per_w_from_explicit_cfm(
+    params: &Map<String, Value>,
+    key: &str,
+    capacity_w: f64,
+) -> Option<f64> {
     if !capacity_w.is_finite() || capacity_w <= 0.0 {
         return None;
     }
@@ -222,7 +225,8 @@ fn compute_duct_dse_params(building: &Building) -> DuctDseParams {
 ///
 /// DSE is pre-computed here using ASHRAE 152 so that typed-config equipment
 /// init paths (which only see `DuctConfig.dse_heat/dse_cool`) apply duct
-/// losses correctly. Uses a default airflow based on equipment type conventions.
+/// losses correctly. Uses explicit HPXML airflow when present, otherwise a
+/// nominal airflow based on equipment type conventions.
 ///
 /// Returns `DuctConfig { dse_heat: None, dse_cool: None }` when no duct zone
 /// type was recorded (i.e., ducts are in conditioned space or absent).
@@ -232,6 +236,7 @@ fn compute_duct_config(
     is_heating: bool,
     n_speeds: u8,
     is_heat_pump: bool,
+    explicit_airflow_m3_s_per_w: Option<f64>,
 ) -> DuctConfig {
     use hares_physics::ashrae152::{Ashrae152ZoneType, DuctDseInput, calculate_dse};
     use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
@@ -275,7 +280,9 @@ fn compute_duct_config(
     }
 
     let cfm_per_ton = if is_heating { 350.0_f64 } else { 400.0_f64 };
-    let fan_flow_m3_s = capacity_w * (cfm_per_ton * CFM_TO_M3_S / W_PER_TON);
+    let fan_flow_m3_s = explicit_airflow_m3_s_per_w
+        .map(|airflow| capacity_w * airflow)
+        .unwrap_or_else(|| capacity_w * (cfm_per_ton * CFM_TO_M3_S / W_PER_TON));
 
     let input = DuctDseInput {
         zone_type,
@@ -484,7 +491,20 @@ fn try_build_gas_furnace_config(
     let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
-    let ducts = compute_duct_config(duct_params, capacity_w, true, n_speeds, false);
+    let airflow_m3_s_per_w =
+        airflow_m3_s_per_w_from_explicit_cfm(params, "heating_airflow_cfm", capacity_w)
+            .unwrap_or_else(|| {
+                350.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
+            });
+    let mut ducts = compute_duct_config(
+        duct_params,
+        capacity_w,
+        true,
+        n_speeds,
+        false,
+        Some(airflow_m3_s_per_w),
+    );
+    ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
     let cfg = GasFurnaceConfig {
         equipment_id: None,
@@ -512,7 +532,20 @@ fn try_build_electric_furnace_config(
     let heating_efficiency = resistance_efficiency_from_params(params);
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
-    let ducts = compute_duct_config(duct_params, capacity_w, true, n_speeds, false);
+    let airflow_m3_s_per_w =
+        airflow_m3_s_per_w_from_explicit_cfm(params, "heating_airflow_cfm", capacity_w)
+            .unwrap_or_else(|| {
+                350.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
+            });
+    let mut ducts = compute_duct_config(
+        duct_params,
+        capacity_w,
+        true,
+        n_speeds,
+        false,
+        Some(airflow_m3_s_per_w),
+    );
+    ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
     let cfg = ElectricFurnaceConfig {
         equipment_id: None,
@@ -680,11 +713,20 @@ fn try_build_central_ac_config(
         .map(str::to_string);
     let startup_cd = params.get("startup_cd").and_then(Value::as_f64);
     let fraction_load_served = params.get("fraction_load_served").and_then(Value::as_f64);
-    let duct = compute_duct_config(duct_params, capacity_w, false, n_speeds, false);
     let curve_bounds = extract_curve_bounds(params);
     let airflow_m3_s_per_w =
         airflow_m3_s_per_w_from_explicit_cfm(params, "cooling_airflow_cfm", capacity_w)
-            .unwrap_or_else(|| 400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params));
+            .unwrap_or_else(|| {
+                400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
+            });
+    let duct = compute_duct_config(
+        duct_params,
+        capacity_w,
+        false,
+        n_speeds,
+        false,
+        Some(airflow_m3_s_per_w),
+    );
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
@@ -741,7 +783,9 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
     let curve_bounds = extract_curve_bounds(params);
     let airflow_m3_s_per_w =
         airflow_m3_s_per_w_from_explicit_cfm(params, "cooling_airflow_cfm", capacity_w)
-            .unwrap_or_else(|| 320.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params));
+            .unwrap_or_else(|| {
+                320.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
+            });
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let cfg = RoomAcConfig {
@@ -831,18 +875,15 @@ fn try_build_heat_pump_heater_config(
         .and_then(Value::as_f64);
     let curve_bounds = extract_curve_bounds(params);
     let ref_cap_w = heating_capacity_w.or(cooling_capacity_w).unwrap_or(0.0);
-    let airflow_m3_s_per_w = airflow_m3_s_per_w_from_explicit_cfm(
-        params,
-        "heating_airflow_cfm",
-        ref_cap_w,
-    )
-    .unwrap_or_else(|| {
-        (if is_mini_split {
-            312.0_f64 * CFM_TO_M3_S / W_PER_TON
-        } else {
-            400.0_f64 * CFM_TO_M3_S / W_PER_TON
-        }) * airflow_defect_multiplier(params)
-    });
+    let airflow_m3_s_per_w =
+        airflow_m3_s_per_w_from_explicit_cfm(params, "heating_airflow_cfm", ref_cap_w)
+            .unwrap_or_else(|| {
+                (if is_mini_split {
+                    312.0_f64 * CFM_TO_M3_S / W_PER_TON
+                } else {
+                    400.0_f64 * CFM_TO_M3_S / W_PER_TON
+                }) * airflow_defect_multiplier(params)
+            });
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
@@ -850,7 +891,14 @@ fn try_build_heat_pump_heater_config(
     let duct = if is_mini_split {
         DuctConfig::default()
     } else {
-        compute_duct_config(duct_params, ref_cap, true, n_speeds, true)
+        compute_duct_config(
+            duct_params,
+            ref_cap,
+            true,
+            n_speeds,
+            true,
+            Some(airflow_m3_s_per_w),
+        )
     };
 
     let ochre_class = if is_mini_split {
@@ -941,18 +989,15 @@ fn try_build_heat_pump_cooler_config(
         .and_then(Value::as_f64);
     let curve_bounds = extract_curve_bounds(params);
     let ref_cap_w = cooling_capacity_w.or(heating_capacity_w).unwrap_or(0.0);
-    let airflow_m3_s_per_w = airflow_m3_s_per_w_from_explicit_cfm(
-        params,
-        "cooling_airflow_cfm",
-        ref_cap_w,
-    )
-    .unwrap_or_else(|| {
-        (if is_mini_split {
-            312.0_f64 * CFM_TO_M3_S / W_PER_TON
-        } else {
-            400.0_f64 * CFM_TO_M3_S / W_PER_TON
-        }) * airflow_defect_multiplier(params)
-    });
+    let airflow_m3_s_per_w =
+        airflow_m3_s_per_w_from_explicit_cfm(params, "cooling_airflow_cfm", ref_cap_w)
+            .unwrap_or_else(|| {
+                (if is_mini_split {
+                    312.0_f64 * CFM_TO_M3_S / W_PER_TON
+                } else {
+                    400.0_f64 * CFM_TO_M3_S / W_PER_TON
+                }) * airflow_defect_multiplier(params)
+            });
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
@@ -960,7 +1005,14 @@ fn try_build_heat_pump_cooler_config(
     let duct = if is_mini_split {
         DuctConfig::default()
     } else {
-        compute_duct_config(duct_params, ref_cap, false, n_speeds, true)
+        compute_duct_config(
+            duct_params,
+            ref_cap,
+            false,
+            n_speeds,
+            true,
+            Some(airflow_m3_s_per_w),
+        )
     };
 
     let ochre_class = if is_mini_split {
@@ -2595,6 +2647,40 @@ mod tests {
     }
 
     #[test]
+    fn gas_furnace_builder_uses_explicit_heating_airflow() {
+        let mut params = minimal_furnace_params(0.96, 24_000.0);
+        params.insert("airflow_defect_ratio".to_string(), json!(-0.25));
+        params.insert("heating_airflow_cfm".to_string(), json!(1_200.0));
+
+        let duct_params = DuctDseParams {
+            zone_id: Some(1),
+            zone_type: Some("attic_unvented".to_string()),
+            house_volume_m3: 400.0,
+            supply_leakage_frac: 0.08,
+            supply_area_m2: 20.0,
+            supply_r_m2_k_w: 0.5,
+            return_leakage_frac: 0.05,
+            return_area_m2: 12.0,
+            return_r_m2_k_w: 0.5,
+            latitude_deg: 40.0,
+            longitude_deg: -105.0,
+        };
+        let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
+            .expect("gas furnace builder must succeed with explicit airflow");
+        use hares_equipment::hvac::heating_config::GasFurnaceConfig;
+        let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
+        let expected = 1_200.0 * CFM_TO_M3_S / 24_000.0;
+        assert!(
+            (cfg.ducts.airflow_m3_s_per_w.expect("airflow") - expected).abs() < 1e-12,
+            "explicit heating airflow must be converted from CFM to SI and ignore defect ratio"
+        );
+        assert!(
+            cfg.ducts.dse_heat.is_some(),
+            "duct DSE must still be computed"
+        );
+    }
+
+    #[test]
     fn central_ac_builder_produces_typed_config_with_correct_eir() {
         let params = minimal_central_ac_params(16.0, 12_000.0);
         let duct_params = DuctDseParams::default();
@@ -2913,6 +2999,34 @@ mod tests {
         assert_eq!(cfg.cooling_capacity_w, Some(8_000.0));
         assert_eq!(cfg.fraction_heating_load_served, Some(0.9));
         assert_eq!(cfg.fraction_cooling_load_served, Some(0.9));
+    }
+
+    #[test]
+    fn ideal_hvac_builder_preserves_heating_only_thermostat_source() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), json!(9_000.0));
+        params.insert(
+            "heating_setpoint_source".to_string(),
+            daily_profile_source([19.5; 24], [19.5; 24]),
+        );
+
+        let ec = try_build_ideal_hvac_config("Ideal HVAC", &params)
+            .expect("Ideal HVAC typed config should be built");
+
+        use hares_equipment::hvac::heating_config::IdealHvacConfig;
+        let cfg: IdealHvacConfig = ec.typed().expect("typed ideal config");
+        assert_eq!(cfg.heating_setpoint_c, Some(19.5));
+        assert_eq!(
+            cfg.heating_setpoint_source,
+            Some(ScheduleSourceConfig::DailyProfile {
+                weekday: [19.5; 24],
+                weekend: [19.5; 24],
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            })
+        );
+        assert_eq!(cfg.cooling_setpoint_c, None);
+        assert_eq!(cfg.cooling_setpoint_source, None);
     }
 
     #[test]

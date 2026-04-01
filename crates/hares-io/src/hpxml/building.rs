@@ -1553,10 +1553,6 @@ fn assign_walls_to_zones(boundaries: &[Boundary], zones: &mut HashMap<String, Zo
 
 fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
     let mut ducts = Vec::new();
-    // Legacy format: <DuctSystem> at BuildingDetails level.
-    details.descendants("DuctSystem", &mut ducts);
-    // HPXML 4.x format: <HVACDistribution>/<DistributionSystemType>/<AirDistribution>/<Ducts>.
-    // DuctLeakageMeasurement is a sibling of Ducts under AirDistribution, matched by DuctType.
     let mut air_dist_nodes = Vec::new();
     details.descendants("AirDistribution", &mut air_dist_nodes);
     let mut leakage_by_type: std::collections::HashMap<String, f64> =
@@ -1593,25 +1589,11 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
 
     for duct_node in ducts {
         let id = element_id(duct_node).unwrap_or_else(|| "unknown".to_string());
-        // Try child elements first (legacy), then HPXML 4.x sibling lookup.
         let duct_type_text = duct_node
             .first_descendant("DuctType")
             .map(|n| normalize_ascii(&n.text))
             .unwrap_or_default();
-        let leakage_fraction = duct_node
-            .first_descendant("LeakageFraction")
-            .and_then(XmlNode::text_as_f64)
-            .or_else(|| {
-                duct_node
-                    .first_descendant("DuctLeakage")
-                    .and_then(XmlNode::text_as_f64)
-            })
-            .or_else(|| {
-                duct_node
-                    .first_descendant("AnnualDuctLeakageValue")
-                    .and_then(XmlNode::text_as_f64)
-            })
-            .or_else(|| leakage_by_type.get(&duct_type_text).copied());
+        let leakage_fraction = leakage_by_type.get(&duct_type_text).copied();
 
         let insulation_r_value_m2_k_w = duct_node
             .first_descendant("DuctInsulationRValue")
@@ -2041,7 +2023,7 @@ fn normalize_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoundaryType, HpxmlError, ZoneType, parse_building};
+    use super::{BoundaryType, DuctType, HpxmlError, ZoneType, parse_building};
 
     const SAMPLE_XML: &str = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
@@ -2132,12 +2114,40 @@ mod tests {
       <Systems>
         <HVAC>
           <HVACDistribution>
-            <DuctSystem>
-              <SystemIdentifier id="Duct1"/>
-              <LeakageFraction>0.12</LeakageFraction>
-              <DuctInsulationRValue>8</DuctInsulationRValue>
-              <DuctLocation>attic vented</DuctLocation>
-            </DuctSystem>
+            <DistributionSystemType>
+              <AirDistribution>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="Leak1"/>
+                  <DuctType>supply</DuctType>
+                  <DuctLeakage>
+                    <Value>12</Value>
+                    <Units>Percent</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="Leak2"/>
+                  <DuctType>return</DuctType>
+                  <DuctLeakage>
+                    <Value>5</Value>
+                    <Units>Percent</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
+                <Ducts>
+                  <SystemIdentifier id="SupplyDuct"/>
+                  <DuctType>supply</DuctType>
+                  <DuctInsulationRValue>8</DuctInsulationRValue>
+                  <DuctSurfaceArea>50</DuctSurfaceArea>
+                  <DuctLocation>attic vented</DuctLocation>
+                </Ducts>
+                <Ducts>
+                  <SystemIdentifier id="ReturnDuct"/>
+                  <DuctType>return</DuctType>
+                  <DuctInsulationRValue>4</DuctInsulationRValue>
+                  <DuctSurfaceArea>30</DuctSurfaceArea>
+                  <DuctLocation>attic vented</DuctLocation>
+                </Ducts>
+              </AirDistribution>
+            </DistributionSystemType>
           </HVACDistribution>
           <HeatingSystem>
             <HeatingCapacity>60</HeatingCapacity>
@@ -2210,15 +2220,21 @@ mod tests {
             .iter()
             .find(|z| matches!(z.zone_type, ZoneType::Attic))
             .expect("attic zone expected");
-        assert_eq!(attic.duct_systems.len(), 1);
-        assert!(
-            (attic.duct_systems[0]
-                .insulation_r_value_m2_k_w
-                .unwrap_or_default()
-                - 1.4088)
-                .abs()
-                < 1e-4
-        );
+        assert_eq!(attic.duct_systems.len(), 2);
+        let supply = attic
+            .duct_systems
+            .iter()
+            .find(|d| d.duct_type == DuctType::Supply)
+            .expect("supply duct expected");
+        let return_duct = attic
+            .duct_systems
+            .iter()
+            .find(|d| d.duct_type == DuctType::Return)
+            .expect("return duct expected");
+        assert_eq!(supply.leakage_fraction, Some(0.12));
+        assert_eq!(return_duct.leakage_fraction, Some(0.05));
+        assert!((supply.insulation_r_value_m2_k_w.unwrap_or_default() - 1.4088).abs() < 1e-4);
+        assert!((return_duct.insulation_r_value_m2_k_w.unwrap_or_default() - 0.7044).abs() < 1e-4);
 
         assert_eq!(building.windows.len(), 1);
         assert!((building.windows[0].area_m2 - 1.393_545_6).abs() < 1e-6);

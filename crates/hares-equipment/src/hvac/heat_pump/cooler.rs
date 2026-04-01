@@ -11,7 +11,6 @@ use hares_types::{
 
 use crate::{Equipment, EquipmentConfig, Telemetry};
 
-use super::super::SpeedControlMode;
 use super::super::ac_config::{CentralAirConditionerConfig, HeatPumpCoolerConfig};
 use super::super::air_conditioner::AirConditioner;
 use super::super::helpers::{equipment_id_from_config, zone_id_from_config};
@@ -60,6 +59,11 @@ impl HpCooler {
                 stage: ExecutionStage::Thermal,
                 control_capabilities: ControlCapabilities::THERMAL_SETPOINT
                     | ControlCapabilities::THERMAL_SETPOINT_DELTA
+                    | ControlCapabilities::DUTY_CYCLE
+                    | ControlCapabilities::LOAD_FRACTION
+                    | ControlCapabilities::POWER_LIMIT
+                    | ControlCapabilities::MODE_OVERRIDE
+                    | ControlCapabilities::DEMAND_RESPONSE
                     | ControlCapabilities::IDEAL_CAPACITY,
                 core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
                 telemetry_fields: inner.descriptor().telemetry_fields.clone(),
@@ -131,7 +135,7 @@ impl HpCooler {
             capacity_w,
             eir,
             shr: hp_cfg.shr,
-            number_of_speeds: hp_cfg.number_of_speeds,
+            number_of_speeds: hp_cfg.effective_number_of_speeds(),
             stage_capacities_w: hp_cfg.stage_cooling_capacities_w.clone(),
             stage_eirs: hp_cfg.stage_cooling_eirs.clone(),
             stage_shrs: hp_cfg.stage_shrs.clone(),
@@ -149,7 +153,7 @@ impl HpCooler {
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.duct.clone(),
             system_type: hp_cfg.is_mini_split.then(|| "mini-split".to_string()),
-            startup_cd: None,
+            startup_cd: hp_cfg.derived_cooling_startup_cd(),
             biquadratic_x1_min: hp_cfg.biquadratic_x1_min,
             biquadratic_x1_max: hp_cfg.biquadratic_x1_max,
             biquadratic_x2_min: hp_cfg.biquadratic_x2_min,
@@ -179,21 +183,9 @@ impl Equipment for HpCooler {
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         let typed_hp_cfg = config.require_typed::<HeatPumpCoolerConfig>("Heat Pump Cooler")?;
+        typed_hp_cfg.validate()?;
         let mapped = Self::typed_hp_to_central_ac_config(config, &typed_hp_cfg)?;
         self.inner.init(&mapped, env)?;
-
-        if typed_hp_cfg.is_mini_split {
-            self.inner.core.hvac.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
-            let cap = self.inner.core.hvac.cooling_capacities_w.clone();
-            let eir = self.inner.core.hvac.eir_by_stage.clone();
-            if cap.len() == 1 {
-                let base_cap = cap[0];
-                let base_eir = eir[0];
-                self.inner.core.hvac.cooling_capacities_w =
-                    vec![base_cap * 0.25, base_cap * 0.5, base_cap * 0.75, base_cap];
-                self.inner.core.hvac.eir_by_stage = vec![base_eir; 4];
-            }
-        }
         let n_speeds = self.inner.core.hvac.cooling_capacities_w.len();
         if let Some(shrs) = &typed_hp_cfg.stage_shrs {
             if !shrs.is_empty() && shrs.len() != n_speeds {
@@ -502,6 +494,22 @@ mod tests {
             .expect("ThermalSetpoint should be accepted by HpCooler");
     }
 
+    #[test]
+    fn hp_cooler_declares_wrapped_air_conditioner_control_capabilities() {
+        let cfg = base_config();
+        let eq = HpCooler::ashp_cooler(cfg);
+        let caps = eq.descriptor().control_capabilities;
+
+        assert!(caps.contains(ControlCapabilities::THERMAL_SETPOINT));
+        assert!(caps.contains(ControlCapabilities::THERMAL_SETPOINT_DELTA));
+        assert!(caps.contains(ControlCapabilities::DUTY_CYCLE));
+        assert!(caps.contains(ControlCapabilities::LOAD_FRACTION));
+        assert!(caps.contains(ControlCapabilities::POWER_LIMIT));
+        assert!(caps.contains(ControlCapabilities::MODE_OVERRIDE));
+        assert!(caps.contains(ControlCapabilities::DEMAND_RESPONSE));
+        assert!(caps.contains(ControlCapabilities::IDEAL_CAPACITY));
+    }
+
     /// OCHRE parity: cooler must be OFF at initialization when zone_temp == cooling_setpoint.
     ///
     /// OCHRE HVAC.py: turn_on = setpoint + deadband * (1 - offset) = 24.4 + 1.0 * 0.8 = 25.2
@@ -603,13 +611,12 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         assert_eq!(
-            eq.inner.core.hvac.cooling_capacities_w.len(),
-            4,
-            "typed mini-split must initialize with 4 cooling speeds"
+            eq.inner.core.hvac.speed_control_mode,
+            SpeedControlMode::VariableSpeedIdeal
         );
         assert_eq!(
-            eq.inner.core.hvac.speed_control_mode,
-            SpeedControlMode::MultiSpeedInterpolated
+            eq.inner.core.hvac.startup.c_d, 0.0,
+            "typed mini-split cooling must derive zero startup Cd"
         );
     }
 
@@ -661,7 +668,7 @@ mod tests {
         let duty = eq.inner.core.hvac.duty_cycle;
         assert!(
             duty > 0.0 && duty < 1.0,
-            "mini-split multi-speed cooling should preserve fractional runtime near setpoint, got duty={duty}"
+            "mini-split variable-speed cooling should preserve fractional runtime near setpoint, got duty={duty}"
         );
     }
 }

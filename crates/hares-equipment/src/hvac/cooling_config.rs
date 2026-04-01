@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::heating_config::DuctConfig;
+use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
 use hares_types::ScheduleSourceConfig;
 
@@ -111,6 +112,25 @@ impl EquipmentTypedConfig for CentralAirConditionerConfig {
 }
 
 impl CentralAirConditionerConfig {
+    pub fn cooling_speed_control_mode(&self) -> SpeedControlMode {
+        match self.number_of_speeds {
+            1 => SpeedControlMode::SingleSpeed,
+            2 => SpeedControlMode::TwoSpeedSetpoint,
+            4 => SpeedControlMode::VariableSpeedIdeal,
+            _ => SpeedControlMode::SingleSpeed,
+        }
+    }
+
+    pub fn derived_cooling_startup_cd(&self) -> Option<f64> {
+        self.startup_cd.or(match self.cooling_speed_control_mode() {
+            SpeedControlMode::VariableSpeedIdeal => Some(0.0),
+            SpeedControlMode::TwoSpeedSetpoint
+            | SpeedControlMode::TwoSpeedTime
+            | SpeedControlMode::TwoSpeedAlternating => Some(0.11),
+            SpeedControlMode::SingleSpeed | SpeedControlMode::MultiSpeedInterpolated => None,
+        })
+    }
+
     /// Validate that efficiency and capacity fields are finite and positive.
     pub fn validate(&self) -> crate::Result<()> {
         use hares_types::HaresError;
@@ -126,6 +146,12 @@ impl CentralAirConditionerConfig {
                 self.eir
             )));
         }
+        if !matches!(self.number_of_speeds, 1 | 2 | 4) {
+            return Err(HaresError::Equipment(format!(
+                "CentralAirConditionerConfig: number_of_speeds must be 1, 2, or 4, got {}",
+                self.number_of_speeds
+            )));
+        }
         for (name, value) in [
             ("cooling_setpoint_c", self.cooling_setpoint_c),
             ("heating_setpoint_c", self.heating_setpoint_c),
@@ -135,6 +161,7 @@ impl CentralAirConditionerConfig {
                 "crankcase_heater_threshold_c",
                 self.crankcase_heater_threshold_c,
             ),
+            ("startup_cd", self.startup_cd),
         ] {
             if let Some(v) = value
                 && !v.is_finite()
@@ -149,6 +176,13 @@ impl CentralAirConditionerConfig {
         {
             return Err(HaresError::Equipment(
                 "CentralAirConditionerConfig: airflow_m3_s_per_w must be > 0".to_string(),
+            ));
+        }
+        if let Some(v) = self.startup_cd
+            && v < 0.0
+        {
+            return Err(HaresError::Equipment(
+                "CentralAirConditionerConfig: startup_cd must be >= 0".to_string(),
             ));
         }
         if let Some(v) = self.crankcase_heater_kw
@@ -166,6 +200,68 @@ impl CentralAirConditionerConfig {
                 "CentralAirConditionerConfig: crankcase_capacity_curve_coeffs must be finite"
                     .to_string(),
             ));
+        }
+        if let Some(stage_capacities_w) = &self.stage_capacities_w {
+            if stage_capacities_w.len() != self.number_of_speeds as usize {
+                return Err(HaresError::Equipment(format!(
+                    "CentralAirConditionerConfig: stage_capacities_w length {} must match number_of_speeds {}",
+                    stage_capacities_w.len(),
+                    self.number_of_speeds
+                )));
+            }
+            if stage_capacities_w
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+            {
+                return Err(HaresError::Equipment(
+                    "CentralAirConditionerConfig: stage_capacities_w must be finite and positive"
+                        .to_string(),
+                ));
+            }
+        }
+        if let Some(stage_eirs) = &self.stage_eirs {
+            let expected_len = self
+                .stage_capacities_w
+                .as_ref()
+                .map_or(self.number_of_speeds as usize, Vec::len);
+            if stage_eirs.len() != expected_len {
+                return Err(HaresError::Equipment(format!(
+                    "CentralAirConditionerConfig: stage_eirs length {} must match stage count {}",
+                    stage_eirs.len(),
+                    expected_len
+                )));
+            }
+            if stage_eirs
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+            {
+                return Err(HaresError::Equipment(
+                    "CentralAirConditionerConfig: stage_eirs must be finite and positive"
+                        .to_string(),
+                ));
+            }
+        }
+        if let Some(stage_shrs) = &self.stage_shrs {
+            let expected_len = self
+                .stage_capacities_w
+                .as_ref()
+                .map_or(self.number_of_speeds as usize, Vec::len);
+            if stage_shrs.len() != expected_len {
+                return Err(HaresError::Equipment(format!(
+                    "CentralAirConditionerConfig: stage_shrs length {} must match stage count {}",
+                    stage_shrs.len(),
+                    expected_len
+                )));
+            }
+            if stage_shrs
+                .iter()
+                .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+            {
+                return Err(HaresError::Equipment(
+                    "CentralAirConditionerConfig: stage_shrs must be finite and within [0, 1]"
+                        .to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -515,6 +611,136 @@ mod tests {
             plf_max: None,
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn central_ac_rejects_unsupported_speed_count() {
+        let cfg = CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 12_000.0,
+            eir: 0.25,
+            shr: None,
+            number_of_speeds: 3,
+            stage_capacities_w: None,
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: None,
+            fan_power_w_per_cfm: None,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            airflow_m3_s_per_w: None,
+            fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn central_ac_rejects_stage_length_mismatch() {
+        let cfg = CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 12_000.0,
+            eir: 0.25,
+            shr: None,
+            number_of_speeds: 4,
+            stage_capacities_w: Some(vec![3_000.0, 6_000.0, 9_000.0]),
+            stage_eirs: Some(vec![0.20, 0.22, 0.24, 0.26]),
+            stage_shrs: None,
+            fan_power_w: None,
+            fan_power_w_per_cfm: None,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            airflow_m3_s_per_w: None,
+            fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn central_ac_typed_speed_mode_and_cd_follow_speed_count() {
+        let mut cfg = CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: None,
+            capacity_w: 12_000.0,
+            eir: 0.25,
+            shr: None,
+            number_of_speeds: 2,
+            stage_capacities_w: Some(vec![6_000.0, 12_000.0]),
+            stage_eirs: None,
+            stage_shrs: None,
+            fan_power_w: None,
+            fan_power_w_per_cfm: None,
+            cooling_setpoint_c: None,
+            heating_setpoint_c: None,
+            hysteresis_c: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            airflow_m3_s_per_w: None,
+            fraction_load_served: None,
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: None,
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        };
+
+        assert_eq!(
+            cfg.cooling_speed_control_mode(),
+            SpeedControlMode::TwoSpeedSetpoint
+        );
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.11));
+
+        cfg.number_of_speeds = 4;
+        cfg.stage_capacities_w = Some(vec![3_000.0, 6_000.0, 9_000.0, 12_000.0]);
+        assert_eq!(
+            cfg.cooling_speed_control_mode(),
+            SpeedControlMode::VariableSpeedIdeal
+        );
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.0));
     }
 
     #[test]

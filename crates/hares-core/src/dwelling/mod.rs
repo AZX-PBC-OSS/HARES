@@ -46,6 +46,7 @@ use serde_json::{Map, Value};
 
 use crate::actors::{BatteryManagementActor, EvDriverActor, SolverFeedbackActor};
 use crate::checkpoint::{CHECKPOINT_VERSION, DwellingCheckpoint};
+use crate::environment::EnvironmentInitOptions;
 use crate::invariants::InvariantChecker;
 use crate::telemetry::DwellingTelemetry;
 use crate::{Actor, EnvironmentManager, SimClock, derive_dwelling_rng};
@@ -807,14 +808,19 @@ impl Dwelling {
 
         let time_res = chrono_to_std_duration(config.sim_config.time_res)?;
         let weather_avgs = compute_weather_averages(&weather);
+        let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
         let mut environment = EnvironmentManager::new_with_resample(
             weather,
             schedule,
             &building,
             time_res,
             local_start,
-            config.sim_config.civil_timezone.as_deref(),
-            config.resample_overrides.as_ref(),
+            EnvironmentInitOptions {
+                civil_timezone: config.sim_config.civil_timezone.as_deref(),
+                resample_overrides: config.resample_overrides.as_ref(),
+                initial_rng: Some(rng.clone()),
+                setpoint_deadband_c: config.sim_config.setpoint_deadband_c,
+            },
         )
         .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
 
@@ -989,8 +995,6 @@ impl Dwelling {
         let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&building);
         let latitude_deg = building.site.latitude_deg;
         let facility_type = building.residential_facility_type.clone();
-
-        let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
 
         let equipment_column_map = build_equipment_column_map(&equipment, &output_column_index);
         let zone_types = environment.zone_types().to_vec();
@@ -1939,15 +1943,13 @@ impl Dwelling {
                 .max(current_process_hwm_kb());
         }
 
-        // Step 2a: re-run update_control for thermal equipment that have a
-        // pending ideal capacity signal. The solver feedback actor computed and
-        // dispatched IdealCapacity between Step 1b and here; re-running
-        // update_control lets the equipment convert the solver-provided load
-        // into a fractional duty cycle for the current step (not one step late).
+        // Step 2a: re-run update_control for thermal equipment after control
+        // dispatch so ThermalSetpoint / ModeOverride / DR signals take effect
+        // on the current timestep, not one step later. This also preserves the
+        // ideal-capacity conversion path because the solver feedback actor
+        // dispatches IdealCapacity in Step 1d.
         for &idx in &self.equipment_execution_order {
-            if self.equipment[idx].descriptor().stage == ExecutionStage::Thermal
-                && self.equipment[idx].ideal_target().is_some()
-            {
+            if self.equipment[idx].descriptor().stage == ExecutionStage::Thermal {
                 let _ = self.equipment[idx].update_control(&self.latest_env);
             }
         }
@@ -2042,7 +2044,7 @@ impl Dwelling {
             #[cfg(feature = "observe")]
             let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
 
-            // update_control() was already called in Step 1b for thermal equipment
+            // update_control() already ran in Step 2a after control dispatch.
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.warnings.push(format!(
                     "equipment step failed for '{}' : {err}",
@@ -2393,8 +2395,19 @@ impl Dwelling {
             row[idx] = self.latest_env.weather.outdoor_temp_c;
         }
 
-        // Envelope component gains from the thermal solver (verbosity >= 6).
+        // Envelope, boundary, and HVAC thermal gains from the thermal solver.
         let gains = self.thermal_solver.component_gains();
+        let net_sensible_indoor_w = gains.window_solar_w
+            + gains.infiltration_w
+            + gains.ventilation_w
+            + gains.natural_ventilation_w
+            + gains.internal_gain_w
+            + gains.jacket_loss_w
+            + gains.duct_loss_w
+            + gains.opaque_solar_lwr_w
+            + gains.interior_lwr_w
+            + gains.hvac_heating_w.max(0.0)
+            - gains.hvac_cooling_w.abs();
         let envelope_cols: &[(&str, f64)] = &[
             ("Window Transmitted Solar Gain (W)", gains.window_solar_w),
             ("Infiltration Heat Gain - Indoor (W)", gains.infiltration_w),
@@ -2406,23 +2419,39 @@ impl Dwelling {
                 "Natural Ventilation Heat Gain - Indoor (W)",
                 gains.natural_ventilation_w,
             ),
-            (
-                "Internal Heat Gain - Indoor (W)",
-                gains.internal_gain_w + gains.jacket_loss_w,
-            ),
+            ("Net Sensible Heat Gain - Indoor (W)", net_sensible_indoor_w),
+            ("Internal Heat Gain - Indoor (W)", gains.internal_gain_w),
             ("Radiation Heat Gain - Indoor (W)", gains.interior_lwr_w),
             (
                 "Opaque Surface Heat Gain - Indoor (W)",
                 gains.opaque_solar_lwr_w,
             ),
             ("Duct Loss Heat Gain - Indoor (W)", gains.duct_loss_w),
-            ("HVAC Heating Delivered (W)", gains.hvac_heating_w),
-            ("HVAC Cooling Delivered (W)", gains.hvac_cooling_w),
+            ("Roof Heat Gain - Indoor (W)", gains.roof_heat_gain_w),
+            ("Floor Heat Gain - Indoor (W)", gains.floor_heat_gain_w),
+            ("Wall Heat Gain - Indoor (W)", gains.wall_heat_gain_w),
+            ("Window Heat Gain - Indoor (W)", gains.window_heat_gain_w),
+            (
+                "Internal Mass Heat Gain - Indoor (W)",
+                gains.internal_mass_heat_gain_w,
+            ),
+            ("HVAC Heating Delivered (W)", gains.hvac_heating_w.max(0.0)),
+            ("HVAC Cooling Delivered (W)", gains.hvac_cooling_w.abs()),
         ];
         for &(col_name, value) in envelope_cols {
             if let Some(&idx) = self.output_column_index.get(col_name) {
                 row[idx] = value;
             }
+        }
+
+        if let Some(&idx) = self.output_column_index.get("Temperature - Ground (C)") {
+            row[idx] = self.latest_env.weather.ground_temp_c;
+        }
+        if let Some(&idx) = self
+            .output_column_index
+            .get("Hot Water Mains Temperature (C)")
+        {
+            row[idx] = self.latest_env.weather.mains_temp_c;
         }
 
         for &(zone, value) in &gains.infiltration_by_zone {
@@ -2811,6 +2840,8 @@ mod tests {
     use std::borrow::Cow;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3425,6 +3456,103 @@ mod tests {
         }
     }
 
+    struct DispatchAwareThermalEquipment {
+        descriptor: EquipmentDescriptor,
+        mode_override: Option<OperatingMode>,
+        update_calls: Arc<AtomicUsize>,
+        last_mode_code: Arc<AtomicU8>,
+        core_output: CoreOutput,
+    }
+
+    impl DispatchAwareThermalEquipment {
+        fn new(name: &str, update_calls: Arc<AtomicUsize>, last_mode_code: Arc<AtomicU8>) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(777),
+                    name: name.to_string(),
+                    end_use: EndUse::HVAC_HEATING,
+                    equipment_type: Cow::Borrowed("DispatchAwareThermalEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Thermal,
+                    control_capabilities: ControlCapabilities::MODE_OVERRIDE,
+                    core_capabilities: CoreCapabilities::HAS_MODE,
+                    telemetry_fields: vec![],
+                },
+                mode_override: None,
+                update_calls,
+                last_mode_code,
+                core_output: CoreOutput::default(),
+            }
+        }
+    }
+
+    impl Equipment for DispatchAwareThermalEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &[]
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            self.update_calls.fetch_add(1, Ordering::Relaxed);
+            let mode = self.mode_override.unwrap_or(OperatingMode::Off);
+            let code = if mode == OperatingMode::Heating { 1 } else { 0 };
+            self.last_mode_code.store(code, Ordering::Relaxed);
+            self.core_output.state.operating_mode = Some(mode);
+            mode
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            _ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            static EMPTY_TELEMETRY: std::sync::OnceLock<Telemetry> = std::sync::OnceLock::new();
+            EMPTY_TELEMETRY.get_or_init(Telemetry::default)
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_control_unchecked(
+            &mut self,
+            signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            if let ControlSignal::ModeOverride { mode } = signal {
+                self.mode_override = Some(*mode);
+            }
+            Ok(())
+        }
+    }
+
     #[test]
     fn stage_rank_orders_execution_stages() {
         assert!(stage_rank(ExecutionStage::Independent) < stage_rank(ExecutionStage::Electrical));
@@ -3449,6 +3577,43 @@ mod tests {
         let telemetry = dwelling.telemetry();
 
         assert!((telemetry.reactive_power_kvar - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn thermal_mode_override_dispatch_is_applied_same_timestep() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        let mut dwelling = Dwelling::from_toml_config_with_write_output(&base_path, Some(false))
+            .expect("build dwelling");
+
+        let update_calls = Arc::new(AtomicUsize::new(0));
+        let last_mode_code = Arc::new(AtomicU8::new(0));
+        let thermal_eq = DispatchAwareThermalEquipment::new(
+            "ThermalDispatchEq",
+            Arc::clone(&update_calls),
+            Arc::clone(&last_mode_code),
+        );
+
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(thermal_eq)]);
+        dwelling.apply_control(
+            "ThermalDispatchEq",
+            ControlSignal::ModeOverride {
+                mode: OperatingMode::Heating,
+            },
+        );
+
+        let _ = dwelling.run_timestep(false).expect("dwelling step");
+
+        assert_eq!(
+            update_calls.load(Ordering::Relaxed),
+            2,
+            "thermal equipment update_control must run before and after dispatch in the same step"
+        );
+        assert_eq!(
+            last_mode_code.load(Ordering::Relaxed),
+            1,
+            "post-dispatch update_control must observe ModeOverride=Heating in the same step"
+        );
     }
 
     #[test]

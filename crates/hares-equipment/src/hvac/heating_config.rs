@@ -51,7 +51,8 @@ pub struct ElectricFurnaceConfig {
     pub zone_id: Option<u16>,
     /// Required; resolver errors if absent.
     pub capacity_w: f64,
-    /// Required; resolver errors if absent.
+    /// Electric input ratio [W/W] = electric input power divided by delivered
+    /// thermal output. Unity is ideal resistive conversion.
     pub eir: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_power_w: Option<f64>,
@@ -134,7 +135,8 @@ pub struct ElectricBoilerConfig {
     pub loop_id: Option<u16>,
     /// Required; resolver errors if absent.
     pub capacity_w: f64,
-    /// Required; resolver errors if absent.
+    /// Electric input ratio [W/W] = electric input power divided by delivered
+    /// thermal output. Unity is ideal resistive conversion.
     pub eir: f64,
     #[serde(default = "default_flow_rate_kg_s")]
     pub flow_rate_kg_s: f64,
@@ -178,7 +180,8 @@ pub struct ElectricBaseboardConfig {
     pub zone_id: Option<u16>,
     /// Required; resolver errors if absent.
     pub capacity_w: f64,
-    /// Required; resolver errors if absent.
+    /// Electric input ratio [W/W] = electric input power divided by delivered
+    /// thermal output. Unity is ideal resistive conversion.
     pub eir: f64,
 }
 

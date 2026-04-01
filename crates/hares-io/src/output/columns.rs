@@ -32,6 +32,9 @@ const ZONE_TEMP_PREFIX: &str = "Temperature -";
 const ZONE_TEMP_UNIT: &str = "(C)";
 const ZONE_UNMET_LOAD_COL: &str = "Unmet HVAC Load (C)";
 const OUTDOOR_TEMP_COL: &str = "Outdoor Dry Bulb (C)";
+const GROUND_TEMP_COL: &str = "Temperature - Ground (C)";
+const NET_SENSIBLE_HEAT_GAIN_COL: &str = "Net Sensible Heat Gain - Indoor (W)";
+const HOT_WATER_MAINS_TEMP_COL: &str = "Hot Water Mains Temperature (C)";
 
 /// Equipment state column suffixes for verbosity 3.
 const MODE_SUFFIX: &str = "Mode (-)";
@@ -98,6 +101,7 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
         ));
         fields.push(Field::new(ZONE_UNMET_LOAD_COL, DataType::Float64, true));
         fields.push(Field::new(OUTDOOR_TEMP_COL, DataType::Float64, true));
+        fields.push(Field::new(GROUND_TEMP_COL, DataType::Float64, true));
     }
 
     if verbosity >= 3 {
@@ -160,6 +164,11 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
                 ));
             }
         }
+        fields.push(Field::new(
+            NET_SENSIBLE_HEAT_GAIN_COL,
+            DataType::Float64,
+            true,
+        ));
     }
 
     if verbosity >= 6 {
@@ -197,6 +206,11 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
                 true,
             ));
         }
+        fields.push(Field::new(
+            HOT_WATER_MAINS_TEMP_COL,
+            DataType::Float64,
+            true,
+        ));
     }
 
     if verbosity >= 8 {
@@ -232,6 +246,16 @@ pub fn expected_columns_at_verbosity(verbosity: u8) -> Vec<&'static str> {
         cols.push("Temperature - Indoor (C)");
         cols.push("Temperature - Attic (C)");
         cols.push(ZONE_UNMET_LOAD_COL);
+        cols.push(OUTDOOR_TEMP_COL);
+        cols.push(GROUND_TEMP_COL);
+    }
+
+    if verbosity >= 5 {
+        cols.push(NET_SENSIBLE_HEAT_GAIN_COL);
+    }
+
+    if verbosity >= 7 {
+        cols.push(HOT_WATER_MAINS_TEMP_COL);
     }
 
     cols
@@ -429,6 +453,21 @@ mod tests {
         assert!(names.contains(&"Temperature - Indoor (C)"));
         assert!(names.contains(&"Unmet HVAC Load (C)"));
         assert!(names.contains(&"Outdoor Dry Bulb (C)"));
+        assert!(names.contains(&"Temperature - Ground (C)"));
+    }
+
+    #[test]
+    fn verbosity_5_adds_net_sensible_heat_gain_column() {
+        let schema = build_schema(&[], 5);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"Net Sensible Heat Gain - Indoor (W)"));
+    }
+
+    #[test]
+    fn verbosity_7_adds_hot_water_mains_temperature_column() {
+        let schema = build_schema(&[], 7);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"Hot Water Mains Temperature (C)"));
     }
 
     #[test]

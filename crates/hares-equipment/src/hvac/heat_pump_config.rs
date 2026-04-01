@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::heating_config::DuctConfig;
+use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
 use hares_types::ScheduleSourceConfig;
 
@@ -379,6 +380,111 @@ impl EquipmentTypedConfig for HeatPumpCoolerConfig {
     }
 }
 
+impl HeatPumpCoolerConfig {
+    /// Returns the effective number of speeds, forcing 4 when `is_mini_split` is true.
+    pub fn effective_number_of_speeds(&self) -> u8 {
+        if self.is_mini_split {
+            4
+        } else {
+            self.number_of_speeds
+        }
+    }
+
+    /// Cooling-side control mode derived from the typed config.
+    ///
+    /// Mini-split coolers are modeled as continuously variable-speed equipment.
+    pub fn cooling_speed_control_mode(&self) -> SpeedControlMode {
+        let n = self.effective_number_of_speeds();
+        match n {
+            1 => SpeedControlMode::SingleSpeed,
+            2 => SpeedControlMode::TwoSpeedSetpoint,
+            n if n >= 4 => SpeedControlMode::VariableSpeedIdeal,
+            _ => SpeedControlMode::SingleSpeed,
+        }
+    }
+
+    /// Derived startup degradation coefficient for typed cooling operation.
+    ///
+    /// Single-speed coolers retain the generic HVAC-core default unless an explicit
+    /// typed startup Cd is available upstream.
+    pub fn derived_cooling_startup_cd(&self) -> Option<f64> {
+        match self.cooling_speed_control_mode() {
+            SpeedControlMode::VariableSpeedIdeal => Some(0.0),
+            SpeedControlMode::TwoSpeedSetpoint
+            | SpeedControlMode::TwoSpeedTime
+            | SpeedControlMode::TwoSpeedAlternating => Some(0.11),
+            SpeedControlMode::SingleSpeed | SpeedControlMode::MultiSpeedInterpolated => None,
+        }
+    }
+
+    /// Validate that cooling-side fields are finite and positive when present.
+    pub fn validate(&self) -> crate::Result<()> {
+        use hares_types::HaresError;
+
+        let check_positive = |value: f64, field: &str| -> crate::Result<()> {
+            if !value.is_finite() || value <= 0.0 {
+                Err(HaresError::Equipment(format!(
+                    "HeatPumpCoolerConfig: {field} must be finite and positive, got {value}"
+                )))
+            } else {
+                Ok(())
+            }
+        };
+
+        if let Some(value) = self.cooling_capacity_w {
+            check_positive(value, "cooling_capacity_w")?;
+        }
+        if let Some(value) = self.cooling_eir {
+            check_positive(value, "cooling_eir")?;
+        }
+        if let Some(value) = self.heating_capacity_w {
+            check_positive(value, "heating_capacity_w")?;
+        }
+        if let Some(value) = self.heating_eir {
+            check_positive(value, "heating_eir")?;
+        }
+        if let Some(value) = self.backup_capacity_w
+            && (!value.is_finite() || value < 0.0)
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpCoolerConfig: backup_capacity_w must be finite and non-negative, got {value}"
+            )));
+        }
+
+        for (name, value) in [
+            ("heating_setpoint_c", self.heating_setpoint_c),
+            ("cooling_setpoint_c", self.cooling_setpoint_c),
+            ("hysteresis_c", self.hysteresis_c),
+            ("airflow_m3_s_per_w", self.airflow_m3_s_per_w),
+        ] {
+            if let Some(value) = value
+                && !value.is_finite()
+            {
+                return Err(HaresError::Equipment(format!(
+                    "HeatPumpCoolerConfig: {name} must be finite, got {value}"
+                )));
+            }
+        }
+
+        if let Some(value) = self.hysteresis_c
+            && value < 0.0
+        {
+            return Err(HaresError::Equipment(
+                "HeatPumpCoolerConfig: hysteresis_c must be >= 0".to_string(),
+            ));
+        }
+        if let Some(value) = self.airflow_m3_s_per_w
+            && value <= 0.0
+        {
+            return Err(HaresError::Equipment(
+                "HeatPumpCoolerConfig: airflow_m3_s_per_w must be > 0".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 /// Alias for `HeatPumpHeaterConfig`; prefer the full name for new code.
 pub type HeatPumpConfig = HeatPumpHeaterConfig;
 
@@ -447,6 +553,64 @@ mod tests {
         assert_eq!(recovered.stage_shrs, cfg.stage_shrs);
         assert_eq!(recovered.biquadratic_x1_min, cfg.biquadratic_x1_min);
         assert_eq!(recovered.ff_min, cfg.ff_min);
+    }
+
+    #[test]
+    fn heat_pump_cooler_effective_control_mode_tracks_typed_intent() {
+        let mut cfg = HeatPumpCoolerConfig {
+            equipment_id: None,
+            zone_id: None,
+            heating_capacity_w: None,
+            heating_eir: None,
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: None,
+            backup_eir: None,
+            fraction_heating_load_served: None,
+            cooling_capacity_w: Some(12_000.0),
+            cooling_eir: Some(0.25),
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            stage_shrs: None,
+            fraction_cooling_load_served: None,
+            number_of_speeds: 2,
+            is_mini_split: false,
+            shr: None,
+            fan_power_w: None,
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            hysteresis_c: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        };
+
+        assert_eq!(
+            cfg.cooling_speed_control_mode(),
+            SpeedControlMode::TwoSpeedSetpoint
+        );
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.11));
+
+        cfg.number_of_speeds = 4;
+        cfg.is_mini_split = true;
+
+        assert_eq!(cfg.effective_number_of_speeds(), 4);
+        assert_eq!(
+            cfg.cooling_speed_control_mode(),
+            SpeedControlMode::VariableSpeedIdeal
+        );
+        assert_eq!(cfg.derived_cooling_startup_cd(), Some(0.0));
     }
 
     #[test]

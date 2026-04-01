@@ -23,7 +23,7 @@ pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 
 #[cfg(test)]
 use hares_types::BoundaryPolicy;
-use hares_types::{DomainId, EnvironmentState, LoopId, PortSlots, ScheduleSource};
+use hares_types::{EnvironmentState, HaresError, LoopId, PortSlots, ScheduleSource};
 
 use crate::EquipmentRegistry;
 
@@ -58,34 +58,34 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     );
 }
 
-/// Domain ID used by `hares-core::EnvironmentManager` to publish per-step mains
-/// water temperature [°C] in `EnvironmentState.custom_domains`.
-const MAINS_WATER_DOMAIN_ID: DomainId = DomainId(u16::MAX - 1);
-
 /// Resolve per-step storage-water-heater inputs `(mains_temp_c, draw_rate_kg_s)`.
 ///
 /// Priority:
-/// 1. Schedule-column values (when configured and finite)
-/// 2. Runtime mains domain value for mains temperature
-/// 3. Config fallback values from equipment init
+/// 1. Canonical weather mains temperature
+/// 2. Schedule-column mains temperature when weather is unavailable
+/// 3. Config default from equipment init
 pub(super) fn resolve_storage_step_inputs(
     env: &EnvironmentState,
-    fallback_mains_temp_c: f64,
-    fallback_draw_rate_kg_s: f64,
+    default_mains_temp_c: f64,
+    default_draw_rate_kg_s: f64,
     draw_rate_kg_s_source: Option<&mut ScheduleSource>,
     mains_temp_c_source: Option<&mut ScheduleSource>,
 ) -> (f64, f64) {
-    let mains_temp_c = mains_temp_c_source
-        .and_then(|source| source.value_at(env).ok())
-        .filter(|v| v.is_finite())
-        .unwrap_or_else(|| resolve_mains_temp_c(env, fallback_mains_temp_c));
+    let mains_temp_c = if env.weather.mains_temp_c.is_finite() {
+        env.weather.mains_temp_c
+    } else {
+        mains_temp_c_source
+            .and_then(|source| source.value_at(env).ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or_else(|| resolve_mains_temp_c(env, default_mains_temp_c))
+    };
 
     // Schedule draw is interpreted as SI mass flow [kg/s].
     let draw_rate_kg_s = draw_rate_kg_s_source
         .and_then(|source| source.value_at(env).ok())
         .filter(|v| v.is_finite())
         .map(|draw_kg_s| draw_kg_s.max(0.0))
-        .unwrap_or(fallback_draw_rate_kg_s);
+        .unwrap_or(default_draw_rate_kg_s);
 
     (mains_temp_c, draw_rate_kg_s)
 }
@@ -134,16 +134,28 @@ pub(super) fn mains_temp_schedule_source(
 
 /// Resolve mains water temperature for this timestep.
 ///
-/// The runtime environment value takes priority; `fallback_mains_temp_c` preserves
-/// compatibility when running against older environment producers.
-pub(super) fn resolve_mains_temp_c(env: &EnvironmentState, fallback_mains_temp_c: f64) -> f64 {
-    env.custom_domains
-        .iter()
-        .find(|d| d.domain_id == MAINS_WATER_DOMAIN_ID)
-        .and_then(|d| d.custom_payload.as_ref())
-        .and_then(|payload| payload.first().copied())
-        .filter(|value| value.is_finite())
-        .unwrap_or(fallback_mains_temp_c)
+/// Priority:
+/// 1. Canonical weather field (`env.weather.mains_temp_c`)
+/// 2. Config default (`default_mains_temp_c`)
+pub(super) fn resolve_mains_temp_c(env: &EnvironmentState, default_mains_temp_c: f64) -> f64 {
+    if env.weather.mains_temp_c.is_finite() {
+        return env.weather.mains_temp_c;
+    }
+    default_mains_temp_c
+}
+
+pub(super) fn require_mains_temp_c(
+    env: &EnvironmentState,
+    equipment_name: &str,
+) -> crate::Result<f64> {
+    let mains_temp_c = env.weather.mains_temp_c;
+    if mains_temp_c.is_finite() {
+        Ok(mains_temp_c)
+    } else {
+        Err(HaresError::Equipment(format!(
+            "{equipment_name} requires finite env.weather.mains_temp_c at init"
+        )))
+    }
 }
 
 /// Apply insulation jacket R-value correction to tank UA.
@@ -169,23 +181,20 @@ pub(super) fn apply_jacket_r_value(
 
 /// Thermostat hysteresis logic shared by all storage water heater types.
 ///
-/// We use `<=` for the off→on transition (turn on when at or below deadband floor)
-/// and `<` for the on→off transition (stay on until setpoint is strictly reached).
-/// OCHRE uses `<` for both; our choice keeps the element off when temperature is
-/// exactly at `setpoint_c - deadband_c`, which matches physical thermostat behavior
-/// and avoids chatter at the boundary.
+/// We use `<` for both transitions to match OCHRE's strict deadband floor.
+/// The thermostat stays off when temperature is exactly at `setpoint_c - deadband_c`.
 pub(super) fn hysteresis_call(
     sensor_temp_c: f64,
     setpoint_c: f64,
     deadband_c: f64,
     currently_on: bool,
 ) -> bool {
-    if currently_on {
-        sensor_temp_c < setpoint_c
-    } else {
-        // off→on: engage at or below the deadband floor
-        sensor_temp_c <= setpoint_c - deadband_c
-    }
+    sensor_temp_c
+        < if currently_on {
+            setpoint_c
+        } else {
+            setpoint_c - deadband_c
+        }
 }
 
 /// Volume-weighted average temperature across all tank nodes.
@@ -356,18 +365,18 @@ mod tests {
     };
     use crate::EquipmentConfig;
 
-    /// Document our `<=` vs `<` boundary choice: at exactly `setpoint - deadband`,
-    /// an inactive heater should turn on (we use `<=`), whereas OCHRE uses `<`.
+    /// Document the shared hysteresis floor: at exactly `setpoint - deadband`,
+    /// an inactive heater remains off, matching OCHRE's strict boundary.
     #[test]
-    fn hysteresis_boundary_exact_deadband_floor_turns_on() {
+    fn hysteresis_boundary_exact_deadband_floor_remains_off() {
         let setpoint = 52.0_f64;
         let deadband = 2.0_f64;
         let boundary = setpoint - deadband; // 50.0
 
-        // Exactly at boundary: off → on (our choice: <=)
+        // Exactly at boundary: off → off (strict `<` threshold)
         assert!(
-            hysteresis_call(boundary, setpoint, deadband, false),
-            "at exactly setpoint-deadband, inactive heater should turn on"
+            !hysteresis_call(boundary, setpoint, deadband, false),
+            "at exactly setpoint-deadband, inactive heater should remain off"
         );
         // One epsilon above boundary: off → off
         assert!(
@@ -404,6 +413,8 @@ mod tests {
                 tank_nodes: None,
                 avg_water_draw_l_per_day: None,
                 draw_flow_rate_kg_s: None,
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
@@ -414,10 +425,7 @@ mod tests {
         )
     }
 
-    fn env_with_payloads(
-        schedule_payload: Option<Vec<f64>>,
-        mains_payload: Option<Vec<f64>>,
-    ) -> EnvironmentState {
+    fn env_with_payloads(schedule_payload: Option<Vec<f64>>) -> EnvironmentState {
         let mut custom_domains = Vec::new();
         if let Some(payload) = schedule_payload {
             custom_domains.push(DomainUpdate {
@@ -426,17 +434,16 @@ mod tests {
                 custom_payload: Some(payload),
             });
         }
-        if let Some(payload) = mains_payload {
-            custom_domains.push(DomainUpdate {
-                domain_id: super::MAINS_WATER_DOMAIN_ID,
-                zone_temperatures_c: Vec::new(),
-                custom_payload: Some(payload),
-            });
-        }
+
+        // Use NaN to exercise the non-finite mains-temperature path in tests.
+        let weather = WeatherState {
+            mains_temp_c: f64::NAN,
+            ..Default::default()
+        };
 
         EnvironmentState {
             zones: Vec::new(),
-            weather: WeatherState::default(),
+            weather,
             grid: GridState {
                 voltage_pu: 1.0,
                 frequency_hz: 60.0,
@@ -506,7 +513,8 @@ mod tests {
 
     #[test]
     fn storage_step_inputs_use_schedule_when_configured() {
-        let env = env_with_payloads(Some(vec![6.0, 10.0, 999.0]), Some(vec![13.0]));
+        let mut env = env_with_payloads(Some(vec![6.0, 10.0, 999.0]));
+        env.weather.mains_temp_c = 13.0;
         let mut draw_source = ScheduleSource::ColumnRef {
             col_idx: 1,
             boundary: BoundaryPolicy::Clamp,
@@ -528,8 +536,9 @@ mod tests {
     }
 
     #[test]
-    fn storage_step_inputs_fall_back_when_schedule_missing_or_invalid() {
-        let env = env_with_payloads(Some(vec![f64::NAN]), Some(vec![12.5]));
+    fn storage_step_inputs_use_weather_when_schedule_missing_or_invalid() {
+        let mut env = env_with_payloads(Some(vec![f64::NAN]));
+        env.weather.mains_temp_c = 12.5;
         let mut draw_source = ScheduleSource::ColumnRef {
             col_idx: 5,
             boundary: BoundaryPolicy::Clamp,
@@ -547,6 +556,18 @@ mod tests {
         );
 
         assert!((mains_temp_c - 12.5).abs() < 1e-12);
+        assert!((draw_rate_kg_s - 0.08).abs() < 1e-12);
+    }
+
+    #[test]
+    fn storage_step_inputs_prefer_canonical_weather_mains_temp() {
+        let mut env = env_with_payloads(Some(vec![f64::NAN]));
+        env.weather.mains_temp_c = 14.25;
+
+        let (mains_temp_c, draw_rate_kg_s) =
+            resolve_storage_step_inputs(&env, 15.0, 0.08, None, None);
+
+        assert!((mains_temp_c - 14.25).abs() < 1e-12);
         assert!((draw_rate_kg_s - 0.08).abs() < 1e-12);
     }
 
@@ -731,6 +752,8 @@ mod dhw_integration_tests {
                 tank_nodes: None,
                 avg_water_draw_l_per_day: None,
                 draw_flow_rate_kg_s: Some(0.0),
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,

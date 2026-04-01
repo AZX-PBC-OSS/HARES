@@ -74,6 +74,20 @@ fn repo_defaults() -> DefaultsStore {
     DefaultsStore::load(&defaults_dir).expect("load defaults")
 }
 
+fn parity_fixture_xml(fixture_name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests")
+        .join("fixtures")
+        .join("parity")
+        .join(fixture_name)
+        .join("building.xml");
+    std::fs::read_to_string(path).expect("fixture building.xml should be readable")
+}
+
 fn make_env(zone_temp_c: f64, outdoor_temp_c: f64) -> EnvironmentState {
     EnvironmentState {
         zones: vec![ZoneState {
@@ -403,14 +417,8 @@ fn heat_pump_extension_install_quality_fields_are_extracted() {
 //   duct_r_value = duct.DuctInsulationRValue
 //
 // HARES stores these as duct_supply_area_m2, duct_supply_leakage_frac, etc.
-//
-// NOTE: HARES building.rs parse_duct_systems() searches for <DuctSystem>
-// elements (not HPXML 4.x <HVACDistribution/AirDistribution/Ducts>). The
-// test below uses the format the parser actually reads; a full HPXML 4.x
-// test requires DuctSystem adapter logic not yet implemented.
-//
-// This test documents the current duct extraction behavior using the
-// existing DuctSystem element format that HARES parses.
+// The fixture below uses the HPXML 4.x HVACDistribution / AirDistribution /
+// DuctLeakageMeasurement / Ducts structure that HARES now parses directly.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -439,6 +447,22 @@ fn duct_parameters_extracted_for_hvac_equipment() {
             <SystemIdentifier id="hvacd1"/>
             <DistributionSystemType>
               <AirDistribution>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="supply-leak"/>
+                  <DuctType>supply</DuctType>
+                  <DuctLeakage>
+                    <Value>12</Value>
+                    <Units>Percent</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="return-leak"/>
+                  <DuctType>return</DuctType>
+                  <DuctLeakage>
+                    <Value>5</Value>
+                    <Units>Percent</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
                 <Ducts>
                   <SystemIdentifier id="supply-duct"/>
                   <DuctType>supply</DuctType>
@@ -488,6 +512,7 @@ fn duct_parameters_extracted_for_hvac_equipment() {
         (r_si - 1.41).abs() < 0.05,
         "R-8 imperial should convert to ~1.41 m²·K/W RSI, got {r_si:.3}"
     );
+    assert_eq!(supply.leakage_fraction, Some(0.12));
 
     let area_m2 = supply
         .surface_area_m2
@@ -496,6 +521,12 @@ fn duct_parameters_extracted_for_hvac_equipment() {
         area_m2 > 0.0,
         "supply duct surface area must be > 0, got {area_m2}"
     );
+
+    let return_duct = attic_ducts
+        .iter()
+        .find(|d| d.duct_type == hares_io::hpxml::DuctType::Return)
+        .expect("return duct should be present");
+    assert_eq!(return_duct.leakage_fraction, Some(0.05));
 }
 
 // ---------------------------------------------------------------------------
@@ -755,6 +786,34 @@ fn ashp_backup_lockout_temperature_extracted() {
 }
 
 #[test]
+fn cz4a_ashp_fixture_preserves_single_stage_compressor_intent() {
+    let xml = parity_fixture_xml("cz4a_ashp_hpwh");
+    let defaults = repo_defaults();
+    let building = parse_building(&xml).expect("fixture should parse");
+    let specs = resolve_equipment(&building, &defaults, &json!({})).expect("resolve_equipment");
+
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("fixture should emit ASHP Heater");
+    let cfg: HeatPumpHeaterConfig = heater
+        .typed_config
+        .as_ref()
+        .expect("typed ASHP heater config")
+        .typed()
+        .expect("typed ASHP heater config should deserialize");
+
+    assert_eq!(
+        cfg.number_of_speeds, 1,
+        "single-stage HPXML compressor must resolve to one speed"
+    );
+    assert!(
+        heater.parameters.get("use_ideal_capacity").is_none(),
+        "fixture should not force use_ideal_capacity through resolver params"
+    );
+}
+
+#[test]
 fn propane_storage_water_heater_resolves_and_inits_as_propane() {
     let xml = minimal_xml(
         r#"<Systems><WaterHeating>
@@ -853,5 +912,55 @@ fn hpwh_heating_capacity_populates_backup_element_power() {
             .get("backup_element_power_w")
             .and_then(|v| v.as_f64()),
         Some(4500.0)
+    );
+}
+
+#[test]
+fn low_power_hpwh_sets_ochre_hp_only_mode_and_defaults() {
+    let xml = minimal_xml(
+        r#"<Systems><WaterHeating>
+            <WaterHeatingSystem>
+                <FuelType>electricity</FuelType>
+                <WaterHeaterType>heat pump water heater</WaterHeaterType>
+                <UniformEnergyFactor>4.9</UniformEnergyFactor>
+                <TankVolume>66</TankVolume>
+            </WaterHeatingSystem>
+        </WaterHeating></Systems>"#,
+    );
+    let building = parse_building(&xml).expect("should parse");
+    let specs = resolve_equipment(&building, &DefaultsStore::empty(), &json!({}))
+        .expect("resolve_equipment");
+
+    let wh = specs
+        .iter()
+        .find(|s| s.name == "Heat Pump Water Heater")
+        .expect("should emit Heat Pump Water Heater");
+
+    let typed_cfg: HeatPumpWaterHeaterConfig = wh
+        .typed_config
+        .as_ref()
+        .expect("typed hpwh config")
+        .typed()
+        .expect("hpwh typed config");
+
+    assert_eq!(
+        typed_cfg.hp_only_mode,
+        Some(true),
+        "OCHRE low-power HPWH branch must disable backup resistance"
+    );
+    assert_eq!(
+        typed_cfg.cop,
+        Some(4.2),
+        "OCHRE low-power HPWH branch fixes COP at 4.2"
+    );
+    assert_eq!(
+        typed_cfg.setpoint_c,
+        Some(60.0),
+        "OCHRE low-power HPWH branch fixes storage setpoint at 60 C"
+    );
+    assert_eq!(
+        typed_cfg.tempering_valve_setpoint_c,
+        Some(51.67),
+        "OCHRE low-power HPWH branch fixes tempering valve setpoint at 51.67 C"
     );
 }

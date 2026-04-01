@@ -20,8 +20,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, equipment_id_from_config, operating_mode_code,
-        update_heating_control, zone_id_from_config,
+        apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
+        equipment_id_from_config, operating_mode_code, update_heating_control, zone_id_from_config,
     },
 };
 
@@ -207,7 +207,9 @@ impl Equipment for ElectricBaseboard {
     }
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Baseboard")
+        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Baseboard")?;
+        apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
+        Ok(())
     }
 }
 
@@ -252,8 +254,8 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState,
+        ControlSignal, EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator,
+        WeatherState, ZoneId, ZoneState,
     };
 
     use super::ElectricBaseboard;
@@ -384,5 +386,35 @@ mod tests {
             .create("Electric Baseboard", config(5_000.0))
             .unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
+    }
+
+    #[test]
+    fn ideal_capacity_control_scales_baseboard_output() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 1_500.0,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            (ports.thermal[0].sensible_gain_w - 1_500.0).abs() < 1e-6,
+            "IdealCapacity must scale delivered heat to 50% of rated output"
+        );
     }
 }

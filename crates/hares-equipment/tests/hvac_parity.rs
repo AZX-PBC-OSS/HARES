@@ -12,7 +12,7 @@ use std::time::Duration;
 use chrono::{FixedOffset, TimeZone};
 use hares_equipment::{
     CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, EquipmentConfig,
-    EquipmentRegistry, GasFurnaceConfig, HeatPumpHeaterConfig,
+    EquipmentRegistry, GasFurnaceConfig, HeatPumpCoolerConfig, HeatPumpHeaterConfig,
 };
 use hares_types::{
     ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
@@ -69,6 +69,17 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, zone_wb_c: f64) -> Environmen
         price_signal: Default::default(),
         electrical: Default::default(),
     }
+}
+
+fn make_env_at_minute(
+    zone_temp_c: f64,
+    outdoor_temp_c: f64,
+    zone_wb_c: f64,
+    minute: i64,
+) -> EnvironmentState {
+    let mut env = make_env(zone_temp_c, outdoor_temp_c, zone_wb_c);
+    env.current_time += chrono::Duration::minutes(minute);
+    env
 }
 
 fn make_ports() -> PortSlots {
@@ -169,6 +180,61 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
         ),
         _ => panic!("unsupported class in hvac_parity cfg helper: {class}"),
     }
+}
+
+fn hp_cooler_cfg(
+    name: &str,
+    number_of_speeds: u8,
+    is_mini_split: bool,
+    stage_capacities_w: Option<Vec<f64>>,
+    stage_eirs: Option<Vec<f64>>,
+) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        if is_mini_split {
+            "MSHP Cooler".to_string()
+        } else {
+            "ASHP Cooler".to_string()
+        },
+        HeatPumpCoolerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: None,
+            heating_eir: None,
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: None,
+            backup_eir: None,
+            fraction_heating_load_served: None,
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(0.33),
+            stage_cooling_capacities_w: stage_capacities_w,
+            stage_cooling_eirs: stage_eirs,
+            stage_shrs: None,
+            fraction_cooling_load_served: Some(1.0),
+            number_of_speeds,
+            is_mini_split,
+            shr: Some(0.75),
+            fan_power_w: None,
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: Some(24.0),
+            hysteresis_c: Some(0.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +672,112 @@ fn air_conditioner_setpoint_override() {
     );
 }
 
+#[test]
+fn ashp_cooler_two_speed_runtime_is_partial_near_setpoint() {
+    let cfg = hp_cooler_cfg(
+        "ashp-cooler",
+        2,
+        false,
+        Some(vec![4_000.0, 8_000.0]),
+        Some(vec![0.33, 0.33]),
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("ASHP Cooler", cfg.clone()).unwrap();
+    let env = make_env(24.1, 35.0, 18.0);
+    eq.init(&cfg, &env).unwrap();
+    eq.update_control(&env);
+
+    let mut ports = make_ports();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let rtf = eq
+        .telemetry()
+        .get("runtime_fraction")
+        .expect("runtime_fraction must exist");
+    let electric_kw = eq.telemetry().get("electric_kw").expect("electric_kw");
+
+    assert!(
+        rtf > 0.0 && rtf < 0.8,
+        "two-speed ASHP cooler near setpoint must run at partial runtime, got rtf={rtf:.3}"
+    );
+    assert!(
+        electric_kw > 0.0,
+        "two-speed ASHP cooler must still draw power under partial runtime; got {electric_kw:.4} kW"
+    );
+}
+
+#[test]
+fn minisplit_cooling_has_no_first_step_startup_penalty() {
+    let cfg = hp_cooler_cfg("mshp-cooler", 1, true, None, None);
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("MSHP Cooler", cfg.clone()).unwrap();
+    let env = make_env(24.2, 35.0, 18.0);
+    eq.init(&cfg, &env).unwrap();
+
+    let mut ports_first = make_ports();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports_first)
+        .unwrap();
+    let kw_first = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let rtf_first = eq
+        .telemetry()
+        .get("runtime_fraction")
+        .expect("runtime_fraction");
+
+    let mut ports_second = make_ports();
+    eq.update_control(&env);
+    eq.step(&env, Duration::from_secs(60), &mut ports_second)
+        .unwrap();
+    let kw_second = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let rtf_second = eq
+        .telemetry()
+        .get("runtime_fraction")
+        .expect("runtime_fraction");
+
+    assert!(
+        (kw_first - kw_second).abs() < 0.02,
+        "variable-speed minisplit cooling should not ramp between first and second step; first={kw_first:.4} kW second={kw_second:.4} kW"
+    );
+    assert!(
+        (rtf_first - rtf_second).abs() < 0.02,
+        "variable-speed minisplit runtime should be stable across repeated near-setpoint steps; first={rtf_first:.3} second={rtf_second:.3}"
+    );
+}
+
+#[test]
+fn minisplit_cooling_stage_match_runs_continuously() {
+    let cfg = hp_cooler_cfg(
+        "mshp-stage-match",
+        4,
+        true,
+        Some(vec![2_000.0, 4_000.0, 6_000.0, 8_000.0]),
+        Some(vec![0.20, 0.25, 0.30, 0.35]),
+    );
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("MSHP Cooler", cfg.clone()).unwrap();
+    let env = make_env(24.5, 35.0, 18.0);
+    eq.init(&cfg, &env).unwrap();
+    eq.update_control(&env);
+
+    let mut ports = make_ports();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let rtf = eq
+        .telemetry()
+        .get("runtime_fraction")
+        .expect("runtime_fraction must exist");
+    let electric_kw = eq.telemetry().get("electric_kw").expect("electric_kw");
+
+    assert!(
+        (rtf - 1.0).abs() < 1e-9,
+        "an exact 4-speed mini-split stage match must run continuously, got rtf={rtf:.3}"
+    );
+    assert!(
+        electric_kw > 0.0,
+        "variable-speed mini-split stage selection must still draw power, got {electric_kw:.4} kW"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 8. ASHP defrost: OnDemand defrost engages at sub-freezing outdoor temp
 //
@@ -765,6 +937,70 @@ fn make_ports_two_zones() -> PortSlots {
         ],
         ..PortSlots::default()
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HvacStepSnapshot {
+    mode: OperatingMode,
+    electric_kw: f64,
+    sensible_w: f64,
+    runtime_fraction: f64,
+}
+
+fn hvac_step_snapshot(
+    eq: &mut dyn hares_equipment::Equipment,
+    env: &EnvironmentState,
+) -> HvacStepSnapshot {
+    let mode = eq.update_control(env);
+    let mut ports = make_ports();
+    eq.step(env, Duration::from_secs(60), &mut ports).unwrap();
+    HvacStepSnapshot {
+        mode,
+        electric_kw: ports.electrical.net_active_kw(),
+        sensible_w: ports.thermal[0].sensible_gain_w,
+        runtime_fraction: eq.telemetry().get("runtime_fraction").unwrap_or(0.0),
+    }
+}
+
+fn two_speed_ac_config() -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        "two-speed-ac".to_string(),
+        "Air Conditioner".to_string(),
+        CentralAirConditionerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 8_000.0,
+            eir: 0.33,
+            shr: Some(0.75),
+            number_of_speeds: 2,
+            stage_capacities_w: Some(vec![4_000.0, 8_000.0]),
+            stage_eirs: Some(vec![0.33, 0.33]),
+            stage_shrs: Some(vec![0.75, 0.75]),
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            cooling_setpoint_c: Some(24.0),
+            heating_setpoint_c: Some(20.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            airflow_m3_s_per_w: None,
+            fraction_load_served: Some(1.0),
+            crankcase_heater_kw: None,
+            crankcase_heater_threshold_c: None,
+            crankcase_capacity_curve_coeffs: None,
+            duct: DuctConfig::default(),
+            system_type: None,
+            startup_cd: Some(0.0),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,4 +1378,323 @@ fn gas_furnace_dse_multi_zone_energy_conservation() {
         "total delivered heat must conserve energy: zone1 + zone2 = 10000 W; \
          got zone1={zone1_w:.2} W + zone2={zone2_w:.2} W = {total_w:.2} W"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 16. Default asymmetric deadband matches documented turn-on / turn-off edges
+//
+// OCHRE-style thermostat thresholds (deadband_offset = 0.2, hysteresis = 1.0 C):
+//   Heating turn_on  = setpoint - 0.8 C
+//   Heating turn_off = setpoint + 0.2 C
+//   Cooling turn_on  = setpoint + 0.8 C
+//   Cooling turn_off = setpoint - 0.2 C
+//
+// This regression checks both the activation edge and the hysteresis hold region
+// through the public Equipment API for a heater and a cooler.
+// ---------------------------------------------------------------------------
+#[test]
+fn hvac_default_deadband_matrix_matches_ochre_thresholds() {
+    let registry = EquipmentRegistry::new();
+
+    let furnace_cfg = EquipmentConfig::from_typed(
+        "furnace".to_string(),
+        "Gas Furnace".to_string(),
+        GasFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            afue: 0.80,
+            capacity_w: 10_000.0,
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            ducts: DuctConfig::default(),
+        },
+    );
+    let mut furnace = registry.create("Gas Furnace", furnace_cfg.clone()).unwrap();
+    furnace
+        .init(&furnace_cfg, &make_env_at_minute(19.0, 0.0, 13.0, 0))
+        .unwrap();
+    furnace
+        .apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+
+    let heating_on = hvac_step_snapshot(furnace.as_mut(), &make_env_at_minute(20.15, 0.0, 13.0, 0));
+    let heating_hold =
+        hvac_step_snapshot(furnace.as_mut(), &make_env_at_minute(21.15, 0.0, 13.0, 1));
+    let heating_off =
+        hvac_step_snapshot(furnace.as_mut(), &make_env_at_minute(21.25, 0.0, 13.0, 2));
+
+    assert_eq!(
+        heating_on.mode,
+        OperatingMode::Heating,
+        "heating must engage below 21.0-0.8=20.2 C; got {:?}",
+        heating_on.mode
+    );
+    assert_eq!(
+        heating_hold.mode,
+        OperatingMode::Heating,
+        "heating must stay latched below 21.0+0.2=21.2 C; got {:?}",
+        heating_hold.mode
+    );
+    assert_ne!(
+        heating_off.mode,
+        OperatingMode::Heating,
+        "heating must release above 21.0+0.2=21.2 C; got {:?}",
+        heating_off.mode
+    );
+
+    let ac_cfg = cfg(
+        "ac",
+        "Air Conditioner",
+        &[
+            ("zone_id", 1.0),
+            ("capacity_w", 10_000.0),
+            ("heating_setpoint_c", 20.0),
+            ("cooling_setpoint_c", 24.0),
+        ],
+    );
+    let mut ac = registry.create("Air Conditioner", ac_cfg.clone()).unwrap();
+    ac.init(&ac_cfg, &make_env_at_minute(25.0, 32.0, 18.0, 0))
+        .unwrap();
+
+    let cooling_on = hvac_step_snapshot(ac.as_mut(), &make_env_at_minute(24.85, 32.0, 18.0, 0));
+    let cooling_hold = hvac_step_snapshot(ac.as_mut(), &make_env_at_minute(23.85, 32.0, 18.0, 1));
+    let cooling_off = hvac_step_snapshot(ac.as_mut(), &make_env_at_minute(23.75, 32.0, 18.0, 2));
+
+    assert_eq!(
+        cooling_on.mode,
+        OperatingMode::Cooling,
+        "cooling must engage above 24.0+0.8=24.8 C; got {:?}",
+        cooling_on.mode
+    );
+    assert_eq!(
+        cooling_hold.mode,
+        OperatingMode::Cooling,
+        "cooling must stay latched above 24.0-0.2=23.8 C; got {:?}",
+        cooling_hold.mode
+    );
+    assert_ne!(
+        cooling_off.mode,
+        OperatingMode::Cooling,
+        "cooling must release below 24.0-0.2=23.8 C; got {:?}",
+        cooling_off.mode
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 17. Two-speed setpoint control drops from high stage to low-stage cycling
+//
+// Staging rule: when the thermostat is already calling, load_fraction below the
+// low-speed capacity fraction should fall back to stage 0 and cycle there.
+// With low_speed_capacity_fraction = 0.5 and load_fraction = 0.4, the expected
+// low-stage PLR is 0.4 / 0.5 = 0.8.
+// ---------------------------------------------------------------------------
+#[test]
+fn two_speed_ac_setpoint_matrix_transitions_from_high_to_low_stage() {
+    let registry = EquipmentRegistry::new();
+    let cfg = two_speed_ac_config();
+    let mut eq = registry.create("Air Conditioner", cfg.clone()).unwrap();
+    eq.init(&cfg, &make_env_at_minute(27.0, 35.0, 20.0, 0))
+        .unwrap();
+
+    let mut high = None;
+    for minute in 0..=5 {
+        high = Some(hvac_step_snapshot(
+            eq.as_mut(),
+            &make_env_at_minute(27.0, 35.0, 20.0, minute),
+        ));
+    }
+    let high = high.expect("high-stage snapshot after dwell");
+
+    let mut low = None;
+    for minute in 6..=11 {
+        low = Some(hvac_step_snapshot(
+            eq.as_mut(),
+            &make_env_at_minute(24.4, 35.0, 18.0, minute),
+        ));
+    }
+    let low = low.expect("low-stage snapshot after stage-down dwell");
+
+    assert_eq!(high.mode, OperatingMode::Cooling);
+    assert_eq!(
+        low.mode,
+        OperatingMode::Cooling,
+        "cooling call should persist inside the hysteresis hold region"
+    );
+    assert!(
+        (high.runtime_fraction - 1.0).abs() < 1e-9,
+        "high-load two-speed call should run full runtime fraction; got {}",
+        high.runtime_fraction
+    );
+    assert!(
+        (low.runtime_fraction - 0.8).abs() < 1e-9,
+        "load_fraction 0.4 with low stage fraction 0.5 should cycle stage 0 at PLR=0.8; got {}",
+        low.runtime_fraction
+    );
+    assert!(
+        low.electric_kw < high.electric_kw,
+        "falling back to low stage must reduce electric draw: high={} kW low={} kW",
+        high.electric_kw,
+        low.electric_kw
+    );
+    assert!(
+        low.sensible_w.abs() < high.sensible_w.abs(),
+        "low-stage cycling must remove less sensible heat: high={} W low={} W",
+        high.sensible_w,
+        low.sensible_w
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 18. Two-speed setpoint staging honors the 300 s dwell before escalating
+//
+// The typed two-speed AC defaults to setpoint-based staging with a 300 s
+// minimum time per speed. Under sustained high load it should stay at low
+// stage for the first five 1-minute steps, then escalate to high stage once
+// the dwell has elapsed.
+// ---------------------------------------------------------------------------
+#[test]
+fn two_speed_ac_stage_lockout_holds_low_speed_until_dwell_elapses() {
+    let registry = EquipmentRegistry::new();
+    let cfg = two_speed_ac_config();
+    let mut eq = registry.create("Air Conditioner", cfg.clone()).unwrap();
+    eq.init(&cfg, &make_env_at_minute(27.0, 35.0, 20.0, 0))
+        .unwrap();
+
+    let mut snapshots = Vec::new();
+    for minute in 0..=5 {
+        snapshots.push(hvac_step_snapshot(
+            eq.as_mut(),
+            &make_env_at_minute(27.0, 35.0, 20.0, minute),
+        ));
+    }
+
+    for (idx, snap) in snapshots.iter().enumerate().take(5) {
+        assert_eq!(
+            snap.mode,
+            OperatingMode::Cooling,
+            "two-speed AC must stay cooling during pre-escalation step {idx}"
+        );
+        assert!(
+            (snap.runtime_fraction - 1.0).abs() < 1e-9,
+            "low stage is saturated at full runtime under the large load before dwell expiry; got {} at step {idx}",
+            snap.runtime_fraction
+        );
+    }
+
+    let low_stage_kw = snapshots[0].electric_kw;
+    let high_stage_kw = snapshots[5].electric_kw;
+    assert!(
+        snapshots[..5]
+            .iter()
+            .all(|snap| (snap.electric_kw - low_stage_kw).abs() < 1e-9),
+        "electric draw must stay locked to the low stage before the 300 s dwell expires"
+    );
+    assert!(
+        high_stage_kw > low_stage_kw * 1.5,
+        "after 300 s of sustained high load the controller must escalate to high speed; low={low_stage_kw:.4} kW high={high_stage_kw:.4} kW"
+    );
+    assert!(
+        snapshots[5].sensible_w.abs() > snapshots[0].sensible_w.abs() * 1.5,
+        "high stage after dwell expiry must remove materially more heat"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 19. Heat-pump heating lockout matrix switches among HP, ER, and Off
+//
+// With hp_lockout_temp_c = 10 C and er_lockout_temp_c = 5 C:
+//   outdoor > 10 C  -> compressor heating is available, ER locked out
+//   5 C < outdoor <= 10 C -> HP locked out and ER still blocked -> no heat
+//   outdoor <= 5 C -> HP locked out and ER permitted
+// ---------------------------------------------------------------------------
+#[test]
+fn ashp_lockout_matrix_matches_outdoor_thresholds() {
+    let registry = EquipmentRegistry::new();
+    let cfg = EquipmentConfig::from_typed(
+        "ashp".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(8_000.0),
+            heating_eir: Some(3.412_141_633 / 9.0),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: Some(5_000.0),
+            backup_eir: None,
+            fraction_heating_load_served: Some(1.0),
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(3.412_141_633 / 14.0),
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            stage_shrs: None,
+            fraction_cooling_load_served: Some(1.0),
+            number_of_speeds: 1,
+            is_mini_split: false,
+            shr: Some(0.75),
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(27.0),
+            hysteresis_c: Some(1.0),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            hp_lockout_temp_c: Some(10.0),
+            er_lockout_temp_c: Some(5.0),
+            max_oat_supplemental_c: Some(50.0),
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    );
+
+    let mut mild = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    mild.init(&cfg, &make_env_at_minute(17.0, 12.0, 11.0, 0))
+        .unwrap();
+    let mild_step = hvac_step_snapshot(mild.as_mut(), &make_env_at_minute(17.0, 12.0, 11.0, 0));
+    assert_eq!(
+        mild_step.mode,
+        OperatingMode::HeatingHP,
+        "outdoor air above the HP lockout should allow compressor-only heating"
+    );
+    assert!(mild_step.sensible_w > 0.0);
+
+    let mut shoulder = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    shoulder
+        .init(&cfg, &make_env_at_minute(17.0, 7.0, 11.0, 0))
+        .unwrap();
+    let shoulder_step =
+        hvac_step_snapshot(shoulder.as_mut(), &make_env_at_minute(17.0, 7.0, 11.0, 0));
+    assert_eq!(
+        shoulder_step.mode,
+        OperatingMode::Off,
+        "between the ER and HP lockouts neither heat source should be available"
+    );
+    assert!(shoulder_step.electric_kw.abs() < 1e-6);
+    assert!(shoulder_step.sensible_w.abs() < 1e-6);
+
+    let mut cold = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    cold.init(&cfg, &make_env_at_minute(17.0, 0.0, 11.0, 0))
+        .unwrap();
+    let cold_step = hvac_step_snapshot(cold.as_mut(), &make_env_at_minute(17.0, 0.0, 11.0, 0));
+    assert_eq!(
+        cold_step.mode,
+        OperatingMode::HeatingER,
+        "below the ER lockout the backup element should carry the heating call"
+    );
+    assert!(cold_step.sensible_w > 0.0);
 }

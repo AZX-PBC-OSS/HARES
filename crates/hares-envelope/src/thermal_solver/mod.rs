@@ -1474,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn infiltration_coupling_uses_continuous_b_coeff_scaling() {
+    fn infiltration_coupling_uses_discrete_input_gain_scaling() {
         use hares_physics::constants::CP_DRY_AIR_J_KG_K;
         use hares_physics::infiltration::ach_infiltration;
 
@@ -1492,7 +1492,7 @@ mod tests {
         let t_next = update.zone_temperatures_c[0].1;
 
         let h_inf = 1.2 * ach_infiltration(ach, env.zones[0].volume_m3) * CP_DRY_AIR_J_KG_K;
-        let b_coeff = solver.dt_s * solver.model.b_c().expect("continuous model")[(0, 1)];
+        let b_coeff = solver.model.b_eff()[(0, 1)];
         let d = h_inf * b_coeff;
         let a_d = solver.model.n_mat()[(0, 0)];
         let b_out = solver.model.b_eff()[(0, 0)];

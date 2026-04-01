@@ -326,6 +326,8 @@ mod tests {
             parasitic_power_w: Some(5.0),
             inlet_temp_c: None,
             draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             avg_water_draw_l_per_day: None,
         };
         let ec = crate::config::EquipmentConfig::from_typed(

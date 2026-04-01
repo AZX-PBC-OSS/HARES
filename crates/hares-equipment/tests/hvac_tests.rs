@@ -2,12 +2,14 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::{
-    CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, ElectricFurnaceConfig,
-    EquipmentConfig, EquipmentRegistry, GasFurnaceConfig, HeatPumpHeaterConfig,
+    CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig,
+    ElectricFurnaceConfig, EquipmentConfig, EquipmentRegistry, GasFurnaceConfig,
+    HeatPumpHeaterConfig,
 };
 use hares_types::{
-    ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots,
-    ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+    ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
+    GridState, LoopId, OperatingMode, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+    ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -101,9 +103,36 @@ fn electric_furnace_config(name: &str) -> EquipmentConfig {
     )
 }
 
+fn electric_boiler_config(name: &str) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        "Electric Boiler".to_string(),
+        ElectricBoilerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            eir: 1.0,
+            capacity_w: 10_000.0,
+            flow_rate_kg_s: 0.5,
+            return_temp_c: 40.0,
+            fluid_type: FluidType::Water,
+            fan_power_w: None,
+            number_of_speeds: 1,
+        },
+    )
+}
+
 fn ports_for_zone1() -> PortSlots {
     PortSlots {
         thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+        ..PortSlots::default()
+    }
+}
+
+fn ports_for_zone1_with_water_loop() -> PortSlots {
+    PortSlots {
+        thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+        fluid: vec![FluidAccumulator::new(LoopId(1), FluidType::Water)],
         ..PortSlots::default()
     }
 }
@@ -575,5 +604,273 @@ fn checkpoint_round_trip_preserves_mode() {
         "restored furnace must reproduce same thermal output: expected {:.3} W, got {:.3} W",
         ports.thermal[0].sensible_gain_w,
         ports_restored.thermal[0].sensible_gain_w,
+    );
+}
+
+// OCHRE HVAC.py:392-404 uses asymmetric deadband thresholds:
+// turn_on = setpoint - deadband * (1 - deadband_offset)
+// turn_off = setpoint + deadband * deadband_offset
+#[test]
+fn gas_furnace_uses_ochre_asymmetric_deadband_thresholds() {
+    let cfg = gas_furnace_config("furnace");
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Gas Furnace", cfg.clone()).unwrap();
+
+    let mut env = env_with_zone_temp(20.15);
+    eq.init(&cfg, &env).unwrap();
+    eq.apply_control(&ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(21.0),
+        cooling_setpoint_c: None,
+        deadband_c: Some(1.0),
+    })
+    .unwrap();
+
+    let heating_on = eq.update_control(&env);
+    assert_eq!(
+        heating_on,
+        OperatingMode::Heating,
+        "zone below 21.0-0.8=20.2 C must trigger heating"
+    );
+
+    let mut ports = ports_for_zone1();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+    assert!(ports.thermal[0].sensible_gain_w > 0.0);
+
+    env.current_time += ChronoDuration::minutes(1);
+    env.zones[0].temperature_c = 21.15;
+    let heating_hold = eq.update_control(&env);
+    assert_eq!(
+        heating_hold,
+        OperatingMode::Heating,
+        "zone below 21.0+0.2=21.2 C must stay in heating hysteresis hold"
+    );
+
+    env.current_time += ChronoDuration::minutes(1);
+    env.zones[0].temperature_c = 21.25;
+    let heating_off = eq.update_control(&env);
+    assert_eq!(
+        heating_off,
+        OperatingMode::Off,
+        "zone above 21.0+0.2=21.2 C must release heating"
+    );
+}
+
+#[test]
+fn electric_resistance_heaters_use_eir_as_input_ratio() {
+    const THERMAL_OUTPUT_W: f64 = 10_000.0;
+    const EIR: f64 = 1.05;
+    const EXPECTED_ELECTRIC_KW: f64 = THERMAL_OUTPUT_W * EIR / 1_000.0;
+
+    let furnace_cfg = EquipmentConfig::from_typed(
+        "ef".to_string(),
+        "Electric Furnace".to_string(),
+        ElectricFurnaceConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            eir: EIR,
+            capacity_w: THERMAL_OUTPUT_W,
+            number_of_speeds: 1,
+            fan_power_w: Some(0.0),
+            ducts: DuctConfig::default(),
+        },
+    );
+    let boiler_cfg = EquipmentConfig::from_typed(
+        "eb".to_string(),
+        "Electric Boiler".to_string(),
+        ElectricBoilerConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: Some(1),
+            eir: EIR,
+            capacity_w: THERMAL_OUTPUT_W,
+            flow_rate_kg_s: 0.5,
+            return_temp_c: 40.0,
+            fluid_type: FluidType::Water,
+            fan_power_w: None,
+            number_of_speeds: 1,
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+    let env = env_with_zone_temp(18.0);
+
+    let mut furnace = registry
+        .create("Electric Furnace", furnace_cfg.clone())
+        .unwrap();
+    furnace.init(&furnace_cfg, &env).unwrap();
+    furnace.update_control(&env);
+    let mut furnace_ports = ports_for_zone1();
+    furnace
+        .step(&env, Duration::from_secs(60), &mut furnace_ports)
+        .unwrap();
+
+    let mut boiler = registry
+        .create("Electric Boiler", boiler_cfg.clone())
+        .unwrap();
+    boiler.init(&boiler_cfg, &env).unwrap();
+    boiler.update_control(&env);
+    let mut boiler_ports = ports_for_zone1_with_water_loop();
+    boiler
+        .step(&env, Duration::from_secs(60), &mut boiler_ports)
+        .unwrap();
+
+    assert!(
+        (furnace_ports.electrical.net_active_kw() - EXPECTED_ELECTRIC_KW).abs() < 1e-9,
+        "electric furnace input must equal thermal_output * EIR"
+    );
+    assert!(
+        (boiler_ports.electrical.net_active_kw() - EXPECTED_ELECTRIC_KW).abs() < 1e-9,
+        "electric boiler input must equal thermal_output * EIR"
+    );
+    assert!(
+        (furnace_ports.thermal[0].sensible_gain_w - THERMAL_OUTPUT_W).abs() < 1e-9,
+        "electric furnace zone heat must equal configured thermal output with zero fan losses"
+    );
+    assert!(
+        (boiler
+            .telemetry()
+            .get("thermal_output_w")
+            .expect("electric boiler thermal_output_w telemetry")
+            - THERMAL_OUTPUT_W)
+            .abs()
+            < 1e-9,
+        "electric boiler thermal output telemetry must equal configured thermal output"
+    );
+}
+
+// OCHRE HVAC.py:526-554 applies power from thermal capacity through EIR for all
+// Heater subclasses, and ElectricFurnace/ElectricBoiler/ElectricBaseboard are
+// direct Heater subclasses at HVAC.py:664-679.
+#[test]
+fn simple_heaters_ideal_capacity_scales_output() {
+    let registry = EquipmentRegistry::new();
+    let env = env_with_zone_temp(18.0);
+
+    let mut gas_furnace = registry
+        .create("Gas Furnace", gas_furnace_config("gf"))
+        .unwrap();
+    let gas_furnace_cfg = gas_furnace_config("gf");
+    gas_furnace.init(&gas_furnace_cfg, &env).unwrap();
+    assert!(
+        gas_furnace
+            .descriptor()
+            .control_capabilities
+            .contains(ControlCapabilities::IDEAL_CAPACITY)
+    );
+    gas_furnace
+        .apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 5_000.0,
+        })
+        .unwrap();
+    assert_eq!(gas_furnace.update_control(&env), OperatingMode::Heating);
+    let mut gas_furnace_ports = ports_for_zone1();
+    gas_furnace
+        .step(&env, Duration::from_secs(60), &mut gas_furnace_ports)
+        .unwrap();
+    assert!(
+        (gas_furnace_ports.thermal[0].sensible_gain_w - 5_000.0).abs() < 1e-6,
+        "gas furnace ideal capacity must scale delivered heat to the requested thermal output"
+    );
+
+    let mut electric_furnace = registry
+        .create("Electric Furnace", electric_furnace_config("ef"))
+        .unwrap();
+    let electric_furnace_cfg = electric_furnace_config("ef");
+    electric_furnace.init(&electric_furnace_cfg, &env).unwrap();
+    electric_furnace
+        .apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 5_000.0,
+        })
+        .unwrap();
+    assert_eq!(
+        electric_furnace.update_control(&env),
+        OperatingMode::Heating
+    );
+    let mut electric_furnace_ports = ports_for_zone1();
+    electric_furnace
+        .step(&env, Duration::from_secs(60), &mut electric_furnace_ports)
+        .unwrap();
+    assert!(
+        (electric_furnace_ports.thermal[0].sensible_gain_w - 5_000.0).abs() < 1e-6,
+        "electric furnace ideal capacity must scale delivered heat to the requested thermal output"
+    );
+    assert!(
+        (electric_furnace_ports.electrical.net_active_kw() - 5.0).abs() < 1e-6,
+        "electric furnace ideal capacity must scale input power with thermal output at unity EIR"
+    );
+
+    let mut electric_boiler = registry
+        .create("Electric Boiler", electric_boiler_config("eb"))
+        .unwrap();
+    let electric_boiler_cfg = electric_boiler_config("eb");
+    electric_boiler.init(&electric_boiler_cfg, &env).unwrap();
+    electric_boiler
+        .apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 5_000.0,
+        })
+        .unwrap();
+    assert_eq!(electric_boiler.update_control(&env), OperatingMode::Heating);
+    let mut electric_boiler_ports = ports_for_zone1_with_water_loop();
+    electric_boiler
+        .step(&env, Duration::from_secs(60), &mut electric_boiler_ports)
+        .unwrap();
+    assert!(
+        (electric_boiler
+            .telemetry()
+            .get("thermal_output_w")
+            .expect("electric boiler thermal_output_w telemetry")
+            - 5_000.0)
+            .abs()
+            < 1e-6,
+        "electric boiler ideal capacity must scale loop thermal output to the requested value"
+    );
+    assert!(
+        (electric_boiler_ports.electrical.net_active_kw() - 5.0).abs() < 1e-6,
+        "electric boiler ideal capacity must scale input power with thermal output at unity EIR"
+    );
+
+    let mut baseboard = registry
+        .create(
+            "Electric Baseboard",
+            EquipmentConfig::from_typed(
+                "bb".to_string(),
+                "Electric Baseboard".to_string(),
+                ElectricBaseboardConfig {
+                    equipment_id: None,
+                    zone_id: Some(1),
+                    capacity_w: 3_000.0,
+                    eir: 1.0,
+                },
+            ),
+        )
+        .unwrap();
+    let baseboard_cfg = EquipmentConfig::from_typed(
+        "bb".to_string(),
+        "Electric Baseboard".to_string(),
+        ElectricBaseboardConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            capacity_w: 3_000.0,
+            eir: 1.0,
+        },
+    );
+    baseboard.init(&baseboard_cfg, &env).unwrap();
+    baseboard
+        .apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 1_500.0,
+        })
+        .unwrap();
+    assert_eq!(baseboard.update_control(&env), OperatingMode::Heating);
+    let mut baseboard_ports = ports_for_zone1();
+    baseboard
+        .step(&env, Duration::from_secs(60), &mut baseboard_ports)
+        .unwrap();
+    assert!(
+        (baseboard_ports.thermal[0].sensible_gain_w - 1_500.0).abs() < 1e-6,
+        "electric baseboard ideal capacity must scale delivered heat to the requested thermal output"
+    );
+    assert!(
+        (baseboard_ports.electrical.net_active_kw() - 1.5).abs() < 1e-6,
+        "electric baseboard ideal capacity must scale input power with thermal output at unity EIR"
     );
 }

@@ -20,8 +20,8 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, equipment_id_from_config, operating_mode_code,
-        update_heating_control, zone_id_from_config,
+        apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
+        equipment_id_from_config, operating_mode_code, update_heating_control, zone_id_from_config,
     },
 };
 
@@ -253,7 +253,9 @@ impl Equipment for ElectricFurnace {
     }
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Furnace")
+        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Furnace")?;
+        apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
+        Ok(())
     }
 }
 
@@ -467,7 +469,9 @@ impl Equipment for GasFurnace {
     }
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Furnace")
+        apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Furnace")?;
+        apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
+        Ok(())
     }
 }
 
@@ -594,8 +598,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_physics::constants::W_PER_TON;
     use hares_types::{
-        EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator,
+        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{ElectricFurnace, GasFurnace};
@@ -646,12 +650,12 @@ mod tests {
         }
     }
 
-    fn ef_config(capacity_w: f64, efficiency: f64) -> EquipmentConfig {
+    fn ef_config(capacity_w: f64, eir: f64) -> EquipmentConfig {
         EquipmentConfig::from_typed(
             "EF".to_string(),
             "Electric Furnace".to_string(),
             ElectricFurnaceConfig {
-                eir: efficiency,
+                eir,
                 capacity_w,
                 fan_power_w: Some(0.0),
                 zone_id: Some(1),
@@ -676,7 +680,7 @@ mod tests {
 
     #[test]
     fn electric_furnace_power_matches_capacity_times_eir() {
-        let cfg = ef_config(8_000.0, 0.5);
+        let cfg = ef_config(8_000.0, 1.05);
         let mut eq = ElectricFurnace::new(cfg.clone());
         let mut state = env(18.0);
         eq.init(&cfg, &state).unwrap();
@@ -688,7 +692,8 @@ mod tests {
         eq.update_control(&state);
         eq.step(&state, Duration::from_secs(60), &mut ports)
             .unwrap();
-        assert!((ports.electrical.net_active_kw() - 4.0).abs() < 1e-9);
+        assert!((ports.electrical.net_active_kw() - 8.4).abs() < 1e-9);
+        assert!((ports.thermal[0].sensible_gain_w - 8_000.0).abs() < 1e-9);
 
         state.current_time += ChronoDuration::minutes(1);
         ports.zero();
@@ -832,7 +837,7 @@ mod tests {
 
     #[test]
     fn furnace_state_round_trip_preserves_mode_and_outputs() {
-        let cfg = ef_config(8_000.0, 0.5);
+        let cfg = ef_config(8_000.0, 1.05);
         let mut eq = ElectricFurnace::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -999,5 +1004,35 @@ mod tests {
         );
         let eq = registry.create("Electric Furnace", cfg).unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
+    }
+
+    #[test]
+    fn electric_furnace_ideal_capacity_control_scales_output() {
+        let cfg = ef_config(8_000.0, 1.0);
+        let mut eq = ElectricFurnace::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 4_000.0,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            (ports.thermal[0].sensible_gain_w - 4_000.0).abs() < 1e-6,
+            "IdealCapacity must scale electric-furnace thermal output to commanded value"
+        );
     }
 }

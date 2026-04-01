@@ -23,6 +23,7 @@ use super::coil_physics::{
     CoilResult, LatentDegradationParams, calculate_shr, effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
+use super::speed_control::SpeedSelection;
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
     helpers::{equipment_id_from_config, lookup_zone, operating_mode_code, zone_id_from_config},
@@ -322,6 +323,113 @@ impl Equipment for RoomAC {
 }
 
 impl CoolingCore {
+    fn apply_cooling_startup_cd(&mut self, cd: Option<f64>) {
+        if let Some(cd) = cd {
+            self.hvac.plf_cooling_degradation_coeff = cd;
+            self.hvac.startup.c_d = cd;
+        }
+    }
+
+    fn select_variable_speed_cooling(
+        &mut self,
+        requested_capacity_fraction: f64,
+    ) -> SpeedSelection {
+        let requested_capacity_fraction = requested_capacity_fraction.clamp(0.0, 1.0);
+        let capacities = &self.hvac.cooling_capacities_w;
+        let selection = if capacities.is_empty() {
+            SpeedSelection {
+                speed_index: 0,
+                speed_frac: 0.0,
+                part_load_ratio: 0.0,
+            }
+        } else if capacities.len() == 1 {
+            SpeedSelection {
+                speed_index: 0,
+                speed_frac: 0.0,
+                part_load_ratio: requested_capacity_fraction,
+            }
+        } else {
+            let max_capacity_w = capacities.last().copied().unwrap_or_default();
+            let capacity_fractions: Vec<f64> = capacities
+                .iter()
+                .map(|capacity_w| capacity_w / max_capacity_w.max(f64::MIN_POSITIVE))
+                .collect();
+            if requested_capacity_fraction <= capacity_fractions[0] {
+                SpeedSelection {
+                    speed_index: 0,
+                    speed_frac: 0.0,
+                    part_load_ratio: (requested_capacity_fraction
+                        / capacity_fractions[0].max(f64::MIN_POSITIVE))
+                    .clamp(0.0, 1.0),
+                }
+            } else if requested_capacity_fraction
+                >= *capacity_fractions
+                    .last()
+                    .expect("non-empty capacity fractions")
+            {
+                SpeedSelection {
+                    speed_index: capacity_fractions.len() - 1,
+                    speed_frac: 0.0,
+                    part_load_ratio: 1.0,
+                }
+            } else {
+                let hi = capacity_fractions
+                    .partition_point(|&fraction| fraction < requested_capacity_fraction);
+                let lo = hi - 1;
+                let span = capacity_fractions[hi] - capacity_fractions[lo];
+                let speed_frac = if span > f64::EPSILON {
+                    (requested_capacity_fraction - capacity_fractions[lo]) / span
+                } else {
+                    0.0
+                };
+                SpeedSelection {
+                    speed_index: lo,
+                    speed_frac,
+                    part_load_ratio: 1.0,
+                }
+            }
+        };
+        self.hvac.last_speed_index = selection.speed_index;
+        self.hvac.last_speed_frac = selection.speed_frac;
+        selection
+    }
+
+    fn variable_speed_point(&self, selection: SpeedSelection) -> (f64, f64, f64) {
+        let stage_capacity_w = if self.hvac.cooling_capacities_w.len() > 1
+            && selection.speed_frac > 0.0
+        {
+            self.hvac.interpolated_capacity(
+                &self.hvac.cooling_capacities_w,
+                selection.speed_index,
+                selection.speed_frac,
+            )
+        } else if self.hvac.cooling_capacities_w.len() == 1 {
+            self.hvac
+                .cooling_capacities_w
+                .first()
+                .copied()
+                .unwrap_or_default()
+        } else {
+            HvacEquipment::capacity_at_stage(&self.hvac.cooling_capacities_w, selection.speed_index)
+        };
+        let stage_eir = if self.hvac.cooling_capacities_w.len() > 1 && selection.speed_frac > 0.0 {
+            self.hvac
+                .interpolated_eir(selection.speed_index, selection.speed_frac)
+        } else {
+            self.hvac.eir_at_stage(selection.speed_index)
+        };
+        let part_load_ratio = if self.hvac.cooling_capacities_w.len() == 1
+            || (selection.speed_index == 0
+                && selection.speed_frac == 0.0
+                && selection.part_load_ratio < 1.0)
+        {
+            selection.part_load_ratio.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        (stage_capacity_w, stage_eir, part_load_ratio)
+    }
+
     fn new(config: EquipmentConfig, is_room_ac: bool) -> Self {
         let zone = zone_id_from_config(&config).unwrap_or(ZoneId(1));
         let equipment_type = if is_room_ac {
@@ -437,22 +545,18 @@ impl CoolingCore {
             };
 
             let default_eir = cfg.eir;
+            let stage_count = self.hvac.cooling_capacities_w.len();
 
             self.hvac.eir_by_stage = if let Some(stages) = &cfg.stage_eirs {
                 stages.clone()
             } else {
-                vec![default_eir]
+                vec![default_eir; stage_count]
             };
 
             if self.hvac.cooling_capacities_w.len() != self.hvac.eir_by_stage.len() {
-                if self.hvac.eir_by_stage.len() == 1 {
-                    self.hvac.eir_by_stage =
-                        vec![self.hvac.eir_by_stage[0]; self.hvac.cooling_capacities_w.len()];
-                } else {
-                    return Err(HaresError::Equipment(
-                        "cooling capacity and EIR stage counts must match".to_string(),
-                    ));
-                }
+                return Err(HaresError::Equipment(
+                    "cooling capacity and EIR stage counts must match".to_string(),
+                ));
             }
 
             if let Some(airflow_m3_s_per_w) = cfg.airflow_m3_s_per_w {
@@ -488,12 +592,8 @@ impl CoolingCore {
                 )
             };
 
-            self.hvac.speed_control_mode = match cfg.number_of_speeds {
-                1 => SpeedControlMode::SingleSpeed,
-                2 => SpeedControlMode::TwoSpeedSetpoint,
-                n if n >= 4 => SpeedControlMode::MultiSpeedInterpolated,
-                _ => SpeedControlMode::SingleSpeed,
-            };
+            let speed_mode = cfg.cooling_speed_control_mode();
+            self.hvac.speed_control_mode = speed_mode;
 
             self.rated_shr = cfg.shr.unwrap_or(0.75).clamp(0.0, 1.0);
 
@@ -503,10 +603,7 @@ impl CoolingCore {
                 self.rated_shr = self.stage_shrs[0].clamp(0.0, 1.0);
             }
 
-            if let Some(cd) = cfg.startup_cd {
-                self.hvac.plf_cooling_degradation_coeff = cd;
-                self.hvac.startup.c_d = cd;
-            }
+            self.apply_cooling_startup_cd(cfg.derived_cooling_startup_cd());
         }
 
         self.hvac.update_zone_heat_fractions();
@@ -548,8 +645,6 @@ impl CoolingCore {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
-        // Reset transient signals each step.
-        self.ctrl_load_fraction = 1.0;
         self.use_ideal = self.hvac.use_ideal_capacity(env);
 
         // Advance DR duration; auto-revert to Normal when expired.
@@ -577,41 +672,33 @@ impl CoolingCore {
             .update_mode(env)
             .unwrap_or(ThermostatMode::Deadband);
         if mode == ThermostatMode::Cooling {
-            if self.use_ideal {
-                // Ideal capacity mode (coarse timesteps >= 5 min): the thermal
-                // solver provides exact PLR via calculate_performance. Set
-                // duty_cycle=1.0 as placeholder; the solver's IdealCapacity
-                // signal arrives before step() and overrides PLR there.
-                self.hvac.duty_cycle = 1.0;
+            let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
+            let zone_temp = lookup_zone(env, self.hvac.zone_id)
+                .map(|z| z.temperature_c)
+                .unwrap_or(setpoint);
+            let deadband = self
+                .hvac
+                .thermostat
+                .hysteresis_c
+                .max(MIN_LOAD_FRACTION_DEADBAND_C);
+            let load_fraction = if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed {
+                1.0
             } else {
-                // Fine timestep: thermostat-driven load fraction.
-                let setpoint =
-                    self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
-                let zone_temp = lookup_zone(env, self.hvac.zone_id)
-                    .map(|z| z.temperature_c)
-                    .unwrap_or(setpoint);
-                let deadband = self
-                    .hvac
-                    .thermostat
-                    .hysteresis_c
-                    .max(MIN_LOAD_FRACTION_DEADBAND_C);
-                let load_fraction = if self.hvac.speed_control_mode == SpeedControlMode::SingleSpeed
-                {
-                    // Single-speed compressor physics: thermostat call means
-                    // full-stage runtime for the step (on/off cycling only).
-                    1.0
-                } else {
-                    ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
-                };
-                let selection =
+                ((zone_temp - setpoint) / deadband).clamp(0.0, 1.0)
+            };
+            self.hvac.update_prev_zone_temp(Some(zone_temp));
+            self.hvac.duty_cycle = match self.hvac.speed_control_mode {
+                SpeedControlMode::VariableSpeedIdeal => {
+                    self.select_variable_speed_cooling(load_fraction)
+                        .part_load_ratio
+                }
+                _ if self.use_ideal => 1.0,
+                _ => {
                     self.hvac
-                        .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false);
-                self.hvac.update_prev_zone_temp(Some(zone_temp));
-                self.hvac.duty_cycle = match self.hvac.speed_control_mode {
-                    SpeedControlMode::VariableSpeedIdeal => selection.speed_frac.clamp(0.0, 1.0),
-                    _ => selection.part_load_ratio,
-                };
-            }
+                        .select_speed_with_zone_temp(load_fraction, Some(zone_temp), false)
+                        .part_load_ratio
+                }
+            };
             self.operating_mode = if self.hvac.duty_cycle > 0.0 {
                 OperatingMode::Cooling
             } else {
@@ -654,7 +741,6 @@ impl CoolingCore {
             latent_cooling_w = perf.latent_cooling_w;
             self.hvac.shr = perf.shr;
             self.hvac.supply_air_temp_c = perf.supply_temp_c;
-            self.last_cooling_rtf = perf.rtf;
 
             // Apply compound load multipliers (duty cycle * transient load * DR).
             let effective_load = (self.ctrl_duty_cycle
@@ -662,6 +748,7 @@ impl CoolingCore {
                 * self.dr_load_fraction
                 * self.dr_duty_cycle)
                 .clamp(0.0, 1.0);
+            self.last_cooling_rtf = (perf.rtf * effective_load).clamp(0.0, 1.0);
 
             // Apply PowerLimit: clamp electric, proportionally reduce thermal.
             let total_electric_kw = compressor_kw + fan_kw;
@@ -767,6 +854,8 @@ impl CoolingCore {
 
         // Clear solver-provided capacity so next step starts fresh.
         self.ideal_capacity_w = 0.0;
+        // LoadFraction is a one-step post-thermostat multiplier.
+        self.ctrl_load_fraction = 1.0;
 
         Ok(())
     }
@@ -812,21 +901,18 @@ impl CoolingCore {
             )));
         }
 
-        let speed_index = self.hvac.last_speed_index;
+        let is_variable_speed =
+            self.hvac.speed_control_mode == SpeedControlMode::VariableSpeedIdeal;
+        let mut speed_index = self.hvac.last_speed_index;
         let speed_frac = self.hvac.last_speed_frac;
-        let (stage_cap_w, stage_eir) = match self.hvac.speed_control_mode {
-            SpeedControlMode::VariableSpeedIdeal => {
-                let max_cap = self
-                    .hvac
-                    .cooling_capacities_w
-                    .last()
-                    .copied()
-                    .unwrap_or_default();
-                (
-                    max_cap * speed_frac.clamp(0.0, 1.0),
-                    self.hvac.eir_at_stage(speed_index),
-                )
-            }
+        let mut variable_selection = SpeedSelection {
+            speed_index,
+            speed_frac,
+            part_load_ratio: self.hvac.duty_cycle.clamp(0.0, 1.0),
+        };
+        let (mut stage_cap_w, mut stage_eir, mut variable_plr) = match self.hvac.speed_control_mode
+        {
+            SpeedControlMode::VariableSpeedIdeal => self.variable_speed_point(variable_selection),
             SpeedControlMode::MultiSpeedInterpolated => (
                 self.hvac.interpolated_capacity(
                     &self.hvac.cooling_capacities_w,
@@ -834,64 +920,126 @@ impl CoolingCore {
                     speed_frac,
                 ),
                 self.hvac.interpolated_eir(speed_index, speed_frac),
+                self.hvac.duty_cycle.clamp(0.0, 1.0),
             ),
             _ => (
                 HvacEquipment::capacity_at_stage(&self.hvac.cooling_capacities_w, speed_index),
                 self.hvac.eir_at_stage(speed_index),
+                self.hvac.duty_cycle.clamp(0.0, 1.0),
             ),
         };
 
-        // Fan shaft heat raises entering dry-bulb temperature seen by the coil.
-        // Apply ΔT to dry-bulb first, then re-derive wet-bulb from (DB, w, p).
-        let flow_m3_s_for_fan = stage_cap_w.max(0.0) * self.hvac.airflow_m3_s_per_w;
-        let fan_shaft_heat_correction_c = if flow_m3_s_for_fan > 0.0 {
-            use hares_physics::{
-                air_properties::moist_air_density_kg_m3,
-                psychrometrics::SPECIFIC_HEAT_DRY_AIR_KJ_KG_K,
-            };
-            let fan_power_w = self.hvac.fan_power_w_per_m3_s * flow_m3_s_for_fan;
-            let rho = moist_air_density_kg_m3(
-                env.weather.pressure_kpa * 1000.0,
-                zone.temperature_c,
-                zone.humidity_ratio.max(0.0),
-            );
-            let mfr = flow_m3_s_for_fan * rho;
-            if mfr > 0.0 {
-                (fan_power_w / 1000.0) / (mfr * SPECIFIC_HEAT_DRY_AIR_KJ_KG_K)
+        let outdoor_c = env.weather.outdoor_temp_c;
+
+        fn curve_inputs(
+            stage_capacity_w: f64,
+            hvac: &HvacEquipment,
+            zone: &hares_types::ZoneState,
+            env: &EnvironmentState,
+            outdoor_c: f64,
+            flow_fraction_correction: f64,
+        ) -> (f64, f64, f64, f64, f64) {
+            let flow_m3_s_for_fan = stage_capacity_w.max(0.0) * hvac.airflow_m3_s_per_w;
+            let fan_shaft_heat_correction_c = if flow_m3_s_for_fan > 0.0 {
+                use hares_physics::{
+                    air_properties::moist_air_density_kg_m3,
+                    psychrometrics::SPECIFIC_HEAT_DRY_AIR_KJ_KG_K,
+                };
+                let fan_power_w = hvac.fan_power_w_per_m3_s * flow_m3_s_for_fan;
+                let rho = moist_air_density_kg_m3(
+                    env.weather.pressure_kpa * 1000.0,
+                    zone.temperature_c,
+                    zone.humidity_ratio.max(0.0),
+                );
+                let mfr = flow_m3_s_for_fan * rho;
+                if mfr > 0.0 {
+                    (fan_power_w / 1000.0) / (mfr * SPECIFIC_HEAT_DRY_AIR_KJ_KG_K)
+                } else {
+                    0.0
+                }
             } else {
                 0.0
-            }
-        } else {
-            0.0
-        };
-        let coil_entering_db_c = zone.temperature_c + fan_shaft_heat_correction_c;
-        let coil_entering_wb_c = if fan_shaft_heat_correction_c.abs() > f64::EPSILON {
-            hares_physics::psychrometrics::wet_bulb_from_humidity_ratio(
+            };
+            let coil_entering_db_c = zone.temperature_c + fan_shaft_heat_correction_c;
+            let coil_entering_wb_c = if fan_shaft_heat_correction_c.abs() > f64::EPSILON {
+                hares_physics::psychrometrics::wet_bulb_from_humidity_ratio(
+                    coil_entering_db_c,
+                    zone.humidity_ratio.max(0.0),
+                    env.weather.pressure_kpa * 1000.0,
+                )
+            } else {
+                zone.wet_bulb_c
+            };
+            let (_, cap_ratio) = hvac.evaluate_biquadratic_with_flow(
+                0,
+                coil_entering_wb_c,
+                outdoor_c,
+                flow_fraction_correction,
+            );
+            let (_, eir_ratio_base) = hvac.evaluate_biquadratic_with_flow(
+                1,
+                coil_entering_wb_c,
+                outdoor_c,
+                flow_fraction_correction,
+            );
+            (
+                flow_m3_s_for_fan,
                 coil_entering_db_c,
-                zone.humidity_ratio.max(0.0),
-                env.weather.pressure_kpa * 1000.0,
+                coil_entering_wb_c,
+                cap_ratio,
+                eir_ratio_base,
             )
-        } else {
-            zone.wet_bulb_c
-        };
+        }
 
-        let outdoor_c = env.weather.outdoor_temp_c;
-        // Capacity biquadratic: evaluate first — needed to derive PLR from
-        // solver-provided ideal capacity at current conditions.
-        let (_, cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
-            0,
-            coil_entering_wb_c,
+        let (
+            mut flow_m3_s_for_fan,
+            mut coil_entering_db_c,
+            mut coil_entering_wb_c,
+            mut cap_ratio,
+            mut eir_ratio_base,
+        ) = curve_inputs(
+            stage_cap_w,
+            &self.hvac,
+            zone,
+            env,
             outdoor_c,
             self.flow_fraction_correction,
         );
 
+        if is_variable_speed && self.use_ideal && self.ideal_capacity_w.abs() > f64::EPSILON {
+            let max_capacity_w = self
+                .hvac
+                .cooling_capacities_w
+                .last()
+                .copied()
+                .unwrap_or_default();
+            let requested_capacity_fraction =
+                (-self.ideal_capacity_w / (max_capacity_w * cap_ratio).max(1.0)).clamp(0.0, 1.0);
+            variable_selection = self.select_variable_speed_cooling(requested_capacity_fraction);
+            speed_index = variable_selection.speed_index;
+            self.hvac.duty_cycle = variable_selection.part_load_ratio;
+            (stage_cap_w, stage_eir, variable_plr) = self.variable_speed_point(variable_selection);
+            (
+                flow_m3_s_for_fan,
+                coil_entering_db_c,
+                coil_entering_wb_c,
+                cap_ratio,
+                eir_ratio_base,
+            ) = curve_inputs(
+                stage_cap_w,
+                &self.hvac,
+                zone,
+                env,
+                outdoor_c,
+                self.flow_fraction_correction,
+            );
+        }
+
         // Derive PLR: from solver's ideal capacity (coarse timestep) or
         // thermostat duty cycle (fine timestep).
-        let is_variable_speed =
-            self.hvac.speed_control_mode == SpeedControlMode::VariableSpeedIdeal;
         let steady_capacity_w = (stage_cap_w * cap_ratio).max(0.0);
         let plr = if is_variable_speed {
-            1.0
+            variable_plr
         } else if self.use_ideal && self.ideal_capacity_w.abs() > f64::EPSILON {
             // Solver-provided ideal capacity (negative for cooling): derive PLR
             // from biquadratic-corrected capacity at current conditions.
@@ -912,12 +1060,6 @@ impl CoolingCore {
         };
 
         // EIR curve: divide by PLF — a lower PLF (more cycling) means worse efficiency.
-        let (_, eir_ratio_base) = self.hvac.evaluate_biquadratic_with_flow(
-            1,
-            coil_entering_wb_c,
-            outdoor_c,
-            self.flow_fraction_correction,
-        );
         let eir_ratio = if plf > 0.0 {
             eir_ratio_base / plf
         } else {
@@ -1249,11 +1391,11 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, ExecutionStage, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, EnvironmentState, ExecutionStage, GridState, OperatingMode, PortSlots,
+        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
-    use super::{AirConditioner, RoomAC};
+    use super::{AirConditioner, RoomAC, SpeedControlMode};
 
     use crate::{
         CentralAirConditionerConfig, Equipment, EquipmentConfig, EquipmentRegistry, RoomAcConfig,
@@ -1880,7 +2022,7 @@ mod tests {
     #[test]
     fn variable_speed_ideal_uses_fractional_duty_cycle() {
         let cfg = ac_config_with(|typed| {
-            typed.number_of_speeds = 0;
+            typed.number_of_speeds = 4;
             typed.hysteresis_c = Some(0.0);
         });
         let env_part = env(24.25, 0.010, 18.0, 35.0); // load_fraction=(0.25/0.5)=0.5
@@ -1888,6 +2030,10 @@ mod tests {
 
         let mut eq_part = AirConditioner::new(cfg.clone());
         eq_part.init(&cfg, &env_part).unwrap();
+        assert_eq!(
+            eq_part.core.hvac.speed_control_mode,
+            SpeedControlMode::VariableSpeedIdeal
+        );
         eq_part.update_control(&env_part);
         assert!(
             (eq_part.core.hvac.duty_cycle - 0.5).abs() < 1e-9,
@@ -1902,6 +2048,247 @@ mod tests {
             (eq_full.core.hvac.duty_cycle - 1.0).abs() < 1e-9,
             "high load should clamp to full duty cycle; got {}",
             eq_full.core.hvac.duty_cycle
+        );
+    }
+
+    #[test]
+    fn central_four_speed_ac_uses_variable_speed_mode() {
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 4;
+            typed.hysteresis_c = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let env = env(24.25, 0.010, 18.0, 35.0);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        assert_eq!(
+            eq.core.hvac.speed_control_mode,
+            SpeedControlMode::VariableSpeedIdeal
+        );
+        assert_eq!(
+            eq.core.hvac.startup.c_d, 0.0,
+            "OCHRE 4-speed variable cooling should map to zero startup Cd"
+        );
+
+        eq.update_control(&env);
+        assert!(
+            (eq.core.hvac.duty_cycle - 0.5).abs() < 1e-9,
+            "central 4-speed variable cooling should preserve fractional duty; got {}",
+            eq.core.hvac.duty_cycle
+        );
+    }
+
+    #[test]
+    fn central_four_speed_variable_speed_interpolates_stage_ladder() {
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 4;
+            typed.hysteresis_c = Some(0.0);
+            typed.stage_capacities_w = Some(vec![2_000.0, 4_000.0, 6_000.0, 8_000.0]);
+            typed.stage_eirs = Some(vec![0.20, 0.25, 0.30, 0.35]);
+            typed.stage_shrs = Some(vec![0.75, 0.75, 0.75, 0.75]);
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let environment = env(24.25, 0.010, 18.0, 35.0);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0);
+
+        assert_eq!(eq.core.hvac.last_speed_index, 0);
+        assert!((eq.core.hvac.last_speed_frac - 1.0).abs() < 1e-9);
+        assert!(
+            compressor_kw > 0.0,
+            "load_fraction=0.5 with a 4-speed ladder must energize the second stage, got compressor_kw={compressor_kw}"
+        );
+        assert!(
+            (rtf - 1.0).abs() < 1e-9,
+            "an exact variable-speed stage match must run continuously, got runtime_fraction={rtf}"
+        );
+    }
+
+    #[test]
+    fn typed_two_speed_ac_derives_two_speed_startup_cd() {
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 2;
+            typed.startup_cd = None;
+        });
+        let env = env(28.0, 0.010, 18.0, 35.0);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+
+        assert_eq!(
+            eq.core.hvac.speed_control_mode,
+            SpeedControlMode::TwoSpeedSetpoint
+        );
+        assert!(
+            (eq.core.hvac.startup.c_d - 0.11).abs() < 1e-9,
+            "two-speed typed cooling must derive startup Cd=0.11, got {}",
+            eq.core.hvac.startup.c_d
+        );
+        assert!(
+            (eq.core.hvac.plf_cooling_degradation_coeff - 0.11).abs() < 1e-9,
+            "two-speed typed cooling must derive PLF Cd=0.11, got {}",
+            eq.core.hvac.plf_cooling_degradation_coeff
+        );
+    }
+
+    #[test]
+    fn transient_load_fraction_can_be_applied_before_update_control() {
+        let cfg = ac_config();
+        let environment = env(30.0, 0.010, 18.0, 35.0);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.0 })
+            .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert_eq!(
+            kw, 0.0,
+            "LoadFraction applied before update_control must still affect the current step"
+        );
+
+        let mut ports_next = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports_next)
+            .unwrap();
+        let kw_next = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert!(
+            kw_next > 0.0,
+            "transient LoadFraction must clear after one step; got {kw_next}"
+        );
+    }
+
+    #[test]
+    fn runtime_fraction_tracks_post_control_duty_cycle() {
+        let cfg = ac_config_with(|typed| typed.startup_cd = Some(0.0));
+        let environment = env(30.0, 0.010, 18.0, 35.0);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::DutyCycle {
+            on_fraction: 0.5,
+            period_s: None,
+            component: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(-1.0);
+        assert!(
+            (rtf - 0.5).abs() < 0.1,
+            "Runtime fraction must reflect post-control duty cycle; got {rtf}"
+        );
+    }
+
+    #[test]
+    fn coarse_timestep_variable_speed_ideal_signal_selects_stage_from_capacity() {
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 4;
+            typed.stage_capacities_w = Some(vec![2_000.0, 4_000.0, 6_000.0, 8_000.0]);
+            typed.stage_eirs = Some(vec![0.20, 0.25, 0.30, 0.35]);
+            typed.stage_shrs = Some(vec![0.75, 0.75, 0.75, 0.75]);
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let mut environment = env(26.0, 0.010, 19.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -4_000.0,
+        })
+        .unwrap();
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+
+        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0);
+
+        assert_eq!(eq.core.hvac.last_speed_index, 1);
+        assert!(
+            compressor_kw > 0.0,
+            "IdealCapacity=-4 kW on a 4-speed ladder must energize the second stage, got compressor_kw={compressor_kw}"
+        );
+        assert!(
+            (rtf - 1.0).abs() < 1e-9,
+            "exact ideal-capacity stage selection must run continuously, got runtime_fraction={rtf}"
+        );
+    }
+
+    #[test]
+    fn cooling_core_output_matches_telemetry_and_ports() {
+        let cfg = ac_config_with(|typed| typed.startup_cd = Some(0.0));
+        let environment = env(30.0, 0.010, 18.0, 35.0);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let operating_mode = eq.telemetry().get(tk::OPERATING_MODE).unwrap_or(-1.0);
+        let core = eq.core_output();
+        let core_electric_kw = match core.flows.electric_kw {
+            Some(super::ElectricPower::Consumption(value)) => value,
+            other => panic!("expected electric consumption flow, got {other:?}"),
+        };
+
+        assert!(
+            (ports.electrical.net_active_kw() - electric_kw).abs() < 1e-9,
+            "electrical port and telemetry must match: ports={} telemetry={electric_kw}",
+            ports.electrical.net_active_kw()
+        );
+        assert!(
+            (core_electric_kw - electric_kw).abs() < 1e-9,
+            "CoreOutput electric flow and telemetry must match: core={core_electric_kw} telemetry={electric_kw}"
+        );
+        assert_eq!(core.state.operating_mode, Some(OperatingMode::Cooling));
+        assert_eq!(operating_mode, 2.0);
+        assert!(
+            ports.thermal[0].sensible_gain_w < 0.0,
+            "cooling thermal port must remove sensible heat, got {}",
+            ports.thermal[0].sensible_gain_w
         );
     }
 }
@@ -2225,8 +2612,8 @@ mod dr_tests {
     }
 
     // LoadFraction 0.0: forces AC off for that step.
-    // LoadFraction is transient — it must be applied AFTER update_control but BEFORE step,
-    // because update_control resets ctrl_load_fraction = 1.0 at its start.
+    // The signal is one-step transient, but it survives update_control and clears
+    // at the end of step().
     #[test]
     fn load_fraction_zero_forces_off() {
         let cfg = base_config();
@@ -2237,7 +2624,7 @@ mod dr_tests {
 
         // update_control determines thermostat mode first (sets operating_mode = Cooling).
         eq.update_control(&environment);
-        // Then apply LoadFraction=0 after update_control so the reset does not clobber it.
+        // Applying after update_control still affects the current step.
         eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.0 })
             .unwrap();
         let mut ports = make_ports();
@@ -2247,9 +2634,8 @@ mod dr_tests {
         assert_eq!(kw, 0.0, "LoadFraction 0.0 must force zero output this step");
     }
 
-    // LoadFraction is transient: update_control resets ctrl_load_fraction = 1.0 each step.
-    // Applying LoadFraction=0 between update_control and step affects only that step;
-    // the next update_control call restores the default.
+    // LoadFraction is transient for one step. The next step restores the default
+    // unless the control is re-applied.
     #[test]
     fn load_fraction_resets_each_step() {
         let cfg = base_config();
@@ -2268,7 +2654,7 @@ mod dr_tests {
         let kw_step1 = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert_eq!(kw_step1, 0.0, "step 1 with LoadFraction=0 must be off");
 
-        // Step 2: update_control resets ctrl_load_fraction=1.0; no signal reapplied → AC runs.
+        // Step 2: no signal reapplied → AC runs again.
         let kw_step2 = step_once(&mut eq, &environment);
         assert!(
             kw_step2 > 0.0,

@@ -248,7 +248,7 @@ impl ResistanceWH {
     fn init_typed(
         &mut self,
         config: &EquipmentConfig,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
     ) -> crate::Result<()> {
         let c = config.require_typed::<ElectricResistanceWaterHeaterConfig>(
             "Electric Resistance Water Heater",
@@ -304,10 +304,10 @@ impl ResistanceWH {
         self.upper_element_on = false;
         self.lower_element_on = false;
 
-        self.mains_temp_c = 15.0;
+        self.mains_temp_c = super::require_mains_temp_c(env, "Electric Resistance Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.draw_l_per_min_source = None;
-        self.mains_temp_c_source = None;
+        self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
+        self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
         self.zip = WaterHeaterZip::default();
 
         self.setpoint_ramp_rate_c_per_s =
@@ -869,6 +869,8 @@ mod tests {
             tank_nodes: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1417,6 +1419,8 @@ mod element_priority_tests {
                 tank_nodes: None,
                 avg_water_draw_l_per_day: None,
                 draw_flow_rate_kg_s: Some(0.0),
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,

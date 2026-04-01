@@ -1,7 +1,5 @@
 //! Config parsing helpers for HVAC equipment initialization.
 
-#[cfg(test)]
-use hares_types::BoundaryPolicy;
 use hares_types::normalize_ascii;
 use hares_types::{HaresError, ScheduleSource, ScheduleSourceConfig};
 use serde::{Deserialize, Serialize};
@@ -27,6 +25,17 @@ pub struct DuctConfig {
     /// Cooling duct distribution system efficiency (DSE), [0, 1].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dse_cool: Option<f64>,
+    /// Explicit airflow in m^3/s/W for ducted heating equipment.
+    ///
+    /// When present, this carries the HPXML explicit airflow field through the
+    /// typed furnace config so equipment init can skip nominal airflow defaults
+    /// and airflow defect adjustments.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "duct_airflow_m3_s_per_w"
+    )]
+    pub airflow_m3_s_per_w: Option<f64>,
     /// Zone where duct losses are deposited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duct_zone_id: Option<u16>,
@@ -119,45 +128,7 @@ pub(super) fn build_setpoint_source(
     prefix: &str,
 ) -> Option<ScheduleSource> {
     let source_key = format!("{prefix}_setpoint_source");
-    if let Some(source) = extract_schedule_source(config, &source_key) {
-        return Some(source);
-    }
-
-    // Test-only compatibility shim for legacy fixtures that still populate raw keys.
-    let col_key = format!("{prefix}_setpoint_schedule_col");
-    if let Some(col) = config.get_f64(&col_key) {
-        return Some(ScheduleSource::ColumnRef {
-            col_idx: col as usize,
-            boundary: BoundaryPolicy::Clamp,
-        });
-    }
-
-    let wd_key = format!("{prefix}_weekday_setpoints_c");
-    let we_key = format!("{prefix}_weekend_setpoints_c");
-    let weekday = config.get_f64_array(&wd_key);
-    let weekend = config.get_f64_array(&we_key);
-    if let Some(wd) = weekday {
-        let we = weekend.unwrap_or(wd);
-        return Some(ScheduleSource::DailyProfile {
-            weekday: slice_to_24(wd),
-            weekend: slice_to_24(we),
-            month_multipliers: [1.0; 12],
-            max_value: 1.0,
-        });
-    }
-
-    None
-}
-
-#[cfg(test)]
-pub(super) fn slice_to_24(src: &[f64]) -> [f64; 24] {
-    let mut arr = [0.0; 24];
-    let n = src.len().min(24);
-    arr[..n].copy_from_slice(&src[..n]);
-    if let Some(&last) = src.last() {
-        arr[n..].fill(last);
-    }
-    arr
+    extract_schedule_source(config, &source_key)
 }
 
 pub(super) fn load_bounds_pair(

@@ -10,12 +10,15 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
 use hares_equipment::water_heater::gas::GasWH;
 use hares_equipment::water_heater::resistance::ResistanceWH;
+use hares_equipment::water_heater::tankless::TanklessWH;
 use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig, GasWaterHeaterConfig,
+    TanklessWaterHeaterConfig,
 };
 use hares_types::{
-    ControlSignal, EnvironmentState, FuelType, GridState, OperatingMode, PortSlots, WeatherState,
-    ZoneId, ZoneState,
+    BoundaryPolicy, ControlSignal, DomainUpdate, EnvironmentState, FuelType, GridState,
+    OperatingMode, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSourceConfig, WeatherState, ZoneId,
+    ZoneState,
 };
 
 // ── Shared test helpers ──────────────────────────────────────────────────────
@@ -36,6 +39,7 @@ fn make_env(zone_temp_c: f64) -> EnvironmentState {
             wind_speed_m_s: 1.5,
             wind_dir_deg: 0.0,
             ground_temp_c: zone_temp_c,
+            mains_temp_c: 15.0,
             sky_temp_c: zone_temp_c - 5.0,
             pressure_kpa: 101.325,
             solar_irradiance: vec![],
@@ -93,6 +97,8 @@ fn resistance_config(
             tank_nodes: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(draw_flow_rate_kg_s),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -130,6 +136,8 @@ fn gas_config(
             tank_nodes: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(draw_flow_rate_kg_s),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             pilot_power_w: Some(0.0),
             flue_loss_fraction: None,
             skin_loss_fraction: None,
@@ -137,6 +145,37 @@ fn gas_config(
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
+        },
+    )
+}
+
+fn tankless_config(
+    fuel_type: FuelType,
+    setpoint_c: f64,
+    inlet_temp_c: f64,
+    draw_flow_rate_kg_s: f64,
+    draw_flow_rate_source: Option<ScheduleSourceConfig>,
+    mains_temp_c_source: Option<ScheduleSourceConfig>,
+) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        "TWH".to_string(),
+        "Tankless Water Heater".to_string(),
+        TanklessWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: None,
+            loop_id: None,
+            fuel_type,
+            energy_factor: Some(1.0),
+            uniform_energy_factor: None,
+            heating_capacity_w: Some(20_000.0),
+            setpoint_c: Some(setpoint_c),
+            parasitic_power_w: Some(0.0),
+            performance_adjustment: Some(1.0),
+            inlet_temp_c: Some(inlet_temp_c),
+            draw_flow_rate_kg_s: Some(draw_flow_rate_kg_s),
+            draw_flow_rate_source,
+            mains_temp_c_source,
+            avg_water_draw_l_per_day: None,
         },
     )
 }
@@ -322,7 +361,135 @@ fn gas_wh_consumes_gas_not_electricity() {
     );
 }
 
-// ── Test 6: energy_conservation_over_draw_cycle ───────────────────────────────
+#[test]
+fn resistance_wh_uses_schedule_draw_source() {
+    let mut env = make_env(21.0);
+    env.custom_domains = vec![DomainUpdate {
+        domain_id: SCHEDULE_DOMAIN_ID,
+        zone_temperatures_c: vec![],
+        custom_payload: Some(vec![99.0, 0.05]),
+    }];
+
+    let mut typed: ElectricResistanceWaterHeaterConfig = resistance_config(52.0, 2.0, 40.0, 0.0)
+        .typed()
+        .expect("typed resistance config");
+    typed.draw_flow_rate_source = Some(ScheduleSourceConfig::ColumnRef {
+        col_idx: 1,
+        boundary: BoundaryPolicy::Clamp,
+    });
+    let cfg = EquipmentConfig::from_typed(
+        "RWH".to_string(),
+        "Resistance Water Heater".to_string(),
+        typed,
+    );
+
+    let mut wh = ResistanceWH::new(cfg.clone());
+    wh.init(&cfg, &env).unwrap();
+    let mut ports = PortSlots::from_declarations(wh.ports());
+
+    step_wh(&mut wh, &env, &mut ports);
+
+    let draw_kg_s = wh.telemetry().get("draw_flow_rate_kg_s").unwrap_or(-1.0);
+    assert!(
+        (draw_kg_s - 0.05).abs() < 1e-12,
+        "resistance WH draw schedule must override config draw; got {draw_kg_s:.6} kg/s"
+    );
+}
+
+#[test]
+fn gas_wh_uses_schedule_draw_source() {
+    let mut env = make_env(21.0);
+    env.custom_domains = vec![DomainUpdate {
+        domain_id: SCHEDULE_DOMAIN_ID,
+        zone_temperatures_c: vec![],
+        custom_payload: Some(vec![99.0, 0.05]),
+    }];
+
+    let mut typed: GasWaterHeaterConfig = gas_config(52.0, 2.0, 40.0, 0.0)
+        .typed()
+        .expect("typed gas config");
+    typed.draw_flow_rate_source = Some(ScheduleSourceConfig::ColumnRef {
+        col_idx: 1,
+        boundary: BoundaryPolicy::Clamp,
+    });
+    let cfg = EquipmentConfig::from_typed("GWH".to_string(), "Gas Water Heater".to_string(), typed);
+
+    let mut wh = GasWH::new(cfg.clone());
+    wh.init(&cfg, &env).unwrap();
+    let mut ports = PortSlots::from_declarations(wh.ports());
+
+    step_wh(&mut wh, &env, &mut ports);
+
+    let draw_kg_s = wh.telemetry().get("draw_flow_rate_kg_s").unwrap_or(-1.0);
+    assert!(
+        (draw_kg_s - 0.05).abs() < 1e-12,
+        "gas WH draw schedule must override config draw; got {draw_kg_s:.6} kg/s"
+    );
+}
+
+// ── Test 6: tankless_wh_uses_schedule_draw_and_mains_inputs ──────────────────
+
+#[test]
+fn tankless_wh_uses_schedule_draw_and_mains_inputs() {
+    let mut env = make_env(21.0);
+    env.weather.mains_temp_c = f64::NAN;
+    env.custom_domains = vec![DomainUpdate {
+        domain_id: SCHEDULE_DOMAIN_ID,
+        zone_temperatures_c: vec![],
+        custom_payload: Some(vec![10.0, 0.05]),
+    }];
+
+    let cfg = tankless_config(
+        FuelType::Electric,
+        60.0,
+        25.0,
+        0.10,
+        Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 1,
+            boundary: BoundaryPolicy::Clamp,
+        }),
+        Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 0,
+            boundary: BoundaryPolicy::Clamp,
+        }),
+    );
+
+    let mut wh = TanklessWH::new(cfg.clone());
+    wh.init(&cfg, &env).unwrap();
+    let mut ports = PortSlots::from_declarations(wh.ports());
+
+    step_wh(&mut wh, &env, &mut ports);
+
+    let draw_kg_s = wh.telemetry().get("draw_flow_rate_kg_s").unwrap_or(-1.0);
+    let thermal_w = wh.telemetry().get("thermal_output_w").unwrap_or(-1.0);
+    let outlet_c = wh.telemetry().get("outlet_temp_c").unwrap_or(-1.0);
+
+    assert!(
+        (draw_kg_s - 0.05).abs() < 1e-12,
+        "schedule draw must override config draw; got {draw_kg_s:.6} kg/s"
+    );
+    assert!(
+        (thermal_w - (0.05 * 4183.0 * 50.0)).abs() < 1e-6,
+        "tankless thermal output must use schedule draw and mains temp; got {thermal_w:.3} W"
+    );
+    assert!(
+        (outlet_c - 60.0).abs() < 1e-12,
+        "tankless outlet should reach the setpoint when demand is within capacity; got {outlet_c:.6}°C"
+    );
+}
+
+#[test]
+#[should_panic(expected = "Tankless Water Heater requires typed FuelType")]
+fn tankless_wh_requires_explicit_fuel_type() {
+    let cfg = EquipmentConfig::with_payload(
+        "TWH".to_string(),
+        "Tankless Water Heater".to_string(),
+        Default::default(),
+    );
+    let _ = TanklessWH::new(cfg);
+}
+
+// ── Test 7: energy_conservation_over_draw_cycle ───────────────────────────────
 
 /// Energy balance over a draw cycle for a 1-node resistance WH with UA=0.
 ///
@@ -358,6 +525,8 @@ fn energy_conservation_over_draw_cycle() {
             tank_nodes: Some(1),
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.02),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -417,7 +586,7 @@ fn energy_conservation_over_draw_cycle() {
     );
 }
 
-// ── Test 7: setpoint_control_changes_target ───────────────────────────────────
+// ── Test 8: setpoint_control_changes_target ───────────────────────────────────
 
 /// A ThermalSetpoint control signal updates the active setpoint.
 ///
@@ -478,7 +647,7 @@ fn setpoint_control_changes_target() {
     );
 }
 
-// ── Test 8: max_tank_temp_safety_limit ────────────────────────────────────────
+// ── Test 9: max_tank_temp_safety_limit ────────────────────────────────────────
 
 /// The safety cutout prevents any tank node from exceeding max_tank_temp_c.
 ///
@@ -510,6 +679,8 @@ fn max_tank_temp_safety_limit() {
             tank_nodes: Some(1),
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -721,6 +892,8 @@ fn resistance_config_with_ramp(
             tank_nodes: None,
             avg_water_draw_l_per_day: None,
             draw_flow_rate_kg_s: Some(0.0),
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,

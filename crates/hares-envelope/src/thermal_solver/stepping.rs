@@ -83,14 +83,9 @@ impl ThermalSolver {
             let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&inf.zone) else {
                 continue;
             };
-            // Use the continuous sensible-gain coefficient when available
-            // (scaled by dt to match the discrete implicit diagonal term).
-            // Falling back to b_eff preserves behavior for from_discrete models.
-            let b_coeff = self
-                .model
-                .b_c()
-                .map(|b_c| self.dt_s * b_c[(state_idx, input_idx)])
-                .unwrap_or_else(|| self.model.b_eff()[(state_idx, input_idx)]);
+            // Use the discrete input gain coefficient for implicit coupling.
+            // This keeps coupling on the same discretization as the state step.
+            let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
             // Backward Euler for infiltration coupling: add full d to M diagonal
             // and cancel the N-side subtraction via forcing.
             let d = inf.h_inf_w_k * b_coeff;

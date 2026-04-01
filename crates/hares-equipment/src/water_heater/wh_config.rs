@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::EquipmentTypedConfig;
-use hares_types::{FuelType, HaresError};
+use hares_types::{FuelType, HaresError, ScheduleSourceConfig};
 
 fn check_finite(name: &str, value: Option<f64>, min: f64, strict: bool) -> crate::Result<()> {
     if let Some(v) = value {
@@ -50,6 +50,8 @@ pub struct GasWaterHeaterConfig {
     pub tank_nodes: Option<u8>,
     pub avg_water_draw_l_per_day: Option<f64>,
     pub draw_flow_rate_kg_s: Option<f64>,
+    pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
+    pub mains_temp_c_source: Option<ScheduleSourceConfig>,
     pub pilot_power_w: Option<f64>,
     pub flue_loss_fraction: Option<f64>,
     pub skin_loss_fraction: Option<f64>,
@@ -162,6 +164,8 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub tank_nodes: Option<u8>,
     pub avg_water_draw_l_per_day: Option<f64>,
     pub draw_flow_rate_kg_s: Option<f64>,
+    pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
+    pub mains_temp_c_source: Option<ScheduleSourceConfig>,
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
@@ -279,6 +283,8 @@ pub struct TanklessWaterHeaterConfig {
     pub performance_adjustment: Option<f64>,
     pub inlet_temp_c: Option<f64>,
     pub draw_flow_rate_kg_s: Option<f64>,
+    pub draw_flow_rate_source: Option<ScheduleSourceConfig>,
+    pub mains_temp_c_source: Option<ScheduleSourceConfig>,
     pub avg_water_draw_l_per_day: Option<f64>,
 }
 
@@ -514,6 +520,8 @@ mod tests {
             tank_nodes: None,
             avg_water_draw_l_per_day: Some(227.0),
             draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             pilot_power_w: Some(5.0),
             flue_loss_fraction: Some(0.1),
             skin_loss_fraction: None,
@@ -565,6 +573,8 @@ mod tests {
             tank_nodes: None,
             avg_water_draw_l_per_day: Some(227.0),
             draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
@@ -611,6 +621,8 @@ mod tests {
             performance_adjustment: Some(0.92),
             inlet_temp_c: None,
             draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
             avg_water_draw_l_per_day: Some(227.0),
         };
         let ec = EquipmentConfig::from_typed(

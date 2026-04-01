@@ -1240,7 +1240,7 @@ mod tests {
         );
     }
 
-    /// `DrawResult` from `step()` has zero `unmet_load_w` (backward compat).
+    /// `DrawResult` from `step()` has zero `unmet_load_w`.
     #[test]
     fn raw_step_has_zero_unmet_load() {
         let mut tank = test_tank(1, 55.0);

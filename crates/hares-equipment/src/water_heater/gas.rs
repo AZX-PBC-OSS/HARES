@@ -239,7 +239,7 @@ impl GasWH {
     fn init_typed(
         &mut self,
         config: &EquipmentConfig,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
     ) -> crate::Result<()> {
         let c = config.require_typed::<GasWaterHeaterConfig>("Gas Water Heater")?;
         c.validate()?;
@@ -295,9 +295,10 @@ impl GasWH {
         self.mode_override = None;
         self.burner_on = false;
 
+        self.mains_temp_c = super::require_mains_temp_c(env, "Gas Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.draw_l_per_min_source = None;
-        self.mains_temp_c_source = None;
+        self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
+        self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
         self.zip = WaterHeaterZip::default();
 
         self.flue_loss_fraction = c.flue_loss_fraction.unwrap_or(DEFAULT_FLUE_LOSS_FRACTION);
@@ -840,6 +841,8 @@ mod tests {
                 tank_nodes: None,
                 avg_water_draw_l_per_day: None,
                 draw_flow_rate_kg_s: Some(0.0),
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
                 pilot_power_w: Some(50.0),
                 flue_loss_fraction: Some(0.2),
                 skin_loss_fraction: None,

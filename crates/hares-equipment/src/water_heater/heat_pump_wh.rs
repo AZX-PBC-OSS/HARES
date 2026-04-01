@@ -140,7 +140,7 @@ pub struct HeatPumpWH {
     /// OCHRE WaterHeater.py:521: `if not self.hp_only_mode`.
     hp_only_mode: bool,
     /// Fraction of sensible zone heat gain that goes to interior wall surfaces
-    /// rather than the zone air.  0.0 = all to zone air (default / backward compat).
+    /// rather than the zone air.  0.0 = all to zone air.
     /// OCHRE WaterHeater.py:483: `HPWH Wall Interaction Factor (-)`, default 0.5.
     wall_heat_fraction: f64,
     element_hp_control: ElementHpControlMode,
@@ -335,7 +335,7 @@ impl HeatPumpWH {
     fn init_typed(
         &mut self,
         config: &EquipmentConfig,
-        _env: &EnvironmentState,
+        env: &EnvironmentState,
     ) -> crate::Result<()> {
         let c = config.require_typed::<HeatPumpWaterHeaterConfig>("Heat Pump Water Heater")?;
         c.validate()?;
@@ -358,25 +358,27 @@ impl HeatPumpWH {
         self.condenser_node = if n_nodes > 1 { n_nodes / 2 } else { 0 };
         self.condenser_node_weights = default_condenser_weights(n_nodes);
 
+        self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
+        self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
+        self.setpoint_ramp_rate_c_per_s = None;
+        self.target_setpoint_c = self.setpoint_c;
+
+        let initial_tank_temp_c = c
+            .initial_tank_temp_c
+            .unwrap_or(self.setpoint_c - self.deadband_c / 10.0);
+
         self.tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes,
             height_m,
             diameter_m,
             ua_w_per_k: c.ua_w_per_k.unwrap_or(DEFAULT_UA_W_PER_K),
             conductivity_w_m_k: DEFAULT_CONDUCTIVITY_W_M_K,
-            initial_temp_c: c
-                .initial_tank_temp_c
-                .unwrap_or(c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C)),
+            initial_temp_c: initial_tank_temp_c,
             element_nodes: [Some(self.condenser_node), Some(self.thermostat_node)],
             node_volumes_m3: None,
             ua_end_cap_w_per_k: None,
         })?;
 
-        self.setpoint_c = c.setpoint_c.unwrap_or(DEFAULT_SETPOINT_C);
-        self.setpoint_ramp_rate_c_per_s = None;
-        self.target_setpoint_c = self.setpoint_c;
-
-        self.deadband_c = c.deadband_c.unwrap_or(DEFAULT_DEADBAND_C);
         self.duty_cycle = 1.0;
         self.hp_duty_cycle = 1.0;
         self.er_duty_cycle = 1.0;
@@ -446,7 +448,7 @@ impl HeatPumpWH {
             Some("Simultaneous") | Some("simultaneous") => ElementHpControlMode::Simultaneous,
             _ => ElementHpControlMode::MutuallyExclusive,
         };
-        self.mains_temp_c = 15.0;
+        self.mains_temp_c = super::require_mains_temp_c(env, "Heat Pump Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.zip = WaterHeaterZip::default();
 
@@ -712,26 +714,30 @@ impl Equipment for HeatPumpWH {
         let sensible_gain_w = (hp_waste_w * shr + fan_parasitic_w + er_waste_w) * keep_fraction;
         let latent_gain_w = hp_waste_w * (1.0 - shr) * keep_fraction;
 
-        // For backward compat: zone_heat_extraction_w remains the total heat moved from zone to tank.
+        // zone_heat_extraction_w records the total heat moved from zone to tank.
         let zone_heat_extraction_w = delivered_hp_w - compressor_power_w;
 
         // OCHRE WaterHeater.py:678-685: split sensible gain between zone air and interior wall.
-        // wall_heat_fraction of sensible gain goes to the wall surface; the rest to zone air.
-        // Wall heat fraction is tracked via telemetry for future wall-surface modeling.
-        // Until interior wall surfaces exist, both fractions are posted to the zone
-        // thermal port to preserve the energy balance.
-        let _sensible_to_zone_w = sensible_gain_w * (1.0 - self.wall_heat_fraction);
+        // The wall share is tracked separately so downstream envelope solvers can
+        // preserve the physical distinction between zone air and jacket coupling.
+        let sensible_to_zone_w = sensible_gain_w * (1.0 - self.wall_heat_fraction);
         let sensible_to_wall_w = sensible_gain_w * self.wall_heat_fraction;
 
         if let Some(zone) = self.descriptor.zone {
-            if sensible_gain_w != 0.0 || latent_gain_w != 0.0 {
+            if sensible_to_zone_w != 0.0 || latent_gain_w != 0.0 {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
-                    sensible_gain_w, // full sensible gain (zone + wall) to preserve energy balance
+                    sensible_gain_w: sensible_to_zone_w,
                     latent_gain_w,
-                    // Net zone interaction: compressor extracts heat (can be negative),
-                    // fan and ER add waste heat. InternalGain captures the mixed character.
                     category: ThermalCategory::InternalGain,
+                })?;
+            }
+            if sensible_to_wall_w != 0.0 {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone,
+                    sensible_gain_w: sensible_to_wall_w,
+                    latent_gain_w: 0.0,
+                    category: ThermalCategory::JacketLoss,
                 })?;
             }
         }
@@ -1125,7 +1131,7 @@ mod tests {
         ZoneState, telemetry_keys as tk,
     };
 
-    use super::HeatPumpWH;
+    use super::{weighted_average_tank_temp, HeatPumpWH};
     use crate::{Equipment, EquipmentConfig, EquipmentTypedConfig, HeatPumpWaterHeaterConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -1267,6 +1273,43 @@ mod tests {
         eq.init(&config, &env).expect("typed init should succeed");
 
         assert_eq!(eq.backup_element_power_w, 4500.0);
+    }
+
+    #[test]
+    fn typed_init_defaults_initial_tank_temp_close_to_top_of_deadband() {
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = None;
+        let config = equipment_config(typed.clone());
+        let env = env(20.0);
+
+        let mut eq = HeatPumpWH::new(config.clone());
+        eq.init(&config, &env).expect("typed init should succeed");
+
+        let expected = typed.setpoint_c.expect("base typed config has setpoint")
+            - typed.deadband_c.expect("base typed config has deadband") / 10.0;
+        let actual = weighted_average_tank_temp(eq.tank.node_temps(), eq.tank.node_volumes_m3());
+
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "unspecified initial_tank_temp_c must default near the top of the deadband: expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn typed_init_honors_explicit_initial_tank_temp_override() {
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(41.25);
+        let config = equipment_config(typed.clone());
+        let env = env(20.0);
+
+        let mut eq = HeatPumpWH::new(config.clone());
+        eq.init(&config, &env).expect("typed init should succeed");
+
+        let actual = weighted_average_tank_temp(eq.tank.node_temps(), eq.tank.node_volumes_m3());
+        assert!(
+            (actual - 41.25).abs() < 1e-9,
+            "explicit initial_tank_temp_c must be preserved"
+        );
     }
 
     fn ports() -> PortSlots {
@@ -2517,7 +2560,7 @@ mod new_feature_tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
         ControlSignal, DutyCycleComponent, EnvironmentState, GridState, OperatingMode, PortSlots,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
+        ThermalAccumulator, ThermalCategory, WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::HeatPumpWH;
@@ -2713,19 +2756,28 @@ mod new_feature_tests {
         let mut p50 = ports();
         eq50.step(&e, Duration::from_secs(60), &mut p50).unwrap();
         let sens50 = p50.thermal[0].sensible_gain_w;
+        let internal50 = p50.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
+        let jacket50 = p50.thermal[0].sensible_for_category(ThermalCategory::JacketLoss);
 
         assert!(
             sens0.abs() > 1e-6,
             "baseline sensible gain must be non-zero"
         );
-        // Full sensible gain posted to zone port for energy balance (wall fraction
-        // tracked in telemetry only until wall surfaces are modeled).
         let ratio = sens50 / sens0;
         assert!(
             (ratio - 1.0).abs() < 0.01,
-            "zone port must receive full sensible gain for energy balance: ratio={ratio:.4}"
+            "total sensible gain must be preserved across the wall split: ratio={ratio:.4}"
         );
-        // Telemetry tracks the wall-fraction split for future wall-surface modeling.
+        assert!(
+            (internal50 - sens0 * 0.5).abs() < 1.0,
+            "internal gain should receive half of total sensible gain: {internal50:.2} vs {:.2}",
+            sens0 * 0.5
+        );
+        assert!(
+            (jacket50 - sens0 * 0.5).abs() < 1.0,
+            "jacket loss should receive half of total sensible gain: {jacket50:.2} vs {:.2}",
+            sens0 * 0.5
+        );
         let wall_w = eq50
             .telemetry()
             .get(tk::WALL_SENSIBLE_GAIN_W)
@@ -2898,7 +2950,7 @@ mod new_feature_tests {
     }
 
     #[test]
-    fn whole_equipment_duty_cycle_backward_compatible() {
+    fn whole_equipment_duty_cycle_applies_to_both_components() {
         let mut typed = base_typed_config();
         typed.setpoint_c = Some(50.0);
         let cfg = equipment_config(typed);

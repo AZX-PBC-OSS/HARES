@@ -26,7 +26,7 @@ pub use dwelling::{
     StepResult, building_to_boundary_inputs, building_to_zone_inputs,
 };
 pub use engine::{KernelTimer, SimStatus, SimulationEngine, SimulationResults};
-pub use environment::EnvironmentManager;
+pub use environment::{EnvironmentInitOptions, EnvironmentManager};
 pub use hares_io::SimulationConfig;
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;

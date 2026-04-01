@@ -299,7 +299,7 @@ impl HvacEquipment {
     pub fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
         self.thermostat = ThermostatConfig {
             hysteresis_c: extract_numeric(config, "hysteresis_c").unwrap_or(1.0),
-            cutout_ratio: extract_numeric(config, "cutout_ratio").unwrap_or(DEFAULT_CUTOUT_RATIO),
+            cutout_ratio: DEFAULT_CUTOUT_RATIO,
             min_cycle_time_s: extract_numeric(config, "min_cycle_time_s")
                 .unwrap_or(DEFAULT_MIN_CYCLE_TIME_S),
             use_ideal_capacity: extract_bool(config, "use_ideal_capacity").unwrap_or(false),
@@ -330,7 +330,8 @@ impl HvacEquipment {
         self.static_setpoints
             .validate_for_deadband(self.thermostat.hysteresis_c)?;
 
-        let explicit_airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w");
+        let explicit_airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w")
+            .or_else(|| extract_numeric(config, "duct_airflow_m3_s_per_w"));
         let mut airflow_m3_s_per_w = explicit_airflow_m3_s_per_w
             .unwrap_or_else(|| self.equipment_type.default_airflow_m3_s_per_w());
         if explicit_airflow_m3_s_per_w.is_none() {
@@ -594,74 +595,34 @@ impl HvacEquipment {
 
         let hysteresis = self.thermostat.hysteresis_c;
         let offset = self.thermostat.deadband_offset.clamp(0.0, 1.0);
-        let cutout = self.thermostat.cutout_ratio;
-
-        // OCHRE HVAC.py lines 397–408: deadband_offset makes the band asymmetric.
-        //   Heating turn_on  = setpoint − hysteresis × (1 − offset)
-        //   Heating turn_off = setpoint + hysteresis × offset
-        //
-        // When offset=0: turn_on = setpoint − hysteresis, turn_off = setpoint (no overshoot)
-        // When offset=0.2 (OCHRE default): the setpoint sits near the top of the
-        //   deadband for heating and near the bottom for cooling.
-        //
-        // The legacy `cutout_ratio` path is used only when `deadband_offset == 0.0`
-        // to preserve backward compatibility with configurations that did not set an
-        // offset. In that case the symmetric ±hysteresis band with the cutout point
-        // at `setpoint + hysteresis × cutout` is preserved.
-        let next_mode = if offset > 0.0 {
-            match self.mode {
-                ThermostatMode::Heating => {
-                    let turn_off = setpoints.heating_c + hysteresis * offset;
-                    if zone_temp > turn_off {
-                        ThermostatMode::Deadband
-                    } else {
-                        ThermostatMode::Heating
-                    }
-                }
-                ThermostatMode::Cooling => {
-                    let turn_off = setpoints.cooling_c - hysteresis * offset;
-                    if zone_temp < turn_off {
-                        ThermostatMode::Deadband
-                    } else {
-                        ThermostatMode::Cooling
-                    }
-                }
-                ThermostatMode::Deadband => {
-                    let heat_turn_on = setpoints.heating_c - hysteresis * (1.0 - offset);
-                    let cool_turn_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
-                    if zone_temp < heat_turn_on {
-                        ThermostatMode::Heating
-                    } else if zone_temp > cool_turn_on {
-                        ThermostatMode::Cooling
-                    } else {
-                        ThermostatMode::Deadband
-                    }
+        // OCHRE HVAC.py lines 397–408: a single asymmetric deadband rule governs
+        // heating and cooling transitions for all HVAC equipment.
+        let next_mode = match self.mode {
+            ThermostatMode::Heating => {
+                let turn_off = setpoints.heating_c + hysteresis * offset;
+                if zone_temp > turn_off {
+                    ThermostatMode::Deadband
+                } else {
+                    ThermostatMode::Heating
                 }
             }
-        } else {
-            match self.mode {
-                ThermostatMode::Heating => {
-                    if zone_temp > setpoints.heating_c + hysteresis * cutout {
-                        ThermostatMode::Deadband
-                    } else {
-                        ThermostatMode::Heating
-                    }
+            ThermostatMode::Cooling => {
+                let turn_off = setpoints.cooling_c - hysteresis * offset;
+                if zone_temp < turn_off {
+                    ThermostatMode::Deadband
+                } else {
+                    ThermostatMode::Cooling
                 }
-                ThermostatMode::Cooling => {
-                    if zone_temp < setpoints.cooling_c - hysteresis * cutout {
-                        ThermostatMode::Deadband
-                    } else {
-                        ThermostatMode::Cooling
-                    }
-                }
-                ThermostatMode::Deadband => {
-                    if zone_temp < setpoints.heating_c - hysteresis {
-                        ThermostatMode::Heating
-                    } else if zone_temp > setpoints.cooling_c + hysteresis {
-                        ThermostatMode::Cooling
-                    } else {
-                        ThermostatMode::Deadband
-                    }
+            }
+            ThermostatMode::Deadband => {
+                let heat_turn_on = setpoints.heating_c - hysteresis * (1.0 - offset);
+                let cool_turn_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
+                if zone_temp < heat_turn_on {
+                    ThermostatMode::Heating
+                } else if zone_temp > cool_turn_on {
+                    ThermostatMode::Cooling
+                } else {
+                    ThermostatMode::Deadband
                 }
             }
         };
@@ -679,6 +640,9 @@ impl HvacEquipment {
     }
 
     pub fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
+        let variable_speed_mode = matches!(self.speed_control_mode, SpeedControlMode::VariableSpeedIdeal);
+        let has_four_plus_stages =
+            self.heating_capacities_w.len().max(self.cooling_capacities_w.len()) >= 4;
         let coarse_auto =
             env.time_res >= ChronoDuration::seconds(IDEAL_CAPACITY_TIME_RES_THRESHOLD_S);
         // Coarse-timestep auto-ideal is only valid for equipment paths that
@@ -691,7 +655,9 @@ impl HvacEquipment {
                 | HvacEquipmentType::AshpHeatPumpAux
                 | HvacEquipmentType::MiniSplitHeat
         );
-        self.thermostat.use_ideal_capacity || (coarse_auto && supports_auto_ideal)
+        let auto_ideal = (coarse_auto || variable_speed_mode || has_four_plus_stages)
+            && supports_auto_ideal;
+        self.thermostat.use_ideal_capacity || auto_ideal
     }
 
     /// Set the thermostat mode and record the transition timestamp.
@@ -1364,6 +1330,37 @@ mod tests {
                 "{eq_type:?} must default to Cd=0 (no cycling penalty)"
             );
         }
+    }
+
+    #[test]
+    fn variable_speed_cooling_always_uses_ideal_capacity() {
+        let env = env(26.0, 60, 0);
+
+        let mut central = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        central.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
+        assert!(
+            central.use_ideal_capacity(&env),
+            "4-speed central cooling must use ideal-capacity control"
+        );
+
+        let mut minisplit = HvacEquipment::new(HvacEquipmentType::MiniSplitCool, ZoneId(1));
+        minisplit.speed_control_mode = SpeedControlMode::VariableSpeedIdeal;
+        assert!(
+            minisplit.use_ideal_capacity(&env),
+            "4-speed mini-split cooling must use ideal-capacity control"
+        );
+    }
+
+    #[test]
+    fn four_stage_minisplit_heating_auto_enables_ideal_capacity() {
+        let env = env(17.0, 60, 0);
+        let mut minisplit_heat = HvacEquipment::new(HvacEquipmentType::MiniSplitHeat, ZoneId(1));
+        minisplit_heat.speed_control_mode = SpeedControlMode::MultiSpeedInterpolated;
+        minisplit_heat.heating_capacities_w = vec![2500.0, 5000.0, 7500.0, 10_000.0];
+        assert!(
+            minisplit_heat.use_ideal_capacity(&env),
+            "4-stage mini-split heating must auto-enable ideal-capacity control"
+        );
     }
 
     #[test]

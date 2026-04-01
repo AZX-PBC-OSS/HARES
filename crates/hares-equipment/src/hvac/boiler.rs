@@ -21,8 +21,9 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, ThermostatMode,
     helpers::{
-        apply_heating_control_unchecked, equipment_id_from_config, loop_id_from_config,
-        operating_mode_code, update_heating_control, zone_id_from_config,
+        apply_heating_control_unchecked, apply_simple_heating_ideal_capacity_control,
+        equipment_id_from_config, loop_id_from_config, operating_mode_code, update_heating_control,
+        zone_id_from_config,
     },
 };
 
@@ -69,7 +70,7 @@ pub struct ElectricBoiler {
     core_output: CoreOutput,
     hvac: HvacEquipment,
     rated_capacity_w: f64,
-    efficiency: f64,
+    eir: f64,
     loop_id: LoopId,
     fluid_type: FluidType,
     flow_rate_kg_s: f64,
@@ -147,7 +148,7 @@ impl ElectricBoiler {
             core_output: CoreOutput::default(),
             hvac: HvacEquipment::new(HvacEquipmentType::Other, zone),
             rated_capacity_w: 0.0,
-            efficiency: 1.0,
+            eir: 1.0,
             loop_id,
             fluid_type: FluidType::Water,
             flow_rate_kg_s: 0.0,
@@ -171,17 +172,17 @@ impl Equipment for ElectricBoiler {
         self.hvac.init(config, env)?;
         let typed = config.require_typed::<ElectricBoilerConfig>("Electric Boiler")?;
         self.rated_capacity_w = typed.capacity_w.max(0.0);
-        self.efficiency = typed.eir;
+        self.eir = typed.eir;
         if let Some(lid) = typed.loop_id {
             self.loop_id = LoopId(lid);
         }
         self.fluid_type = typed.fluid_type;
         self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
         self.default_return_temp_c = typed.return_temp_c;
-        if self.efficiency <= 0.0 || !self.efficiency.is_finite() {
+        if self.eir <= 0.0 || !self.eir.is_finite() {
             return Err(HaresError::Equipment(format!(
                 "invalid Electric Boiler eir: {}",
-                self.efficiency
+                self.eir
             )));
         }
         self.hvac.heating_capacities_w = vec![self.rated_capacity_w];
@@ -207,7 +208,7 @@ impl Equipment for ElectricBoiler {
         let duty = self.hvac.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty;
-        let electric_kw = (thermal_output_w / self.efficiency) / 1_000.0 * sf;
+        let electric_kw = thermal_output_w * self.eir / 1_000.0 * sf;
 
         let return_temp_c =
             loop_return_temp_c(env, self.loop_id).unwrap_or(self.default_return_temp_c);
@@ -275,7 +276,7 @@ impl Equipment for ElectricBoiler {
             electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
             fuel_input_w: 0.0,
             thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
-            eir: 1.0 / self.efficiency,
+            eir: self.eir,
             supply_temp_c: self.telemetry.get(tk::SUPPLY_TEMP_C).unwrap_or(0.0),
             return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
         })
@@ -306,7 +307,9 @@ impl Equipment for ElectricBoiler {
     }
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Boiler")
+        apply_heating_control_unchecked(&mut self.hvac, signal, "Electric Boiler")?;
+        apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
+        Ok(())
     }
 }
 
@@ -599,7 +602,9 @@ impl Equipment for GasBoiler {
     }
 
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-        apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Boiler")
+        apply_heating_control_unchecked(&mut self.hvac, signal, "Gas Boiler")?;
+        apply_simple_heating_ideal_capacity_control(&mut self.hvac, signal, self.rated_capacity_w);
+        Ok(())
     }
 }
 
@@ -732,9 +737,9 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        DomainUpdate, EnvironmentState, ExecutionStage, FLUID, FluidDomainPayload, FluidLoopState,
-        FluidType, GridState, LoopId, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
-        ZoneState, telemetry_keys as tk,
+        ControlSignal, DomainUpdate, EnvironmentState, ExecutionStage, FLUID, FluidDomainPayload,
+        FluidLoopState, FluidType, GridState, LoopId, PortSlots, ThermalAccumulator, WeatherState,
+        ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::{
@@ -787,14 +792,14 @@ mod tests {
         }
     }
 
-    fn eb_config(capacity_w: f64, efficiency: f64) -> EquipmentConfig {
+    fn eb_config(capacity_w: f64, eir: f64) -> EquipmentConfig {
         EquipmentConfig::from_typed(
             "EB".to_string(),
             "Electric Boiler".to_string(),
             ElectricBoilerConfig {
                 zone_id: Some(1),
                 loop_id: Some(1),
-                eir: efficiency,
+                eir,
                 capacity_w,
                 ..ElectricBoilerConfig::default()
             },
@@ -817,7 +822,10 @@ mod tests {
 
     #[test]
     fn electric_boiler_writes_electrical_and_fluid_ports() {
-        let cfg = eb_config(8_000.0, 0.95);
+        const THERMAL_OUTPUT_W: f64 = 8_000.0;
+        const EIR: f64 = 1.05;
+
+        let cfg = eb_config(THERMAL_OUTPUT_W, EIR);
         let mut eq = ElectricBoiler::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
@@ -832,8 +840,16 @@ mod tests {
         };
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        assert!(ports.electrical.net_active_kw() > 0.0);
+
+        let expected_electric_kw = THERMAL_OUTPUT_W * EIR / 1_000.0;
+        assert!(
+            (ports.electrical.net_active_kw() - expected_electric_kw).abs() < 1e-9,
+            "electric boiler electric input must equal thermal_output * EIR"
+        );
         assert!(ports.fluid[0].total_flow_kg_s > 0.0);
+        assert!(
+            (eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap() - THERMAL_OUTPUT_W).abs() < 1e-9
+        );
     }
 
     #[test]
@@ -1139,5 +1155,38 @@ mod tests {
             .create("Gas Boiler", gb_config(10_000.0, 0.80))
             .unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
+    }
+
+    #[test]
+    fn electric_boiler_ideal_capacity_control_scales_output() {
+        let cfg = eb_config(8_000.0, 1.0);
+        let mut eq = ElectricBoiler::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: None,
+            deadband_c: None,
+        })
+        .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: 4_000.0,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            (eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0) - 4_000.0).abs() < 1e-6,
+            "IdealCapacity must scale electric-boiler thermal output to commanded value"
+        );
     }
 }

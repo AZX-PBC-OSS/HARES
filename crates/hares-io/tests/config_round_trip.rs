@@ -18,13 +18,15 @@ use hares_equipment::{
     GeneratorConfig, PvConfig, VentilationConfig,
 };
 use hares_types::{
-    EnvironmentState, FuelType, GridState, SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    BoundaryPolicy, EnvironmentState, FuelType, GridState, ScheduleSourceConfig, SurfaceIrradiance,
+    WeatherState, ZoneId, ZoneState,
 };
 
 fn sample_duct_config() -> DuctConfig {
     DuctConfig {
         dse_heat: Some(0.92),
         dse_cool: Some(0.89),
+        airflow_m3_s_per_w: Some(5.0e-5),
         duct_zone_id: Some(2),
         duct_house_volume_m3: Some(425.0),
         duct_supply_leakage_frac: Some(0.08),
@@ -122,6 +124,8 @@ fn sample_ideal_hvac_config() -> IdealHvacConfig {
 }
 
 fn sample_central_ac_config() -> CentralAirConditionerConfig {
+    let mut duct = sample_duct_config();
+    duct.airflow_m3_s_per_w = None;
     CentralAirConditionerConfig {
         equipment_id: Some(7),
         zone_id: Some(1),
@@ -141,7 +145,7 @@ fn sample_central_ac_config() -> CentralAirConditionerConfig {
         cooling_setpoint_source: None,
         airflow_m3_s_per_w: Some(5.3678384759785085e-5),
         fraction_load_served: Some(1.0),
-        duct: sample_duct_config(),
+        duct,
         system_type: Some("split".to_string()),
         startup_cd: Some(0.15),
         crankcase_heater_kw: None,
@@ -185,6 +189,8 @@ fn sample_room_ac_config() -> RoomAcConfig {
 }
 
 fn sample_heat_pump_config() -> HeatPumpConfig {
+    let mut duct = sample_duct_config();
+    duct.airflow_m3_s_per_w = None;
     HeatPumpConfig {
         equipment_id: Some(9),
         zone_id: Some(1),
@@ -218,7 +224,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
         max_oat_supplemental_c: None,
         er_setpoint_offset_c: None,
         er_hard_lockout_time_s: None,
-        duct: sample_duct_config(),
+        duct,
         biquadratic_x1_min: Some(12.0),
         biquadratic_x1_max: Some(24.0),
         biquadratic_x2_min: Some(18.0),
@@ -261,6 +267,14 @@ fn sample_gas_water_heater_config() -> GasWaterHeaterConfig {
         tank_nodes: None,
         avg_water_draw_l_per_day: Some(220.0),
         draw_flow_rate_kg_s: None,
+        draw_flow_rate_source: Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 7,
+            boundary: BoundaryPolicy::Clamp,
+        }),
+        mains_temp_c_source: Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 2,
+            boundary: BoundaryPolicy::Clamp,
+        }),
         pilot_power_w: Some(5.0),
         flue_loss_fraction: Some(0.12),
         skin_loss_fraction: None,
@@ -289,6 +303,14 @@ fn sample_electric_resistance_water_heater_config() -> ElectricResistanceWaterHe
         tank_nodes: None,
         avg_water_draw_l_per_day: Some(220.0),
         draw_flow_rate_kg_s: None,
+        draw_flow_rate_source: Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 7,
+            boundary: BoundaryPolicy::Clamp,
+        }),
+        mains_temp_c_source: Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 2,
+            boundary: BoundaryPolicy::Clamp,
+        }),
         performance_adjustment: Some(0.95),
         zone_type: Some("conditioned".to_string()),
         first_hour_rating_m3: Some(0.20),
@@ -312,6 +334,14 @@ fn sample_tankless_water_heater_config() -> TanklessWaterHeaterConfig {
         performance_adjustment: Some(0.92),
         inlet_temp_c: None,
         draw_flow_rate_kg_s: None,
+        draw_flow_rate_source: Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 7,
+            boundary: BoundaryPolicy::Clamp,
+        }),
+        mains_temp_c_source: Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 2,
+            boundary: BoundaryPolicy::Clamp,
+        }),
         avg_water_draw_l_per_day: Some(220.0),
     }
 }
