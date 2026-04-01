@@ -287,6 +287,7 @@ fn sample_gas_water_heater_config() -> GasWaterHeaterConfig {
         zone_type: Some("conditioned".to_string()),
         first_hour_rating_m3: Some(0.20),
         jacket_r_value_m2_k_w: None,
+        conversion_efficiency: None,
     }
 }
 

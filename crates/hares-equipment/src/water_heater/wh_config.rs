@@ -61,6 +61,8 @@ pub struct GasWaterHeaterConfig {
     pub first_hour_rating_m3: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jacket_r_value_m2_k_w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversion_efficiency: Option<f64>,
 }
 
 impl EquipmentTypedConfig for GasWaterHeaterConfig {
@@ -148,6 +150,12 @@ impl GasWaterHeaterConfig {
             self.jacket_r_value_m2_k_w,
             0.0,
             false,
+        )?;
+        check_range(
+            "gas_wh: conversion_efficiency",
+            self.conversion_efficiency,
+            0.0,
+            1.0,
         )?;
         Ok(())
     }
@@ -567,6 +575,7 @@ mod tests {
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
             jacket_r_value_m2_k_w: None,
+            conversion_efficiency: None,
         };
         let ec = EquipmentConfig::from_typed(
             "gas".to_string(),

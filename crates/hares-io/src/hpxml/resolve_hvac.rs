@@ -713,7 +713,10 @@ fn try_build_central_ac_config(
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
 ) -> Option<EquipmentConfig> {
-    let seer = seer_from_params(params)?;
+    let Some(seer) = seer_from_params(params) else {
+        tracing::warn!("Skipping AC: AnnualCoolingEfficiency (SEER) not found in HPXML");
+        return None;
+    };
     let eir = 3.412_141_633 / seer.max(1e-6);
     let capacity_w = params.get("cooling_capacity_w").and_then(Value::as_f64)?;
     let n_speeds = n_speeds_from_params(params);
@@ -2147,6 +2150,49 @@ mod tests {
     use hares_physics::units as conv;
     use hares_types::{BoundaryPolicy, ScheduleSourceConfig};
     use std::collections::HashMap;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriterGuard;
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriterGuard(self.0.clone())
+        }
+    }
+
+    struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("writer lock poisoned").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_warnings<F>(f: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = SharedWriter(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(writer)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(buffer.lock().expect("log lock poisoned").clone())
+            .expect("logs must be valid utf8")
+    }
 
     fn empty_building(zones: Vec<Zone>) -> Building {
         Building {
@@ -3456,6 +3502,23 @@ mod tests {
 
         let result = fan_power_from_params(&params);
         assert_eq!(result, Some(300.0), "fan_power_w must take precedence over auxiliary_power_w");
+    }
+
+    #[test]
+    fn central_ac_builder_warns_when_seer_absent() {
+        let mut params = Map::new();
+        params.insert("cooling_capacity_w".to_string(), json!(12_000.0));
+
+        let log = capture_warnings(|| {
+            let result =
+                try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default());
+            assert!(result.is_none(), "builder must return None when SEER is absent");
+        });
+
+        assert!(
+            log.contains("AnnualCoolingEfficiency (SEER) not found"),
+            "expected SEER-missing warning in log output; got: {log:?}"
+        );
     }
 
     fn repo_defaults() -> DefaultsStore {

@@ -812,6 +812,7 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 zone_type: None,
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
+                conversion_efficiency: None,
             },
         ),
         "Resistance Water Heater" | "Electric Resistance Water Heater" => typed_alias_config(

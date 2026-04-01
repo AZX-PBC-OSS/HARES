@@ -32,7 +32,6 @@ const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE storage WH defaul
 const DEFAULT_BURNER_INPUT_W: f64 = 11_000.0;
 const DEFAULT_BURNER_EFFICIENCY: f64 = 0.78;
 const DEFAULT_FLUE_LOSS_FRACTION: f64 = 0.10;
-#[cfg(test)]
 const DEFAULT_PILOT_POWER_W: f64 = 5.0;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GasWhState {
@@ -289,7 +288,7 @@ impl GasWH {
             .pilot_power_w
             .unwrap_or(match c.ignition_type.as_deref() {
                 Some("ElectronicIgnition") | Some("electronic") | Some("electronic ignition") => 0.0,
-                _ => 5.0,
+                _ => DEFAULT_PILOT_POWER_W,
             })
             .max(0.0);
         self.fan_power_w = 0.0;
@@ -307,11 +306,12 @@ impl GasWH {
         self.zip = WaterHeaterZip::default();
 
         self.flue_loss_fraction = c.flue_loss_fraction.unwrap_or(DEFAULT_FLUE_LOSS_FRACTION);
-        self.burner_efficiency_constant = c
-            .energy_factor
-            .or(c.uniform_energy_factor)
-            .map(|v| v * c.performance_adjustment.unwrap_or(1.0))
-            .unwrap_or(DEFAULT_BURNER_EFFICIENCY);
+        self.burner_efficiency_constant = c.conversion_efficiency.unwrap_or_else(|| {
+            c.energy_factor
+                .or(c.uniform_energy_factor)
+                .map(|v| v * c.performance_adjustment.unwrap_or(1.0))
+                .unwrap_or(DEFAULT_BURNER_EFFICIENCY)
+        });
         self.burner_efficiency_poly = None;
 
         self.fuel_type = c.fuel_type;
@@ -390,8 +390,33 @@ impl Equipment for GasWH {
     ) -> std::result::Result<(), HaresError> {
         let ambient_c = self.ambient_temp_c(env);
         let mode = self.update_control(env);
-        let duty =
+        let ctrl_duty =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
+
+        // Ideal capacity mode (coarse timesteps >= 5 min): compute the duty
+        // cycle fraction that delivers just enough heat to maintain the
+        // thermostat node at setpoint. Mirrors OCHRE's solve_ideal_capacity.
+        let use_ideal = env.time_res.num_seconds() >= 300;
+        let duty = if use_ideal && self.burner_on && self.burner_input_w > 0.0 {
+            let dt_s = dt.as_secs_f64();
+            let efficiency = self.burner_efficiency(1.0);
+            let net_efficiency = efficiency * (1.0 - self.flue_loss_fraction);
+            let effective_capacity_w = self.burner_input_w * net_efficiency;
+            if effective_capacity_w > 0.0 {
+                let ideal_w = self.tank.ideal_capacity_for_node(
+                    self.burner_node,
+                    self.effective_setpoint_c(),
+                    ambient_c,
+                    dt_s,
+                );
+                (ideal_w / effective_capacity_w).clamp(0.0, 1.0) * ctrl_duty
+            } else {
+                ctrl_duty
+            }
+        } else {
+            ctrl_duty
+        };
+
         let burner_input_w = if self.burner_on {
             self.burner_input_w * duty
         } else {
@@ -495,6 +520,7 @@ impl Equipment for GasWH {
         self.telemetry.set(tk::PILOT_KW, self.pilot_power_w / 1_000.0);
         self.telemetry.set(tk::FUEL_INPUT_KW, fuel_input_w / 1_000.0);
         self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
+        self.telemetry.set(tk::SKIN_LOSS_W, skin_loss_to_zone_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(
@@ -874,6 +900,7 @@ mod tests {
                 zone_type: None,
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
+                conversion_efficiency: None,
             },
         )
     }
@@ -1320,6 +1347,175 @@ mod tests {
         assert!(
             pilot_kw <= fuel_input_kw,
             "pilot_kw {pilot_kw:.6} must not exceed fuel_input_kw {fuel_input_kw:.6}"
+        );
+    }
+
+    /// At 5-minute timesteps, ideal capacity mode should modulate the burner
+    /// below full rated power, preventing overshoot. Compare to the same
+    /// scenario at 1-minute timesteps (non-ideal) which runs at full power.
+    #[test]
+    fn gas_wh_ideal_capacity_modulates_below_full_power() {
+        use chrono::Duration as ChronoDuration;
+
+        // burner_node at 40°C (12°C below setpoint=52), deadband=2 => calls for heat.
+        let cfg = config_with_extras(&[
+            ("initial_tank_temp_c", Some(40.0.into())),
+            ("setpoint_c", Some(52.0.into())),
+            ("deadband_c", Some(2.0.into())),
+            ("flue_loss_fraction", Some(0.0.into())),
+            ("max_tank_temp_c", Some(300.0.into())),
+        ]);
+
+        // Run at 5-minute timestep (ideal capacity active).
+        let mut e_ideal = env(21.0);
+        e_ideal.time_res = ChronoDuration::seconds(300);
+        let mut eq_ideal = GasWH::new(cfg.clone());
+        eq_ideal.init(&cfg, &e_ideal).unwrap();
+        let mut p_ideal = ports();
+        eq_ideal
+            .step(&e_ideal, Duration::from_secs(300), &mut p_ideal)
+            .unwrap();
+
+        let burner_w_ideal = eq_ideal
+            .telemetry()
+            .get(tk::BURNER_POWER_W)
+            .unwrap_or(0.0);
+
+        // Run at 1-minute timestep (thermostat on/off, no ideal capacity).
+        let mut e_therm = env(21.0);
+        e_therm.time_res = ChronoDuration::seconds(60);
+        let mut eq_therm = GasWH::new(cfg.clone());
+        eq_therm.init(&cfg, &e_therm).unwrap();
+        let mut p_therm = ports();
+        eq_therm
+            .step(&e_therm, Duration::from_secs(60), &mut p_therm)
+            .unwrap();
+
+        let burner_w_therm = eq_therm
+            .telemetry()
+            .get(tk::BURNER_POWER_W)
+            .unwrap_or(0.0);
+
+        assert!(
+            burner_w_ideal > 0.0,
+            "burner must fire in ideal mode (node far below setpoint)"
+        );
+        assert!(
+            burner_w_therm > 0.0,
+            "burner must fire in thermostat mode"
+        );
+        assert!(
+            burner_w_ideal < burner_w_therm,
+            "ideal mode should modulate below thermostat full-power: \
+             ideal={burner_w_ideal:.1} W, therm={burner_w_therm:.1} W"
+        );
+    }
+
+    #[test]
+    fn gas_wh_uses_conversion_efficiency_not_ef() {
+        let cfg = EquipmentConfig::from_typed(
+            "GWH".to_string(),
+            "Gas Water Heater".to_string(),
+            crate::GasWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                loop_id: Some(1),
+                fuel_type: hares_types::FuelType::Gas,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                energy_factor: Some(0.62),
+                uniform_energy_factor: None,
+                heating_capacity_w: None,
+                ua_w_per_k: None,
+                setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: None,
+                initial_tank_temp_c: Some(40.0),
+                tank_nodes: None,
+                avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: Some(0.0),
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
+                pilot_power_w: Some(0.0),
+                flue_loss_fraction: Some(0.0),
+                skin_loss_fraction: None,
+                ignition_type: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+                jacket_r_value_m2_k_w: None,
+                conversion_efficiency: Some(0.80),
+            },
+        );
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+        assert!(
+            (eq.burner_efficiency_constant - 0.80).abs() < 1e-9,
+            "burner_efficiency_constant must be conversion_efficiency (0.80), not EF (0.62), \
+             got {:.4}",
+            eq.burner_efficiency_constant
+        );
+    }
+
+    #[test]
+    fn gas_wh_fuel_consumption_matches_ochre_formula() {
+        let burner_input_w = 11_000.0_f64;
+        let eta_c = 0.80_f64;
+        let flue_loss_fraction = 0.0_f64;
+        let cfg = EquipmentConfig::from_typed(
+            "GWH".to_string(),
+            "Gas Water Heater".to_string(),
+            crate::GasWaterHeaterConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                loop_id: Some(1),
+                fuel_type: hares_types::FuelType::Gas,
+                tank_volume_m3: None,
+                tank_height_m: None,
+                energy_factor: Some(0.62),
+                uniform_energy_factor: None,
+                heating_capacity_w: Some(burner_input_w),
+                ua_w_per_k: None,
+                setpoint_c: Some(52.0),
+                deadband_c: Some(2.0),
+                max_tank_temp_c: None,
+                initial_tank_temp_c: Some(40.0),
+                tank_nodes: None,
+                avg_water_draw_l_per_day: None,
+                draw_flow_rate_kg_s: Some(0.0),
+                draw_flow_rate_source: None,
+                mains_temp_c_source: None,
+                pilot_power_w: Some(0.0),
+                flue_loss_fraction: Some(flue_loss_fraction),
+                skin_loss_fraction: None,
+                ignition_type: None,
+                performance_adjustment: None,
+                zone_type: None,
+                first_hour_rating_m3: None,
+                jacket_r_value_m2_k_w: None,
+                conversion_efficiency: Some(eta_c),
+            },
+        );
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p).unwrap();
+
+        let thermal_output_w = burner_input_w * eta_c * (1.0 - flue_loss_fraction);
+        let expected_fuel_w = thermal_output_w / eta_c;
+        let reported_fuel_w = eq
+            .telemetry()
+            .get(tk::FUEL_INPUT_W)
+            .expect("FUEL_INPUT_W must be present");
+        assert!(
+            (reported_fuel_w - expected_fuel_w).abs() < 1.0,
+            "fuel_w {reported_fuel_w:.2} W must match thermal_output/eta_c = {expected_fuel_w:.2} W"
+        );
+        assert!(
+            (reported_fuel_w - burner_input_w * 0.62).abs() > 100.0
+                || reported_fuel_w == 0.0,
+            "fuel consumption must NOT be derived from EF=0.62 when conversion_efficiency is set"
         );
     }
 }

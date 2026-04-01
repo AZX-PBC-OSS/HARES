@@ -74,9 +74,8 @@ pub(super) fn resolve_water_heaters(
             heating_capacity_btu_hr,
             first_hour_rating_gal,
         };
-        let ua_w_per_k = match ua_from_energy_factor(&ua_inputs) {
-            Ok(Some(ua_result)) => Some(ua_result.ua_w_per_k),
-            Ok(None) => None,
+        let ua_result = match ua_from_energy_factor(&ua_inputs) {
+            Ok(result) => result,
             Err(err) => {
                 tracing::warn!(
                     water_heater_type = %wh_type,
@@ -86,9 +85,13 @@ pub(super) fn resolve_water_heaters(
                 None
             }
         };
+        let ua_w_per_k = ua_result.map(|r| r.ua_w_per_k);
 
         let spec = match name.as_str() {
             "Gas Water Heater" => {
+                let conversion_efficiency = ua_result.map(|r| r.conversion_efficiency);
+                let gas_flue_loss_fraction = child_f64(wh, "FlueLossFraction")
+                    .or_else(|| conversion_efficiency.map(|_| 0.0));
                 let cfg = GasWaterHeaterConfig {
                     equipment_id: None,
                     zone_id: None,
@@ -110,13 +113,14 @@ pub(super) fn resolve_water_heaters(
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
                     pilot_power_w: child_f64(wh, "PilotPower"),
-                    flue_loss_fraction: child_f64(wh, "FlueLossFraction"),
+                    flue_loss_fraction: gas_flue_loss_fraction,
                     skin_loss_fraction: None,
                     ignition_type: child_text(wh, "IgnitionType"),
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
                     jacket_r_value_m2_k_w,
+                    conversion_efficiency,
                 };
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
@@ -151,7 +155,10 @@ pub(super) fn resolve_water_heaters(
                 typed_spec(name.clone(), fuel, cfg, defaults)
             }
             "Tankless Water Heater" | "Gas Tankless Water Heater" => {
-                let perf_adj = child_f64(wh, "PerformanceAdjustment").unwrap_or(0.92);
+                // UEF-only inputs (no EF) use 0.94 default per RESNET 301;
+                // EF-sourced inputs use the legacy 0.92 default.
+                let default_perf_adj = if energy_factor.is_none() { 0.94 } else { 0.92 };
+                let perf_adj = child_f64(wh, "PerformanceAdjustment").unwrap_or(default_perf_adj);
                 let cfg = TanklessWaterHeaterConfig {
                     equipment_id: None,
                     zone_id: None,
@@ -531,6 +538,7 @@ mod tests {
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
             jacket_r_value_m2_k_w: None,
+            conversion_efficiency: None,
         };
         let spec = typed_spec(
             "Gas Water Heater".to_string(),
@@ -949,6 +957,178 @@ mod tests {
         assert!(
             (actual_w - expected_w).abs() < 1e-6,
             "expected {expected_w} W, got {actual_w} W (HeatingCapacity must be converted from Btu/h)"
+        );
+    }
+
+    /// Gas WH resolver must populate conversion_efficiency (eta_c) from the UA derivation
+    /// and set flue_loss_fraction=0 when deriving from EF/RE/capacity.
+    /// EF=0.59, RE=0.76, 36 kBtu/hr => eta_c ~ 0.782.
+    #[test]
+    fn gas_wh_resolver_emits_eta_c_as_conversion_efficiency() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <TankVolume>40</TankVolume>
+                      <EnergyFactor>0.59</EnergyFactor>
+                      <RecoveryEfficiency>0.76</RecoveryEfficiency>
+                      <HeatingCapacity>36000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("water heaters must resolve");
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Gas Water Heater")
+            .expect("Gas Water Heater spec must be emitted");
+        let cfg: GasWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed GasWaterHeaterConfig");
+
+        let eta_c = cfg
+            .conversion_efficiency
+            .expect("conversion_efficiency must be populated");
+        assert!(
+            (eta_c - 0.782).abs() < 0.01,
+            "expected eta_c ~ 0.782, got {eta_c:.4}"
+        );
+        assert!(
+            eta_c > 0.76,
+            "eta_c must be greater than RE (0.76), got {eta_c:.4}"
+        );
+        assert_eq!(
+            cfg.energy_factor,
+            Some(0.59),
+            "energy_factor must remain the original EF, not eta_c"
+        );
+        assert_eq!(
+            cfg.flue_loss_fraction,
+            Some(0.0),
+            "flue_loss_fraction must be 0.0 when eta_c is derived from UA calc"
+        );
+    }
+
+    /// Tankless WH with UEF-only (no EF) should default perf_adj to 0.94.
+    #[test]
+    fn tankless_uef_only_default_performance_adjustment() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <UniformEnergyFactor>0.87</UniformEnergyFactor>
+                      <HeatingCapacity>199000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("water heaters must resolve");
+        let spec = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("Tankless spec must be emitted");
+        let cfg: TanklessWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed TanklessWaterHeaterConfig");
+
+        assert_eq!(
+            cfg.performance_adjustment,
+            Some(0.94),
+            "UEF-only tankless must default perf_adj to 0.94, got {:?}",
+            cfg.performance_adjustment
+        );
+    }
+
+    /// Tankless WH with EF (not UEF-only) should default perf_adj to 0.92.
+    #[test]
+    fn tankless_ef_default_performance_adjustment() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <EnergyFactor>0.82</EnergyFactor>
+                      <HeatingCapacity>199000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("water heaters must resolve");
+        let spec = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("Tankless spec must be emitted");
+        let cfg: TanklessWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed TanklessWaterHeaterConfig");
+
+        assert_eq!(
+            cfg.performance_adjustment,
+            Some(0.92),
+            "EF-sourced tankless must default perf_adj to 0.92, got {:?}",
+            cfg.performance_adjustment
         );
     }
 }

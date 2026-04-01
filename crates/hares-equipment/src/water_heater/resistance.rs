@@ -425,40 +425,44 @@ impl Equipment for ResistanceWH {
         // OCHRE's WaterHeater.solve_ideal_capacity(). This produces time-averaged
         // power instead of full on/off cycling spikes.
         let use_ideal = env.time_res.num_seconds() >= 300;
-        let duty = if use_ideal && mode == OperatingMode::Heating {
-            // Each element only heats its local node. Compute ideal capacity
-            // for the node where the active element sits, not the whole tank.
-            let (active_w, element_node) = if self.upper_element_on {
-                (self.upper_element_power_w, self.upper_node)
-            } else {
-                (self.lower_element_power_w, self.lower_node)
-            };
-            if active_w > 0.0 {
-                let dt_s = dt.as_secs_f64();
-                let ambient_c = self.ambient_temp_c(env);
+        let (upper_power_w, lower_power_w) = if use_ideal && mode == OperatingMode::Heating {
+            let dt_s = dt.as_secs_f64();
+            let ambient_c = self.ambient_temp_c(env);
+            let up = if self.upper_element_on && self.upper_element_power_w > 0.0 {
                 let ideal_w = self.tank.ideal_capacity_for_node(
-                    element_node,
+                    self.upper_node,
                     self.setpoint_c,
                     ambient_c,
                     dt_s,
                 );
-                (ideal_w / active_w).clamp(0.0, 1.0) * ctrl_duty
+                self.upper_element_power_w * (ideal_w / self.upper_element_power_w).clamp(0.0, 1.0) * ctrl_duty
             } else {
                 0.0
-            }
+            };
+            let lo = if self.lower_element_on && self.lower_element_power_w > 0.0 {
+                let ideal_w = self.tank.ideal_capacity_for_node(
+                    self.lower_node,
+                    self.setpoint_c,
+                    ambient_c,
+                    dt_s,
+                );
+                self.lower_element_power_w * (ideal_w / self.lower_element_power_w).clamp(0.0, 1.0) * ctrl_duty
+            } else {
+                0.0
+            };
+            (up, lo)
         } else {
-            ctrl_duty
-        };
-
-        let upper_power_w = if self.upper_element_on {
-            self.upper_element_power_w * duty
-        } else {
-            0.0
-        };
-        let lower_power_w = if self.lower_element_on {
-            self.lower_element_power_w * duty
-        } else {
-            0.0
+            let up = if self.upper_element_on {
+                self.upper_element_power_w * ctrl_duty
+            } else {
+                0.0
+            };
+            let lo = if self.lower_element_on {
+                self.lower_element_power_w * ctrl_duty
+            } else {
+                0.0
+            };
+            (up, lo)
         };
 
         let mut heat_injections = Vec::with_capacity(2);
@@ -1749,6 +1753,53 @@ mod element_priority_tests {
             restored.dr_load_fraction < 1.0,
             "dr_load_fraction must be < 1.0 after Critical DR (got {})",
             restored.dr_load_fraction
+        );
+    }
+
+    /// Simultaneous mode with ideal capacity: upper node slightly below deadband
+    /// floor (low duty) and lower node far below (high duty) must produce
+    /// independent duties for each element.
+    #[test]
+    fn simultaneous_ideal_capacity_independent_duties() {
+        let mut env = env_state();
+        // 5-minute timestep to activate ideal capacity mode.
+        env.time_res = ChronoDuration::seconds(300);
+
+        let cfg = cold_config("Simultaneous");
+        let mut wh = ResistanceWH::new(cfg.clone());
+        wh.init(&cfg, &env).unwrap();
+
+        // setpoint=52, deadband=2 => deadband floor = 50°C.
+        // Upper node at 49.5°C: just below the floor, so upper element fires (small deficit).
+        // Lower node at 30°C: far below floor (large deficit).
+        // Pre-set upper_element_on=true so hysteresis keeps it on at the upper threshold.
+        wh.tank.node_temps_mut()[wh.upper_node] = 49.5;
+        wh.tank.node_temps_mut()[wh.lower_node] = 30.0;
+
+        let mut p = ports();
+        wh.step(&env, Duration::from_secs(300), &mut p).unwrap();
+
+        let upper_w = wh
+            .telemetry()
+            .get(hares_types::telemetry_keys::UPPER_ELEMENT_POWER_W)
+            .unwrap_or(0.0);
+        let lower_w = wh
+            .telemetry()
+            .get(hares_types::telemetry_keys::LOWER_ELEMENT_POWER_W)
+            .unwrap_or(0.0);
+
+        assert!(
+            upper_w > 0.0,
+            "upper element should deliver some power (node is 2.5K below setpoint)"
+        );
+        assert!(
+            lower_w > 0.0,
+            "lower element should deliver power (node is 22K below setpoint)"
+        );
+        assert!(
+            lower_w > upper_w,
+            "lower element (cold node) must have higher duty than upper (near setpoint): \
+             upper={upper_w:.1} W, lower={lower_w:.1} W"
         );
     }
 }
