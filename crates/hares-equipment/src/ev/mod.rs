@@ -31,7 +31,7 @@ use telemetry::{default_telemetry, telemetry_fields};
 fn charging_level_from_config(config: &EquipmentConfig) -> ChargingLevel {
     let level = config
         .get_str(KEY_CHARGING_LEVEL)
-        .or_else(|| config.get_str(KEY_CHARGING_LEVEL_HPIXML))
+        .or_else(|| config.get_str(KEY_CHARGING_LEVEL_HPXML))
         .unwrap_or("L2")
         .trim()
         .replace(' ', "")

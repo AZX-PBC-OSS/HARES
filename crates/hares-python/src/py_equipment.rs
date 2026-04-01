@@ -887,6 +887,7 @@ impl PyCoreOutput {
             OperatingMode::HeatingHPAndER => "HeatingHPAndER".to_string(),
             OperatingMode::HeatPumpWH => "HeatPumpWH".to_string(),
             OperatingMode::BackupElement => "BackupElement".to_string(),
+            OperatingMode::On => "On".to_string(),
         })
     }
 

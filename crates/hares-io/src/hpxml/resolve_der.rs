@@ -183,7 +183,7 @@ pub(super) fn resolve_ev(
                 initial_connection_state: None,
             };
             specs.push(build_typed_spec(
-                "Electric Vehicle".to_string(),
+                "EV".to_string(),
                 FuelType::Electric,
                 cfg,
                 defaults,

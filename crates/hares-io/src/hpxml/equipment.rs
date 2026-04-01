@@ -677,8 +677,8 @@ mod tests {
             .expect("resolve_equipment");
         let ev = specs
             .iter()
-            .find(|s| s.name == "Electric Vehicle")
-            .expect("Electric Vehicle spec must be present");
+            .find(|s| s.name == "EV")
+            .expect("EV spec must be present");
 
         let typed: hares_equipment::EvConfig = ev
             .typed_config

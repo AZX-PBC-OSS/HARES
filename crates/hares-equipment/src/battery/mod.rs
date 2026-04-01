@@ -197,7 +197,7 @@ impl CapacityDerateModel {
     /// Evaluate the derate factor at the given cell temperature.
     ///
     /// Returns a value in (0, ~1.0] where 1.0 means no derating. The factor
-    /// applies to both energy capacity and power limits.
+    /// applies to available energy capacity (SOC bounds), not instantaneous power limits.
     fn evaluate(&self, cell_temp_c: f64) -> f64 {
         match self {
             Self::Arrhenius {
@@ -618,7 +618,7 @@ impl Battery {
                 .map_or(limit, |pl| limit.min(pl));
             power_kw.min(limit)
         } else {
-            let hw_max = self.max_discharge_kw * temp_derate * dr_fraction;
+            let hw_max = self.max_discharge_kw * dr_fraction;
             let limit = self
                 .export_limit_kw
                 .map(|lim| hw_max.min(lim))
@@ -3853,6 +3853,32 @@ mod tests {
         assert!(
             clamped < -4.0,
             "discharge should not be limited by charging LUT, got {clamped}"
+        );
+    }
+
+    #[test]
+    fn battery_discharge_not_double_derated() {
+        // min_discharge_temp=-20C, full_power_temp=10C → at -10C, linear derate = 10/30 ≈ 0.333
+        // capacity_derate_model is set to return 0.5 at -10C to confirm it does NOT affect discharge power.
+        // clamp_power(-5.0) should return -5.0 (unclamped by capacity model); step() applies the linear ramp separately.
+        let config = battery_config(&[]);
+        let mut bat = Battery::new(config);
+        bat.cell_temp_c = -10.0;
+        bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear {
+            points: vec![(-20.0, 0.2), (25.0, 0.5)],
+        };
+
+        let clamped = bat.clamp_power(-5.0);
+        assert!(
+            (clamped - (-5.0)).abs() < 1e-9,
+            "discharge clamp_power should not apply capacity_derate_model; expected -5.0, got {clamped}"
+        );
+
+        // Charge branch still uses capacity_derate_model (interpolates ~0.41 at -10C → 5.0 * 0.41 ≈ 2.05)
+        let charge_clamped = bat.clamp_power(5.0);
+        assert!(
+            charge_clamped < 3.0,
+            "charge clamp_power should still apply capacity_derate_model, got {charge_clamped}"
         );
     }
 

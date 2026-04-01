@@ -287,6 +287,7 @@ pub fn mode_to_ordinal(mode: OperatingMode) -> f64 {
         OperatingMode::HeatingHPAndER => 9.0,
         OperatingMode::HeatPumpWH => 10.0,
         OperatingMode::BackupElement => 11.0,
+        OperatingMode::On => 12.0,
     }
 }
 

@@ -538,6 +538,7 @@ impl PyControlSignal {
                     OperatingMode::HeatingHPAndER => "HeatingHPAndER",
                     OperatingMode::HeatPumpWH => "HeatPumpWH",
                     OperatingMode::BackupElement => "BackupElement",
+                    OperatingMode::On => "On",
                 };
                 dict.set_item("mode", m_str)?;
             }
@@ -650,6 +651,7 @@ fn parse_mode(mode: &str) -> PyResult<OperatingMode> {
         "HeatingHPAndER" => Ok(OperatingMode::HeatingHPAndER),
         "HeatPumpWH" => Ok(OperatingMode::HeatPumpWH),
         "BackupElement" => Ok(OperatingMode::BackupElement),
+        "On" => Ok(OperatingMode::On),
         _ => Err(PyValueError::new_err(format!(
             "unsupported OperatingMode `{mode}`"
         ))),

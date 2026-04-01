@@ -137,6 +137,12 @@ pub enum ControlSignal {
     EventDelay {
         delay_s: f64,
     },
+    /// Limit maximum capacity to a fraction of rated capacity [0, 1].
+    /// OCHRE HVAC.py: `ext_capacity_frac` — clips ideal capacity output to
+    /// `capacity_max * fraction`. Only meaningful for ideal-capacity equipment.
+    MaxCapacityFraction {
+        fraction: f64,
+    },
 }
 
 /// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
@@ -175,6 +181,7 @@ bitflags! {
         const EV_AWAY_CHARGE = 1 << 21;
         const EV_SET_READY_BY = 1 << 22;
         const EVENT_DELAY = 1 << 23;
+        const MAX_CAPACITY_FRACTION = 1 << 24;
     }
 }
 
@@ -215,6 +222,7 @@ impl ControlSignal {
             Self::EvAwayCharge { .. } => ControlCapabilities::EV_AWAY_CHARGE,
             Self::EvSetReadyBy { .. } => ControlCapabilities::EV_SET_READY_BY,
             Self::EventDelay { .. } => ControlCapabilities::EVENT_DELAY,
+            Self::MaxCapacityFraction { .. } => ControlCapabilities::MAX_CAPACITY_FRACTION,
         }
     }
 }
@@ -315,6 +323,7 @@ mod tests {
                 target_soc: 0.8,
             },
             ControlSignal::EventDelay { delay_s: 300.0 },
+            ControlSignal::MaxCapacityFraction { fraction: 0.5 },
         ];
 
         for signal in signals {

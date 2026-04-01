@@ -268,8 +268,8 @@ impl ResistanceWH {
             .max(1e-6)
             .sqrt();
         let n_nodes = usize::from(c.tank_nodes.unwrap_or(6).max(1));
-        self.upper_node = 0;
-        self.lower_node = n_nodes.saturating_sub(1);
+        self.upper_node = if n_nodes >= 12 { 2 } else { 0 };
+        self.lower_node = if n_nodes >= 12 { 9 } else { n_nodes.saturating_sub(1) };
 
         self.tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes,
@@ -465,13 +465,11 @@ impl Equipment for ResistanceWH {
             (up, lo)
         };
 
-        let mut heat_injections = Vec::with_capacity(2);
-        if upper_power_w > 0.0 {
-            heat_injections.push((self.upper_node, upper_power_w));
-        }
-        if lower_power_w > 0.0 {
-            heat_injections.push((self.lower_node, lower_power_w));
-        }
+        let mut heat_buf = [(0usize, 0.0f64); 2];
+        let mut n = 0;
+        if upper_power_w > 0.0 { heat_buf[n] = (self.upper_node, upper_power_w); n += 1; }
+        if lower_power_w > 0.0 { heat_buf[n] = (self.lower_node, lower_power_w); n += 1; }
+        let heat_injections = &heat_buf[..n];
 
         let draw_l_per_min_source = self.draw_l_per_min_source.as_mut();
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
@@ -1090,7 +1088,8 @@ mod tests {
     //
     // DR Moderate: setpoint offset = -3°C. Tank at 49°C with setpoint 52°C — normally
     // calling for heat (49 < 52 - 2 = 50). After Moderate, effective setpoint = 49°C; tank at
-    // 49°C is not below 49 - 2 = 47, so no call from Off state.    #[test]
+    // 49°C is not below 49 - 2 = 47, so no call from Off state.
+    #[test]
     fn wh_dr_moderate_reduces_setpoint() {
         let mut typed = typed_config();
         typed.initial_tank_temp_c = Some(49.0);
@@ -1453,6 +1452,30 @@ mod tests {
         assert!(
             (element_kw - electric_kw).abs() < 1e-9,
             "element_kw {element_kw:.6} must equal electric_kw {electric_kw:.6}"
+        );
+    }
+
+    #[test]
+    fn twelve_node_tank_element_positions_match_ochre() {
+        let mut typed = typed_config();
+        typed.tank_nodes = Some(12);
+        let cfg = config_from_typed(typed);
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+        assert_eq!(eq.upper_node, 2, "12-node tank: upper element must be at node 2");
+        assert_eq!(eq.lower_node, 9, "12-node tank: lower element must be at node 9");
+    }
+
+    #[test]
+    fn default_node_tank_element_positions() {
+        let cfg = config_from_typed(typed_config());
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+        assert_eq!(eq.upper_node, 0, "default 6-node tank: upper element must be at node 0");
+        assert_eq!(
+            eq.lower_node,
+            eq.tank.node_temps().len() - 1,
+            "default 6-node tank: lower element must be at last node"
         );
     }
 }

@@ -80,7 +80,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
         })
     };
 
-    let charging_level = get_str(&[KEY_CHARGING_LEVEL, KEY_CHARGING_LEVEL_HPIXML]).map(|level| {
+    let charging_level = get_str(&[KEY_CHARGING_LEVEL, KEY_CHARGING_LEVEL_HPXML]).map(|level| {
         match level.as_str() {
             "Level1" => "L1".to_string(),
             "Level2" => "L2".to_string(),
@@ -88,7 +88,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
         }
     });
 
-    let capacity_kwh = get_f64(&[KEY_BATTERY_CAPACITY_KWH, KEY_BATTERY_CAPACITY_HPIXML_KWH])
+    let capacity_kwh = get_f64(&[KEY_BATTERY_CAPACITY_KWH, KEY_BATTERY_CAPACITY_HPXML_KWH])
         .or_else(|| {
             get_f64(&[KEY_RANGE_MILES]).map(|range| {
                 let economy = get_f64(&[KEY_FUEL_ECONOMY_KWH_PER_MI])
@@ -100,7 +100,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
 
     let default_level = charging_level.clone().unwrap_or_else(|| "L2".to_string());
     let max_charging_power_kw =
-        get_f64(&[KEY_MAX_CHARGING_POWER_KW, KEY_MAX_CHARGING_POWER_HPIXML_KW]).unwrap_or_else(
+        get_f64(&[KEY_MAX_CHARGING_POWER_KW, KEY_MAX_CHARGING_POWER_HPXML_KW]).unwrap_or_else(
             || match default_level.as_str() {
                 "L1" => L1_CHARGING_POWER_KW,
                 _ => default_max_power_kw(
@@ -364,9 +364,9 @@ fn supports_hpxml_key_aliases() {
     raw.remove(KEY_BATTERY_CAPACITY_KWH);
     raw.remove(KEY_MAX_CHARGING_POWER_KW);
     raw.remove(KEY_CHARGING_LEVEL);
-    raw.insert(KEY_BATTERY_CAPACITY_HPIXML_KWH.to_string(), 64.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_HPIXML_KW.to_string(), 11.5.into());
-    raw.insert(KEY_CHARGING_LEVEL_HPIXML.to_string(), "Level2".into());
+    raw.insert(KEY_BATTERY_CAPACITY_HPXML_KWH.to_string(), 64.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_HPXML_KW.to_string(), 11.5.into());
+    raw.insert(KEY_CHARGING_LEVEL_HPXML.to_string(), "Level2".into());
 
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());

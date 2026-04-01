@@ -301,3 +301,33 @@ pub(super) fn load_biquadratic_coeffs(
         Ok(curves)
     }
 }
+
+/// Parse a 3-element f64 array from a bracketed string like `[1.0, 0.0, 0.0]`.
+pub(super) fn parse_f64_array_3(raw: &str) -> crate::Result<[f64; 3]> {
+    let mut numbers = Vec::new();
+    let mut token = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | 'e' | 'E') {
+            token.push(ch);
+        } else if !token.is_empty() {
+            let value = token.parse::<f64>().map_err(|err| {
+                HaresError::Equipment(format!("invalid coefficient '{token}': {err}"))
+            })?;
+            numbers.push(value);
+            token.clear();
+        }
+    }
+    if !token.is_empty() {
+        let value = token.parse::<f64>().map_err(|err| {
+            HaresError::Equipment(format!("invalid coefficient '{token}': {err}"))
+        })?;
+        numbers.push(value);
+    }
+    if numbers.len() != 3 {
+        return Err(HaresError::Equipment(format!(
+            "expected 3 coefficients, got {}",
+            numbers.len()
+        )));
+    }
+    Ok([numbers[0], numbers[1], numbers[2]])
+}

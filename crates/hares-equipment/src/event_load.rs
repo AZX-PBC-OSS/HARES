@@ -364,9 +364,16 @@ impl EventBasedLoad {
         // but only when the equipment is actually in an active event phase.
         // OCHRE gates p_setpoint on self.mode == "On".
         let active_power_kw = if active_now {
+            let base_kw = if !self.extracted_events.is_empty()
+                && self.event_cursor < self.extracted_events.len()
+            {
+                self.extracted_events[self.event_cursor].power_kw
+            } else {
+                self.active_power_kw
+            };
             self.power_setpoint_override
                 .take()
-                .unwrap_or(self.active_power_kw * self.load_fraction.max(0.0) * month_scale)
+                .unwrap_or(base_kw * self.load_fraction.max(0.0) * month_scale)
         } else {
             self.power_setpoint_override = None;
             0.0
@@ -516,7 +523,7 @@ impl Equipment for EventBasedLoad {
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
         match self.phase {
             EventPhase::Idle => OperatingMode::Off,
-            EventPhase::Active => OperatingMode::Standby,
+            EventPhase::Active => OperatingMode::On,
             EventPhase::Cooldown => OperatingMode::Off,
         }
     }
@@ -556,7 +563,6 @@ impl Equipment for EventBasedLoad {
 
             if in_event {
                 self.phase = EventPhase::Active;
-                self.active_power_kw = self.extracted_events[self.event_cursor].power_kw;
                 self.remaining_phase_s = dt_s;
             } else {
                 self.phase = EventPhase::Idle;
@@ -669,6 +675,11 @@ impl Equipment for EventBasedLoad {
                 if self.phase == EventPhase::Active {
                     return Err(HaresError::Control(
                         "cannot delay an active event".to_string(),
+                    ));
+                }
+                if *delay_s <= 0.0 {
+                    return Err(HaresError::Control(
+                        "EventDelay delay_s must be positive".to_string(),
                     ));
                 }
                 self.delay_remaining_s += delay_s;
@@ -996,7 +1007,7 @@ impl Equipment for WetAppliance {
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
         if self.active {
-            OperatingMode::Standby
+            OperatingMode::On
         } else {
             OperatingMode::Off
         }
@@ -1152,6 +1163,11 @@ impl Equipment for WetAppliance {
                 if self.active {
                     return Err(HaresError::Control(
                         "cannot delay an active event".to_string(),
+                    ));
+                }
+                if *delay_s <= 0.0 {
+                    return Err(HaresError::Control(
+                        "EventDelay delay_s must be positive".to_string(),
                     ));
                 }
                 self.delay_remaining_s += delay_s;
@@ -1863,8 +1879,8 @@ mod tests {
         let mode_active = eq2.update_control(&env);
         assert_eq!(
             mode_active,
-            hares_types::OperatingMode::Standby,
-            "Active phase should return Standby"
+            hares_types::OperatingMode::On,
+            "Active phase should return On"
         );
 
         // Clear override, advance past active_duration to enter Cooldown
@@ -2546,25 +2562,43 @@ mod tests {
         );
     }
 
-    /// EventDelay { delay_s: 0.0 } adds nothing; the event starts on the very
-    /// first step as if no delay signal had been sent.
+    /// EventDelay { delay_s: 0.0 } is rejected: delay must be strictly positive.
     #[test]
-    fn event_delay_zero_is_noop() {
-        let mut env = base_env();
+    fn event_delay_zero_returns_error() {
+        let env = base_env();
         let config = event_config("delay_zero_test", "EventBasedLoad");
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();
 
-        eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 0.0 })
-            .unwrap();
-
-        set_schedule_payload(&mut env, vec![1.0, 1.0]);
-        let mut slots = PortSlots::from_declarations(eq.ports());
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 0.0 });
         assert!(
-            (slots.electrical.load_power_kw - 1.5).abs() < 1e-9,
-            "delay_s=0 must not block the event; expected 1.5 kW, got {}",
-            slots.electrical.load_power_kw
+            result.is_err(),
+            "delay_s=0.0 must be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("must be positive"),
+            "error should mention positivity, got: {msg}"
+        );
+    }
+
+    /// EventDelay with negative delay_s is rejected.
+    #[test]
+    fn event_delay_negative_returns_error() {
+        let env = base_env();
+        let config = event_config("delay_neg_test", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: -10.0 });
+        assert!(
+            result.is_err(),
+            "negative delay_s must be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("must be positive"),
+            "error should mention positivity, got: {msg}"
         );
     }
 
@@ -2829,6 +2863,176 @@ mod tests {
         assert_eq!(
             slots_a.electrical.load_power_kw, slots_b.electrical.load_power_kw,
             "checkpoint round-trip must produce identical behaviour to the original instance"
+        );
+    }
+
+    // =======================================================================
+    // T3: PowerSetpoint on idle EventBasedLoad → electric_kw == 0.0
+    // =======================================================================
+
+    #[test]
+    fn power_setpoint_on_idle_event_load_produces_zero() {
+        let mut env = base_env();
+        let config = event_config("idle_setpoint", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 5.0,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+
+        set_schedule_payload(&mut env, vec![0.0, 0.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        assert_eq!(
+            slots.electrical.load_power_kw, 0.0,
+            "PowerSetpoint on an idle load must not produce output"
+        );
+    }
+
+    // =======================================================================
+    // T4: PowerSetpoint on active EventBasedLoad → output equals setpoint
+    // =======================================================================
+
+    #[test]
+    fn power_setpoint_on_active_event_load_equals_setpoint() {
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 3.0.into());
+        raw.insert("active_duration_s".to_string(), 3600.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 1.0.into());
+        let config = EquipmentConfig::raw(
+            "setpoint_active".to_string(),
+            "EventBasedLoad".to_string(),
+            raw,
+        );
+
+        let mut env = base_env();
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        assert!(
+            slots.electrical.load_power_kw > 0.0,
+            "equipment must be active"
+        );
+
+        eq.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_kw: 0.75,
+            reactive_power_kvar: None,
+        })
+        .unwrap();
+
+        env.current_time += chrono::Duration::minutes(1);
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+
+        assert!(
+            (slots.electrical.load_power_kw - 0.75).abs() < 1e-9,
+            "active load with PowerSetpoint must output setpoint value; got {}",
+            slots.electrical.load_power_kw
+        );
+    }
+
+    // =======================================================================
+    // T5: Deterministic event does not mutate active_power_kw field
+    // =======================================================================
+
+    #[test]
+    fn deterministic_event_does_not_mutate_active_power_kw_field() {
+        use super::super::config::ConfigValue;
+
+        let kw_series = vec![0.0_f64, 5.0, 5.0, 0.0];
+        let mut raw: std::collections::HashMap<String, ConfigValue> =
+            std::collections::HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 99.0.into());
+        raw.insert("active_duration_s".to_string(), 60.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 42.0.into());
+        raw.insert(
+            "event_power_kw_series".to_string(),
+            ConfigValue::FloatArray(kw_series),
+        );
+        let config = EquipmentConfig::raw(
+            "field_unchanged".to_string(),
+            "EventBasedLoad".to_string(),
+            raw,
+        );
+
+        let mut env = base_env();
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        let original_active_power_kw = eq.active_power_kw;
+
+        for _ in 0..4 {
+            let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
+            set_schedule_payload(&mut env, vec![1.0, 1.0]);
+            eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+            env.current_time += chrono::Duration::minutes(1);
+        }
+
+        assert_eq!(
+            eq.active_power_kw, original_active_power_kw,
+            "deterministic replay must not mutate active_power_kw field; \
+             expected {original_active_power_kw}, got {}",
+            eq.active_power_kw
+        );
+    }
+
+    // =======================================================================
+    // T8: Active EventPhase → update_control returns OperatingMode::On
+    // =======================================================================
+
+    #[test]
+    fn active_phase_update_control_returns_on() {
+        let mut env = base_env();
+        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+        raw.insert("zone_id".to_string(), 1.0.into());
+        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
+        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_duration_s".to_string(), 3600.0.into());
+        raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+        raw.insert("building_id".to_string(), 1.0.into());
+        raw.insert("master_seed".to_string(), 1.0.into());
+        let config = EquipmentConfig::raw(
+            "mode_test".to_string(),
+            "EventBasedLoad".to_string(),
+            raw,
+        );
+
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut slots = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(1), &mut slots).unwrap();
+
+        assert_eq!(
+            eq.phase,
+            super::EventPhase::Active,
+            "equipment must be in Active phase"
+        );
+        let mode = eq.update_control(&env);
+        assert_eq!(
+            mode,
+            hares_types::OperatingMode::On,
+            "Active phase must return OperatingMode::On, got {mode:?}"
         );
     }
 }

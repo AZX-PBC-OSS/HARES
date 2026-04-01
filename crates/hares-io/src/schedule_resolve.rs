@@ -976,7 +976,7 @@ mod tests {
     use tempfile::tempdir;
     use tracing_subscriber::fmt::MakeWriter;
 
-    use super::inject_schedule_into_specs;
+    use super::{determine_max_kw, inject_schedule_into_specs};
     use crate::{EquipmentSpec, ScheduleTimeSeries};
 
     #[derive(Clone, Default)]
@@ -1857,5 +1857,46 @@ mod tests {
         let mut specs = vec![make_typed_tankless_spec(None)];
 
         inject_schedule_into_specs(&mut specs, &mut schedule, None);
+    }
+
+    // =======================================================================
+    // Quantitative: determine_max_kw with both electric and gas annual energy
+    // =======================================================================
+
+    #[test]
+    fn determine_max_kw_electric_plus_gas_therms() {
+        let annual_electric_kwh = 44.0;
+        let annual_gas_therms = 153.0;
+        let fractions = [0.2, 1.0, 0.4];
+        let mean_fraction: f64 = fractions.iter().sum::<f64>() / fractions.len() as f64;
+
+        let mut parameters = Map::new();
+        parameters.insert(
+            "annual_electric_kwh".to_string(),
+            Value::from(annual_electric_kwh),
+        );
+        parameters.insert(
+            "annual_gas_therms".to_string(),
+            Value::from(annual_gas_therms),
+        );
+        let spec = EquipmentSpec {
+            name: "Gas Dryer".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters,
+            zip_params: None,
+            typed_config: None,
+        };
+
+        let result = determine_max_kw(&spec, mean_fraction);
+        assert!(result.is_some(), "determine_max_kw must return Some");
+
+        let annual_gas_kwh = hares_physics::units::energy_therms_to_kwh(annual_gas_therms);
+        let expected = (annual_electric_kwh + annual_gas_kwh) / 8760.0 / mean_fraction;
+        let actual = result.unwrap();
+
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected:.6}, got {actual:.6}"
+        );
     }
 }

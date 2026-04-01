@@ -1,6 +1,6 @@
 //! Air conditioner curve helpers and telemetry — typed config structs live in cooling_config.
 
-use hares_types::{HaresError, Telemetry, TelemetryField, telemetry_keys as tk};
+use hares_types::{Telemetry, TelemetryField, telemetry_keys as tk};
 
 use super::core_config::parse_biquadratic_list;
 use crate::EquipmentConfig;
@@ -20,7 +20,7 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(13);
+    let mut telemetry = Telemetry::with_capacity(14);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_COOLING_W, 0.0);
@@ -34,6 +34,7 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::SUPPLY_TEMP_C, 0.0);
     telemetry.insert(tk::APPARATUS_DEW_POINT_C, 0.0);
     telemetry.insert(tk::BYPASS_FACTOR, 0.0);
+    telemetry.insert(tk::MAX_CAPACITY_FRACTION, 1.0);
     telemetry
 }
 
@@ -104,6 +105,11 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             unit: "-".to_string(),
             description: "Coil bypass factor (fraction of air bypassing the coil)".to_string(),
         },
+        TelemetryField {
+            name: tk::MAX_CAPACITY_FRACTION.to_string(),
+            unit: "-".to_string(),
+            description: "External max-capacity fraction control [0..1]".to_string(),
+        },
     ]
 }
 
@@ -117,19 +123,39 @@ pub(super) fn load_curve_pair(
         Vec::new()
     };
 
-    if let Some(cap) = parse_single_coeff_array(config.get_str("capacity_biquadratic_coeffs"))? {
-        if curves.is_empty() {
-            curves.push(cap);
-        } else {
-            curves[0] = cap;
-        }
-    }
+    // Per-stage cap/eir keys: may contain multiple 6-element chunks.
+    // Interleave them: [cap_0, eir_0, cap_1, eir_1, ...].
+    let cap_curves = config
+        .get_str("capacity_biquadratic_coeffs")
+        .map(parse_biquadratic_list)
+        .transpose()?
+        .unwrap_or_default();
+    let eir_curves = config
+        .get_str("eir_biquadratic_coeffs")
+        .map(parse_biquadratic_list)
+        .transpose()?
+        .unwrap_or_default();
 
-    if let Some(eir) = parse_single_coeff_array(config.get_str("eir_biquadratic_coeffs"))? {
-        if curves.len() < 2 {
-            curves.resize(2, eir);
+    if !cap_curves.is_empty() || !eir_curves.is_empty() {
+        let n_stages = cap_curves.len().max(eir_curves.len());
+        let default_cap = if is_room_ac {
+            DEFAULT_ROOM_AC_CAPACITY_CURVE
+        } else {
+            DEFAULT_AC_CAPACITY_CURVE
+        };
+        let default_eir = if is_room_ac {
+            DEFAULT_ROOM_AC_EIR_CURVE
+        } else {
+            DEFAULT_AC_EIR_CURVE
+        };
+        let mut interleaved = Vec::with_capacity(n_stages * 2);
+        for i in 0..n_stages {
+            let cap = cap_curves.get(i).copied().unwrap_or(default_cap);
+            let eir = eir_curves.get(i).copied().unwrap_or(default_eir);
+            interleaved.push(cap);
+            interleaved.push(eir);
         }
-        curves[1] = eir;
+        curves = interleaved;
     }
 
     if curves.is_empty() {
@@ -154,17 +180,3 @@ pub(super) fn load_curve_pair(
     Ok(curves)
 }
 
-fn parse_single_coeff_array(raw: Option<&str>) -> crate::Result<Option<[f64; 6]>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let curves = parse_biquadratic_list(raw)?;
-    match curves.len() {
-        0 => Ok(None),
-        1 => Ok(Some(curves[0])),
-        n => Err(HaresError::Equipment(format!(
-            "expected exactly 6 biquadratic coefficients, got {}",
-            n * 6
-        ))),
-    }
-}

@@ -8,11 +8,11 @@ use hares_types::ChargingLevel;
 
 pub(super) use crate::config::KEY_EQUIPMENT_ID;
 pub(crate) const KEY_BATTERY_CAPACITY_KWH: &str = "capacity_kwh";
-pub(super) const KEY_BATTERY_CAPACITY_HPIXML_KWH: &str = "BatteryCapacity";
+pub(super) const KEY_BATTERY_CAPACITY_HPXML_KWH: &str = "BatteryCapacity";
 pub(crate) const KEY_CHARGING_LEVEL: &str = "charging_level";
-pub(super) const KEY_CHARGING_LEVEL_HPIXML: &str = "ChargingLevel";
+pub(super) const KEY_CHARGING_LEVEL_HPXML: &str = "ChargingLevel";
 pub(crate) const KEY_MAX_CHARGING_POWER_KW: &str = "max_charging_power_kw";
-pub(super) const KEY_MAX_CHARGING_POWER_HPIXML_KW: &str = "MaxChargingPower";
+pub(super) const KEY_MAX_CHARGING_POWER_HPXML_KW: &str = "MaxChargingPower";
 pub(crate) const KEY_VEHICLE_TYPE: &str = "vehicle_type";
 pub(crate) const KEY_RANGE_MILES: &str = "range_miles";
 pub(super) const KEY_INITIAL_SOC: &str = "initial_soc";
@@ -75,7 +75,7 @@ pub(super) const MIN_TIMESTEP_HOURS: f64 = 1e-9;
 pub(super) fn resolve_capacity_kwh(config: &EquipmentConfig) -> Option<f64> {
     let direct = config
         .get_f64(KEY_BATTERY_CAPACITY_KWH)
-        .or_else(|| config.get_f64(KEY_BATTERY_CAPACITY_HPIXML_KWH));
+        .or_else(|| config.get_f64(KEY_BATTERY_CAPACITY_HPXML_KWH));
     if let Some(capacity_kwh) = direct
         && capacity_kwh.is_finite()
         && capacity_kwh > 0.0
@@ -98,7 +98,7 @@ pub(super) fn resolve_rated_power_kw(
 ) -> Option<f64> {
     let direct = config
         .get_f64(KEY_MAX_CHARGING_POWER_KW)
-        .or_else(|| config.get_f64(KEY_MAX_CHARGING_POWER_HPIXML_KW));
+        .or_else(|| config.get_f64(KEY_MAX_CHARGING_POWER_HPXML_KW));
 
     if let Some(power_kw) = direct
         && power_kw.is_finite()

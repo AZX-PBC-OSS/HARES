@@ -454,7 +454,8 @@ impl CoolingCore {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
-                    | ControlCapabilities::IDEAL_CAPACITY,
+                    | ControlCapabilities::IDEAL_CAPACITY
+                    | ControlCapabilities::MAX_CAPACITY_FRACTION,
                 core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
                 telemetry_fields: telemetry_fields(),
             },
@@ -865,6 +866,8 @@ impl CoolingCore {
             .set(tk::APPARATUS_DEW_POINT_C, self.last_adp_c);
         self.telemetry
             .set(tk::BYPASS_FACTOR, self.last_bypass_factor);
+        self.telemetry
+            .set(tk::MAX_CAPACITY_FRACTION, self.hvac.max_capacity_fraction);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -1094,7 +1097,9 @@ impl CoolingCore {
         let staged_capacity_w = self
             .hvac
             .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
-        let total_capacity_w = (staged_capacity_w * plr).max(0.0);
+        // OCHRE HVAC.py:445-448 — clip to rated_max * ext_capacity_frac.
+        let capacity_ceiling = steady_capacity_w * self.hvac.max_capacity_fraction;
+        let total_capacity_w = (staged_capacity_w * plr).max(0.0).min(capacity_ceiling);
 
         let flow_m3_s = flow_m3_s_for_fan;
 
@@ -1309,6 +1314,15 @@ impl CoolingCore {
             ControlSignal::IdealCapacity { capacity_w } => {
                 // Solver-provided load: negative = cooling needed.
                 self.ideal_capacity_w = *capacity_w;
+            }
+            ControlSignal::MaxCapacityFraction { fraction } => {
+                if !fraction.is_finite() || !(0.0..=1.0).contains(fraction) {
+                    return Err(HaresError::Control(format!(
+                        "invalid max capacity fraction for {}: {fraction}",
+                        self.descriptor.equipment_type
+                    )));
+                }
+                self.hvac.max_capacity_fraction = *fraction;
             }
             _ => {}
         }
@@ -3368,6 +3382,64 @@ mod ideal_capacity_tests {
             rtf, 0.0,
             "900 s timestep with zone below FSM turn-on and no solver signal must \
              produce RTF=0.0, got {rtf}"
+        );
+    }
+
+    #[test]
+    fn max_capacity_fraction_clips_cooling_output() {
+        let cfg = ac_config();
+        let environment = make_env(26.0, 900);
+
+        // Baseline: run at full ideal capacity (rated = 8000 W).
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -8_000.0,
+        })
+        .unwrap();
+        eq.update_control(&environment);
+        let mut ports = make_ports();
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let full_cooling_w = eq
+            .telemetry()
+            .get(tk::SENSIBLE_COOLING_W)
+            .unwrap_or(0.0)
+            .abs()
+            + eq.telemetry()
+                .get(tk::LATENT_COOLING_W)
+                .unwrap_or(0.0)
+                .abs();
+        assert!(full_cooling_w > 1000.0, "baseline should produce meaningful output");
+
+        // Apply MaxCapacityFraction(0.5) -- output must not exceed ~50% of baseline.
+        let mut eq2 = AirConditioner::new(cfg.clone());
+        eq2.init(&cfg, &environment).unwrap();
+        eq2.apply_control(&ControlSignal::MaxCapacityFraction { fraction: 0.5 })
+            .unwrap();
+        eq2.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -8_000.0,
+        })
+        .unwrap();
+        eq2.update_control(&environment);
+        let mut ports2 = make_ports();
+        eq2.step(&environment, Duration::from_secs(900), &mut ports2)
+            .unwrap();
+        let capped_cooling_w = eq2
+            .telemetry()
+            .get(tk::SENSIBLE_COOLING_W)
+            .unwrap_or(0.0)
+            .abs()
+            + eq2
+                .telemetry()
+                .get(tk::LATENT_COOLING_W)
+                .unwrap_or(0.0)
+                .abs();
+        let limit = full_cooling_w * 0.55;
+        assert!(
+            capped_cooling_w <= limit,
+            "MaxCapacityFraction(0.5) should limit output to ~50%; \
+             got {capped_cooling_w:.1}W vs full {full_cooling_w:.1}W (limit={limit:.1}W)"
         );
     }
 }

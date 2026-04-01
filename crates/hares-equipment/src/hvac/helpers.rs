@@ -117,6 +117,7 @@ pub fn operating_mode_code(mode: OperatingMode) -> f64 {
         OperatingMode::Standby => 9.0,
         OperatingMode::Charging => 10.0,
         OperatingMode::Discharging => 11.0,
+        OperatingMode::On => 12.0,
     }
 }
 

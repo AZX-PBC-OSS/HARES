@@ -328,11 +328,12 @@ impl Equipment for TanklessWH {
                     // Within capacity: deliver setpoint temperature.
                     (demand_w, setpoint_c)
                 } else {
-                    // Over-capacity: clamp time-averaged output; compute on-phase outlet temp
-                    // using full (non-duty-scaled) power — the heater fires at rated power
-                    // during its on-fraction.
+                    // Over-capacity: clamp time-averaged output; outlet temp uses the
+                    // instantaneous rated power — the heater fires at rated capacity during
+                    // its on-fraction regardless of duty or power-limit accounting.
                     let outlet_c = inlet_temp_c
-                        + effective_max_w / (total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+                        + self.rated_thermal_power_w
+                            / (total_draw_kg_s * WATER_SPECIFIC_HEAT_J_PER_KG_K);
                     (capacity_w, outlet_c)
                 }
             } else if mode == OperatingMode::Heating {
@@ -345,6 +346,7 @@ impl Equipment for TanklessWH {
 
         let fuel_input_w = thermal_output_w / self.efficiency_factor;
         let mut fuel_w_for_core = None;
+        let mut parasitic_electric_w_reported = 0.0_f64;
         let electric_kw_for_core = if self.fuel_type == FuelType::Electric {
             let (electric_w, reactive_kvar) = self.zip.apply(fuel_input_w, env.grid.voltage_pu);
             if electric_w > 0.0 || reactive_kvar != 0.0 {
@@ -367,20 +369,21 @@ impl Equipment for TanklessWH {
             });
             // Gas ignition controller draws electricity continuously regardless of
             // burner state (OCHRE/ANSI RESNET 301 standby parasitic).
-            let (parasitic_w, parasitic_kvar) =
+            let (zip_parasitic_w, parasitic_kvar) =
                 self.zip.apply(self.parasitic_power_w, env.grid.voltage_pu);
             ports.accumulate(&PortContribution::Electrical {
-                active_power_kw: parasitic_w / 1_000.0,
+                active_power_kw: zip_parasitic_w / 1_000.0,
                 reactive_power_kvar: parasitic_kvar,
             })?;
-            (parasitic_w / 1_000.0).max(0.0)
+            parasitic_electric_w_reported = zip_parasitic_w.max(0.0);
+            (zip_parasitic_w / 1_000.0).max(0.0)
         };
 
         self.telemetry.set(tk::OUTLET_TEMP_C, outlet_temp_c);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
         self.telemetry
-            .set(tk::PARASITIC_ELECTRIC_W, self.parasitic_power_w);
+            .set(tk::PARASITIC_ELECTRIC_W, parasitic_electric_w_reported);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(
             tk::OPERATING_MODE,
@@ -1167,6 +1170,50 @@ mod tests {
         assert!(
             (outlet - expected_outlet).abs() < 1e-6,
             "outlet temp must use full rated power: {expected_outlet:.4}°C, got {outlet:.4}"
+        );
+    }
+
+    /// Over-capacity outlet temperature uses instantaneous rated power, not duty-scaled power.
+    /// OCHRE reference: outlet formula uses `capacity_rated`, not `capacity_rated * duty`.
+    /// Setup: rated=20 kW, duty=0.5, flow=0.5 kg/s, inlet=20°C.
+    /// Expected outlet = 20 + 20000 / (0.5 * 4183) ≈ 29.56°C (not 24.78°C from 10 kW).
+    #[test]
+    fn over_capacity_outlet_temp_uses_instantaneous_power() {
+        use hares_types::ControlSignal;
+
+        let mut typed = typed_config();
+        typed.draw_flow_rate_kg_s = Some(0.5);
+        typed.heating_capacity_w = Some(20_000.0);
+        typed.energy_factor = Some(0.8);
+        typed.inlet_temp_c = Some(20.0);
+        typed.setpoint_c = Some(51.666_666_7);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        eq.apply_control(&ControlSignal::DutyCycle {
+            on_fraction: 0.5,
+            period_s: None,
+            component: None,
+        })
+        .unwrap();
+
+        step_once(&mut eq);
+
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).unwrap();
+        let thermal = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
+
+        // Time-averaged output = rated * duty = 10,000 W
+        assert!(
+            (thermal - 10_000.0).abs() < 1e-6,
+            "time-averaged thermal must be 10,000 W (rated * duty), got {thermal}"
+        );
+        // Outlet uses full 20 kW instantaneous, not duty-scaled 10 kW
+        let expected_outlet = 20.0 + 20_000.0 / (0.5 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+        let wrong_outlet = 20.0 + 10_000.0 / (0.5 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
+        assert!(
+            (outlet - expected_outlet).abs() < 1e-4,
+            "outlet must use instantaneous rated power: {expected_outlet:.4}°C, got {outlet:.4}°C (wrong duty-scaled would be {wrong_outlet:.4}°C)"
         );
     }
 

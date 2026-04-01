@@ -183,6 +183,7 @@ pub enum OperatingMode {
     HeatingHPAndER = 9,
     HeatPumpWH = 10,
     BackupElement = 11,
+    On = 12,
 }
 
 impl OperatingMode {

@@ -412,7 +412,6 @@ impl Equipment for Ventilation {
         let eff_s = self.effective_sensible_effectiveness(t_outdoor_c);
         let eff_l = self.effective_latent_effectiveness(t_outdoor_c);
         let bypass_active = self.ventilation_type != VentilationType::ExhaustFan
-            && eff_s == 0.0
             && t_outdoor_c >= self.bypass_temp_min_c
             && t_outdoor_c <= self.bypass_temp_max_c;
 
@@ -515,7 +514,7 @@ impl Equipment for Ventilation {
                 if *fraction <= 0.0 {
                     self.mode = OperatingMode::Off;
                 } else {
-                    self.mode = OperatingMode::Standby;
+                    self.mode = OperatingMode::On;
                 }
             }
             _ => {
@@ -550,6 +549,11 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
+        TelemetryField {
+            name: tk::ELECTRIC_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Total electrical power draw".to_string(),
+        },
         TelemetryField {
             name: tk::FAN_POWER_W.to_string(),
             unit: "W".to_string(),

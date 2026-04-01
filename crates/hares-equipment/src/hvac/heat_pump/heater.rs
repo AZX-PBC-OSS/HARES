@@ -361,7 +361,8 @@ impl HeatPumpHeaterCore {
                     | ControlCapabilities::POWER_LIMIT
                     | ControlCapabilities::MODE_OVERRIDE
                     | ControlCapabilities::DEMAND_RESPONSE
-                    | ControlCapabilities::IDEAL_CAPACITY,
+                    | ControlCapabilities::IDEAL_CAPACITY
+                    | ControlCapabilities::MAX_CAPACITY_FRACTION,
                 core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_MODE,
                 telemetry_fields: heater_telemetry_fields(),
             },
@@ -804,6 +805,8 @@ impl HeatPumpHeaterCore {
         self.telemetry.set(tk::HP_CAPACITY_W, step.hp_capacity_w);
         self.telemetry.set(tk::ER_CAPACITY_W, step.er_capacity_w);
         self.telemetry.set(tk::FUEL_INPUT_W, scaled_fuel_w);
+        self.telemetry
+            .set(tk::MAX_CAPACITY_FRACTION, self.hvac.max_capacity_fraction);
         let core_fuel_w = if scaled_fuel_w > 0.0 {
             self.backup_fuel_type.map(|fuel_type| FuelPower {
                 fuel_type,
@@ -914,8 +917,10 @@ impl HeatPumpHeaterCore {
         let staged_capacity_w = self
             .hvac
             .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
+        // OCHRE HVAC.py:1156 — clip to capacity_max * ext_capacity_frac.
+        let capacity_ceiling = steady_capacity_w * self.hvac.max_capacity_fraction;
         let mut hp_capacity_w = if hp_on {
-            (staged_capacity_w * plr).max(0.0)
+            (staged_capacity_w * plr).max(0.0).min(capacity_ceiling)
         } else {
             0.0
         };
@@ -1529,6 +1534,15 @@ impl HeatPumpHeaterCore {
             }
             ControlSignal::IdealCapacity { capacity_w } => {
                 self.ideal_capacity_w = *capacity_w;
+            }
+            ControlSignal::MaxCapacityFraction { fraction } => {
+                if !fraction.is_finite() || !(0.0..=1.0).contains(fraction) {
+                    return Err(HaresError::Control(format!(
+                        "invalid max capacity fraction for {}: {fraction}",
+                        self.descriptor.equipment_type
+                    )));
+                }
+                self.hvac.max_capacity_fraction = *fraction;
             }
             _ => {
                 apply_heating_control_unchecked(

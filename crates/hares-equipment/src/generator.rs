@@ -519,7 +519,7 @@ impl Generator {
             control_capabilities: ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::SELF_CONSUMPTION,
-            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::FUEL,
+            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::FUEL | CoreCapabilities::HAS_MODE,
             telemetry_fields: generator_telemetry_fields(has_chp),
         };
 
@@ -838,7 +838,7 @@ impl Equipment for Generator {
                 }),
             },
             state: CoreState {
-                operating_mode: None,
+                operating_mode: Some(self.mode),
                 soc: None,
             },
         };
@@ -2615,6 +2615,34 @@ mod tests {
         cfg.eta_electric = Some(0.35);
         cfg.eta_thermal = Some(0.45);
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn core_output_operating_mode_reflects_generator_state() {
+        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
+        generator.init(&config, &base_env()).unwrap();
+
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+        assert_eq!(
+            generator.core_output().state.operating_mode,
+            Some(OperatingMode::Off),
+            "idle generator must report Off"
+        );
+
+        ramp_to_steady_state(&mut generator, 5.0, &base_env());
+        let mut slots = ports_for(&generator);
+        generator
+            .step(&base_env(), Duration::from_secs(1), &mut slots)
+            .unwrap();
+        assert_eq!(
+            generator.core_output().state.operating_mode,
+            Some(OperatingMode::Standby),
+            "running generator must report Standby"
+        );
     }
 
     #[test]

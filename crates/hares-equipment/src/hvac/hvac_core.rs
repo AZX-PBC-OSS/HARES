@@ -9,7 +9,8 @@ use crate::EquipmentConfig;
 
 use super::core_config::{
     build_setpoint_source, extract_bool, extract_numeric, extract_text, load_biquadratic_coeffs,
-    load_bounds_pair, load_plr_coefficients, parse_biquadratic_list, parse_speed_control_mode,
+    load_bounds_pair, load_plr_coefficients, parse_biquadratic_list, parse_f64_array_3,
+    parse_speed_control_mode,
 };
 use super::speed_control::{SpeedControlMode, StartupConfig};
 use super::staging::{DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF};
@@ -225,6 +226,17 @@ pub struct HvacEquipment {
     /// Scales electrical/fuel output but NOT thermal zone contributions.
     /// OCHRE HVAC.py:104: `self.space_fraction`.
     pub space_fraction: f64,
+    /// External max-capacity fraction [0, 1]. Clips ideal capacity output to
+    /// `rated_max * max_capacity_fraction`. Set via `MaxCapacityFraction` control signal.
+    /// OCHRE HVAC.py: `self.ext_capacity_frac`.
+    pub max_capacity_fraction: f64,
+    /// Per-speed flow-fraction quadratic coefficients for capacity curve.
+    /// Evaluates: `cap_ff[0] + cap_ff[1]*ff + cap_ff[2]*ff^2`.
+    /// Default `[1.0, 0.0, 0.0]` = no flow-fraction correction (scalar 1.0).
+    pub cap_ff_coeffs: [f64; 3],
+    /// Per-speed flow-fraction quadratic coefficients for EIR curve.
+    /// Evaluates: `eir_ff[0] + eir_ff[1]*ff + eir_ff[2]*ff^2`.
+    pub eir_ff_coeffs: [f64; 3],
 }
 
 impl HvacEquipment {
@@ -296,6 +308,9 @@ impl HvacEquipment {
             max_enabled_speed: 0,
             prev_zone_temp_c: None,
             space_fraction: 1.0,
+            max_capacity_fraction: 1.0,
+            cap_ff_coeffs: [1.0, 0.0, 0.0],
+            eir_ff_coeffs: [1.0, 0.0, 0.0],
         }
     }
 
@@ -384,24 +399,26 @@ impl HvacEquipment {
         // (capacity_biquadratic_coeffs / eir_biquadratic_coeffs). These are the
         // same keys that ac_config::load_curve_pair handles for the AC path; the
         // HP heater goes through this generic init, so we replicate the fallback
-        // here.  Split keys override or supplement the combined key at indices 0/1.
-        if let Some(raw) = extract_text(config, "capacity_biquadratic_coeffs") {
-            let cap = parse_biquadratic_list(raw)?;
-            if !cap.is_empty() {
-                if self.biquadratic_coeffs.is_empty() {
-                    self.biquadratic_coeffs.push(cap[0]);
-                } else {
-                    self.biquadratic_coeffs[0] = cap[0];
+        // here. Per-stage curves are interleaved: [cap_0, eir_0, cap_1, eir_1, ...].
+        {
+            let cap_curves = extract_text(config, "capacity_biquadratic_coeffs")
+                .map(parse_biquadratic_list)
+                .transpose()?
+                .unwrap_or_default();
+            let eir_curves = extract_text(config, "eir_biquadratic_coeffs")
+                .map(parse_biquadratic_list)
+                .transpose()?
+                .unwrap_or_default();
+            if !cap_curves.is_empty() || !eir_curves.is_empty() {
+                let n_stages = cap_curves.len().max(eir_curves.len());
+                let mut interleaved = Vec::with_capacity(n_stages * 2);
+                for i in 0..n_stages {
+                    let cap = cap_curves.get(i).copied().unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
+                    let eir = eir_curves.get(i).copied().unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
+                    interleaved.push(cap);
+                    interleaved.push(eir);
                 }
-            }
-        }
-        if let Some(raw) = extract_text(config, "eir_biquadratic_coeffs") {
-            let eir = parse_biquadratic_list(raw)?;
-            if !eir.is_empty() {
-                while self.biquadratic_coeffs.len() < 2 {
-                    self.biquadratic_coeffs.push(DEFAULT_BIQUADRATIC_COEFFS);
-                }
-                self.biquadratic_coeffs[1] = eir[0];
+                self.biquadratic_coeffs = interleaved;
             }
         }
         // OCHRE HVAC.py: biquadratic CSV files specify `min_Twb`, `max_Twb`,
@@ -424,6 +441,18 @@ impl HvacEquipment {
         // "min_on_time_s" / "min_off_time_s" keys. OCHRE defaults: 120 s / 180 s.
         self.min_on_time_s = extract_numeric(config, "min_on_time_s").unwrap_or(0.0);
         self.min_off_time_s = extract_numeric(config, "min_off_time_s").unwrap_or(0.0);
+
+        // Flow-fraction quadratic coefficients: OCHRE HVAC.py `cap_ff` / `eir_ff`.
+        if let Some(raw) = extract_text(config, "cap_ff_coeffs") {
+            if let Ok(arr) = parse_f64_array_3(raw) {
+                self.cap_ff_coeffs = arr;
+            }
+        }
+        if let Some(raw) = extract_text(config, "eir_ff_coeffs") {
+            if let Ok(arr) = parse_f64_array_3(raw) {
+                self.eir_ff_coeffs = arr;
+            }
+        }
 
         // Apply equipment-type and efficiency-rating Cd defaults per AHRI / OCHRE table.
         // Explicit config keys ("cooling_cd", "cd", "startup_cd") take precedence because
@@ -540,6 +569,9 @@ impl HvacEquipment {
                         .map(|d| base.cooling_c + d)
                         .or(prior.cooling_c),
                 });
+            }
+            ControlSignal::MaxCapacityFraction { fraction } => {
+                self.max_capacity_fraction = fraction.clamp(0.0, 1.0);
             }
             _ => {}
         }
@@ -760,11 +792,20 @@ impl HvacEquipment {
         curve.evaluate(t_indoor_c, t_outdoor_c)
     }
 
+    /// Evaluate the flow-fraction quadratic: `c[0] + c[1]*ff + c[2]*ff^2`.
+    /// OCHRE HVAC.py `_biquadratic`: `ff_ratio = coeffs_ff[0] + coeffs_ff[1]*ff + coeffs_ff[2]*ff*ff`.
+    pub fn evaluate_ff_quadratic(coeffs: &[f64; 3], ff: f64) -> f64 {
+        coeffs[0] + coeffs[1] * ff + coeffs[2] * ff * ff
+    }
+
     /// Evaluate a biquadratic curve and apply the flow-fraction correction.
     ///
     /// Returns `(raw, flow_adjusted)` where:
     /// - `raw` is the direct curve output
-    /// - `flow_adjusted` is `raw * flow_fraction_correction`
+    /// - `flow_adjusted` is `raw * ff_ratio` where `ff_ratio` is evaluated from the
+    ///   flow-fraction quadratic coefficients (`cap_ff_coeffs` for even curve indices,
+    ///   `eir_ff_coeffs` for odd curve indices). When the ff coefficients are the
+    ///   default `[1.0, 0.0, 0.0]`, this degenerates to `raw * flow_fraction`.
     ///
     /// PLF is intentionally NOT applied here. Callers must apply it themselves:
     /// - Capacity curves: PLF does not apply.
@@ -774,10 +815,17 @@ impl HvacEquipment {
         curve_index: usize,
         t_indoor_c: f64,
         t_outdoor_c: f64,
-        flow_fraction_correction: f64,
+        flow_fraction: f64,
     ) -> (f64, f64) {
         let raw = self.evaluate_biquadratic(curve_index, t_indoor_c, t_outdoor_c);
-        let adjusted = raw * flow_fraction_correction;
+        // Use cap_ff for capacity curves (even index), eir_ff for EIR curves (odd index).
+        let ff_coeffs = if curve_index % 2 == 0 {
+            &self.cap_ff_coeffs
+        } else {
+            &self.eir_ff_coeffs
+        };
+        let ff_ratio = Self::evaluate_ff_quadratic(ff_coeffs, flow_fraction);
+        let adjusted = raw * ff_ratio;
         (raw, adjusted)
     }
 
@@ -1142,14 +1190,45 @@ mod tests {
     }
 
     #[test]
-    fn flow_fraction_is_applied_after_biquadratic_plf_is_not() {
+    fn flow_fraction_quadratic_applied_in_evaluate_biquadratic_with_flow() {
         // PLF is NOT applied by evaluate_biquadratic_with_flow; callers handle
         // PLF separately: capacity does not use PLF, EIR divides by PLF.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
-        let (raw, adjusted) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 1.1);
+        // Default ff coeffs [1, 0, 0]: ff_ratio = 1.0 regardless of ff input.
+        let (raw, adjusted) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.8);
         assert!((raw - 1.0).abs() < 1e-12);
-        assert!((adjusted - 1.1).abs() < 1e-12);
+        assert!((adjusted - 1.0).abs() < 1e-12);
+
+        // Non-trivial ff quadratic: ff_ratio = 0.7 + 0.4*ff - 0.1*ff^2
+        // At ff=0.8: 0.7 + 0.32 - 0.064 = 0.956
+        hvac.cap_ff_coeffs = [0.7, 0.4, -0.1];
+        let (raw2, adjusted2) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.8);
+        assert!((raw2 - 1.0).abs() < 1e-12);
+        let expected_ff = 0.7 + 0.4 * 0.8 + (-0.1) * 0.8 * 0.8;
+        assert!(
+            (adjusted2 - expected_ff).abs() < 1e-12,
+            "adjusted2={adjusted2}, expected={expected_ff}"
+        );
+    }
+
+    #[test]
+    fn eir_ff_quadratic_used_for_odd_curve_index() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.biquadratic_coeffs = vec![
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        hvac.eir_ff_coeffs = [1.3, -0.5, 0.2];
+        // curve_index=1 (odd) → uses eir_ff_coeffs
+        // At ff=0.8: 1.3 + (-0.5)*0.8 + 0.2*0.64 = 1.3 - 0.4 + 0.128 = 1.028
+        let (raw, adjusted) = hvac.evaluate_biquadratic_with_flow(1, 19.0, 35.0, 0.8);
+        assert!((raw - 1.0).abs() < 1e-12);
+        let expected = 1.3 + (-0.5) * 0.8 + 0.2 * 0.64;
+        assert!(
+            (adjusted - expected).abs() < 1e-12,
+            "adjusted={adjusted}, expected={expected}"
+        );
     }
 
     #[test]

@@ -1967,14 +1967,26 @@ fn apply_multispeed_parameters(
                 Value::String(coeff_text),
             );
         }
-        if let Some(primary) = select_primary_curve_pair(curve_set, n_speeds) {
+        let all_pairs = select_all_curve_pairs(curve_set, n_speeds);
+        if let Some(primary) = all_pairs.last() {
+            // Emit per-stage biquadratic coefficients as a flat list.
+            // The equipment loader splits on 6-element chunks to get per-stage curves.
+            // Index 0 in the list = lowest speed stage.
+            let cap_flat: Vec<f64> = all_pairs
+                .iter()
+                .flat_map(|p| p.cap_coeffs.iter().copied())
+                .collect();
+            let eir_flat: Vec<f64> = all_pairs
+                .iter()
+                .flat_map(|p| p.eir_coeffs.iter().copied())
+                .collect();
             params.insert(
                 "capacity_biquadratic_coeffs".to_string(),
-                Value::String(format!("{:?}", primary.cap_coeffs)),
+                Value::String(format!("{cap_flat:?}")),
             );
             params.insert(
                 "eir_biquadratic_coeffs".to_string(),
-                Value::String(format!("{:?}", primary.eir_coeffs)),
+                Value::String(format!("{eir_flat:?}")),
             );
             params.insert("biquadratic_x1_min".to_string(), json!(primary.x1_bounds.0));
             params.insert("biquadratic_x1_max".to_string(), json!(primary.x1_bounds.1));
@@ -1988,6 +2000,14 @@ fn apply_multispeed_parameters(
                 params.insert("plf_min".to_string(), json!(plf_min));
                 params.insert("plf_max".to_string(), json!(plf_max));
             }
+            params.insert(
+                "cap_ff_coeffs".to_string(),
+                Value::String(format!("{:?}", primary.cap_ff)),
+            );
+            params.insert(
+                "eir_ff_coeffs".to_string(),
+                Value::String(format!("{:?}", primary.eir_ff)),
+            );
         }
     }
 }
@@ -2011,26 +2031,41 @@ fn serialize_stage_plr_coefficients(
 struct PrimaryCurvePair {
     cap_coeffs: [f64; 6],
     eir_coeffs: [f64; 6],
+    cap_ff: [f64; 3],
+    eir_ff: [f64; 3],
     x1_bounds: (f64, f64),
     x2_bounds: (f64, f64),
     ff_bounds: Option<(f64, f64)>,
     plf_bounds: Option<(f64, f64)>,
 }
 
+#[cfg(test)]
 fn select_primary_curve_pair(
     curve_set: &crate::defaults::HvacCurveSet,
     n_speeds: usize,
 ) -> Option<PrimaryCurvePair> {
+    select_all_curve_pairs(curve_set, n_speeds).into_iter().last()
+}
+
+/// Return all matched curve variants in speed order (lowest speed first).
+fn select_all_curve_pairs(
+    curve_set: &crate::defaults::HvacCurveSet,
+    n_speeds: usize,
+) -> Vec<PrimaryCurvePair> {
     let variants = select_variants_for_speed_count(curve_set, n_speeds);
-    let selected = variants.last().copied()?;
-    Some(PrimaryCurvePair {
-        cap_coeffs: selected.cap_t.coeffs,
-        eir_coeffs: selected.eir_t.coeffs,
-        x1_bounds: selected.cap_t.x1_bounds,
-        x2_bounds: selected.cap_t.x2_bounds,
-        ff_bounds: selected.ff_bounds,
-        plf_bounds: selected.plf_bounds,
-    })
+    variants
+        .iter()
+        .map(|v| PrimaryCurvePair {
+            cap_coeffs: v.cap_t.coeffs,
+            eir_coeffs: v.eir_t.coeffs,
+            cap_ff: v.cap_ff,
+            eir_ff: v.eir_ff,
+            x1_bounds: v.cap_t.x1_bounds,
+            x2_bounds: v.cap_t.x2_bounds,
+            ff_bounds: v.ff_bounds,
+            plf_bounds: v.plf_bounds,
+        })
+        .collect()
 }
 
 fn select_variants_for_speed_count(
@@ -2386,6 +2421,73 @@ mod tests {
         assert_eq!(selected.x2_bounds, (18.0, 50.0));
         assert_eq!(selected.ff_bounds, Some((0.4, 1.0)));
         assert_eq!(selected.plf_bounds, Some((0.5, 1.0)));
+    }
+
+    #[test]
+    fn four_speed_emits_per_stage_biquadratic_curves() {
+        let make_variant = |name: &str, cap0: f64, eir0: f64| crate::defaults::HvacCurveVariant {
+            name: name.to_string(),
+            cap_t: hares_physics::biquadratic::BiquadraticCurve {
+                coeffs: [cap0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                x1_bounds: (12.0, 24.0),
+                x2_bounds: (18.0, 50.0),
+            },
+            cap_ff: [1.0, 0.0, 0.0],
+            eir_t: hares_physics::biquadratic::BiquadraticCurve {
+                coeffs: [eir0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                x1_bounds: (12.0, 24.0),
+                x2_bounds: (18.0, 50.0),
+            },
+            eir_ff: [1.0, 0.0, 0.0],
+            eir_plr: [1.0, 0.0, 0.0],
+            ff_bounds: None,
+            plf_bounds: None,
+        };
+        let curve_set = crate::defaults::HvacCurveSet {
+            variants: vec![
+                make_variant("Variable_1", 0.8, 1.2),
+                make_variant("Variable_2", 0.9, 1.1),
+                make_variant("Variable_3", 1.0, 1.0),
+                make_variant("Variable_4", 1.1, 0.9),
+            ],
+        };
+        let all = select_all_curve_pairs(&curve_set, 4);
+        assert_eq!(all.len(), 4, "should return 4 curve pairs for 4-speed unit");
+        // Lowest speed first.
+        assert!((all[0].cap_coeffs[0] - 0.8).abs() < 1e-12);
+        assert!((all[1].cap_coeffs[0] - 0.9).abs() < 1e-12);
+        assert!((all[2].cap_coeffs[0] - 1.0).abs() < 1e-12);
+        assert!((all[3].cap_coeffs[0] - 1.1).abs() < 1e-12);
+        // EIR curves in order too.
+        assert!((all[0].eir_coeffs[0] - 1.2).abs() < 1e-12);
+        assert!((all[3].eir_coeffs[0] - 0.9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn select_primary_curve_pair_carries_ff_coefficients() {
+        let curve_set = crate::defaults::HvacCurveSet {
+            variants: vec![crate::defaults::HvacCurveVariant {
+                name: "Variable_1".to_string(),
+                cap_t: hares_physics::biquadratic::BiquadraticCurve {
+                    coeffs: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    x1_bounds: (12.0, 24.0),
+                    x2_bounds: (18.0, 50.0),
+                },
+                cap_ff: [0.7, 0.4, -0.1],
+                eir_t: hares_physics::biquadratic::BiquadraticCurve {
+                    coeffs: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    x1_bounds: (12.0, 24.0),
+                    x2_bounds: (18.0, 50.0),
+                },
+                eir_ff: [1.3, -0.5, 0.2],
+                eir_plr: [1.0, 0.0, 0.0],
+                ff_bounds: None,
+                plf_bounds: None,
+            }],
+        };
+        let selected = select_primary_curve_pair(&curve_set, 4).expect("should find pair");
+        assert_eq!(selected.cap_ff, [0.7, 0.4, -0.1]);
+        assert_eq!(selected.eir_ff, [1.3, -0.5, 0.2]);
     }
 
     // -----------------------------------------------------------------------

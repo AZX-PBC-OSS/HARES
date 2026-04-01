@@ -59,6 +59,9 @@ pub const IS_ON: &str = "is_on";
 pub const RAMP_LIMITED: &str = "ramp_limited";
 pub const CYCLE_PHASE: &str = "cycle_phase";
 
+// ── Control overrides ──────────────────────────────────────────────────────
+pub const MAX_CAPACITY_FRACTION: &str = "max_capacity_fraction";
+
 // ── Efficiency & performance ────────────────────────────────────────────────
 pub const COP: &str = "cop";
 pub const EIR: &str = "eir";
