@@ -60,6 +60,16 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
         fields.push(Field::new(col, DataType::Float64, true));
     }
 
+    // Always-present context columns: outdoor temp and primary indoor zone temp.
+    // These appear at every verbosity level so any output file is self-contained
+    // enough to correlate equipment behavior with conditions.
+    fields.push(Field::new(OUTDOOR_TEMP_COL, DataType::Float64, true));
+    fields.push(Field::new(
+        format!("{ZONE_TEMP_PREFIX} Indoor {ZONE_TEMP_UNIT}"),
+        DataType::Float64,
+        true,
+    ));
+
     // Compute instance-qualified names once for all verbosity levels that need them.
     let names = if verbosity >= 1 && !equipment_list.is_empty() {
         instance_qualified_names(equipment_list)
@@ -85,22 +95,12 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
     }
 
     if verbosity >= 2 {
-        // Zone columns — we always include at least one conditioned zone.
-        // At schema-build time we don't know exact zone count, so emit the
-        // common indoor + attic temperature channels used by parity/oracle
-        // paths. Dwelling record logic writes whichever zones exist.
-        fields.push(Field::new(
-            format!("{ZONE_TEMP_PREFIX} Indoor {ZONE_TEMP_UNIT}"),
-            DataType::Float64,
-            true,
-        ));
         fields.push(Field::new(
             format!("{ZONE_TEMP_PREFIX} Attic {ZONE_TEMP_UNIT}"),
             DataType::Float64,
             true,
         ));
         fields.push(Field::new(ZONE_UNMET_LOAD_COL, DataType::Float64, true));
-        fields.push(Field::new(OUTDOOR_TEMP_COL, DataType::Float64, true));
         fields.push(Field::new(GROUND_TEMP_COL, DataType::Float64, true));
     }
 
@@ -241,12 +241,12 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
 pub fn expected_columns_at_verbosity(verbosity: u8) -> Vec<&'static str> {
     let mut cols = vec![TIMESTAMP_COL];
     cols.extend_from_slice(LEVEL_0_COLUMNS);
+    cols.push(OUTDOOR_TEMP_COL);
+    cols.push("Temperature - Indoor (C)");
 
     if verbosity >= 2 {
-        cols.push("Temperature - Indoor (C)");
         cols.push("Temperature - Attic (C)");
         cols.push(ZONE_UNMET_LOAD_COL);
-        cols.push(OUTDOOR_TEMP_COL);
         cols.push(GROUND_TEMP_COL);
     }
 
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn verbosity_0_has_timestamp_and_total_power() {
+    fn verbosity_0_has_timestamp_total_power_and_context_columns() {
         let schema = build_schema(&[], 0);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
@@ -410,6 +410,8 @@ mod tests {
                 "Total Electric Power (kW)",
                 "Total Gas Power (therms/hour)",
                 "Total Reactive Power (kVAR)",
+                "Outdoor Dry Bulb (C)",
+                "Temperature - Indoor (C)",
             ]
         );
     }
@@ -447,12 +449,11 @@ mod tests {
     }
 
     #[test]
-    fn verbosity_2_adds_zone_and_outdoor_temp_columns() {
+    fn verbosity_2_adds_attic_and_ground_temp_columns() {
         let schema = build_schema(&[], 2);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(names.contains(&"Temperature - Indoor (C)"));
+        assert!(names.contains(&"Temperature - Attic (C)"));
         assert!(names.contains(&"Unmet HVAC Load (C)"));
-        assert!(names.contains(&"Outdoor Dry Bulb (C)"));
         assert!(names.contains(&"Temperature - Ground (C)"));
     }
 
@@ -471,13 +472,17 @@ mod tests {
     }
 
     #[test]
-    fn verbosity_0_and_1_exclude_outdoor_temp() {
-        for v in [0, 1] {
+    fn all_verbosity_levels_include_outdoor_temp_and_indoor_temp() {
+        for v in 0..=8u8 {
             let schema = build_schema(&[], v);
             let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
             assert!(
-                !names.contains(&"Outdoor Dry Bulb (C)"),
-                "verbosity {v} should not include outdoor temp"
+                names.contains(&"Outdoor Dry Bulb (C)"),
+                "verbosity {v} must include 'Outdoor Dry Bulb (C)'"
+            );
+            assert!(
+                names.contains(&"Temperature - Indoor (C)"),
+                "verbosity {v} must include 'Temperature - Indoor (C)'"
             );
         }
     }

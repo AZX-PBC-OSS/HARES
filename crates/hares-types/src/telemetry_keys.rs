@@ -24,6 +24,10 @@ pub const SENSIBLE_COOLING_W: &str = "sensible_cooling_w";
 pub const LATENT_COOLING_W: &str = "latent_cooling_w";
 pub const IDEAL_CAPACITY_W: &str = "ideal_capacity_w";
 
+// ── Simulation context (available at all output verbosity levels) ────────────
+pub const OUTDOOR_TEMP_C: &str = "outdoor_temp_c";
+pub const INDOOR_TEMP_C: &str = "indoor_temp_c";
+
 // ── Temperature ─────────────────────────────────────────────────────────────
 pub const CELL_TEMP_C: &str = "cell_temp_c";
 pub const BATTERY_TEMP_C: &str = "battery_temp_c";

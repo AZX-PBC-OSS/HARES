@@ -180,6 +180,45 @@ fn expected_columns_at_verbosity_2_includes_ochre_temp_format() {
 }
 
 // ===========================================================================
+// 2b. Context columns present at all verbosity levels
+// ===========================================================================
+
+#[test]
+fn context_columns_present_at_all_verbosity_levels() {
+    for v in 0..=8u8 {
+        let schema = build_schema(&[], v);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(
+            names.contains(&"Outdoor Dry Bulb (C)"),
+            "verbosity {v}: 'Outdoor Dry Bulb (C)' must be present at every verbosity level"
+        );
+        assert!(
+            names.contains(&"Temperature - Indoor (C)"),
+            "verbosity {v}: 'Temperature - Indoor (C)' must be present at every verbosity level"
+        );
+        assert!(
+            names.contains(&"Time"),
+            "verbosity {v}: 'Time' must be present at every verbosity level"
+        );
+    }
+}
+
+#[test]
+fn expected_columns_at_verbosity_includes_context_columns_at_all_levels() {
+    for v in 0..=8u8 {
+        let cols = expected_columns_at_verbosity(v);
+        assert!(
+            cols.contains(&"Outdoor Dry Bulb (C)"),
+            "expected_columns_at_verbosity({v}) must include 'Outdoor Dry Bulb (C)'"
+        );
+        assert!(
+            cols.contains(&"Temperature - Indoor (C)"),
+            "expected_columns_at_verbosity({v}) must include 'Temperature - Indoor (C)'"
+        );
+    }
+}
+
+// ===========================================================================
 // 3. Verbosity 6-8 columns
 // ===========================================================================
 

@@ -297,7 +297,7 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
             .initialization_duration_seconds
             .and_then(|seconds| u64::try_from(seconds).ok())
             .map(StdDuration::from_secs),
-        resample_overrides: None,
+        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
     };
 
     let engine = SimulationEngine::new();
