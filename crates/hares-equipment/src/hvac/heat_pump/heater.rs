@@ -193,6 +193,8 @@ struct HeaterState {
     max_oat_supplemental_c: f64,
     hp_available: bool,
     er_was_on: bool,
+    thermostat_hysteresis_c: f64,
+    time_at_current_speed_s: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -1452,6 +1454,8 @@ impl HeatPumpHeaterCore {
             max_oat_supplemental_c: self.max_oat_supplemental_c,
             hp_available: self.hp_available,
             er_was_on: self.er_was_on,
+            thermostat_hysteresis_c: self.hvac.thermostat.hysteresis_c,
+            time_at_current_speed_s: self.hvac.time_at_current_speed_s,
         })
     }
 
@@ -1484,6 +1488,8 @@ impl HeatPumpHeaterCore {
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.hp_available = decoded.hp_available;
         self.max_oat_supplemental_c = decoded.max_oat_supplemental_c;
+        self.hvac.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac.time_at_current_speed_s = decoded.time_at_current_speed_s;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
@@ -4400,6 +4406,91 @@ mod tests {
         assert!(
             eq.init(&cfg, &environment).is_ok(),
             "number_of_speeds=2 with a matching 2-element stage_heating_capacities_w must succeed"
+        );
+    }
+
+    #[test]
+    fn checkpoint_thermostat_hysteresis_c() {
+        let cfg = heater_config_with(|typed| {
+            typed.hysteresis_c = Some(1.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_lockout_temp_c = Some(100.0);
+        });
+        let environment = env(16.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        // Apply a non-default deadband via ThermalSetpoint control.
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            deadband_c: Some(3.0),
+        })
+        .unwrap();
+        assert_eq!(eq.core.hvac.thermostat.hysteresis_c, 3.0);
+
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let state = eq.save_state();
+
+        let mut restored = ASHPHeater::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        assert_eq!(
+            restored.core.hvac.thermostat.hysteresis_c, 1.0,
+            "fresh instance must have config default"
+        );
+
+        restored.load_state(&state).unwrap();
+        assert_eq!(
+            restored.core.hvac.thermostat.hysteresis_c, 3.0,
+            "thermostat_hysteresis_c must survive checkpoint round-trip"
+        );
+    }
+
+    #[test]
+    fn checkpoint_time_at_current_speed_s() {
+        let cfg = heater_config_with(|typed| {
+            typed.hysteresis_c = Some(0.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_lockout_temp_c = Some(100.0);
+        });
+        let environment = env(16.0, 5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        for _ in 0..10 {
+            eq.update_control(&environment);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&environment, Duration::from_secs(60), &mut ports)
+                .unwrap();
+        }
+
+        let accumulated = eq.core.hvac.time_at_current_speed_s;
+        assert!(
+            accumulated > 0.0,
+            "time_at_current_speed_s must be positive after stepping"
+        );
+
+        let state = eq.save_state();
+
+        let mut restored = ASHPHeater::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        assert_eq!(restored.core.hvac.time_at_current_speed_s, 0.0);
+
+        restored.load_state(&state).unwrap();
+        assert!(
+            (restored.core.hvac.time_at_current_speed_s - accumulated).abs() < 1e-9,
+            "time_at_current_speed_s must survive checkpoint; expected {accumulated}, got {}",
+            restored.core.hvac.time_at_current_speed_s
         );
     }
 }

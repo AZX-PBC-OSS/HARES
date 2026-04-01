@@ -133,6 +133,8 @@ struct AirConditionerState {
     dr_duration_remaining_s: Option<f64>,
     last_adp_c: f64,
     last_bypass_factor: f64,
+    thermostat_hysteresis_c: f64,
+    time_at_current_speed_s: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -1254,6 +1256,8 @@ impl CoolingCore {
             dr_duration_remaining_s: self.dr_duration_remaining_s,
             last_adp_c: self.last_adp_c,
             last_bypass_factor: self.last_bypass_factor,
+            thermostat_hysteresis_c: self.hvac.thermostat.hysteresis_c,
+            time_at_current_speed_s: self.hvac.time_at_current_speed_s,
         })
     }
 
@@ -1285,6 +1289,8 @@ impl CoolingCore {
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.last_adp_c = decoded.last_adp_c;
         self.last_bypass_factor = decoded.last_bypass_factor;
+        self.hvac.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
+        self.hvac.time_at_current_speed_s = decoded.time_at_current_speed_s;
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
         self.telemetry
@@ -2543,6 +2549,90 @@ mod tests {
             (eq.core.rated_shr - 0.65).abs() < 1e-12,
             "rated_shr must be 0.65 after init with shr=Some(0.65), got {}",
             eq.core.rated_shr
+        );
+    }
+
+    #[test]
+    fn checkpoint_thermostat_hysteresis_c() {
+        let cfg = ac_config_with(|typed| {
+            typed.hysteresis_c = Some(1.0);
+        });
+        let environment = env(28.0, 0.010, 19.0, 35.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        // Apply a non-default deadband via ThermalSetpoint control.
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(18.0),
+            cooling_setpoint_c: Some(24.0),
+            deadband_c: Some(3.0),
+        })
+        .unwrap();
+        assert_eq!(eq.core.hvac.thermostat.hysteresis_c, 3.0);
+
+        // Step once so state is fully populated.
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let state = eq.save_state();
+
+        // Create a fresh instance and restore.
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        assert_eq!(
+            restored.core.hvac.thermostat.hysteresis_c, 1.0,
+            "fresh instance must have config default"
+        );
+
+        restored.load_state(&state).unwrap();
+        assert_eq!(
+            restored.core.hvac.thermostat.hysteresis_c, 3.0,
+            "thermostat_hysteresis_c must survive checkpoint round-trip"
+        );
+    }
+
+    #[test]
+    fn checkpoint_time_at_current_speed_s() {
+        let cfg = ac_config_with(|typed| {
+            typed.hysteresis_c = Some(0.0);
+        });
+        let environment = env(28.0, 0.010, 19.0, 35.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        // Step 10 times at 60s to accumulate speed time.
+        for _ in 0..10 {
+            eq.update_control(&environment);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&environment, Duration::from_secs(60), &mut ports)
+                .unwrap();
+        }
+
+        let accumulated = eq.core.hvac.time_at_current_speed_s;
+        assert!(
+            accumulated > 0.0,
+            "time_at_current_speed_s must be positive after stepping"
+        );
+
+        let state = eq.save_state();
+
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        assert_eq!(restored.core.hvac.time_at_current_speed_s, 0.0);
+
+        restored.load_state(&state).unwrap();
+        assert!(
+            (restored.core.hvac.time_at_current_speed_s - accumulated).abs() < 1e-9,
+            "time_at_current_speed_s must survive checkpoint; expected {accumulated}, got {}",
+            restored.core.hvac.time_at_current_speed_s
         );
     }
 }

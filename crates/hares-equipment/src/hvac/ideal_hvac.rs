@@ -78,6 +78,7 @@ struct IdealHvacState {
     mode_start_at: Option<DateTime<FixedOffset>>,
     load_fraction: f64,
     last_sim_time: Option<DateTime<FixedOffset>>,
+    thermostat_hysteresis_c: f64,
 }
 
 impl IdealHvac {
@@ -629,6 +630,7 @@ impl Equipment for IdealHvac {
             mode_start_at: self.mode_start_at,
             load_fraction: self.load_fraction,
             last_sim_time: self.last_sim_time,
+            thermostat_hysteresis_c: self.thermostat.hysteresis_c,
         })
     }
 
@@ -642,6 +644,7 @@ impl Equipment for IdealHvac {
         self.mode_start_at = decoded.mode_start_at;
         self.load_fraction = decoded.load_fraction;
         self.last_sim_time = decoded.last_sim_time;
+        self.thermostat.hysteresis_c = decoded.thermostat_hysteresis_c;
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -789,7 +792,7 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        BoundaryPolicy, ControlCapabilities, DomainUpdate, ElectricPower, EndUse,
+        BoundaryPolicy, ControlCapabilities, ControlSignal, DomainUpdate, ElectricPower, EndUse,
         EnvironmentState, GridState, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
         SurfaceIrradiance, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
@@ -2124,6 +2127,55 @@ mod tests {
             ports.electrical.load_power_kw > 0.0,
             "electrical consumption must be > 0, got {}",
             ports.electrical.load_power_kw
+        );
+    }
+
+    #[test]
+    fn checkpoint_thermostat_hysteresis_c() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.test_extras_mut()
+            .insert("ideal_capacity_mode".into(), "on".into());
+        cfg.test_extras_mut()
+            .insert("capacity_w".into(), 10_000.0.into());
+
+        let e = env(16.0, 60, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        // Apply a non-default deadband via ThermalSetpoint control.
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(26.0),
+            deadband_c: Some(3.0),
+        })
+        .unwrap();
+        assert_eq!(eq.thermostat.hysteresis_c, 3.0);
+
+        eq.update_control(&e);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let state = eq.save_state();
+
+        let mut restored = IdealHvac::new(cfg.clone());
+        restored.init(&cfg, &e).unwrap();
+        assert_eq!(
+            restored.thermostat.hysteresis_c, 1.0,
+            "fresh instance must have config default"
+        );
+
+        restored.load_state(&state).unwrap();
+        assert_eq!(
+            restored.thermostat.hysteresis_c, 3.0,
+            "thermostat_hysteresis_c must survive checkpoint round-trip"
         );
     }
 }
