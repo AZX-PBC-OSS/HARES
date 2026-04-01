@@ -94,6 +94,10 @@ pub const INVERTER_CLIPPING_KW: &str = "inverter_clipping_kw";
 pub const SOILING_RATIO: &str = "soiling_ratio";
 pub const SHADING_FACTOR: &str = "shading_factor";
 
+// ── HVAC capacity reporting ────────────────────────────────────────────────
+pub const HVAC_HEATING_CAPACITY_W: &str = "hvac_heating_capacity_w";
+pub const HVAC_COOLING_CAPACITY_W: &str = "hvac_cooling_capacity_w";
+
 // ── HVAC component power ───────────────────────────────────────────────────
 pub const COMPRESSOR_KW: &str = "compressor_kw";
 pub const COMPRESSOR_POWER_W: &str = "compressor_power_w";

@@ -32,7 +32,7 @@ impl ThermalSolver {
                 let transmitted_diffuse_w = win.area_m2 * win.transmittance * poa_diffuse;
                 let transmitted_total_w = transmitted_beam_w + transmitted_diffuse_w;
 
-                debug_assert!(
+                assert!(
                     win.shgc >= win.transmittance - 1e-6,
                     "SHGC ({}) < transmittance ({}): check window config",
                     win.shgc,

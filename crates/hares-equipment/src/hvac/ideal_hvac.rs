@@ -57,6 +57,15 @@ pub struct IdealHvac {
     /// Used to split ideal cooling capacity into sensible and latent components.
     /// Defaults to 1.0 (no latent); set from config "shr" key.
     shr: f64,
+    /// Rated fan power [W]. Zero means no fan.
+    rated_fan_power_w: f64,
+    /// Energy input ratio (1/COP). Default 1.0 = ideal.
+    rated_eir: f64,
+    /// Pre-computed ratio: rated_fan_power / (max_capacity * rated_eir).
+    /// Used in ideal-capacity mode: fan_power = |capacity| * eir * fan_power_ratio.
+    fan_power_ratio: f64,
+    /// Minimum capacity [W]. Below this the unit turns off.
+    capacity_min_w: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,7 +103,7 @@ impl IdealHvac {
 
         Self {
             descriptor,
-            ports: vec![PortDeclaration::thermal(zone)],
+            ports: vec![PortDeclaration::thermal(zone), PortDeclaration::electrical()],
             telemetry: ideal_hvac_default_telemetry(),
             core_output: CoreOutput::default(),
             zone_id: zone,
@@ -122,6 +131,10 @@ impl IdealHvac {
             load_fraction: 1.0,
             last_sim_time: None,
             shr: 1.0,
+            rated_fan_power_w: 0.0,
+            rated_eir: 1.0,
+            fan_power_ratio: 0.0,
+            capacity_min_w: 0.0,
         }
     }
 
@@ -394,6 +407,18 @@ impl Equipment for IdealHvac {
         {
             self.load_fraction = fraction.clamp(0.0, 1.0);
         }
+        if let Some(fp) = typed.rated_fan_power_w {
+            self.rated_fan_power_w = fp.max(0.0);
+        }
+        if let Some(eir) = typed.rated_eir {
+            self.rated_eir = eir.max(0.0);
+        }
+        if let Some(min_cap) = typed.capacity_min_w {
+            self.capacity_min_w = min_cap.max(0.0);
+        }
+        if let Some(fuel) = typed.fuel_type {
+            self.descriptor.fuel = fuel;
+        }
 
         if let Some(zone) = extract_numeric(config, "zone_id") {
             let zone = ZoneId(zone as u16);
@@ -446,6 +471,15 @@ impl Equipment for IdealHvac {
             self.cooling_setpoint_source = Some(source);
         }
 
+        // Compute fan_power_ratio per OCHRE: fan_power_max / (capacity_max * eir_max).
+        let max_capacity = self.rated_capacity_w.max(self.cooling_capacity_w);
+        let denom = max_capacity * self.rated_eir;
+        self.fan_power_ratio = if denom > 0.0 {
+            self.rated_fan_power_w / denom
+        } else {
+            0.0
+        };
+
         self.effective_setpoints()
             .validate_for_deadband(self.thermostat.hysteresis_c)?;
         self.thermostat.validate(env)?;
@@ -472,7 +506,7 @@ impl Equipment for IdealHvac {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        let capacity_w = match self.mode {
+        let mut capacity_w = match self.mode {
             ThermostatMode::Deadband => 0.0,
             ThermostatMode::Heating if self.use_ideal_cached => {
                 // Clamp: non-negative (one-step-stale estimate may go negative) and
@@ -491,52 +525,80 @@ impl Equipment for IdealHvac {
             ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction,
         };
 
-        // Update end_use to reflect actual operating mode (D4: was hardcoded to HVAC_HEATING).
+        // R3: Minimum capacity — if operating below threshold, force off.
+        if capacity_w.abs() > 0.0 && capacity_w.abs() < self.capacity_min_w {
+            capacity_w = 0.0;
+            self.ideal_capacity_w = 0.0;
+            self.mode = ThermostatMode::Deadband;
+        }
+
+        // Update end_use to reflect actual operating mode.
         self.descriptor.end_use = if capacity_w >= 0.0 {
             EndUse::HVAC_HEATING
         } else {
             EndUse::HVAC_COOLING
         };
 
-        if capacity_w.abs() > 0.0 {
+        // Fan power per OCHRE: fan_power = |capacity| * eir * fan_power_ratio.
+        let fan_power_w = if capacity_w.abs() > 0.0 {
+            capacity_w.abs() * self.rated_eir * self.fan_power_ratio
+        } else {
+            0.0
+        };
+
+        if capacity_w.abs() > 0.0 || fan_power_w > 0.0 {
             let (sensible_w, latent_w, category) = if capacity_w > 0.0 {
                 // Heating: all sensible, no latent.
                 (capacity_w, 0.0, ThermalCategory::HvacHeating)
-            } else {
+            } else if capacity_w < 0.0 {
                 // Cooling: split by SHR. Latent removes moisture (negative = cooling).
                 let sensible = capacity_w * self.shr;
                 let latent = capacity_w * (1.0 - self.shr);
                 (sensible, latent, ThermalCategory::HvacCooling)
+            } else {
+                (0.0, 0.0, ThermalCategory::HvacHeating)
             };
+            // Fan motor heat always enters the zone as sensible gain (positive
+            // in both heating and cooling modes).
             ports.accumulate(&PortContribution::Thermal {
                 zone: self.zone_id,
-                sensible_gain_w: sensible_w,
+                sensible_gain_w: sensible_w + fan_power_w,
                 latent_gain_w: latent_w,
                 category,
             })?;
         }
 
-        self.telemetry.set(tk::THERMAL_OUTPUT_W, capacity_w);
-        self.telemetry.set(
-            tk::OPERATING_MODE,
-            operating_mode_code(match self.mode {
-                ThermostatMode::Heating => OperatingMode::Heating,
-                ThermostatMode::Cooling => OperatingMode::Cooling,
-                ThermostatMode::Deadband => OperatingMode::Off,
-            }),
-        );
-        self.telemetry
-            .set(tk::IDEAL_CAPACITY_W, self.ideal_capacity_w);
-        self.telemetry
-            .set(tk::CURRENT_TARGET_C, self.current_target_c);
+        // Emit electrical port contribution for fan power.
+        let fan_kw = fan_power_w / 1000.0;
+        if fan_power_w > 0.0 {
+            ports.accumulate(&PortContribution::Electrical {
+                active_power_kw: fan_kw,
+                reactive_power_kvar: 0.0,
+            })?;
+        }
+
         let operating_mode = match self.mode {
             ThermostatMode::Heating => OperatingMode::Heating,
             ThermostatMode::Cooling => OperatingMode::Cooling,
             ThermostatMode::Deadband => OperatingMode::Off,
         };
+
+        self.telemetry.set(tk::THERMAL_OUTPUT_W, capacity_w);
+        self.telemetry
+            .set(tk::OPERATING_MODE, operating_mode_code(operating_mode));
+        self.telemetry
+            .set(tk::IDEAL_CAPACITY_W, self.ideal_capacity_w);
+        self.telemetry
+            .set(tk::CURRENT_TARGET_C, self.current_target_c);
+        self.telemetry.set(tk::FAN_KW, fan_kw);
+        self.telemetry
+            .set(tk::HVAC_HEATING_CAPACITY_W, self.rated_capacity_w);
+        self.telemetry
+            .set(tk::HVAC_COOLING_CAPACITY_W, self.cooling_capacity_w);
+
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                electric_kw: Some(ElectricPower::Consumption(fan_kw)),
                 reactive_power_kvar: None,
                 fuel_w: None,
             },
@@ -668,11 +730,14 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn ideal_hvac_default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(4);
+    let mut telemetry = Telemetry::with_capacity(7);
     telemetry.insert(tk::THERMAL_OUTPUT_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::IDEAL_CAPACITY_W, 0.0);
     telemetry.insert(tk::CURRENT_TARGET_C, 0.0);
+    telemetry.insert(tk::FAN_KW, 0.0);
+    telemetry.insert(tk::HVAC_HEATING_CAPACITY_W, 0.0);
+    telemetry.insert(tk::HVAC_COOLING_CAPACITY_W, 0.0);
     telemetry
 }
 
@@ -700,6 +765,21 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
             unit: "C".to_string(),
             description: "Current setpoint target temperature".to_string(),
         },
+        TelemetryField {
+            name: tk::FAN_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Fan electrical consumption".to_string(),
+        },
+        TelemetryField {
+            name: tk::HVAC_HEATING_CAPACITY_W.to_string(),
+            unit: "W".to_string(),
+            description: "Rated heating capacity".to_string(),
+        },
+        TelemetryField {
+            name: tk::HVAC_COOLING_CAPACITY_W.to_string(),
+            unit: "W".to_string(),
+            description: "Rated cooling capacity".to_string(),
+        },
     ]
 }
 
@@ -709,12 +789,13 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        BoundaryPolicy, ControlCapabilities, DomainUpdate, EnvironmentState, GridState, PortSlots,
-        SCHEDULE_DOMAIN_ID, ScheduleSource, SurfaceIrradiance,
-        ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+        BoundaryPolicy, ControlCapabilities, DomainUpdate, ElectricPower, EndUse,
+        EnvironmentState, GridState, PortSlots, SCHEDULE_DOMAIN_ID, ScheduleSource,
+        SurfaceIrradiance, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
     use super::IdealHvac;
+    use super::super::thermostat::ThermostatMode;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64, time_res_s: i64, second: i64) -> EnvironmentState {
@@ -1700,6 +1781,349 @@ mod tests {
         assert!(
             eq.schedule_setpoints.is_none(),
             "step 1: source returned None (out of bounds), schedule_setpoints must be cleared"
+        );
+    }
+
+    fn typed_config(typed: crate::IdealHvacConfig) -> EquipmentConfig {
+        EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed)
+    }
+
+    #[test]
+    fn ideal_hvac_heating_capped_at_rated_capacity() {
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(26.0),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 300, 0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        // Solver says 50kW — far above rated 10kW.
+        eq.ideal_capacity_w = 50_000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            (ports.thermal[0].sensible_gain_w - 10_000.0).abs() < 1e-6,
+            "output must be capped at rated 10kW, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    #[test]
+    fn ideal_hvac_cooling_capped_at_cooling_capacity() {
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            cooling_capacity_w: Some(8_000.0),
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(24.0),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(28.0, 300, 0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        // Solver says -40kW cooling.
+        eq.ideal_capacity_w = -40_000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        // SHR defaults to 1.0, so all sensible. Capacity = -8000 (capped).
+        assert!(
+            ports.thermal[0].sensible_gain_w <= -8_000.0 + 1e-6,
+            "|output| must be <= 8kW, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+        assert!(
+            ports.thermal[0].sensible_gain_w >= -8_000.0 - 1e-6,
+            "output must be exactly -8kW, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    #[test]
+    fn ideal_hvac_cooling_emits_latent() {
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            cooling_capacity_w: Some(20_000.0),
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(24.0),
+            shr: Some(0.8),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(28.0, 300, 0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.ideal_capacity_w = -10_000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        // sensible = -10000 * 0.8 = -8000
+        // latent = -10000 * 0.2 = -2000
+        assert!(
+            (ports.thermal[0].sensible_gain_w - (-8_000.0)).abs() < 1e-6,
+            "sensible should be -8kW, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+        assert!(
+            (ports.thermal[0].latent_gain_w - (-2_000.0)).abs() < 1e-6,
+            "latent should be -2kW, got {}",
+            ports.thermal[0].latent_gain_w
+        );
+    }
+
+    #[test]
+    fn ideal_hvac_end_use_switches_with_mode() {
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            cooling_capacity_w: Some(10_000.0),
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(24.0),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env_cool = env(28.0, 300, 0);
+        eq.init(&cfg, &env_cool).unwrap();
+        eq.update_control(&env_cool);
+        eq.ideal_capacity_w = -5_000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_cool, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        assert_eq!(
+            eq.descriptor().end_use,
+            EndUse::HVAC_COOLING,
+            "end_use should be HVAC_COOLING when cooling"
+        );
+    }
+
+    #[test]
+    fn ideal_hvac_fan_power_in_electrical_port() {
+        // 10kW heating capacity, 200W fan, EIR=1.0
+        // fan_power_ratio = 200 / (10000 * 1.0) = 0.02
+        // At 5kW capacity: fan_power = 5000 * 1.0 * 0.02 = 100W = 0.1kW
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            cooling_capacity_w: Some(10_000.0),
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(26.0),
+            rated_fan_power_w: Some(200.0),
+            rated_eir: Some(1.0),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 300, 0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.ideal_capacity_w = 5_000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let expected_fan_w = 5_000.0 * 1.0 * (200.0 / (10_000.0 * 1.0));
+        let expected_fan_kw = expected_fan_w / 1000.0;
+
+        // Electrical port should have fan power.
+        assert!(
+            (ports.electrical.load_power_kw - expected_fan_kw).abs() < 1e-9,
+            "electrical load should be {expected_fan_kw} kW, got {}",
+            ports.electrical.load_power_kw
+        );
+
+        // core_output should reflect fan consumption.
+        let core = eq.core_output();
+        match core.flows.electric_kw {
+            Some(ElectricPower::Consumption(kw)) => {
+                assert!(
+                    (kw - expected_fan_kw).abs() < 1e-9,
+                    "core electric_kw should be {expected_fan_kw}, got {kw}"
+                );
+            }
+            other => panic!("expected Consumption, got {other:?}"),
+        }
+
+        // Thermal port: sensible = capacity + fan heat.
+        assert!(
+            (ports.thermal[0].sensible_gain_w - (5_000.0 + expected_fan_w)).abs() < 1e-6,
+            "sensible should include fan heat: expected {}, got {}",
+            5_000.0 + expected_fan_w,
+            ports.thermal[0].sensible_gain_w
+        );
+
+        // Telemetry FAN_KW.
+        let fan_kw_telem = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
+        assert!(
+            fan_kw_telem.is_some(),
+            "telemetry must contain FAN_KW"
+        );
+        assert!(
+            (fan_kw_telem.unwrap() - expected_fan_kw).abs() < 1e-9,
+            "FAN_KW telemetry should be {expected_fan_kw}, got {:?}",
+            fan_kw_telem
+        );
+    }
+
+    #[test]
+    fn ideal_hvac_emits_capacity_columns() {
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(12_000.0),
+            cooling_capacity_w: Some(9_000.0),
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(26.0),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(22.0, 300, 0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let heating_cap = eq
+            .telemetry()
+            .get(hares_types::telemetry_keys::HVAC_HEATING_CAPACITY_W)
+            .expect("telemetry must contain HVAC_HEATING_CAPACITY_W");
+        let cooling_cap = eq
+            .telemetry()
+            .get(hares_types::telemetry_keys::HVAC_COOLING_CAPACITY_W)
+            .expect("telemetry must contain HVAC_COOLING_CAPACITY_W");
+
+        assert!(
+            (heating_cap - 12_000.0).abs() < 1e-6,
+            "heating capacity should be 12000, got {heating_cap}"
+        );
+        assert!(
+            (cooling_cap - 9_000.0).abs() < 1e-6,
+            "cooling capacity should be 9000, got {cooling_cap}"
+        );
+    }
+
+    #[test]
+    fn ideal_hvac_minimum_capacity_forces_off() {
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(26.0),
+            capacity_min_w: Some(1_000.0),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 300, 0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        // Solver says 500W — below 1000W minimum.
+        eq.ideal_capacity_w = 500.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            ports.thermal[0].sensible_gain_w.abs() < 1e-9,
+            "output must be 0W when below minimum capacity, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+        assert_eq!(eq.mode, ThermostatMode::Deadband);
+        assert!(
+            eq.ideal_capacity_w.abs() < 1e-9,
+            "ideal_capacity_w must be cleared, got {}",
+            eq.ideal_capacity_w
+        );
+    }
+
+    #[test]
+    fn ideal_hvac_fan_power_cooling_mode() {
+        // Cooling mode: ideal_capacity = -5000W, SHR=1.0, fan=200W, rated_eir=1.0, capacity=10kW.
+        // fan_power_ratio = 200 / (10000 * 1.0) = 0.02
+        // fan_power = 5000 * 1.0 * 0.02 = 100W
+        // sensible_gain = -5000 * 1.0 (SHR) + 100 (fan heat) = -4900W
+        let cfg = typed_config(crate::IdealHvacConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            cooling_capacity_w: Some(10_000.0),
+            heating_setpoint_c: Some(20.0),
+            cooling_setpoint_c: Some(26.0),
+            rated_fan_power_w: Some(200.0),
+            rated_eir: Some(1.0),
+            shr: Some(1.0),
+            ideal_capacity_mode: Some(crate::hvac::heating_config::IdealCapacityModeConfig::On),
+            ..Default::default()
+        });
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(30.0, 300, 0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+        eq.ideal_capacity_w = -5_000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        let fan_power_ratio = 200.0 / (10_000.0 * 1.0);
+        let expected_fan_w = 5_000.0 * 1.0 * fan_power_ratio;
+        let expected_sensible = -5_000.0 * 1.0 + expected_fan_w;
+
+        assert!(
+            (ports.thermal[0].sensible_gain_w - expected_sensible).abs() < 1e-6,
+            "sensible should be {expected_sensible}, got {}",
+            ports.thermal[0].sensible_gain_w
+        );
+
+        let fan_kw = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
+        assert!(
+            fan_kw.is_some(),
+            "fan_kw telemetry must be present in cooling mode"
+        );
+        assert!(
+            fan_kw.unwrap() > 0.0,
+            "fan electrical consumption must be > 0 in cooling mode, got {:?}",
+            fan_kw
+        );
+
+        assert!(
+            ports.electrical.load_power_kw > 0.0,
+            "electrical consumption must be > 0, got {}",
+            ports.electrical.load_power_kw
         );
     }
 }

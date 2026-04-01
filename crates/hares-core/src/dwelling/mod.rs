@@ -1445,6 +1445,11 @@ impl Dwelling {
     /// and streaming recorder so that dynamically added equipment appears in
     /// simulation output.
     pub fn refresh_equipment_caches(&mut self) {
+        self.equipment_id_by_name = self
+            .equipment
+            .iter()
+            .map(|eq| (eq.descriptor().name.clone(), eq.descriptor().id))
+            .collect();
         self.equipment_execution_order = compute_equipment_execution_order(&self.equipment);
         self.solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&self.equipment));

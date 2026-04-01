@@ -117,11 +117,13 @@ fn sample_ideal_hvac_config() -> IdealHvacConfig {
         cooling_setpoint_source: None,
         heating_capacity_w: Some(12_000.0),
         cooling_capacity_w: Some(12_000.0),
-        heating_eir: Some(1.0),
-        cooling_eir: Some(1.0),
         shr: Some(0.75),
         fraction_heating_load_served: Some(1.0),
         fraction_cooling_load_served: Some(1.0),
+        rated_fan_power_w: None,
+        rated_eir: Some(1.0),
+        capacity_min_w: None,
+        fuel_type: None,
     }
 }
 
@@ -200,7 +202,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
         heating_eir: Some(3.412_141_633 / 9.5),
         stage_heating_capacities_w: Some(vec![6_000.0, 12_000.0]),
         stage_heating_eirs: Some(vec![0.34, 0.28]),
-        backup_fuel: Some("electric".to_string()),
+        backup_fuel: Some(FuelType::Electric),
         backup_capacity_w: Some(5_000.0),
         backup_eir: Some(1.0),
         fraction_heating_load_served: Some(1.0),

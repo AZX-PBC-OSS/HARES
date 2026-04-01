@@ -19,11 +19,11 @@ mod tests {
 
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-    use hares_equipment::config::ConfigValue;
-    use hares_equipment::{EquipmentConfig, EquipmentRegistry};
+    use hares_equipment::hvac::heating_config::IdealCapacityModeConfig;
+    use hares_equipment::{EquipmentConfig, EquipmentRegistry, IdealHvacConfig};
     use hares_io::OutputFormat;
     use hares_physics::solar::GlazingCurve;
-    use hares_types::{EndUse, ZoneId};
+    use hares_types::{EndUse, ScheduleSourceConfig, ZoneId};
 
     fn unique_temp_name(base: &str, ext: &str) -> String {
         let nanos = std::time::SystemTime::now()
@@ -142,46 +142,44 @@ mod tests {
         (heating_c, cooling_c)
     }
 
+    fn setpoints_to_daily_array(setpoints: &[f64]) -> [f64; 24] {
+        let mut arr = [0.0f64; 24];
+        for (i, v) in arr.iter_mut().enumerate() {
+            *v = setpoints.get(i).copied().unwrap_or(setpoints[0]);
+        }
+        arr
+    }
+
     fn create_ideal_hvac_config(
         zone_id: ZoneId,
         heating_setpoints_c: &[f64],
         cooling_setpoints_c: &[f64],
     ) -> EquipmentConfig {
-        let mut raw_config = std::collections::HashMap::new();
-        raw_config.insert("zone_id".to_string(), ConfigValue::Float(zone_id.0 as f64));
-        raw_config.insert(
-            "ideal_capacity_mode".to_string(),
-            ConfigValue::Text("on".to_string()),
-        );
-        raw_config.insert(
-            "heating_capacity_w".to_string(),
-            ConfigValue::Float(10_000.0),
-        );
-        raw_config.insert(
-            "cooling_capacity_w".to_string(),
-            ConfigValue::Float(10_000.0),
-        );
-        raw_config.insert(
-            "heating_weekday_setpoints_c".to_string(),
-            ConfigValue::FloatArray(heating_setpoints_c.to_vec()),
-        );
-        raw_config.insert(
-            "heating_weekend_setpoints_c".to_string(),
-            ConfigValue::FloatArray(heating_setpoints_c.to_vec()),
-        );
-        raw_config.insert(
-            "cooling_weekday_setpoints_c".to_string(),
-            ConfigValue::FloatArray(cooling_setpoints_c.to_vec()),
-        );
-        raw_config.insert(
-            "cooling_weekend_setpoints_c".to_string(),
-            ConfigValue::FloatArray(cooling_setpoints_c.to_vec()),
-        );
-
-        EquipmentConfig::raw(
+        let heating_arr = setpoints_to_daily_array(heating_setpoints_c);
+        let cooling_arr = setpoints_to_daily_array(cooling_setpoints_c);
+        EquipmentConfig::from_typed(
             "Ideal HVAC".to_string(),
             "Ideal HVAC".to_string(),
-            raw_config,
+            IdealHvacConfig {
+                equipment_id: None,
+                zone_id: Some(zone_id.0),
+                ideal_capacity_mode: Some(IdealCapacityModeConfig::On),
+                heating_capacity_w: Some(10_000.0),
+                cooling_capacity_w: Some(10_000.0),
+                heating_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
+                    weekday: heating_arr,
+                    weekend: heating_arr,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                cooling_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
+                    weekday: cooling_arr,
+                    weekend: cooling_arr,
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                ..IdealHvacConfig::default()
+            },
         )
     }
 

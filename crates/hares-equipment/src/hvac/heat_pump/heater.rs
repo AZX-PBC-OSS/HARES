@@ -36,18 +36,16 @@ use super::heater_config::{
     default_heater_telemetry, heater_telemetry_fields, operating_mode_code,
 };
 
-fn eir_from_backup_fuel(fuel: Option<&str>) -> f64 {
-    match fuel.map(str::to_ascii_lowercase).as_deref() {
-        Some("natural_gas") | Some("gas") | Some("propane") | Some("fuel_oil") => 1.0 / 0.80,
+fn eir_from_backup_fuel(fuel: Option<FuelType>) -> f64 {
+    match fuel {
+        Some(FuelType::Gas) | Some(FuelType::Propane) | Some(FuelType::Oil) => 1.0 / 0.80,
         _ => DEFAULT_BACKUP_EIR,
     }
 }
 
-fn fuel_type_from_backup_fuel(fuel: Option<&str>) -> Option<FuelType> {
-    match fuel.map(str::to_ascii_lowercase).as_deref() {
-        Some("natural_gas") | Some("gas") => Some(FuelType::Gas),
-        Some("propane") => Some(FuelType::Propane),
-        Some("fuel_oil") => Some(FuelType::Oil),
+fn fuel_type_from_backup_fuel(fuel: Option<FuelType>) -> Option<FuelType> {
+    match fuel {
+        Some(FuelType::Gas) | Some(FuelType::Propane) | Some(FuelType::Oil) => fuel,
         _ => None,
     }
 }
@@ -557,9 +555,9 @@ impl HeatPumpHeaterCore {
             .max(0.0);
         self.backup_eir = cfg
             .backup_eir
-            .unwrap_or_else(|| eir_from_backup_fuel(cfg.backup_fuel.as_deref()))
+            .unwrap_or_else(|| eir_from_backup_fuel(cfg.backup_fuel))
             .max(0.0);
-        self.backup_fuel_type = fuel_type_from_backup_fuel(cfg.backup_fuel.as_deref());
+        self.backup_fuel_type = fuel_type_from_backup_fuel(cfg.backup_fuel);
         self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
         self.hp_lockout_hysteresis_c = DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
         self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
@@ -3122,7 +3120,7 @@ mod tests {
             typed.er_lockout_temp_c = Some(5.0);
             typed.er_setpoint_offset_c = Some(0.0);
             typed.backup_capacity_w = Some(4_000.0);
-            typed.backup_fuel = Some("natural_gas".to_string());
+            typed.backup_fuel = Some(hares_types::FuelType::Gas);
             typed.backup_eir = None;
             typed.fan_power_w = Some(0.0);
         });
@@ -3170,7 +3168,7 @@ mod tests {
             typed.er_lockout_temp_c = Some(5.0);
             typed.er_setpoint_offset_c = Some(0.0);
             typed.backup_capacity_w = Some(6_000.0);
-            typed.backup_fuel = Some("natural_gas".to_string());
+            typed.backup_fuel = Some(hares_types::FuelType::Gas);
             typed.backup_eir = None;
             typed.fan_power_w = Some(0.0);
         });

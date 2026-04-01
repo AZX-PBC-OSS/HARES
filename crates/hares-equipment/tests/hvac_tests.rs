@@ -1,15 +1,16 @@
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
+use hares_equipment::hvac::heating_config::IdealCapacityModeConfig;
 use hares_equipment::{
     CentralAirConditionerConfig, DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig,
     ElectricFurnaceConfig, EquipmentConfig, EquipmentRegistry, GasFurnaceConfig,
-    HeatPumpHeaterConfig,
+    HeatPumpHeaterConfig, IdealHvacConfig,
 };
 use hares_types::{
     telemetry_keys as tk, ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator,
-    FluidType, FuelType, GridState, LoopId, OperatingMode, PortSlots, ThermalAccumulator,
-    WeatherState, ZoneId, ZoneState,
+    FluidType, FuelType, GridState, LoopId, OperatingMode, PortSlots, ScheduleSourceConfig,
+    ThermalAccumulator, WeatherState, ZoneId, ZoneState,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +70,39 @@ fn env_with_zone_temp_hot(temp_c: f64) -> EnvironmentState {
     e.weather.outdoor_temp_c = 35.0;
     e.weather.outdoor_wet_bulb_c = 24.0;
     e
+}
+
+fn env_with_timestep(temp_c: f64, time_res_s: i64) -> EnvironmentState {
+    let mut e = env_with_zone_temp(temp_c);
+    e.time_res = ChronoDuration::seconds(time_res_s);
+    e
+}
+
+fn ideal_hvac_config(name: &str, mode: IdealCapacityModeConfig) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        name.to_string(),
+        "Ideal HVAC".to_string(),
+        IdealHvacConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            cooling_capacity_w: Some(10_000.0),
+            ideal_capacity_mode: Some(mode),
+            heating_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
+                weekday: [21.0; 24],
+                weekend: [21.0; 24],
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            }),
+            cooling_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
+                weekday: [26.0; 24],
+                weekend: [26.0; 24],
+                month_multipliers: [1.0; 12],
+                max_value: 1.0,
+            }),
+            ..IdealHvacConfig::default()
+        },
+    )
 }
 
 fn gas_furnace_config(name: &str) -> EquipmentConfig {
@@ -1304,5 +1338,261 @@ fn mshp_defaults_match_reference() {
     assert!(
         pan_kw_warm < 1e-9,
         "MSHP pan heater must be off when OAT=5°C (> 0°C threshold); got {pan_kw_warm:.6} kW"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// bang_bang_single_speed_cycles_within_deadband
+//   Single-speed ASHP at 60 s timestep uses full-on / full-off (bang-bang):
+//   - Zone cold (18°C, below setpoint-deadband 20°C) → full rated capacity
+//   - Zone warm (23°C, above setpoint 21°C) → zero output
+//
+//   OCHRE parity: HVAC.py:237 auto-selects bang-bang when time_res < 5 min.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bang_bang_single_speed_cycles_within_deadband() {
+    const RATED_W: f64 = 8_000.0;
+
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_bb".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(RATED_W),
+            heating_eir: Some(3.412_141_633 / 9.0),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: Some(0.0),
+            backup_eir: None,
+            fraction_heating_load_served: None,
+            cooling_capacity_w: None,
+            cooling_eir: None,
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            stage_shrs: None,
+            fraction_cooling_load_served: None,
+            number_of_speeds: 1,
+            is_mini_split: false,
+            shr: None,
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            heating_setpoint_c: None,
+            cooling_setpoint_c: None,
+            hysteresis_c: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+            hp_lockout_temp_c: None,
+            er_lockout_temp_c: None,
+            max_oat_supplemental_c: None,
+            er_setpoint_offset_c: None,
+            er_hard_lockout_time_s: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+        },
+    );
+
+    let registry = EquipmentRegistry::new();
+
+    // Cold zone: below turn-on threshold (setpoint 21°C - deadband 1°C = 20°C).
+    // Equipment turns ON — RTF must be 1.0 (full duty cycle).
+    let mut eq_cold = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    let mut env_cold = env_with_timestep(18.0, 60);
+    env_cold.weather.outdoor_temp_c = 7.0;
+    env_cold.weather.outdoor_wet_bulb_c = 5.0;
+    eq_cold.init(&cfg, &env_cold).unwrap();
+    eq_cold.update_control(&env_cold);
+    let mut ports_cold = ports_for_zone1();
+    eq_cold
+        .step(&env_cold, Duration::from_secs(60), &mut ports_cold)
+        .unwrap();
+
+    let rtf_cold = eq_cold
+        .telemetry()
+        .get(tk::RUNTIME_FRACTION)
+        .expect("ASHP must emit runtime_fraction telemetry");
+    assert!(
+        (rtf_cold - 1.0).abs() < 1e-9,
+        "bang-bang ASHP must run at full duty (RTF=1.0) when zone (18°C) is below heating \
+         turn-on threshold; got RTF={rtf_cold:.4}"
+    );
+    let gain_cold = ports_cold.thermal[0].sensible_gain_w;
+    assert!(
+        gain_cold > 1e-6,
+        "bang-bang ASHP must deliver positive heat when running; got {gain_cold:.1} W"
+    );
+
+    // Warm zone: above setpoint (21°C), equipment turns OFF — RTF must be 0.
+    let mut eq_warm = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    let mut env_warm = env_with_timestep(23.0, 60);
+    env_warm.weather.outdoor_temp_c = 7.0;
+    env_warm.weather.outdoor_wet_bulb_c = 5.0;
+    eq_warm.init(&cfg, &env_warm).unwrap();
+    eq_warm.update_control(&env_warm);
+    let mut ports_warm = ports_for_zone1();
+    eq_warm
+        .step(&env_warm, Duration::from_secs(60), &mut ports_warm)
+        .unwrap();
+
+    let rtf_warm = eq_warm
+        .telemetry()
+        .get(tk::RUNTIME_FRACTION)
+        .expect("ASHP must emit runtime_fraction telemetry");
+    assert!(
+        rtf_warm.abs() < 1e-9,
+        "bang-bang ASHP must have RTF=0 when zone (23°C) is above heating setpoint (21°C); \
+         got RTF={rtf_warm:.4}"
+    );
+    let gain_warm = ports_warm.thermal[0].sensible_gain_w;
+    assert!(
+        gain_warm.abs() < 1e-6,
+        "bang-bang ASHP must output zero heat when off; got {gain_warm:.4} W"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ideal_capacity_produces_continuous_output
+//   IdealHvac with IdealCapacityMode::On accepts a solver-injected capacity
+//   signal and delivers exactly that value — not 0 or rated.
+//
+//   Simulates the solver feedback loop by manually applying an IdealCapacity
+//   signal at 40% of rated capacity.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ideal_capacity_produces_continuous_output() {
+    const RATED_W: f64 = 10_000.0;
+    const INJECTED_W: f64 = 4_000.0;
+
+    let cfg = ideal_hvac_config("ideal_continuous", IdealCapacityModeConfig::On);
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Ideal HVAC", cfg.clone()).unwrap();
+
+    // Zone below heating setpoint (21°C): equipment enters Heating mode.
+    let env = env_with_timestep(18.0, 60);
+    eq.init(&cfg, &env).unwrap();
+    eq.update_control(&env);
+
+    // Simulate solver feedback: inject 4000 W (40% of rated).
+    eq.apply_control(&ControlSignal::IdealCapacity {
+        capacity_w: INJECTED_W,
+    })
+    .unwrap();
+
+    // Re-run update_control to pick up the injected capacity (as dwelling step 2a does).
+    eq.update_control(&env);
+
+    let mut ports = ports_for_zone1();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let gain = ports.thermal[0].sensible_gain_w;
+    assert!(
+        (gain - INJECTED_W).abs() < 1e-6,
+        "ideal-capacity HVAC must deliver exactly the injected capacity ({INJECTED_W:.0} W); \
+         got {gain:.4} W — must not be 0 or rated ({RATED_W:.0} W)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// auto_mode_selects_bang_bang_at_1min_timestep
+//   IdealHvac with IdealCapacityMode::Auto at 60 s (< 300 s threshold) uses
+//   bang-bang: ideal_target() returns None and step outputs full rated capacity.
+//
+//   OCHRE parity: HVAC.py:237 — use_ideal_capacity = time_res >= 5 min.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn auto_mode_selects_bang_bang_at_1min_timestep() {
+    const RATED_W: f64 = 10_000.0;
+
+    let cfg = ideal_hvac_config("ideal_auto_bb", IdealCapacityModeConfig::Auto);
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Ideal HVAC", cfg.clone()).unwrap();
+
+    // 60 s timestep: below the 300 s Auto threshold.
+    let env = env_with_timestep(18.0, 60);
+    eq.init(&cfg, &env).unwrap();
+    eq.update_control(&env);
+
+    // With Auto mode and 60 s timestep, ideal_target() must return None.
+    assert!(
+        eq.ideal_target().is_none(),
+        "at 60 s timestep, auto-mode IdealHvac must not expose an ideal target (bang-bang mode)"
+    );
+
+    // No IdealCapacity signal dispatched → ideal_capacity_w remains 0.
+    // Step must run the bang-bang path: full rated output.
+    let mut ports = ports_for_zone1();
+    eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+    let gain = ports.thermal[0].sensible_gain_w;
+    assert!(
+        gain > RATED_W * 0.95,
+        "auto-mode IdealHvac at 60 s must output near rated capacity (bang-bang); \
+         got {gain:.1} W, expected ~{RATED_W:.0} W"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// auto_mode_selects_ideal_at_5min_timestep
+//   IdealHvac with IdealCapacityMode::Auto at 300 s (>= 300 s threshold) uses
+//   ideal capacity: ideal_target() returns Some(zone, setpoint), and a solver-
+//   injected IdealCapacity signal scales the output proportionally.
+//
+//   OCHRE parity: HVAC.py:237 — use_ideal_capacity = time_res >= 5 min.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn auto_mode_selects_ideal_at_5min_timestep() {
+    const RATED_W: f64 = 10_000.0;
+    const INJECTED_W: f64 = 3_500.0;
+
+    let cfg = ideal_hvac_config("ideal_auto_ideal", IdealCapacityModeConfig::Auto);
+    let registry = EquipmentRegistry::new();
+    let mut eq = registry.create("Ideal HVAC", cfg.clone()).unwrap();
+
+    // 300 s timestep: exactly at the Auto threshold.
+    let env = env_with_timestep(18.0, 300);
+    eq.init(&cfg, &env).unwrap();
+    eq.update_control(&env);
+
+    // With Auto mode and 300 s timestep, ideal_target() must return Some(zone, setpoint).
+    let target = eq.ideal_target();
+    assert!(
+        target.is_some(),
+        "at 300 s timestep, auto-mode IdealHvac must expose an ideal target"
+    );
+    let (zone, setpoint_c) = target.unwrap();
+    assert_eq!(zone, ZoneId(1));
+    assert!(
+        (setpoint_c - 21.0).abs() < 0.1,
+        "auto-mode ideal target must reflect the heating setpoint (21°C); got {setpoint_c:.2}°C"
+    );
+
+    // Inject solver-computed capacity (simulating SolverFeedbackActor dispatch).
+    eq.apply_control(&ControlSignal::IdealCapacity {
+        capacity_w: INJECTED_W,
+    })
+    .unwrap();
+    eq.update_control(&env);
+
+    let mut ports = ports_for_zone1();
+    eq.step(&env, Duration::from_secs(300), &mut ports).unwrap();
+
+    let gain = ports.thermal[0].sensible_gain_w;
+    assert!(
+        (gain - INJECTED_W).abs() < 1e-6,
+        "auto-mode IdealHvac at 300 s must output the solver-injected capacity ({INJECTED_W:.0} W); \
+         got {gain:.4} W — must not be 0 or rated ({RATED_W:.0} W)"
     );
 }

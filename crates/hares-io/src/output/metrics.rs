@@ -9,6 +9,8 @@ use arrow::{
 };
 use thiserror::Error;
 
+use hares_types::telemetry_keys as tk;
+
 use crate::SimulationConfig;
 
 /// Suffix used by end-use electric power telemetry columns (OCHRE style).
@@ -859,14 +861,14 @@ fn discover_hvac_capacity_pairs(schema: &Schema) -> Result<Vec<(usize, usize)>, 
     // Try heating pair.
     if let (Some(output_idx), Some(capacity_idx)) = (
         optional_float64_column(schema, &["HVAC Heating Delivered (W)"])?,
-        optional_float64_column(schema, &["HVAC Heating Capacity (W)"])?,
+        optional_float64_column(schema, &[tk::HVAC_HEATING_CAPACITY_W])?,
     ) {
         pairs.push((output_idx, capacity_idx));
     }
     // Try cooling pair.
     if let (Some(output_idx), Some(capacity_idx)) = (
         optional_float64_column(schema, &["HVAC Cooling Delivered (W)"])?,
-        optional_float64_column(schema, &["HVAC Cooling Capacity (W)"])?,
+        optional_float64_column(schema, &[tk::HVAC_COOLING_CAPACITY_W])?,
     ) {
         pairs.push((output_idx, capacity_idx));
     }
@@ -1037,7 +1039,7 @@ mod tests {
             "HVAC Heating Setpoint (C)",
             "HVAC Cooling Setpoint (C)",
             "HVAC Heating Delivered (W)",
-            "HVAC Heating Capacity (W)",
+            tk::HVAC_HEATING_CAPACITY_W,
         ]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
 
@@ -1047,7 +1049,7 @@ mod tests {
             ("HVAC Heating Setpoint (C)", vec![21.0, 21.0, 21.0]),
             ("HVAC Cooling Setpoint (C)", vec![22.0, 22.0, 22.0]),
             ("HVAC Heating Delivered (W)", vec![0.0, 0.0, 0.0]),
-            ("HVAC Heating Capacity (W)", vec![4.0, 4.0, 4.0]),
+            (tk::HVAC_HEATING_CAPACITY_W, vec![4.0, 4.0, 4.0]),
         ]);
         calc.accumulate(&batch);
         let metrics = calc.finish();
@@ -1113,7 +1115,7 @@ mod tests {
             "HVAC Cooling Setpoint (C)",
             "Setpoint Deadband (C)",
             "HVAC Heating Delivered (W)",
-            "HVAC Heating Capacity (W)",
+            tk::HVAC_HEATING_CAPACITY_W,
         ]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
 
@@ -1124,7 +1126,7 @@ mod tests {
             ("HVAC Cooling Setpoint (C)", vec![22.0, 22.0, 22.0]),
             ("Setpoint Deadband (C)", vec![1.0, 1.0, 1.0]),
             ("HVAC Heating Delivered (W)", vec![3.0, 2.0, 3.0]),
-            ("HVAC Heating Capacity (W)", vec![3.0, 3.0, 3.0]),
+            (tk::HVAC_HEATING_CAPACITY_W, vec![3.0, 3.0, 3.0]),
         ]));
         let metrics = calc.finish();
 
@@ -1198,7 +1200,7 @@ mod tests {
             "HVAC Heating Setpoint (C)",
             "HVAC Cooling Setpoint (C)",
             "HVAC Heating Delivered (W)",
-            "HVAC Heating Capacity (W)",
+            tk::HVAC_HEATING_CAPACITY_W,
         ]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
 
@@ -1210,7 +1212,7 @@ mod tests {
             ("HVAC Heating Setpoint (C)", vec![21.0; rows]),
             ("HVAC Cooling Setpoint (C)", vec![23.0; rows]),
             ("HVAC Heating Delivered (W)", vec![1.0; rows]),
-            ("HVAC Heating Capacity (W)", vec![5.0; rows]),
+            (tk::HVAC_HEATING_CAPACITY_W, vec![5.0; rows]),
         ]));
         let metrics = calc.finish();
 
@@ -1241,7 +1243,7 @@ mod tests {
             "HVAC Heating Setpoint (C)",
             "HVAC Cooling Setpoint (C)",
             "HVAC Heating Delivered (W)",
-            "HVAC Heating Capacity (W)",
+            tk::HVAC_HEATING_CAPACITY_W,
         ]);
         let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
 
@@ -1255,7 +1257,7 @@ mod tests {
             ("HVAC Heating Setpoint (C)", vec![21.0]),
             ("HVAC Cooling Setpoint (C)", vec![22.0]),
             ("HVAC Heating Delivered (W)", vec![output]),
-            ("HVAC Heating Capacity (W)", vec![capacity]),
+            (tk::HVAC_HEATING_CAPACITY_W, vec![capacity]),
         ]));
         let metrics = calc.finish();
 

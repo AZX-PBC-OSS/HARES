@@ -411,7 +411,8 @@ impl Equipment for Ventilation {
 
         let eff_s = self.effective_sensible_effectiveness(t_outdoor_c);
         let eff_l = self.effective_latent_effectiveness(t_outdoor_c);
-        let bypass_active = eff_s == 0.0
+        let bypass_active = self.ventilation_type != VentilationType::ExhaustFan
+            && eff_s == 0.0
             && t_outdoor_c >= self.bypass_temp_min_c
             && t_outdoor_c <= self.bypass_temp_max_c;
 
@@ -1078,5 +1079,48 @@ mod tests {
         assert_eq!(fan.sensible_effectiveness, 0.75);
         assert_eq!(fan.latent_effectiveness, 0.10);
         assert!((fan.schedule_source.value_at(&env).unwrap() - (8.0 / 24.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn exhaust_fan_no_bypass_at_mild_outdoor_temp() {
+        let cfg = EquipmentConfig::from_typed(
+            "Exhaust".to_string(),
+            "Ventilation Fan".to_string(),
+            VentilationConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                flow_rate_m3_s: 0.025,
+                fan_power_w: Some(30.0),
+                sensible_effectiveness: Some(0.0),
+                latent_effectiveness: Some(0.0),
+                bypass_temp_min_c: None,
+                bypass_temp_max_c: None,
+                defrost_temp_c: None,
+                defrost_effectiveness_fraction: None,
+                ventilation_type: Some("exhaust_fan".to_string()),
+                balanced: None,
+                hours_in_operation: None,
+            },
+        );
+        let mut fan = Ventilation::new(cfg.clone());
+        // 21°C is within the default bypass range [18, 24]°C
+        let e = env(21.0, 22.0);
+        fan.init(&cfg, &e).expect("init");
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        fan.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+
+        let bypass = fan
+            .telemetry()
+            .get(tk::BYPASS_ACTIVE)
+            .expect("bypass_active");
+        assert!(
+            (bypass - 0.0).abs() < 1e-9,
+            "exhaust fan should never report bypass active, got {bypass}"
+        );
     }
 }

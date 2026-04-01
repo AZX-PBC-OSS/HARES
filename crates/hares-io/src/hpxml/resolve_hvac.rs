@@ -675,6 +675,7 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
         .and_then(Value::as_f64)
         .map(|v| 1.0 / v.max(1e-6));
     let cooling_eir = seer_from_params(params).map(|seer| 3.412_141_633_f64 / seer.max(1e-6));
+    let rated_eir = heating_eir.or(cooling_eir);
     let fraction = params.get("fraction_load_served").and_then(Value::as_f64);
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
@@ -691,11 +692,13 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
         cooling_setpoint_source,
         heating_capacity_w,
         cooling_capacity_w,
-        heating_eir,
-        cooling_eir,
         shr: params.get("shr").and_then(Value::as_f64),
         fraction_heating_load_served: fraction,
         fraction_cooling_load_served: fraction,
+        rated_fan_power_w: None,
+        rated_eir,
+        capacity_min_w: None,
+        fuel_type: None,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -875,7 +878,7 @@ fn try_build_heat_pump_heater_config(
     let backup_fuel = params
         .get("backup_fuel")
         .and_then(Value::as_str)
-        .map(str::to_string);
+        .map(|s| super::xml_helpers::parse_fuel(Some(s)));
     let fraction_heating_load_served = params
         .get("fraction_heating_load_served")
         .and_then(Value::as_f64);
@@ -989,7 +992,7 @@ fn try_build_heat_pump_cooler_config(
     let backup_fuel = params
         .get("backup_fuel")
         .and_then(Value::as_str)
-        .map(str::to_string);
+        .map(|s| super::xml_helpers::parse_fuel(Some(s)));
     let fraction_heating_load_served = params
         .get("fraction_heating_load_served")
         .and_then(Value::as_f64);

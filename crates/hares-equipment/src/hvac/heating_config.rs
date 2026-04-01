@@ -1,6 +1,6 @@
 //! Typed configuration structs for heating equipment.
 
-use hares_types::{FluidType, ScheduleSourceConfig};
+use hares_types::{FluidType, FuelType, ScheduleSourceConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::config::EquipmentTypedConfig;
@@ -234,15 +234,24 @@ pub struct IdealHvacConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooling_capacity_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heating_eir: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooling_eir: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shr: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_heating_load_served: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_cooling_load_served: Option<f64>,
+    /// Rated fan power [W]. When non-zero, fan electrical consumption is
+    /// computed as `capacity * eir * fan_power_ratio` in ideal-capacity mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rated_fan_power_w: Option<f64>,
+    /// Energy input ratio (1/COP). Defaults to 1.0 (ideal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rated_eir: Option<f64>,
+    /// Minimum capacity [W]. Below this threshold the unit shuts off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_min_w: Option<f64>,
+    /// Override fuel type for the equipment descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fuel_type: Option<FuelType>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,9 +323,11 @@ mod tests {
         let ih = IdealHvacConfig {
             heating_capacity_w: Some(10_000.0),
             cooling_capacity_w: Some(8_000.0),
-            heating_eir: Some(1.0),
-            cooling_eir: Some(1.0),
             shr: Some(0.75),
+            rated_fan_power_w: Some(200.0),
+            rated_eir: Some(1.0),
+            capacity_min_w: Some(500.0),
+            fuel_type: Some(FuelType::Electric),
             ..IdealHvacConfig::default()
         };
 

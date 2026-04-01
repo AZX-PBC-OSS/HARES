@@ -21,7 +21,10 @@ use super::thermostat::{
 pub const IDEAL_CAPACITY_TIME_RES_THRESHOLD_S: i64 = 300;
 pub(super) const DEFAULT_BIQUADRATIC_COEFFS: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
-/// Default fan power [W/CFM]. ACCA Manual D residential air handler.
+/// Default fan power: 0.365 W/CFM.
+/// Source: ANSI/RESNET/ICC 301-2019 §4.2.2(1) Table 4.2.2(1),
+/// "Default Heating and Cooling Systems" — supply fan power for
+/// forced-air systems.
 const DEFAULT_FAN_POWER_W_PER_CFM: f64 = 0.365;
 const DEFAULT_FAN_POWER_W_PER_M3_S: f64 = DEFAULT_FAN_POWER_W_PER_CFM * CFM_PER_M3_S;
 

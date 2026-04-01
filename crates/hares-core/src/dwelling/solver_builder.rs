@@ -924,24 +924,47 @@ pub(crate) fn build_default_solvers(
 
     // --- Mechanical ventilation from equipment specs ---
     if let Some(vent_spec) = equipment_specs.iter().find(|s| s.name == "Ventilation Fan") {
-        let params = &vent_spec.parameters;
-        if let Some(flow_m3_s) = params.get("flow_rate_m3_s").and_then(|v| v.as_f64()) {
-            thermal_cfg.ventilation_flow_m3_s = flow_m3_s;
-        }
-        if let Some(balanced) = params.get("balanced").and_then(|v| v.as_bool()) {
-            thermal_cfg.ventilation.balanced = balanced;
-        }
-        if let Some(sens_re) = params
-            .get("sensible_recovery_efficiency")
-            .and_then(|v| v.as_f64())
-        {
-            thermal_cfg.ventilation.sensible_recovery_efficiency = sens_re;
-        }
-        if let Some(lat_re) = params
-            .get("latent_recovery_efficiency")
-            .and_then(|v| v.as_f64())
-        {
-            thermal_cfg.ventilation.latent_recovery_efficiency = lat_re;
+        let applied = if let Some(ref tc) = vent_spec.typed_config {
+            match tc.typed::<hares_equipment::VentilationConfig>() {
+                Ok(cfg) => {
+                    thermal_cfg.ventilation_flow_m3_s = cfg.flow_rate_m3_s;
+                    thermal_cfg.ventilation.balanced = cfg.balanced.unwrap_or(false);
+                    if let Some(sens) = cfg.sensible_effectiveness {
+                        thermal_cfg.ventilation.sensible_recovery_efficiency = sens;
+                    }
+                    if let Some(lat) = cfg.latent_effectiveness {
+                        thermal_cfg.ventilation.latent_recovery_efficiency = lat;
+                    }
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("ventilation typed config deserialization failed: {e}; falling back to raw params");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if !applied {
+            let params = &vent_spec.parameters;
+            if let Some(flow_m3_s) = params.get("flow_rate_m3_s").and_then(|v| v.as_f64()) {
+                thermal_cfg.ventilation_flow_m3_s = flow_m3_s;
+            }
+            if let Some(balanced) = params.get("balanced").and_then(|v| v.as_bool()) {
+                thermal_cfg.ventilation.balanced = balanced;
+            }
+            if let Some(sens_re) = params
+                .get("sensible_effectiveness")
+                .and_then(|v| v.as_f64())
+            {
+                thermal_cfg.ventilation.sensible_recovery_efficiency = sens_re;
+            }
+            if let Some(lat_re) = params
+                .get("latent_effectiveness")
+                .and_then(|v| v.as_f64())
+            {
+                thermal_cfg.ventilation.latent_recovery_efficiency = lat_re;
+            }
         }
     }
 
@@ -1540,5 +1563,55 @@ mod tests {
         let zone = attic_zone(Some(100.0), Some(120.0), false, None, None);
         let method = attic_infiltration_method(&zone, Some(100.0), 5.0, 3).expect("method");
         assert_eq!(method, InfiltrationMethod::Ach { ach: 0.1 });
+    }
+
+    #[test]
+    fn ventilation_effectiveness_keys_map_to_recovery_efficiency() {
+        use hares_envelope::MechanicalVentilationParams;
+        use hares_equipment::{EquipmentConfig, VentilationConfig};
+
+        let cfg = VentilationConfig {
+            equipment_id: None,
+            zone_id: None,
+            flow_rate_m3_s: 0.035,
+            fan_power_w: None,
+            sensible_effectiveness: Some(0.75),
+            latent_effectiveness: Some(0.65),
+            bypass_temp_min_c: None,
+            bypass_temp_max_c: None,
+            defrost_temp_c: None,
+            defrost_effectiveness_fraction: None,
+            ventilation_type: Some("erv".to_string()),
+            balanced: Some(true),
+            hours_in_operation: None,
+        };
+
+        let ec = EquipmentConfig::from_typed(
+            "Ventilation Fan".to_string(),
+            "Ventilation Fan".to_string(),
+            cfg.clone(),
+        );
+        let recovered: VentilationConfig = ec.typed().unwrap();
+
+        let mut ventilation = MechanicalVentilationParams::default();
+        ventilation.balanced = recovered.balanced.unwrap_or(false);
+        if let Some(sens) = recovered.sensible_effectiveness {
+            ventilation.sensible_recovery_efficiency = sens;
+        }
+        if let Some(lat) = recovered.latent_effectiveness {
+            ventilation.latent_recovery_efficiency = lat;
+        }
+
+        assert!(ventilation.balanced);
+        assert!(
+            (ventilation.sensible_recovery_efficiency - 0.75).abs() < 1e-12,
+            "sensible recovery should be 0.75, got {}",
+            ventilation.sensible_recovery_efficiency
+        );
+        assert!(
+            (ventilation.latent_recovery_efficiency - 0.65).abs() < 1e-12,
+            "latent recovery should be 0.65, got {}",
+            ventilation.latent_recovery_efficiency
+        );
     }
 }

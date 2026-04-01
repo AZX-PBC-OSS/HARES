@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::heating_config::DuctConfig;
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
-use hares_types::ScheduleSourceConfig;
+use hares_types::{FuelType, ScheduleSourceConfig};
 
 fn default_one() -> u8 {
     1
@@ -33,9 +33,8 @@ pub struct HeatPumpHeaterConfig {
     /// Per-stage heating EIRs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_eirs: Option<Vec<f64>>,
-    /// Backup heating fuel type (e.g., "electric", "gas").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup_fuel: Option<String>,
+    pub backup_fuel: Option<FuelType>,
     /// Backup heating capacity in watts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_capacity_w: Option<f64>,
@@ -299,7 +298,7 @@ pub struct HeatPumpCoolerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_eirs: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup_fuel: Option<String>,
+    pub backup_fuel: Option<FuelType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_capacity_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -510,7 +509,7 @@ mod tests {
             heating_eir: Some(9.0),
             stage_heating_capacities_w: Some(vec![5_000.0, 10_000.0]),
             stage_heating_eirs: Some(vec![0.28, 0.25]),
-            backup_fuel: Some("electric".to_string()),
+            backup_fuel: Some(FuelType::Electric),
             backup_capacity_w: Some(5_000.0),
             backup_eir: Some(1.0),
             fraction_heating_load_served: Some(1.0),
