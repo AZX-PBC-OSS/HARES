@@ -581,6 +581,8 @@ impl HvacEquipment {
                 cooling_c,
                 ..ScheduleSetpoints::default()
             });
+        } else {
+            self.schedule_setpoints = None;
         }
     }
 
@@ -595,34 +597,61 @@ impl HvacEquipment {
 
         let hysteresis = self.thermostat.hysteresis_c;
         let offset = self.thermostat.deadband_offset.clamp(0.0, 1.0);
-        // OCHRE HVAC.py lines 397–408: a single asymmetric deadband rule governs
-        // heating and cooling transitions for all HVAC equipment.
-        let next_mode = match self.mode {
-            ThermostatMode::Heating => {
-                let turn_off = setpoints.heating_c + hysteresis * offset;
-                if zone_temp > turn_off {
-                    ThermostatMode::Deadband
-                } else {
-                    ThermostatMode::Heating
+        let cutout = self.thermostat.cutout_ratio;
+        let next_mode = if offset > 0.0 {
+            match self.mode {
+                ThermostatMode::Heating => {
+                    let turn_off = setpoints.heating_c + hysteresis * offset;
+                    if zone_temp > turn_off {
+                        ThermostatMode::Deadband
+                    } else {
+                        ThermostatMode::Heating
+                    }
+                }
+                ThermostatMode::Cooling => {
+                    let turn_off = setpoints.cooling_c - hysteresis * offset;
+                    if zone_temp < turn_off {
+                        ThermostatMode::Deadband
+                    } else {
+                        ThermostatMode::Cooling
+                    }
+                }
+                ThermostatMode::Deadband => {
+                    let heat_turn_on = setpoints.heating_c - hysteresis * (1.0 - offset);
+                    let cool_turn_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
+                    if zone_temp < heat_turn_on {
+                        ThermostatMode::Heating
+                    } else if zone_temp > cool_turn_on {
+                        ThermostatMode::Cooling
+                    } else {
+                        ThermostatMode::Deadband
+                    }
                 }
             }
-            ThermostatMode::Cooling => {
-                let turn_off = setpoints.cooling_c - hysteresis * offset;
-                if zone_temp < turn_off {
-                    ThermostatMode::Deadband
-                } else {
-                    ThermostatMode::Cooling
+        } else {
+            match self.mode {
+                ThermostatMode::Heating => {
+                    if zone_temp > setpoints.heating_c + hysteresis * cutout {
+                        ThermostatMode::Deadband
+                    } else {
+                        ThermostatMode::Heating
+                    }
                 }
-            }
-            ThermostatMode::Deadband => {
-                let heat_turn_on = setpoints.heating_c - hysteresis * (1.0 - offset);
-                let cool_turn_on = setpoints.cooling_c + hysteresis * (1.0 - offset);
-                if zone_temp < heat_turn_on {
-                    ThermostatMode::Heating
-                } else if zone_temp > cool_turn_on {
-                    ThermostatMode::Cooling
-                } else {
-                    ThermostatMode::Deadband
+                ThermostatMode::Cooling => {
+                    if zone_temp < setpoints.cooling_c - hysteresis * cutout {
+                        ThermostatMode::Deadband
+                    } else {
+                        ThermostatMode::Cooling
+                    }
+                }
+                ThermostatMode::Deadband => {
+                    if zone_temp < setpoints.heating_c - hysteresis {
+                        ThermostatMode::Heating
+                    } else if zone_temp > setpoints.cooling_c + hysteresis {
+                        ThermostatMode::Cooling
+                    } else {
+                        ThermostatMode::Deadband
+                    }
                 }
             }
         };
@@ -762,8 +791,8 @@ impl HvacEquipment {
 mod tests {
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, GridState, PortSlots, SurfaceIrradiance,
-        ThermalAccumulator, ThermalCategory, WeatherState, ZoneState,
+        BoundaryPolicy, ControlSignal, EnvironmentState, GridState, PortSlots, ScheduleSource,
+        SurfaceIrradiance, ThermalAccumulator, ThermalCategory, WeatherState, ZoneState,
     };
 
     use super::super::thermostat::{
@@ -2717,5 +2746,58 @@ mod tests {
             (l - 0.0).abs() < 1e-9,
             "shr=1.5 clamped to 1.0 → latent=0; got {l}"
         );
+    }
+
+    #[test]
+    fn schedule_setpoints_cleared_when_source_returns_none_after_valid_step() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.static_setpoints = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 25.0,
+        };
+        // One-element shared source: step 0 returns a value, step 1 errors → None.
+        hvac.heating_setpoint_source = Some(ScheduleSource::Shared {
+            data: std::sync::Arc::from(vec![21.0]),
+            cursor: 0,
+            boundary: BoundaryPolicy::Error,
+        });
+
+        hvac.resolve_profile_setpoints(&env(20.0, 60, 0));
+        assert!(
+            hvac.schedule_setpoints.is_some(),
+            "step 0: source returned a value, schedule_setpoints must be Some"
+        );
+        assert_eq!(hvac.schedule_setpoints.unwrap().heating_c, Some(21.0));
+
+        hvac.resolve_profile_setpoints(&env(20.0, 60, 60));
+        assert!(
+            hvac.schedule_setpoints.is_none(),
+            "step 1: source returned None (out of bounds), schedule_setpoints must be cleared"
+        );
+    }
+
+    #[test]
+    fn cutout_ratio_governs_turn_off_threshold_when_deadband_offset_is_zero() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        hvac.thermostat.hysteresis_c = 2.0;
+        hvac.thermostat.cutout_ratio = 0.5;
+        hvac.thermostat.deadband_offset = 0.0;
+        hvac.static_setpoints = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 28.0,
+        };
+
+        // Turn heating on (below heating_c - hysteresis).
+        let mode = hvac.update_mode(&env(17.0, 60, 0)).expect("turns on");
+        assert_eq!(mode, ThermostatMode::Heating);
+
+        // At setpoint (20.0) heating should still be on because turn-off is
+        // heating_c + hysteresis * cutout_ratio = 20.0 + 2.0 * 0.5 = 21.0.
+        let mode = hvac.update_mode(&env(20.0, 60, 61)).expect("still heating");
+        assert_eq!(mode, ThermostatMode::Heating, "must still be heating below cutout threshold");
+
+        // Just above the cutout threshold (21.0) heating should turn off.
+        let mode = hvac.update_mode(&env(21.1, 60, 122)).expect("turns off");
+        assert_eq!(mode, ThermostatMode::Deadband, "must turn off above cutout threshold");
     }
 }

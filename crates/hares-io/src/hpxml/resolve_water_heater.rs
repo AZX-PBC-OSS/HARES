@@ -62,7 +62,7 @@ pub(super) fn resolve_water_heaters(
         let jacket_r_value_m2_k_w = wh
             .path(&["WaterHeaterInsulation", "Jacket"])
             .and_then(|j| child_f64(j, "JacketRValue"))
-            .map(|r_ip| r_ip * 0.176_110_184);
+            .map(conv::r_value_ip_to_si);
 
         let category = wh_category(&wh_type, fuel);
         let ua_inputs = UaInputs {
@@ -190,10 +190,7 @@ pub(super) fn resolve_water_heaters(
                     tank_volume_m3,
                     tank_height_m: Some(tank_height_m),
                     cop,
-                    // CFG-012: HPWH typed config uses `backup_element_power_w` directly.
-                    // The existing HPXML/regression expectations treat this value as the
-                    // electric backup element rating already expressed in watts.
-                    backup_element_power_w: heating_capacity_input,
+                    backup_element_power_w: heating_capacity_w,
                     ua_w_per_k,
                     setpoint_c,
                     deadband_c: None,
@@ -712,9 +709,8 @@ mod tests {
 
     #[test]
     fn jacket_r_value_parsed_and_converted_to_si() {
-        // R5 jacket in IP units (hr·ft²·°F/Btu). Conversion: 5 * 0.176_110_184 ≈ 0.880_550_92
         let r_ip = 5.0_f64;
-        let expected_si = r_ip * 0.176_110_184;
+        let expected_si = conv::r_value_ip_to_si(r_ip);
 
         let xml = format!(
             r#"
@@ -900,6 +896,59 @@ mod tests {
         assert!(
             cfg.ignition_type.is_none(),
             "absent IgnitionType must yield None in config"
+        );
+    }
+
+    #[test]
+    fn hpwh_heating_capacity_converted_from_btu_h_to_watts() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>electricity</FuelType>
+                      <WaterHeaterType>heat pump water heater</WaterHeaterType>
+                      <TankVolume>50</TankVolume>
+                      <UniformEnergyFactor>3.75</UniformEnergyFactor>
+                      <HeatingCapacity>4500</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("building details must exist");
+        let mut specs = Vec::new();
+        resolve_water_heaters(details, &DefaultsStore::empty(), &mut specs)
+            .expect("water heaters must resolve");
+        let spec = specs
+            .iter()
+            .find(|s| s.name == "Heat Pump Water Heater")
+            .expect("HPWH spec must be emitted");
+        let cfg: HeatPumpWaterHeaterConfig = spec
+            .typed_config
+            .as_ref()
+            .expect("typed config expected")
+            .typed()
+            .expect("typed HeatPumpWaterHeaterConfig");
+
+        let expected_w = conv::power_btu_h_to_w(4500.0);
+        let actual_w = cfg
+            .backup_element_power_w
+            .expect("backup_element_power_w must be populated");
+        assert!(
+            (actual_w - expected_w).abs() < 1e-6,
+            "expected {expected_w} W, got {actual_w} W (HeatingCapacity must be converted from Btu/h)"
         );
     }
 }

@@ -324,29 +324,14 @@ fn port_slots_are_zeroed_between_steps() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: stale zone temperature regression (stale-temp documentation)
+// Test: occupancy gain reduces HVAC heating demand
 //
-// OCHRE updates zone state between each equipment step so HVAC sees current
-// internal gains. HARES currently runs all non-thermal equipment (pass 3a),
-// then runs HVAC (pass 3b) with the zone temperature from the PREVIOUS
-// timestep — not reflecting pass 3a contributions.
-//
-// This test compares two dwellings across multiple cold-day steps:
-//   A: normal, with occupancy gains (occupancy=1.0, which contributes ~66 W
-//      sensible convective gain per step via apply_occupancy_gains).
-//   B: identical except occupancy=0.0 (no internal gain).
-//
-// If HVAC saw current-timestep gains (OCHRE behavior), dwelling A's furnace
-// would run less than dwelling B's furnace over the same horizon because the
-// zone is warmer. With the stale-temp defect, the HVAC decision in the
-// CURRENT step ignores this step's gains and both dwellings behave identically
-// for that step.
-//
-// The test measures cumulative electric consumption over 30 steps. Because the
-// occupancy gain is small relative to typical furnace capacity, the difference
-// may only emerge over many steps. The test documents the EXPECTED outcome
-// (A consumes less than B) and marks the assertion with an explanatory comment
-// so that when the defect is fixed the test passes without modification.
+// Both dwellings are identical except dwelling A has occupancy=1.0 (~66 W
+// sensible convective gain per step) and dwelling B has occupancy=0.0.
+// Both use the same building_id so they start from the same initial zone
+// temperature.  Over 120 cold-day steps (2 h), occupancy heat offsets ~0.066
+// kWh of furnace demand → cumulative electric consumption for A must be
+// strictly less than B.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -362,7 +347,7 @@ fn stale_zone_temp_regression_occupancy_gain_affects_hvac_cumulative_energy() {
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
 time_res_s = 60
-duration_s = 1800
+duration_s = 7200
 
 [geometry]
 floor_area_m2 = 48.0
@@ -396,15 +381,17 @@ master_seed = 0
     )
     .expect("write dwelling A toml");
 
-    // Dwelling B: occupancy = 0 (no internal gain from occupants)
+    // Dwelling B: occupancy = 0 (no internal gain from occupants).
+    // Same building_id as A so both get the same RNG-derived initial zone
+    // temperature and the only difference is the occupancy gain.
     fs::write(
         &path_b,
-        r#"building_id = 2
+        r#"building_id = 1
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
 time_res_s = 60
-duration_s = 1800
+duration_s = 7200
 
 [geometry]
 floor_area_m2 = 48.0
@@ -445,7 +432,7 @@ master_seed = 0
     let _ = fs::remove_file(&path_a);
     let _ = fs::remove_file(&path_b);
 
-    const STEPS: usize = 30;
+    const STEPS: usize = 120;
     let mut kwh_a = 0.0_f64;
     let mut kwh_b = 0.0_f64;
     let timestep_h = 1.0 / 60.0; // 60-second steps
@@ -462,16 +449,12 @@ master_seed = 0
         "cumulative kWh must be finite (A={kwh_a:.4} B={kwh_b:.4})"
     );
 
-    // OCHRE-correct behavior: occupancy gain reduces heating demand → A < B.
-    //
-    // STALE-TEMP DEFECT (open): HVAC reads zone temperature from the previous
-    // timestep and does not see same-timestep occupancy gains. Until fixed,
-    // both dwellings produce identical heating energy (kwh_a == kwh_b).
-    // Change <= to < once the stale-temp defect is resolved.
+    // Occupancy sensible heat raises zone temp in A, reducing furnace runtime vs B.
+    // Over 120 cold-day steps the cumulative difference is clearly measurable.
     assert!(
-        kwh_a <= kwh_b,
-        "occupancy gain (A, {kwh_a:.4} kWh) must not exceed \
-         no-occupancy (B, {kwh_b:.4} kWh) over {STEPS} steps"
+        kwh_a < kwh_b,
+        "occupancy gain (A, {kwh_a:.4} kWh) must be strictly less than no-occupancy \
+         (B, {kwh_b:.4} kWh) over {STEPS} steps"
     );
 }
 

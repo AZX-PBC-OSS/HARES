@@ -726,6 +726,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     } else {
         None
     };
+    if garage_floor_area_m2 > 0.0 && garage_geometry.is_none() {
+        tracing::warn!(
+            garage_floor_area_m2,
+            "could not derive garage geometry; compound attic volume unavailable"
+        );
+    }
 
     // Attic floor area: OCHRE defines attic_floor_area as the top-floor
     // boundary area (Attic Floor / Roof / Adjacent Ceiling) plus Garage Ceiling area.
@@ -2088,10 +2094,21 @@ fn compute_garage_geometry(boundaries: &[Boundary], garage_floor_area_m2: f64) -
             if let Some((aa1, aa2)) = max_areas_by_azimuth(&attached_areas, &attached_azimuths) {
                 aa1 * aa2 / (wall_height * wall_height)
             } else {
+                tracing::warn!(
+                    n_attached = 3,
+                    "garage: 3 attached walls but max_areas_by_azimuth returned None; treating as detached"
+                );
                 0.0
             }
         }
-        _ => 0.0,
+        n => {
+            tracing::warn!(
+                n_attached = n,
+                garage_floor_area_m2,
+                "garage: unsupported attached wall count (expected 0-3); treating as detached"
+            );
+            0.0
+        }
     };
 
     let protruded = (garage_floor_area_m2 - garage_area_in_main).max(0.0);
@@ -2249,12 +2266,14 @@ fn compute_attic_volume(
 
     // Path B: No Attic Garage Wall, has garage, 3 gable walls → compound formula.
     if has_garage && gable_areas.len() == 3 {
+        // OCHRE uses `attic_wall_areas[1]` — the second exterior gable wall in
+        // parse order (outdoor walls first, then adjacent attic walls). Our
+        // `gable_areas` preserves this ordering, so index 1 matches OCHRE.
+        let attic_gable_area = gable_areas[1];
+
         let mut sorted = gable_areas.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let (low, med, high) = (sorted[0], sorted[1], sorted[2]);
-
-        // OCHRE: attic_gable_area = sorted[1] (median)
-        let attic_gable_area = med;
         // Third gable: whichever of low/high is "more different" from the median.
         let third_gable_area = if med - low > high - med { low } else { high };
 
@@ -2281,7 +2300,21 @@ fn compute_attic_volume(
     let gable_area = match gable_areas.len() {
         0 => return None,
         1 => gable_areas[0],
-        2 => gable_areas[0],
+        2 => {
+            let abs_diff = (gable_areas[1] - gable_areas[0]).abs();
+            if abs_diff > 0.5 {
+                tracing::warn!(
+                    area_0_m2 = gable_areas[0],
+                    area_1_m2 = gable_areas[1],
+                    diff_m2 = abs_diff,
+                    "attic gable walls differ by {diff:.2} m² (> 0.5 m²); \
+                     cannot derive reliable attic height",
+                    diff = abs_diff,
+                );
+                return None;
+            }
+            gable_areas[0]
+        }
         _ => {
             let mut sorted = gable_areas;
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -3786,12 +3819,17 @@ mod tests {
                 floor_or_ceiling: None,
             }
         }
+        // Regression guard: verifies compound attic volume formula against
+        // hand-calculated expected values; not a physics oracle.
+        //
         // 6:12 pitch for both attic and garage roofs
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
         let tilt_rad = tilt_deg.to_radians();
 
-        // 3 gable walls: sorted → [5.0, 10.0, 12.0]
-        // med=10, high=12; med-low=5, high-med=2 → third_gable = low = 5.0
+        // 3 gable walls in parse order: [10.0, 12.0, 5.0]
+        // OCHRE picks index 1 = 12.0 as attic_gable_area.
+        // sorted → [5.0, 10.0, 12.0]; med=10, low=5, high=12
+        // med-low=5 > high-med=2 → third_gable = low = 5.0
         let boundaries = vec![
             boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 80.0, Some(tilt_deg)),
             boundary(BoundaryType::Roof, ZoneType::Garage, ZoneType::Outdoor, 20.0, Some(tilt_deg)),
@@ -3808,8 +3846,9 @@ mod tests {
         let vol = compute_attic_volume(&boundaries, Some(floor_area), Some(&garage_geom))
             .expect("volume should compute");
 
-        // Expected compound formula:
-        let attic_height = (10.0 * tilt_rad.tan()).sqrt();
+        // Expected compound formula using index-1 gable (12.0 m²):
+        let attic_gable_area = 12.0; // gable_areas[1] per OCHRE convention
+        let attic_height = (attic_gable_area * tilt_rad.tan()).sqrt();
         let third_gable_area = 5.0;
         let garage_height = (third_gable_area * tilt_rad.tan()).sqrt();
         let garage_width = 2.0 * third_gable_area / garage_height;
@@ -3821,6 +3860,86 @@ mod tests {
         assert!(
             (vol - expected).abs() < 1e-4,
             "3-gable compound: got {vol}, expected {expected}"
+        );
+
+        // Hand-calculated concrete value:
+        // tan(26.565°) = 0.5, attic_gable=12 → h_a = sqrt(12*0.5) = sqrt(6) ≈ 2.449
+        // third_gable=5 → h_g = sqrt(5*0.5) = sqrt(2.5) ≈ 1.581
+        // garage_width = 2*5/1.581 ≈ 6.325
+        // garage_depth = 1.581*0.5 ≈ 0.791
+        // square_area = 120 - 15 = 105
+        // vol = 0.5*105*2.449 + 0.5*15*1.581 + (1/6)*6.325*0.791*1.581
+        //     ≈ 128.603 + 11.859 + 1.319 ≈ 141.781
+        assert!(
+            (vol - 141.781).abs() < 0.1,
+            "3-gable compound hand-calc: got {vol}, expected ~141.781"
+        );
+    }
+
+    #[test]
+    fn attic_volume_3_gable_index1_differs_from_median() {
+        // Verifies that index-1 (OCHRE convention) is used, not the sorted median.
+        // gable_areas in parse order: [15.0, 7.0, 10.0]
+        //   index-1 = 7.0
+        //   sorted = [7, 10, 15], median = 10.0 (differs from index-1)
+        use super::{Boundary, BoundaryType, GarageGeometry, ZoneType, compute_attic_volume};
+        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+            Boundary {
+                id: String::new(),
+                boundary_type: bt,
+                area_m2: area,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(interior),
+                exterior_zone: Some(exterior),
+                material_layers: Vec::new(),
+                framing_factor: None,
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: tilt,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+            }
+        }
+        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
+        let tilt_rad = tilt_deg.to_radians();
+        let boundaries = vec![
+            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 80.0, Some(tilt_deg)),
+            boundary(BoundaryType::Roof, ZoneType::Garage, ZoneType::Outdoor, 20.0, Some(tilt_deg)),
+            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 15.0, None),
+            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 7.0, None),
+            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.0, None),
+        ];
+        let garage_geom = GarageGeometry {
+            floor_area_m2: 30.0,
+            wall_height_m: 2.5,
+            protruded_area_m2: 15.0,
+        };
+        let floor_area = 120.0;
+        let vol = compute_attic_volume(&boundaries, Some(floor_area), Some(&garage_geom))
+            .expect("volume should compute");
+
+        // attic_gable_area = gable_areas[1] = 7.0 (NOT sorted median 10.0)
+        // sorted = [7, 10, 15]; med=10, low=7, high=15
+        // med-low=3, high-med=5 → third_gable = high = 15.0
+        let attic_gable_area = 7.0;
+        let third_gable_area = 15.0;
+        let attic_height = (attic_gable_area * tilt_rad.tan()).sqrt();
+        let garage_height = (third_gable_area * tilt_rad.tan()).sqrt();
+        let garage_width = 2.0 * third_gable_area / garage_height;
+        let garage_depth_in_house = garage_height * tilt_rad.tan();
+        let square_area = floor_area - garage_geom.protruded_area_m2;
+        let expected = 0.5 * square_area * attic_height
+            + 0.5 * garage_geom.protruded_area_m2 * garage_height
+            + (1.0 / 6.0) * garage_width * garage_depth_in_house * garage_height;
+        assert!(
+            (vol - expected).abs() < 1e-4,
+            "index-1 vs median: got {vol}, expected {expected}"
         );
     }
 
@@ -3870,6 +3989,89 @@ mod tests {
         assert!(
             (vol - expected).abs() < 1e-6,
             "path A: got {vol}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn attic_volume_asymmetric_gables_returns_none() {
+        use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
+        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+            Boundary {
+                id: String::new(),
+                boundary_type: bt,
+                area_m2: area,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(interior),
+                exterior_zone: Some(exterior),
+                material_layers: Vec::new(),
+                framing_factor: None,
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: tilt,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+            }
+        }
+        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
+        // diff = 5.0 m² > 0.5 m² threshold → None
+        let boundaries = vec![
+            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 50.0, Some(tilt_deg)),
+            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.0, None),
+            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 15.0, None),
+        ];
+        assert!(
+            compute_attic_volume(&boundaries, Some(100.0), None).is_none(),
+            "asymmetric gables (diff=5.0 m²) should return None"
+        );
+    }
+
+    #[test]
+    fn attic_volume_nearly_equal_gables_succeeds() {
+        use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
+        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+            Boundary {
+                id: String::new(),
+                boundary_type: bt,
+                area_m2: area,
+                azimuth_deg: None,
+                assembly_r_value_m2_k_w: None,
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(interior),
+                exterior_zone: Some(exterior),
+                material_layers: Vec::new(),
+                framing_factor: None,
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: tilt,
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+            }
+        }
+        let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
+        let floor_area = 100.0;
+        // diff = 0.3 m² < 0.5 m² threshold → Some(volume)
+        let boundaries = vec![
+            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 50.0, Some(tilt_deg)),
+            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.0, None),
+            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.3, None),
+        ];
+        let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
+            .expect("nearly-equal gables (diff=0.3 m²) should return Some");
+        let attic_height = (10.0_f64 * tilt_deg.to_radians().tan()).sqrt();
+        let expected = 0.5 * floor_area * attic_height;
+        assert!(
+            (vol - expected).abs() < 1e-6,
+            "nearly-equal gables: got {vol}, expected {expected}"
         );
     }
 

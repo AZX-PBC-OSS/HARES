@@ -3593,7 +3593,8 @@ mod tests {
         };
 
         // No recovery
-        let mut solver_no = solver_with_ventilation(&env, MechanicalVentilationParams::default(), vent_flow);
+        let mut solver_no =
+            solver_with_ventilation(&env, MechanicalVentilationParams::default(), vent_flow);
         let update_no = solver_no.resolve(&ports, &env, Duration::from_secs(60));
         let latent_no = extract_latent(&update_no);
 

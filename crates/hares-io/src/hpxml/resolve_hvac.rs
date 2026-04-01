@@ -1241,10 +1241,9 @@ pub(super) fn resolve_hvac(
             params.insert("fraction_load_served".to_string(), json!(frac));
         }
         if let Some(aux_kwh) = child_f64(heating, "ElectricAuxiliaryEnergy") {
-            // OCHRE: aux_power = kwh/year / 2080 * 1000 = W
             params.insert(
                 "auxiliary_power_w".to_string(),
-                json!(aux_kwh / 2080.0 * 1000.0),
+                json!(aux_kwh / 8760.0 * 1000.0),
             );
         }
         if let Some(ext) = heating.child("extension") {
@@ -3518,6 +3517,50 @@ mod tests {
             (stage_eirs[1] - 1.0 / 0.90).abs() < 1e-6,
             "high stage EIR must be 1/0.90, got {}",
             stage_eirs[1]
+        );
+    }
+
+    #[test]
+    fn electric_auxiliary_energy_kwh_per_year_converts_to_watts() {
+        let xml = r#"
+            <HPXML>
+              <Building>
+                <BuildingDetails>
+                  <Systems>
+                    <HVAC>
+                      <HVACPlant>
+                        <HeatingSystem>
+                          <SystemIdentifier id="htg1"/>
+                          <HeatingSystemType><ElectricResistance/></HeatingSystemType>
+                          <HeatingSystemFuel>electricity</HeatingSystemFuel>
+                          <ElectricAuxiliaryEnergy>876</ElectricAuxiliaryEnergy>
+                          <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+                        </HeatingSystem>
+                      </HVACPlant>
+                    </HVAC>
+                  </Systems>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details must exist");
+        let mut building = empty_building(vec![conditioned_zone()]);
+        building.details_xml = details.clone();
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_hvac(&building, &defaults, &mut specs).expect("resolve_hvac must succeed");
+        assert_eq!(specs.len(), 1, "expected one heating spec");
+        let aux_w = specs[0]
+            .parameters
+            .get("auxiliary_power_w")
+            .and_then(|v| v.as_f64())
+            .expect("auxiliary_power_w must be present");
+        assert!(
+            (aux_w - 100.0).abs() < 1e-6,
+            "ElectricAuxiliaryEnergy=876 kWh/year must yield 100.0 W, got {aux_w}"
         );
     }
 }

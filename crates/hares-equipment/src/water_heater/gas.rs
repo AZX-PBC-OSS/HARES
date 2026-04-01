@@ -1221,6 +1221,20 @@ mod tests {
     }
 
     #[test]
+    fn pilot_defaults_to_zero_for_hpxml_electronic_ignition_string() {
+        let cfg = config_with_extras(&[
+            ("pilot_power_w", None),
+            ("ignition_type", Some("electronic ignition".into())),
+        ]);
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+        assert_eq!(
+            eq.pilot_power_w, 0.0,
+            "HPXML 'electronic ignition' string must suppress pilot power"
+        );
+    }
+
+    #[test]
     fn explicit_pilot_power_overrides_ignition_type() {
         let cfg = config_with_extras(&[
             ("ignition_type", Some("electronic".into())),

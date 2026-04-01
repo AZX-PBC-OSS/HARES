@@ -100,9 +100,11 @@ pub struct OutputMapping {
 
 /// Discrete-time state-space model (ZOH base step) with optional implicit couplings.
 ///
-/// Each step solves: `x[k+1] = M⁻¹ · (N · x[k] + B_eff · u[k])`
-/// where `M = I - dt/2·A_c`, `N = I + dt/2·A_c`, `B_eff = dt·B_c`.
-/// For discrete-path models (`from_discrete`), M = I so the solve is a no-op.
+/// For `from_continuous`: M = I, N = A_d = expm(A_c·dt), B_eff = B_d = A_c⁻¹·(A_d − I)·B_c.
+/// For `from_discrete`: M and N are caller-supplied; B_eff = B_d (caller-supplied).
+///
+/// The implicit coupling step modifies the diagonal of M to account for
+/// infiltration and other conductances that depend on state variables.
 #[derive(Clone)]
 pub struct StateSpaceModel {
     a_c: Option<DMatrix<f64>>,
@@ -201,17 +203,17 @@ impl StateSpaceModel {
         self.max_discrete_eigenvalue_magnitude
     }
 
-    /// Implicit-half matrix M = I - dt/2·A_c (or I for discrete-path).
+    /// Implicit-half matrix M (I for continuous-path; caller-supplied for discrete-path).
     pub fn m_mat(&self) -> &DMatrix<f64> {
         &self.m_mat
     }
 
-    /// Explicit-half matrix N = I + dt/2·A_c (or A_d for discrete-path).
+    /// Explicit-half matrix N = A_d (or caller-supplied for discrete-path).
     pub fn n_mat(&self) -> &DMatrix<f64> {
         &self.n_mat
     }
 
-    /// Effective input matrix B_eff = dt·B_c (or B_d for discrete-path).
+    /// Discrete input matrix B_d (ZOH-discretized, or caller-supplied for discrete-path).
     pub fn b_eff(&self) -> &DMatrix<f64> {
         &self.b_eff
     }

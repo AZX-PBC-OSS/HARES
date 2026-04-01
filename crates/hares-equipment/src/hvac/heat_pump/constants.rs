@@ -61,4 +61,4 @@ pub const MSHP_PAN_HEATER_DEFAULT_TEMP_C: f64 = 0.0;
 /// Per OCHRE MinisplitAHSPHeater class attribute (HVAC.py:1482).
 pub const MSHP_PAN_HEATER_DEFAULT_KW: f64 = 0.150;
 
-pub const HEATER_TELEMETRY_CAPACITY: usize = 22;
+pub const HEATER_TELEMETRY_CAPACITY: usize = 23;

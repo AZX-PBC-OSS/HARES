@@ -58,8 +58,10 @@ struct SolverBoundary {
     exterior_emissivity: f64,
     exterior_solar_absorptance: f64,
     attic_emissivity: f64,
-    #[allow(dead_code)]
-    attic_solar_absorptance: f64,
+    /// Attic interior solar absorptance (0.05 with radiant barrier, 0.5 default).
+    /// Stored for future use when attic-zone interior solar distribution is implemented.
+    /// Currently attic solar gain enters only via conduction through the roof exterior.
+    _attic_solar_absorptance: f64,
     outer_wiring: Option<NodeWiring>,
     inner_wiring: Option<NodeWiring>,
     exterior_rad_frac: f64,
@@ -350,7 +352,7 @@ fn build_solver_boundaries(
             exterior_emissivity,
             exterior_solar_absorptance,
             attic_emissivity,
-            attic_solar_absorptance,
+            _attic_solar_absorptance: attic_solar_absorptance,
             outer_wiring,
             inner_wiring,
             exterior_rad_frac,

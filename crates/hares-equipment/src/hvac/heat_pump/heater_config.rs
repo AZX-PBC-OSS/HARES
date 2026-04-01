@@ -33,6 +33,7 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::ER_HARD_LOCKOUT_TIME_S, 0.0);
     telemetry.insert(tk::BACKUP_CAPACITY_W, 0.0);
     telemetry.insert(tk::BACKUP_EIR, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry
 }
 
@@ -149,6 +150,11 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::BACKUP_EIR.to_string(),
             unit: "-".to_string(),
             description: "Backup heater energy input ratio".to_string(),
+        },
+        TelemetryField {
+            name: tk::FUEL_INPUT_W.to_string(),
+            unit: "W".to_string(),
+            description: "Fuel backup heater combustion input power".to_string(),
         },
     ]
 }

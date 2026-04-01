@@ -199,6 +199,8 @@ impl IdealHvac {
                 cooling_c,
                 ..ScheduleSetpoints::default()
             });
+        } else {
+            self.schedule_setpoints = None;
         }
     }
 
@@ -425,7 +427,12 @@ impl Equipment for IdealHvac {
             self.ideal_capacity_mode = match mode.trim().to_ascii_lowercase().as_str() {
                 "on" => IdealCapacityMode::On,
                 "off" => IdealCapacityMode::Off,
-                _ => IdealCapacityMode::Auto,
+                "auto" => IdealCapacityMode::Auto,
+                other => {
+                    return Err(HaresError::Equipment(format!(
+                        "unrecognized ideal_capacity_mode '{other}'; expected 'on', 'off', or 'auto'"
+                    )))
+                }
             };
         }
         if self.heating_setpoint_source.is_none()
@@ -702,7 +709,7 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlCapabilities, DomainUpdate, EnvironmentState, GridState, PortSlots,
+        BoundaryPolicy, ControlCapabilities, DomainUpdate, EnvironmentState, GridState, PortSlots,
         SCHEDULE_DOMAIN_ID, ScheduleSource, SurfaceIrradiance,
         ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
@@ -1633,6 +1640,66 @@ mod tests {
             ports.thermal[0].sensible_gain_w, 0.0,
             "Heating mode must not output negative capacity, got {}",
             ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    #[test]
+    fn ideal_capacity_mode_invalid_string_returns_error() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+        cfg.test_extras_mut()
+            .insert("ideal_capacity_mode".into(), "invalid".into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let e = env(20.0, 60, 0);
+        let result = eq.init(&cfg, &e);
+
+        assert!(
+            result.is_err(),
+            "init must return an error for unrecognized ideal_capacity_mode"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("invalid"),
+            "error message must contain the bad value; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn schedule_setpoints_cleared_when_source_returns_none_after_valid_step() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        cfg.test_extras_mut()
+            .insert("heating_setpoint_c".into(), 20.0.into());
+        cfg.test_extras_mut()
+            .insert("cooling_setpoint_c".into(), 26.0.into());
+
+        let mut eq = IdealHvac::new(cfg.clone());
+        let e = env(20.0, 60, 0);
+        eq.init(&cfg, &e).unwrap();
+
+        // One-element shared source: step 0 returns a value, step 1 errors → None.
+        eq.heating_setpoint_source = Some(ScheduleSource::Shared {
+            data: std::sync::Arc::from(vec![21.0f64]),
+            cursor: 0,
+            boundary: BoundaryPolicy::Error,
+        });
+
+        eq.resolve_schedule_setpoints(&env(20.0, 60, 0));
+        assert!(
+            eq.schedule_setpoints.is_some(),
+            "step 0: source returned a value, schedule_setpoints must be Some"
+        );
+        assert_eq!(eq.schedule_setpoints.unwrap().heating_c, Some(21.0));
+
+        eq.resolve_schedule_setpoints(&env(20.0, 60, 60));
+        assert!(
+            eq.schedule_setpoints.is_none(),
+            "step 1: source returned None (out of bounds), schedule_setpoints must be cleared"
         );
     }
 }

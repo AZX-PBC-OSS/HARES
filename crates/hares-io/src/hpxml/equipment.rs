@@ -586,7 +586,7 @@ mod tests {
             r#"<Batteries>
           <Battery>
             <NominalCapacity><Value>10</Value><Units>kWh</Units></NominalCapacity>
-            <RatedPowerOutput>5</RatedPowerOutput>
+            <RatedPowerOutput>5000</RatedPowerOutput>
           </Battery>
         </Batteries>"#,
         );

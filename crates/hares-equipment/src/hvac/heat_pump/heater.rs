@@ -7,8 +7,8 @@ use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CoreState,
     DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, ThermalCategory, ZoneId,
+    ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, Telemetry, ThermalCategory, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,15 @@ fn eir_from_backup_fuel(fuel: Option<&str>) -> f64 {
     match fuel.map(str::to_ascii_lowercase).as_deref() {
         Some("natural_gas") | Some("gas") | Some("propane") | Some("fuel_oil") => 1.0 / 0.80,
         _ => DEFAULT_BACKUP_EIR,
+    }
+}
+
+fn fuel_type_from_backup_fuel(fuel: Option<&str>) -> Option<FuelType> {
+    match fuel.map(str::to_ascii_lowercase).as_deref() {
+        Some("natural_gas") | Some("gas") => Some(FuelType::Gas),
+        Some("propane") => Some(FuelType::Propane),
+        Some("fuel_oil") => Some(FuelType::Oil),
+        _ => None,
     }
 }
 
@@ -76,6 +85,7 @@ struct HeatPumpHeaterCore {
     min_er_cycle_time_s: f64,
     backup_capacity_w: f64,
     backup_eir: f64,
+    backup_fuel_type: Option<FuelType>,
     pan_heater_kw: f64,
     pan_heater_temp_c: f64,
     pan_heater_on: bool,
@@ -219,6 +229,9 @@ struct HeaterStep {
     er_capacity_w: f64,
     defrost_active: bool,
     defrost_time_fraction: f64,
+    /// Fuel consumption [W] when backup heater burns gas/propane/oil.
+    /// Zero when backup is electric or not running.
+    fuel_w: f64,
 }
 
 impl ASHPHeater {
@@ -368,6 +381,7 @@ impl HeatPumpHeaterCore {
             min_er_cycle_time_s: DEFAULT_MIN_ER_CYCLE_TIME_S,
             backup_capacity_w,
             backup_eir: DEFAULT_BACKUP_EIR,
+            backup_fuel_type: None,
             pan_heater_kw: 0.0,
             pan_heater_temp_c: MSHP_PAN_HEATER_DEFAULT_TEMP_C,
             pan_heater_on: false,
@@ -545,6 +559,7 @@ impl HeatPumpHeaterCore {
             .backup_eir
             .unwrap_or_else(|| eir_from_backup_fuel(cfg.backup_fuel.as_deref()))
             .max(0.0);
+        self.backup_fuel_type = fuel_type_from_backup_fuel(cfg.backup_fuel.as_deref());
         self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
         self.hp_lockout_hysteresis_c = DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
         self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
@@ -677,6 +692,15 @@ impl HeatPumpHeaterCore {
                 reactive_power_kvar: 0.0,
             })?;
         }
+        let scaled_fuel_w = step.fuel_w * self.hvac.space_fraction;
+        if scaled_fuel_w > 0.0 {
+            if let Some(fuel_type) = self.backup_fuel_type {
+                ports.accumulate(&PortContribution::Fuel {
+                    fuel_type,
+                    consumption_w: scaled_fuel_w,
+                })?;
+            }
+        }
 
         // Record RTF for companion cooler crankcase accounting. When the HP
         // compressor is running the RTF equals the duty cycle (PLR).
@@ -759,11 +783,20 @@ impl HeatPumpHeaterCore {
         );
         self.telemetry.set(tk::HP_CAPACITY_W, step.hp_capacity_w);
         self.telemetry.set(tk::ER_CAPACITY_W, step.er_capacity_w);
+        self.telemetry.set(tk::FUEL_INPUT_W, scaled_fuel_w);
+        let core_fuel_w = if scaled_fuel_w > 0.0 {
+            self.backup_fuel_type.map(|fuel_type| FuelPower {
+                fuel_type,
+                consumption_w: scaled_fuel_w,
+            })
+        } else {
+            None
+        };
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(scaled_electric_kw.max(0.0))),
                 reactive_power_kvar: None,
-                fuel_w: None,
+                fuel_w: core_fuel_w,
             },
             state: CoreState {
                 operating_mode: Some(self.operating_mode),
@@ -944,16 +977,24 @@ impl HeatPumpHeaterCore {
             0.0
         };
 
+        let backup_is_fuel = matches!(
+            self.backup_fuel_type,
+            Some(FuelType::Gas | FuelType::Propane | FuelType::Oil)
+        );
+        let er_electric_w = if backup_is_fuel { 0.0 } else { er_power_w };
+        let mut fuel_w = if backup_is_fuel { er_power_w } else { 0.0 };
+
         // Gross output including fan waste heat (OCHRE HVAC.py line 543).
         // zone_heat_fractions (set from duct_dse during init) distributes
         // this to conditioned and duct zones in write_zone_thermal_contributions.
         let mut thermal_output_w = hp_capacity_w + er_capacity_w + fan_power_w;
-        let mut electric_kw = (hp_electric_w + er_power_w + fan_power_w + pan_heater_w) / 1000.0;
+        let mut electric_kw =
+            (hp_electric_w + er_electric_w + fan_power_w + pan_heater_w) / 1000.0;
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Track compressor-only kW separately so scaling stays consistent with electric_kw.
         let mut compressor_kw = hp_electric_w / 1000.0;
         let mut fan_kw = fan_power_w / 1000.0;
-        let mut backup_er_kw = er_power_w / 1000.0;
+        let mut backup_er_kw = er_electric_w / 1000.0;
         let mut step_pan_heater_kw = pan_heater_w / 1000.0;
         let mut step_hp_capacity_w = hp_capacity_w;
         let mut step_er_capacity_w = er_capacity_w;
@@ -970,37 +1011,47 @@ impl HeatPumpHeaterCore {
             let er_thermal = er_capacity_w;
             thermal_output_w = hp_thermal * effective_load + er_thermal;
             let hp_electric = (hp_electric_w + fan_power_w + pan_heater_w) / 1000.0;
-            let er_electric = er_power_w / 1000.0;
+            let er_electric = er_electric_w / 1000.0;
             electric_kw = hp_electric * effective_load + er_electric;
             compressor_kw *= effective_load;
             fan_kw *= effective_load;
             step_pan_heater_kw *= effective_load;
             step_hp_capacity_w *= effective_load;
-            // backup_er_kw and step_er_capacity_w are not scaled (ER is not modulatable)
+            // backup_er_kw, fuel_w, and step_er_capacity_w are not scaled (ER is not modulatable)
         }
 
         // Apply PowerLimit (sticky): shed ER first (it is on/off, not modulatable),
         // then scale HP+fan proportionally only if still over limit after shedding ER.
-        if self.ctrl_power_limit_kw.is_finite() && electric_kw > self.ctrl_power_limit_kw {
-            let total_without_er = electric_kw - backup_er_kw;
-            if total_without_er <= self.ctrl_power_limit_kw {
-                // Shedding ER alone is sufficient.
-                electric_kw = total_without_er;
-                thermal_output_w -= step_er_capacity_w;
-                backup_er_kw = 0.0;
-                step_er_capacity_w = 0.0;
-            } else {
-                // Still over limit after shedding ER; scale HP+fan+pan proportionally.
-                let er_thermal = step_er_capacity_w;
-                backup_er_kw = 0.0;
-                step_er_capacity_w = 0.0;
-                let ratio = self.ctrl_power_limit_kw / total_without_er.max(f64::MIN_POSITIVE);
-                electric_kw = self.ctrl_power_limit_kw;
-                thermal_output_w = (thermal_output_w - er_thermal) * ratio;
-                compressor_kw *= ratio;
-                fan_kw *= ratio;
-                step_pan_heater_kw *= ratio;
-                step_hp_capacity_w *= ratio;
+        // For fuel backup, electric_kw excludes ER (fuel_w carries it); the limit
+        // still triggers ER shedding when fuel_w would exceed the threshold, removing
+        // the thermal contribution, but the electric draw is unaffected.
+        if self.ctrl_power_limit_kw.is_finite() {
+            let total_kw = electric_kw + fuel_w / 1000.0;
+            if total_kw > self.ctrl_power_limit_kw {
+                let hp_electric_kw = electric_kw - backup_er_kw;
+                let hp_only_total_kw = hp_electric_kw; // fuel ER already shed in this branch
+                if hp_only_total_kw <= self.ctrl_power_limit_kw {
+                    // Shedding ER alone is sufficient.
+                    electric_kw = hp_electric_kw;
+                    thermal_output_w -= step_er_capacity_w;
+                    backup_er_kw = 0.0;
+                    fuel_w = 0.0;
+                    step_er_capacity_w = 0.0;
+                } else {
+                    // Still over limit after shedding ER; scale HP+fan+pan proportionally.
+                    let er_thermal = step_er_capacity_w;
+                    backup_er_kw = 0.0;
+                    fuel_w = 0.0;
+                    step_er_capacity_w = 0.0;
+                    let ratio =
+                        self.ctrl_power_limit_kw / hp_only_total_kw.max(f64::MIN_POSITIVE);
+                    electric_kw = self.ctrl_power_limit_kw;
+                    thermal_output_w = (thermal_output_w - er_thermal) * ratio;
+                    compressor_kw *= ratio;
+                    fan_kw *= ratio;
+                    step_pan_heater_kw *= ratio;
+                    step_hp_capacity_w *= ratio;
+                }
             }
         }
 
@@ -1022,6 +1073,7 @@ impl HeatPumpHeaterCore {
             er_capacity_w: step_er_capacity_w.max(0.0),
             defrost_active,
             defrost_time_fraction,
+            fuel_w: fuel_w.max(0.0),
         })
     }
 
@@ -1247,6 +1299,7 @@ impl HeatPumpHeaterCore {
             }
             DRLevel::GridEmergency => {
                 self.dr_setpoint_offset_c = 0.0;
+                self.dr_duty_cycle = 1.0;
                 self.dr_load_fraction = 0.0;
             }
         }
@@ -2429,6 +2482,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dr_grid_emergency_resets_dr_duty_cycle() {
+        let cfg = heater_config();
+        let e = env(18.0, 5.0, 0.005);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: None,
+        })
+        .unwrap();
+
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: None,
+        })
+        .unwrap();
+
+        assert!(
+            (eq.core.dr_duty_cycle - 1.0).abs() < f64::EPSILON,
+            "GridEmergency must reset dr_duty_cycle to 1.0; got {}",
+            eq.core.dr_duty_cycle
+        );
+        assert_eq!(
+            eq.core.dr_load_fraction, 0.0,
+            "GridEmergency must set dr_load_fraction to 0.0; got {}",
+            eq.core.dr_load_fraction
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert_eq!(kw, 0.0, "GridEmergency must force zero output; got {kw}");
+    }
+
     // GridEmergency: dr_load_fraction=0 → full shed → zero output.
     #[test]
     fn dr_grid_emergency_forces_heater_off() {
@@ -3045,13 +3139,98 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        // Gas backup at 80 AFUE: EIR = 1/0.80 = 1.25; electric draw = 4000 W * 1.25 = 5000 W
-        let expected_kw = 4_000.0 * (1.0 / 0.80) / 1000.0;
+        // Gas backup at AFUE 80%: fuel_input = capacity / 0.80 = 4000 / 0.80 = 5000 W.
+        let expected_fuel_w = 4_000.0 / 0.80;
+        let fuel_input_w = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(0.0);
         assert!(
-            (electric_kw - expected_kw).abs() < 1e-6,
-            "gas backup EIR=1/0.80 should produce {expected_kw:.6} kW, got {electric_kw:.6} kW"
+            (fuel_input_w - expected_fuel_w).abs() < 1e-6,
+            "gas backup AFUE 80% should produce {expected_fuel_w:.6} W fuel, got {fuel_input_w:.6} W"
         );
+        // No electric draw (fan_power_w = 0, backup is gas).
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert!(
+            electric_kw.abs() < 1e-9,
+            "gas backup should draw no electric power, got {electric_kw:.9} kW"
+        );
+        // Fuel port must carry the gas consumption.
+        assert!(
+            (ports.fuel.get(hares_types::FuelType::Gas) - expected_fuel_w).abs() < 1e-6,
+            "gas fuel port must carry {expected_fuel_w:.6} W, got {:.6} W",
+            ports.fuel.get(hares_types::FuelType::Gas)
+        );
+    }
+
+    #[test]
+    fn gas_backup_fuel_port_contribution_and_no_electric_leak() {
+        // ASHP with natural_gas backup: when ER is on, fuel consumption must appear on
+        // the fuel port, not the electrical port. Electric port must only include
+        // compressor + fan (none here since fan_power_w=0 and HP is locked out).
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0);
+            typed.er_lockout_temp_c = Some(5.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.backup_capacity_w = Some(6_000.0);
+            typed.backup_fuel = Some("natural_gas".to_string());
+            typed.backup_eir = None;
+            typed.fan_power_w = Some(0.0);
+        });
+
+        let environment = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &environment).unwrap();
+        let mode = eq.update_control(&environment);
+        assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out by OAT");
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        // fuel_input_w telemetry must be set.
+        let fuel_input_w = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(0.0);
+        assert!(
+            fuel_input_w > 0.0,
+            "FUEL_INPUT_W telemetry must be > 0 when gas backup is active"
+        );
+
+        // Expected: 6000 W capacity / 0.80 AFUE = 7500 W fuel.
+        let expected_fuel_w = 6_000.0 / 0.80;
+        assert!(
+            (fuel_input_w - expected_fuel_w).abs() < 1e-6,
+            "expected {expected_fuel_w:.3} W fuel, got {fuel_input_w:.3} W"
+        );
+
+        // Fuel port carries gas consumption.
+        let gas_port_w = ports.fuel.get(hares_types::FuelType::Gas);
+        assert!(
+            (gas_port_w - expected_fuel_w).abs() < 1e-6,
+            "gas fuel port must carry {expected_fuel_w:.3} W, got {gas_port_w:.3} W"
+        );
+
+        // Electrical port must be zero (no compressor, no fan).
+        assert!(
+            ports.electrical.load_power_kw.abs() < 1e-9,
+            "gas backup must not contribute to electrical port, got {:.9} kW",
+            ports.electrical.load_power_kw
+        );
+
+        // core_output.flows.fuel_w must be Some and match.
+        let core_fuel = eq.core_output().flows.fuel_w.as_ref().expect("fuel_w must be Some");
+        assert_eq!(core_fuel.fuel_type, hares_types::FuelType::Gas);
+        assert!(
+            (core_fuel.consumption_w - expected_fuel_w).abs() < 1e-6,
+            "core_output fuel_w must be {expected_fuel_w:.3} W, got {:.3} W",
+            core_fuel.consumption_w
+        );
+
+        // Electrical core_output must be zero.
+        if let Some(hares_types::ElectricPower::Consumption(kw)) = eq.core_output().flows.electric_kw {
+            assert!(
+                kw.abs() < 1e-9,
+                "core electric_kw must be zero for gas-only backup, got {kw:.9} kW"
+            );
+        }
     }
 
     // Bug 1: HP lockout hysteresis prevents chatter when OAT oscillates near threshold.

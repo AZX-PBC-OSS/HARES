@@ -98,7 +98,9 @@ pub(super) fn resolve_batteries(
     };
 
     for battery in batteries.children_named("Battery") {
-        let rated_power_kw = child_f64(battery, "RatedPowerOutput").unwrap_or(5.0);
+        let rated_power_kw = child_f64(battery, "RatedPowerOutput")
+            .map(|w| w / 1000.0)
+            .unwrap_or(5.0);
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
@@ -241,5 +243,56 @@ pub(super) fn resolve_generators(
             cfg,
             defaults,
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::defaults::DefaultsStore;
+    use crate::hpxml::parse_xml_document;
+    use hares_equipment::BatteryConfig;
+
+    #[test]
+    fn battery_rated_power_output_watts_converts_to_kw() {
+        let xml = r#"
+            <HPXML>
+              <Building>
+                <BuildingDetails>
+                  <Systems>
+                    <Batteries>
+                      <Battery>
+                        <SystemIdentifier id="bat1"/>
+                        <RatedPowerOutput>5000</RatedPowerOutput>
+                        <NominalCapacity>
+                          <Units>kilowatthours</Units>
+                          <Value>13.5</Value>
+                        </NominalCapacity>
+                      </Battery>
+                    </Batteries>
+                  </Systems>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details must exist");
+        let defaults = DefaultsStore::empty();
+        let mut specs = Vec::new();
+        resolve_batteries(details, &defaults, &mut specs);
+        assert_eq!(specs.len(), 1, "expected one battery spec");
+        let cfg: BatteryConfig = specs[0]
+            .typed_config
+            .as_ref()
+            .expect("typed_config must be present")
+            .typed()
+            .expect("must deserialize to BatteryConfig");
+        assert!(
+            (cfg.max_charge_kw - 5.0).abs() < 1e-9,
+            "RatedPowerOutput=5000 W must parse as max_charge_kw=5.0 kW, got {}",
+            cfg.max_charge_kw
+        );
     }
 }

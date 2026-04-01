@@ -353,6 +353,90 @@ fn discretization_preserves_stability() {
     }
 }
 
+/// With a stiff RC node (τ=10s, dt=300s) and high infiltration, the zone
+/// temperature must converge toward outdoor temp when infiltration dominates.
+///
+/// The implicit coupling in the solver uses B_c (continuous input gain) rather
+/// than B_d (ZOH-discretized). For stiff systems, B_d saturates toward the
+/// steady-state gain and materially under-represents the physical conductance,
+/// causing the coupled step to under-weight infiltration. Using B_c produces
+/// the correct coupling strength.
+#[test]
+fn stiff_infiltration_coupling_uses_b_c_not_b_d() {
+    // Stiff 1R-1C: τ = R·C = 10 s, dt = 300 s → dt/τ = 30 (deeply stiff).
+    let r = 1.0; // K/W
+    let c_cap = 10.0; // J/K  → τ = 10 s
+    let dt = 300.0; // s
+
+    let caps = HashMap::from([(node(1), c_cap)]);
+    let res = HashMap::from([((node(1), node(2)), r)]);
+    let net = RCNetwork::from_elements(caps, res, vec![node(2)]).expect("valid 1R-1C network");
+    let (a_c, b_c) = net.build_matrices().expect("1R-1C matrices");
+
+    let mapping = OutputMapping {
+        output_count: 1,
+        node_to_output: vec![(0, 0, 1.0)],
+        input_to_output: vec![],
+    };
+    let model =
+        StateSpaceModel::from_continuous(&a_c, &b_c, dt, &mapping).expect("should build");
+
+    // Verify B_d and B_c differ materially for this stiff system.
+    let b_c_val = model.b_c().expect("continuous-path model has B_c")[(0, 0)];
+    let b_d_val = model.b_eff()[(0, 0)];
+    assert!(
+        (b_c_val - b_d_val).abs() / b_c_val.abs() > 0.5,
+        "B_c and B_d should differ substantially for stiff system; \
+         b_c={b_c_val}, b_d={b_d_val}"
+    );
+
+    // Simulate infiltration coupling like stepping.rs does:
+    //   d = h_inf * b_coeff
+    //   forcing = h_inf * t_outdoor * b_coeff + d * x[state_idx]
+    let t_indoor_init = 22.0;
+    let t_outdoor = 0.0;
+    let h_inf = 50.0; // W/K — large infiltration conductance
+
+    let state_idx = 0_usize;
+    let mut x = DVector::from_row_slice(&[t_indoor_init]);
+    let u = DVector::from_row_slice(&[t_outdoor]); // ambient already in u
+    let mut buf = DVector::zeros(1);
+    let mut m_scratch = DMatrix::zeros(1, 1);
+
+    // Run 20 steps with B_c coupling (the correct path).
+    for _ in 0..20 {
+        let d = h_inf * b_c_val;
+        let forcing = h_inf * t_outdoor * b_c_val + d * x[state_idx];
+        let couplings = vec![(state_idx, d, forcing)];
+        model.step_with_coupling_into(&x, &u, &mut buf, &mut m_scratch, &couplings);
+        x.copy_from(&buf);
+    }
+
+    // With strong infiltration, zone temp must converge close to outdoor.
+    assert!(
+        (x[0] - t_outdoor).abs() < 1.0,
+        "with B_c coupling, zone should converge toward outdoor; got T={:.2}",
+        x[0]
+    );
+
+    // Now verify that using B_d (the old buggy path) fails to converge.
+    let mut x_bad = DVector::from_row_slice(&[t_indoor_init]);
+    for _ in 0..20 {
+        let d = h_inf * b_d_val;
+        let forcing = h_inf * t_outdoor * b_d_val + d * x_bad[state_idx];
+        let couplings = vec![(state_idx, d, forcing)];
+        model.step_with_coupling_into(&x_bad, &u, &mut buf, &mut m_scratch, &couplings);
+        x_bad.copy_from(&buf);
+    }
+
+    // B_d under-weights infiltration for stiff systems, so temperature stays higher.
+    assert!(
+        (x_bad[0] - t_outdoor).abs() > 3.0,
+        "with B_d coupling, zone should NOT converge as well; got T={:.2} (too close to outdoor)",
+        x_bad[0]
+    );
+}
+
 /// Building a `StateSpaceModel` via the full RC → continuous → discrete
 /// pipeline and then stepping it must match the analytic step-response formula
 /// for a simple 1R-1C circuit after an arbitrary number of steps.

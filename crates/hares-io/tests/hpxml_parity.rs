@@ -906,12 +906,23 @@ fn hpwh_heating_capacity_populates_backup_element_power() {
         .expect("typed hpwh config")
         .typed()
         .expect("hpwh typed config");
-    assert_eq!(typed_cfg.backup_element_power_w, Some(4500.0));
-    assert_eq!(
-        wh.parameters
-            .get("backup_element_power_w")
-            .and_then(|v| v.as_f64()),
-        Some(4500.0)
+    // 4500 Btu/h converted to watts: 4500 * 0.29307107 ≈ 1318.82 W
+    let expected_w = 4500.0_f64 * 0.293_071_07_f64;
+    let actual_w = typed_cfg
+        .backup_element_power_w
+        .expect("backup_element_power_w must be populated");
+    assert!(
+        (actual_w - expected_w).abs() < 1e-4,
+        "expected {expected_w} W, got {actual_w} W"
+    );
+    let params_w = wh
+        .parameters
+        .get("backup_element_power_w")
+        .and_then(|v| v.as_f64())
+        .expect("backup_element_power_w must be in parameters");
+    assert!(
+        (params_w - expected_w).abs() < 1e-4,
+        "expected {expected_w} W in parameters, got {params_w} W"
     );
 }
 
