@@ -529,6 +529,11 @@ fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
 fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
         TelemetryField {
+            name: tk::FAN_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Electric furnace fan electric power".to_string(),
+        },
+        TelemetryField {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Electric furnace active power draw".to_string(),
@@ -1033,6 +1038,16 @@ mod tests {
         assert!(
             (ports.thermal[0].sensible_gain_w - 4_000.0).abs() < 1e-6,
             "IdealCapacity must scale electric-furnace thermal output to commanded value"
+        );
+    }
+
+    #[test]
+    fn electric_furnace_telemetry_fields_declares_fan_kw() {
+        use super::electric_furnace_telemetry_fields;
+        let fields = electric_furnace_telemetry_fields();
+        assert!(
+            fields.iter().any(|f| f.name == tk::FAN_KW),
+            "electric furnace telemetry_fields must declare FAN_KW"
         );
     }
 }

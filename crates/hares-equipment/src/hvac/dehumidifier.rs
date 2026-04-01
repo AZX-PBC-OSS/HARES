@@ -133,8 +133,8 @@ impl Dehumidifier {
     fn update_is_on(&mut self, current_rh: f64) {
         let maybe_override = self.mode_override;
         self.is_on = match maybe_override {
-            Some(OperatingMode::Off) => false,
-            Some(OperatingMode::Cooling) | Some(OperatingMode::Standby) => true,
+            Some(OperatingMode::Off) | Some(OperatingMode::Standby) => false,
+            Some(OperatingMode::Cooling) => true,
             Some(_) | None => {
                 if self.is_on {
                     current_rh >= self.min_rh
@@ -312,7 +312,6 @@ impl Equipment for Dehumidifier {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        self.update_control(env);
         let zone = env
             .zones
             .iter()
@@ -687,6 +686,7 @@ mod tests {
         let mut eq = Dehumidifier::new(cfg.clone());
         eq.init(&cfg, &env(0.60)).unwrap();
 
+        eq.update_control(&env(0.60));
         let mut slots = ports();
         eq.step(&env(0.60), Duration::from_secs(60), &mut slots)
             .unwrap();
@@ -711,6 +711,7 @@ mod tests {
         let mut eq = Dehumidifier::new(cfg.clone());
         eq.init(&cfg, &env(0.62)).unwrap();
 
+        eq.update_control(&env(0.62));
         let mut slots = ports();
         eq.step(&env(0.62), Duration::from_secs(60), &mut slots)
             .unwrap();
@@ -734,6 +735,7 @@ mod tests {
         let mut eq = Dehumidifier::new(cfg.clone());
         eq.init(&cfg, &env(0.62)).unwrap();
 
+        eq.update_control(&env(0.62));
         let mut slots_a = ports();
         eq.step(&env(0.62), Duration::from_secs(60), &mut slots_a)
             .unwrap();
@@ -742,6 +744,7 @@ mod tests {
         let mut restored = Dehumidifier::new(cfg.clone());
         restored.init(&cfg, &env(0.62)).unwrap();
         restored.load_state(&state).unwrap();
+        restored.update_control(&env(0.62));
         let mut slots_b = ports();
         restored
             .step(&env(0.62), Duration::from_secs(60), &mut slots_b)
@@ -793,5 +796,71 @@ mod tests {
         let registry = EquipmentRegistry::new();
         let eq = registry.create("Dehumidifier", config()).unwrap();
         assert_eq!(eq.descriptor().stage, ExecutionStage::Thermal);
+    }
+
+    #[test]
+    fn standby_mode_override_results_in_zero_power() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.90)).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Standby,
+        })
+        .unwrap();
+
+        let mode = eq.update_control(&env(0.90));
+        assert_eq!(mode, OperatingMode::Off);
+        assert_eq!(eq.telemetry().get(tk::IS_ON), Some(0.0));
+
+        let mut slots = ports();
+        eq.step(&env(0.90), Duration::from_secs(60), &mut slots)
+            .unwrap();
+        assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
+        assert_eq!(slots.electrical.load_power_kw, 0.0);
+    }
+
+    #[test]
+    fn cooling_mode_override_results_in_active_operation() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.40)).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Cooling,
+        })
+        .unwrap();
+
+        let mode = eq.update_control(&env(0.40));
+        assert_eq!(mode, OperatingMode::Cooling);
+
+        let mut slots = ports();
+        eq.step(&env(0.40), Duration::from_secs(60), &mut slots)
+            .unwrap();
+        assert_eq!(eq.telemetry().get(tk::IS_ON), Some(1.0));
+        assert!(eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap() > 0.0);
+        assert!(slots.electrical.load_power_kw > 0.0);
+    }
+
+    #[test]
+    fn off_mode_override_results_in_no_operation() {
+        let cfg = config();
+        let mut eq = Dehumidifier::new(cfg.clone());
+        eq.init(&cfg, &env(0.90)).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+
+        let mode = eq.update_control(&env(0.90));
+        assert_eq!(mode, OperatingMode::Off);
+        assert_eq!(eq.telemetry().get(tk::IS_ON), Some(0.0));
+
+        let mut slots = ports();
+        eq.step(&env(0.90), Duration::from_secs(60), &mut slots)
+            .unwrap();
+        assert_eq!(eq.telemetry().get(tk::ELECTRIC_POWER_W), Some(0.0));
+        assert_eq!(slots.electrical.load_power_kw, 0.0);
     }
 }

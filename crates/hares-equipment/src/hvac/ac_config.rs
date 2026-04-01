@@ -20,12 +20,13 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(12);
+    let mut telemetry = Telemetry::with_capacity(13);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_COOLING_W, 0.0);
     telemetry.insert(tk::SHR, 1.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::SPEED_INDEX, 0.0);
     telemetry.insert(tk::COP, 0.0);
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::COMPRESSOR_KW, 0.0);
@@ -62,6 +63,11 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "Operating mode code: 0=Off, 2=Cooling".to_string(),
+        },
+        TelemetryField {
+            name: tk::SPEED_INDEX.to_string(),
+            unit: "-".to_string(),
+            description: "Active compressor speed stage index (0-based)".to_string(),
         },
         TelemetryField {
             name: tk::COP.to_string(),

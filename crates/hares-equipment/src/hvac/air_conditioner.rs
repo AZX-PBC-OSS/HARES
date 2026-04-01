@@ -821,6 +821,8 @@ impl CoolingCore {
         self.telemetry.set(tk::SHR, self.hvac.shr);
         self.telemetry
             .set(tk::OPERATING_MODE, operating_mode_code(self.operating_mode));
+        self.telemetry
+            .set(tk::SPEED_INDEX, self.hvac.last_speed_index as f64);
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         let compressor_only_w = compressor_kw * 1000.0;
         let total_cooling_w = sensible_cooling_w + latent_cooling_w;
@@ -2289,6 +2291,37 @@ mod tests {
             ports.thermal[0].sensible_gain_w < 0.0,
             "cooling thermal port must remove sensible heat, got {}",
             ports.thermal[0].sensible_gain_w
+        );
+    }
+
+    #[test]
+    fn speed_index_appears_in_telemetry_when_cooling() {
+        let cfg = ac_config_with(|typed| {
+            typed.number_of_speeds = 4;
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let environment = env(30.0, 0.010, 18.0, 35.0);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let speed_index = eq.telemetry().get(tk::SPEED_INDEX);
+        assert!(
+            speed_index.is_some(),
+            "SPEED_INDEX must be present in AC telemetry after a cooling step"
+        );
+        assert_eq!(
+            speed_index.unwrap(),
+            eq.core.hvac.last_speed_index as f64,
+            "SPEED_INDEX telemetry must match hvac.last_speed_index"
         );
     }
 }
