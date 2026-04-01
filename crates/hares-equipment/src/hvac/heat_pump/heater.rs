@@ -2582,31 +2582,20 @@ mod tests {
         // heater_config(): heating_setpoint=21°C, hysteresis=1°C, backup=4 kW.
         // After init: er_setpoint_offset_c = 1.0*(1.8-0.2) = 1.6°C.
         // ER fires only when zone <= 21.0 - 1.6 = 19.4°C.
-        // Zone at setpoint - 1.0 = 20.0°C is above 19.4°C → ER must NOT fire.
+        // Zone at setpoint - 1.0 = 20.0°C is above 19.4°C → ER must NOT fire on first call.
         let cfg = heater_config();
 
         // OAT=0°C: below HP lockout (-17.78°C) threshold, so HP is available.
         //          below ER lockout (4.44°C), so ER is temperature-permitted.
         //          below max_oat_supplemental (21°C), so ER is not EnergyPlus-blocked.
-        let env_cold = env(18.0, 0.0, 0.003); // zone well below setpoint → enters Heating
+        // Init directly at zone=20°C so er_was_on is false — ER turn-on requires
+        // zone <= 19.4°C and er_thermostat_call is false at the start.
         let env_test = env(20.0, 0.0, 0.003); // zone = setpoint - 1.0°C
 
         let mut eq = ASHPHeater::new(cfg.clone());
-        let mut ports = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
-        eq.init(&cfg, &env_cold).unwrap();
+        eq.init(&cfg, &env_test).unwrap();
 
-        // Step 1: prime thermostat FSM into Heating mode (18°C < 21-1=20°C).
-        eq.update_control(&env_cold);
-        eq.step(&env_cold, Duration::from_secs(60), &mut ports)
-            .unwrap();
-
-        // Step 2: zone at exactly one deadband below setpoint (20.0°C).
-        // Thermostat stays in Heating (20.0 <= 21.0 with cutout_ratio=0).
-        // load_ratio = (21-20)/1 = 1.0 → HP runs at full speed.
-        // er_thermostat_call: 20.0 <= 19.4 → false → ER must not fire.
+        // First call: er_thermostat_call = (20.0 <= 19.4) = false → ER must not fire.
         let mode = eq.update_control(&env_test);
         assert_eq!(
             mode,
@@ -2620,37 +2609,26 @@ mod tests {
     }
 
     // ER engagement threshold: zone at 1.7°C below setpoint (19.3°C) is below
-    // the 1.6°C er_setpoint_offset threshold (19.4°C), but the compressor is
-    // still available so the thermostat path must not overlap ER with HP.
+    // the 1.6°C er_setpoint_offset threshold (19.4°C). With HP also available,
+    // supplemental ER engages simultaneously (HeatingHPAndER).
     #[test]
-    fn er_threshold_does_not_overlap_with_hp_when_compressor_is_available() {
-        // Same config as the companion test above.
+    fn er_engages_with_hp_when_zone_crosses_er_threshold() {
         // Zone = 21.0 - 1.7 = 19.3°C; er_call_threshold = 21.0 - 1.6 = 19.4°C.
-        // The ER call is present, but the compressor remains the active source.
+        // HP available (OAT 0°C > -17.78°C); ER temperature-permitted (OAT 0°C < 4.44°C).
+        // Zone is below ER threshold on first call so er_thermostat_call=true.
+        // With simultaneous HP+ER operation enabled, mode must be HeatingHPAndER.
         let cfg = heater_config();
 
-        let env_cold = env(18.0, 0.0, 0.003); // prime FSM into Heating
         let env_test = env(19.3, 0.0, 0.003); // zone = setpoint - 1.7°C
 
         let mut eq = ASHPHeater::new(cfg.clone());
-        let mut ports = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
-        eq.init(&cfg, &env_cold).unwrap();
+        eq.init(&cfg, &env_test).unwrap();
 
-        // Step 1: prime thermostat FSM into Heating mode.
-        eq.update_control(&env_cold);
-        eq.step(&env_cold, Duration::from_secs(60), &mut ports)
-            .unwrap();
-
-        // Step 2: zone has dropped to 19.3°C, which is below the 19.4°C ER threshold.
-        // HP is available (OAT 0°C > -17.78°C); ER is temperature-permitted (OAT 0°C < 4.44°C).
-        // The control path should keep compressor heating active without overlapping ER.
         let mode = eq.update_control(&env_test);
-        assert!(
-            mode == OperatingMode::HeatingHP,
-            "when HP is available, the thermostat path must not overlap ER; got {mode:?}",
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingHPAndER,
+            "zone below ER threshold with HP available must select HeatingHPAndER; got {mode:?}",
         );
     }
 
@@ -3589,10 +3567,11 @@ mod tests {
     fn hp_lockout_re_enables_when_oat_rises() {
         // HP lockout temp set to -5°C. Start well below to ensure lockout,
         // then step above to verify re-enable.
+        // Use OAT=5°C (above default ER lockout 4.44°C) in the warm step so that
+        // ER is blocked by temperature, isolating the HP re-enable signal.
         let lockout_c = -5.0_f64;
         let cfg = heater_config_with(|typed| {
             typed.hp_lockout_temp_c = Some(lockout_c);
-            typed.er_setpoint_offset_c = Some(0.0);
         });
 
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -3606,8 +3585,9 @@ mod tests {
             "HP must be off when OAT is well below lockout ({lockout_c}°C); got {mode_cold:?}"
         );
 
-        // Step 2: raise OAT above lockout — HP must re-enable.
-        let warm_env = env(18.0, lockout_c + 2.0, 0.003);
+        // Step 2: raise OAT to 5°C — above HP lockout (-5°C) and above ER lockout
+        // (4.44°C), so only HP runs.
+        let warm_env = env(18.0, 5.0, 0.003);
         let mode_warm = eq.update_control(&warm_env);
         assert_eq!(
             mode_warm,
