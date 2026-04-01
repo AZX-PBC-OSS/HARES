@@ -25,7 +25,7 @@ impl ThermalSolver {
                 let iam_diffuse = curve.diffuse_iam();
 
                 let poa_beam = irr.direct_w_m2 * iam_beam;
-                let poa_diffuse = irr.diffuse_w_m2 * iam_diffuse;
+                let poa_diffuse = (irr.diffuse_w_m2 + irr.reflected_w_m2) * iam_diffuse;
                 let poa_w_m2 = poa_beam + poa_diffuse;
 
                 let transmitted_beam_w = win.area_m2 * win.transmittance * poa_beam;

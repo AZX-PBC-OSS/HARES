@@ -35,6 +35,7 @@ struct NodeWiring {
 }
 
 struct WindowSolarData {
+    base_shgc: f64,
     shgc_summer: f64,
     shgc_winter: f64,
     u_factor_w_m2_k: f64,
@@ -320,6 +321,7 @@ fn build_solver_boundaries(
                         .sum()
                 };
                 WindowSolarData {
+                    base_shgc,
                     shgc_summer,
                     shgc_winter,
                     u_factor_w_m2_k: u_factor,
@@ -668,7 +670,7 @@ pub(crate) fn build_default_solvers(
                         radiation_frac: ws.radiation_frac,
                         glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(
                             ws.u_factor_w_m2_k,
-                            ws.shgc_summer,
+                            ws.base_shgc,
                         ),
                     },
                 );
