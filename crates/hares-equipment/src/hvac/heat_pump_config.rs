@@ -276,24 +276,26 @@ impl HeatPumpHeaterConfig {
                 "HeatPumpHeaterConfig: er_hard_lockout_time_s must be >= 0".to_string(),
             ));
         }
-        let n_speeds = self.effective_number_of_speeds() as usize;
-        if n_speeds >= 2 {
-            if let Some(stages) = &self.stage_heating_capacities_w {
-                if stages.len() != n_speeds {
-                    return Err(HaresError::Equipment(format!(
-                        "HeatPumpHeaterConfig: stage_heating_capacities_w has {} elements but number_of_speeds is {}; lengths must match",
-                        stages.len(),
-                        n_speeds,
-                    )));
+        if !self.is_mini_split {
+            let n_speeds = self.effective_number_of_speeds() as usize;
+            if n_speeds >= 2 {
+                if let Some(stages) = &self.stage_heating_capacities_w {
+                    if stages.len() != n_speeds {
+                        return Err(HaresError::Equipment(format!(
+                            "HeatPumpHeaterConfig: stage_heating_capacities_w has {} elements but number_of_speeds is {}; lengths must match",
+                            stages.len(),
+                            n_speeds,
+                        )));
+                    }
                 }
-            }
-            if let Some(stages) = &self.stage_heating_eirs {
-                if stages.len() != n_speeds {
-                    return Err(HaresError::Equipment(format!(
-                        "HeatPumpHeaterConfig: stage_heating_eirs has {} elements but number_of_speeds is {}; lengths must match",
-                        stages.len(),
-                        n_speeds,
-                    )));
+                if let Some(stages) = &self.stage_heating_eirs {
+                    if stages.len() != n_speeds {
+                        return Err(HaresError::Equipment(format!(
+                            "HeatPumpHeaterConfig: stage_heating_eirs has {} elements but number_of_speeds is {}; lengths must match",
+                            stages.len(),
+                            n_speeds,
+                        )));
+                    }
                 }
             }
         }

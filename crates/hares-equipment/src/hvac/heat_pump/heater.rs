@@ -470,13 +470,16 @@ impl HeatPumpHeaterCore {
             vec![DEFAULT_HEATING_CAPACITY_W]
         };
 
-        let n_speeds = cfg.effective_number_of_speeds() as usize;
-        if n_speeds >= 2 && self.hvac.heating_capacities_w.len() < n_speeds {
-            return Err(hares_types::HaresError::Equipment(format!(
-                "Heat pump heater init: number_of_speeds={n_speeds} but only {} heating capacity value(s) provided; supply stage_heating_capacities_w with {} elements",
-                self.hvac.heating_capacities_w.len(),
-                n_speeds,
-            )));
+        let is_mini_split = cfg.is_mini_split || matches!(self.variant, HeaterVariant::Minisplit);
+        if !is_mini_split {
+            let n_speeds = cfg.effective_number_of_speeds() as usize;
+            if n_speeds >= 2 && self.hvac.heating_capacities_w.len() < n_speeds {
+                return Err(hares_types::HaresError::Equipment(format!(
+                    "Heat pump heater init: number_of_speeds={n_speeds} but only {} heating capacity value(s) provided; supply stage_heating_capacities_w with {} elements",
+                    self.hvac.heating_capacities_w.len(),
+                    n_speeds,
+                )));
+            }
         }
 
         let default_eir = cfg
@@ -4328,6 +4331,39 @@ mod tests {
             "defrost time fraction must be 0.0 when defrost inactive"
         );
     }
+
+    #[test]
+    fn two_speed_with_single_capacity_errors() {
+        let cfg = heater_config_with(|typed| {
+            typed.number_of_speeds = 2;
+            typed.heating_capacity_w = Some(8_000.0);
+            typed.stage_heating_capacities_w = None;
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 5.0, 0.003);
+        let result = eq.init(&cfg, &environment);
+        assert!(
+            result.is_err(),
+            "number_of_speeds=2 with only a single heating_capacity_w must return an error"
+        );
+    }
+
+    #[test]
+    fn two_speed_with_matching_stage_vec_succeeds() {
+        let cfg = heater_config_with(|typed| {
+            typed.number_of_speeds = 2;
+            typed.heating_capacity_w = None;
+            typed.stage_heating_capacities_w = Some(vec![4_000.0, 8_000.0]);
+            typed.stage_heating_eirs = Some(vec![0.33, 0.33]);
+            typed.backup_capacity_w = Some(0.0);
+        });
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let environment = env(18.0, 5.0, 0.003);
+        assert!(
+            eq.init(&cfg, &environment).is_ok(),
+            "number_of_speeds=2 with a matching 2-element stage_heating_capacities_w must succeed"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4942,39 +4978,6 @@ mod ideal_capacity_tests {
         assert!(
             (er_w - EXPECTED_ER_W).abs() < 1.0,
             "ER must fill only the residual ({EXPECTED_ER_W:.0} W); got {er_w:.1} W"
-        );
-    }
-
-    #[test]
-    fn two_speed_with_single_capacity_errors() {
-        let cfg = heater_config_with(|typed| {
-            typed.number_of_speeds = 2;
-            typed.heating_capacity_w = Some(8_000.0);
-            typed.stage_heating_capacities_w = None;
-        });
-        let mut eq = ASHPHeater::new(cfg.clone());
-        let environment = env(18.0, 5.0, 0.003);
-        let result = eq.init(&cfg, &environment);
-        assert!(
-            result.is_err(),
-            "number_of_speeds=2 with only a single heating_capacity_w must return an error"
-        );
-    }
-
-    #[test]
-    fn two_speed_with_matching_stage_vec_succeeds() {
-        let cfg = heater_config_with(|typed| {
-            typed.number_of_speeds = 2;
-            typed.heating_capacity_w = None;
-            typed.stage_heating_capacities_w = Some(vec![4_000.0, 8_000.0]);
-            typed.stage_heating_eirs = Some(vec![0.33, 0.33]);
-            typed.backup_capacity_w = Some(0.0);
-        });
-        let mut eq = ASHPHeater::new(cfg.clone());
-        let environment = env(18.0, 5.0, 0.003);
-        assert!(
-            eq.init(&cfg, &environment).is_ok(),
-            "number_of_speeds=2 with a matching 2-element stage_heating_capacities_w must succeed"
         );
     }
 
