@@ -20,6 +20,9 @@ pub(super) fn default_heater_telemetry() -> Telemetry {
     telemetry.insert(tk::RUNTIME_FRACTION, 0.0);
     telemetry.insert(tk::COMPRESSOR_KW, 0.0);
     telemetry.insert(tk::DEFROST_TIME_FRACTION, 0.0);
+    telemetry.insert(tk::DEFROST_EXTRA_POWER_W, 0.0);
+    telemetry.insert(tk::DEFROST_Q_W, 0.0);
+    telemetry.insert(tk::DEFROST_CAPACITY_MULTIPLIER, 1.0);
     telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
     telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
     telemetry.insert(tk::FAN_KW, 0.0);
@@ -85,6 +88,21 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::DEFROST_TIME_FRACTION.to_string(),
             unit: "-".to_string(),
             description: "Fraction of timestep in defrost mode [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::DEFROST_EXTRA_POWER_W.to_string(),
+            unit: "W".to_string(),
+            description: "Additional electric power consumed during defrost".to_string(),
+        },
+        TelemetryField {
+            name: tk::DEFROST_Q_W.to_string(),
+            unit: "W".to_string(),
+            description: "Heating capacity lost to defrost energy [W]".to_string(),
+        },
+        TelemetryField {
+            name: tk::DEFROST_CAPACITY_MULTIPLIER.to_string(),
+            unit: "-".to_string(),
+            description: "Capacity multiplier during defrost [0..1]".to_string(),
         },
         TelemetryField {
             name: tk::HEATING_SETPOINT_C.to_string(),

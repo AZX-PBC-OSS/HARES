@@ -946,11 +946,11 @@ fn lut_tapers_charge_power_at_high_soc() {
 fn degradation_starts_at_zero() {
     let config = ev_config(base_raw());
     let ev = Ev::new(config);
-    assert_eq!(ev.degradation.capacity_fade_pct(), 0.0);
+    assert_eq!(ev.degradation.capacity_fade_fraction(), 0.0);
 }
 
 #[test]
-fn capacity_fade_pct_in_telemetry() {
+fn capacity_fade_fraction_in_telemetry() {
     let config = ev_config(base_raw());
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -970,8 +970,8 @@ fn degradation_state_survives_checkpoint() {
     ev2.init(&config, &env).unwrap();
     ev2.load_state(&saved).unwrap();
     assert_eq!(
-        ev2.degradation.capacity_fade_pct(),
-        ev1.degradation.capacity_fade_pct(),
+        ev2.degradation.capacity_fade_fraction(),
+        ev1.degradation.capacity_fade_fraction(),
     );
 }
 

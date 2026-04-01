@@ -285,8 +285,10 @@ pub struct Battery {
 
     // Static config
     capacity_kwh: f64,
-    /// Nominal pack capacity before temperature derating (d0 Arrhenius model).
-    /// Set once from config; capacity_kwh is updated each step based on cell temperature.
+    /// Rated pack capacity from config (immutable). Used as baseline for SOH scaling.
+    capacity_kwh_rated: f64,
+    /// Nominal pack capacity after SOH degradation, before temperature derating.
+    /// Updated daily: capacity_kwh_rated * (1 - capacity_fade).
     capacity_kwh_nominal: f64,
     max_charge_kw: f64,
     max_discharge_kw: f64,
@@ -399,6 +401,7 @@ impl Battery {
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
             capacity_kwh: DEFAULT_CAPACITY_KWH,
+            capacity_kwh_rated: DEFAULT_CAPACITY_KWH,
             capacity_kwh_nominal: DEFAULT_CAPACITY_KWH,
             max_charge_kw: DEFAULT_MAX_CHARGE_KW,
             max_discharge_kw: DEFAULT_MAX_DISCHARGE_KW,
@@ -597,8 +600,8 @@ impl Battery {
         if power_kw > 0.0 {
             let mut hw_max = self.max_charge_kw * temp_derate * dr_fraction;
             if let Some(ref lut) = self.charging_curve_lut {
-                let soh = 1.0 - self.degradation.capacity_fade_pct();
-                let pack_kwh = self.capacity_kwh_nominal * soh;
+                let soh = 1.0 - self.degradation.capacity_fade_fraction();
+                let pack_kwh = self.capacity_kwh_nominal;
                 let c_rate = if pack_kwh > 0.0 {
                     power_kw / pack_kwh
                 } else {
@@ -674,7 +677,8 @@ impl Battery {
         c.validate()?;
 
         self.capacity_kwh = c.capacity_kwh;
-        self.capacity_kwh_nominal = self.capacity_kwh;
+        self.capacity_kwh_rated = c.capacity_kwh;
+        self.capacity_kwh_nominal = self.capacity_kwh_rated;
         self.max_charge_kw = c.max_charge_kw;
         self.max_discharge_kw = c.max_discharge_kw;
 
@@ -1024,6 +1028,9 @@ impl Equipment for Battery {
             let sum_sq_dod = self.rainflow.sum_squared_dod_daily();
             self.degradation
                 .update_daily(&self.u_neg_table, cell_temp_k, sum_sq_dod);
+            let soh = 1.0 - self.degradation.capacity_fade_fraction();
+            self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
+            tracing::debug!(soh, capacity_kwh_nominal = self.capacity_kwh_nominal, "daily SOH update");
             self.degradation.reset_day_tracking(self.soc);
             self.rainflow.reset_daily();
             self.last_daily_update_day = current_day;
@@ -1046,7 +1053,7 @@ impl Equipment for Battery {
         self.telemetry
             .set(tk::CYCLE_COUNT, self.rainflow.total_cycles());
         self.telemetry
-            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
+            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_fraction() * 100.0);
         self.telemetry.set(tk::TERMINAL_VOLTAGE_V, terminal_v);
         self.telemetry.set(tk::CURRENT_A, current_a);
         self.core_output = CoreOutput {
@@ -1109,6 +1116,9 @@ impl Equipment for Battery {
     }
 
     fn load_state(&mut self, state: &[u8]) -> crate::Result<()> {
+        // `capacity_kwh_rated` is static config set by init(), not stored in the
+        // checkpoint. The caller must call init() before load_state() so that
+        // `capacity_kwh_rated` is available for recomputing `capacity_kwh_nominal`.
         let cp: BatteryCheckpoint = load_postcard(state)?;
         self.soc = cp.soc;
         self.cell_temp_c = cp.cell_temp_c;
@@ -1130,13 +1140,17 @@ impl Equipment for Battery {
         self.dr_duration_remaining_s = cp.dr_duration_remaining_s;
         self.external_power_limit_kw = cp.external_power_limit_kw;
 
+        // Recompute capacity_kwh_nominal from rated capacity and restored SOH.
+        let soh = 1.0 - self.degradation.capacity_fade_fraction();
+        self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
+
         // Recompute all derived telemetry from restored state so no fields are stale.
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry.set(tk::CELL_TEMP_C, self.cell_temp_c);
         self.telemetry
             .set(tk::CYCLE_COUNT, self.rainflow.total_cycles());
         self.telemetry
-            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
+            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_fraction() * 100.0);
         self.telemetry
             .set(tk::DISCHARGE_DERATE, self.discharge_derate_factor());
         self.telemetry.set(
@@ -3025,7 +3039,7 @@ mod tests {
     #[test]
     fn degradation_starts_at_zero() {
         let state = DegradationState::default();
-        assert_eq!(state.capacity_fade_pct(), 0.0);
+        assert_eq!(state.capacity_fade_fraction(), 0.0);
     }
 
     /// After many complete days of cycling at 25 C, capacity fade must be positive
@@ -3119,7 +3133,7 @@ mod tests {
     }
 
     /// Higher temperature must produce more q_li1 (calendar SEI growth) than lower temperature.
-    /// Uses q_li1 directly — capacity_fade_pct includes q_li3 whose temperature dependence
+    /// Uses q_li1 directly — capacity_fade_fraction includes q_li3 whose temperature dependence
     /// differs and can mask the Arrhenius effect during the BOL transient.
     #[test]
     fn degradation_higher_temp_more_fade() {
@@ -3185,7 +3199,7 @@ mod tests {
         }
 
         let saved = bat1.save_state();
-        let fade_before = bat1.degradation.capacity_fade_pct();
+        let fade_before = bat1.degradation.capacity_fade_fraction();
         let b1_accum_before = bat1.degradation.b1_accum;
 
         // Restore into a fresh battery.
@@ -3194,12 +3208,66 @@ mod tests {
         bat2.load_state(&saved).unwrap();
 
         assert!(
-            (bat2.degradation.capacity_fade_pct() - fade_before).abs() < 1e-15,
+            (bat2.degradation.capacity_fade_fraction() - fade_before).abs() < 1e-15,
             "capacity_fade must survive checkpoint"
         );
         assert!(
             (bat2.degradation.b1_accum - b1_accum_before).abs() < 1e-15,
             "b1_accum must survive checkpoint"
+        );
+    }
+
+    /// After several days of cycling, save a checkpoint, load into a fresh Battery,
+    /// and verify `capacity_kwh_nominal` matches the original (non-zero degradation).
+    #[test]
+    fn load_state_preserves_nominal_capacity_after_degradation() {
+        let config = typed_battery_config(None, None);
+        let mut env = warm_env();
+        let mut bat1 = Battery::new(config.clone());
+        bat1.init(&config, &env).unwrap();
+
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288;
+
+        // Run 7 days of cycling to accumulate measurable degradation.
+        for _day in 0..7 {
+            for step in 0..steps_per_day {
+                env.current_time = env.current_time + ChronoDuration::seconds(300);
+                let power = if step < steps_per_day / 2 { 5.0 } else { -5.0 };
+                bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                    active_power_kw: power,
+                    reactive_power_kvar: None,
+                })
+                .unwrap();
+                let mut ports = default_ports();
+                bat1.step(&env, dt, &mut ports).unwrap();
+            }
+        }
+
+        let fade1 = bat1.degradation.capacity_fade_fraction();
+        let nominal1 = bat1.capacity_kwh_nominal;
+        let rated = bat1.capacity_kwh_rated;
+
+        // Degradation should be non-zero after 7 days.
+        assert!(
+            fade1.abs() > 0.0,
+            "expected non-zero fade after 7 days, got {fade1}"
+        );
+
+        // Save and restore into a fresh battery.
+        let saved = bat1.save_state();
+        let mut bat2 = Battery::new(config.clone());
+        bat2.init(&config, &env).unwrap();
+        bat2.load_state(&saved).unwrap();
+
+        assert!(
+            (bat2.capacity_kwh_nominal - nominal1).abs() < 1e-12,
+            "capacity_kwh_nominal mismatch after load_state: expected {nominal1}, got {}",
+            bat2.capacity_kwh_nominal
+        );
+        assert!(
+            (bat2.capacity_kwh_nominal - rated * (1.0 - fade1)).abs() < 1e-12,
+            "capacity_kwh_nominal should equal rated * soh"
         );
     }
 
@@ -3861,5 +3929,77 @@ mod tests {
             }
             _ => panic!("expected Battery seed"),
         }
+    }
+
+    /// Run 365 days of cycling. The SOH-to-capacity relationship
+    /// capacity_fade_fraction = 1.0 - (capacity_kwh_nominal / capacity_kwh_rated) must hold.
+    /// Note: the BOL transient (q_li3 < 0) can cause soh > 1.0 initially (Smith 2017),
+    /// so we verify the algebraic relationship rather than assuming monotonic decline.
+    #[test]
+    fn degradation_reduces_nominal_capacity() {
+        let config = typed_battery_config(None, None);
+        let mut bat = Battery::new(config.clone());
+        let mut env = warm_env();
+        bat.init(&config, &env).unwrap();
+
+        let rated = bat.capacity_kwh_rated;
+        assert!(
+            (bat.capacity_kwh_nominal - rated).abs() < 1e-12,
+            "nominal should equal rated at init"
+        );
+
+        let dt = Duration::from_secs(300);
+        let steps_per_day = 288; // 5-min steps
+
+        // Cycle the battery: charge then discharge each day to cause degradation.
+        for day in 0..365 {
+            for step in 0..steps_per_day {
+                env.current_time = env.current_time + ChronoDuration::seconds(300);
+
+                if step < steps_per_day / 2 {
+                    bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                        active_power_kw: 5.0,
+                        reactive_power_kvar: None,
+                    })
+                    .unwrap();
+                } else {
+                    bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+                        active_power_kw: -5.0,
+                        reactive_power_kvar: None,
+                    })
+                    .unwrap();
+                }
+
+                let mut ports = default_ports();
+                bat.step(&env, dt, &mut ports).unwrap();
+            }
+
+            // Verify the SOH-to-capacity algebraic relationship at periodic checkpoints.
+            if day % 50 == 0 {
+                let fade = bat.degradation.capacity_fade_fraction();
+                let soh = 1.0 - fade;
+                let expected_nominal = rated * soh;
+                assert!(
+                    (bat.capacity_kwh_nominal - expected_nominal).abs() < 1e-6,
+                    "day {day}: capacity_kwh_nominal ({}) should match rated * soh ({expected_nominal})",
+                    bat.capacity_kwh_nominal
+                );
+            }
+        }
+
+        // After 365 days, the algebraic invariant must still hold.
+        let fade = bat.degradation.capacity_fade_fraction();
+        let expected_fade = 1.0 - (bat.capacity_kwh_nominal / rated);
+        assert!(
+            (fade - expected_fade).abs() < 1e-6,
+            "capacity_fade_fraction ({fade}) should match 1 - nominal/rated ({expected_fade})"
+        );
+
+        // Capacity_kwh_nominal should differ from rated (degradation had an effect).
+        assert!(
+            (bat.capacity_kwh_nominal - rated).abs() > 1e-6,
+            "after 365 days, nominal ({}) should differ from rated ({rated})",
+            bat.capacity_kwh_nominal
+        );
     }
 }

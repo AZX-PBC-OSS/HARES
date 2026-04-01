@@ -227,6 +227,9 @@ struct HeaterStep {
     er_capacity_w: f64,
     defrost_active: bool,
     defrost_time_fraction: f64,
+    defrost_extra_power_w: f64,
+    defrost_q_w: f64,
+    defrost_capacity_multiplier: f64,
     /// Fuel consumption [W] when backup heater burns gas/propane/oil.
     /// Zero when backup is electric or not running.
     fuel_w: f64,
@@ -765,6 +768,11 @@ impl HeatPumpHeaterCore {
         );
         self.telemetry
             .set(tk::DEFROST_TIME_FRACTION, step.defrost_time_fraction);
+        self.telemetry
+            .set(tk::DEFROST_EXTRA_POWER_W, step.defrost_extra_power_w);
+        self.telemetry.set(tk::DEFROST_Q_W, step.defrost_q_w);
+        self.telemetry
+            .set(tk::DEFROST_CAPACITY_MULTIPLIER, step.defrost_capacity_multiplier);
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(
             tk::HEATING_SETPOINT_C,
@@ -857,16 +865,15 @@ impl HeatPumpHeaterCore {
         let plr = if self.use_ideal && self.ideal_capacity_w.abs() > f64::EPSILON {
             // Solver-provided ideal capacity (positive for heating): derive PLR
             // from biquadratic-corrected capacity at current conditions.
-            // The denominator must reflect the active heat source on this step.
-            let total_available = if hp_on_control && er_on {
-                steady_capacity_w + self.backup_capacity_w
-            } else if er_on {
+            // When ER is also on, HP runs at full available capacity first; ER fills
+            // the residual. Do not inflate the denominator with ER rated capacity.
+            let hp_denominator = if er_on && !hp_on_control {
                 self.backup_capacity_w
             } else {
                 steady_capacity_w
             };
             let min_cap = (stage_capacity_w * 0.01).max(1.0);
-            let p = (self.ideal_capacity_w / total_available.max(min_cap)).clamp(0.0, 1.0);
+            let p = (self.ideal_capacity_w / hp_denominator.max(min_cap)).clamp(0.0, 1.0);
             // Write back so telemetry and RTF reporting see the solver-derived value.
             self.hvac.duty_cycle = p;
             p
@@ -909,6 +916,9 @@ impl HeatPumpHeaterCore {
 
         let mut defrost_active = false;
         let mut defrost_time_fraction = 0.0;
+        let mut defrost_extra_power_w = 0.0;
+        let mut defrost_q_w = 0.0;
+        let mut defrost_capacity_multiplier = 1.0;
 
         if hp_on {
             let max_capacity_w = self
@@ -932,13 +942,28 @@ impl HeatPumpHeaterCore {
             if defrost.active {
                 defrost_active = true;
                 defrost_time_fraction = defrost.time_fraction;
+                defrost_extra_power_w = defrost.extra_power_w;
+                defrost_q_w = defrost.q_defrost_w;
+                defrost_capacity_multiplier = defrost.capacity_multiplier;
 
-                hp_capacity_w = (hp_capacity_w * defrost.capacity_multiplier - defrost.q_defrost_w)
-                    .max(0.0)
-                    * self
-                        .defrost_config
-                        .capacity_reduction_factor
-                        .clamp(0.0, 1.0);
+                let crf = self.defrost_config.capacity_reduction_factor.clamp(0.0, 1.0);
+
+                if self.use_ideal {
+                    // OCHRE HVAC.py:1154-1156 — clamp to post-defrost rated ceiling.
+                    // capacity_max = rated * cap_mult - q_defrost, then
+                    // capacity = min(capacity, capacity_max * ext_capacity_frac).
+                    // In HARES ext_capacity_frac is folded into crf.
+                    let capacity_ceiling =
+                        (max_capacity_w * defrost.capacity_multiplier - defrost.q_defrost_w)
+                            .max(0.0)
+                            * crf;
+                    hp_capacity_w = hp_capacity_w.min(capacity_ceiling);
+                } else {
+                    hp_capacity_w = (hp_capacity_w * defrost.capacity_multiplier
+                        - defrost.q_defrost_w)
+                        .max(0.0)
+                        * crf;
+                }
 
                 hp_electric_w = hp_electric_w * defrost.power_multiplier + defrost.extra_power_w;
             }
@@ -958,7 +983,11 @@ impl HeatPumpHeaterCore {
             fan_power_w = 0.0;
         }
 
-        let er_capacity_w = if er_on {
+        let er_capacity_w = if er_on && self.use_ideal {
+            (self.ideal_capacity_w - hp_capacity_w)
+                .max(0.0)
+                .min(self.backup_capacity_w)
+        } else if er_on {
             self.backup_capacity_w * plr
         } else {
             0.0
@@ -1071,6 +1100,9 @@ impl HeatPumpHeaterCore {
             er_capacity_w: step_er_capacity_w.max(0.0),
             defrost_active,
             defrost_time_fraction,
+            defrost_extra_power_w,
+            defrost_q_w,
+            defrost_capacity_multiplier,
             fuel_w: fuel_w.max(0.0),
         })
     }
@@ -1185,11 +1217,42 @@ impl HeatPumpHeaterCore {
         };
 
         let hp_on = hp_on_control && hp_available && speed.part_load_ratio > 0.0;
+        let er_demand = if self.use_ideal && self.ideal_capacity_w > f64::EPSILON {
+            if hp_available {
+                let stage_cap = if matches!(
+                    self.hvac.speed_control_mode,
+                    SpeedControlMode::MultiSpeedInterpolated | SpeedControlMode::VariableSpeedIdeal
+                ) {
+                    self.hvac.interpolated_capacity(
+                        &self.hvac.heating_capacities_w,
+                        speed.speed_index,
+                        speed.speed_frac,
+                    )
+                } else {
+                    HvacEquipment::capacity_at_stage(
+                        &self.hvac.heating_capacities_w,
+                        speed.speed_index,
+                    )
+                };
+                let (_, cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
+                    0,
+                    zone.temperature_c,
+                    env.weather.outdoor_temp_c,
+                    1.0,
+                );
+                let hp_available_capacity_w = (stage_cap * cap_ratio).max(0.0);
+                self.ideal_capacity_w > hp_available_capacity_w
+            } else {
+                self.ideal_capacity_w > f64::EPSILON
+            }
+        } else {
+            er_thermostat_call
+        };
         let er_on = self.backup_capacity_w > 0.0
             && er_allowed_by_temp
             && er_allowed_by_cycle
             && er_allowed_by_lockout
-            && er_thermostat_call;
+            && er_demand;
 
         if std::env::var("HARES_DEBUG_ASHP_CONTROL").is_ok()
             && matches!(self.variant, HeaterVariant::Ashp)
@@ -3900,6 +3963,26 @@ mod tests {
             "HP_CAPACITY_W during defrost ({cold_capacity_w:.1} W) must be reduced \
              vs warm-OAT baseline ({warm_capacity_w:.1} W)"
         );
+
+        // Verify the non-ideal defrost formula:
+        //   hp_capacity = (original * cap_mult - q_defrost).max(0.0) * crf
+        // With identity biquadratic curves, warm_capacity_w == pre-defrost capacity.
+        // Default crf = 1.0.
+        let cap_mult = eq_cold
+            .telemetry()
+            .get(tk::DEFROST_CAPACITY_MULTIPLIER)
+            .expect("DEFROST_CAPACITY_MULTIPLIER must be present");
+        let q_defrost = eq_cold
+            .telemetry()
+            .get(tk::DEFROST_Q_W)
+            .expect("DEFROST_Q_W must be present");
+        let expected = (warm_capacity_w * cap_mult - q_defrost).max(0.0);
+        assert!(
+            (cold_capacity_w - expected).abs() < 1e-6,
+            "non-ideal defrost formula mismatch: hp_capacity_w={cold_capacity_w:.6}, \
+             expected={expected:.6} (warm_cap={warm_capacity_w:.1} * cap_mult={cap_mult:.6} \
+             - q_defrost={q_defrost:.6})"
+        );
     }
 
     #[test]
@@ -4032,6 +4115,136 @@ mod tests {
             "OAT below HP lockout must select HeatingER only; got {mode:?}"
         );
     }
+
+    #[test]
+    fn ideal_mode_defrost_clamps_to_post_defrost_ceiling() {
+        let rated_cap = 8_000.0_f64;
+        let mut cfg = heater_config_with(|typed| {
+            typed.heating_capacity_w = Some(rated_cap);
+        });
+        cfg.test_extras_mut()
+            .insert("use_ideal_capacity".to_string(), true.into());
+
+        // OAT=0°C with humidity: triggers defrost (below 4.44°C threshold).
+        let environment = env(18.0, 0.0, 0.005);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+
+        // Request full rated capacity via ideal-capacity signal.
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: rated_cap,
+        })
+        .expect("ideal-capacity control accepted");
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let hp_cap = eq.telemetry().get(tk::HP_CAPACITY_W).unwrap_or(0.0);
+        let defrost_active = eq.telemetry().get(tk::DEFROST_ACTIVE).unwrap_or(0.0);
+        let cap_mult = eq
+            .telemetry()
+            .get(tk::DEFROST_CAPACITY_MULTIPLIER)
+            .unwrap_or(1.0);
+        let q_defrost = eq.telemetry().get(tk::DEFROST_Q_W).unwrap_or(0.0);
+
+        assert_eq!(
+            defrost_active, 1.0,
+            "OAT=0°C with humidity must trigger defrost"
+        );
+
+        // Post-defrost rated ceiling (crf defaults to 1.0).
+        let ceiling = rated_cap * cap_mult - q_defrost;
+        assert!(
+            ceiling > 0.0,
+            "ceiling must be positive; cap_mult={cap_mult}, q_defrost={q_defrost}"
+        );
+        assert!(
+            hp_cap <= ceiling + 1e-6,
+            "ideal-mode hp_capacity_w ({hp_cap:.1} W) must not exceed post-defrost \
+             rated ceiling ({ceiling:.1} W = {rated_cap} * {cap_mult:.4} - {q_defrost:.1})"
+        );
+        assert!(
+            hp_cap < rated_cap,
+            "defrost must reduce capacity below rated; got {hp_cap:.1} W vs rated {rated_cap} W"
+        );
+    }
+
+    #[test]
+    fn defrost_telemetry_fields_emitted() {
+        let cfg = heater_config();
+        let environment = env(18.0, -5.0, 0.005);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let defrost_active = eq.telemetry().get(tk::DEFROST_ACTIVE).unwrap_or(0.0);
+        assert_eq!(defrost_active, 1.0, "must be in defrost at OAT=-5°C");
+
+        let extra_power = eq.telemetry().get(tk::DEFROST_EXTRA_POWER_W);
+        let q_w = eq.telemetry().get(tk::DEFROST_Q_W);
+        let cap_mult = eq.telemetry().get(tk::DEFROST_CAPACITY_MULTIPLIER);
+
+        assert!(extra_power.is_some(), "DEFROST_EXTRA_POWER_W must be present");
+        assert!(q_w.is_some(), "DEFROST_Q_W must be present");
+        assert!(cap_mult.is_some(), "DEFROST_CAPACITY_MULTIPLIER must be present");
+
+        assert!(extra_power.unwrap() > 0.0, "defrost extra power must be strictly positive when active");
+        assert!(q_w.unwrap() > 0.0, "defrost q_w must be positive when active");
+        assert!(
+            cap_mult.unwrap() > 0.0 && cap_mult.unwrap() < 1.0,
+            "defrost capacity multiplier must be in (0, 1); got {:.4}",
+            cap_mult.unwrap()
+        );
+    }
+
+    #[test]
+    fn defrost_telemetry_zero_when_inactive() {
+        let cfg = heater_config();
+        let environment = env(18.0, 10.0, 0.002);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let defrost_active = eq.telemetry().get(tk::DEFROST_ACTIVE).unwrap_or(0.0);
+        assert_eq!(defrost_active, 0.0, "warm OAT should not trigger defrost");
+
+        assert_eq!(
+            eq.telemetry().get(tk::DEFROST_EXTRA_POWER_W),
+            Some(0.0),
+            "extra power must be 0.0 when defrost inactive"
+        );
+        assert_eq!(
+            eq.telemetry().get(tk::DEFROST_Q_W),
+            Some(0.0),
+            "q_w must be 0.0 when defrost inactive"
+        );
+        assert_eq!(
+            eq.telemetry().get(tk::DEFROST_CAPACITY_MULTIPLIER),
+            Some(1.0),
+            "capacity multiplier must be 1.0 when defrost inactive"
+        );
+        assert_eq!(
+            eq.telemetry().get(tk::DEFROST_TIME_FRACTION),
+            Some(0.0),
+            "defrost time fraction must be 0.0 when defrost inactive"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4040,8 +4253,8 @@ mod ideal_capacity_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState,
-        ZoneId, ZoneState, telemetry_keys as tk,
+        ControlSignal, EnvironmentState, GridState, OperatingMode, PortSlots, ThermalAccumulator,
+        WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
     use super::ASHPHeater;
@@ -4284,6 +4497,368 @@ mod ideal_capacity_tests {
         assert_eq!(
             rtf, 0.0,
             "900 s timestep with zone above heating setpoint must produce RTF=0.0, got {rtf}"
+        );
+    }
+
+    // Build a config with backup ER and OAT below the ER lockout threshold.
+    // Identity biquadratic curves (cap_ratio = 1.0) so capacity is exactly rated.
+    fn heater_config_with_er() -> EquipmentConfig {
+        let mut cfg = EquipmentConfig::from_typed(
+            "HP Heater ER".to_string(),
+            "ASHP Heater".to_string(),
+            crate::HeatPumpHeaterConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(6_000.0),
+                heating_eir: Some(0.33),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(4_000.0),
+                backup_eir: Some(1.0),
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                stage_shrs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                hp_lockout_temp_c: None,
+                er_lockout_temp_c: Some(10.0),
+                max_oat_supplemental_c: Some(21.0),
+                er_setpoint_offset_c: Some(3.0),
+                er_hard_lockout_time_s: None,
+                duct: Default::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+        // Identity curves: cap_ratio = 1.0, eir_ratio = 1.0
+        cfg.test_extras_mut().insert(
+            "biquadratic_coeffs".to_string(),
+            "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
+        );
+        cfg.test_extras_mut()
+            .insert("use_ideal_capacity".to_string(), true.into());
+        cfg
+    }
+
+    // In ideal mode with HP partially covering the load, ER provides only the
+    // residual gap (ideal_w - hp_w), not a proportional share of the full request.
+    //
+    // Setup: HP rated=6000 W, ER rated=4000 W, OAT=0°C (below er_lockout 10°C).
+    // Solver injects 8000 W ideal. HP available = 6000 W (identity curve).
+    // Bug A: er_demand = 8000 > 6000 → er_on = true.
+    // Bug B: er_capacity = (8000 - hp_actual).min(4000) = ideal - hp (residual fill).
+    // The total delivered (hp + er) must equal ideal_w, and er = ideal - hp exactly.
+    #[test]
+    fn ideal_mode_er_fills_residual_not_proportional() {
+        const ER_RATED_W: f64 = 4_000.0;
+        const IDEAL_W: f64 = 8_000.0;
+
+        let cfg = heater_config_with_er();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // OAT=0°C: below ER lockout (10°C) so ER is temperature-permitted.
+        let env = {
+            let mut e = make_env(18.0, 900);
+            e.weather.outdoor_temp_c = 0.0;
+            e
+        };
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity { capacity_w: IDEAL_W })
+            .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let hp_w = eq.telemetry().get(tk::HP_CAPACITY_W).unwrap_or(0.0);
+        let er_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
+
+        // ER must be active (load exceeds HP capacity).
+        assert!(er_w > 0.0, "ER must be active when ideal demand exceeds HP capacity");
+        // ER fills exactly the residual: er = (ideal - hp).min(er_rated).
+        // Startup capacity degradation may reduce hp_w below steady-state; ER compensates up
+        // to its rated limit regardless.
+        let expected_er_w = (IDEAL_W - hp_w).max(0.0).min(ER_RATED_W);
+        assert!(
+            (er_w - expected_er_w).abs() < 1e-6,
+            "ER must fill only the residual gap (ideal - hp = {expected_er_w:.1} W); got {er_w:.1} W"
+        );
+    }
+
+    // In ideal mode when the HP can fully cover the ideal demand, ER must stay off
+    // even if the zone temperature is far below the ER setpoint offset threshold.
+    //
+    // Setup: HP rated=6000 W, ER rated=4000 W, OAT=0°C.
+    // Solver injects 4000 W (< HP rated=6000 W). HP can cover it alone.
+    // er_setpoint_offset_c=3.0 so zone (18°C) is well below er_turn_on (21-3=18°C):
+    // thermostat-based logic would fire ER, but ideal logic must suppress it.
+    #[test]
+    fn ideal_mode_er_only_when_hp_cannot_cover_load() {
+        const IDEAL_W: f64 = 4_000.0;
+
+        let cfg = heater_config_with_er();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let env = {
+            let mut e = make_env(18.0, 900);
+            e.weather.outdoor_temp_c = 0.0;
+            e
+        };
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity { capacity_w: IDEAL_W })
+            .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let er_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(f64::NAN);
+        assert!(
+            er_w < 1e-6,
+            "ER must stay off when HP can cover the full ideal demand ({IDEAL_W:.0} W < HP rated 6000 W); \
+             got er_capacity_w={er_w:.1} W"
+        );
+    }
+
+    // In bang-bang mode (use_ideal=false, 60 s timestep), ER uses the proportional
+    // PLR path: backup_capacity_w * plr.  Zone below setpoint → PLR=1.0 → ER runs
+    // at full rated capacity when OAT is below the ER lockout threshold.
+    #[test]
+    fn bang_bang_er_unchanged() {
+        const ER_RATED_W: f64 = 4_000.0;
+
+        let mut cfg = EquipmentConfig::from_typed(
+            "HP Heater BB".to_string(),
+            "ASHP Heater".to_string(),
+            crate::HeatPumpHeaterConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(6_000.0),
+                heating_eir: Some(0.33),
+                stage_heating_capacities_w: None,
+                stage_heating_eirs: None,
+                backup_fuel: None,
+                backup_capacity_w: Some(ER_RATED_W),
+                backup_eir: Some(1.0),
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                stage_shrs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                hp_lockout_temp_c: Some(10.0),
+                er_lockout_temp_c: Some(5.0),
+                max_oat_supplemental_c: Some(21.0),
+                er_setpoint_offset_c: Some(0.0),
+                er_hard_lockout_time_s: None,
+                duct: Default::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+        cfg.test_extras_mut().insert(
+            "biquadratic_coeffs".to_string(),
+            "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
+        );
+        // 60 s timestep → use_ideal=false (bang-bang path).
+        let env = {
+            let mut e = make_env(18.0, 60);
+            // OAT below HP lockout (10°C) and below ER lockout (5°C): HP off, ER allowed.
+            e.weather.outdoor_temp_c = 0.0;
+            e
+        };
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        let mode = eq.update_control(&env);
+        assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out in bang-bang test");
+        eq.step(&env, Duration::from_secs(60), &mut make_ports())
+            .unwrap();
+
+        let er_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
+        // Bang-bang: PLR=1.0 → er_capacity = backup_capacity_w * 1.0 = ER_RATED_W.
+        assert!(
+            (er_w - ER_RATED_W).abs() < 1.0,
+            "bang-bang ER must run at full rated capacity ({ER_RATED_W:.0} W) with PLR=1.0; \
+             got {er_w:.1} W"
+        );
+    }
+
+    // VariableSpeedIdeal: with load_fraction=1.0 the speed selector sets speed_index=0
+    // and speed_frac=1.0, so interpolated_capacity spans the full two-stage range.
+    // Bug 1 fix: er_demand must compare ideal_w against interpolated capacity, not the
+    // un-interpolated lower stage.
+    //
+    // Setup: is_mini_split=true forces VariableSpeedIdeal.
+    //   stage_heating_capacities_w = [5000, 10000] (two explicit stages kept as-is)
+    //   ER rated = 4000 W, OAT below ER lockout threshold.
+    //   Solver injects 7000 W.
+    //
+    //   Pre-fix: capacity_at_stage(0) = 5000 → er_demand = 7000 > 5000 = true → ER fires.
+    //   Post-fix: interpolated_capacity(0, 1.0) = 10000 → er_demand = 7000 > 10000 = false → ER off.
+    #[test]
+    fn variable_speed_ideal_er_decision_uses_interpolated_capacity() {
+        const IDEAL_W: f64 = 7_000.0;
+
+        let mut cfg = EquipmentConfig::from_typed(
+            "VS HP ER".to_string(),
+            "ASHP Heater".to_string(),
+            crate::HeatPumpHeaterConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: None,
+                heating_eir: Some(0.33),
+                stage_heating_capacities_w: Some(vec![5_000.0, 10_000.0]),
+                stage_heating_eirs: Some(vec![0.33, 0.33]),
+                backup_fuel: None,
+                backup_capacity_w: Some(4_000.0),
+                backup_eir: Some(1.0),
+                fraction_heating_load_served: None,
+                cooling_capacity_w: None,
+                cooling_eir: None,
+                stage_cooling_capacities_w: None,
+                stage_cooling_eirs: None,
+                stage_shrs: None,
+                fraction_cooling_load_served: None,
+                number_of_speeds: 2,
+                // is_mini_split forces VariableSpeedIdeal mode regardless of number_of_speeds.
+                is_mini_split: true,
+                shr: None,
+                fan_power_w: Some(0.0),
+                fan_power_w_per_cfm: None,
+                airflow_m3_s_per_w: None,
+                heating_setpoint_c: Some(21.0),
+                cooling_setpoint_c: Some(26.0),
+                hysteresis_c: Some(1.0),
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
+                hp_lockout_temp_c: None,
+                er_lockout_temp_c: Some(5.0),
+                max_oat_supplemental_c: Some(21.0),
+                er_setpoint_offset_c: Some(3.0),
+                er_hard_lockout_time_s: None,
+                duct: Default::default(),
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+            },
+        );
+        cfg.test_extras_mut().insert(
+            "biquadratic_coeffs".to_string(),
+            "[[1,0,0,0,0,0],[1,0,0,0,0,0]]".into(),
+        );
+        cfg.test_extras_mut()
+            .insert("use_ideal_capacity".to_string(), true.into());
+
+        let env = {
+            let mut e = make_env(18.0, 900);
+            e.weather.outdoor_temp_c = 0.0;
+            e
+        };
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity { capacity_w: IDEAL_W })
+            .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let er_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(f64::NAN);
+        // Interpolated HP capacity = 10000 W > 7000 W ideal → ER must stay off.
+        assert!(
+            er_w < 1e-6,
+            "ER must stay off when interpolated HP capacity (10000 W) covers ideal demand \
+             ({IDEAL_W:.0} W); er_capacity_w={er_w:.1} W — Bug 1 fix"
+        );
+    }
+
+    // In ideal+ER mode, HP must run at full available capacity first; ER fills
+    // the residual. The PLR denominator for HP must be steady_capacity_w alone,
+    // not steady_capacity_w + backup_capacity_w.
+    //
+    // Setup: HP rated=6000 W, ER rated=4000 W. Solver injects 8000 W.
+    // Identity biquadratic curves: steady_capacity_w = 6000 W.
+    //
+    //   Pre-fix: plr = 8000 / (6000 + 4000) = 0.8 → hp_w = 6000 * 0.8 = 4800 W (throttled)
+    //   Post-fix: plr = min(8000 / 6000, 1.0) = 1.0 → hp_w = 6000 * 1.0 = 6000 W (full)
+    //             er_w = (8000 - 6000).min(4000) = 2000 W
+    #[test]
+    fn ideal_er_mode_hp_runs_at_full_plr_not_throttled_by_er_denominator() {
+        const HP_RATED_W: f64 = 6_000.0;
+        const ER_RATED_W: f64 = 4_000.0;
+        const IDEAL_W: f64 = 8_000.0;
+        const EXPECTED_ER_W: f64 = IDEAL_W - HP_RATED_W;
+
+        let cfg = heater_config_with_er();
+        let mut eq = ASHPHeater::new(cfg.clone());
+        // OAT=7°C: above defrost threshold (4.44°C) so no defrost; below ER lockout (10°C) so ER allowed.
+        let env = {
+            let mut e = make_env(18.0, 900);
+            e.weather.outdoor_temp_c = 7.0;
+            e.weather.outdoor_humidity_ratio = 0.002;
+            e
+        };
+        eq.init(&cfg, &env).unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity { capacity_w: IDEAL_W })
+            .unwrap();
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(900), &mut make_ports())
+            .unwrap();
+
+        let hp_w = eq.telemetry().get(tk::HP_CAPACITY_W).unwrap_or(0.0);
+        let er_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
+        let defrost_active = eq.telemetry().get(tk::DEFROST_ACTIVE).unwrap_or(0.0);
+
+        assert_eq!(defrost_active, 0.0, "OAT=7°C must not trigger defrost");
+
+        // HP must run at full rated capacity (PLR=1.0).
+        assert!(
+            hp_w >= HP_RATED_W * 0.99,
+            "HP must run at full capacity ({HP_RATED_W:.0} W); got {hp_w:.1} W — \
+             Bug 2 fix: HP PLR denominator must not include ER capacity"
+        );
+        // ER fills residual: IDEAL - HP = 2000 W.
+        assert!(
+            (er_w - EXPECTED_ER_W).abs() < 1.0,
+            "ER must fill only the residual ({EXPECTED_ER_W:.0} W); got {er_w:.1} W"
         );
     }
 

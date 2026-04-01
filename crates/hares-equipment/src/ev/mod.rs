@@ -417,7 +417,7 @@ impl Ev {
             ChargingLevel::L2 => self.rated_power_kw.min(max_power_kw),
         };
         let curve_limited_rated = if let Some(lut) = &self.charging_curve_lut {
-            let soh = 1.0 - self.degradation.capacity_fade_pct();
+            let soh = 1.0 - self.degradation.capacity_fade_fraction();
             let effective_kwh = self.battery_capacity_kwh * soh;
             let c_rate = if effective_kwh > 0.0 {
                 rated / effective_kwh
@@ -562,7 +562,7 @@ impl Ev {
             .set(tk::V2L_ACTIVE, if self.v2l_active { 1.0 } else { 0.0 });
         self.telemetry.set(tk::V2L_POWER_KW, self.v2l_power_kw);
         self.telemetry
-            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_pct());
+            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_fraction() * 100.0);
         self.telemetry
             .set(tk::AWAY_CHARGE_POWER_KW, self.away_charge_actual_kw);
         self.telemetry
