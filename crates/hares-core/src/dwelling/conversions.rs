@@ -8,6 +8,7 @@ use chrono::{DateTime, Duration, FixedOffset};
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
 use hares_io::{Building, DefaultsStore, SimulationConfig};
+use hares_io::hpxml::ZoneType;
 use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
 
@@ -15,12 +16,32 @@ use super::{DwellingConfig, Result};
 
 const DEFAULT_R_M2_K_W: f64 = hares_envelope::boundary_rc::DEFAULT_R_M2_K_W;
 
+/// Interior mass multiplier by zone type.
+///
+/// Conditioned space has furniture, partition walls, etc. that store heat.
+/// Foundation has minimal furniture; attic/garage have none.
+/// Ref: OCHRE uses a flat 7.0 for all zones. We refine per-zone for accuracy.
+fn mass_multiplier_for_zone(zone_type: &ZoneType) -> f64 {
+    match zone_type {
+        ZoneType::Conditioned => 7.0,
+        ZoneType::Foundation => 1.5,
+        ZoneType::Attic | ZoneType::Garage => 1.0,
+        _ => 7.0,
+    }
+}
+
 /// Convert building zones to envelope-crate ZoneInput.
 pub fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneInput> {
     (0..n_zones)
-        .map(|idx| ZoneInput {
-            floor_area_m2: building.zones.get(idx).and_then(|z| z.floor_area_m2),
-            volume_m3: building.zones.get(idx).and_then(|z| z.volume_m3),
+        .map(|idx| {
+            let zone = building.zones.get(idx);
+            ZoneInput {
+                floor_area_m2: zone.and_then(|z| z.floor_area_m2),
+                volume_m3: zone.and_then(|z| z.volume_m3),
+                mass_multiplier: zone
+                    .map(|z| mass_multiplier_for_zone(&z.zone_type))
+                    .unwrap_or(7.0),
+            }
         })
         .collect()
 }

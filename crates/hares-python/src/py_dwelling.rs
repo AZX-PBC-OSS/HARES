@@ -13,7 +13,7 @@ use hares_equipment::{
     BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig, PvConfig,
     config::ConfigValue,
 };
-use hares_io::{OutputFormat, SimulationConfig, output::metrics::MetricsCalculator};
+use hares_io::{OutputFormat, ResampleOverrides, SimulationConfig, output::metrics::MetricsCalculator};
 use hares_types::{BatteryChemistry, EvConnectionState, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -1541,6 +1541,35 @@ fn build_config(
         .transpose()?
         .map(PathBuf::from);
 
+    let resample_overrides: Option<ResampleOverrides> = {
+        let raw: Option<std::collections::HashMap<String, String>> = kwargs
+            .as_ref()
+            .and_then(|k| k.get_item("resample_overrides").ok().flatten())
+            .map(|obj| obj.extract())
+            .transpose()?;
+        raw.map(|map| {
+            let mut overrides = ResampleOverrides::default();
+            macro_rules! set_field {
+                ($($field:ident),*) => {
+                    $(
+                        if let Some(v) = map.get(stringify!($field)) {
+                            overrides.$field = match v.as_str() {
+                                "zoh" => Some(hares_io::ResampleMethod::Zoh),
+                                "pchip" => Some(hares_io::ResampleMethod::Pchip),
+                                "linear" => Some(hares_io::ResampleMethod::Linear),
+                                _ => None,
+                            };
+                        }
+                    )*
+                };
+            }
+            set_field!(dry_bulb, dew_point, rel_humidity, pressure, infrared,
+                       sky_temp, ground_temp, opaque_sky_cover, ghi, dni, dhi,
+                       wind_speed, wind_dir);
+            overrides
+        })
+    };
+
     Ok(DwellingConfig {
         hpxml_path: PathBuf::from(hpxml),
         schedule_path: PathBuf::from(schedule),
@@ -1550,7 +1579,7 @@ fn build_config(
         overrides: None,
         bldg_id,
         initialization_duration,
-        resample_overrides: None,
+        resample_overrides,
     })
 }
 

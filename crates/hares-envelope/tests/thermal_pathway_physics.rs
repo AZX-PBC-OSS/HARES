@@ -345,6 +345,7 @@ fn rc_network_exposes_ground_column() {
     let zones = vec![ZoneInput {
         floor_area_m2: Some(48.0),
         volume_m3: Some(129.6),
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
     }];
     let zone_caps = derive_zone_capacitances(&zones);
 

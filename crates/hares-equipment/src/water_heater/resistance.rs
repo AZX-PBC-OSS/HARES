@@ -529,6 +529,8 @@ impl Equipment for ResistanceWH {
         self.telemetry.set(tk::LOWER_ELEMENT_POWER_W, lower_power_w);
         self.telemetry
             .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
+        self.telemetry
+            .set(tk::ELEMENT_KW, electric_power_w / 1_000.0);
         self.telemetry.set(tk::ELECTRIC_POWER_W, electric_power_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(
@@ -616,6 +618,7 @@ impl Equipment for ResistanceWH {
         self.telemetry
             .insert(tk::LOWER_ELEMENT_POWER_W, decoded.lower_element_power_w);
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELEMENT_KW, decoded.electric_kw);
         self.telemetry
             .insert(tk::ELECTRIC_POWER_W, decoded.electric_kw * 1_000.0);
         self.telemetry
@@ -731,11 +734,12 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(7);
+    let mut telemetry = Telemetry::with_capacity(8);
     telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
     telemetry.insert(tk::UPPER_ELEMENT_POWER_W, 0.0);
     telemetry.insert(tk::LOWER_ELEMENT_POWER_W, 0.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::ELEMENT_KW, 0.0);
     telemetry.insert(tk::ELECTRIC_POWER_W, 0.0);
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
@@ -763,6 +767,11 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::ELECTRIC_KW.to_string(),
             unit: "kW".to_string(),
             description: "Total electric draw".to_string(),
+        },
+        TelemetryField {
+            name: tk::ELEMENT_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Heating element electric power".to_string(),
         },
         TelemetryField {
             name: tk::ELECTRIC_POWER_W.to_string(),
@@ -1412,6 +1421,34 @@ mod tests {
             loss_with_jacket < loss_no_jacket,
             "jacket insulation must reduce standby skin loss: \
              with_jacket={loss_with_jacket:.4} W must be < no_jacket={loss_no_jacket:.4} W"
+        );
+    }
+
+    #[test]
+    fn element_kw_present_and_equals_electric_kw_when_heating() {
+        let mut eq = ResistanceWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        let electric_kw = eq
+            .telemetry()
+            .get(tk::ELECTRIC_KW)
+            .expect("ELECTRIC_KW must be present");
+        let element_kw = eq
+            .telemetry()
+            .get(tk::ELEMENT_KW)
+            .expect("ELEMENT_KW must be present");
+
+        assert!(
+            electric_kw > 0.0,
+            "WH must be heating for this test to be meaningful"
+        );
+        assert!(
+            (element_kw - electric_kw).abs() < 1e-9,
+            "element_kw {element_kw:.6} must equal electric_kw {electric_kw:.6}"
         );
     }
 }

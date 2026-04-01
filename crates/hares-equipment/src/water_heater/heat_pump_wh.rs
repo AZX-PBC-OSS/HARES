@@ -768,6 +768,10 @@ impl Equipment for HeatPumpWH {
         self.telemetry
             .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
         self.telemetry
+            .set(tk::COMPRESSOR_KW, compressor_power_w / 1_000.0);
+        self.telemetry
+            .set(tk::ELEMENT_KW, backup_power_w / 1_000.0);
+        self.telemetry
             .set(tk::COMPRESSOR_POWER_W, compressor_power_w);
         self.telemetry
             .set(tk::BACKUP_ELEMENT_POWER_W, backup_power_w);
@@ -884,6 +888,10 @@ impl Equipment for HeatPumpWH {
         self.telemetry.insert(tk::COP, decoded.cop);
         self.telemetry.insert(tk::CAP_MULT, decoded.cap_mult);
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry
+            .insert(tk::COMPRESSOR_KW, decoded.compressor_power_w / 1_000.0);
+        self.telemetry
+            .insert(tk::ELEMENT_KW, decoded.backup_element_power_w / 1_000.0);
         self.telemetry
             .insert(tk::COMPRESSOR_POWER_W, decoded.compressor_power_w);
         self.telemetry
@@ -1019,11 +1027,13 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(10);
+    let mut telemetry = Telemetry::with_capacity(12);
     telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
     telemetry.insert(tk::COP, 0.0);
     telemetry.insert(tk::CAP_MULT, 1.0);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
+    telemetry.insert(tk::COMPRESSOR_KW, 0.0);
+    telemetry.insert(tk::ELEMENT_KW, 0.0);
     telemetry.insert(tk::COMPRESSOR_POWER_W, 0.0);
     telemetry.insert(tk::BACKUP_ELEMENT_POWER_W, 0.0);
     telemetry.insert(tk::ZONE_HEAT_EXTRACTION_W, 0.0);
@@ -1057,6 +1067,16 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             unit: "kW".to_string(),
             description: "Total electrical power draw (compressor + backup + fan + parasitic)"
                 .to_string(),
+        },
+        TelemetryField {
+            name: tk::COMPRESSOR_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Heat pump compressor electric power".to_string(),
+        },
+        TelemetryField {
+            name: tk::ELEMENT_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Backup resistance element electric power".to_string(),
         },
         TelemetryField {
             name: tk::COMPRESSOR_POWER_W.to_string(),
@@ -3046,6 +3066,51 @@ mod new_feature_tests {
         assert!(
             (eq.er_duty_cycle - 1.0).abs() < 1e-10,
             "er_duty_cycle should remain 1.0"
+        );
+    }
+
+    #[test]
+    fn compressor_kw_and_element_kw_present_and_sum_to_electric_kw_without_fan() {
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(40.0);
+        typed.fan_power_w = Some(0.0);
+        typed.parasitic_power_w = Some(0.0);
+        let cfg = equipment_config(typed);
+
+        let mut eq = HeatPumpWH::new(cfg.clone());
+        eq.init(&cfg, &env_at(20.0)).unwrap();
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatPumpWH,
+        })
+        .unwrap();
+
+        let mut p = ports();
+        eq.step(&env_at(20.0), Duration::from_secs(60), &mut p)
+            .unwrap();
+
+        let electric_kw = eq
+            .telemetry()
+            .get(tk::ELECTRIC_KW)
+            .expect("ELECTRIC_KW must be present");
+        let compressor_kw = eq
+            .telemetry()
+            .get(tk::COMPRESSOR_KW)
+            .expect("COMPRESSOR_KW must be present");
+        let element_kw = eq
+            .telemetry()
+            .get(tk::ELEMENT_KW)
+            .expect("ELEMENT_KW must be present");
+
+        assert!(
+            electric_kw > 0.0,
+            "HPWH must be drawing power for this test to be meaningful"
+        );
+        let sub_sum = compressor_kw + element_kw;
+        let rel_err = (sub_sum - electric_kw).abs() / electric_kw.max(f64::MIN_POSITIVE);
+        assert!(
+            rel_err < 1e-9,
+            "compressor_kw {compressor_kw:.6} + element_kw {element_kw:.6} = {sub_sum:.6} \
+             must equal electric_kw {electric_kw:.6} (rel_err={rel_err:.2e})"
         );
     }
 }

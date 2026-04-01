@@ -115,11 +115,17 @@ pub struct BoundaryInput {
     pub framing_factor: Option<f64>,
 }
 
-/// Zone input: floor area and volume for capacitance derivation.
+///// Zone input: floor area, volume, and mass multiplier for capacitance derivation.
 #[derive(Debug, Clone)]
 pub struct ZoneInput {
     pub floor_area_m2: Option<f64>,
     pub volume_m3: Option<f64>,
+    /// Effective thermal mass multiplier applied to zone air capacitance.
+    /// Accounts for furniture and interior mass. Typical values:
+    /// - Conditioned: 7.0 (standard furnished living space)
+    /// - Foundation: 1.5 (minimal furniture)
+    /// - Attic / Garage: 1.0 (no furniture)
+    pub mass_multiplier: f64,
 }
 
 // ── Diagnostics ─────────────────────────────────────────────────────────────
@@ -221,7 +227,7 @@ pub struct BuildingRC {
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-/// Derive zone air-node capacitances [J/K] from zone floor areas.
+/// Derive zone air-node capacitances [J/K] from zone volumes and mass multipliers.
 pub fn derive_zone_capacitances(zones: &[ZoneInput]) -> Vec<f64> {
     zones
         .iter()
@@ -230,7 +236,7 @@ pub fn derive_zone_capacitances(zones: &[ZoneInput]) -> Vec<f64> {
                 .volume_m3
                 .or_else(|| z.floor_area_m2.map(|a| a * DEFAULT_HEIGHT_M))
                 .unwrap_or(DEFAULT_VOLUME_M3);
-            (AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * volume * INTERIOR_MASS_MULTIPLIER)
+            (AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * volume * z.mass_multiplier)
                 .max(MIN_CAPACITANCE_J_K)
         })
         .collect()
@@ -928,6 +934,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         assert_eq!(caps.len(), 1);
@@ -943,6 +950,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: Some(300.0),
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Should use 300 m³ (explicit), not 100 × 2.5 = 250 m³ (derived from area)
@@ -955,6 +963,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: None,
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let expected =
@@ -968,6 +977,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(1e-12),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         assert!((caps[0] - MIN_CAPACITANCE_J_K).abs() < 1e-6);
@@ -980,6 +990,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
@@ -1006,6 +1017,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let layers = vec![
@@ -1040,10 +1052,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -1065,6 +1079,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Only a slab boundary connecting zone 0 to ground.
@@ -1083,6 +1098,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Same-zone boundary with no material layers — no thermal mass to model.
@@ -1099,6 +1115,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let layers = vec![
@@ -1121,6 +1138,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // layer[1]: density=2000, cp=900, thickness=0.10, area=50 → full cap = 9000 J/K
@@ -1148,6 +1166,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // density=2000, cp=900, thickness=0.10, area=50 → full cap = 9000 J/K
@@ -1173,6 +1192,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
 
@@ -1204,10 +1224,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(50.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -1228,6 +1250,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let (rc, _diag) = assemble_building_rc(&[], 1, &caps).unwrap();
@@ -1244,10 +1267,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -1269,10 +1294,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(80.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -1294,6 +1321,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let layers = vec![make_layer(0.1, 0.5, 1000.0, 800.0, 50.0)];
@@ -1316,6 +1344,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let boundaries = vec![make_boundary(0.0, 0, ExteriorTarget::Outdoor, vec![], 2.5)];
@@ -1351,6 +1380,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let precomputed = vec![PrecomputedRCLayer {
@@ -1381,6 +1411,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         let precomputed = vec![
@@ -1416,6 +1447,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Middle layer has zero capacitance — should be merged out.
@@ -1451,6 +1483,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // 4 layers, outdoor exterior → not same-zone, all layers kept.
@@ -1490,10 +1523,12 @@ mod tests {
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
             ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             },
         ];
         let caps = derive_zone_capacitances(&zones);
@@ -1533,6 +1568,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // All layers have zero capacitance → no layer nodes, just a single resistance.
@@ -1565,6 +1601,7 @@ mod tests {
         let zones = vec![ZoneInput {
             floor_area_m2: Some(100.0),
             volume_m3: None,
+        mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
         // Boundary has both material layers AND precomputed — precomputed wins.
@@ -1625,6 +1662,7 @@ mod tests {
             derive_zone_capacitances(&[ZoneInput {
                 floor_area_m2: Some(100.0),
                 volume_m3: Some(250.0),
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
             }])[0],
         ];
 
@@ -1664,5 +1702,32 @@ mod tests {
             zone_diag_ff < zone_diag_no_ff,
             "framing should increase heat loss (more negative A diagonal): no_ff={zone_diag_no_ff}, ff={zone_diag_ff}"
         );
+    }
+
+    // ── Per-zone mass multiplier ────────────────────────────────────────
+
+    #[test]
+    fn zone_capacitance_uses_per_zone_multiplier() {
+        let conditioned = ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: 7.0,
+        };
+        let attic = ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: 1.0,
+        };
+        let foundation = ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: 1.5,
+        };
+        let caps = derive_zone_capacitances(&[conditioned, attic, foundation]);
+        let vol = 100.0 * DEFAULT_HEIGHT_M;
+        let base = AIR_DENSITY_KG_M3 * AIR_CP_J_KG_K * vol;
+        assert!((caps[0] - base * 7.0).abs() < 1e-6, "conditioned: 7x");
+        assert!((caps[1] - base * 1.0).abs() < 1e-6, "attic: 1x");
+        assert!((caps[2] - base * 1.5).abs() < 1e-6, "foundation: 1.5x");
     }
 }

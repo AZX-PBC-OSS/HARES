@@ -492,6 +492,8 @@ impl Equipment for GasWH {
         self.telemetry.set(tk::BURNER_POWER_W, burner_input_w);
         self.telemetry.set(tk::PILOT_POWER_W, self.pilot_power_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
+        self.telemetry.set(tk::PILOT_KW, self.pilot_power_w / 1_000.0);
+        self.telemetry.set(tk::FUEL_INPUT_KW, fuel_input_w / 1_000.0);
         self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
@@ -580,6 +582,10 @@ impl Equipment for GasWH {
             .insert(tk::PILOT_POWER_W, decoded.pilot_power_w);
         self.telemetry
             .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
+        self.telemetry
+            .insert(tk::PILOT_KW, decoded.pilot_power_w / 1_000.0);
+        self.telemetry
+            .insert(tk::FUEL_INPUT_KW, decoded.fuel_input_w / 1_000.0);
         self.telemetry.insert(tk::FLUE_LOSS_W, decoded.flue_loss_w);
         self.telemetry
             .insert(tk::FAN_ELECTRIC_W, decoded.fan_electric_w);
@@ -685,11 +691,13 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(8);
+    let mut telemetry = Telemetry::with_capacity(10);
     telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
     telemetry.insert(tk::BURNER_POWER_W, 0.0);
     telemetry.insert(tk::PILOT_POWER_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
+    telemetry.insert(tk::PILOT_KW, 0.0);
+    telemetry.insert(tk::FUEL_INPUT_KW, 0.0);
     telemetry.insert(tk::FLUE_LOSS_W, 0.0);
     telemetry.insert(tk::FAN_ELECTRIC_W, 0.0);
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
@@ -717,6 +725,16 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::FUEL_INPUT_W.to_string(),
             unit: "W".to_string(),
+            description: "Total fuel consumption rate".to_string(),
+        },
+        TelemetryField {
+            name: tk::PILOT_KW.to_string(),
+            unit: "kW".to_string(),
+            description: "Pilot light fuel input power".to_string(),
+        },
+        TelemetryField {
+            name: tk::FUEL_INPUT_KW.to_string(),
+            unit: "kW".to_string(),
             description: "Total fuel consumption rate".to_string(),
         },
         TelemetryField {
@@ -1240,6 +1258,54 @@ mod tests {
         assert!(
             eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(0.0) > 0.0,
             "standing-pilot unit should report non-zero gas consumption at standby"
+        );
+    }
+
+    #[test]
+    fn pilot_kw_and_fuel_input_kw_present_and_sum_correctly() {
+        let cfg = config_with_extras(&[("initial_tank_temp_c", Some(40.0.into()))]);
+        let e = env(21.0);
+
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        let fuel_input_w = eq
+            .telemetry()
+            .get(tk::FUEL_INPUT_W)
+            .expect("FUEL_INPUT_W must be present");
+        let pilot_kw = eq
+            .telemetry()
+            .get(tk::PILOT_KW)
+            .expect("PILOT_KW must be present");
+        let fuel_input_kw = eq
+            .telemetry()
+            .get(tk::FUEL_INPUT_KW)
+            .expect("FUEL_INPUT_KW must be present");
+
+        assert!(
+            fuel_input_w > 0.0,
+            "burner must be firing for this test to be meaningful"
+        );
+        assert!(
+            (fuel_input_kw - fuel_input_w / 1_000.0).abs() < 1e-9,
+            "fuel_input_kw {fuel_input_kw:.6} must equal fuel_input_w/1000 {:.6}",
+            fuel_input_w / 1_000.0
+        );
+        let pilot_w = eq
+            .telemetry()
+            .get(tk::PILOT_POWER_W)
+            .expect("PILOT_POWER_W must be present");
+        assert!(
+            (pilot_kw - pilot_w / 1_000.0).abs() < 1e-9,
+            "pilot_kw {pilot_kw:.6} must equal pilot_power_w/1000 {:.6}",
+            pilot_w / 1_000.0
+        );
+        assert!(
+            pilot_kw <= fuel_input_kw,
+            "pilot_kw {pilot_kw:.6} must not exceed fuel_input_kw {fuel_input_kw:.6}"
         );
     }
 }

@@ -112,6 +112,9 @@ pub const BACKUP_CAPACITY_W: &str = "backup_capacity_w";
 pub const BACKUP_EIR: &str = "backup_eir";
 
 // ── Water heater ────────────────────────────────────────────────────────────
+pub const ELEMENT_KW: &str = "element_kw";
+pub const PILOT_KW: &str = "pilot_kw";
+pub const FUEL_INPUT_KW: &str = "fuel_input_kw";
 pub const DRAW_FLOW_RATE_KG_S: &str = "draw_flow_rate_kg_s";
 pub const UPPER_ELEMENT_POWER_W: &str = "upper_element_power_w";
 pub const LOWER_ELEMENT_POWER_W: &str = "lower_element_power_w";

@@ -31,6 +31,18 @@ START_HARES = "2019-05-05T13:00:00"
 DURATION_H = 1
 TIME_RES_MIN = 1
 
+# ZOH resampling for all continuous weather fields — matches OCHRE's pandas ffill().
+OCHRE_COMPAT_RESAMPLE: dict[str, str] = {
+    "dry_bulb": "zoh",
+    "dew_point": "zoh",
+    "rel_humidity": "zoh",
+    "pressure": "zoh",
+    "infrared": "zoh",
+    "sky_temp": "zoh",
+    "ground_temp": "zoh",
+    "opaque_sky_cover": "zoh",
+}
+
 
 # ---------------------------------------------------------------------------
 # OCHRE runner
@@ -83,6 +95,7 @@ def _run_hares() -> dict[str, float]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        resample_overrides=OCHRE_COMPAT_RESAMPLE,
     )
 
     # Step through and accumulate per-column power sums
@@ -119,6 +132,7 @@ def _run_hares_simulate() -> dict[str, float]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        resample_overrides=OCHRE_COMPAT_RESAMPLE,
     )
     df = dwelling.simulate()
 
@@ -251,8 +265,8 @@ def test_parity(
 BENCH_DURATION_H = 7 * 24  # 1 week
 
 
-def _run_ochre_7d() -> tuple[dict[str, float], float]:
-    """Run OCHRE for 7 days, return (kwh_dict, elapsed_seconds)."""
+def _run_ochre_7d() -> tuple[dict[str, float], float, float]:
+    """Run OCHRE for 7 days, return (kwh_dict, init_elapsed, sim_elapsed)."""
     import time
 
     if str(VENDOR_OCHRE) not in sys.path:
@@ -285,8 +299,8 @@ def _run_ochre_7d() -> tuple[dict[str, float], float]:
     return result, init_elapsed, sim_elapsed
 
 
-def _run_hares_7d() -> tuple[dict[str, float], float]:
-    """Run HARES for 7 days, return (kwh_dict, elapsed_seconds)."""
+def _run_hares_7d() -> tuple[dict[str, float], float, float]:
+    """Run HARES for 7 days, return (kwh_dict, init_elapsed, sim_elapsed)."""
     import time
 
     from ochre_next import Dwelling as HaresDwelling
@@ -302,6 +316,7 @@ def _run_hares_7d() -> tuple[dict[str, float], float]:
         output_verbosity=6,
         defaults_path=str(HARES_DEFAULTS),
         master_seed=42,
+        resample_overrides=OCHRE_COMPAT_RESAMPLE,
     )
     init_elapsed = time.perf_counter() - t0
 

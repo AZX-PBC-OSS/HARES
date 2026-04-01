@@ -803,7 +803,15 @@ fn initial_zones(
                         return Err(EnvironmentManagerError::MissingAtticVolume { zone_idx: idx });
                     }
                     (_, Some(volume_m3)) => volume_m3,
-                    (_, None) => DEFAULT_ZONE_VOLUME_M3,
+                    (zone_type, None) => {
+                        tracing::warn!(
+                            zone_idx = idx,
+                            zone_type = ?zone_type,
+                            default_m3 = DEFAULT_ZONE_VOLUME_M3,
+                            "zone is missing volume_m3; using {DEFAULT_ZONE_VOLUME_M3} m³ default"
+                        );
+                        DEFAULT_ZONE_VOLUME_M3
+                    }
                 };
                 Ok(ZoneState {
                     id: ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)),
