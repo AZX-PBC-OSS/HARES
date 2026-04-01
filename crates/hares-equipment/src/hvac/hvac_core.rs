@@ -3,7 +3,7 @@
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset};
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::CFM_PER_M3_S;
-use hares_types::{ControlSignal, EnvironmentState, ScheduleSource, ZoneId};
+use hares_types::{ControlSignal, EnvironmentState, HaresError, ScheduleSource, ZoneId};
 
 use crate::EquipmentConfig;
 
@@ -330,12 +330,23 @@ impl HvacEquipment {
         self.static_setpoints
             .validate_for_deadband(self.thermostat.hysteresis_c)?;
 
-        let mut airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w")
+        let explicit_airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w");
+        let mut airflow_m3_s_per_w = explicit_airflow_m3_s_per_w
             .unwrap_or_else(|| self.equipment_type.default_airflow_m3_s_per_w());
-        let airflow_defect_ratio = extract_numeric(config, "AirflowDefectRatio")
-            .or_else(|| extract_numeric(config, "airflow_defect_ratio"))
-            .unwrap_or(1.0);
-        airflow_m3_s_per_w *= airflow_defect_ratio;
+        if explicit_airflow_m3_s_per_w.is_none() {
+            // HPXML installation quality uses defect deltas where 0.0 means
+            // no defect and -0.25 means a 25% airflow reduction.
+            let airflow_defect_ratio = extract_numeric(config, "AirflowDefectRatio")
+                .or_else(|| extract_numeric(config, "airflow_defect_ratio"))
+                .unwrap_or(0.0);
+            airflow_m3_s_per_w *= 1.0 + airflow_defect_ratio;
+        }
+        if !airflow_m3_s_per_w.is_finite() || airflow_m3_s_per_w <= 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "airflow_m3_s_per_w must be finite and > 0 after defect application, got {}",
+                airflow_m3_s_per_w
+            )));
+        }
         self.airflow_m3_s_per_w = airflow_m3_s_per_w;
         if let Some(w_per_m3_s) = extract_numeric(config, "fan_power_w_per_m3_s") {
             self.fan_power_w_per_m3_s = w_per_m3_s.max(0.0);
@@ -1054,27 +1065,52 @@ mod tests {
     }
 
     #[test]
-    fn airflow_heating_defaults_and_scales_by_defect_ratio() {
+    fn airflow_heating_defaults_and_scales_by_defect_delta() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
             .test_extras_mut()
-            .insert("AirflowDefectRatio".to_string(), 0.8.into());
+            .insert("AirflowDefectRatio".to_string(), (-0.2).into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         let expected = AIRFLOW_HEATING_M3_S_PER_W * 0.8;
         assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
     }
 
     #[test]
-    fn airflow_cooling_defaults_and_scales_by_defect_ratio() {
+    fn airflow_cooling_defaults_and_scales_by_defect_delta() {
         let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
             .test_extras_mut()
-            .insert("AirflowDefectRatio".to_string(), 0.8.into());
+            .insert("AirflowDefectRatio".to_string(), (-0.2).into());
         hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
         let expected = AIRFLOW_CENTRAL_AC_M3_S_PER_W * 0.8;
         assert!((hvac.airflow_m3_s_per_w - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn airflow_defect_zero_keeps_default_airflow() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .test_extras_mut()
+            .insert("AirflowDefectRatio".to_string(), 0.0.into());
+        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+        assert!((hvac.airflow_m3_s_per_w - AIRFLOW_CENTRAL_AC_M3_S_PER_W).abs() < 1e-12);
+    }
+
+    #[test]
+    fn explicit_airflow_is_not_rescaled_by_defect_ratio() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .test_extras_mut()
+            .insert("airflow_m3_s_per_w".to_string(), 4.2e-5.into());
+        config
+            .test_extras_mut()
+            .insert("AirflowDefectRatio".to_string(), (-0.5).into());
+        hvac.init(&config, &env(20.0, 60, 0)).expect("init ok");
+        assert!((hvac.airflow_m3_s_per_w - 4.2e-5).abs() < 1e-12);
     }
 
     #[test]

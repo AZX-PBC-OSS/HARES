@@ -335,6 +335,65 @@ fn fan_power_w_per_cfm_extracted_from_cooling_system_extension() {
     );
 }
 
+#[test]
+fn heat_pump_extension_install_quality_fields_are_extracted() {
+    let xml = minimal_xml(
+        r#"<Systems><HVAC><HeatPump>
+            <HeatPumpType>air-to-air</HeatPumpType>
+            <CompressorType>single stage</CompressorType>
+            <HeatingCapacity>36000</HeatingCapacity>
+            <CoolingCapacity>36000</CoolingCapacity>
+            <AnnualHeatingEfficiency><Units>HSPF</Units><Value>8.5</Value></AnnualHeatingEfficiency>
+            <AnnualCoolingEfficiency><Units>SEER</Units><Value>14.0</Value></AnnualCoolingEfficiency>
+            <extension>
+                <AirflowDefectRatio>-0.25</AirflowDefectRatio>
+                <ChargeDefectRatio>-0.10</ChargeDefectRatio>
+                <HeatingAirflowCFM>1400</HeatingAirflowCFM>
+                <CoolingAirflowCFM>1300</CoolingAirflowCFM>
+            </extension>
+        </HeatPump></HVAC></Systems>"#,
+    );
+
+    let specs = resolve(&xml);
+    let heater = specs
+        .iter()
+        .find(|s| s.name == "ASHP Heater")
+        .expect("should emit ASHP Heater");
+    let cooler = specs
+        .iter()
+        .find(|s| s.name == "ASHP Cooler")
+        .expect("should emit ASHP Cooler");
+
+    assert_eq!(
+        heater
+            .parameters
+            .get("airflow_defect_ratio")
+            .and_then(|v| v.as_f64()),
+        Some(-0.25)
+    );
+    assert_eq!(
+        heater
+            .parameters
+            .get("charge_defect_ratio")
+            .and_then(|v| v.as_f64()),
+        Some(-0.10)
+    );
+    assert_eq!(
+        heater
+            .parameters
+            .get("heating_airflow_cfm")
+            .and_then(|v| v.as_f64()),
+        Some(1400.0)
+    );
+    assert_eq!(
+        cooler
+            .parameters
+            .get("cooling_airflow_cfm")
+            .and_then(|v| v.as_f64()),
+        Some(1300.0)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test: duct parameters extracted (surface area, leakage, r-value)
 //

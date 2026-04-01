@@ -32,7 +32,20 @@ fn airflow_defect_multiplier(params: &Map<String, Value>) -> f64 {
         .get("airflow_defect_ratio")
         .or_else(|| params.get("AirflowDefectRatio"))
         .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .map(|v| 1.0 + v)
         .unwrap_or(1.0)
+}
+
+fn airflow_m3_s_per_w_from_explicit_cfm(params: &Map<String, Value>, key: &str, capacity_w: f64) -> Option<f64> {
+    if !capacity_w.is_finite() || capacity_w <= 0.0 {
+        return None;
+    }
+    let cfm = params.get(key).and_then(Value::as_f64)?;
+    if !cfm.is_finite() || cfm <= 0.0 {
+        return None;
+    }
+    Some(cfm * CFM_TO_M3_S / capacity_w)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -670,7 +683,8 @@ fn try_build_central_ac_config(
     let duct = compute_duct_config(duct_params, capacity_w, false, n_speeds, false);
     let curve_bounds = extract_curve_bounds(params);
     let airflow_m3_s_per_w =
-        400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
+        airflow_m3_s_per_w_from_explicit_cfm(params, "cooling_airflow_cfm", capacity_w)
+            .unwrap_or_else(|| 400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params));
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
@@ -726,7 +740,8 @@ fn try_build_room_ac_config(name: &str, params: &Map<String, Value>) -> Option<E
 
     let curve_bounds = extract_curve_bounds(params);
     let airflow_m3_s_per_w =
-        320.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params);
+        airflow_m3_s_per_w_from_explicit_cfm(params, "cooling_airflow_cfm", capacity_w)
+            .unwrap_or_else(|| 320.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params));
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
     let cfg = RoomAcConfig {
@@ -815,11 +830,19 @@ fn try_build_heat_pump_heater_config(
         .get("fraction_cooling_load_served")
         .and_then(Value::as_f64);
     let curve_bounds = extract_curve_bounds(params);
-    let airflow_m3_s_per_w = if is_mini_split {
-        312.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
-    } else {
-        400.0_f64 * CFM_TO_M3_S / W_PER_TON * airflow_defect_multiplier(params)
-    };
+    let ref_cap_w = heating_capacity_w.or(cooling_capacity_w).unwrap_or(0.0);
+    let airflow_m3_s_per_w = airflow_m3_s_per_w_from_explicit_cfm(
+        params,
+        "heating_airflow_cfm",
+        ref_cap_w,
+    )
+    .unwrap_or_else(|| {
+        (if is_mini_split {
+            312.0_f64 * CFM_TO_M3_S / W_PER_TON
+        } else {
+            400.0_f64 * CFM_TO_M3_S / W_PER_TON
+        }) * airflow_defect_multiplier(params)
+    });
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
@@ -917,11 +940,19 @@ fn try_build_heat_pump_cooler_config(
         .get("fraction_cooling_load_served")
         .and_then(Value::as_f64);
     let curve_bounds = extract_curve_bounds(params);
-    let airflow_m3_s_per_w = if is_mini_split {
-        312.0_f64 * CFM_TO_M3_S / W_PER_TON
-    } else {
-        400.0_f64 * CFM_TO_M3_S / W_PER_TON
-    } * airflow_defect_multiplier(params);
+    let ref_cap_w = cooling_capacity_w.or(heating_capacity_w).unwrap_or(0.0);
+    let airflow_m3_s_per_w = airflow_m3_s_per_w_from_explicit_cfm(
+        params,
+        "cooling_airflow_cfm",
+        ref_cap_w,
+    )
+    .unwrap_or_else(|| {
+        (if is_mini_split {
+            312.0_f64 * CFM_TO_M3_S / W_PER_TON
+        } else {
+            400.0_f64 * CFM_TO_M3_S / W_PER_TON
+        }) * airflow_defect_multiplier(params)
+    });
     let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cooling_setpoint_source = schedule_source_from_params(params, "cooling");
 
@@ -1153,6 +1184,12 @@ pub(super) fn resolve_hvac(
             } else if let Some(w) = child_f64(ext, "FanPowerWatts") {
                 params.insert("fan_power_w".to_string(), json!(w));
             }
+            if let Some(v) = child_f64(ext, "AirflowDefectRatio") {
+                params.insert("airflow_defect_ratio".to_string(), json!(v));
+            }
+            if let Some(v) = child_f64(ext, "HeatingAirflowCFM") {
+                params.insert("heating_airflow_cfm".to_string(), json!(v));
+            }
         }
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
@@ -1222,6 +1259,15 @@ pub(super) fn resolve_hvac(
                 params.insert("fan_power_w_per_cfm".to_string(), json!(w_per_cfm));
             } else if let Some(w) = child_f64(ext, "FanPowerWatts") {
                 params.insert("fan_power_w".to_string(), json!(w));
+            }
+            if let Some(v) = child_f64(ext, "AirflowDefectRatio") {
+                params.insert("airflow_defect_ratio".to_string(), json!(v));
+            }
+            if let Some(v) = child_f64(ext, "ChargeDefectRatio") {
+                params.insert("charge_defect_ratio".to_string(), json!(v));
+            }
+            if let Some(v) = child_f64(ext, "CoolingAirflowCFM") {
+                params.insert("cooling_airflow_cfm".to_string(), json!(v));
             }
         }
         for (k, v) in &setpoint_params {
@@ -1348,6 +1394,18 @@ pub(super) fn resolve_hvac(
                 params.insert("fan_power_w_per_cfm".to_string(), json!(w_per_cfm));
             } else if let Some(w) = child_f64(ext, "FanPowerWatts") {
                 params.insert("fan_power_w".to_string(), json!(w));
+            }
+            if let Some(v) = child_f64(ext, "AirflowDefectRatio") {
+                params.insert("airflow_defect_ratio".to_string(), json!(v));
+            }
+            if let Some(v) = child_f64(ext, "ChargeDefectRatio") {
+                params.insert("charge_defect_ratio".to_string(), json!(v));
+            }
+            if let Some(v) = child_f64(ext, "HeatingAirflowCFM") {
+                params.insert("heating_airflow_cfm".to_string(), json!(v));
+            }
+            if let Some(v) = child_f64(ext, "CoolingAirflowCFM") {
+                params.insert("cooling_airflow_cfm".to_string(), json!(v));
             }
         }
         for (k, v) in &setpoint_params {
@@ -2585,6 +2643,44 @@ mod tests {
         assert_eq!(cfg.ff_max, Some(1.0));
         assert_eq!(cfg.plf_min, Some(0.6));
         assert_eq!(cfg.plf_max, Some(1.0));
+    }
+
+    #[test]
+    fn airflow_defect_ratio_uses_install_quality_delta_semantics() {
+        let mut params = minimal_central_ac_params(16.0, 12_000.0);
+        params.insert("airflow_defect_ratio".to_string(), json!(0.0));
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
+            .expect("central AC builder must succeed");
+        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+        let cfg: CentralAirConditionerConfig = ec
+            .typed()
+            .expect("must deserialize to CentralAirConditionerConfig");
+        let nominal = 400.0_f64 * CFM_TO_M3_S / W_PER_TON;
+        assert!((cfg.airflow_m3_s_per_w.expect("airflow") - nominal).abs() < 1e-12);
+
+        params.insert("airflow_defect_ratio".to_string(), json!(-0.25));
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
+            .expect("central AC builder must succeed");
+        let cfg: CentralAirConditionerConfig = ec
+            .typed()
+            .expect("must deserialize to CentralAirConditionerConfig");
+        let expected = nominal * 0.75;
+        assert!((cfg.airflow_m3_s_per_w.expect("airflow") - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn explicit_cooling_airflow_cfm_overrides_defect_ratio_scaling() {
+        let mut params = minimal_central_ac_params(16.0, 12_000.0);
+        params.insert("airflow_defect_ratio".to_string(), json!(-0.25));
+        params.insert("cooling_airflow_cfm".to_string(), json!(1_500.0));
+        let ec = try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default())
+            .expect("central AC builder must succeed");
+        use hares_equipment::hvac::cooling_config::CentralAirConditionerConfig;
+        let cfg: CentralAirConditionerConfig = ec
+            .typed()
+            .expect("must deserialize to CentralAirConditionerConfig");
+        let expected = 1_500.0 * CFM_TO_M3_S / 12_000.0;
+        assert!((cfg.airflow_m3_s_per_w.expect("airflow") - expected).abs() < 1e-12);
     }
 
     #[test]
