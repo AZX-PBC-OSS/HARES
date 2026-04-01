@@ -15,7 +15,7 @@ pub enum ElementHpControlMode {
 }
 
 pub(super) const DEFAULT_DEADBAND_C: f64 = 8.166_666_667; // 14.7°F (OCHRE HPWH-specific default)
-pub(super) const DEFAULT_COMPRESSOR_POWER_W: f64 = 1_200.0;
+pub(super) const DEFAULT_COMPRESSOR_POWER_W: f64 = 1_725.0; // 500 W electrical × 3.45 COP
 /// Default nominal HPWH COP used to scale the biquadratic COP curve when no
 /// explicit COP/UEF is provided in config.
 ///

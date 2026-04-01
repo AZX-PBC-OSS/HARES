@@ -207,7 +207,7 @@ pub(super) fn resolve_water_heaters(
                     tempering_valve_setpoint_c,
                     avg_water_draw_l_per_day,
                     draw_flow_rate_kg_s: None,
-                    compressor_power_w: None,
+                    compressor_power_w: if low_power { Some(1_499.4) } else { None },
                     backup_enable_offset_c: None,
                     min_ambient_temp_c: None,
                     max_ambient_temp_c: None,

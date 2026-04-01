@@ -17,7 +17,7 @@ use hares_equipment::{
 };
 use hares_types::{
     EnvironmentState, FuelType, GridState, PortSlots, ThermalCategory, WeatherState, ZoneId,
-    ZoneState,
+    ZoneState, telemetry_keys,
 };
 
 // ---------------------------------------------------------------------------
@@ -1031,24 +1031,26 @@ fn hpwh_wall_heat_fraction_splits_sensible_gain_by_category() {
         .telemetry()
         .get("wall_sensible_gain_w")
         .expect("wall_sensible_gain_w must exist");
+    let skin_loss_w = wh50
+        .telemetry()
+        .get(telemetry_keys::SKIN_LOSS_W)
+        .expect("skin_loss_w must exist");
 
     assert!(
         (sens0 - sens50).abs() < 1e-6,
         "wall fraction must preserve total sensible gain; baseline={sens0:.3}, split={sens50:.3}"
     );
     assert!(
-        (internal50 - sens50 * 0.5).abs() < 1.0,
-        "internal gain should receive half of sensible gain; got {internal50:.3} vs {:.3}",
-        sens50 * 0.5
+        (internal50 - wall_w).abs() < 1.0,
+        "internal gain must equal wall share of HP waste heat; got {internal50:.3} vs {wall_w:.3}"
     );
     assert!(
-        (jacket50 - sens50 * 0.5).abs() < 1.0,
-        "jacket loss should receive half of sensible gain; got {jacket50:.3} vs {:.3}",
-        sens50 * 0.5
+        (jacket50 - wall_w - skin_loss_w).abs() < 1.0,
+        "jacket loss must equal wall share plus skin loss; got {jacket50:.3} vs wall={wall_w:.3} + skin={skin_loss_w:.3}"
     );
     assert!(
-        (wall_w - sens50 * 0.5).abs() < 1.0,
-        "wall_sensible_gain_w telemetry should track the wall share; got {wall_w:.3} vs {:.3}",
-        sens50 * 0.5
+        (wall_w - (sens50 - skin_loss_w) * 0.5).abs() < 1.0,
+        "wall_sensible_gain_w telemetry must be half of HP waste heat; got {wall_w:.3} vs {:.3}",
+        (sens50 - skin_loss_w) * 0.5
     );
 }

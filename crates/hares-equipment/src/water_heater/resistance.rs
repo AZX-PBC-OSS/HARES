@@ -1772,7 +1772,7 @@ mod element_priority_tests {
         // setpoint=52, deadband=2 => deadband floor = 50°C.
         // Upper node at 49.5°C: just below the floor, so upper element fires (small deficit).
         // Lower node at 30°C: far below floor (large deficit).
-        // Pre-set upper_element_on=true so hysteresis keeps it on at the upper threshold.
+        // Upper node at 49.5°C < (52 - 2) = 50°C floor, so thermostat calls for heat on first step.
         wh.tank.node_temps_mut()[wh.upper_node] = 49.5;
         wh.tank.node_temps_mut()[wh.lower_node] = 30.0;
 

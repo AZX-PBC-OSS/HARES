@@ -1458,7 +1458,10 @@ mod tests {
     }
 
     #[test]
-    fn gas_wh_fuel_consumption_matches_ochre_formula() {
+    fn gas_wh_fuel_consumption_tracks_burner_input() {
+        // HARES uses conversion_efficiency directly as burner efficiency, unlike OCHRE
+        // which derives it from EF via a regression. This is an intentional model
+        // difference: conversion_efficiency is the physically meaningful parameter.
         let burner_input_w = 11_000.0_f64;
         let eta_c = 0.80_f64;
         let flue_loss_fraction = 0.0_f64;

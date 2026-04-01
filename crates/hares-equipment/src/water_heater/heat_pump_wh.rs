@@ -742,6 +742,18 @@ impl Equipment for HeatPumpWH {
             }
         }
 
+        let skin_loss_w = self.tank.skin_loss_w();
+        if let Some(zone) = self.descriptor.zone {
+            if skin_loss_w.abs() > 1e-3 {
+                ports.accumulate(&PortContribution::Thermal {
+                    zone,
+                    sensible_gain_w: skin_loss_w,
+                    latent_gain_w: 0.0,
+                    category: ThermalCategory::JacketLoss,
+                })?;
+            }
+        }
+
         if total_draw_kg_s > 0.0 {
             // Apply tempering valve: cold mains water is mixed with hot tank water to cap
             // delivery temperature at tempering_valve_setpoint_c. The mixed outlet never
@@ -1331,6 +1343,128 @@ mod tests {
         assert!(
             (actual - 41.25).abs() < 1e-9,
             "explicit initial_tank_temp_c must be preserved"
+        );
+    }
+
+    #[test]
+    fn hpwh_default_thermal_capacity_matches_ochre() {
+        let typed = HeatPumpWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: None,
+            backup_element_power_w: None,
+            ua_w_per_k: None,
+            setpoint_c: None,
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            compressor_power_w: None,
+            backup_enable_offset_c: None,
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: None,
+            min_off_time_s: None,
+            hp_only_mode: None,
+            element_hp_control_mode: None,
+            fan_power_w: None,
+            parasitic_power_w: None,
+            backup_efficiency: None,
+            shr: None,
+            lost_heat_fraction: None,
+            wall_heat_fraction: None,
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+        };
+        let config = equipment_config(typed);
+        let e = env(20.0);
+        let mut eq = HeatPumpWH::new(config.clone());
+        eq.init(&config, &e).expect("init should succeed");
+        assert!(
+            (eq.compressor_power_w - 1_725.0).abs() < 1e-9,
+            "default thermal capacity must be 500 W × 3.45 COP = 1725 W; got {}",
+            eq.compressor_power_w
+        );
+    }
+
+    #[test]
+    fn low_power_hpwh_thermal_capacity_is_1499_4() {
+        let typed = HeatPumpWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: None,
+            tank_volume_m3: None,
+            tank_height_m: None,
+            cop: None,
+            backup_element_power_w: None,
+            ua_w_per_k: None,
+            setpoint_c: None,
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            tempering_valve_setpoint_c: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            compressor_power_w: Some(1_499.4),
+            backup_enable_offset_c: None,
+            min_ambient_temp_c: None,
+            max_ambient_temp_c: None,
+            min_on_time_s: None,
+            min_off_time_s: None,
+            hp_only_mode: Some(true),
+            element_hp_control_mode: None,
+            fan_power_w: None,
+            parasitic_power_w: None,
+            backup_efficiency: None,
+            shr: None,
+            lost_heat_fraction: None,
+            wall_heat_fraction: None,
+            capacity_biquadratic_coeffs: None,
+            cop_biquadratic_coeffs: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+        };
+        let config = equipment_config(typed);
+        let e = env(20.0);
+        let mut eq = HeatPumpWH::new(config.clone());
+        eq.init(&config, &e).expect("init should succeed");
+        assert!(
+            (eq.compressor_power_w - 1_499.4).abs() < 1e-9,
+            "low-power HPWH thermal capacity must be 1499.4 W; got {}",
+            eq.compressor_power_w
+        );
+    }
+
+    #[test]
+    fn hpwh_skin_loss_telemetry_populated_after_step() {
+        let mut typed = base_typed_config();
+        typed.initial_tank_temp_c = Some(55.0);
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let config = equipment_config(typed);
+        let e = env(15.0);
+        let mut eq = HeatPumpWH::new(config.clone());
+        eq.init(&config, &e).expect("init should succeed");
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p)
+            .expect("step should succeed");
+        let skin_loss = eq.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
+        assert!(
+            skin_loss > 0.0,
+            "SKIN_LOSS_W must be positive when tank ({} °C) is hotter than ambient (15 °C); got {skin_loss}",
+            55.0
         );
     }
 
@@ -1944,10 +2078,17 @@ mod tests {
             sens0.abs() > 1e-6,
             "baseline sensible gain must be non-zero for this test"
         );
-        let ratio = sens75 / sens0;
+        let skin_loss_w = eq0.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
+        let hp_waste0 = sens0 - skin_loss_w;
+        let hp_waste75 = sens75 - skin_loss_w;
+        assert!(
+            hp_waste0.abs() > 1e-6,
+            "HP waste component must be non-zero for this test"
+        );
+        let ratio = hp_waste75 / hp_waste0;
         assert!(
             (ratio - 0.25).abs() < 0.05,
-            "lost_heat_fraction=0.75 should leave 25% of sensible gain in zone: ratio={ratio:.3}"
+            "lost_heat_fraction=0.75 should leave 25% of HP waste heat in zone: ratio={ratio:.3}"
         );
     }
 
@@ -2858,24 +2999,20 @@ mod new_feature_tests {
             (ratio - 1.0).abs() < 0.01,
             "total sensible gain must be preserved across the wall split: ratio={ratio:.4}"
         );
+        let skin_loss_w = eq50.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
+        let wall_w = eq50.telemetry().get(tk::WALL_SENSIBLE_GAIN_W).unwrap_or(0.0);
         assert!(
-            (internal50 - sens0 * 0.5).abs() < 1.0,
-            "internal gain should receive half of total sensible gain: {internal50:.2} vs {:.2}",
-            sens0 * 0.5
+            (internal50 - wall_w).abs() < 1.0,
+            "internal gain must equal wall share of HP waste heat: {internal50:.2} vs {wall_w:.2}"
         );
         assert!(
-            (jacket50 - sens0 * 0.5).abs() < 1.0,
-            "jacket loss should receive half of total sensible gain: {jacket50:.2} vs {:.2}",
-            sens0 * 0.5
+            (jacket50 - wall_w - skin_loss_w).abs() < 1.0,
+            "jacket loss must equal wall share plus skin loss: {jacket50:.2} vs wall={wall_w:.2} + skin={skin_loss_w:.2}"
         );
-        let wall_w = eq50
-            .telemetry()
-            .get(tk::WALL_SENSIBLE_GAIN_W)
-            .unwrap_or(0.0);
         assert!(
-            (wall_w.abs() - sens0.abs() * 0.5).abs() < 1.0,
-            "wall_sensible_gain_w telemetry should be half of total: {wall_w:.2} vs {:.2}",
-            sens0.abs() * 0.5
+            (wall_w.abs() - (sens0 - skin_loss_w).abs() * 0.5).abs() < 1.0,
+            "wall_sensible_gain_w telemetry must be half of HP waste heat: {wall_w:.2} vs {:.2}",
+            (sens0 - skin_loss_w).abs() * 0.5
         );
     }
 

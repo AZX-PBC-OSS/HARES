@@ -154,7 +154,7 @@ impl GasWaterHeaterConfig {
         check_range(
             "gas_wh: conversion_efficiency",
             self.conversion_efficiency,
-            0.0,
+            0.01,
             1.0,
         )?;
         Ok(())
