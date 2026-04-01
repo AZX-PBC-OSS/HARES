@@ -425,12 +425,7 @@ impl HeatPumpWH {
         self.max_tank_temp_c = c.max_tank_temp_c.unwrap_or(DEFAULT_MAX_TANK_TEMP_C);
 
         self.shr = c.shr.unwrap_or(DEFAULT_SHR);
-        self.lost_heat_fraction = c
-            .lost_heat_fraction
-            .unwrap_or(match c.zone_type.as_deref() {
-                Some("conditioned") => 0.25,
-                _ => DEFAULT_LOST_HEAT_FRACTION,
-            });
+        self.lost_heat_fraction = c.lost_heat_fraction.unwrap_or(DEFAULT_LOST_HEAT_FRACTION);
         self.wall_heat_fraction = c
             .wall_heat_fraction
             .unwrap_or(match c.zone_type.as_deref() {
@@ -1897,6 +1892,72 @@ mod tests {
     }
 
     #[test]
+    fn lost_heat_fraction_0_75_reduces_zone_gain_to_25_percent() {
+        let e = env_with_wet_bulb(24.0, 14.0);
+
+        let mut typed0 = base_typed_config();
+        typed0.lost_heat_fraction = Some(0.0);
+        let cfg0 = equipment_config(typed0);
+        let mut eq0 = HeatPumpWH::new(cfg0.clone());
+        eq0.init(&cfg0, &e).unwrap();
+        let mut p0 = ports();
+        eq0.step(&e, Duration::from_secs(60), &mut p0).unwrap();
+
+        let mut typed75 = base_typed_config();
+        typed75.lost_heat_fraction = Some(0.75);
+        let cfg75 = equipment_config(typed75);
+        let mut eq75 = HeatPumpWH::new(cfg75.clone());
+        eq75.init(&cfg75, &e).unwrap();
+        let mut p75 = ports();
+        eq75.step(&e, Duration::from_secs(60), &mut p75).unwrap();
+
+        let sens0 = p0.thermal[0].sensible_gain_w;
+        let sens75 = p75.thermal[0].sensible_gain_w;
+        assert!(
+            sens0.abs() > 1e-6,
+            "baseline sensible gain must be non-zero for this test"
+        );
+        let ratio = sens75 / sens0;
+        assert!(
+            (ratio - 0.25).abs() < 0.05,
+            "lost_heat_fraction=0.75 should leave 25% of sensible gain in zone: ratio={ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn lost_heat_fraction_default_none_equals_zero() {
+        let e = env_with_wet_bulb(24.0, 14.0);
+
+        let mut typed_explicit = base_typed_config();
+        typed_explicit.lost_heat_fraction = Some(0.0);
+        let cfg_explicit = equipment_config(typed_explicit);
+        let mut eq_explicit = HeatPumpWH::new(cfg_explicit.clone());
+        eq_explicit.init(&cfg_explicit, &e).unwrap();
+        let mut p_explicit = ports();
+        eq_explicit
+            .step(&e, Duration::from_secs(60), &mut p_explicit)
+            .unwrap();
+
+        let mut typed_default = base_typed_config();
+        typed_default.lost_heat_fraction = None;
+        let cfg_default = equipment_config(typed_default);
+        let mut eq_default = HeatPumpWH::new(cfg_default.clone());
+        eq_default.init(&cfg_default, &e).unwrap();
+        let mut p_default = ports();
+        eq_default
+            .step(&e, Duration::from_secs(60), &mut p_default)
+            .unwrap();
+
+        let sens_explicit = p_explicit.thermal[0].sensible_gain_w;
+        let sens_default = p_default.thermal[0].sensible_gain_w;
+        assert!(
+            (sens_explicit - sens_default).abs() < 1e-6,
+            "omitting lost_heat_fraction must produce same result as lost_heat_fraction=0.0: \
+             explicit={sens_explicit:.6}, default={sens_default:.6}"
+        );
+    }
+
+    #[test]
     fn backup_efficiency_scales_backup_power_delivery() {
         // Force backup-only mode so the backup element fires on the first step.
         // With backup_efficiency=0.8, delivered heat = 0.8 * electrical input,
@@ -2682,7 +2743,7 @@ mod new_feature_tests {
     }
 
     #[test]
-    fn conditioned_zone_uses_default_interaction_fractions() {
+    fn unset_lost_heat_fraction_defaults_to_zero_regardless_of_zone_type() {
         let typed = HeatPumpWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
@@ -2724,8 +2785,8 @@ mod new_feature_tests {
         let mut eq = HeatPumpWH::new(cfg.clone());
         eq.init(&cfg, &env_at(24.0)).unwrap();
         assert!(
-            (eq.lost_heat_fraction - 0.25).abs() < 1e-12,
-            "conditioned-zone default lost_heat_fraction should be 0.25, got {}",
+            eq.lost_heat_fraction.abs() < 1e-12,
+            "unset lost_heat_fraction must default to 0.0, got {}",
             eq.lost_heat_fraction
         );
         assert!(

@@ -35,6 +35,13 @@ use super::heater_config::{
     default_heater_telemetry, heater_telemetry_fields, operating_mode_code,
 };
 
+fn eir_from_backup_fuel(fuel: Option<&str>) -> f64 {
+    match fuel.map(str::to_ascii_lowercase).as_deref() {
+        Some("natural_gas") | Some("gas") | Some("propane") | Some("fuel_oil") => 1.0 / 0.80,
+        _ => DEFAULT_BACKUP_EIR,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum HeaterVariant {
     Ashp,
@@ -291,11 +298,15 @@ impl HeatPumpHeaterCore {
             HeaterVariant::Ashp => "ASHP Heater",
             HeaterVariant::Minisplit => "MSHP Heater",
         };
+        let default_backup = match variant {
+            HeaterVariant::Ashp => DEFAULT_BACKUP_CAPACITY_W,
+            HeaterVariant::Minisplit => 0.0,
+        };
         let backup_capacity_w = config
             .typed::<HeatPumpHeaterConfig>()
             .ok()
             .and_then(|cfg| cfg.backup_capacity_w)
-            .unwrap_or(DEFAULT_BACKUP_CAPACITY_W)
+            .unwrap_or(default_backup)
             .max(0.0);
         let hvac_type = match variant {
             HeaterVariant::Ashp => {
@@ -344,7 +355,7 @@ impl HeatPumpHeaterCore {
             max_oat_supplemental_c: MAX_OAT_SUPPLEMENTAL_C,
             er_setpoint_offset_c: 0.0,
             min_er_cycle_time_s: DEFAULT_MIN_ER_CYCLE_TIME_S,
-            backup_capacity_w: DEFAULT_BACKUP_CAPACITY_W,
+            backup_capacity_w,
             backup_eir: DEFAULT_BACKUP_EIR,
             pan_heater_kw: 0.0,
             pan_heater_temp_c: MSHP_PAN_HEATER_DEFAULT_TEMP_C,
@@ -508,11 +519,18 @@ impl HeatPumpHeaterCore {
         self.hvac.update_zone_heat_fractions();
 
         // Backup heating from typed config.
+        let default_backup = match self.variant {
+            HeaterVariant::Ashp => DEFAULT_BACKUP_CAPACITY_W,
+            HeaterVariant::Minisplit => 0.0,
+        };
         self.backup_capacity_w = cfg
             .backup_capacity_w
-            .unwrap_or(DEFAULT_BACKUP_CAPACITY_W)
+            .unwrap_or(default_backup)
             .max(0.0);
-        self.backup_eir = cfg.backup_eir.unwrap_or(DEFAULT_BACKUP_EIR).max(0.0);
+        self.backup_eir = cfg
+            .backup_eir
+            .unwrap_or_else(|| eir_from_backup_fuel(cfg.backup_fuel.as_deref()))
+            .max(0.0);
         self.hp_lockout_temp_c = cfg.hp_lockout_temp_c.unwrap_or(DEFAULT_HP_LOCKOUT_TEMP_C);
         self.hp_lockout_hysteresis_c = DEFAULT_HP_LOCKOUT_HYSTERESIS_C;
         self.er_lockout_temp_c = cfg.er_lockout_temp_c.unwrap_or(DEFAULT_ER_LOCKOUT_TEMP_C);
@@ -1512,7 +1530,7 @@ mod tests {
                 weekday,
                 weekend: weekday,
                 month_multipliers: [1.0; 12],
-                max_value: 40.0,
+                max_value: 1.0,
             });
             typed.heating_setpoint_c = Some(18.0);
         });
@@ -2847,6 +2865,117 @@ mod tests {
         assert_eq!(
             n_stages, 4,
             "MSHP typed init with single capacity must produce 4 speed stages, got {n_stages}"
+        );
+    }
+
+    fn mshp_config_with(mutator: impl FnOnce(&mut HeatPumpHeaterConfig)) -> EquipmentConfig {
+        use crate::config::EquipmentTypedConfig;
+        let mut typed = HeatPumpHeaterConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(8_000.0),
+            heating_eir: Some(0.33),
+            is_mini_split: true,
+            heating_setpoint_c: Some(21.0),
+            cooling_setpoint_c: Some(26.0),
+            hysteresis_c: Some(1.0),
+            ..Default::default()
+        };
+        mutator(&mut typed);
+        let mut cfg = crate::config::EquipmentConfig::with_payload(
+            "MSHP Heater".to_string(),
+            "MSHP Heater".to_string(),
+            crate::config::EquipmentConfig::from_typed(
+                "MSHP Heater".to_string(),
+                HeatPumpHeaterConfig::equipment_type_name().to_string(),
+                typed,
+            )
+            .payload
+            .clone(),
+        );
+        add_identity_biquadratic_curves(&mut cfg);
+        cfg
+    }
+
+    #[test]
+    fn mshp_default_backup_capacity_is_zero() {
+        let cfg = mshp_config_with(|_| {});
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let environment = env(18.0, 5.0, 0.003);
+        eq.init(&cfg, &environment).unwrap();
+
+        assert_eq!(
+            eq.core.backup_capacity_w, 0.0,
+            "MSHP without explicit backup must default to 0 W, got {}",
+            eq.core.backup_capacity_w
+        );
+    }
+
+    #[test]
+    fn mshp_explicit_backup_capacity_is_respected() {
+        let cfg = mshp_config_with(|typed| typed.backup_capacity_w = Some(3_000.0));
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let environment = env(18.0, 5.0, 0.003);
+        eq.init(&cfg, &environment).unwrap();
+
+        assert_eq!(
+            eq.core.backup_capacity_w, 3_000.0,
+            "MSHP with explicit backup_capacity_w must use that value"
+        );
+    }
+
+    #[test]
+    fn mshp_er_does_not_engage_without_backup_capacity() {
+        use hares_types::OperatingMode;
+        let cfg = mshp_config_with(|_| {});
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        // Zone well below setpoint (21°C) and OAT above HP lockout — HP should run, ER must not.
+        let environment = env(15.0, 5.0, 0.003);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &environment).unwrap();
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let mode = eq.core.operating_mode;
+        assert!(
+            !matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER),
+            "MSHP with no backup must never engage ER, but mode was {mode:?}"
+        );
+    }
+
+    #[test]
+    fn gas_backup_fuel_without_explicit_eir_uses_afue80_eir() {
+        let cfg = heater_config_with(|typed| {
+            typed.hp_lockout_temp_c = Some(10.0);
+            typed.er_lockout_temp_c = Some(5.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+            typed.backup_capacity_w = Some(4_000.0);
+            typed.backup_fuel = Some("natural_gas".to_string());
+            typed.backup_eir = None;
+            typed.fan_power_w = Some(0.0);
+        });
+
+        let environment = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &environment).unwrap();
+        let mode = eq.update_control(&environment);
+        assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out");
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+
+        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        // Gas backup at 80 AFUE: EIR = 1/0.80 = 1.25; electric draw = 4000 W * 1.25 = 5000 W
+        let expected_kw = 4_000.0 * (1.0 / 0.80) / 1000.0;
+        assert!(
+            (electric_kw - expected_kw).abs() < 1e-6,
+            "gas backup EIR=1/0.80 should produce {expected_kw:.6} kW, got {electric_kw:.6} kW"
         );
     }
 }

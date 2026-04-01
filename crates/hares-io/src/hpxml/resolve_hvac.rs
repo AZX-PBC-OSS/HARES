@@ -449,9 +449,12 @@ fn extract_stage_values(params: &Map<String, Value>, prefix: &str) -> Option<Vec
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// Extract fan_power_w from params (optional).
+/// Extract fan_power_w from params, falling back to auxiliary_power_w (ElectricAuxiliaryEnergy).
 fn fan_power_from_params(params: &Map<String, Value>) -> Option<f64> {
-    params.get("fan_power_w").and_then(Value::as_f64)
+    params
+        .get("fan_power_w")
+        .and_then(Value::as_f64)
+        .or_else(|| params.get("auxiliary_power_w").and_then(Value::as_f64))
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3328,5 +3331,24 @@ mod tests {
             (actual_eir - expected_eir).abs() / expected_eir < 0.10,
             "1/COP at AHRI conditions must be within 10% of nominal EIR=3.412/SEER={expected_eir:.4}, got {actual_eir:.4}"
         );
+    }
+
+    #[test]
+    fn fan_power_from_params_falls_back_to_auxiliary_power_w() {
+        let mut params = Map::new();
+        params.insert("auxiliary_power_w".to_string(), json!(250.0));
+
+        let result = fan_power_from_params(&params);
+        assert_eq!(result, Some(250.0), "auxiliary_power_w must be returned when fan_power_w is absent");
+    }
+
+    #[test]
+    fn fan_power_from_params_prefers_fan_power_w_over_auxiliary() {
+        let mut params = Map::new();
+        params.insert("fan_power_w".to_string(), json!(300.0));
+        params.insert("auxiliary_power_w".to_string(), json!(250.0));
+
+        let result = fan_power_from_params(&params);
+        assert_eq!(result, Some(300.0), "fan_power_w must take precedence over auxiliary_power_w");
     }
 }
