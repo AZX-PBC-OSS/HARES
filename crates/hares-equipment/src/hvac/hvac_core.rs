@@ -237,6 +237,15 @@ pub struct HvacEquipment {
     /// Per-speed flow-fraction quadratic coefficients for EIR curve.
     /// Evaluates: `eir_ff[0] + eir_ff[1]*ff + eir_ff[2]*ff^2`.
     pub eir_ff_coeffs: [f64; 3],
+    /// Flow-fraction clamping bounds `(min, max)` applied before evaluating the
+    /// flow-fraction quadratic in `evaluate_biquadratic_with_flow`.
+    /// Default `(0.0, f64::INFINITY)` = no clamping.
+    /// Config keys: `ff_min`, `ff_max`.
+    pub ff_bounds: (f64, f64),
+    /// Minimum PLF floor used in `part_load_factor_for_stage`.
+    /// Default 0.7 per AHRI 210/240.  MSHP CSV-derived configs may set a lower
+    /// value via the `plf_min` config key.
+    pub plf_min: f64,
 }
 
 impl HvacEquipment {
@@ -311,6 +320,8 @@ impl HvacEquipment {
             max_capacity_fraction: 1.0,
             cap_ff_coeffs: [1.0, 0.0, 0.0],
             eir_ff_coeffs: [1.0, 0.0, 0.0],
+            ff_bounds: (0.0, f64::INFINITY),
+            plf_min: 0.7,
         }
     }
 
@@ -452,6 +463,19 @@ impl HvacEquipment {
             if let Ok(arr) = parse_f64_array_3(raw) {
                 self.eir_ff_coeffs = arr;
             }
+        }
+
+        // Flow-fraction clamping bounds: applied before ff quadratic evaluation.
+        if let Some(ff_min) = extract_numeric(config, "ff_min") {
+            self.ff_bounds.0 = ff_min;
+        }
+        if let Some(ff_max) = extract_numeric(config, "ff_max") {
+            self.ff_bounds.1 = ff_max;
+        }
+
+        // PLF floor: AHRI 210/240 default 0.7; MSHP CSV-derived configs may lower it.
+        if let Some(plf_min) = extract_numeric(config, "plf_min") {
+            self.plf_min = plf_min;
         }
 
         // Apply equipment-type and efficiency-rating Cd defaults per AHRI / OCHRE table.
@@ -818,13 +842,14 @@ impl HvacEquipment {
         flow_fraction: f64,
     ) -> (f64, f64) {
         let raw = self.evaluate_biquadratic(curve_index, t_indoor_c, t_outdoor_c);
+        let ff_clamped = flow_fraction.clamp(self.ff_bounds.0, self.ff_bounds.1);
         // Use cap_ff for capacity curves (even index), eir_ff for EIR curves (odd index).
         let ff_coeffs = if curve_index.is_multiple_of(2) {
             &self.cap_ff_coeffs
         } else {
             &self.eir_ff_coeffs
         };
-        let ff_ratio = Self::evaluate_ff_quadratic(ff_coeffs, flow_fraction);
+        let ff_ratio = Self::evaluate_ff_quadratic(ff_coeffs, ff_clamped);
         let adjusted = raw * ff_ratio;
         (raw, adjusted)
     }
@@ -2906,5 +2931,38 @@ mod tests {
         // Just above the cutout threshold (21.0) heating should turn off.
         let mode = hvac.update_mode(&env(21.1, 60, 122)).expect("turns off");
         assert_eq!(mode, ThermostatMode::Deadband, "must turn off above cutout threshold");
+    }
+
+    #[test]
+    fn ff_bounds_clamp_flow_fraction_before_quadratic() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        // ff quadratic: ratio = 0.5 + 0.5*ff  (linear in ff)
+        hvac.cap_ff_coeffs = [0.5, 0.5, 0.0];
+        hvac.ff_bounds = (0.7, 1.3);
+
+        // ff=0.6 is below ff_min=0.7, should be clamped to 0.7
+        let (_raw, adjusted) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.6);
+        let expected = 0.5 + 0.5 * 0.7; // clamped to 0.7
+        assert!(
+            (adjusted - expected).abs() < 1e-12,
+            "ff=0.6 with ff_min=0.7: expected {expected}, got {adjusted}"
+        );
+
+        // ff=0.8 is within bounds, no clamping
+        let (_raw, adjusted) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.8);
+        let expected = 0.5 + 0.5 * 0.8;
+        assert!(
+            (adjusted - expected).abs() < 1e-12,
+            "ff=0.8 within bounds: expected {expected}, got {adjusted}"
+        );
+
+        // ff=1.5 is above ff_max=1.3, should be clamped to 1.3
+        let (_raw, adjusted) = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 1.5);
+        let expected = 0.5 + 0.5 * 1.3;
+        assert!(
+            (adjusted - expected).abs() < 1e-12,
+            "ff=1.5 with ff_max=1.3: expected {expected}, got {adjusted}"
+        );
     }
 }

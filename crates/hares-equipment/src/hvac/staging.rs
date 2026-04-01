@@ -297,15 +297,16 @@ impl HvacEquipment {
             1.0 - cd * (1.0 - plr)
         };
 
-        if plf_raw < 0.7 {
+        if plf_raw < self.plf_min {
             tracing::warn!(
                 plf_raw,
                 plr,
                 stage_index,
-                "PLF curve returned value < 0.7; check eir_plr or cooling_cd. Clamping to max(0.7, PLR)."
+                plf_min = self.plf_min,
+                "PLF curve returned value < plf_min; check eir_plr or cooling_cd. Clamping to max(plf_min, PLR)."
             );
         }
-        let plf = plf_raw.clamp(0.7_f64.max(plr), 1.0);
+        let plf = plf_raw.clamp(self.plf_min.max(plr), 1.0);
         self.plf_state = plf;
         plf
     }
@@ -470,7 +471,7 @@ mod tests {
         );
     }
 
-    /// High Cd produces raw PLF below 0.7, which must be clamped to max(0.7, PLR).
+    /// High Cd produces raw PLF below default plf_min (0.7), clamped to max(0.7, PLR).
     /// Cd=0.5, PLR=0.3 → raw PLF = 1 - 0.5*(1-0.3) = 0.65 → clamped to max(0.7, 0.3) = 0.7.
     #[test]
     fn plf_floor_clamp_with_high_cd() {
@@ -480,6 +481,38 @@ mod tests {
         assert!(
             (plf - 0.7).abs() < 1e-9,
             "PLR=0.3, Cd=0.5: raw PLF=0.65 must clamp to 0.7, got {plf}"
+        );
+    }
+
+    /// MSHP CSV-derived plf_min=0.2195: the PLF floor should use that value, not 0.7.
+    /// Cd=0.5, PLR=0.3 → raw PLF = 1 - 0.5*(1-0.3) = 0.65 → clamped to max(0.2195, 0.3) = 0.3.
+    #[test]
+    fn plf_floor_uses_custom_plf_min() {
+        let mut hvac = make_single_speed();
+        hvac.plf_cooling_degradation_coeff = 0.5;
+        hvac.plf_min = 0.2195;
+        let plf = hvac.part_load_factor_for_stage(0.3, 0);
+        // raw=0.65, floor=max(0.2195, 0.3)=0.3, so PLF=0.65 (above floor)
+        assert!(
+            (plf - 0.65).abs() < 1e-9,
+            "PLR=0.3, Cd=0.5, plf_min=0.2195: raw PLF=0.65 >= floor 0.3, got {plf}"
+        );
+
+        // PLR=0.1 → raw PLF = 1 - 0.5*(1-0.1) = 0.55 → floor=max(0.2195, 0.1)=0.2195
+        // 0.55 >= 0.2195, so PLF=0.55
+        let plf2 = hvac.part_load_factor_for_stage(0.1, 0);
+        assert!(
+            (plf2 - 0.55).abs() < 1e-9,
+            "PLR=0.1, Cd=0.5, plf_min=0.2195: raw PLF=0.55 >= floor 0.2195, got {plf2}"
+        );
+
+        // Extreme: Cd=0.95, PLR=0.1 → raw PLF = 1 - 0.95*0.9 = 0.145 < plf_min=0.2195
+        // floor=max(0.2195, 0.1)=0.2195, clamp to 0.2195
+        hvac.plf_cooling_degradation_coeff = 0.95;
+        let plf3 = hvac.part_load_factor_for_stage(0.1, 0);
+        assert!(
+            (plf3 - 0.2195).abs() < 1e-9,
+            "PLR=0.1, Cd=0.95, plf_min=0.2195: raw PLF=0.145 clamped to 0.2195, got {plf3}"
         );
     }
 

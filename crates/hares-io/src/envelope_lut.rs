@@ -191,7 +191,12 @@ impl EnvelopeLookup {
             filtered[0]
         } else if let Some(r_val) = assembly_r_value {
             // OCHRE clamps R >= 17.6 m²·K/W (100 IP) to ~88 m²·K/W (500 IP) for "Minimal" boundaries.
-            let r_val = if r_val >= 17.6 { 88.0 } else { r_val };
+            // When clamping, clear all type filters so the Minimal row is reachable.
+            let mut r_val = r_val;
+            if r_val >= 17.6 {
+                filtered = candidates.iter().collect();
+                r_val = 88.0;
+            }
 
             let film_r = if FLOOR_CEILING_BOUNDARIES.contains(&boundary_name) {
                 FILM_R_FLOOR_CEILING

@@ -303,3 +303,23 @@ fn both_zones_missing_uses_defaults() {
         Some("Exterior Wall")
     );
 }
+
+#[test]
+fn high_r_clamps_to_minimal_regardless_of_construction_type() {
+    let lut = EnvelopeLookup::load(&defaults_envelope_dir()).unwrap();
+    // R=20.0 exceeds the 17.6 threshold → should clamp to 88.0 and match Minimal,
+    // even though construction_type filters to WoodStud rows first.
+    let result = lut
+        .lookup("Exterior Wall", Some("WoodStud"), None, None, Some(20.0))
+        .expect("high R with WoodStud should still match Minimal");
+    assert!(
+        result.matched_boundary_type.contains("Minimal"),
+        "expected Minimal variant, got: {}",
+        result.matched_boundary_type
+    );
+    assert!(
+        result.matched_r_value > 80.0,
+        "expected high R-value for Minimal, got: {}",
+        result.matched_r_value
+    );
+}
