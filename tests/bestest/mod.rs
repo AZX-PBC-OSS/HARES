@@ -57,35 +57,30 @@ fn run_single_case(case: &BestestCase) {
 }
 
 #[test]
-#[ignore = "temporarily disabled while fixing underlying HARES implementation"]
 fn bestest_case_600() {
     let case = core_cases().into_iter().find(|c| c.id == "600").unwrap();
     run_single_case(&case);
 }
 
 #[test]
-#[ignore = "temporarily disabled while fixing underlying HARES implementation"]
 fn bestest_case_900() {
     let case = core_cases().into_iter().find(|c| c.id == "900").unwrap();
     run_single_case(&case);
 }
 
 #[test]
-#[ignore = "temporarily disabled while fixing underlying HARES implementation"]
 fn bestest_case_600ff() {
     let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
     run_single_case(&case);
 }
 
 #[test]
-#[ignore = "temporarily disabled while fixing underlying HARES implementation"]
 fn bestest_case_900ff() {
     let case = core_cases().into_iter().find(|c| c.id == "900FF").unwrap();
     run_single_case(&case);
 }
 
 #[test]
-#[ignore = "temporarily disabled while fixing underlying HARES implementation"]
 fn bestest_case_640() {
     let case = core_cases().into_iter().find(|c| c.id == "640").unwrap();
     run_single_case(&case);
