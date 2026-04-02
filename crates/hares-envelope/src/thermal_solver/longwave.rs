@@ -281,6 +281,11 @@ impl ThermalSolver {
                 }
             }
 
+            let air_idx = self
+                .wiring
+                .zone_sensible_input_indices
+                .get(&zone_cfg.zone_id)
+                .copied();
             let mut zone_total = 0.0_f64;
             for (_j, (info, &q)) in zone_cfg
                 .surfaces
@@ -291,9 +296,13 @@ impl ThermalSolver {
                 // Surfaces driven by an environmental temperature (windows without RC nodes)
                 // have no thermal capacitor. Their net LWR flux is conducted to the exterior
                 // via the window U-factor and does not enter zone air.
-                // Opaque surfaces route LWR to their inner RC node (info.input_index = iw.b_col).
                 if info.driving_temp.is_none() && info.input_index < u.len() {
-                    u[info.input_index] += q;
+                    u[info.input_index] += q * info.radiation_frac;
+                    if let Some(ai) = air_idx {
+                        if ai < u.len() {
+                            u[ai] += q * (1.0 - info.radiation_frac);
+                        }
+                    }
                 }
                 zone_total += q;
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]

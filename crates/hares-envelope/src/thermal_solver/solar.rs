@@ -124,12 +124,12 @@ impl ThermalSolver {
             &mut self.solar_absorbed_buf,
         );
 
-        // Solar is deposited as a source term at the surface node; it conducts to zone
-        // air through the interior film resistance, matching EnergyPlus CTF treatment.
-        deposit_solar_to_surface_nodes(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
+        let air_spillover =
+            deposit_solar_to_surface_nodes(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
         if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
-            if air_idx < u.len() && reflected_w > 0.0 {
-                u[air_idx] += reflected_w;
+            let air_total = reflected_w + air_spillover;
+            if air_idx < u.len() && air_total > 0.0 {
+                u[air_idx] += air_total;
             }
         }
 
@@ -263,19 +263,25 @@ pub(crate) fn compute_solar_distribution_into(
 
 /// Deposit per-surface absorbed solar [W] into the state-space input vector `u`.
 ///
-/// Each surface's share goes entirely to `u[s.input_index]` (the surface node).
-/// `radiation_frac` is intentionally not used here: solar is a surface source term,
-/// not split between surface and zone air nodes.
+/// Splits each surface's share via `radiation_frac` (the RC network voltage-divider
+/// between film resistance and material half-resistance):
+///   - `q * radiation_frac` → surface RC node
+///   - `q * (1 - radiation_frac)` → returned as zone air contribution
 fn deposit_solar_to_surface_nodes(
     surfaces: &[InteriorSurfaceInfo],
     absorbed: &[f64],
     u: &mut DVector<f64>,
-) {
+) -> f64 {
+    let mut air_total = 0.0;
     for (s, &q) in surfaces.iter().zip(absorbed.iter()) {
-        if s.input_index < u.len() && q > 0.0 {
-            u[s.input_index] += q;
+        if q > 0.0 {
+            if s.input_index < u.len() {
+                u[s.input_index] += q * s.radiation_frac;
+            }
+            air_total += q * (1.0 - s.radiation_frac);
         }
     }
+    air_total
 }
 
 #[cfg(test)]
@@ -517,9 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn deposit_ignores_radiation_frac_all_solar_to_surface_node() {
-        // Surfaces with low radiation_frac — solar must still go entirely to
-        // surface nodes, not be split via radiation_frac.
+    fn deposit_applies_radiation_frac_split() {
         let surfaces = vec![
             make_surface_with_rad_frac(40.0, 0.6, true, 0, 0.02),
             make_surface_with_rad_frac(30.0, 0.5, false, 1, 0.02),
@@ -531,7 +535,6 @@ mod tests {
         let reflected =
             compute_solar_distribution_into(&surfaces, beam, diffuse, LEGACY_BEAM_FLOOR_FRAC, &mut absorbed);
 
-        // Precondition: all solar distributed (nonzero absorptance on all surfaces).
         let total_input = beam + diffuse;
         let total_absorbed: f64 = absorbed.iter().sum();
         assert!(
@@ -539,26 +542,33 @@ mod tests {
             "energy conservation violated"
         );
 
-        // Exercise the actual deposition path.
-        let air_node = 2; // zone air node, distinct from surface nodes 0 and 1
         let mut u = DVector::zeros(3);
-        deposit_solar_to_surface_nodes(&surfaces, &absorbed, &mut u);
+        let air_contribution = deposit_solar_to_surface_nodes(&surfaces, &absorbed, &mut u);
 
-        // All absorbed solar lands on the surface nodes, none split to zone air.
+        // With radiation_frac = 0.02, only 2% goes to surface nodes.
         assert!(
-            (u[0] - absorbed[0]).abs() < 1e-10,
-            "floor surface node should receive its full share: u[0]={}, absorbed={}",
-            u[0], absorbed[0]
+            (u[0] - absorbed[0] * 0.02).abs() < 1e-10,
+            "floor surface node should receive radiation_frac share: u[0]={}, expected={}",
+            u[0], absorbed[0] * 0.02
         );
         assert!(
-            (u[1] - absorbed[1]).abs() < 1e-10,
-            "wall surface node should receive its full share: u[1]={}, absorbed={}",
-            u[1], absorbed[1]
+            (u[1] - absorbed[1] * 0.02).abs() < 1e-10,
+            "wall surface node should receive radiation_frac share: u[1]={}, expected={}",
+            u[1], absorbed[1] * 0.02
         );
+
+        // 98% goes to zone air.
+        let expected_air = absorbed[0] * 0.98 + absorbed[1] * 0.98;
         assert!(
-            u[air_node].abs() < 1e-10,
-            "zone air node must receive zero solar from deposition, got {}",
-            u[air_node]
+            (air_contribution - expected_air).abs() < 1e-10,
+            "zone air should receive (1 - radiation_frac) share: got={}, expected={}",
+            air_contribution, expected_air
+        );
+
+        // Energy conservation: surface deposits + air contribution = total absorbed.
+        assert!(
+            (u[0] + u[1] + air_contribution - total_absorbed).abs() < 1e-10,
+            "energy conservation violated in deposition"
         );
     }
 
