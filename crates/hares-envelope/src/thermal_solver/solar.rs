@@ -6,9 +6,10 @@ use nalgebra::DVector;
 use super::ThermalSolver;
 use super::config::InteriorSurfaceInfo;
 
-/// Default beam-to-floor fraction for residential buildings.
-/// Per EnergyPlus FullInteriorAndExterior: 60% of beam solar hits floors.
-const BEAM_FLOOR_FRACTION: f64 = 0.60;
+#[inline]
+fn beam_floor_fraction(solar_altitude_deg: f64) -> f64 {
+    solar_altitude_deg.to_radians().sin().clamp(0.3, 0.9)
+}
 
 impl ThermalSolver {
     pub(super) fn apply_solar_inputs(&mut self, u: &mut DVector<f64>, env: &EnvironmentState) {
@@ -50,10 +51,11 @@ impl ThermalSolver {
                     shgc,
                     transmittance
                 );
+                // N_i: inward-flowing fraction of glass-absorbed solar (EnergyPlus window model).
+                // Distinct from surface radiation_frac used for LWR exchange.
                 let absorbed_inward = (shgc - transmittance).max(0.0) * win.radiation_frac;
                 let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
 
-                let _shgc = shgc;
                 let zone_id = self.config.window_zone_ids.get(&irr.surface_id).copied();
                 let air_idx = zone_id
                     .and_then(|zid| self.wiring.zone_sensible_input_indices.get(&zid).copied())
@@ -67,6 +69,7 @@ impl ThermalSolver {
                         zid,
                         transmitted_beam_w,
                         transmitted_diffuse_w,
+                        env.weather.solar_altitude_deg,
                     ),
                     None => false,
                 };
@@ -86,26 +89,19 @@ impl ThermalSolver {
                         transmitted_beam_w,
                         transmitted_diffuse_w,
                         absorbed_zone_w,
-                        shgc: _shgc,
+                        shgc,
                     });
             }
         }
     }
 
-    /// Distribute transmitted window solar to interior surfaces.
-    ///
-    /// - Beam: 60% to floor surfaces, 40% to walls/ceiling, weighted by `area × absorptance`
-    /// - Diffuse: distributed to all surfaces by `area × absorptance`
-    /// - Un-distributed energy (e.g. zero-absorptance surfaces) returned as reflected to zone air
-    ///
-    /// Returns `true` if distribution occurred (surfaces found), `false` if no
-    /// interior surfaces configured for this zone (caller should use legacy path).
     fn distribute_transmitted_solar(
         &mut self,
         u: &mut DVector<f64>,
         zone_id: ZoneId,
         beam_w: f64,
         diffuse_w: f64,
+        solar_altitude_deg: f64,
     ) -> bool {
         let zone_cfg = self
             .config
@@ -119,29 +115,21 @@ impl ThermalSolver {
             return false;
         }
 
+        let beam_floor_frac = beam_floor_fraction(solar_altitude_deg);
         let reflected_w = compute_solar_distribution_into(
             &zone_cfg.surfaces,
             beam_w,
             diffuse_w,
+            beam_floor_frac,
             &mut self.solar_absorbed_buf,
         );
 
-        // Split absorbed solar via radiation_frac (OCHRE RC voltage-divider model):
-        //   to_surface_node = absorbed × radiation_frac     (heat into RC mass node)
-        //   to_zone_air     = absorbed × (1 - radiation_frac) (bypasses to zone air)
-        // For thin interior surfaces (drywall), radiation_frac ≈ 0.15 → ~85% to air.
-        let mut zone_air_gain = reflected_w;
-        for (s, &absorbed) in zone_cfg.surfaces.iter().zip(self.solar_absorbed_buf.iter()) {
-            let to_node = absorbed * s.radiation_frac;
-            let to_air = absorbed * (1.0 - s.radiation_frac);
-            if s.input_index < u.len() && to_node > 0.0 {
-                u[s.input_index] += to_node;
-            }
-            zone_air_gain += to_air;
-        }
+        // Solar is deposited as a source term at the surface node; it conducts to zone
+        // air through the interior film resistance, matching EnergyPlus CTF treatment.
+        deposit_solar_to_surface_nodes(&zone_cfg.surfaces, &self.solar_absorbed_buf, u);
         if let Some(&air_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) {
-            if air_idx < u.len() && zone_air_gain > 0.0 {
-                u[air_idx] += zone_air_gain;
+            if air_idx < u.len() && reflected_w > 0.0 {
+                u[air_idx] += reflected_w;
             }
         }
 
@@ -190,10 +178,12 @@ pub(crate) fn compute_solar_distribution(
     surfaces: &[InteriorSurfaceInfo],
     beam_w: f64,
     diffuse_w: f64,
+    beam_floor_frac: f64,
 ) -> (Vec<f64>, f64) {
     let n = surfaces.len();
     let mut absorbed = vec![0.0_f64; n];
-    let reflected = compute_solar_distribution_into(surfaces, beam_w, diffuse_w, &mut absorbed);
+    let reflected =
+        compute_solar_distribution_into(surfaces, beam_w, diffuse_w, beam_floor_frac, &mut absorbed);
     (absorbed, reflected)
 }
 
@@ -208,6 +198,7 @@ pub(crate) fn compute_solar_distribution_into(
     surfaces: &[InteriorSurfaceInfo],
     beam_w: f64,
     diffuse_w: f64,
+    beam_floor_frac: f64,
     absorbed: &mut Vec<f64>,
 ) -> f64 {
     let n = surfaces.len();
@@ -226,13 +217,12 @@ pub(crate) fn compute_solar_distribution_into(
         .sum();
     let total_wa: f64 = floor_wa + nonfloor_wa;
 
-    // Beam: split 60%/40% when both floor and non-floor surfaces exist.
     // If one class is absent, redirect the full beam budget to the remaining class.
     if beam_w > 0.0 {
         let (beam_to_floors, beam_to_walls) = if floor_wa > 0.0 && nonfloor_wa > 0.0 {
             (
-                beam_w * BEAM_FLOOR_FRACTION,
-                beam_w * (1.0 - BEAM_FLOOR_FRACTION),
+                beam_w * beam_floor_frac,
+                beam_w * (1.0 - beam_floor_frac),
             )
         } else if floor_wa > 0.0 {
             (beam_w, 0.0)
@@ -271,9 +261,28 @@ pub(crate) fn compute_solar_distribution_into(
     (beam_w + diffuse_w) - total_distributed
 }
 
+/// Deposit per-surface absorbed solar [W] into the state-space input vector `u`.
+///
+/// Each surface's share goes entirely to `u[s.input_index]` (the surface node).
+/// `radiation_frac` is intentionally not used here: solar is a surface source term,
+/// not split between surface and zone air nodes.
+fn deposit_solar_to_surface_nodes(
+    surfaces: &[InteriorSurfaceInfo],
+    absorbed: &[f64],
+    u: &mut DVector<f64>,
+) {
+    for (s, &q) in surfaces.iter().zip(absorbed.iter()) {
+        if s.input_index < u.len() && q > 0.0 {
+            u[s.input_index] += q;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LEGACY_BEAM_FLOOR_FRAC: f64 = 0.6;
 
     fn make_surface(area: f64, absorptance: f64, is_floor: bool) -> InteriorSurfaceInfo {
         InteriorSurfaceInfo {
@@ -299,7 +308,8 @@ mod tests {
         ];
         let beam = 500.0;
         let diffuse = 200.0;
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, beam, diffuse);
+        let (absorbed, reflected) =
+            compute_solar_distribution(&surfaces, beam, diffuse, LEGACY_BEAM_FLOOR_FRAC);
 
         // Normalized view factors: all solar distributed to surfaces, reflected = 0.
         let total_absorbed: f64 = absorbed.iter().sum();
@@ -324,7 +334,8 @@ mod tests {
         ];
         let beam = 1000.0;
         let diffuse = 0.0;
-        let (absorbed, _) = compute_solar_distribution(&surfaces, beam, diffuse);
+        let (absorbed, _) =
+            compute_solar_distribution(&surfaces, beam, diffuse, LEGACY_BEAM_FLOOR_FRAC);
 
         // Floor should absorb 60% × 1.0 (sole floor) × 0.6 (absorptance) = 360 W
         // Walls should absorb 40% split by area × absorptance
@@ -350,7 +361,8 @@ mod tests {
             make_surface(40.0, 0.0, true),  // perfectly reflective floor
             make_surface(40.0, 0.0, false), // perfectly reflective ceiling
         ];
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, 500.0, 200.0);
+        let (absorbed, reflected) =
+            compute_solar_distribution(&surfaces, 500.0, 200.0, LEGACY_BEAM_FLOOR_FRAC);
         let total_absorbed: f64 = absorbed.iter().sum();
         // With zero absorptance, no distribution occurs — all energy reflected to zone air.
         assert!(
@@ -369,7 +381,8 @@ mod tests {
             make_surface(50.0, 1.0, true),  // blackbody floor
             make_surface(50.0, 1.0, false), // blackbody ceiling
         ];
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, 500.0, 200.0);
+        let (absorbed, reflected) =
+            compute_solar_distribution(&surfaces, 500.0, 200.0, LEGACY_BEAM_FLOOR_FRAC);
         let total_absorbed: f64 = absorbed.iter().sum();
         assert!(
             (total_absorbed - 700.0).abs() < 1e-6,
@@ -387,7 +400,8 @@ mod tests {
             make_surface(30.0, 0.6, false), // wall A (30 m²)
             make_surface(10.0, 0.6, false), // wall B (10 m²)
         ];
-        let (absorbed, _) = compute_solar_distribution(&surfaces, 0.0, 400.0);
+        let (absorbed, _) =
+            compute_solar_distribution(&surfaces, 0.0, 400.0, LEGACY_BEAM_FLOOR_FRAC);
 
         // Wall A gets 3× the incident of wall B (area ratio 30:10)
         // Both have same absorptance so absorbed ratio = area ratio
@@ -404,7 +418,8 @@ mod tests {
             make_surface(20.0, 0.5, false),
             make_surface(20.0, 0.5, false),
         ];
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, 1000.0, 0.0);
+        let (absorbed, reflected) =
+            compute_solar_distribution(&surfaces, 1000.0, 0.0, LEGACY_BEAM_FLOOR_FRAC);
         let total: f64 = absorbed.iter().sum();
         // No floors: full beam goes to walls. Normalized: each wall gets 500 W.
         assert!(
@@ -458,7 +473,8 @@ mod tests {
             make_surface(40.0, 0.6, true),
             make_surface(40.0, 0.5, false),
         ];
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, 0.0, 0.0);
+        let (absorbed, reflected) =
+            compute_solar_distribution(&surfaces, 0.0, 0.0, LEGACY_BEAM_FLOOR_FRAC);
         assert!(absorbed.iter().all(|&q| q == 0.0));
         assert_eq!(reflected, 0.0);
     }
@@ -466,7 +482,8 @@ mod tests {
     #[test]
     fn single_surface_receives_all_solar() {
         let surfaces = vec![make_surface(20.0, 0.7, true)];
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, 500.0, 200.0);
+        let (absorbed, reflected) =
+            compute_solar_distribution(&surfaces, 500.0, 200.0, LEGACY_BEAM_FLOOR_FRAC);
         // Single floor: sole surface gets all solar via normalized view factor.
         assert!(
             (absorbed[0] - 700.0).abs() < 1e-6,
@@ -479,10 +496,77 @@ mod tests {
         );
     }
 
+    fn make_surface_with_rad_frac(
+        area: f64,
+        absorptance: f64,
+        is_floor: bool,
+        input_index: usize,
+        radiation_frac: f64,
+    ) -> InteriorSurfaceInfo {
+        InteriorSurfaceInfo {
+            state_index: 0,
+            input_index,
+            area_m2: area,
+            emissivity: 0.9,
+            radiation_frac,
+            rad_res_k_w: 0.0,
+            solar_absorptance: absorptance,
+            is_floor,
+            driving_temp: None,
+        }
+    }
+
+    #[test]
+    fn deposit_ignores_radiation_frac_all_solar_to_surface_node() {
+        // Surfaces with low radiation_frac — solar must still go entirely to
+        // surface nodes, not be split via radiation_frac.
+        let surfaces = vec![
+            make_surface_with_rad_frac(40.0, 0.6, true, 0, 0.02),
+            make_surface_with_rad_frac(30.0, 0.5, false, 1, 0.02),
+        ];
+        let beam = 600.0;
+        let diffuse = 200.0;
+
+        let mut absorbed = Vec::new();
+        let reflected =
+            compute_solar_distribution_into(&surfaces, beam, diffuse, LEGACY_BEAM_FLOOR_FRAC, &mut absorbed);
+
+        // Precondition: all solar distributed (nonzero absorptance on all surfaces).
+        let total_input = beam + diffuse;
+        let total_absorbed: f64 = absorbed.iter().sum();
+        assert!(
+            (total_absorbed + reflected - total_input).abs() < 1e-6,
+            "energy conservation violated"
+        );
+
+        // Exercise the actual deposition path.
+        let air_node = 2; // zone air node, distinct from surface nodes 0 and 1
+        let mut u = DVector::zeros(3);
+        deposit_solar_to_surface_nodes(&surfaces, &absorbed, &mut u);
+
+        // All absorbed solar lands on the surface nodes, none split to zone air.
+        assert!(
+            (u[0] - absorbed[0]).abs() < 1e-10,
+            "floor surface node should receive its full share: u[0]={}, absorbed={}",
+            u[0], absorbed[0]
+        );
+        assert!(
+            (u[1] - absorbed[1]).abs() < 1e-10,
+            "wall surface node should receive its full share: u[1]={}, absorbed={}",
+            u[1], absorbed[1]
+        );
+        assert!(
+            u[air_node].abs() < 1e-10,
+            "zone air node must receive zero solar from deposition, got {}",
+            u[air_node]
+        );
+    }
+
     #[test]
     fn only_floors_receive_full_beam_budget() {
         let surfaces = vec![make_surface(30.0, 0.6, true), make_surface(20.0, 0.6, true)];
-        let (absorbed, reflected) = compute_solar_distribution(&surfaces, 1000.0, 0.0);
+        let (absorbed, reflected) =
+            compute_solar_distribution(&surfaces, 1000.0, 0.0, LEGACY_BEAM_FLOOR_FRAC);
         // All surfaces are floors with same absorptance. Normalized: all beam distributed.
         let total_absorbed: f64 = absorbed.iter().sum();
         assert!(
@@ -492,6 +576,45 @@ mod tests {
         assert!(
             reflected.abs() < 1e-6,
             "no reflection with normalized view factors, got {reflected}"
+        );
+    }
+
+    #[test]
+    fn beam_floor_fraction_boundaries() {
+        assert_eq!(beam_floor_fraction(0.0), 0.3);
+        assert_eq!(beam_floor_fraction(90.0), 0.9);
+        assert!((beam_floor_fraction(30.0) - 0.5).abs() < 1e-9);
+        assert_eq!(beam_floor_fraction(-10.0), 0.3);
+
+        let alt_sin_03 = (0.3_f64).asin().to_degrees();
+        assert!(
+            (beam_floor_fraction(alt_sin_03) - 0.3).abs() < 1e-9,
+            "clamp should engage at lower bound (sin ≈ 0.3)"
+        );
+        let alt_sin_09 = (0.9_f64).asin().to_degrees();
+        assert!(
+            (beam_floor_fraction(alt_sin_09) - 0.9).abs() < 1e-9,
+            "clamp should engage at upper bound (sin ≈ 0.9)"
+        );
+    }
+
+    #[test]
+    fn floor_absorbs_more_at_high_altitude() {
+        let surfaces = vec![
+            make_surface(40.0, 0.6, true),
+            make_surface(40.0, 0.5, false),
+            make_surface(20.0, 0.5, false),
+        ];
+        let beam = 1000.0;
+        let high_frac = beam_floor_fraction(70.0);
+        let low_frac = beam_floor_fraction(10.0);
+        let (abs_high, _) = compute_solar_distribution(&surfaces, beam, 0.0, high_frac);
+        let (abs_low, _) = compute_solar_distribution(&surfaces, beam, 0.0, low_frac);
+        assert!(
+            abs_high[0] > abs_low[0],
+            "floor should absorb more at 70° ({}) than 10° ({})",
+            abs_high[0],
+            abs_low[0]
         );
     }
 }

@@ -200,6 +200,12 @@ pub struct BoundaryDiagnostic {
     /// Includes film resistance plus half the innermost layer's conduction.
     /// `None` for fallback-R boundaries with no RC nodes.
     pub r_zone_to_inner_m2_k_w: Option<f64>,
+    /// Half-resistance of the post-split outermost sub-layer [m²·K/W].
+    /// `None` for fallback-R boundaries with no RC nodes.
+    pub r_outer_half_m2_k_w: Option<f64>,
+    /// Half-resistance of the post-split innermost sub-layer [m²·K/W].
+    /// `None` for fallback-R boundaries with no RC nodes.
+    pub r_inner_half_m2_k_w: Option<f64>,
     pub path: RCPath,
     /// NodeId of the innermost RC node (closest to zone air).
     /// `None` for fallback-R boundaries with no RC nodes.
@@ -408,6 +414,12 @@ pub fn assemble_building_rc(
             } else {
                 None
             };
+            let pre_r_outer_half = if same_zone {
+                None
+            } else {
+                bd.precomputed_rc.first().map(|l| l.resistance_m2_k_w / 2.0)
+            };
+            let pre_r_inner_half = bd.precomputed_rc.last().map(|l| l.resistance_m2_k_w / 2.0);
             boundary_diagnostics.push(BoundaryDiagnostic {
                 boundary_idx: bd_idx,
                 ua_w_per_k: bd.area_m2 / r_total.max(1e-6),
@@ -420,6 +432,8 @@ pub fn assemble_building_rc(
                 r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
                 r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
                 r_zone_to_inner_m2_k_w: r_zone_to_inner,
+                r_outer_half_m2_k_w: pre_r_outer_half,
+                r_inner_half_m2_k_w: pre_r_inner_half,
                 path: RCPath::Precomputed,
                 inner_node,
             });
@@ -434,7 +448,8 @@ pub fn assemble_building_rc(
 
         if !valid_layers.is_empty() {
             let nodes_before = graph.next_layer_id;
-            if let Some((inner, outer)) = graph.build_layered_boundary(&valid_layers, &bp) {
+            let build_result = graph.build_layered_boundary(&valid_layers, &bp);
+            let (r_inner_half, r_outer_half) = if let Some((inner, outer, r_ih, r_oh)) = build_result {
                 layer_info.insert(
                     bd_idx,
                     SurfaceLayerInfo {
@@ -443,13 +458,15 @@ pub fn assemble_building_rc(
                         interior_zone_idx: bd.interior_zone_idx,
                     },
                 );
-            }
+                (r_ih, r_oh)
+            } else {
+                (0.0, 0.0)
+            };
             let n_nodes = (graph.next_layer_id - nodes_before) as usize;
             let r_layers: f64 = valid_layers
                 .iter()
                 .map(|l| l.thickness_m / l.conductivity_w_m_k)
                 .sum();
-            // Same-zone boundaries use only inner half of layers and no exterior film.
             let r_effective = if same_zone { r_layers / 2.0 } else { r_layers };
             let r_total = r_effective
                 + bd.r_film_interior_m2_k_w
@@ -479,12 +496,14 @@ pub fn assemble_building_rc(
                 None
             };
             let r_zone_to_inner = if n_nodes > 0 {
-                let inner_layer = valid_layers.last().unwrap();
-                let k =
-                    parallel_path_conductivity(inner_layer.conductivity_w_m_k, bd.framing_factor);
-                Some(bd.r_film_interior_m2_k_w + inner_layer.thickness_m / (2.0 * k))
+                Some(bd.r_film_interior_m2_k_w + r_inner_half)
             } else {
                 None
+            };
+            let (diag_r_outer, diag_r_inner) = if n_nodes > 0 {
+                (if same_zone { None } else { Some(r_outer_half) }, Some(r_inner_half))
+            } else {
+                (None, None)
             };
             boundary_diagnostics.push(BoundaryDiagnostic {
                 boundary_idx: bd_idx,
@@ -498,6 +517,8 @@ pub fn assemble_building_rc(
                 r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
                 r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
                 r_zone_to_inner_m2_k_w: r_zone_to_inner,
+                r_outer_half_m2_k_w: diag_r_outer,
+                r_inner_half_m2_k_w: diag_r_inner,
                 path: RCPath::MaterialLayer,
                 inner_node,
             });
@@ -526,6 +547,8 @@ pub fn assemble_building_rc(
                 r_film_int_m2_k_w: bd.r_film_interior_m2_k_w,
                 r_film_ext_m2_k_w: bd.r_film_exterior_m2_k_w,
                 r_zone_to_inner_m2_k_w: None,
+                r_outer_half_m2_k_w: None,
+                r_inner_half_m2_k_w: None,
                 path: RCPath::FallbackR,
                 inner_node: None,
             });
@@ -691,7 +714,7 @@ impl RcGraphState {
         &mut self,
         layers: &[&LayerInput],
         params: &BoundaryParams,
-    ) -> Option<(NodeId, NodeId)> {
+    ) -> Option<(NodeId, NodeId, f64, f64)> {
         // Split thick dense layers into sub-layers for Fourier stability.
         let split_layers: Vec<LayerInput> = layers
             .iter()
@@ -785,7 +808,12 @@ impl RcGraphState {
             self.add_resistance(layer_nodes[n_layers - 1], params.interior_node, r_int);
         }
 
-        Some((layer_nodes[n_layers - 1], layer_nodes[0]))
+        let r_outer_half = outer.thickness_m / (2.0 * k_outer);
+        let inner = effective_layers[n_layers - 1];
+        let k_inner_eff = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
+        let r_inner_half = inner.thickness_m / (2.0 * k_inner_eff);
+
+        Some((layer_nodes[n_layers - 1], layer_nodes[0], r_inner_half, r_outer_half))
     }
 
     /// Build RC nodes from pre-computed OCHRE layer data.
@@ -1885,16 +1913,196 @@ mod tests {
             (r_zone_to_inner - expected_r).abs() < 1e-4,
             "r_zone_to_inner={r_zone_to_inner:.4}, expected {expected_r:.4}"
         );
+    }
 
-        let radiation_frac = r_film_int / r_zone_to_inner;
-        let expected_rad_frac = r_film_int / expected_r;
-        assert!(
-            (radiation_frac - expected_rad_frac).abs() < 1e-4,
-            "radiation_frac={radiation_frac:.4}, expected {expected_rad_frac:.4}"
+    #[test]
+    fn r_zone_to_inner_uses_post_split_thickness() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(48.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps = derive_zone_capacitances(&zones);
+        let r_film_int = 0.16_f64;
+        // 120mm concrete splits into 2 sub-layers of 60mm each.
+        let concrete = make_layer(0.120, 1.130, 1400.0, 1000.0, 48.0);
+        assert_eq!(
+            split_layer_count(0.120, 1.130, 1400.0, 1000.0, DEFAULT_DT_S),
+            2,
+            "120mm concrete should split into 2 sub-layers"
         );
+        let bd = BoundaryInput {
+            area_m2: 48.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Ground,
+            material_layers: vec![concrete],
+            precomputed_rc: Vec::new(),
+            fallback_r_m2_k_w: 0.0,
+            r_film_interior_m2_k_w: r_film_int,
+            r_film_exterior_m2_k_w: 0.0,
+            framing_factor: None,
+        };
+        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps).unwrap();
+        let bd_diag = &diag.boundaries[0];
+        let r_zone_to_inner = bd_diag
+            .r_zone_to_inner_m2_k_w
+            .expect("floor boundary should have r_zone_to_inner");
+
+        // Post-split innermost sub-layer is 60mm, so half-R = 0.060 / (2 * 1.130).
+        let expected_r = r_film_int + 0.060 / (2.0 * 1.130);
         assert!(
-            (radiation_frac - 0.82).abs() < 0.02,
-            "radiation_frac={radiation_frac:.4} should be ≈ 0.82"
+            (r_zone_to_inner - expected_r).abs() < 1e-4,
+            "r_zone_to_inner={r_zone_to_inner:.4}, expected {expected_r:.4} (post-split 60mm)"
+        );
+    }
+
+    #[test]
+    fn r_zone_to_inner_precomputed_path() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps = derive_zone_capacitances(&zones);
+        let precomputed = vec![
+            PrecomputedRCLayer {
+                resistance_m2_k_w: 1.0,
+                capacitance_kj_m2_k: 30.0,
+            },
+            PrecomputedRCLayer {
+                resistance_m2_k_w: 0.5,
+                capacitance_kj_m2_k: 80.0,
+            },
+        ];
+        let bd = BoundaryInput {
+            area_m2: 20.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: Vec::new(),
+            precomputed_rc: precomputed,
+            fallback_r_m2_k_w: 0.0,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: None,
+        };
+        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps).unwrap();
+        let bd_diag = &diag.boundaries[0];
+        let r_zone_to_inner = bd_diag
+            .r_zone_to_inner_m2_k_w
+            .expect("precomputed boundary should have r_zone_to_inner");
+
+        // Last precomputed layer has R=0.5, so half-R = 0.25.
+        let expected_r = R_FILM_INTERIOR_M2_K_W + 0.5 / 2.0;
+        assert!(
+            (r_zone_to_inner - expected_r).abs() < 1e-4,
+            "r_zone_to_inner={r_zone_to_inner:.4}, expected {expected_r:.4}"
+        );
+    }
+
+    #[test]
+    fn split_outer_layer_half_r_reflects_post_split_thickness() {
+        let caps = derive_zone_capacitances(&[ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }]);
+        let concrete = make_layer(0.100, 0.51, 1400.0, 840.0, 20.0);
+        assert_eq!(
+            split_layer_count(0.100, 0.51, 1400.0, 840.0, DEFAULT_DT_S),
+            2,
+            "100mm concrete should split into 2 sub-layers"
+        );
+        let bd = BoundaryInput {
+            area_m2: 20.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![concrete],
+            precomputed_rc: Vec::new(),
+            fallback_r_m2_k_w: 0.0,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: None,
+        };
+        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps).unwrap();
+        let bd_diag = &diag.boundaries[0];
+        let r_outer = bd_diag
+            .r_outer_half_m2_k_w
+            .expect("should have r_outer_half");
+        let expected = 0.050 / (2.0 * 0.51);
+        assert!(
+            (r_outer - expected).abs() < 1e-6,
+            "r_outer_half={r_outer:.6}, expected {expected:.6} (50mm post-split)"
+        );
+    }
+
+    #[test]
+    fn split_inner_layer_half_r_reflects_post_split_thickness() {
+        let caps = derive_zone_capacitances(&[ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }]);
+        let insulation = make_layer(0.089, 0.04, 12.0, 840.0, 20.0);
+        let concrete_inner = make_layer(0.100, 0.51, 1400.0, 840.0, 20.0);
+        assert_eq!(
+            split_layer_count(0.100, 0.51, 1400.0, 840.0, DEFAULT_DT_S),
+            2,
+            "100mm concrete should split into 2 sub-layers"
+        );
+        let bd = BoundaryInput {
+            area_m2: 20.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![insulation, concrete_inner],
+            precomputed_rc: Vec::new(),
+            fallback_r_m2_k_w: 0.0,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: R_FILM_EXTERIOR_M2_K_W,
+            framing_factor: None,
+        };
+        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps).unwrap();
+        let bd_diag = &diag.boundaries[0];
+        let r_inner = bd_diag
+            .r_inner_half_m2_k_w
+            .expect("should have r_inner_half");
+        let expected = 0.050 / (2.0 * 0.51);
+        assert!(
+            (r_inner - expected).abs() < 1e-6,
+            "r_inner_half={r_inner:.6}, expected {expected:.6} (50mm post-split)"
+        );
+    }
+
+    #[test]
+    fn case_900_wall_exterior_rad_frac() {
+        let caps = derive_zone_capacitances(&[ZoneInput {
+            floor_area_m2: Some(48.0),
+            volume_m3: Some(129.6),
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }]);
+        let concrete = make_layer(0.100, 0.51, 1400.0, 840.0, 0.0);
+        let insulation = make_layer(0.0615, 0.04, 12.0, 840.0, 0.0);
+        let plasterboard = make_layer(0.012, 0.16, 950.0, 840.0, 0.0);
+        let r_film_ext = R_FILM_EXTERIOR_M2_K_W;
+        let bd = BoundaryInput {
+            area_m2: 21.6,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Outdoor,
+            material_layers: vec![concrete, insulation, plasterboard],
+            precomputed_rc: Vec::new(),
+            fallback_r_m2_k_w: 0.0,
+            r_film_interior_m2_k_w: R_FILM_INTERIOR_M2_K_W,
+            r_film_exterior_m2_k_w: r_film_ext,
+            framing_factor: None,
+        };
+        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps).unwrap();
+        let bd_diag = &diag.boundaries[0];
+        let r_outer = bd_diag
+            .r_outer_half_m2_k_w
+            .expect("should have r_outer_half");
+        let exterior_rad_frac = r_film_ext / (r_film_ext + r_outer);
+        assert!(
+            (exterior_rad_frac - 0.38).abs() < 0.02,
+            "exterior_rad_frac={exterior_rad_frac:.3}, expected ≈0.38"
         );
     }
 }

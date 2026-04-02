@@ -1143,7 +1143,7 @@ fn dr_setpoint_offset_bypasses_ramp() {
 fn tmv_reduces_draw_volume_for_hot_tank() {
     let env = make_env(21.0);
     let fixture_temp_c = 40.6_f64;
-    let mains_temp_c = 15.0_f64;
+    let _mains_temp_c = 15.0_f64;
     let tank_temp_c = 52.0_f64;
 
     let cfg = EquipmentConfig::from_typed(

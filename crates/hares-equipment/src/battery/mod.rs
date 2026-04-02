@@ -3249,7 +3249,7 @@ mod tests {
         // Run 7 days of cycling to accumulate measurable degradation.
         for _day in 0..7 {
             for step in 0..steps_per_day {
-                env.current_time = env.current_time + ChronoDuration::seconds(300);
+                env.current_time += ChronoDuration::seconds(300);
                 let power = if step < steps_per_day / 2 { 5.0 } else { -5.0 };
                 bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
                     active_power_kw: power,
@@ -3997,7 +3997,7 @@ mod tests {
         // Cycle the battery: charge then discharge each day to cause degradation.
         for day in 0..365 {
             for step in 0..steps_per_day {
-                env.current_time = env.current_time + ChronoDuration::seconds(300);
+                env.current_time += ChronoDuration::seconds(300);
 
                 if step < steps_per_day / 2 {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {

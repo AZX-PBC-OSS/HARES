@@ -342,7 +342,7 @@ fn debug_600ff_heat_balance_at_peak() {
             .unwrap_or_else(|err| panic!("failed to reload BESTEST case 600FF: {err}"));
     // Print interior surface info to understand radiation_frac values.
     {
-        let mut dwelling_info =
+        let dwelling_info =
             Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
                 .unwrap_or_else(|err| panic!("failed to reload BESTEST case 600FF: {err}"));
         let surf_info = dwelling_info.thermal_solver.interior_surface_info_debug();

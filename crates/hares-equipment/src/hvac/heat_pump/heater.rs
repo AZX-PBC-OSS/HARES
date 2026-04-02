@@ -3840,10 +3840,12 @@ mod tests {
             "ER lockout must be 4.44°C (40°F); got {DEFAULT_ER_LOCKOUT_TEMP_C}"
         );
         // HP lockout must be below ER lockout (compressor can run at colder temps than ER)
-        assert!(
-            DEFAULT_HP_LOCKOUT_TEMP_C < DEFAULT_ER_LOCKOUT_TEMP_C,
-            "HP lockout ({DEFAULT_HP_LOCKOUT_TEMP_C}°C) must be colder than ER lockout ({DEFAULT_ER_LOCKOUT_TEMP_C}°C)"
-        );
+        const {
+            assert!(
+                DEFAULT_HP_LOCKOUT_TEMP_C < DEFAULT_ER_LOCKOUT_TEMP_C,
+                "HP lockout must be colder than ER lockout"
+            );
+        }
 
         // --- ER setpoint offset (OCHRE HVAC.py line 1211: deadband * (1.8 - deadband_offset)) ---
         // With default deadband=1.0, offset = 1.0 * (1.8 - 0.2) = 1.6°C
@@ -3878,10 +3880,12 @@ mod tests {
             "Max OAT supplemental must be 21°C (EnergyPlus default); got {MAX_OAT_SUPPLEMENTAL_C}"
         );
         // Must be above ER lockout (otherwise supplemental cap is never reached)
-        assert!(
-            MAX_OAT_SUPPLEMENTAL_C > DEFAULT_ER_LOCKOUT_TEMP_C,
-            "Max OAT supplemental ({MAX_OAT_SUPPLEMENTAL_C}°C) must be above ER lockout ({DEFAULT_ER_LOCKOUT_TEMP_C}°C)"
-        );
+        const {
+            assert!(
+                MAX_OAT_SUPPLEMENTAL_C > DEFAULT_ER_LOCKOUT_TEMP_C,
+                "Max OAT supplemental must be above ER lockout"
+            );
+        }
 
         // --- Heating airflow (OCHRE HVAC.py line 142: 350 CFM/ton for heating) ---
         // 350 CFM/ton × 4.71947443e-4 m³/s/CFM / 3516.85 W/ton ≈ 4.6969e-5 m³/s/W
@@ -3893,34 +3897,40 @@ mod tests {
         );
 
         // --- ASHP backup defaults ---
-        assert!(
-            DEFAULT_BACKUP_CAPACITY_W > 0.0,
-            "ASHP default backup capacity must be positive; got {DEFAULT_BACKUP_CAPACITY_W}"
-        );
-        assert!(
-            DEFAULT_BACKUP_CAPACITY_W <= 20_000.0,
-            "ASHP default backup capacity ({DEFAULT_BACKUP_CAPACITY_W} W) is implausibly large"
-        );
+        const {
+            assert!(
+                DEFAULT_BACKUP_CAPACITY_W > 0.0,
+                "ASHP default backup capacity must be positive"
+            );
+            assert!(
+                DEFAULT_BACKUP_CAPACITY_W <= 20_000.0,
+                "ASHP default backup capacity is implausibly large"
+            );
+        }
         assert!(
             (DEFAULT_BACKUP_EIR - 1.0).abs() < 1e-9,
             "Default backup EIR must be 1.0 (electric resistance); got {DEFAULT_BACKUP_EIR}"
         );
 
         // --- Heating capacity / EIR fallbacks ---
-        assert!(
-            DEFAULT_HEATING_CAPACITY_W > 0.0 && DEFAULT_HEATING_CAPACITY_W <= 50_000.0,
-            "Default heating capacity must be in [0, 50 kW]; got {DEFAULT_HEATING_CAPACITY_W}"
-        );
-        assert!(
-            DEFAULT_HEATING_EIR > 0.0 && DEFAULT_HEATING_EIR < 1.0,
-            "Default heating EIR must be in (0, 1) (COP > 1); got {DEFAULT_HEATING_EIR}"
-        );
+        const {
+            assert!(
+                DEFAULT_HEATING_CAPACITY_W > 0.0 && DEFAULT_HEATING_CAPACITY_W <= 50_000.0,
+                "Default heating capacity must be in [0, 50 kW]"
+            );
+            assert!(
+                DEFAULT_HEATING_EIR > 0.0 && DEFAULT_HEATING_EIR < 1.0,
+                "Default heating EIR must be in (0, 1) (COP > 1)"
+            );
+        }
 
         // --- Hysteresis band: small positive value preventing rapid cycling ---
-        assert!(
-            DEFAULT_HP_LOCKOUT_HYSTERESIS_C > 0.0 && DEFAULT_HP_LOCKOUT_HYSTERESIS_C < 5.0,
-            "HP lockout hysteresis must be in (0, 5)°C; got {DEFAULT_HP_LOCKOUT_HYSTERESIS_C}"
-        );
+        const {
+            assert!(
+                DEFAULT_HP_LOCKOUT_HYSTERESIS_C > 0.0 && DEFAULT_HP_LOCKOUT_HYSTERESIS_C < 5.0,
+                "HP lockout hysteresis must be in (0, 5) degrees C"
+            );
+        }
 
         // --- MSHP pan heater (OCHRE MinisplitASHPHeater: 0.150 kW @ 0°C) ---
         assert!(
@@ -4842,7 +4852,7 @@ mod ideal_capacity_tests {
         // ER fills exactly the residual: er = (ideal - hp).min(er_rated).
         // Startup capacity degradation may reduce hp_w below steady-state; ER compensates up
         // to its rated limit regardless.
-        let expected_er_w = (IDEAL_W - hp_w).max(0.0).min(ER_RATED_W);
+        let expected_er_w = (IDEAL_W - hp_w).clamp(0.0, ER_RATED_W);
         assert!(
             (er_w - expected_er_w).abs() < 1e-6,
             "ER must fill only the residual gap (ideal - hp = {expected_er_w:.1} W); got {er_w:.1} W"

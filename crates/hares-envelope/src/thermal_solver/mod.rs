@@ -42,7 +42,7 @@ pub struct ThermalSolver {
     dt_s: f64,
     x: DVector<f64>,
     last_u: DVector<f64>,
-    /// Reusable input buffer: swapped out during resolve_internal to avoid per-step allocation.
+    /// Reusable input buffer: swapped during build_input_vector to avoid per-step allocation.
     u_buf: DVector<f64>,
     /// Reusable latent-load accumulator: cleared at the start of each infiltration pass.
     latent_buf: HashMap<ZoneId, f64>,
@@ -52,8 +52,7 @@ pub struct ThermalSolver {
     m_scratch: DMatrix<f64>,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
-    /// Previous-step coupling tuples and pre-built LU for `solve_ideal_capacity_for_target`.
-    /// One-step stale, matching the staleness of `last_u`.
+    /// Previous coupling tuples and pre-built LU for `solve_ideal_capacity_for_target`.
     last_coupling: Vec<(usize, f64, f64)>,
     last_coupled_lu: Option<nalgebra::linalg::LU<f64, nalgebra::Dyn, nalgebra::Dyn>>,
     /// Per-exterior-surface converged surface temperatures [°C] for LWR continuity.
@@ -308,7 +307,7 @@ impl ThermalSolver {
             interior_surface_prev_temps,
             infiltration_buf: Vec::with_capacity(env.zones.len()),
             infiltration_by_zone_buf: Vec::with_capacity(env.zones.len()),
-            solar_absorbed_buf: Vec::new(),
+            solar_absorbed_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
@@ -636,6 +635,26 @@ impl ThermalSolver {
                 u[idx] = env.weather.ground_temp_c;
             }
         }
+    }
+
+    pub fn prepare_inputs(&mut self, ports: &PortSlots, env: &EnvironmentState) {
+        debug_assert!(
+            (env.time_step_secs() - self.dt_s).abs() < 1e-6,
+            "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
+            env.time_step_secs(),
+            self.dt_s
+        );
+        self.prepare_inputs_inner(ports, env);
+    }
+
+    pub fn integrate(&mut self, ports: &PortSlots, env: &EnvironmentState, out: &mut DomainUpdate) {
+        debug_assert!(
+            (env.time_step_secs() - self.dt_s).abs() < 1e-6,
+            "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
+            env.time_step_secs(),
+            self.dt_s
+        );
+        self.integrate_inner(ports, env, out);
     }
 }
 
@@ -3981,6 +4000,104 @@ mod tests {
         assert!(
             (ratio - expected_ratio).abs() < 0.02,
             "gain ratio must match transmittance ratio ({expected_ratio:.4}): actual={ratio:.4}"
+        );
+    }
+
+    /// After `prepare_inputs`, `solve_ideal_capacity_for_target` uses
+    /// current-step weather data (not stale previous-step data).
+    #[test]
+    fn prepare_inputs_updates_ideal_capacity_background() {
+        let env_warm = env_for_temp(20.0, 20.0);
+        let mut solver = one_zone_solver(&env_warm);
+        solver.x[0] = 20.0;
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        // Run one full step at 20 C outdoor to populate last_u.
+        let _ = solver.resolve_new(&ports, &env_warm, Duration::from_secs(60));
+
+        // Now change outdoor to 0 C and only call prepare_inputs.
+        let env_cold = env_for_temp(20.0, 0.0);
+        solver.prepare_inputs(&ports, &env_cold);
+
+        // Ideal capacity to hold 20 C should be positive (heating needed)
+        // because prepare_inputs updated the background to use 0 C outdoor.
+        let cap = solver.solve_ideal_capacity_for_target(ZoneId(1), 20.0);
+        assert!(
+            cap > 0.0,
+            "after prepare_inputs with cold outdoor, heating capacity should be positive, got {cap}"
+        );
+    }
+
+    /// Single-call `resolve` produces identical zone temperature to the
+    /// two-phase `prepare_inputs` + `integrate` path when ports are unchanged.
+    #[test]
+    fn resolve_matches_prepare_plus_integrate() {
+        let env = env_for_temp(20.0, 5.0);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let mut solver_single = one_zone_solver(&env);
+        solver_single.x[0] = 20.0;
+        let update_single = solver_single.resolve_new(&ports, &env, Duration::from_secs(60));
+
+        let mut solver_split = one_zone_solver(&env);
+        solver_split.x[0] = 20.0;
+        solver_split.prepare_inputs(&ports, &env);
+        let mut out_split = DomainUpdate::empty(hares_types::THERMAL);
+        solver_split.integrate(&ports, &env, &mut out_split);
+
+        let t_single = update_single.zone_temperatures_c[0].1;
+        let t_split = out_split.zone_temperatures_c[0].1;
+        assert!(
+            (t_single - t_split).abs() < 1e-12,
+            "single-call and split-call must produce identical results: single={t_single}, split={t_split}"
+        );
+    }
+
+    /// HVAC capacity injected between prepare_inputs and integrate is
+    /// reflected in the resulting zone temperature.
+    #[test]
+    fn hvac_between_phases_affects_temperature() {
+        let env = env_for_temp(20.0, 0.0);
+        let ports_zero = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        // Baseline: no HVAC
+        let mut solver_base = one_zone_solver(&env);
+        solver_base.x[0] = 20.0;
+        solver_base.prepare_inputs(&ports_zero, &env);
+        let mut out_base = DomainUpdate::empty(hares_types::THERMAL);
+        solver_base.integrate(&ports_zero, &env, &mut out_base);
+        let t_base = out_base.zone_temperatures_c[0].1;
+
+        // With heating: add 1000 W between phases
+        let mut solver_heat = one_zone_solver(&env);
+        solver_heat.x[0] = 20.0;
+        solver_heat.prepare_inputs(&ports_zero, &env);
+        let mut ports_heat = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        ports_heat.thermal[0].sensible_gain_w = 1000.0;
+        let mut out_heat = DomainUpdate::empty(hares_types::THERMAL);
+        solver_heat.integrate(&ports_heat, &env, &mut out_heat);
+        let t_heat = out_heat.zone_temperatures_c[0].1;
+
+        assert!(
+            t_heat > t_base,
+            "1000 W heating must raise zone temp: t_heat={t_heat:.6}, t_base={t_base:.6}"
+        );
+        assert!(
+            t_heat - t_base > 0.001,
+            "temperature difference must be measurable: delta={:.6}",
+            t_heat - t_base
         );
     }
 }

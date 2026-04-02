@@ -412,8 +412,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         if is_constant || sensible_frac.is_some() {
             let mut ext_children = Vec::new();
             if is_constant {
-                let flat_24 = std::iter::repeat("0.04167")
-                    .take(24)
+                let flat_24 = std::iter::repeat_n("0.04167", 24)
                     .collect::<Vec<_>>()
                     .join(", ");
                 ext_children.push(hares_io::hpxml::building::XmlNode {
@@ -431,8 +430,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
                 ext_children.push(hares_io::hpxml::building::XmlNode {
                     name: "MonthlyScheduleMultipliers".to_string(),
                     attrs: HashMap::new(),
-                    text: std::iter::repeat("1.0")
-                        .take(12)
+                    text: std::iter::repeat_n("1.0", 12)
                         .collect::<Vec<_>>()
                         .join(", "),
                     children: Vec::new(),

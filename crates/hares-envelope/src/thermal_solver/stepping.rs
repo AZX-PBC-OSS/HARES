@@ -14,10 +14,10 @@ use super::ThermalSolver;
 impl ThermalSolver {
     /// Estimate the ideal HVAC capacity needed to reach an explicit target temperature.
     ///
-    /// Uses `last_u`, `last_coupling`, and `last_coupled_lu` (previous timestep) as
-    /// background. Called by equipment *before* `resolve()` builds the current-step
-    /// inputs, so the estimate is one-step stale. Zero allocation — the coupled LU
-    /// was cached at the end of the previous `resolve()` call.
+    /// Uses `last_u`, `last_coupling`, and `last_coupled_lu` as background.
+    /// When `prepare_inputs()` has been called first (two-phase path), these
+    /// contain current-step weather/solar/infiltration data. Zero allocation —
+    /// the coupled LU is cached by `prepare_inputs` or the previous `integrate`.
     ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
     /// or 0.0 if the zone is unknown or solving fails.
@@ -63,16 +63,7 @@ impl ThermalSolver {
         })
     }
 
-    /// Core per-timestep resolve: builds input vector, applies semi-implicit
-    /// infiltration coupling, runs the base ZOH step, and returns the domain update.
-    pub(super) fn resolve_internal(
-        &mut self,
-        ports: &PortSlots,
-        env: &EnvironmentState,
-        out: &mut DomainUpdate,
-    ) {
-        let (u, latent_by_zone) = self.build_input_vector(ports, env);
-
+    fn build_coupling(&mut self) {
         self.coupling_buf.clear();
         for inf in &self.infiltration_buf {
             if inf.h_inf_w_k.abs() < 1e-15 {
@@ -85,12 +76,48 @@ impl ThermalSolver {
                 continue;
             };
             let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
-            // Backward Euler for infiltration coupling: add full d to M diagonal
-            // and cancel the N-side subtraction via forcing.
             let d = inf.h_inf_w_k * b_coeff;
             let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));
         }
+    }
+
+    /// Phase 1: build input vector and coupling from current weather/solar/infiltration.
+    /// Stores results in `last_u`, `last_coupling`, `last_coupled_lu` so that
+    /// `solve_ideal_capacity_for_target` sees current-step data.
+    /// Does NOT cache u for the integration step — `integrate` rebuilds it from
+    /// post-dispatch ports.
+    pub(super) fn prepare_inputs_inner(&mut self, ports: &PortSlots, env: &EnvironmentState) {
+        let saved_ext_temps = self.exterior_surface_temps.clone();
+        let (u, _latent) = self.build_input_vector(ports, env);
+        self.exterior_surface_temps = saved_ext_temps;
+
+        self.build_coupling();
+
+        if !self.coupling_buf.is_empty() {
+            let coupled_lu = self
+                .model
+                .build_coupled_lu(&mut self.m_scratch, &self.coupling_buf);
+            self.last_coupled_lu = Some(coupled_lu);
+        } else {
+            self.last_coupled_lu = None;
+        }
+
+        self.last_u.clone_from(&u);
+        self.last_coupling.clone_from(&self.coupling_buf);
+        self.u_buf = u;
+    }
+
+    /// Phase 2: rebuild u from post-dispatch ports, rebuild coupling, run ZOH integration.
+    pub(super) fn integrate_inner(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+        out: &mut DomainUpdate,
+    ) {
+        let (u, latent_by_zone) = self.build_input_vector(ports, env);
+
+        self.build_coupling();
 
         if !self.coupling_buf.is_empty() {
             let coupled_lu = self
@@ -114,8 +141,6 @@ impl ThermalSolver {
         std::mem::swap(&mut self.x, &mut self.rhs_buf);
         let y_next = self.model.output(&self.x, &u);
 
-        // Per-boundary convective heat gain diagnostics (non-injecting: read-only from state).
-        // Compiled out in release builds without observe_detailed.
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         if !self.config.boundary_diagnostics.is_empty() {
             let zone_output_idx = self
@@ -179,5 +204,17 @@ impl ThermalSolver {
         self.u_buf = u;
 
         self.format_domain_update(&y_next, latent_by_zone, out);
+    }
+
+    /// Convenience: calls both phases with the same ports/env.
+    /// Used by `DomainSolver::resolve` for non-dwelling callers.
+    pub(super) fn resolve_internal(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+        out: &mut DomainUpdate,
+    ) {
+        self.prepare_inputs_inner(ports, env);
+        self.integrate_inner(ports, env, out);
     }
 }

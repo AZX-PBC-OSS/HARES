@@ -1951,6 +1951,11 @@ impl Dwelling {
             }
         }
 
+        // Phase 1: build current-step inputs so solve_ideal_capacity_for_target
+        // sees current weather/solar/infiltration rather than stale values.
+        self.thermal_solver
+            .prepare_inputs(&self.ports, &self.latest_env);
+
         // Step 1c: solver feedback actor collects ideal targets and solves for capacities.
         self.solver_feedback_actor
             .collect_and_solve(&self.equipment, &self.thermal_solver);
@@ -2161,7 +2166,7 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         let envelope_started = Instant::now();
         self.thermal_solver
-            .resolve(&self.ports, &self.latest_env, dt, &mut self.thermal_update_buf);
+            .integrate(&self.ports, &self.latest_env, &mut self.thermal_update_buf);
 
         // Apply zone temps and capture observer data while we still have the borrow.
         apply_thermal_update_to_zones(&mut self.latest_env, &self.thermal_update_buf);

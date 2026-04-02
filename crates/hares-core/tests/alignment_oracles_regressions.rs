@@ -371,8 +371,9 @@ fn ochre_minisplit_fixture_total_shape_and_timing_aligns() {
     let actual_center =
         activity_center_index(&actual_heat).expect("actual heating series must not be empty");
     // Regression anchor: timing center shifts as physics corrections accumulate.
-    // Updated after: eta_c fix, HPWH capacity, ER threshold, ideal-mode ER residual.
-    let expected_center: usize = 12;
+    // Updated after: eta_c fix, HPWH capacity, ER threshold, ideal-mode ER residual,
+    // two-phase resolve (current-step inputs for ideal capacity).
+    let expected_center: usize = 5;
     assert!(
         actual_center.abs_diff(expected_center) <= 2,
         "minisplit HVAC electric power timing center must stay near step {expected_center}: actual={actual_center}"

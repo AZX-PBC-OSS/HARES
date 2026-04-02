@@ -222,29 +222,10 @@ fn build_solver_boundaries(
         let r_film_ext = bd_input.r_film_exterior_m2_k_w;
         let r_film_int = bd_input.r_film_interior_m2_k_w;
 
-        // Exterior radiation fraction: R_film_ext / (R_film_ext + R_outermost_half).
-        // Layers are exterior→interior, so outermost = first valid layer.
-        let r_outermost_half = if !bd_input.precomputed_rc.is_empty() {
-            bd_input
-                .precomputed_rc
-                .first()
-                .map(|l| l.resistance_m2_k_w / 2.0)
-                .unwrap_or(0.0)
-        } else {
-            let outer = bd_input
-                .material_layers
-                .iter()
-                .find(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0);
-            if let Some(outer) = outer {
-                let k = hares_envelope::parallel_path_conductivity(
-                    outer.conductivity_w_m_k,
-                    bd_input.framing_factor,
-                );
-                outer.thickness_m / (2.0 * k)
-            } else {
-                0.0
-            }
-        };
+        let r_outermost_half = diag_by_idx
+            .get(&surface_idx)
+            .and_then(|d| d.r_outer_half_m2_k_w)
+            .unwrap_or(0.0);
         let (exterior_rad_frac, exterior_rad_res_k_w) =
             if r_outermost_half > 0.0 && boundary.area_m2 > 0.0 {
                 (
@@ -255,28 +236,10 @@ fn build_solver_boundaries(
                 (0.0, 0.0)
             };
 
-        // Interior radiation fraction: R_film_int / (R_film_int + R_inner_half).
-        // Layers are exterior→interior, so innermost = last valid layer.
-        let r_inner_half = if !bd_input.precomputed_rc.is_empty() {
-            bd_input
-                .precomputed_rc
-                .last()
-                .map(|l| l.resistance_m2_k_w / 2.0)
-                .unwrap_or(0.0)
-        } else {
-            bd_input
-                .material_layers
-                .iter()
-                .rfind(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
-                .map(|l| {
-                    let k = hares_envelope::parallel_path_conductivity(
-                        l.conductivity_w_m_k,
-                        bd_input.framing_factor,
-                    );
-                    l.thickness_m / (2.0 * k)
-                })
-                .unwrap_or(0.0)
-        };
+        let r_inner_half = diag_by_idx
+            .get(&surface_idx)
+            .and_then(|d| d.r_inner_half_m2_k_w)
+            .unwrap_or(0.0);
         let interior_rad_frac = if r_inner_half > 0.0 {
             r_film_int / (r_film_int + r_inner_half)
         } else {
@@ -1602,14 +1565,12 @@ mod tests {
         );
         let recovered: VentilationConfig = ec.typed().unwrap();
 
-        let mut ventilation = MechanicalVentilationParams::default();
-        ventilation.balanced = recovered.balanced.unwrap_or(false);
-        if let Some(sens) = recovered.sensible_effectiveness {
-            ventilation.sensible_recovery_efficiency = sens;
-        }
-        if let Some(lat) = recovered.latent_effectiveness {
-            ventilation.latent_recovery_efficiency = lat;
-        }
+        let ventilation = MechanicalVentilationParams {
+            balanced: recovered.balanced.unwrap_or(false),
+            sensible_recovery_efficiency: recovered.sensible_effectiveness.unwrap_or_default(),
+            latent_recovery_efficiency: recovered.latent_effectiveness.unwrap_or_default(),
+            ..Default::default()
+        };
 
         assert!(ventilation.balanced);
         assert!(
