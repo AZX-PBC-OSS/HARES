@@ -229,6 +229,9 @@ pub struct Building {
     /// Residential facility type from `<BuildingConstruction>/<ResidentialFacilityType>`.
     /// Used for adjusted bedroom count in water heater draw profiles.
     pub residential_facility_type: Option<String>,
+    /// Override the zone mass multiplier for all zones.
+    /// When set, replaces the default zone-type-based multiplier.
+    pub mass_multiplier_override: Option<f64>,
     // TODO: `details_xml` leaks the parse tree (`XmlNode`) into the domain model,
     // forcing `hares-core` to construct XmlNode trees. Extract remaining
     // XML-dependent fields into typed struct members and remove this field.
@@ -879,6 +882,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         has_flue_or_chimney,
         foundation_name,
         residential_facility_type,
+        mass_multiplier_override: None,
         details_xml: details.clone(),
     })
 }

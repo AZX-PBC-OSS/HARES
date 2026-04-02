@@ -1098,6 +1098,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             residential_facility_type: None,
+            mass_multiplier_override: None,
             details_xml,
         }
     }

@@ -40,6 +40,37 @@ pub const GROUND_NODE_ID: u32 = u32::MAX;
 /// First NodeId used for material-layer nodes (above zone air node range).
 const LAYER_NODE_BASE: u32 = 1_000;
 
+/// Conservative default timestep [s] for Fourier stability splitting.
+const DEFAULT_DT_S: f64 = 3600.0;
+
+/// Minimum density [kg/m³] to qualify a layer for automatic splitting.
+/// Insulation and air gaps are excluded.
+const SPLIT_MIN_DENSITY: f64 = 100.0;
+
+/// Minimum conductivity [W/(m·K)] to qualify a layer for automatic splitting.
+const SPLIT_MIN_CONDUCTIVITY: f64 = 0.1;
+
+/// Compute the number of RC sub-layers needed for numerical stability.
+///
+/// Ensures the Fourier number Fo = alpha * dt / dx² <= 0.5 by choosing
+/// dx_max = sqrt(2 * alpha * dt) and splitting accordingly.
+fn split_layer_count(thickness_m: f64, conductivity: f64, density: f64, specific_heat: f64, dt_s: f64) -> usize {
+    if density <= 0.0 || specific_heat <= 0.0 || conductivity <= 0.0 || thickness_m <= 0.0 {
+        return 1;
+    }
+    let alpha = conductivity / (density * specific_heat);
+    // EnergyPlus CondFD uses space discretization constant C=3 (Fo = 1/C ≈ 0.33):
+    //   dx = sqrt(C × α × Δt)
+    // Reference: EnergyPlus Engineering Reference §3.3.10 "Conduction Finite
+    // Difference Solution Algorithm" — default C=3, inverse of Fourier number.
+    // Our ZOH state-space solver is implicit and unconditionally stable, so this
+    // is a spatial accuracy criterion, not a stability requirement.
+    let c_discretization = 3.0;
+    let dx_max = (c_discretization * alpha * dt_s).sqrt();
+    let n = (thickness_m / dx_max).ceil() as usize;
+    n.max(1)
+}
+
 // ── Input types ─────────────────────────────────────────────────────────────
 
 /// Pre-computed RC layer values from OCHRE's material database.
@@ -661,7 +692,35 @@ impl RcGraphState {
         layers: &[&LayerInput],
         params: &BoundaryParams,
     ) -> Option<(NodeId, NodeId)> {
-        let mut effective_layers: Vec<&LayerInput> = layers.to_vec();
+        // Split thick dense layers into sub-layers for Fourier stability.
+        let split_layers: Vec<LayerInput> = layers
+            .iter()
+            .flat_map(|layer| {
+                let needs_split = layer.density_kg_m3 > SPLIT_MIN_DENSITY
+                    && layer.conductivity_w_m_k > SPLIT_MIN_CONDUCTIVITY;
+                let n = if needs_split {
+                    split_layer_count(
+                        layer.thickness_m,
+                        layer.conductivity_w_m_k,
+                        layer.density_kg_m3,
+                        layer.specific_heat_j_kg_k,
+                        DEFAULT_DT_S,
+                    )
+                } else {
+                    1
+                };
+                (0..n).map(move |_| LayerInput {
+                    thickness_m: layer.thickness_m / n as f64,
+                    conductivity_w_m_k: layer.conductivity_w_m_k,
+                    density_kg_m3: layer.density_kg_m3,
+                    specific_heat_j_kg_k: layer.specific_heat_j_kg_k,
+                    area_m2: layer.area_m2,
+                })
+            })
+            .collect();
+
+        let effective_refs: Vec<&LayerInput> = split_layers.iter().collect();
+        let mut effective_layers = effective_refs;
         let mut halve_last_cap = false;
 
         if params.same_zone {
@@ -1026,15 +1085,15 @@ mod tests {
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
         let (rc, diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
 
-        // 1 zone air + 2 layer nodes = 3 states.
-        assert_eq!(rc.a_c.nrows(), 3);
+        // 1 zone air + 3 layer nodes (layer0 splits into 2, layer1 stays 1) = 4 states.
+        assert_eq!(rc.a_c.nrows(), 4);
 
-        // Diagnostics: single material-layer boundary with 2 RC nodes.
+        // Diagnostics: single material-layer boundary with 3 RC nodes after splitting.
         assert_eq!(diag.boundaries.len(), 1);
         assert_eq!(diag.boundaries[0].path, RCPath::MaterialLayer);
-        assert_eq!(diag.boundaries[0].n_rc_nodes, 2);
+        assert_eq!(diag.boundaries[0].n_rc_nodes, 3);
         assert!(diag.boundaries[0].capacitance_j_k > 0.0);
-        assert_eq!(rc.a_c.ncols(), 3);
+        assert_eq!(rc.a_c.ncols(), 4);
         // Layer info present for boundary 0.
         assert!(rc.layer_info.contains_key(&0));
         let info = &rc.layer_info[&0];
@@ -1123,11 +1182,11 @@ mod tests {
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
         ];
-        // Same-zone boundary with 4 layers → halved to 2 internal mass nodes.
+        // Same-zone boundary with 4 layers → after splitting: 1+2+1+2=6 sub-layers → halved to 3 internal mass nodes.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
-        // 1 zone air node + 2 layer nodes (inner half of 4 layers).
-        assert_eq!(rc.a_c.nrows(), 3);
+        // 1 zone air node + 3 layer nodes (inner half of 6 split sub-layers).
+        assert_eq!(rc.a_c.nrows(), 4);
     }
 
     // ── Same-zone boundary with odd layers halves middle cap ──────────
@@ -1140,20 +1199,22 @@ mod tests {
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
-        // layer[1]: density=2000, cp=900, thickness=0.10, area=50 → full cap = 9000 J/K
+        // Use low-density materials (density=50 < SPLIT_MIN_DENSITY=100) to avoid auto-splitting,
+        // so we can test the same-zone halving logic directly.
+        // layer[1]: density=50, cp=900, thickness=0.10, area=50 → full cap = 225 J/K
         let layers = vec![
-            make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
-            make_layer(0.10, 1.0, 2000.0, 900.0, 0.0),
-            make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
+            make_layer(0.05, 0.5, 50.0, 800.0, 0.0),
+            make_layer(0.10, 1.0, 50.0, 900.0, 0.0),
+            make_layer(0.05, 0.5, 50.0, 800.0, 0.0),
         ];
-        // 3 layers → keep 2 (n/2+1), with layer[1]'s cap halved.
+        // 3 layers (no splitting) → keep 2 (n/2+1), with layer[1]'s cap halved.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         assert_eq!(rc.a_c.nrows(), 3);
 
         // Verify middle layer (second kept, NodeId 1001) has halved capacitance.
         let middle_cap = rc.node_capacitances[&NodeId(LAYER_NODE_BASE + 1)];
-        let expected = 2000.0 * 900.0 * 0.10 * 50.0 / 2.0; // 4500 J/K
+        let expected = 50.0 * 900.0 * 0.10 * 50.0 / 2.0; // 112.5 J/K
         assert!(
             (middle_cap - expected).abs() < 1e-6,
             "middle cap={middle_cap}, expected {expected} (halved)"
@@ -1168,16 +1229,17 @@ mod tests {
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
-        // density=2000, cp=900, thickness=0.10, area=50 → full cap = 9000 J/K
-        let layers = vec![make_layer(0.10, 1.0, 2000.0, 900.0, 0.0)];
-        // 1 layer → keep 1 (n/2+1=1), with halved capacitance.
+        // Use low-density material (density=50 < SPLIT_MIN_DENSITY=100) to avoid auto-splitting.
+        // density=50, cp=900, thickness=0.10, area=50 → full cap = 225 J/K
+        let layers = vec![make_layer(0.10, 1.0, 50.0, 900.0, 0.0)];
+        // 1 layer (no splitting) → keep 1 (n/2+1=1), with halved capacitance.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         assert_eq!(rc.a_c.nrows(), 2);
 
         // Verify layer node (NodeId 1000) has halved capacitance.
         let layer_cap = rc.node_capacitances[&NodeId(LAYER_NODE_BASE)];
-        let expected = 2000.0 * 900.0 * 0.10 * 50.0 / 2.0; // 4500 J/K
+        let expected = 50.0 * 900.0 * 0.10 * 50.0 / 2.0; // 112.5 J/K
         assert!(
             (layer_cap - expected).abs() < 1e-6,
             "layer cap={layer_cap}, expected {expected} (halved)"
@@ -1195,7 +1257,11 @@ mod tests {
         }];
         let caps = derive_zone_capacitances(&zones);
 
-        // 20 boundaries, each with 3 layers = 60 layer nodes.
+        // 20 boundaries, each with 3 layers. After auto-splitting (C=3, dt=3600):
+        // layer0 (0.05m, k=0.5, ρ=1000, cp=800): α=6.25e-7, dx=0.082 → 1
+        // layer1 (0.10m, k=1.0, ρ=2000, cp=900): α=5.56e-7, dx=0.077 → 2
+        // layer2 (0.02m, k=0.3, ρ=800,  cp=700): α=5.36e-7, dx=0.076 → 1
+        // = 4 sub-layers per boundary = 80 layer nodes total.
         let layers = vec![
             make_layer(0.05, 0.5, 1000.0, 800.0, 0.0),
             make_layer(0.1, 1.0, 2000.0, 900.0, 0.0),
@@ -1206,8 +1272,8 @@ mod tests {
             .collect();
 
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
-        // 1 zone + 60 layer nodes = 61 internal nodes.
-        assert_eq!(rc.a_c.nrows(), 61);
+        // 1 zone + 80 layer nodes = 81 internal nodes.
+        assert_eq!(rc.a_c.nrows(), 81);
         // All node IDs should be distinct from OUTDOOR_NODE_ID and GROUND_NODE_ID.
         for &nid in rc.node_index.keys() {
             assert_ne!(nid, NodeId(OUTDOOR_NODE_ID));
@@ -1728,5 +1794,36 @@ mod tests {
         assert!((caps[0] - base * 7.0).abs() < 1e-6, "conditioned: 7x");
         assert!((caps[1] - base * 1.0).abs() < 1e-6, "attic: 1x");
         assert!((caps[2] - base * 1.5).abs() < 1e-6, "foundation: 1.5x");
+    }
+
+    #[test]
+    fn split_layer_count_concrete_100mm_hourly() {
+        // 100mm concrete: k=0.51, rho=1400, cp=1000 → alpha=3.64e-7 m²/s
+        // dx_max = sqrt(2 * 3.64e-7 * 3600) ≈ 0.0512m → n = ceil(0.1/0.0512) = 2
+        let n = split_layer_count(0.100, 0.51, 1400.0, 1000.0, 3600.0);
+        assert!(n >= 2, "100mm concrete at dt=3600s should need >=2 nodes, got {n}");
+    }
+
+    #[test]
+    fn split_layer_count_thick_concrete_200mm() {
+        // 200mm concrete slab should need more splits
+        let n = split_layer_count(0.200, 1.13, 1400.0, 1000.0, 3600.0);
+        assert!(n >= 3, "200mm concrete at dt=3600s should need >=3 nodes, got {n}");
+    }
+
+    #[test]
+    fn split_layer_count_insulation_no_split() {
+        // Fiberglass insulation: k=0.04, rho=12, cp=840
+        // Low density and low conductivity -- should NOT be split even by the function
+        // (caller guards on density/conductivity thresholds, but function itself returns 1).
+        let n = split_layer_count(0.066, 0.04, 12.0, 840.0, 3600.0);
+        assert_eq!(n, 1, "insulation should not be split");
+    }
+
+    #[test]
+    fn split_layer_count_thin_wood_no_split() {
+        // 9mm wood: k=0.14, rho=530, cp=900
+        let n = split_layer_count(0.009, 0.14, 530.0, 900.0, 3600.0);
+        assert_eq!(n, 1, "thin wood should not need splitting");
     }
 }

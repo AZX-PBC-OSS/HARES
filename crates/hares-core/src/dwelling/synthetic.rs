@@ -38,6 +38,10 @@ pub(crate) struct SyntheticTomlConfig {
     #[serde(default)]
     #[allow(dead_code)] // parsed from TOML, wired in future ticket
     pub(crate) internal_gains_w: Option<f64>,
+    #[serde(default)]
+    pub(crate) internal_gains_constant: Option<bool>,
+    #[serde(default)]
+    pub(crate) internal_gains_sensible_fraction: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +57,8 @@ pub(crate) struct SyntheticGeometryConfig {
     pub(crate) zone_volume_m3: f64,
     #[serde(default = "default_wall_area_m2")]
     pub(crate) wall_area_m2: f64,
+    #[serde(default)]
+    pub(crate) mass_multiplier: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -371,6 +377,87 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         && internal_gains_w > 0.0
     {
         let annual_kwh = internal_gains_w * 8760.0 / 1000.0;
+        let mut plug_children = vec![
+            hares_io::hpxml::building::XmlNode {
+                name: "PlugLoadType".to_string(),
+                attrs: HashMap::new(),
+                text: "other".to_string(),
+                children: Vec::new(),
+            },
+            hares_io::hpxml::building::XmlNode {
+                name: "Load".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![
+                    hares_io::hpxml::building::XmlNode {
+                        name: "Units".to_string(),
+                        attrs: HashMap::new(),
+                        text: "kWh/year".to_string(),
+                        children: Vec::new(),
+                    },
+                    hares_io::hpxml::building::XmlNode {
+                        name: "Value".to_string(),
+                        attrs: HashMap::new(),
+                        text: annual_kwh.to_string(),
+                        children: Vec::new(),
+                    },
+                ],
+            },
+        ];
+
+        let is_constant = config.internal_gains_constant.unwrap_or(false);
+        let sensible_frac = config.internal_gains_sensible_fraction;
+        if is_constant || sensible_frac.is_some() {
+            let mut ext_children = Vec::new();
+            if is_constant {
+                let flat_24 = std::iter::repeat("0.04167")
+                    .take(24)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ext_children.push(hares_io::hpxml::building::XmlNode {
+                    name: "WeekdayScheduleFractions".to_string(),
+                    attrs: HashMap::new(),
+                    text: flat_24.clone(),
+                    children: Vec::new(),
+                });
+                ext_children.push(hares_io::hpxml::building::XmlNode {
+                    name: "WeekendScheduleFractions".to_string(),
+                    attrs: HashMap::new(),
+                    text: flat_24,
+                    children: Vec::new(),
+                });
+                ext_children.push(hares_io::hpxml::building::XmlNode {
+                    name: "MonthlyScheduleMultipliers".to_string(),
+                    attrs: HashMap::new(),
+                    text: std::iter::repeat("1.0")
+                        .take(12)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    children: Vec::new(),
+                });
+            }
+            if let Some(sf) = sensible_frac {
+                ext_children.push(hares_io::hpxml::building::XmlNode {
+                    name: "FracSensible".to_string(),
+                    attrs: HashMap::new(),
+                    text: sf.to_string(),
+                    children: Vec::new(),
+                });
+                ext_children.push(hares_io::hpxml::building::XmlNode {
+                    name: "FracLatent".to_string(),
+                    attrs: HashMap::new(),
+                    text: (1.0 - sf).max(0.0).to_string(),
+                    children: Vec::new(),
+                });
+            }
+            plug_children.push(hares_io::hpxml::building::XmlNode {
+                name: "extension".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: ext_children,
+            });
+        }
+
         details_children.push(hares_io::hpxml::building::XmlNode {
             name: "MiscLoads".to_string(),
             attrs: HashMap::new(),
@@ -379,33 +466,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
                 name: "PlugLoad".to_string(),
                 attrs: HashMap::new(),
                 text: String::new(),
-                children: vec![
-                    hares_io::hpxml::building::XmlNode {
-                        name: "PlugLoadType".to_string(),
-                        attrs: HashMap::new(),
-                        text: "other".to_string(),
-                        children: Vec::new(),
-                    },
-                    hares_io::hpxml::building::XmlNode {
-                        name: "Load".to_string(),
-                        attrs: HashMap::new(),
-                        text: String::new(),
-                        children: vec![
-                            hares_io::hpxml::building::XmlNode {
-                                name: "Units".to_string(),
-                                attrs: HashMap::new(),
-                                text: "kWh/year".to_string(),
-                                children: Vec::new(),
-                            },
-                            hares_io::hpxml::building::XmlNode {
-                                name: "Value".to_string(),
-                                attrs: HashMap::new(),
-                                text: annual_kwh.to_string(),
-                                children: Vec::new(),
-                            },
-                        ],
-                    },
-                ],
+                children: plug_children,
             }],
         });
     }
@@ -605,6 +666,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         has_flue_or_chimney: None,
         foundation_name: None,
         residential_facility_type: None,
+        mass_multiplier_override: config.geometry.mass_multiplier,
         details_xml,
     }
 }

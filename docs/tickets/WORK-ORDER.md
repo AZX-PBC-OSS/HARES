@@ -343,6 +343,7 @@ These fixes are independent of each other and can parallelize within the batch.
 | P1-C | TS-007, TS-009 | Thermal solver: fix b_coeff (continuous B_c); fix exterior LWR iteration off-by-one; add iterative interior LWR surface-temp update | L | Envelope oracle tests tighten |
 | P1-D | TS-008 | Solar distribution: redistribute beam to walls when floor_area=0; never drop energy | S | Invariant test: absorbed solar = transmitted solar within ε |
 | P1-E | CC-009, EA-001 F1, DC-004 F2/F4 | Ventilation double-accounting: remove `PortContribution::Thermal` from `Ventilation::step()`; envelope solver is sole owner of ventilation heat exchange | L | Ventilation on/off → zone temp difference matches analytical; energy balance closes |
+| P1-F | BESTEST-900 | RC layer auto-splitting: split dense layers exceeding Fourier criterion into sub-nodes; fixes Case 900 heating 12% over band and Case 900FF peak 25% over band | M | BESTEST case 900 and 900FF within ASHRAE 140 bands |
 
 **Batch 3 final verification:**
 ```bash
@@ -351,6 +352,78 @@ cargo test -p hares-core -- envelope_oracle
 cargo test -p hares-core -- freefloat_oracle
 ```
 Envelope oracle MAE should tighten relative to pre-fix baseline.
+
+---
+
+### P1-F — RC layer auto-splitting for dense/thick layers (BESTEST-900)
+
+**Ref:** BESTEST investigation 2026-03-30
+**Complexity:** M
+**File:** `crates/hares-envelope/src/boundary_rc.rs:678–691` (`build_layered_boundary`)
+
+`build_layered_boundary` assigns exactly one RC node per `LayerInput` regardless of
+layer thickness or thermal diffusivity. A single node for the 100mm concrete layer in
+BESTEST Case 900 (`k=0.510, ρ=1400, cp=1000 J/kg·K, α=3.64×10⁻⁷ m²/s`) produces a
+discretization error that transmits 2.1× more thermal amplitude at the 24-hour
+diurnal cycle than the analytical solution:
+
+- Theoretical attenuation: `exp(-L√(π/(α·P))) = exp(-3.18) = 0.042` (96% damped)
+- 1-node RC approximation: amplitude ratio ≈ `1 / (1 + (ωRC/2)²)^0.5 = 0.192` (81% damped)
+- Net over-transmission: 4.6× (amplitude); phase shift error: 1.2 h premature
+
+This is the **primary cause** of:
+- Case 900 annual heating 12.4% over the ASHRAE 140 upper band (cold conducted in
+  too readily in winter)
+- Case 900FF peak zone temperature 25% over the ASHRAE 140 upper band (heat conducted
+  in too readily and delivered prematurely in summer)
+
+EnergyPlus uses `max(1, floor(thickness_m / 0.025))` nodes for each layer, giving
+4 nodes for 100mm concrete. The correct criterion is Fourier number: for a node of
+thickness `Δx`, the explicit stability criterion `α·Δt/Δx² < 0.5` sets the minimum
+node count. For BESTEST 3600 s timestep, Fourier-stable `Δx_max ≈ √(2·α·Δt) ≈ 51mm`.
+The 100mm concrete layer therefore requires at minimum 2 nodes; 4 is the EnergyPlus
+convention.
+
+**Change:** In `build_layered_boundary`, before the node-allocation loop, split each
+`LayerInput` that exceeds the Fourier criterion into N sub-nodes where
+`N = max(1, ceil(thickness_m / dx_max))`. The sub-nodes share the layer's thermal
+properties; each sub-node gets `thickness_m / N` thickness and thus `cap / N`
+capacitance. Resistance between sub-nodes is `(thickness_m/N) / (2k·A)` (half-node
+each side), same as the existing inter-layer formula.
+
+The split should happen only for solid materials (`density_kg_m3 > 100` and
+`conductivity_w_m_k > 0.1`) to avoid splitting lightweight insulation where 1 node is
+already an over-estimate of mass.
+
+```rust
+const FOURIER_DX_MAX_FACTOR: f64 = 0.5; // α·Δt/Δx² ≤ this
+// dt_s comes from BuilderParams; add dt_s: f64 to BoundaryParams
+
+fn split_layer_count(layer: &LayerInput, dt_s: f64) -> usize {
+    if layer.density_kg_m3 <= 100.0 || layer.conductivity_w_m_k <= 0.1 {
+        return 1;
+    }
+    let alpha = layer.conductivity_w_m_k / (layer.density_kg_m3 * layer.specific_heat_j_kg_k);
+    let dx_max = (2.0 * FOURIER_DX_MAX_FACTOR * alpha * dt_s).sqrt();
+    let n = (layer.thickness_m / dx_max).ceil() as usize;
+    n.max(1)
+}
+```
+
+The `BoundaryParams` struct must gain a `dt_s: f64` field; callers in
+`build_all_boundaries` must pass the simulation timestep. OCHRE pre-computed RC layers
+(`build_ochre_rc_boundary`) are unaffected because OCHRE already handles splitting
+during LUT generation.
+
+**Verify:**
+```bash
+cargo test -p hares-envelope -- boundary_rc
+cargo test --test bestest -- bestest_case_900
+cargo test --test bestest -- bestest_case_900ff
+```
+New unit test: a 100mm concrete layer at 3600 s timestep must produce `N ≥ 2`
+sub-nodes. BESTEST Case 900 annual heating must fall within [1170, 2041] kWh.
+BESTEST Case 900FF peak zone temperature must fall within [41.6, 44.8] °C.
 
 ---
 
@@ -708,6 +781,132 @@ must match the `Minimal` variant, not a WoodStud variant.
 
 ---
 
+### P2-T — Synthetic fixture zone mass multiplier: bare-box BESTEST uses residential furniture mass (BESTEST-600)
+
+**Ref:** BESTEST investigation 2026-03-30
+**Complexity:** S
+**Files:**
+- `crates/hares-core/src/dwelling/conversions.rs:24–31` (`mass_multiplier_for_zone`)
+- `crates/hares-core/src/dwelling/synthetic.rs` (`SyntheticTomlConfig`)
+
+`mass_multiplier_for_zone` returns 7.0 for `ZoneType::Conditioned`. This multiplier
+is applied as a scale factor on the zone air capacitance to represent furniture and
+interior partition mass in a furnished residential dwelling. BESTEST Cases 600 and 900
+are bare boxes with no furniture; ASHRAE 140 Section 5.2.1 explicitly specifies "no
+interior mass beyond the building envelope surfaces."
+
+Applying 7.0× to the BESTEST zone air capacitance adds:
+- Zone volume: 129.6 m³; air density ≈ 1.2 kg/m³; cp ≈ 1006 J/kg·K
+- Air capacitance: 129.6 × 1.2 × 1006 = 156,455 J/K
+- Multiplier adds: 6 × 156,455 = 938,730 J/K of phantom thermal mass
+
+This phantom mass buffers diurnal temperature swings, reducing both heating and cooling
+loads relative to the true bare-box response. It is the **primary cause** of:
+- Case 600 annual heating 2.1% under the ASHRAE 140 lower band
+- Case 600 annual cooling 10.5% under the ASHRAE 140 lower band
+- Case 600FF peak zone temperature 1.9°C over band (phantom mass delays but doesn't
+  eliminate the over-temperature)
+
+**Change:** Add a `mass_multiplier: Option<f64>` field to `SyntheticTomlConfig` and
+`SyntheticGeometryConfig`. When set, it is written into `ZoneInput::mass_multiplier`
+instead of calling `mass_multiplier_for_zone`. In `build_synthetic_building`, pass
+the override through to the `Zone` struct so that `building_to_zone_inputs` picks it
+up via the existing `zone.mass_multiplier` path (if that field does not exist on `Zone`,
+add it).
+
+Update all BESTEST fixture TOMLs to set `mass_multiplier = 1.0`:
+
+```toml
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+mass_multiplier = 1.0
+```
+
+No production (HPXML) code path is changed; the override is synthetic-fixture-only.
+
+**Verify:**
+```bash
+cargo test --test bestest -- bestest_case_600
+cargo test --test bestest -- bestest_case_600ff
+cargo test --test bestest -- bestest_case_900
+```
+BESTEST Case 600 annual heating must fall within [4296, 5709] kWh.
+BESTEST Case 600 annual cooling must fall within [6137, 7964] kWh.
+
+---
+
+### P2-U — Synthetic fixture internal gains: MELs schedule and sensible fraction not BESTEST-compliant (BESTEST-600)
+
+**Ref:** BESTEST investigation 2026-03-30
+**Complexity:** S
+**Files:**
+- `crates/hares-core/src/dwelling/synthetic.rs:369–411` (`build_synthetic_building`)
+- `crates/hares-io/src/schedule_resolve.rs:702–726` (`inject_power_schedule`)
+- `crates/hares-io/src/hpxml/resolve_loads.rs` (`default_gain_fractions`)
+
+`build_synthetic_building` converts `internal_gains_w` to a `PlugLoadType=other`
+MELs item. Two independent errors cause the delivered zone sensible heat to differ
+from the ASHRAE 140 spec of constant 200 W sensible:
+
+**Issue U-1 — MELs sensible_gain_fraction = 0.855 (HIGH):**
+`default_gain_fractions` returns 0.855 sensible / 0.045 latent for `"MELs"`. ASHRAE
+140 Section 5.4.3 specifies 200 W as 100% sensible internal gains. With
+`sensible_gain_fraction = 0.855`, only 171 W reaches the zone as sensible heat,
+leaving 29 W lost to a latent path. Over a year this is 254 kWh less sensible heating
+of the zone, explaining ~39% of the 647 kWh cooling shortfall in Case 600.
+
+**Issue U-2 — ANSI/RESNET 301 time-varying schedule instead of constant (MEDIUM):**
+When no CSV column exists for `"plug_loads_other"` (true for all BESTEST synthetic
+fixtures), `inject_power_schedule` falls through to `profiles.get("MELs")` which loads
+the ANSI/RESNET 301 Table C.3(1) weekday/weekend fractions from
+`Default Schedule Parameters.csv`. This gives a diurnal profile with mean ≈ 0.0417
+scaled to `max_kw ≈ 0.2/0.0417 ≈ 4.8 kW`, producing instantaneous power ranging from
+173 W to 245 W. Annual total is preserved but the time-of-use pattern diverges from
+the ASHRAE 140 constant-200W spec.
+
+**Change:** In `build_synthetic_building`, when emitting the `PlugLoad` XML node for
+`internal_gains_w`, additionally write:
+1. A `SensibleFraction` child node with value `"1.0"` inside `PlugLoad`, so that
+   `resolve_loads.rs` writes `sensible_gain_fraction = 1.0` into the equipment spec.
+2. A `WeekdayScheduleFractions` child node with 24 values all `"1.0"` and a
+   `WeekendScheduleFractions` child node with 24 values all `"1.0"`, which causes
+   `inject_power_schedule` to prefer the HPXML-parsed schedule (constant fraction) over
+   the MELs default profile.
+
+If the HPXML schema does not provide a flat path for `SensibleFraction` on `PlugLoad`,
+an alternative is to add a `internal_gains_sensible_fraction: Option<f64>` field to
+`SyntheticTomlConfig` and inject it as a raw equipment parameter override, bypassing
+`default_gain_fractions`.
+
+The minimal surgical fix — with lowest risk of touching production code paths — is the
+second approach: add `internal_gains_sensible_fraction: Option<f64>` defaulting to
+`None` (production behavior unchanged), and when `Some(f)`, write
+`"sensible_gain_fraction"` directly into the `PlugLoad` config map before it is
+resolved. Set all BESTEST fixture TOMLs to `internal_gains_sensible_fraction = 1.0`.
+
+For the schedule: add `internal_gains_constant: bool` field (default `false`) to
+`SyntheticTomlConfig`. When `true`, write `power_constant_kw = internal_gains_w / 1000`
+directly into the equipment spec rather than relying on `inject_power_schedule`'s
+profile lookup. This short-circuits the MELs schedule profile entirely.
+
+```toml
+[geometry]  # or top-level
+internal_gains_w = 200.0
+internal_gains_sensible_fraction = 1.0
+internal_gains_constant = true
+```
+
+**Verify:**
+```bash
+cargo test --test bestest -- bestest_case_600
+cargo test --test bestest -- bestest_case_640
+```
+BESTEST Case 600 annual cooling must fall within [6137, 7964] kWh.
+After P2-T is also applied: heating must fall within [4296, 5709] kWh.
+
+---
+
 **Batch 4 final verification:**
 ```bash
 cargo test -p hares-equipment
@@ -845,7 +1044,7 @@ builds to zero per step for the affected paths. No test regressions.
 |------|-----|--------|-----------|
 | P4-A | — | Per-equipment oracle tests: 24 h with known inputs vs analytical reference | L |
 | P4-B | — | Per-fixture parity tests vs OCHRE reference parquet | L |
-| P4-C | — | BESTEST cases 600, 640, 900, 600FF, 900FF within ASHRAE 140 bands | M |
+| P4-C | P1-F, P2-T, P2-U | BESTEST cases 600, 640, 900, 600FF, 900FF within ASHRAE 140 bands; requires P1-F (RC splitting), P2-T (mass multiplier), P2-U (MELs gains) | M |
 
 ### P5 — Output, Python API, checkpoint telemetry
 
@@ -897,7 +1096,7 @@ Batch 0 (critical input fixes)
 
 ## Appendix: Complete Ticket Resolution Map
 
-144 review tickets: 129 resolved by work order batches, 14 no action needed (correct/acceptable), 1 deferred.
+147 review tickets: 132 resolved by work order batches, 14 no action needed (correct/acceptable), 1 deferred.
 
 ### AR series (10 tickets)
 
@@ -1099,3 +1298,11 @@ Batch 0 (critical input fixes)
 | DV-003 | Batch 4 P2-Q (biquadratic input bounds + PLF clamps wired from CSV) |
 | DV-004 | Batch 4 P2-R (battery pack topology + default resistance) |
 | DV-005 | Batch 4 P2-S (envelope LUT filter clear on minimal clamping) |
+
+### BESTEST investigation findings (3 tickets, 2026-03-30)
+
+| Finding | Resolution |
+|---------|------------|
+| BESTEST-900: 1 RC node per 100mm concrete layer → 2.1× amplitude over-transmission | Batch 3 P1-F (RC layer auto-splitting) |
+| BESTEST-600: INTERIOR_MASS_MULTIPLIER=7.0 applied to bare-box (no furniture) | Batch 4 P2-T (synthetic fixture mass multiplier override) |
+| BESTEST-600: MELs sensible_gain_fraction=0.855 + ANSI/RESNET time-varying schedule | Batch 4 P2-U (synthetic fixture internal gains compliance) |

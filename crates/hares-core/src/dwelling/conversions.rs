@@ -35,12 +35,14 @@ pub fn building_to_zone_inputs(building: &Building, n_zones: usize) -> Vec<ZoneI
     (0..n_zones)
         .map(|idx| {
             let zone = building.zones.get(idx);
+            let mass_multiplier = building.mass_multiplier_override.unwrap_or_else(|| {
+                zone.map(|z| mass_multiplier_for_zone(&z.zone_type))
+                    .unwrap_or(7.0)
+            });
             ZoneInput {
                 floor_area_m2: zone.and_then(|z| z.floor_area_m2),
                 volume_m3: zone.and_then(|z| z.volume_m3),
-                mass_multiplier: zone
-                    .map(|z| mass_multiplier_for_zone(&z.zone_type))
-                    .unwrap_or(7.0),
+                mass_multiplier,
             }
         })
         .collect()

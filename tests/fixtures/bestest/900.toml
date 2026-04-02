@@ -8,6 +8,7 @@ duration_s = 31536000
 [geometry]
 floor_area_m2 = 48.0
 zone_volume_m3 = 129.6
+mass_multiplier = 1.0
 
 [materials]
 wall_r_value_m2_k_w = 2.0
@@ -28,6 +29,8 @@ cooling_c = 27.0
 ach = 0.5
 
 internal_gains_w = 200.0
+internal_gains_constant = true
+internal_gains_sensible_fraction = 1.0
 
 [[boundaries]]
 id = "south-wall"
