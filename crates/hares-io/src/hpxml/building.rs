@@ -201,6 +201,9 @@ pub struct Building {
     pub infiltration_cfm50: Option<f64>,
     /// Effective Leakage Area converted to cm² from sq-in input.
     pub infiltration_ela_cm2: Option<f64>,
+    /// Constant infiltration rate in ACH (bypasses AIM-2 wind/stack model).
+    /// Used by BESTEST/ASHRAE 140 synthetic cases that specify a fixed ACH.
+    pub infiltration_constant_ach: Option<f64>,
     pub hvac_capacity_w: Option<f64>,
     pub seer2: Option<f64>,
     pub hspf2: Option<f64>,
@@ -814,6 +817,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         windows,
         infiltration_cfm50,
         infiltration_ela_cm2,
+        infiltration_constant_ach: None,
         infiltration_ach50: extract_first_f64(
             details,
             &[

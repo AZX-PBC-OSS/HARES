@@ -859,7 +859,9 @@ pub(crate) fn build_default_solvers(
 
             let method = match bz.zone_type {
                 ZoneType::Conditioned => {
-                    if let Some(ach50) = resolved_ach50 {
+                    if let Some(ach) = building.infiltration_constant_ach {
+                        InfiltrationMethod::Ach { ach }
+                    } else if let Some(ach50) = resolved_ach50 {
                         let terrain = site_type_to_terrain(&building.site.site_type);
                         let shielding =
                             shielding_str_to_class(building.site.shielding_of_home.as_deref());

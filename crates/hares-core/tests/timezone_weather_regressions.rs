@@ -74,6 +74,7 @@ fn minimal_building() -> hares_io::Building {
         infiltration_ach50: None,
         infiltration_cfm50: None,
         infiltration_ela_cm2: None,
+        infiltration_constant_ach: None,
         hvac_capacity_w: None,
         seer2: None,
         hspf2: None,

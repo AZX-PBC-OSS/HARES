@@ -189,8 +189,13 @@ pub(crate) struct SyntheticWindowConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SyntheticSetpointConfig {
-    pub(crate) heating_c: f64,
+    #[serde(default)]
+    pub(crate) heating_c: Option<f64>,
     pub(crate) cooling_c: f64,
+    /// Optional 24-element hourly heating setpoint profile (°C).
+    /// When present, overrides `heating_c` with an hourly schedule.
+    #[serde(default)]
+    pub(crate) heating_schedule_c: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -537,16 +542,21 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         });
     }
 
-    // Build constant 24-hour setpoint vectors when setpoints are configured.
+    // Build 24-hour setpoint vectors when setpoints are configured.
     let (heating_weekday, cooling_weekday) = if let Some(sp) = &config.setpoints {
-        (Some(vec![sp.heating_c; 24]), Some(vec![sp.cooling_c; 24]))
+        let heating = if let Some(ref schedule) = sp.heating_schedule_c {
+            assert_eq!(schedule.len(), 24, "heating_schedule_c must have exactly 24 elements");
+            Some(schedule.clone())
+        } else {
+            sp.heating_c.map(|t| vec![t; 24])
+        };
+        (heating, Some(vec![sp.cooling_c; 24]))
     } else {
         (None, None)
     };
 
-    // Approximate continuous ACH → ACH50 using a factor of 20 (standard blower-door
-    // assumption: infiltration at 50 Pa ≈ 20× natural infiltration).
-    let infiltration_ach50 = config.infiltration.as_ref().map(|inf| inf.ach * 20.0);
+    // BESTEST/ASHRAE 140 specifies constant ACH — no weather-dependent model.
+    let infiltration_constant_ach = config.infiltration.as_ref().map(|inf| inf.ach);
 
     let wall_ids: Vec<String> = boundaries
         .iter()
@@ -574,9 +584,10 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         }],
         boundaries,
         windows,
-        infiltration_ach50,
+        infiltration_ach50: None,
         infiltration_cfm50: None,
         infiltration_ela_cm2: None,
+        infiltration_constant_ach,
         hvac_capacity_w: Some(conv::power_btu_h_to_w(heating_capacity_btu_h)),
         seer2: None,
         hspf2: None,
