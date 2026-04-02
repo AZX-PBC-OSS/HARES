@@ -216,7 +216,7 @@ shgc = 0.789
 attached_to_wall_id = "south-wall"
 
 [schedule]
-occupancy = 1.0
+occupancy = 0.0
 
 [output]
 output_verbosity = 0

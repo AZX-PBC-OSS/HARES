@@ -46,22 +46,22 @@ interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 
 [[boundaries.material_layers]]
-thickness_m = 0.100
-conductivity_w_m_k = 0.510
-density_kg_m3 = 1400.0
-specific_heat_j_kg_k = 1000.0
-
-[[boundaries.material_layers]]
-thickness_m = 0.0615
-conductivity_w_m_k = 0.040
-density_kg_m3 = 12.0
-specific_heat_j_kg_k = 840.0
-
-[[boundaries.material_layers]]
 thickness_m = 0.009
 conductivity_w_m_k = 0.140
 density_kg_m3 = 530.0
 specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.0615
+conductivity_w_m_k = 0.040
+density_kg_m3 = 10.0
+specific_heat_j_kg_k = 1400.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.100
+conductivity_w_m_k = 0.510
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
 
 [[boundaries]]
 id = "north-wall"
@@ -75,22 +75,22 @@ interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 
 [[boundaries.material_layers]]
-thickness_m = 0.100
-conductivity_w_m_k = 0.510
-density_kg_m3 = 1400.0
-specific_heat_j_kg_k = 1000.0
-
-[[boundaries.material_layers]]
-thickness_m = 0.0615
-conductivity_w_m_k = 0.040
-density_kg_m3 = 12.0
-specific_heat_j_kg_k = 840.0
-
-[[boundaries.material_layers]]
 thickness_m = 0.009
 conductivity_w_m_k = 0.140
 density_kg_m3 = 530.0
 specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.0615
+conductivity_w_m_k = 0.040
+density_kg_m3 = 10.0
+specific_heat_j_kg_k = 1400.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.100
+conductivity_w_m_k = 0.510
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
 
 [[boundaries]]
 id = "east-wall"
@@ -104,22 +104,22 @@ interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 
 [[boundaries.material_layers]]
-thickness_m = 0.100
-conductivity_w_m_k = 0.510
-density_kg_m3 = 1400.0
-specific_heat_j_kg_k = 1000.0
-
-[[boundaries.material_layers]]
-thickness_m = 0.0615
-conductivity_w_m_k = 0.040
-density_kg_m3 = 12.0
-specific_heat_j_kg_k = 840.0
-
-[[boundaries.material_layers]]
 thickness_m = 0.009
 conductivity_w_m_k = 0.140
 density_kg_m3 = 530.0
 specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.0615
+conductivity_w_m_k = 0.040
+density_kg_m3 = 10.0
+specific_heat_j_kg_k = 1400.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.100
+conductivity_w_m_k = 0.510
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
 
 [[boundaries]]
 id = "west-wall"
@@ -133,22 +133,22 @@ interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 
 [[boundaries.material_layers]]
-thickness_m = 0.100
-conductivity_w_m_k = 0.510
-density_kg_m3 = 1400.0
-specific_heat_j_kg_k = 1000.0
-
-[[boundaries.material_layers]]
-thickness_m = 0.0615
-conductivity_w_m_k = 0.040
-density_kg_m3 = 12.0
-specific_heat_j_kg_k = 840.0
-
-[[boundaries.material_layers]]
 thickness_m = 0.009
 conductivity_w_m_k = 0.140
 density_kg_m3 = 530.0
 specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.0615
+conductivity_w_m_k = 0.040
+density_kg_m3 = 10.0
+specific_heat_j_kg_k = 1400.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.100
+conductivity_w_m_k = 0.510
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
 
 [[boundaries]]
 id = "roof"
@@ -215,7 +215,7 @@ shgc = 0.789
 attached_to_wall_id = "south-wall"
 
 [schedule]
-occupancy = 1.0
+occupancy = 0.0
 
 [output]
 output_verbosity = 0

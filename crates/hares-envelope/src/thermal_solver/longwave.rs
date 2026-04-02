@@ -80,6 +80,7 @@ impl ThermalSolver {
 
             let e_factor = info.emissivity * STEFAN_BOLTZMANN * info.area_m2;
             let f_sky = sky_view_factor(info.tilt_deg);
+            let beta = beta_factor(info.tilt_deg);
             let t_node_c = self.x[info.state_index];
 
             // Per-surface solar gain [W] for the iteration (no allocation).
@@ -101,7 +102,7 @@ impl ThermalSolver {
                 e_factor * t_air_k4
             } else {
                 let t_sky_k4 = (t_sky_raw + CELSIUS_TO_KELVIN).powi(4);
-                e_factor * ((1.0 - f_sky) * t_air_k4 + f_sky * t_sky_k4)
+                e_factor * ((1.0 - beta * f_sky) * t_air_k4 + beta * f_sky * t_sky_k4)
             };
 
             // Initial surface temperature estimate from linear interpolation.

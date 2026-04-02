@@ -25,7 +25,7 @@ rel_humidity_pct = 65.0
 pressure_kpa = 101.325
 
 [schedule]
-occupancy = 1.0
+occupancy = 0.0
 
 [output]
 output_verbosity = 0

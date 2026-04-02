@@ -1943,7 +1943,72 @@ impl Dwelling {
         #[cfg(feature = "observe")]
         let observing = self.observer_buf.is_some();
 
-        // Step 1b: thermal equipment update_control() to determine mode and ideal targets.
+        let dt = chrono_to_std_duration(self.clock.time_res)?;
+
+        // Step 1b: deposit deterministic internal gains (occupancy, plug loads)
+        // BEFORE prepare_inputs so the ideal solver sees them when computing
+        // required HVAC capacity.
+        self.apply_occupancy_gains();
+
+        #[cfg(feature = "observe")]
+        let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
+        #[cfg(feature = "observe")]
+        let mut pre_snapshot = if observing {
+            Some(self.ports.clone())
+        } else {
+            None
+        };
+        let mut step_succeeded = vec![false; self.equipment.len()];
+
+        for &idx in &self.equipment_execution_order {
+            let stage = self.equipment[idx].descriptor().stage;
+            if stage == ExecutionStage::Thermal {
+                continue;
+            }
+            #[cfg(feature = "observe")]
+            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
+
+            let _ = self.equipment[idx].update_control(&self.latest_env);
+            if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
+                self.warnings.push(format!(
+                    "equipment step failed for '{}' : {err}",
+                    self.equipment[idx].descriptor().name
+                ));
+            } else {
+                validate_core_contract(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                )?;
+                step_succeeded[idx] = true;
+            }
+
+            #[cfg(feature = "observe")]
+            if let Some(ref mut snapshot) = pre_snapshot {
+                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                nonthermal_obs.push(observer_capture::capture_single_equipment(
+                    self.equipment[idx].as_ref(),
+                    contribution,
+                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+                ));
+                *snapshot = self.ports.clone();
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.stage_snapshot = Some(StageSnapshot {
+                ports: self.ports.clone(),
+            });
+        }
+
+        #[cfg(feature = "observe")]
+        if observing {
+            obs_phases.post_nonthermal_equipment = Some(observer_capture::capture_equipment_phase(
+                nonthermal_obs,
+                &self.ports,
+            ));
+        }
+
+        // Step 1c: thermal equipment update_control() to determine mode and ideal targets.
         // Must run BEFORE solver feedback actor collects targets.
         for &idx in &self.equipment_execution_order {
             if self.equipment[idx].descriptor().stage == ExecutionStage::Thermal {
@@ -1951,20 +2016,15 @@ impl Dwelling {
             }
         }
 
-        // Phase 1: build current-step inputs so solve_ideal_capacity_for_target
-        // sees current weather/solar/infiltration rather than stale values.
+        // Step 1d: build current-step inputs with all non-HVAC gains already on ports.
         self.thermal_solver
             .prepare_inputs(&self.ports, &self.latest_env);
 
-        // Step 1c: solver feedback actor collects ideal targets and solves for capacities.
+        // Step 1e: solver feedback actor collects ideal targets and solves for capacities.
         self.solver_feedback_actor
             .collect_and_solve(&self.equipment, &self.thermal_solver);
 
-        // Actor-facing equipment state is sourced from `latest_env.equipment_core`.
-        // Keep legacy string telemetry map untouched to avoid per-step clone churn.
-
-        // Step 1d: actors decide and queue control signals (registration order, last write wins).
-        // Solver feedback actor decides first (Schedule priority, can be overridden by user actors).
+        // Step 1f: actors decide and queue control signals (registration order, last write wins).
         self.actor_dispatch_buf.clear();
         self.solver_feedback_actor
             .decide(&self.latest_env, &mut self.actor_dispatch_buf);
@@ -2016,85 +2076,15 @@ impl Dwelling {
 
         // Step 2a: re-run update_control for thermal equipment after control
         // dispatch so ThermalSetpoint / ModeOverride / DR signals take effect
-        // on the current timestep, not one step later. This also preserves the
-        // ideal-capacity conversion path because the solver feedback actor
-        // dispatches IdealCapacity in Step 1d.
+        // on the current timestep, not one step later.
         for &idx in &self.equipment_execution_order {
             if self.equipment[idx].descriptor().stage == ExecutionStage::Thermal {
                 let _ = self.equipment[idx].update_control(&self.latest_env);
             }
         }
 
-        let dt = chrono_to_std_duration(self.clock.time_res)?;
-
-        // Step 2b: apply occupancy-driven internal heat gains.
-        // OCHRE Envelope.py:904-908: 400 BTU/h total; sensible=66 W, latent=51 W.
-        // Gains go to the primary (indoor) zone only per OCHRE's single-zone approach.
-        self.apply_occupancy_gains();
-
-        // Step 3a: run stage-ordered equipment, snapshot after stage 1.
         #[cfg(feature = "profiling")]
         let hvac_started = Instant::now();
-
-        #[cfg(feature = "observe")]
-        let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
-        #[cfg(feature = "observe")]
-        let mut pre_snapshot = if observing {
-            Some(self.ports.clone())
-        } else {
-            None
-        };
-        let mut step_succeeded = vec![false; self.equipment.len()];
-
-        for &idx in &self.equipment_execution_order {
-            let stage = self.equipment[idx].descriptor().stage;
-            if stage == ExecutionStage::Thermal {
-                continue;
-            }
-            #[cfg(feature = "observe")]
-            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
-
-            let _ = self.equipment[idx].update_control(&self.latest_env);
-            if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.warnings.push(format!(
-                    "equipment step failed for '{}' : {err}",
-                    self.equipment[idx].descriptor().name
-                ));
-            } else {
-                // Fail fast on core contract violations: continuing the step with
-                // partially invalid equipment state can poison downstream actors/ports.
-                validate_core_contract(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                )?;
-                step_succeeded[idx] = true;
-            }
-
-            #[cfg(feature = "observe")]
-            if let Some(ref mut snapshot) = pre_snapshot {
-                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
-                nonthermal_obs.push(observer_capture::capture_single_equipment(
-                    self.equipment[idx].as_ref(),
-                    contribution,
-                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
-                ));
-                *snapshot = self.ports.clone();
-            }
-        }
-        #[cfg(debug_assertions)]
-        {
-            self.stage_snapshot = Some(StageSnapshot {
-                ports: self.ports.clone(),
-            });
-        }
-
-        #[cfg(feature = "observe")]
-        if observing {
-            obs_phases.post_nonthermal_equipment = Some(observer_capture::capture_equipment_phase(
-                nonthermal_obs,
-                &self.ports,
-            ));
-        }
 
         // Step 3b: thermal stage equipment.
         #[cfg(feature = "observe")]
