@@ -1270,8 +1270,10 @@ pub(super) fn resolve_hvac(
             params.insert(k.clone(), v.clone());
         }
         apply_building_setpoint_profiles(building, &mut params, true, name == "Ideal HVAC");
-        if let Some(deadband) = building.hvac_deadband_c {
-            params.insert("deadband_c".to_string(), json!(deadband));
+        if name == "Ideal HVAC" {
+            if let Some(deadband) = building.hvac_deadband_c {
+                params.insert("deadband_c".to_string(), json!(deadband));
+            }
         }
         duct_params.insert_into_map(&mut params);
         for (k, v) in &basement_params {

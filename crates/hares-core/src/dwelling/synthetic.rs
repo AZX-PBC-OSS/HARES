@@ -204,10 +204,6 @@ pub(crate) struct SyntheticSetpointConfig {
     /// When present, overrides `heating_c` with an hourly schedule.
     #[serde(default)]
     pub(crate) heating_schedule_c: Option<Vec<f64>>,
-    /// Thermostat deadband/hysteresis in °C.
-    /// ASHRAE 140 / BESTEST requires 0.0 for ideal setpoint tracking.
-    #[serde(default)]
-    pub(crate) setpoint_deadband_c: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -670,11 +666,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         foundation_name: None,
         residential_facility_type: None,
         mass_multiplier_override: config.geometry.mass_multiplier,
-        hvac_deadband_c: config
-            .setpoints
-            .as_ref()
-            .and_then(|sp| sp.setpoint_deadband_c)
-            .or(config.hvac.deadband_c),
+        hvac_deadband_c: config.hvac.deadband_c,
         details_xml,
     }
 }

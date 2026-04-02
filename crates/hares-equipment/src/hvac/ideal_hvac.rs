@@ -515,17 +515,10 @@ impl Equipment for IdealHvac {
         let mut capacity_w = match self.mode {
             ThermostatMode::Deadband => 0.0,
             ThermostatMode::Heating if self.use_ideal_cached => {
-                // Clamp: non-negative (one-step-stale estimate may go negative) and
-                // no more than rated capacity (solver has no upper bound).
-                (self.ideal_capacity_w * self.load_fraction)
-                    .max(0.0)
-                    .min(self.rated_capacity_w)
+                (self.ideal_capacity_w * self.load_fraction).max(0.0)
             }
             ThermostatMode::Cooling if self.use_ideal_cached => {
-                // Clamp: non-positive and no more than rated cooling capacity in magnitude.
-                (self.ideal_capacity_w * self.load_fraction)
-                    .min(0.0)
-                    .max(-self.cooling_capacity_w)
+                (self.ideal_capacity_w * self.load_fraction).min(0.0)
             }
             ThermostatMode::Heating => self.rated_capacity_w * self.load_fraction,
             ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction,
@@ -1797,7 +1790,7 @@ mod tests {
     }
 
     #[test]
-    fn ideal_hvac_heating_capped_at_rated_capacity() {
+    fn ideal_hvac_heating_uncapped_in_ideal_mode() {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
@@ -1810,7 +1803,7 @@ mod tests {
         let env = env(18.0, 300, 0);
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
-        // Solver says 50kW — far above rated 10kW.
+        // Solver says 50kW — ideal mode delivers the full amount.
         eq.ideal_capacity_w = 50_000.0;
 
         let mut ports = PortSlots {
@@ -1820,14 +1813,14 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert!(
-            (ports.thermal[0].sensible_gain_w - 10_000.0).abs() < 1e-6,
-            "output must be capped at rated 10kW, got {}",
+            (ports.thermal[0].sensible_gain_w - 50_000.0).abs() < 1e-6,
+            "ideal mode must deliver uncapped capacity, got {}",
             ports.thermal[0].sensible_gain_w
         );
     }
 
     #[test]
-    fn ideal_hvac_cooling_capped_at_cooling_capacity() {
+    fn ideal_hvac_cooling_uncapped_in_ideal_mode() {
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
             cooling_capacity_w: Some(8_000.0),
@@ -1840,7 +1833,7 @@ mod tests {
         let env = env(28.0, 300, 0);
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
-        // Solver says -40kW cooling.
+        // Solver says -40kW cooling — ideal mode delivers the full amount.
         eq.ideal_capacity_w = -40_000.0;
 
         let mut ports = PortSlots {
@@ -1849,15 +1842,10 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        // SHR defaults to 1.0, so all sensible. Capacity = -8000 (capped).
+        // SHR defaults to 1.0, so all sensible. Capacity = -40000 (uncapped).
         assert!(
-            ports.thermal[0].sensible_gain_w <= -8_000.0 + 1e-6,
-            "|output| must be <= 8kW, got {}",
-            ports.thermal[0].sensible_gain_w
-        );
-        assert!(
-            ports.thermal[0].sensible_gain_w >= -8_000.0 - 1e-6,
-            "output must be exactly -8kW, got {}",
+            (ports.thermal[0].sensible_gain_w - (-40_000.0)).abs() < 1e-6,
+            "ideal mode must deliver uncapped capacity, got {}",
             ports.thermal[0].sensible_gain_w
         );
     }
