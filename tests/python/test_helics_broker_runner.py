@@ -324,3 +324,16 @@ def test_make_dwelling_federate_config_rejects_invalid_kwarg_key(
             schedule_path=Path("/data/schedule.csv"),
             **{"bad key": "x"},
         )
+
+
+def test_destroy_broker_disconnects(monkeypatch: pytest.MonkeyPatch) -> None:
+    broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
+
+    broker = _FakeBroker("zmq", "test_broker", "--federates=1")
+    assert broker.disconnected is False
+
+    broker_module.destroy_broker(broker)
+    assert broker.disconnected is True
+
+    # Idempotent — does not raise on second call
+    broker_module.destroy_broker(broker)

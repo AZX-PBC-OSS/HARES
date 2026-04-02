@@ -103,6 +103,7 @@ class _FakeHelicsModule:
     HELICS_FLAG_UNINTERRUPTIBLE = 31
     HELICS_FLAG_TERMINATE_ON_ERROR = 72
     HELICS_PROPERTY_TIME_PERIOD = 141
+    HELICS_PROPERTY_TIME_OFFSET = 142
 
     class HelicsFederateInfo:
         def __init__(self) -> None:
@@ -469,3 +470,33 @@ def test_helics_fleet_negative_dwelling_index_payload_rejected(
 
     assert "must be non-negative" in caplog.text
     assert fleet.applied_controls == []
+
+
+def test_helics_fleet_time_offset_property(monkeypatch: pytest.MonkeyPatch):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+
+    # Default: no offset property written
+    module.HELICSFleet(fleet, fed_name="fleet_1")
+    fedinfo_default = fake_helics.last_fedinfo
+    assert fedinfo_default is not None
+    assert fake_helics.HELICS_PROPERTY_TIME_OFFSET not in fedinfo_default.property
+
+    # Non-zero offset: property written
+    module.HELICSFleet(fleet, fed_name="fleet_2", time_offset_s=2.0)
+    fedinfo_offset = fake_helics.last_fedinfo
+    assert fedinfo_offset is not None
+    assert fedinfo_offset.property[fake_helics.HELICS_PROPERTY_TIME_OFFSET] == pytest.approx(2.0)
+
+
+def test_helics_fleet_per_dwelling_voltage_topics_length_validated(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+
+    with pytest.raises(ValueError, match="must match fleet size"):
+        orchestrator.register_subscriptions(
+            per_dwelling_voltage_topics=["topic_0", "topic_1"],
+        )

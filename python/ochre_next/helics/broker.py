@@ -111,10 +111,11 @@ def wait_for_broker(broker: helics.HelicsBroker, timeout: float = 60.0) -> None:
 
 
 def destroy_broker(broker: helics.HelicsBroker) -> None:
-    """Disconnect a HELICS broker and release library resources.
+    """Disconnect a HELICS broker and release its resources.
 
-    This should be called after all federates have disconnected and the
-    co-simulation is complete to avoid leaking ZMQ contexts.
+    Call after all federates have disconnected.  This does **not** call
+    ``helicsCloseLibrary()`` because that is a process-global teardown that
+    would invalidate all remaining HELICS handles in the process.
 
     Args:
         broker: HELICS broker handle to shut down.
@@ -124,14 +125,6 @@ def destroy_broker(broker: helics.HelicsBroker) -> None:
             broker.disconnect()
         elif hasattr(helics, "helicsBrokerDisconnect"):
             helics.helicsBrokerDisconnect(broker)
-    except Exception:
-        pass
-
-    try:
-        if hasattr(helics, "helicsCloseLibrary"):
-            helics.helicsCloseLibrary()
-        elif hasattr(helics, "close_library"):
-            helics.close_library()
     except Exception:
         pass
 

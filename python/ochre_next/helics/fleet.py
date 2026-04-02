@@ -181,11 +181,17 @@ class HELICSFleet:
 
     def _read_subscriptions(self) -> None:
         if self._sub_voltage_all is not None and self._sub_voltage_all.is_updated():
-            self._fleet.set_grid_voltage_all(float(self._sub_voltage_all.double))
+            try:
+                self._fleet.set_grid_voltage_all(float(self._sub_voltage_all.double))
+            except Exception as exc:
+                _LOG.warning("Failed to apply fleet-wide grid voltage: %s", exc)
 
         for dwelling_index, subscription in enumerate(self._sub_voltage_dwelling):
             if subscription.is_updated():
-                self._fleet.set_grid_voltage(dwelling_index, float(subscription.double))
+                try:
+                    self._fleet.set_grid_voltage(dwelling_index, float(subscription.double))
+                except Exception as exc:
+                    _LOG.warning("Failed to apply grid voltage for dwelling %d: %s", dwelling_index, exc)
 
         if self._sub_control is None or not self._sub_control.is_updated():
             return
@@ -332,7 +338,10 @@ class HELICSFleet:
             return value >= 0
         if not isinstance(value, str):
             return False
-        return value.isdigit()
+        try:
+            return int(value) >= 0
+        except ValueError:
+            return False
 
     @staticmethod
     def _is_negative_int_like(value: Any) -> bool:

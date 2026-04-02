@@ -336,28 +336,41 @@ impl SteppableFleet {
         let total_steps = first.total_steps();
         let time_res_s = first.time_res.num_milliseconds() as f64 / 1000.0;
 
-        for (i, dwelling) in dwellings.iter().enumerate().skip(1) {
-            if dwelling.clock.total_steps() != total_steps {
+        // Remove dwellings whose timing config doesn't match the first.
+        let mut i = 1;
+        while i < dwellings.len() {
+            let other_steps = dwellings[i].clock.total_steps();
+            let other_res = dwellings[i].clock.time_res.num_milliseconds() as f64 / 1000.0;
+            let steps_match = other_steps == total_steps;
+            let res_match = (other_res - time_res_s).abs() <= f64::EPSILON;
+            if !steps_match || !res_match {
+                let removed = dwellings.remove(i);
+                let reason = if !steps_match && !res_match {
+                    format!(
+                        "total_steps={other_steps} and time_res={other_res}s differ from dwelling 0 ({total_steps}, {time_res_s}s)",
+                    )
+                } else if !steps_match {
+                    format!(
+                        "total_steps={other_steps} differs from dwelling 0 total_steps={total_steps}",
+                    )
+                } else {
+                    format!(
+                        "time_res={other_res}s differs from dwelling 0 time_res={time_res_s}s",
+                    )
+                };
                 build_errors.push(DwellingBuildError {
-                    bldg_id: dwelling.bldg_id,
-                    message: format!(
-                        "dwelling {} total_steps={} differs from dwelling 0 total_steps={}",
-                        i,
-                        dwelling.clock.total_steps(),
-                        total_steps,
-                    ),
+                    bldg_id: removed.bldg_id,
+                    message: reason,
                 });
+            } else {
+                i += 1;
             }
-            let other_res = dwelling.clock.time_res.num_milliseconds() as f64 / 1000.0;
-            if (other_res - time_res_s).abs() > f64::EPSILON {
-                build_errors.push(DwellingBuildError {
-                    bldg_id: dwelling.bldg_id,
-                    message: format!(
-                        "dwelling {} time_res={other_res}s differs from dwelling 0 time_res={time_res_s}s",
-                        i,
-                    ),
-                });
-            }
+        }
+
+        if dwellings.is_empty() {
+            return Err(FleetError::AllSteppableDwellingsFailed {
+                count: build_errors.len(),
+            });
         }
 
         Ok((

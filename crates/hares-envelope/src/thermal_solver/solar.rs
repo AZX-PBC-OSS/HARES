@@ -94,11 +94,9 @@ impl ThermalSolver {
 
     /// Distribute transmitted window solar to interior surfaces.
     ///
-    /// EnergyPlus FullInteriorAndExterior method:
-    /// - Beam: 60% to floor surfaces (by area), 40% to walls/ceiling (by area)
-    /// - Diffuse: distributed to all surfaces by area
-    /// - Each surface absorbs incident × solar_absorptance (single application)
-    /// - Reflected fraction (1 - absorptance) goes to zone air node
+    /// - Beam: 60% to floor surfaces, 40% to walls/ceiling, weighted by `area × absorptance`
+    /// - Diffuse: distributed to all surfaces by `area × absorptance`
+    /// - Un-distributed energy (e.g. zero-absorptance surfaces) returned as reflected to zone air
     ///
     /// Returns `true` if distribution occurred (surfaces found), `false` if no
     /// interior surfaces configured for this zone (caller should use legacy path).
@@ -186,7 +184,7 @@ impl ThermalSolver {
 /// Distributes `beam_w` and `diffuse_w` to surfaces. Returns per-surface
 /// absorbed [W] and total reflected to zone air [W].
 ///
-/// Energy conservation: `beam_w + diffuse_w == Σ absorbed + reflected`.
+/// Energy conservation: `beam_w + diffuse_w == Σ absorbed + reflected` always holds.
 #[cfg(test)]
 pub(crate) fn compute_solar_distribution(
     surfaces: &[InteriorSurfaceInfo],
@@ -202,6 +200,10 @@ pub(crate) fn compute_solar_distribution(
 /// Like `compute_solar_distribution` but writes into a caller-owned buffer.
 ///
 /// `absorbed_buf` is resized and zeroed as needed. Returns total reflected [W].
+///
+/// View factors are normalized by `area × absorptance / Σ(area × absorptance)`.
+/// When all surfaces have nonzero absorptance, all solar is distributed. When
+/// absorptance sums to zero, all solar is returned as reflected to zone air.
 pub(crate) fn compute_solar_distribution_into(
     surfaces: &[InteriorSurfaceInfo],
     beam_w: f64,
@@ -211,61 +213,62 @@ pub(crate) fn compute_solar_distribution_into(
     let n = surfaces.len();
     absorbed.clear();
     absorbed.resize(n, 0.0);
-    let floor_area: f64 = surfaces
+
+    let floor_wa: f64 = surfaces
         .iter()
         .filter(|s| s.is_floor)
-        .map(|s| s.area_m2)
+        .map(|s| s.area_m2 * s.solar_absorptance)
         .sum();
-    let nonfloor_area: f64 = surfaces
+    let nonfloor_wa: f64 = surfaces
         .iter()
         .filter(|s| !s.is_floor)
-        .map(|s| s.area_m2)
+        .map(|s| s.area_m2 * s.solar_absorptance)
         .sum();
-    let total_area: f64 = surfaces.iter().map(|s| s.area_m2).sum();
+    let total_wa: f64 = floor_wa + nonfloor_wa;
 
     // Beam: split 60%/40% when both floor and non-floor surfaces exist.
     // If one class is absent, redirect the full beam budget to the remaining class.
     if beam_w > 0.0 {
-        let (beam_to_floors, beam_to_walls) = if floor_area > 0.0 && nonfloor_area > 0.0 {
+        let (beam_to_floors, beam_to_walls) = if floor_wa > 0.0 && nonfloor_wa > 0.0 {
             (
                 beam_w * BEAM_FLOOR_FRACTION,
                 beam_w * (1.0 - BEAM_FLOOR_FRACTION),
             )
-        } else if floor_area > 0.0 {
+        } else if floor_wa > 0.0 {
             (beam_w, 0.0)
-        } else if nonfloor_area > 0.0 {
+        } else if nonfloor_wa > 0.0 {
             (0.0, beam_w)
         } else {
             (0.0, 0.0)
         };
         for (i, s) in surfaces.iter().enumerate() {
-            let incident = if s.is_floor && floor_area > 0.0 {
-                beam_to_floors * (s.area_m2 / floor_area)
-            } else if !s.is_floor && nonfloor_area > 0.0 {
-                beam_to_walls * (s.area_m2 / nonfloor_area)
+            let factor = if s.is_floor && floor_wa > 0.0 {
+                s.area_m2 * s.solar_absorptance / floor_wa
+            } else if !s.is_floor && nonfloor_wa > 0.0 {
+                s.area_m2 * s.solar_absorptance / nonfloor_wa
             } else {
                 0.0
             };
-            absorbed[i] += incident * s.solar_absorptance;
+            absorbed[i] += if s.is_floor {
+                beam_to_floors * factor
+            } else {
+                beam_to_walls * factor
+            };
         }
     }
 
-    // Diffuse: all surfaces by area, then absorb once.
-    if diffuse_w > 0.0 && total_area > 0.0 {
+    // Diffuse: all surfaces by area × absorptance, normalized to sum to 1.
+    if diffuse_w > 0.0 && total_wa > 0.0 {
         for (i, s) in surfaces.iter().enumerate() {
-            let incident = diffuse_w * (s.area_m2 / total_area);
-            absorbed[i] += incident * s.solar_absorptance;
+            let factor = s.area_m2 * s.solar_absorptance / total_wa;
+            absorbed[i] += diffuse_w * factor;
         }
     }
 
-    let total_absorbed: f64 = absorbed.iter().sum();
-    let total_input = beam_w + diffuse_w;
-    let reflected = total_input - total_absorbed;
-    debug_assert!(
-        reflected >= -1e-6,
-        "solar distribution: absorbed ({total_absorbed}) exceeds input ({total_input})"
-    );
-    reflected.max(0.0)
+    // Any energy not distributed to surfaces is reflected back to zone air.
+    // This handles zero-absorptance surfaces and numerical edge cases.
+    let total_distributed: f64 = absorbed.iter().sum();
+    (beam_w + diffuse_w) - total_distributed
 }
 
 #[cfg(test)]
@@ -298,12 +301,16 @@ mod tests {
         let diffuse = 200.0;
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, beam, diffuse);
 
+        // Normalized view factors: all solar distributed to surfaces, reflected = 0.
         let total_absorbed: f64 = absorbed.iter().sum();
-        let total = total_absorbed + reflected;
         assert!(
-            (total - (beam + diffuse)).abs() < 1e-6,
-            "energy conservation: absorbed({total_absorbed}) + reflected({reflected}) = {total}, expected {}",
+            (total_absorbed - (beam + diffuse)).abs() < 1e-6,
+            "all solar should be absorbed: got {total_absorbed}, expected {}",
             beam + diffuse
+        );
+        assert!(
+            reflected.abs() < 1e-6,
+            "no reflection with normalized view factors, got {reflected}"
         );
     }
 
@@ -338,20 +345,21 @@ mod tests {
     }
 
     #[test]
-    fn no_absorptance_means_all_reflected() {
+    fn zero_absorptance_means_zero_distributed() {
         let surfaces = vec![
             make_surface(40.0, 0.0, true),  // perfectly reflective floor
             make_surface(40.0, 0.0, false), // perfectly reflective ceiling
         ];
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, 500.0, 200.0);
         let total_absorbed: f64 = absorbed.iter().sum();
+        // With zero absorptance, no distribution occurs — all energy reflected to zone air.
         assert!(
             total_absorbed.abs() < 1e-10,
-            "zero absorptance should mean zero absorption, got {total_absorbed}"
+            "zero absorptance should mean zero distribution, got {total_absorbed}"
         );
         assert!(
             (reflected - 700.0).abs() < 1e-6,
-            "all solar should be reflected, got {reflected}"
+            "all energy should be reflected when absorptance is zero, got {reflected}"
         );
     }
 
@@ -398,15 +406,14 @@ mod tests {
         ];
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, 1000.0, 0.0);
         let total: f64 = absorbed.iter().sum();
-        // No floors: redirect the full beam budget to walls by area.
-        // Each wall gets 500 W, absorbed = 500 × 0.5 = 250 W each.
+        // No floors: full beam goes to walls. Normalized: each wall gets 500 W.
         assert!(
-            (total - 500.0).abs() < 1e-6,
-            "walls absorb the full beam budget, got {total}"
+            (total - 1000.0).abs() < 1e-6,
+            "all beam should be distributed to walls, got {total}"
         );
         assert!(
-            (reflected - 500.0).abs() < 1e-6,
-            "beam should be conserved with full wall redistribution, got {reflected}"
+            reflected.abs() < 1e-6,
+            "no reflection with normalized view factors, got {reflected}"
         );
     }
 
@@ -457,25 +464,18 @@ mod tests {
     }
 
     #[test]
-    fn single_surface_receives_solar() {
+    fn single_surface_receives_all_solar() {
         let surfaces = vec![make_surface(20.0, 0.7, true)];
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, 500.0, 200.0);
-        // Single floor: receives the full beam budget plus diffuse.
-        // Total incident on floor: 500 (beam) + 200 (diffuse) = 700.
-        // Absorbed: 700 × 0.7 = 490. Reflected: 210.
-        let total = absorbed[0] + reflected;
+        // Single floor: sole surface gets all solar via normalized view factor.
         assert!(
-            (total - 700.0).abs() < 1e-6,
-            "energy conservation: {total} != 700"
-        );
-        assert!(
-            (absorbed[0] - 490.0).abs() < 1e-6,
-            "single floor should absorb the full beam budget, got {}",
+            (absorbed[0] - 700.0).abs() < 1e-6,
+            "single floor should absorb all solar, got {}",
             absorbed[0]
         );
         assert!(
-            (reflected - 210.0).abs() < 1e-6,
-            "single floor reflection should be 210, got {reflected}"
+            reflected.abs() < 1e-6,
+            "no reflection with normalized view factors, got {reflected}"
         );
     }
 
@@ -483,17 +483,15 @@ mod tests {
     fn only_floors_receive_full_beam_budget() {
         let surfaces = vec![make_surface(30.0, 0.6, true), make_surface(20.0, 0.6, true)];
         let (absorbed, reflected) = compute_solar_distribution(&surfaces, 1000.0, 0.0);
-        // All surfaces are floors. Redirect the full beam budget to floors by area.
-        // Floor absorbed: 1000 × 0.6 = 600.
-        // Reflected: 400.
+        // All surfaces are floors with same absorptance. Normalized: all beam distributed.
         let total_absorbed: f64 = absorbed.iter().sum();
         assert!(
-            (total_absorbed - 600.0).abs() < 1e-6,
-            "only-floors: expected 600 absorbed, got {total_absorbed}"
+            (total_absorbed - 1000.0).abs() < 1e-6,
+            "only-floors: all beam should be distributed, got {total_absorbed}"
         );
         assert!(
-            (reflected - 400.0).abs() < 1e-6,
-            "only-floors: expected 400 reflected, got {reflected}"
+            reflected.abs() < 1e-6,
+            "no reflection with normalized view factors, got {reflected}"
         );
     }
 }

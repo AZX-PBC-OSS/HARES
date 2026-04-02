@@ -95,6 +95,7 @@ class _FakeHelicsModule:
     HELICS_FLAG_UNINTERRUPTIBLE = 31
     HELICS_FLAG_TERMINATE_ON_ERROR = 72
     HELICS_PROPERTY_TIME_PERIOD = 141
+    HELICS_PROPERTY_TIME_OFFSET = 142
 
     class HelicsFederateInfo:
         def __init__(self) -> None:
@@ -434,3 +435,23 @@ def test_helics_dwelling_finalize_on_step_exception(monkeypatch: pytest.MonkeyPa
     assert fed is not None
     assert fed.disconnected is True
     assert fake_helics.log.count(("disconnect",)) == 1
+
+
+def test_helics_dwelling_time_offset_property(monkeypatch: pytest.MonkeyPatch):
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+
+    # Default: no offset property written
+    orchestrator_default = module.HELICSDwelling(dwelling, fed_name="house_1")
+    fedinfo_default = fake_helics.last_fedinfo
+    assert fedinfo_default is not None
+    assert fake_helics.HELICS_PROPERTY_TIME_OFFSET not in fedinfo_default.property
+
+    # Non-zero offset: property written
+    orchestrator_offset = module.HELICSDwelling(
+        dwelling, fed_name="house_2", time_offset_s=1.0
+    )
+    fedinfo_offset = fake_helics.last_fedinfo
+    assert fedinfo_offset is not None
+    assert fedinfo_offset.property[fake_helics.HELICS_PROPERTY_TIME_OFFSET] == pytest.approx(1.0)
