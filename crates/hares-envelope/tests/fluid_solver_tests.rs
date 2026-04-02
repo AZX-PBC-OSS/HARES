@@ -117,7 +117,7 @@ fn net_power_from_flow_and_temp_delta() {
     .expect("FluidSolver::new must succeed for valid config");
 
     let ports = make_ports_with_flow(LoopId(1), FluidType::Water, flow, 70.0, 50.0);
-    let update = solver.resolve(&ports, &env(), Duration::from_secs(60));
+    let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
 
     let payload = update
         .custom_payload
@@ -150,7 +150,7 @@ fn zero_flow_zero_power() {
         ..Default::default()
     };
 
-    let update = solver.resolve(&ports, &env(), Duration::from_secs(60));
+    let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
     let payload = update
         .custom_payload
         .expect("payload must be Some: accumulator is present");
@@ -180,7 +180,7 @@ fn checkpoint_round_trip() {
 
     // Prime the solver: one step with real flow so last_known_temps is populated.
     let ports_with_flow = make_ports_with_flow(LoopId(3), FluidType::Water, 1.0, supply, ret);
-    solver.resolve(&ports_with_flow, &env(), Duration::from_secs(60));
+    solver.resolve_new(&ports_with_flow, &env(), Duration::from_secs(60));
 
     // Snapshot.
     let payload = solver.snapshot_payload();
@@ -205,8 +205,8 @@ fn checkpoint_round_trip() {
         ..Default::default()
     };
 
-    let update_orig = solver.resolve(&zero_ports, &env(), Duration::from_secs(60));
-    let update_restored = restored.resolve(&zero_ports, &env(), Duration::from_secs(60));
+    let update_orig = solver.resolve_new(&zero_ports, &env(), Duration::from_secs(60));
+    let update_restored = restored.resolve_new(&zero_ports, &env(), Duration::from_secs(60));
 
     let states_orig = FluidDomainPayload::decode(
         update_orig

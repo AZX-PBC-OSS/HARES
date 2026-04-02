@@ -568,6 +568,13 @@ pub struct Dwelling {
     latest_env: EnvironmentState,
     simulation_results: SimulationResults,
     custom_domain_solvers: Vec<Box<dyn DomainSolver>>,
+    /// Pre-allocated DomainUpdate buffers for each built-in solver, reused per step.
+    thermal_update_buf: hares_types::DomainUpdate,
+    humidity_update_buf: hares_types::DomainUpdate,
+    electrical_update_buf: hares_types::DomainUpdate,
+    fluid_update_buf: hares_types::DomainUpdate,
+    /// Pre-allocated DomainUpdate buffers for custom domain solvers, one per solver.
+    custom_update_bufs: Vec<hares_types::DomainUpdate>,
     stage_snapshot: Option<StageSnapshot>,
     output_column_index: HashMap<String, usize>,
     /// Pre-resolved output column indices for each equipment piece, avoiding
@@ -625,6 +632,16 @@ pub struct Dwelling {
     equipment_execution_order: Vec<usize>,
     /// Numerical invariant checker, allocated once and reused each step.
     invariant_checker: InvariantChecker,
+    /// Pre-allocated scratch buffer for conditioned zone temps in check_invariants.
+    invariant_conditioned_temps: Vec<f64>,
+    /// Pre-allocated scratch buffer for unconditioned zone temps in check_invariants.
+    invariant_unconditioned_temps: Vec<f64>,
+    /// Pre-allocated scratch buffer for tank node temps in check_invariants.
+    invariant_tank_temps: Vec<f64>,
+    /// Pre-computed tank node telemetry keys, avoiding format!() per step.
+    tank_node_keys: Vec<String>,
+    /// Pre-allocated scratch buffer for infiltration latent by zone in check_invariants.
+    invariant_infiltration_latent: Vec<(ZoneId, f64)>,
     /// Per-zone conditioning status, aligned with `latest_env.zones` order.
     /// `true` = conditioned (HVAC-served), `false` = unconditioned (attic, garage, etc.).
     zone_is_conditioned: Vec<bool>,
@@ -637,7 +654,9 @@ pub struct Dwelling {
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
     #[cfg(feature = "actor_profiling")]
-    per_actor_timing: Vec<(String, StdDuration)>,
+    per_actor_timing: Vec<(usize, StdDuration)>,
+    #[cfg(feature = "actor_profiling")]
+    actor_name_cache: Vec<String>,
     #[cfg(feature = "observe")]
     observer_buf: Option<ObserverBuffer>,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -1043,6 +1062,11 @@ impl Dwelling {
             latest_env: initial_env,
             simulation_results: SimulationResults::default(),
             custom_domain_solvers: Vec::new(),
+            thermal_update_buf: hares_types::DomainUpdate::empty(hares_types::THERMAL),
+            humidity_update_buf: hares_types::DomainUpdate::empty(hares_types::HUMIDITY),
+            electrical_update_buf: hares_types::DomainUpdate::empty(hares_types::ELECTRICAL),
+            fluid_update_buf: hares_types::DomainUpdate::empty(hares_types::FLUID),
+            custom_update_bufs: Vec::new(),
             stage_snapshot: None,
             equipment_column_map,
             output_column_index,
@@ -1071,6 +1095,11 @@ impl Dwelling {
             solver_feedback_actor,
             equipment_execution_order,
             invariant_checker: InvariantChecker::new(),
+            invariant_conditioned_temps: Vec::with_capacity(building.zones.len()),
+            invariant_unconditioned_temps: Vec::with_capacity(building.zones.len()),
+            invariant_tank_temps: Vec::new(),
+            tank_node_keys: (0..24).map(tk::tank_node_key).collect(),
+            invariant_infiltration_latent: Vec::new(),
             zone_is_conditioned: if building.zones.is_empty() {
                 vec![true]
             } else {
@@ -1089,6 +1118,8 @@ impl Dwelling {
             profiling: DwellingProfilingSummary::default(),
             #[cfg(feature = "actor_profiling")]
             per_actor_timing: Vec::new(),
+            #[cfg(feature = "actor_profiling")]
+            actor_name_cache: Vec::new(),
             #[cfg(feature = "observe")]
             observer_buf: None,
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -1113,7 +1144,7 @@ impl Dwelling {
     /// Runs the full configured horizon and returns accumulated results.
     pub fn simulate(&mut self) -> Result<SimulationResults> {
         while self.clock.current_step() < self.clock.total_steps() {
-            let _ = self.run_timestep(self.write_output)?;
+            self.run_timestep(self.write_output)?;
         }
         self.finalize_billing();
         if let Some(recorder) = self.recorder.as_mut() {
@@ -1145,7 +1176,8 @@ impl Dwelling {
 
     /// Executes exactly one simulation timestep.
     pub fn step(&mut self) -> Result<StepResult> {
-        self.run_timestep(self.write_output)
+        self.run_timestep(self.write_output)?;
+        Ok(self.simulation_results.steps.last().unwrap().clone())
     }
 
     /// Queues a control signal for one equipment instance by name.
@@ -1213,6 +1245,8 @@ impl Dwelling {
     /// dispatch requests that are routed through the control dispatcher
     /// by [`PriorityTier`].
     pub fn add_actor(&mut self, actor: Box<dyn Actor>) {
+        #[cfg(feature = "actor_profiling")]
+        self.actor_name_cache.push(actor.name().to_string());
         self.actors.push(actor);
     }
 
@@ -1282,6 +1316,13 @@ impl Dwelling {
             let user_actors = std::mem::take(&mut self.actors);
             self.actors = built_in_actors;
             self.actors.extend(user_actors);
+        }
+
+        #[cfg(feature = "actor_profiling")]
+        {
+            self.actor_name_cache.clear();
+            self.actor_name_cache
+                .extend(self.actors.iter().map(|a| a.name().to_string()));
         }
     }
 }
@@ -1518,10 +1559,21 @@ impl Dwelling {
     }
 
     /// Returns per-actor timing from the simulation (requires `actor_profiling` feature).
+    /// Each entry is `(actor_name, elapsed_duration)`.
     #[cfg(feature = "actor_profiling")]
     #[must_use]
-    pub fn actor_timing(&self) -> &[(String, StdDuration)] {
-        &self.per_actor_timing
+    pub fn actor_timing(&self) -> Vec<(String, StdDuration)> {
+        self.per_actor_timing
+            .iter()
+            .map(|&(idx, dur)| {
+                let name = self
+                    .actor_name_cache
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("actor_{idx}"));
+                (name, dur)
+            })
+            .collect()
     }
 
     /// Stores the active price signal for equipment controllers.
@@ -1820,13 +1872,13 @@ impl Dwelling {
             )
             .unwrap_or(0);
         for _ in 0..warmup_steps {
-            let _ = self.run_timestep(false)?;
+            self.run_timestep(false)?;
         }
         self.simulation_results.steps.clear();
         Ok(())
     }
 
-    fn run_timestep(&mut self, record_output: bool) -> Result<StepResult> {
+    fn run_timestep(&mut self, record_output: bool) -> Result<()> {
         if self.clock.current_step() >= self.clock.total_steps() {
             return Err(HaresError::Physics(
                 "simulation already reached configured end".to_string(),
@@ -1908,11 +1960,10 @@ impl Dwelling {
         {
             self.per_actor_timing.clear();
             self.per_actor_timing.reserve(self.actors.len());
-            for actor in &mut self.actors {
+            for (i, actor) in self.actors.iter_mut().enumerate() {
                 let start = Instant::now();
                 actor.decide(&self.latest_env, &mut self.actor_dispatch_buf);
-                self.per_actor_timing
-                    .push((actor.name().to_string(), start.elapsed()));
+                self.per_actor_timing.push((i, start.elapsed()));
             }
         }
         #[cfg(not(feature = "actor_profiling"))]
@@ -2099,19 +2150,18 @@ impl Dwelling {
         // Step 4: envelope/domain resolution.
         #[cfg(feature = "profiling")]
         let envelope_started = Instant::now();
-        let thermal_update = self
-            .thermal_solver
-            .resolve(&self.ports, &self.latest_env, dt);
+        self.thermal_solver
+            .resolve(&self.ports, &self.latest_env, dt, &mut self.thermal_update_buf);
 
         // Apply zone temps and capture observer data while we still have the borrow.
-        apply_thermal_update_to_zones(&mut self.latest_env, &thermal_update);
+        apply_thermal_update_to_zones(&mut self.latest_env, &self.thermal_update_buf);
 
         // Upsert thermal domain so humidity/electrical solvers see updated state.
         // Zone temperatures are already applied above; the upsert stores the full
         // DomainUpdate in custom_domains for solvers that read it (humidity).
         #[cfg(feature = "observe")]
-        let thermal_for_observer = thermal_update.clone();
-        self.latest_env.upsert_domain(thermal_update);
+        let thermal_for_observer = self.thermal_update_buf.clone();
+        self.latest_env.upsert_domain_ref(&self.thermal_update_buf);
 
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
@@ -2124,34 +2174,38 @@ impl Dwelling {
             );
         }
 
-        let humidity_update = self
-            .humidity_solver
-            .resolve(&self.ports, &self.latest_env, dt);
-        let electrical_update = self
-            .electrical_solver
-            .resolve(&self.ports, &self.latest_env, dt);
-        let fluid_update = self.fluid_solver.resolve(&self.ports, &self.latest_env, dt);
+        self.humidity_solver
+            .resolve(&self.ports, &self.latest_env, dt, &mut self.humidity_update_buf);
+        self.electrical_solver
+            .resolve(&self.ports, &self.latest_env, dt, &mut self.electrical_update_buf);
+        self.fluid_solver
+            .resolve(&self.ports, &self.latest_env, dt, &mut self.fluid_update_buf);
 
-        apply_humidity_update_to_zones(&mut self.latest_env, &humidity_update);
+        apply_humidity_update_to_zones(&mut self.latest_env, &self.humidity_update_buf);
 
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
             obs_phases.post_solvers = Some(observer_capture::capture_solvers(
                 &thermal_for_observer,
-                &humidity_update,
-                &electrical_update,
-                &fluid_update,
+                &self.humidity_update_buf,
+                &self.electrical_update_buf,
+                &self.fluid_update_buf,
                 &self.thermal_solver,
             ));
         }
 
-        self.latest_env.upsert_domain(humidity_update);
-        self.latest_env.upsert_domain(electrical_update);
-        self.latest_env.upsert_domain(fluid_update);
+        self.latest_env.upsert_domain_ref(&self.humidity_update_buf);
+        self.latest_env.upsert_domain_ref(&self.electrical_update_buf);
+        self.latest_env.upsert_domain_ref(&self.fluid_update_buf);
 
-        for solver in &mut self.custom_domain_solvers {
-            let update = solver.resolve(&self.ports, &self.latest_env, dt);
-            self.latest_env.upsert_domain(update);
+        // Ensure custom update buffers match the number of custom solvers.
+        while self.custom_update_bufs.len() < self.custom_domain_solvers.len() {
+            self.custom_update_bufs
+                .push(hares_types::DomainUpdate::empty(hares_types::DomainId(0)));
+        }
+        for (i, solver) in self.custom_domain_solvers.iter_mut().enumerate() {
+            solver.resolve(&self.ports, &self.latest_env, dt, &mut self.custom_update_bufs[i]);
+            self.latest_env.upsert_domain_ref(&self.custom_update_bufs[i]);
         }
 
         #[cfg(feature = "observe")]
@@ -2248,8 +2302,6 @@ impl Dwelling {
                     .max(current_process_hwm_kb());
             }
         }
-        self.simulation_results.steps.push(step_result.clone());
-
         #[cfg(feature = "profiling")]
         {
             let accounted = step_envelope.unwrap_or_default()
@@ -2311,7 +2363,8 @@ impl Dwelling {
         self.ports.zero();
         let _ = self.clock.next();
 
-        Ok(step_result)
+        self.simulation_results.steps.push(step_result);
+        Ok(())
     }
 
     fn record_step(&mut self, step: &StepResult) -> Result<()> {
@@ -2487,7 +2540,7 @@ impl Dwelling {
     /// Active when `cfg(any(debug_assertions, feature = "check_invariants"))`.
     /// Returns `Err(HaresError::InvariantViolation { .. })` on the first violation;
     /// the engine then quarantines this dwelling rather than propagating a panic.
-    fn check_invariants(&self, dt: StdDuration) -> Result<()> {
+    fn check_invariants(&mut self, dt: StdDuration) -> Result<()> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]
         {
             let checker = &self.invariant_checker;
@@ -2510,8 +2563,8 @@ impl Dwelling {
                 self.zone_is_conditioned.len(),
                 "zone_is_conditioned length must match latest_env.zones length"
             );
-            let mut conditioned_temps: Vec<f64> = Vec::new();
-            let mut unconditioned_temps: Vec<f64> = Vec::new();
+            self.invariant_conditioned_temps.clear();
+            self.invariant_unconditioned_temps.clear();
             for (zone, &is_cond) in self
                 .latest_env
                 .zones
@@ -2519,33 +2572,31 @@ impl Dwelling {
                 .zip(self.zone_is_conditioned.iter())
             {
                 if is_cond {
-                    conditioned_temps.push(zone.temperature_c);
+                    self.invariant_conditioned_temps.push(zone.temperature_c);
                 } else {
-                    unconditioned_temps.push(zone.temperature_c);
+                    self.invariant_unconditioned_temps.push(zone.temperature_c);
                 }
             }
 
             // Tank node temperatures from all water heater equipment.
-            let mut tank_temps_c: Vec<f64> = Vec::new();
+            self.invariant_tank_temps.clear();
             for eq in &self.equipment {
                 if eq.descriptor().end_use != EndUse::WATER_HEATING {
                     continue;
                 }
                 let telem = eq.telemetry();
-                let mut i = 0usize;
-                loop {
-                    let key = tk::tank_node_key(i);
-                    match telem.get(&key) {
-                        // allowed: tank node channels are dynamic and not represented in CoreOutput.
-                        Some(t) => {
-                            tank_temps_c.push(t);
-                            i += 1;
-                        }
+                for key in &self.tank_node_keys {
+                    match telem.get(key) { // allowed: tank node keys are pre-computed at init.
+                        Some(t) => self.invariant_tank_temps.push(t),
                         None => break,
                     }
                 }
             }
-            checker.check_temperatures(&conditioned_temps, &unconditioned_temps, &tank_temps_c)?;
+            checker.check_temperatures(
+                &self.invariant_conditioned_temps,
+                &self.invariant_unconditioned_temps,
+                &self.invariant_tank_temps,
+            )?;
 
             // SOC bounds for storage equipment.
             for eq in &self.equipment {
@@ -2601,7 +2652,7 @@ impl Dwelling {
             }
             let p_pa = self.latest_env.weather.pressure_pa();
             let moisture_mult = self.humidity_solver.config.moisture_buffering_multiplier;
-            let mut infiltration_latent_by_zone: Vec<(ZoneId, f64)> = Vec::new();
+            self.invariant_infiltration_latent.clear();
             if let Some(thermal_update) = self
                 .latest_env
                 .custom_domains
@@ -2613,7 +2664,8 @@ impl Dwelling {
                     let zone_raw = pair[0];
                     let latent = pair[1];
                     if zone_raw.is_finite() && zone_raw >= 0.0 {
-                        infiltration_latent_by_zone.push((ZoneId(zone_raw as u16), latent));
+                        self.invariant_infiltration_latent
+                            .push((ZoneId(zone_raw as u16), latent));
                     }
                 }
             }
@@ -2654,7 +2706,8 @@ impl Dwelling {
                     .filter(|e| e.zone == zone.id)
                     .map(|e| e.latent_gain_w)
                     .sum();
-                let latent_from_infiltration: f64 = infiltration_latent_by_zone
+                let latent_from_infiltration: f64 = self
+                    .invariant_infiltration_latent
                     .iter()
                     .filter(|(z, _)| *z == zone.id)
                     .map(|(_, l)| *l)
@@ -3577,7 +3630,7 @@ mod tests {
 
         replace_equipment_for_test(&mut dwelling, vec![Box::new(reactive_eq)]);
 
-        let _ = dwelling.run_timestep(false).expect("dwelling step");
+        dwelling.run_timestep(false).expect("dwelling step");
         let telemetry = dwelling.telemetry();
 
         assert!((telemetry.reactive_power_kvar - 0.75).abs() < 1e-9);
@@ -3606,7 +3659,7 @@ mod tests {
             },
         );
 
-        let _ = dwelling.run_timestep(false).expect("dwelling step");
+        dwelling.run_timestep(false).expect("dwelling step");
 
         assert_eq!(
             update_calls.load(Ordering::Relaxed),

@@ -153,7 +153,7 @@ fn test_1r1c_exponential_decay() {
     let mut t_zone = t_initial;
 
     for step in 1..=STEPS_24H {
-        let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
         t_zone = zone_temp(&update);
         env.zones[0].temperature_c = t_zone;
 
@@ -206,7 +206,7 @@ fn test_1r1c_solar_step_response() {
         ports.thermal[0] = ThermalAccumulator::new(ZONE);
         ports.thermal[0].sensible_gain_w += q_solar;
 
-        let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
         t_zone = zone_temp(&update);
         env.zones[0].temperature_c = t_zone;
     }
@@ -257,11 +257,11 @@ fn test_1r1c_with_moderate_infiltration() {
     let mut t_without_inf = t_initial;
 
     for _ in 0..check_step {
-        let u1 = solver_inf.resolve(&ports, &env_inf, Duration::from_secs(DT_S as u64));
+        let u1 = solver_inf.resolve_new(&ports, &env_inf, Duration::from_secs(DT_S as u64));
         t_with_inf = zone_temp(&u1);
         env_inf.zones[0].temperature_c = t_with_inf;
 
-        let u2 = solver_no.resolve(&ports, &env_no, Duration::from_secs(DT_S as u64));
+        let u2 = solver_no.resolve_new(&ports, &env_no, Duration::from_secs(DT_S as u64));
         t_without_inf = zone_temp(&u2);
         env_no.zones[0].temperature_c = t_without_inf;
     }
@@ -307,7 +307,7 @@ fn test_implicit_stability_extreme_ach() {
     let ports = one_zone_ports();
 
     // Step 1: assert zone stays in [-10, 20]°C
-    let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
+    let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
     let t_step1 = zone_temp(&update);
     env.zones[0].temperature_c = t_step1;
     assert!(t_step1.is_finite(), "step 1: temperature is NaN/Inf");
@@ -319,7 +319,7 @@ fn test_implicit_stability_extreme_ach() {
     // Steps 2-20: assert monotonic convergence toward outdoor (no oscillation)
     let mut temps = vec![t_step1];
     for _ in 1..20 {
-        let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
         let t = zone_temp(&update);
         env.zones[0].temperature_c = t;
         temps.push(t);

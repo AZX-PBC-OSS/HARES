@@ -504,7 +504,8 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
             interior_shading_fraction: 1.0,
             winter_shading_fraction: 1.0,
             fraction_operable: 0.0,
-            frame_type: None,
+            exterior_shading_summer: 1.0,
+            exterior_shading_winter: 1.0,
             attached_to_wall_id: wc.attached_to_wall_id.clone(),
         })
         .collect();

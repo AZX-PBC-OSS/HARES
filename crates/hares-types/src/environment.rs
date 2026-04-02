@@ -235,6 +235,21 @@ impl EnvironmentState {
             self.custom_domains.push(update);
         }
     }
+
+    /// Like `upsert_domain` but clones from a reference, reusing the existing
+    /// slot's allocations via `clone_from` when the domain already exists.
+    #[inline]
+    pub fn upsert_domain_ref(&mut self, update: &DomainUpdate) {
+        if let Some(slot) = self
+            .custom_domains
+            .iter_mut()
+            .find(|u| u.domain_id == update.domain_id)
+        {
+            slot.clone_from(update);
+        } else {
+            self.custom_domains.push(update.clone());
+        }
+    }
 }
 
 /// Serialize `chrono::Duration` as integer milliseconds.

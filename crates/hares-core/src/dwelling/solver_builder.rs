@@ -291,8 +291,10 @@ fn build_solver_boundaries(
             win_match.map(|win| {
                 let u_factor = win.u_factor_w_m2_k.unwrap_or(5.0);
                 let base_shgc = win.shgc.unwrap_or(0.4);
-                let shgc_summer = base_shgc * win.interior_shading_fraction;
-                let shgc_winter = base_shgc * win.winter_shading_fraction;
+                let shgc_summer =
+                    base_shgc * win.interior_shading_fraction * win.exterior_shading_summer;
+                let shgc_winter =
+                    base_shgc * win.winter_shading_fraction * win.exterior_shading_winter;
                 let r_total = 1.0 / u_factor.max(0.01);
                 let r_glass = (r_total - r_film_int - r_film_ext).max(0.0);
                 let (transmittance_summer, radiation_frac) =

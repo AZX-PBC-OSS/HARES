@@ -146,7 +146,11 @@ pub struct Window {
     /// Fraction of window area that is operable (0.0–1.0).
     /// Used for natural ventilation flow calculation.
     pub fraction_operable: f64,
-    pub frame_type: Option<String>,
+    /// Exterior shading transmittance multiplier for summer (0.0–1.0).
+    /// 1.0 = unobstructed, 0.0 = fully shaded. Multiplied with interior shading.
+    pub exterior_shading_summer: f64,
+    /// Exterior shading transmittance multiplier for winter (0.0–1.0).
+    pub exterior_shading_winter: f64,
     pub attached_to_wall_id: Option<String>,
 }
 
@@ -972,7 +976,24 @@ fn parse_windows(
             .unwrap_or(0.67)
             .clamp(0.0, 1.0);
 
-        let frame_type = window.child("FrameType").map(|n| n.text.trim().to_string());
+        let (exterior_shading_summer, exterior_shading_winter) =
+            match window.child("ExteriorShading") {
+                Some(shading) => {
+                    let summer = shading
+                        .child("SummerShadingCoefficient")
+                        .and_then(XmlNode::text_as_f64)
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 1.0);
+                    let winter = shading
+                        .child("WinterShadingCoefficient")
+                        .and_then(XmlNode::text_as_f64)
+                        .unwrap_or(1.0)
+                        .clamp(0.0, 1.0);
+                    (summer, winter)
+                }
+                None => (1.0, 1.0),
+            };
+
         let attached_to_wall_id = window
             .child("AttachedToWall")
             .and_then(|n| n.attrs.get("idref").cloned());
@@ -986,7 +1007,8 @@ fn parse_windows(
             interior_shading_fraction,
             winter_shading_fraction,
             fraction_operable,
-            frame_type,
+            exterior_shading_summer,
+            exterior_shading_winter,
             attached_to_wall_id,
         });
 
@@ -1653,10 +1675,19 @@ fn parse_duct_systems(details: &XmlNode, zones: &mut HashMap<String, Zone>) {
                     .and_then(XmlNode::text_as_f64)
                 {
                     let fraction = match units.as_str() {
-                        "percent" => value / 100.0,
-                        _ => value, // CFM25 or fraction — store raw for now
+                        "percent" => Some(value / 100.0),
+                        "fraction" => Some(value),
+                        _ => {
+                            tracing::warn!(
+                                units = %units,
+                                "unsupported duct leakage unit (cannot convert to fraction without fan flow); skipping"
+                            );
+                            None
+                        }
                     };
-                    leakage_by_type.insert(dtype, fraction);
+                    if let Some(f) = fraction {
+                        leakage_by_type.insert(dtype, f);
+                    }
                 }
             }
         }
@@ -1860,7 +1891,17 @@ fn convert_conductivity_to_w_m_k(value: f64, units: Option<&str>) -> f64 {
         Some("btu-in/hr-ft2-f") | Some("btu in/hr ft2 f") | Some("btu*in/(h*ft2*f)") => {
             conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value)
         }
-        _ => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized conductivity unit; returning raw value");
+            value
+        }
+        None => {
+            tracing::debug!(
+                value,
+                "Conductivity has no units attribute; assuming BTU*in/(hr*ft2*F) and converting"
+            );
+            conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value)
+        }
     }
 }
 
@@ -1882,14 +1923,34 @@ fn convert_length_to_m(value: f64, units: Option<&str>) -> f64 {
 fn convert_density_to_kg_m3(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("lb/ft3") | Some("lb/ft^3") | Some("lbm/ft3") => conv::density_lb_ft3_to_kg_m3(value),
-        _ => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized density unit; returning raw value");
+            value
+        }
+        None => {
+            tracing::debug!(
+                value,
+                "Density has no units attribute; assuming lb/ft3 and converting"
+            );
+            conv::density_lb_ft3_to_kg_m3(value)
+        }
     }
 }
 
 fn convert_specific_heat_to_j_kg_k(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("btu/lb-f") | Some("btu/(lb*f)") => conv::specific_heat_btu_lb_f_to_j_kg_k(value),
-        _ => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized specific heat unit; returning raw value");
+            value
+        }
+        None => {
+            tracing::debug!(
+                value,
+                "Specific heat has no units attribute; assuming Btu/(lb*F) and converting"
+            );
+            conv::specific_heat_btu_lb_f_to_j_kg_k(value)
+        }
     }
 }
 
@@ -1899,7 +1960,10 @@ fn convert_temperature_to_c(value: f64, units: Option<&str>) -> f64 {
             conv::temperature_f_to_c(value)
         }
         Some("C") | Some("c") | Some("degC") | Some("degc") | Some("celsius") => value,
-        Some(_) => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized temperature unit; returning raw value");
+            value
+        }
         None => {
             tracing::debug!(
                 value,
@@ -2561,6 +2625,8 @@ mod tests {
         assert_eq!(return_duct.leakage_fraction, Some(0.05));
         assert!((supply.insulation_r_value_m2_k_w.unwrap_or_default() - 1.4088).abs() < 1e-4);
         assert!((return_duct.insulation_r_value_m2_k_w.unwrap_or_default() - 0.7044).abs() < 1e-4);
+        assert!((supply.surface_area_m2.unwrap() - 50.0 * 0.092903).abs() < 0.01);
+        assert!((return_duct.surface_area_m2.unwrap() - 30.0 * 0.092903).abs() < 0.01);
 
         assert_eq!(building.windows.len(), 1);
         assert!((building.windows[0].area_m2 - 1.393_545_6).abs() < 1e-6);
@@ -3487,6 +3553,97 @@ mod tests {
     }
 
     #[test]
+    fn window_exterior_shading_defaults_to_1() {
+        let xml = xml_with_window(
+            r#"<Window>
+                <SystemIdentifier id="W1"/>
+                <Area>10</Area>
+                <SHGC>0.40</SHGC>
+            </Window>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let w = &building.windows[0];
+        assert!(
+            (w.exterior_shading_summer - 1.0).abs() < f64::EPSILON,
+            "no ExteriorShading → summer=1.0, got {}",
+            w.exterior_shading_summer,
+        );
+        assert!(
+            (w.exterior_shading_winter - 1.0).abs() < f64::EPSILON,
+            "no ExteriorShading → winter=1.0, got {}",
+            w.exterior_shading_winter,
+        );
+    }
+
+    #[test]
+    fn window_exterior_shading_parsed() {
+        let xml = xml_with_window(
+            r#"<Window>
+                <SystemIdentifier id="W1"/>
+                <Area>10</Area>
+                <SHGC>0.40</SHGC>
+                <ExteriorShading>
+                    <SystemIdentifier id="W1ExtShade"/>
+                    <SummerShadingCoefficient>0.50</SummerShadingCoefficient>
+                    <WinterShadingCoefficient>0.80</WinterShadingCoefficient>
+                </ExteriorShading>
+            </Window>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let w = &building.windows[0];
+        assert!(
+            (w.exterior_shading_summer - 0.50).abs() < f64::EPSILON,
+            "exterior summer=0.50, got {}",
+            w.exterior_shading_summer,
+        );
+        assert!(
+            (w.exterior_shading_winter - 0.80).abs() < f64::EPSILON,
+            "exterior winter=0.80, got {}",
+            w.exterior_shading_winter,
+        );
+    }
+
+    #[test]
+    fn window_exterior_shading_effective_shgc() {
+        let xml = xml_with_window(
+            r#"<Window>
+                <SystemIdentifier id="W1"/>
+                <Area>10</Area>
+                <SHGC>0.40</SHGC>
+                <InteriorShading>
+                    <SystemIdentifier id="W1IntShade"/>
+                    <SummerShadingCoefficient>0.70</SummerShadingCoefficient>
+                    <WinterShadingCoefficient>0.85</WinterShadingCoefficient>
+                </InteriorShading>
+                <ExteriorShading>
+                    <SystemIdentifier id="W1ExtShade"/>
+                    <SummerShadingCoefficient>0.50</SummerShadingCoefficient>
+                    <WinterShadingCoefficient>0.80</WinterShadingCoefficient>
+                </ExteriorShading>
+            </Window>"#,
+        );
+        let building = parse_building(&xml).expect("should parse");
+        let w = &building.windows[0];
+        let base_shgc = w.shgc.unwrap();
+        let effective_summer =
+            base_shgc * w.interior_shading_fraction * w.exterior_shading_summer;
+        let effective_winter =
+            base_shgc * w.winter_shading_fraction * w.exterior_shading_winter;
+        // 0.40 * 0.70 * 0.50 = 0.14
+        assert!(
+            (effective_summer - 0.14).abs() < 1e-10,
+            "effective summer SHGC = 0.40*0.70*0.50 = 0.14, got {}",
+            effective_summer,
+        );
+        // 0.40 * 0.85 * 0.80 = 0.272
+        assert!(
+            (effective_winter - 0.272).abs() < 1e-10,
+            "effective winter SHGC = 0.40*0.85*0.80 = 0.272, got {}",
+            effective_winter,
+        );
+    }
+
+    #[test]
     fn floor_or_ceiling_parsed() {
         // SAMPLE_XML doesn't have a <Floor> element at the right level,
         // but we can test the parsing via a FrameFloor with FloorOrCeiling.
@@ -4180,5 +4337,56 @@ mod tests {
         let areas = vec![6.0, 4.0];
         let azimuths = vec![0.0, 0.0];
         assert!(max_areas_by_azimuth(&areas, &azimuths).is_none());
+    }
+
+    #[test]
+    fn convert_conductivity_unrecognized_unit_returns_raw() {
+        let val = super::convert_conductivity_to_w_m_k(1.5, Some("bogus"));
+        assert!((val - 1.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_conductivity_none_assumes_ip() {
+        let val = super::convert_conductivity_to_w_m_k(1.0, None);
+        // Should convert from BTU*in/(hr*ft2*F), not return raw
+        assert!(val != 1.0);
+    }
+
+    #[test]
+    fn convert_density_unrecognized_unit_returns_raw() {
+        let val = super::convert_density_to_kg_m3(2.5, Some("bogus"));
+        assert!((val - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_density_none_assumes_ip() {
+        let val = super::convert_density_to_kg_m3(1.0, None);
+        assert!(val != 1.0);
+    }
+
+    #[test]
+    fn convert_specific_heat_unrecognized_unit_returns_raw() {
+        let val = super::convert_specific_heat_to_j_kg_k(3.0, Some("bogus"));
+        assert!((val - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_specific_heat_none_assumes_ip() {
+        let val = super::convert_specific_heat_to_j_kg_k(1.0, None);
+        assert!(val != 1.0);
+    }
+
+    #[test]
+    fn convert_temperature_unrecognized_unit_returns_raw() {
+        let val = super::convert_temperature_to_c(100.0, Some("kelvin"));
+        assert!((val - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_temperature_known_units_work() {
+        let c = super::convert_temperature_to_c(212.0, Some("F"));
+        assert!((c - 100.0).abs() < 0.1);
+        let c2 = super::convert_temperature_to_c(25.0, Some("C"));
+        assert!((c2 - 25.0).abs() < 1e-12);
     }
 }

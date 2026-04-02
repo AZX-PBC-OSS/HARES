@@ -544,6 +544,8 @@ mod tests {
             first_hour_rating_m3: Some(0.2),
             jacket_r_value_m2_k_w: None,
             conversion_efficiency: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         };
         let spec = typed_spec(
             "Gas Water Heater".to_string(),
@@ -597,6 +599,8 @@ mod tests {
             max_setpoint_ramp_rate_c_per_min: None,
             element_priority_mode: None,
             jacket_r_value_m2_k_w: None,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
         };
         let spec = typed_spec(
             "Electric Resistance Water Heater".to_string(),

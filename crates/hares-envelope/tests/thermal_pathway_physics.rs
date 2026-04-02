@@ -145,9 +145,9 @@ fn ground_temperature_drives_zone() {
     let dt = Duration::from_secs_f64(DT_S);
 
     // Run 48 hours to approach steady state.
-    let mut last_update = solver.resolve(&ports, &env, dt);
+    let mut last_update = solver.resolve_new(&ports, &env, dt);
     for _ in 1..576 {
-        last_update = solver.resolve(&ports, &env, dt);
+        last_update = solver.resolve_new(&ports, &env, dt);
     }
 
     let t_zone = zone_temp(&last_update);
@@ -298,7 +298,7 @@ fn interior_solar_distribution_damps_peak_temp() {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = if step < solar_steps { solar_w } else { 0.0 };
-        let update = solver.resolve(&ports, &env, dt);
+        let update = solver.resolve_new(&ports, &env, dt);
         let t = zone_temp(&update);
         peak = peak.max(t);
     }
@@ -318,7 +318,7 @@ fn interior_solar_distribution_damps_peak_temp() {
     );
 
     // After solar ends (10h cooldown), zone should approach outdoor temp
-    let t_final = zone_temp(&solver.resolve(
+    let t_final = zone_temp(&solver.resolve_new(
         &PortSlots {
             thermal: vec![ThermalAccumulator::new(ZONE)],
             ..Default::default()

@@ -46,13 +46,18 @@ pub(crate) fn child_temperature_c(node: &XmlNode) -> Option<f64> {
         .map(String::as_str)
         .unwrap_or("F")
         .to_ascii_lowercase();
-    Some(
-        if units == "f" || units == "degf" || units == "fahrenheit" {
-            conv::temperature_f_to_c(value)
-        } else {
-            value
-        },
-    )
+    if units == "f" || units == "degf" || units == "fahrenheit" {
+        Some(conv::temperature_f_to_c(value))
+    } else if units == "c" || units == "degc" || units == "celsius" {
+        Some(value)
+    } else {
+        tracing::warn!(
+            unit = %units,
+            value,
+            "unrecognized temperature unit in child_temperature_c; treating as Celsius"
+        );
+        Some(value)
+    }
 }
 
 pub(crate) fn child_energy_kwh(node: &XmlNode, child_name: &str) -> Option<f64> {
@@ -109,6 +114,59 @@ fn collect_descendants<'a>(node: &'a XmlNode, name: &str, out: &mut Vec<&'a XmlN
     }
     for child in &node.children {
         collect_descendants(child, name, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn temp_node(tag: &str, value: &str, units: Option<&str>) -> XmlNode {
+        let mut attrs = HashMap::new();
+        if let Some(u) = units {
+            attrs.insert("units".to_string(), u.to_string());
+        }
+        XmlNode {
+            name: tag.to_string(),
+            attrs: HashMap::new(),
+            text: String::new(),
+            children: vec![XmlNode {
+                name: "Temperature".to_string(),
+                attrs,
+                text: value.to_string(),
+                children: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn child_temperature_c_fahrenheit() {
+        let node = temp_node("Parent", "212", Some("F"));
+        let c = child_temperature_c(&node).unwrap();
+        assert!((c - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn child_temperature_c_celsius() {
+        let node = temp_node("Parent", "25", Some("C"));
+        let c = child_temperature_c(&node).unwrap();
+        assert!((c - 25.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn child_temperature_c_unrecognized_unit_returns_raw() {
+        let node = temp_node("Parent", "300", Some("kelvin"));
+        let c = child_temperature_c(&node).unwrap();
+        assert!((c - 300.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn child_temperature_c_no_units_assumes_fahrenheit() {
+        let node = temp_node("Parent", "212", None);
+        let c = child_temperature_c(&node).unwrap();
+        assert!((c - 100.0).abs() < 0.1);
     }
 }
 

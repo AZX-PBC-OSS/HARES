@@ -489,13 +489,13 @@ impl ThermalSolver {
         (u, latent_by_zone)
     }
 
-    /// Formats solver outputs into a `DomainUpdate` and returns the latent buffer
-    /// for reuse.
+    /// Formats solver outputs into `out` in-place, reusing its allocations.
     fn format_domain_update(
         &mut self,
         y_next: &DVector<f64>,
         latent_by_zone: HashMap<ZoneId, f64>,
-    ) -> DomainUpdate {
+        out: &mut DomainUpdate,
+    ) {
         // Update temperatures in pre-sorted zone_temps_buf (no allocation, no sort).
         for (zone, temp) in &mut self.zone_temps_buf {
             if let Some(&output_idx) = self.wiring.zone_output_indices.get(zone) {
@@ -517,16 +517,25 @@ impl ThermalSolver {
 
         self.latent_buf = latent_by_zone;
 
-        let custom_payload = if self.custom_payload_buf.is_empty() {
-            None
+        // Fill output in-place: clear and extend zone_temperatures_c from internal buf.
+        out.domain_id = THERMAL;
+        out.zone_temperatures_c.clear();
+        out.zone_temperatures_c.extend_from_slice(&self.zone_temps_buf);
+        if self.custom_payload_buf.is_empty() {
+            if let Some(ref mut p) = out.custom_payload {
+                p.clear();
+            }
+            out.custom_payload = None;
         } else {
-            Some(self.custom_payload_buf.clone())
-        };
-
-        DomainUpdate {
-            domain_id: THERMAL,
-            zone_temperatures_c: self.zone_temps_buf.clone(),
-            custom_payload,
+            match out.custom_payload {
+                Some(ref mut p) => {
+                    p.clear();
+                    p.extend_from_slice(&self.custom_payload_buf);
+                }
+                None => {
+                    out.custom_payload = Some(self.custom_payload_buf.clone());
+                }
+            }
         }
     }
 
@@ -554,14 +563,14 @@ impl DomainSolver for ThermalSolver {
         THERMAL
     }
 
-    fn resolve(&mut self, ports: &PortSlots, env: &EnvironmentState, dt: Duration) -> DomainUpdate {
+    fn resolve(&mut self, ports: &PortSlots, env: &EnvironmentState, dt: Duration, out: &mut DomainUpdate) {
         debug_assert!(
             (dt.as_secs_f64() - self.dt_s).abs() < 1e-6,
             "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
             dt.as_secs_f64(),
             self.dt_s
         );
-        self.resolve_internal(ports, env)
+        self.resolve_internal(ports, env, out);
     }
 }
 
@@ -772,7 +781,7 @@ mod tests {
 
         let mut t_last = 20.0;
         for _ in 0..60 {
-            let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
             t_last = update.zone_temperatures_c[0].1;
             env.zones[0].temperature_c = t_last;
         }
@@ -799,7 +808,7 @@ mod tests {
             let t = (k as f64) * dt_s;
             env.weather.outdoor_temp_c = 15.0 + 10.0 * (omega * t).sin();
             outdoor.push(env.weather.outdoor_temp_c);
-            let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
             let t_zone = update.zone_temperatures_c[0].1;
             env.zones[0].temperature_c = t_zone;
             indoor.push(t_zone);
@@ -837,7 +846,7 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
-        let update = boxed.resolve(&ports, &env, Duration::from_secs(60));
+        let update = boxed.resolve_new(&ports, &env, Duration::from_secs(60));
         assert_eq!(update.domain_id, hares_types::THERMAL);
     }
 
@@ -981,7 +990,7 @@ mod tests {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()
         };
-        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
 
         // Extract latent load from custom_payload
         let payload = update
@@ -1022,7 +1031,7 @@ mod tests {
         let dt = 60.0;
         for _ in 0..20 {
             let t_prev = solver.state()[0];
-            let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+            let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
             let t_next = update.zone_temperatures_c[0].1;
             let q_gain = 0.0;
             let d_e_storage = c * (t_next - t_prev) / dt;
@@ -1492,7 +1501,7 @@ mod tests {
             ..Default::default()
         };
 
-        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let t_next = update.zone_temperatures_c[0].1;
 
         let h_inf = 1.2 * ach_infiltration(ach, env.zones[0].volume_m3) * CP_DRY_AIR_J_KG_K;
@@ -1525,7 +1534,7 @@ mod tests {
         let mut solver_no_inf =
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_inf = solver_no_inf
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -1540,7 +1549,7 @@ mod tests {
             },
         );
         let t_with_inf = solver_inf
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -1572,7 +1581,7 @@ mod tests {
         let mut solver_no_inf =
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_inf = solver_no_inf
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -1586,7 +1595,7 @@ mod tests {
             },
         );
         let t_ela = solver_ela
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -1653,7 +1662,7 @@ mod tests {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = q_ideal;
-        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let t_after = update.zone_temperatures_c[0].1;
 
         assert!(
@@ -1814,7 +1823,7 @@ mod tests {
             ..Default::default()
         };
         ports.thermal[0].sensible_gain_w = q_ideal;
-        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let t_after = update.zone_temperatures_c[0].1;
 
         assert!(
@@ -1949,13 +1958,13 @@ mod tests {
 
         let mut solver_no = make_solver(&env_no_solar);
         let t_no_solar = solver_no
-            .resolve(&ports, &env_no_solar, Duration::from_secs(60))
+            .resolve_new(&ports, &env_no_solar, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_with = make_solver(&env_solar);
         let t_solar = solver_with
-            .resolve(&ports, &env_solar, Duration::from_secs(60))
+            .resolve_new(&ports, &env_solar, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2091,19 +2100,19 @@ mod tests {
 
         let mut solver_full = make_solver(1.0);
         let t_full = solver_full
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_060 = make_solver(0.60);
         let t_060 = solver_060
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
         let mut solver_005 = make_solver(0.05);
         let t_005 = solver_005
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2248,11 +2257,11 @@ mod tests {
         let env = make_env();
 
         let t_dark = make_solver(0.25)
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
         let t_light = make_solver(0.60)
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2298,7 +2307,7 @@ mod tests {
         env_low_wind.weather.wind_speed_m_s = 2.0;
         let mut solver_low = solver_with_infiltration(&env_low_wind, method);
         let t_low_wind = solver_low
-            .resolve(&ports, &env_low_wind, Duration::from_secs(60))
+            .resolve_new(&ports, &env_low_wind, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2306,7 +2315,7 @@ mod tests {
         env_high_wind.weather.wind_speed_m_s = 8.0;
         let mut solver_high = solver_with_infiltration(&env_high_wind, method);
         let t_high_wind = solver_high
-            .resolve(&ports, &env_high_wind, Duration::from_secs(60))
+            .resolve_new(&ports, &env_high_wind, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2346,7 +2355,7 @@ mod tests {
         env_low_wind.weather.wind_speed_m_s = 1.0;
         let mut solver_low = solver_with_infiltration(&env_low_wind, method);
         let t_low_wind = solver_low
-            .resolve(&ports, &env_low_wind, Duration::from_secs(60))
+            .resolve_new(&ports, &env_low_wind, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2354,7 +2363,7 @@ mod tests {
         env_high_wind.weather.wind_speed_m_s = 6.0;
         let mut solver_high = solver_with_infiltration(&env_high_wind, method);
         let t_high_wind = solver_high
-            .resolve(&ports, &env_high_wind, Duration::from_secs(60))
+            .resolve_new(&ports, &env_high_wind, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2588,19 +2597,19 @@ mod tests {
 
         let env_base = make_env(0.0);
         let t_base = make_solver(&env_base)
-            .resolve(&ports, &env_base, Duration::from_secs(60))
+            .resolve_new(&ports, &env_base, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
         let env_low = make_env(300.0);
         let t_low = make_solver(&env_low)
-            .resolve(&ports, &env_low, Duration::from_secs(60))
+            .resolve_new(&ports, &env_low, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
         let env_high = make_env(600.0);
         let t_high = make_solver(&env_high)
-            .resolve(&ports, &env_high, Duration::from_secs(60))
+            .resolve_new(&ports, &env_high, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2642,7 +2651,7 @@ mod tests {
 
         let mut solver_no_nv = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_nv = solver_no_nv
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2690,7 +2699,7 @@ mod tests {
         solver_nv.x[0] = zone_temp;
 
         let t_nv = solver_nv
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2723,7 +2732,7 @@ mod tests {
         // Baseline (no nat vent, pure conduction through envelope)
         let mut solver_no_nv = solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.0 });
         let t_no_nv = solver_no_nv
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2769,7 +2778,7 @@ mod tests {
         solver_nv.x[0] = zone_temp;
 
         let t_nv = solver_nv
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -2867,12 +2876,12 @@ mod tests {
         };
 
         let t_no_lw = make_solver(false, &env)
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
         let t_with_lw = make_solver(true, &env)
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -3015,12 +3024,12 @@ mod tests {
         };
 
         let t_normal = make_solver(&env_normal)
-            .resolve(&ports, &env_normal, Duration::from_secs(60))
+            .resolve_new(&ports, &env_normal, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
         let t_oblique = make_solver(&env_oblique)
-            .resolve(&ports, &env_oblique, Duration::from_secs(60))
+            .resolve_new(&ports, &env_oblique, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -3123,7 +3132,7 @@ mod tests {
         // rad_frac > 0: iterative solver estimates true surface temp
         let mut solver = make_solver(0.375, 0.0015, &env);
         let initial_t_prev = solver.exterior_surface_temps[0];
-        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let updated_t_prev = solver.exterior_surface_temps[0];
 
         // exterior_surface_temps must be updated from its initial value (outdoor temp)
@@ -3535,7 +3544,7 @@ mod tests {
             vent_flow,
         );
         let t_no_recovery = solver_no_recovery
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -3551,7 +3560,7 @@ mod tests {
             vent_flow,
         );
         let t_hrv = solver_hrv
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -3599,7 +3608,7 @@ mod tests {
         // No recovery
         let mut solver_no =
             solver_with_ventilation(&env, MechanicalVentilationParams::default(), vent_flow);
-        let update_no = solver_no.resolve(&ports, &env, Duration::from_secs(60));
+        let update_no = solver_no.resolve_new(&ports, &env, Duration::from_secs(60));
         let latent_no = extract_latent(&update_no);
 
         // ERV: 70% sensible, 30% latent recovery
@@ -3613,7 +3622,7 @@ mod tests {
             },
             vent_flow,
         );
-        let update_erv = solver_erv.resolve(&ports, &env, Duration::from_secs(60));
+        let update_erv = solver_erv.resolve_new(&ports, &env, Duration::from_secs(60));
         let latent_erv = extract_latent(&update_erv);
 
         // Outdoor humidity (0.004) < indoor (0.008) → latent gain is negative.
@@ -3644,7 +3653,7 @@ mod tests {
         let mut solver_inf_only =
             solver_with_infiltration(&env, InfiltrationMethod::Ach { ach: 0.5 });
         let t_inf_only = solver_inf_only
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -3698,7 +3707,7 @@ mod tests {
         .unwrap();
         solver_combined.x[0] = env.zones[0].temperature_c;
         let t_combined = solver_combined
-            .resolve(&ports, &env, Duration::from_secs(60))
+            .resolve_new(&ports, &env, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
@@ -3858,12 +3867,12 @@ mod tests {
         let env_jul = make_env((2026, 7));
 
         let t_jan = make_solver(&env_jan)
-            .resolve(&ports, &env_jan, Duration::from_secs(60))
+            .resolve_new(&ports, &env_jan, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 
         let t_jul = make_solver(&env_jul)
-            .resolve(&ports, &env_jul, Duration::from_secs(60))
+            .resolve_new(&ports, &env_jul, Duration::from_secs(60))
             .zone_temperatures_c[0]
             .1;
 

@@ -113,7 +113,8 @@ impl DomainSolver for FluidSolver {
         ports: &PortSlots,
         _env: &hares_types::EnvironmentState,
         _dt: Duration,
-    ) -> DomainUpdate {
+        out: &mut DomainUpdate,
+    ) {
         self.loop_states.clear();
 
         let mut grouped: HashMap<LoopId, Vec<&hares_types::FluidAccumulator>> = HashMap::new();
@@ -171,11 +172,9 @@ impl DomainSolver for FluidSolver {
 
         let mut states: Vec<FluidLoopState> = self.loop_states.values().cloned().collect();
         states.sort_by_key(|s| s.loop_id.0);
-        DomainUpdate {
-            domain_id: FLUID,
-            zone_temperatures_c: vec![],
-            custom_payload: FluidDomainPayload::encode(&states),
-        }
+        out.domain_id = FLUID;
+        out.zone_temperatures_c.clear();
+        out.custom_payload = FluidDomainPayload::encode(&states);
     }
 }
 
@@ -273,7 +272,7 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve(&ports, &env(), Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         approx_eq(states[0].net_power_w, 0.5 * 4186.0 * 20.0);
     }
@@ -311,7 +310,7 @@ mod tests {
             })
             .unwrap();
 
-        let update = solver.resolve(&ports, &env(), Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         let s = &states[0];
         approx_eq(s.net_power_w, 4186.0 * (1.0 * 10.0 + 2.0 * 10.0));
@@ -342,7 +341,7 @@ mod tests {
                 fluid_type: FluidType::Water,
             })
             .unwrap();
-        let _ = solver.resolve(&ports, &env(), Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
 
         let zero_ports = PortSlots {
             fluid: vec![hares_types::FluidAccumulator::new(
@@ -351,7 +350,7 @@ mod tests {
             )],
             ..Default::default()
         };
-        let update = solver.resolve(&zero_ports, &env(), Duration::from_secs(60));
+        let update = solver.resolve_new(&zero_ports, &env(), Duration::from_secs(60));
         let states = FluidDomainPayload::decode(&update.custom_payload.unwrap()).unwrap();
         approx_eq(states[0].mean_supply_temp_c, 52.0);
         approx_eq(states[0].mean_return_temp_c, 45.0);
@@ -361,7 +360,7 @@ mod tests {
     fn empty_ports_returns_none_payload_and_no_state() {
         let mut solver = FluidSolver::new(FluidSolverConfig::default(), &[]).unwrap();
         let ports = PortSlots::default();
-        let update = solver.resolve(&ports, &env(), Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
         assert_eq!(update.custom_payload, None);
         assert!(solver.loop_state(LoopId(1)).is_none());
     }
@@ -393,7 +392,7 @@ mod tests {
                 fluid_type: FluidType::Water,
             })
             .unwrap();
-        let _ = solver.resolve(&ports, &env(), Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env(), Duration::from_secs(60));
         assert!(
             solver.loop_state(LoopId(1)).is_some(),
             "loop should have state after contributions"
@@ -401,7 +400,7 @@ mod tests {
 
         // Step 2: no contributions at all (empty fluid vec)
         let empty_ports = PortSlots::default();
-        let _ = solver.resolve(&empty_ports, &env(), Duration::from_secs(60));
+        let _ = solver.resolve_new(&empty_ports, &env(), Duration::from_secs(60));
         assert!(
             solver.loop_state(LoopId(1)).is_none(),
             "loop should have no state after step with no contributions"

@@ -161,7 +161,7 @@ fn test_energy_conservation_1r1c_no_hvac() {
 
     for _ in 0..STEPS_24H {
         let t_before = t_zone;
-        let update = solver.resolve(&ports, &env, Duration::from_secs(DT_S as u64));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(DT_S as u64));
         t_zone = zone_temp(&update);
         env.zones[0].temperature_c = t_zone;
 

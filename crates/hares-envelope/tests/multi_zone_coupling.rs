@@ -188,7 +188,7 @@ fn test_two_zone_coupled_wall_heat_direction() {
 
     let ports = two_zone_ports();
 
-    let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
 
     let t1_after = update
         .zone_temperatures_c

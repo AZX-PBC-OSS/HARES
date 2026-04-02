@@ -69,7 +69,8 @@ impl ThermalSolver {
         &mut self,
         ports: &PortSlots,
         env: &EnvironmentState,
-    ) -> DomainUpdate {
+        out: &mut DomainUpdate,
+    ) {
         let (u, latent_by_zone) = self.build_input_vector(ports, env);
 
         self.coupling_buf.clear();
@@ -177,6 +178,6 @@ impl ThermalSolver {
         self.last_coupling.clone_from(&self.coupling_buf);
         self.u_buf = u;
 
-        self.format_domain_update(&y_next, latent_by_zone)
+        self.format_domain_update(&y_next, latent_by_zone, out);
     }
 }

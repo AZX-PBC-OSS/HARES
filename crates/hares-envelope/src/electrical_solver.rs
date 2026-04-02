@@ -108,11 +108,10 @@ impl DomainSolver for ElectricalSolver {
         ports: &PortSlots,
         env: &EnvironmentState,
         _dt: Duration,
-    ) -> DomainUpdate {
+        out: &mut DomainUpdate,
+    ) {
         let p_load = ports.electrical.load_power_kw;
         let p_gen = ports.electrical.generation_power_kw;
-        // ZIP correction uses voltage_pu directly per spec (nominal_voltage_pu
-        // defaults to 1.0; non-unity nominal documented as a v2 extension).
         // ZIP correction uses voltage_pu directly per spec (nominal_voltage_pu
         // defaults to 1.0; non-unity nominal documented as a v2 extension).
         let v = env.grid.voltage_pu / self.config.nominal_voltage_pu;
@@ -123,11 +122,12 @@ impl DomainSolver for ElectricalSolver {
         self.net_active_kw = p_load_adj + p_gen_adj;
         self.net_reactive_kvar = ports.electrical.reactive_power_kvar;
 
-        DomainUpdate {
-            domain_id: ELECTRICAL,
-            zone_temperatures_c: vec![],
-            custom_payload: Some(vec![self.net_active_kw, self.net_reactive_kvar]),
-        }
+        out.domain_id = ELECTRICAL;
+        out.zone_temperatures_c.clear();
+        let payload = out.custom_payload.get_or_insert_with(|| Vec::with_capacity(2));
+        payload.clear();
+        payload.push(self.net_active_kw);
+        payload.push(self.net_reactive_kvar);
     }
 }
 
@@ -214,7 +214,7 @@ mod tests {
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
-        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         assert_eq!(update.domain_id, hares_types::ELECTRICAL);
         assert_eq!(solver.net_active_kw(), 6.0);
     }
@@ -235,7 +235,7 @@ mod tests {
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
-        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let expected = 6.0 * (0.5 * 0.95 * 0.95 + 0.3 * 0.95 + 0.2);
         assert!((solver.net_active_kw() - expected).abs() <= 1e-10);
     }
@@ -263,11 +263,11 @@ mod tests {
             .unwrap();
 
         let env_nominal = env_with_voltage(1.0);
-        let _ = solver.resolve(&ports, &env_nominal, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env_nominal, Duration::from_secs(60));
         assert!((solver.net_active_kw() - (-2.0)).abs() <= 1e-12);
 
         let env_low_v = env_with_voltage(0.95);
-        let _ = solver.resolve(&ports, &env_low_v, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env_low_v, Duration::from_secs(60));
         let expected = 3.0 * (0.5 * 0.95 * 0.95 + 0.3 * 0.95 + 0.2) - 5.0;
         assert!((solver.net_active_kw() - expected).abs() <= 1e-10);
     }
@@ -289,7 +289,7 @@ mod tests {
                 reactive_power_kvar: -0.1,
             })
             .unwrap();
-        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let p_grid = solver.net_active_kw();
         let p_equipment_sum = ports.electrical.net_active_kw();
         assert!((p_grid - p_equipment_sum).abs() < 0.001);
@@ -300,7 +300,7 @@ mod tests {
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig::default()).unwrap();
         let env = env_with_voltage(1.0);
         let ports = PortSlots::default();
-        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         assert_eq!(update.custom_payload, Some(vec![0.0, 0.0]));
         assert_eq!(solver.net_active_kw(), 0.0);
         assert_eq!(solver.net_reactive_kvar(), 0.0);
@@ -326,7 +326,7 @@ mod tests {
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
-        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let expected = 10.0 * (0.2 * 0.9025 + 0.2 * 0.95 + 0.6);
         assert!(
             (solver.net_active_kw() - expected).abs() <= 1e-10,
@@ -362,7 +362,7 @@ mod tests {
                 reactive_power_kvar: 0.0,
             })
             .unwrap();
-        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let load_scale = 0.5 * 0.9025 + 0.3 * 0.95 + 0.2;
         let expected = 10.0 * load_scale + (-3.0);
         assert!(

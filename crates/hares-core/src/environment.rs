@@ -597,9 +597,6 @@ impl EnvironmentManager {
         state.weather.rainfall_m = self.weather.get(WeatherField::LiquidPrecipM, weather_idx);
         state.weather.ground_albedo = ground_albedo;
 
-        // Step 8: reset equipment telemetry map (capacity retained).
-        state.equipment_telemetry.clear();
-
         state.current_time = clock.current_time();
         state.time_res = clock.time_res;
         state.price_signal = Default::default();

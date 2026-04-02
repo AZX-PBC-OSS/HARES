@@ -74,7 +74,7 @@ impl DomainSolver for HumiditySolver {
         HUMIDITY
     }
 
-    fn resolve(&mut self, ports: &PortSlots, env: &EnvironmentState, dt: Duration) -> DomainUpdate {
+    fn resolve(&mut self, ports: &PortSlots, env: &EnvironmentState, dt: Duration, out: &mut DomainUpdate) {
         let dt_s = dt.as_secs_f64();
         let p_pa = env.weather.pressure_pa();
 
@@ -100,8 +100,10 @@ impl DomainSolver for HumiditySolver {
             }
         }
 
-        let mut payload = Vec::with_capacity(env.zones.len() * 4);
-        let mut zone_temperatures_c = Vec::with_capacity(env.zones.len());
+        out.domain_id = HUMIDITY;
+        out.zone_temperatures_c.clear();
+        let payload = out.custom_payload.get_or_insert_with(Vec::new);
+        payload.clear();
 
         for zone in &env.zones {
             let zone_id = zone.id;
@@ -146,16 +148,10 @@ impl DomainSolver for HumiditySolver {
             let rh = relative_humidity(t_zone_c, w_new, p_pa);
             let wet_bulb_c = wet_bulb_from_humidity_ratio(t_zone_c, w_new, p_pa);
 
-            zone_temperatures_c.push((zone_id, t_zone_c));
+            out.zone_temperatures_c.push((zone_id, t_zone_c));
             payload.extend_from_slice(&[f64::from(zone_id.0), w_new, rh, wet_bulb_c]);
         }
-        zone_temperatures_c.sort_by_key(|(zone_id, _)| *zone_id);
-
-        DomainUpdate {
-            domain_id: HUMIDITY,
-            zone_temperatures_c,
-            custom_payload: Some(payload),
-        }
+        out.zone_temperatures_c.sort_by_key(|(zone_id, _)| *zone_id);
     }
 }
 
@@ -266,7 +262,7 @@ mod tests {
             ..Default::default()
         };
         let w_old = solver.humidity_ratio(ZoneId(1));
-        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let w_new = solver.humidity_ratio(ZoneId(1));
 
         let rho = hares_physics::air_properties::moist_air_density_kg_m3(
@@ -302,7 +298,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let payload = update.custom_payload.unwrap();
         let w = payload[1];
         let rh = payload[2];
@@ -324,7 +320,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let _ = solver.resolve(&ports_hi, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports_hi, &env, Duration::from_secs(60));
         let w_hi = solver.humidity_ratio(ZoneId(1));
         let w_sat =
             hares_physics::psychrometrics::humidity_ratio_from_tdp(20.0, env.weather.pressure_pa());
@@ -339,7 +335,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let _ = solver.resolve(&ports_lo, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports_lo, &env, Duration::from_secs(60));
         let w_lo = solver.humidity_ratio(ZoneId(1));
         assert!(w_lo >= 0.0);
     }
@@ -381,7 +377,7 @@ mod tests {
         let w_old = solver.humidity_ratio(zone_id);
 
         let ports = PortSlots::default();
-        let _ = solver.resolve(&ports, &env, Duration::from_secs(dt_s as u64));
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(dt_s as u64));
         let w_new = solver.humidity_ratio(zone_id);
 
         let rho = hares_physics::air_properties::moist_air_density_kg_m3(
@@ -463,11 +459,11 @@ mod tests {
         };
 
         let w1_old = solver_1.humidity_ratio(ZoneId(1));
-        let _ = solver_1.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver_1.resolve_new(&ports, &env, Duration::from_secs(60));
         let w1_new = solver_1.humidity_ratio(ZoneId(1));
 
         let w2_old = solver_2.humidity_ratio(ZoneId(1));
-        let _ = solver_2.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver_2.resolve_new(&ports, &env, Duration::from_secs(60));
         let w2_new = solver_2.humidity_ratio(ZoneId(1));
 
         let dw1 = w1_new - w1_old;
@@ -555,11 +551,11 @@ mod tests {
         };
 
         let w_unbuffered_old = solver_unbuffered.humidity_ratio(ZoneId(1));
-        let _ = solver_unbuffered.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver_unbuffered.resolve_new(&ports, &env, Duration::from_secs(60));
         let dw_unbuffered = solver_unbuffered.humidity_ratio(ZoneId(1)) - w_unbuffered_old;
 
         let w_default_old = solver_default.humidity_ratio(ZoneId(1));
-        let _ = solver_default.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver_default.resolve_new(&ports, &env, Duration::from_secs(60));
         let dw_default = solver_default.humidity_ratio(ZoneId(1)) - w_default_old;
 
         assert!(
@@ -637,7 +633,7 @@ mod tests {
             &env,
         );
         let w_before = solver_zone_vol.humidity_ratio(zone_id);
-        let _ = solver_zone_vol.resolve(&ports, &env, dt);
+        let _ = solver_zone_vol.resolve_new(&ports, &env, dt);
         let dw_zone = solver_zone_vol.humidity_ratio(zone_id) - w_before;
 
         // Solver using overridden volume (600 m³).
@@ -652,7 +648,7 @@ mod tests {
             &env,
         );
         let w_before_ov = solver_override.humidity_ratio(zone_id);
-        let _ = solver_override.resolve(&ports, &env, dt);
+        let _ = solver_override.resolve_new(&ports, &env, dt);
         let dw_override = solver_override.humidity_ratio(zone_id) - w_before_ov;
 
         // dW scales inversely with volume: dW(override) / dW(zone) = zone_vol / override_vol.
@@ -772,7 +768,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = solver.resolve(&ports, &env, dt);
+        let _ = solver.resolve_new(&ports, &env, dt);
 
         let dw_small = solver.humidity_ratio(ZoneId(1)) - w_init;
         let dw_large = solver.humidity_ratio(ZoneId(2)) - w_init;
@@ -822,7 +818,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = solver.resolve(&ports, &env_two, dt);
+        let _ = solver.resolve_new(&ports, &env_two, dt);
 
         // Zone 2 must have been initialised from ZoneState::humidity_ratio.
         // With zero latent gain it should remain at or very near w_new_zone.
@@ -866,7 +862,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = solver.resolve(&ports, &env, dt);
+        let _ = solver.resolve_new(&ports, &env, dt);
 
         let w_zone2_after = solver.humidity_ratio(ZoneId(2));
         let w_indoor_after = solver.humidity_ratio(ZoneId(1));
@@ -977,7 +973,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = solver.resolve(&ports, &env, Duration::from_secs(60));
+        let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
 
         let dw_a = solver.humidity_ratio(zone_a) - w_init;
         let dw_b = solver.humidity_ratio(zone_b) - w_init;
@@ -1019,7 +1015,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let _ = solver_single.resolve(&ports_single, &env_single, Duration::from_secs(60));
+        let _ = solver_single.resolve_new(&ports_single, &env_single, Duration::from_secs(60));
         let dw_a_solo = solver_single.humidity_ratio(zone_a) - w_init;
         assert!(
             (dw_a - dw_a_solo).abs() < 1e-15,

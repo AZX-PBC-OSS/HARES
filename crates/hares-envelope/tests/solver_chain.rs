@@ -132,7 +132,7 @@ fn electrical_solver_net_with_load_and_pv() {
     let ports = ports_with_electrical(2.0, -1.5);
     let dt = Duration::from_secs(60);
 
-    let update = solver.resolve(&ports, &env, dt);
+    let update = solver.resolve_new(&ports, &env, dt);
 
     let payload = update
         .custom_payload
@@ -167,7 +167,7 @@ fn electrical_solver_generation_only_produces_negative_net() {
     let env = env_with_zone(21.0, 10.0, 0.008);
     let ports = ports_with_electrical(0.0, -3.0);
 
-    let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
     let net_kw = update.custom_payload.expect("payload must be Some")[0];
 
     assert!(
@@ -185,7 +185,7 @@ fn electrical_solver_zero_load_zero_generation_is_zero_net() {
     let env = env_with_zone(21.0, 10.0, 0.008);
     let ports = PortSlots::default();
 
-    let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
     let net_kw = update.custom_payload.expect("payload")[0];
 
     assert_eq!(
@@ -221,7 +221,7 @@ fn electrical_balance_invariant_holds_for_multiple_sources() {
             .expect("gen");
     }
 
-    let update = solver.resolve(&ports, &env, Duration::from_secs(60));
+    let update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
     let net_kw = update.custom_payload.expect("payload")[0];
     let expected = ports.electrical.net_active_kw(); // 2.5 + (-2.8) = -0.3
 
@@ -249,7 +249,7 @@ fn humidity_solver_latent_gain_increases_humidity_ratio() {
     let ports = ports_with_latent(zone, 500.0); // 500 W latent gain
     let dt = Duration::from_secs(60);
 
-    let _update = solver.resolve(&ports, &env, dt);
+    let _update = solver.resolve_new(&ports, &env, dt);
 
     let w_new = solver.humidity_ratio(zone);
     assert!(
@@ -267,7 +267,7 @@ fn humidity_solver_zero_latent_gain_no_change() {
     let mut solver = HumiditySolver::new(HumiditySolverConfig::default(), &env);
 
     let ports = ports_with_latent(zone, 0.0);
-    let _update = solver.resolve(&ports, &env, Duration::from_secs(60));
+    let _update = solver.resolve_new(&ports, &env, Duration::from_secs(60));
 
     let w_new = solver.humidity_ratio(zone);
     approx_eq(
@@ -295,7 +295,7 @@ fn humidity_moisture_mass_balance_invariant() {
     let mut solver = HumiditySolver::new(HumiditySolverConfig::default(), &env);
 
     let ports = ports_with_latent(zone, latent_w);
-    let _update = solver.resolve(&ports, &env, Duration::from_secs(dt_s as u64));
+    let _update = solver.resolve_new(&ports, &env, Duration::from_secs(dt_s as u64));
 
     let w_new = solver.humidity_ratio(zone);
     let delta_w = w_new - initial_w;
@@ -376,8 +376,8 @@ fn electrical_and_humidity_resolvers_are_independent() {
         })
         .expect("thermal accumulate");
 
-    let elec_update = elec_solver.resolve(&ports, &env, dt);
-    let _hum_update = hum_solver.resolve(&ports, &env, dt);
+    let elec_update = elec_solver.resolve_new(&ports, &env, dt);
+    let _hum_update = hum_solver.resolve_new(&ports, &env, dt);
 
     // Electrical result must still be correct after humidity resolved.
     let net_kw = elec_update.custom_payload.expect("elec payload")[0];
