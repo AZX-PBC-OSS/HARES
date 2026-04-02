@@ -246,6 +246,160 @@ fn debug_bestest_600ff_observe_peak_terms() {
     );
 }
 
+#[test]
+fn debug_600ff_matrix_values() {
+    let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
+    let mut dwelling =
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("failed to load BESTEST case 600FF: {err}"));
+
+    let (n_states, n_inputs, n_outputs) = dwelling.thermal_solver.model_dims();
+    eprintln!("[debug] 600FF model dims: states={n_states} inputs={n_inputs} outputs={n_outputs}");
+
+    let x_init: Vec<f64> = dwelling.thermal_solver.state_vector().to_vec();
+    eprintln!("[debug] initial state x: {:?}", x_init);
+
+    if let Some((state_row, input_col, b_d_entry, x)) =
+        dwelling.thermal_solver.b_d_zone_sensible_debug()
+    {
+        eprintln!(
+            "[debug] zone_air state_row={state_row} sensible_col={input_col} B_d[zone,sensible]={b_d_entry:.6e}"
+        );
+        let _ = x;
+    }
+
+    if let Some(b_d_row) = dwelling.thermal_solver.b_d_zone_row_debug() {
+        eprintln!("[debug] B_d[zone_air, :] = {:?}", b_d_row);
+    }
+
+    if let Some(a_d_row) = dwelling.thermal_solver.a_d_zone_row_debug() {
+        eprintln!("[debug] A_d[zone_air, :] = {:?}", a_d_row);
+        let sum: f64 = a_d_row.iter().sum::<f64>();
+        eprintln!("[debug] sum(A_d[zone_air, :]) = {sum:.6}");
+    }
+
+    // Step once (ignore error - invariant may fire) and inspect what happened
+    let step_result = dwelling.step();
+    eprintln!("[debug] step result ok={}", step_result.is_ok());
+    if let Err(ref e) = step_result {
+        eprintln!("[debug] step error: {e}");
+    }
+    // Check last_u from the completed step
+    let last_u: Vec<f64> = dwelling.thermal_solver.last_u_debug().to_vec();
+    eprintln!("[debug] last_u after step 1: {:?}", last_u);
+    let x_after: Vec<f64> = dwelling.thermal_solver.state_vector().to_vec();
+    eprintln!("[debug] state after step 1: {:?}", x_after);
+}
+
+#[test]
+fn debug_600ff_heat_balance_at_peak() {
+    let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
+    let mut dwelling =
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("failed to load BESTEST case 600FF: {err}"));
+
+    let total_steps = 8760usize;
+    let mut max_temp = f64::NEG_INFINITY;
+    let mut max_step = 0usize;
+
+    // First pass: find the step with the highest zone temperature.
+    for step in 0..total_steps {
+        match dwelling.step() {
+            Ok(result) => {
+                for (_, t) in &result.zone_temperatures_c {
+                    if *t > max_temp {
+                        max_temp = *t;
+                        max_step = step;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    eprintln!("[heat_balance] peak temp={max_temp:.2}°C at step={max_step}");
+
+    // Reload and re-run to the peak step, then print detailed component gains.
+    let mut dwelling2 =
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("failed to reload BESTEST case 600FF: {err}"));
+    for _ in 0..max_step {
+        let _ = dwelling2.step();
+    }
+    let peak_gains = dwelling2.thermal_solver.component_gains().clone();
+    eprintln!("[heat_balance] window_solar_w={:.1}", peak_gains.window_solar_w);
+    eprintln!("[heat_balance] opaque_solar_lwr_w={:.1}", peak_gains.opaque_solar_lwr_w);
+    eprintln!("[heat_balance] opaque_solar_w={:.1}", peak_gains.opaque_solar_w);
+    eprintln!("[heat_balance] exterior_lwr_w={:.1}", peak_gains.exterior_lwr_w);
+    eprintln!("[heat_balance] interior_lwr_w={:.1}", peak_gains.interior_lwr_w);
+    eprintln!("[heat_balance] infiltration_w={:.1}", peak_gains.infiltration_w);
+    eprintln!("[heat_balance] internal_gain_w={:.1}", peak_gains.internal_gain_w);
+    eprintln!("[heat_balance] driving_outdoor_temp_c={:.1}", peak_gains.driving_outdoor_temp_c);
+    // Add a test that separately measures each contribution to u[13]
+    // by running the exact peak step and checking component gains carefully.
+    let mut dwelling3 =
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("failed to reload BESTEST case 600FF: {err}"));
+    // Print interior surface info to understand radiation_frac values.
+    {
+        let mut dwelling_info =
+            Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+                .unwrap_or_else(|err| panic!("failed to reload BESTEST case 600FF: {err}"));
+        let surf_info = dwelling_info.thermal_solver.interior_surface_info_debug();
+        for (i, (area, abs, rad_frac, is_floor, input_idx, has_driving)) in surf_info.iter().enumerate() {
+            eprintln!("[surface_info] s={i} area={area:.1}m² solar_abs={abs:.3} rad_frac={rad_frac:.4} is_floor={is_floor} input_idx={input_idx} driving={has_driving}");
+        }
+    }
+
+    // Run to step max_step-2 (so the NEXT step will be the pre-peak step = max_step-1)
+    for _ in 0..max_step.saturating_sub(1) {
+        let _ = dwelling3.step();
+    }
+    // At this point dwelling3 is at end of step max_step-2.
+    // latest_env() now reflects the env used FOR step max_step-1.
+    // Call zone_sensible_breakdown_debug to see how u[zone_sensible] is assembled at the peak step.
+    let breakdown = {
+        let env_clone = dwelling3.latest_env().clone();
+        let ports_clone = dwelling3.ports.clone();
+        dwelling3.thermal_solver.zone_sensible_breakdown_debug(&ports_clone, &env_clone)
+    };
+    eprintln!("[breakdown] after_outdoor={:.2}", breakdown[0]);
+    eprintln!("[breakdown] after_window_solar={:.2} (delta={:.2})", breakdown[1], breakdown[1] - breakdown[0]);
+    eprintln!("[breakdown] after_ext_solar={:.2} (delta={:.2})", breakdown[2], breakdown[2] - breakdown[1]);
+    eprintln!("[breakdown] after_ext_lwr={:.2} (delta={:.2})", breakdown[3], breakdown[3] - breakdown[2]);
+    eprintln!("[breakdown] after_int_lwr={:.2} (delta={:.2})", breakdown[4], breakdown[4] - breakdown[3]);
+    eprintln!("[breakdown] after_port={:.2} (delta={:.2})", breakdown[5], breakdown[5] - breakdown[4]);
+
+    // The zone temp at step (max_step-1)
+    let pre_peak_result = dwelling3.step().expect("pre-peak step");
+    let pre_peak_zone_temp: f64 = pre_peak_result.zone_temperatures_c.iter().map(|(_, t)| *t).fold(f64::NEG_INFINITY, f64::max);
+    eprintln!("[heat_balance] zone_temp at step {}={:.2}°C", max_step.saturating_sub(1), pre_peak_zone_temp);
+    let pre_peak_gains = dwelling3.thermal_solver.component_gains().clone();
+    eprintln!("[heat_balance] pre_peak window_solar_w={:.1}", pre_peak_gains.window_solar_w);
+    eprintln!("[heat_balance] pre_peak opaque_solar_lwr_w={:.1}", pre_peak_gains.opaque_solar_lwr_w);
+    let pre_peak_u = dwelling3.thermal_solver.last_u_debug().to_vec();
+    eprintln!("[heat_balance] pre_peak last_u={:?}", pre_peak_u);
+    eprintln!("[heat_balance] pre_peak u13={:.1}", pre_peak_u.get(13).copied().unwrap_or(0.0));
+    eprintln!("[heat_balance] pre_peak state={:?}", dwelling3.thermal_solver.state_vector().to_vec());
+
+    // Also print last_u to see the actual input vector at peak
+    let last_u = dwelling2.thermal_solver.last_u_debug().to_vec();
+    eprintln!("[heat_balance] last_u={:?}", last_u);
+    eprintln!("[heat_balance] u13_zone_sensible={:.1}", last_u.get(13).copied().unwrap_or(0.0));
+    let peak_step_result = dwelling2.step().expect("peak step must succeed");
+    let peak_zone_temp: f64 = peak_step_result.zone_temperatures_c.iter().map(|(_, t)| *t).fold(f64::NEG_INFINITY, f64::max);
+    eprintln!("[heat_balance] zone_temp_after_peak_step={:.2}°C", peak_zone_temp);
+    // Print the gains at the peak step itself
+    let peak_gains2 = dwelling2.thermal_solver.component_gains().clone();
+    eprintln!("[heat_balance:peakstep] window_solar_w={:.1}", peak_gains2.window_solar_w);
+    eprintln!("[heat_balance:peakstep] opaque_solar_lwr_w={:.1}", peak_gains2.opaque_solar_lwr_w);
+    eprintln!("[heat_balance:peakstep] infiltration_w={:.1}", peak_gains2.infiltration_w);
+    eprintln!("[heat_balance:peakstep] internal_gain_w={:.1}", peak_gains2.internal_gain_w);
+    eprintln!("[heat_balance:peakstep] driving_outdoor_temp_c={:.1}", peak_gains2.driving_outdoor_temp_c);
+    let last_u2 = dwelling2.thermal_solver.last_u_debug().to_vec();
+    eprintln!("[heat_balance:peakstep] u13_zone_sensible={:.1}", last_u2.get(13).copied().unwrap_or(0.0));
+}
+
 fn evaluate_bands(observation: &CaseObservation, bands: &[ReferenceBand]) -> Vec<BandCheck> {
     let mut checks = Vec::new();
     for band in bands {

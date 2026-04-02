@@ -186,16 +186,16 @@ interior_zone = "Conditioned"
 exterior_zone = "Ground"
 
 [[boundaries.material_layers]]
-thickness_m = 0.025
-conductivity_w_m_k = 0.140
-density_kg_m3 = 530.0
-specific_heat_j_kg_k = 900.0
-
-[[boundaries.material_layers]]
 thickness_m = 1.003
 conductivity_w_m_k = 0.040
 density_kg_m3 = 12.0
 specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.025
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
 
 [[windows]]
 id = "south-window-1"

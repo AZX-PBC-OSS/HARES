@@ -223,19 +223,19 @@ fn build_solver_boundaries(
         let r_film_int = bd_input.r_film_interior_m2_k_w;
 
         // Exterior radiation fraction: R_film_ext / (R_film_ext + R_outermost_half).
+        // Layers are exterior→interior, so outermost = first valid layer.
         let r_outermost_half = if !bd_input.precomputed_rc.is_empty() {
             bd_input
                 .precomputed_rc
-                .last()
+                .first()
                 .map(|l| l.resistance_m2_k_w / 2.0)
                 .unwrap_or(0.0)
         } else {
-            let valid_layers: Vec<&hares_envelope::LayerInput> = bd_input
+            let outer = bd_input
                 .material_layers
                 .iter()
-                .filter(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
-                .collect();
-            if let Some(outer) = valid_layers.last() {
+                .find(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0);
+            if let Some(outer) = outer {
                 let k = hares_envelope::parallel_path_conductivity(
                     outer.conductivity_w_m_k,
                     bd_input.framing_factor,
@@ -256,17 +256,18 @@ fn build_solver_boundaries(
             };
 
         // Interior radiation fraction: R_film_int / (R_film_int + R_inner_half).
+        // Layers are exterior→interior, so innermost = last valid layer.
         let r_inner_half = if !bd_input.precomputed_rc.is_empty() {
             bd_input
                 .precomputed_rc
-                .first()
+                .last()
                 .map(|l| l.resistance_m2_k_w / 2.0)
                 .unwrap_or(0.0)
         } else {
             bd_input
                 .material_layers
                 .iter()
-                .find(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
+                .rfind(|l| l.conductivity_w_m_k > 0.0 && l.thickness_m > 0.0)
                 .map(|l| {
                     let k = hares_envelope::parallel_path_conductivity(
                         l.conductivity_w_m_k,

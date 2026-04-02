@@ -104,9 +104,6 @@ pub fn building_to_boundary_inputs(
                 .unwrap_or(DEFAULT_R_M2_K_W)
                 .max(1e-6);
 
-            // Try LUT lookup for precomputed RC layers — skip when the boundary
-            // has explicit material layers (BESTEST synthetic configs define their own
-            // layer stack which must not be overridden by the LUT).
             // Skip LUT when the boundary has explicit material layers (BESTEST
             // synthetic configs define their own layer stack).
             let precomputed_rc = if !bd.material_layers.is_empty() {
@@ -149,9 +146,9 @@ pub fn building_to_boundary_inputs(
                             matched_type = %result.matched_boundary_type,
                             "envelope LUT match"
                         );
-                        // LUT layers are exterior→interior (OCHRE CSV convention).
-                        // RC builder expects interior→exterior, so reverse.
-                        let mut layers: Vec<_> = result
+                        // LUT layers are exterior→interior (OCHRE CSV convention),
+                        // matching boundary_rc's expected ordering.
+                        let layers: Vec<_> = result
                             .layers
                             .into_iter()
                             .map(|l| PrecomputedRCLayer {
@@ -159,7 +156,6 @@ pub fn building_to_boundary_inputs(
                                 capacitance_kj_m2_k: l.capacitance_kj_m2_k,
                             })
                             .collect();
-                        layers.reverse();
                         Some(layers)
                     })
                     .unwrap_or_default()

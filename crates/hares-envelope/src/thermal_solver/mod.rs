@@ -135,6 +135,87 @@ impl ThermalSolver {
         )
     }
 
+    /// Returns diagnostic information about the B_d (discrete input matrix) for the
+    /// zone air state row and sensible input column. Used for physics debugging only.
+    pub fn b_d_zone_sensible_debug(&self) -> Option<(usize, usize, f64, &[f64])> {
+        let zone_id = self.config.indoor_zone_id;
+        let state_row = *self.wiring.zone_state_indices.get(&zone_id)?;
+        let input_col = *self.wiring.zone_sensible_input_indices.get(&zone_id)?;
+        let b_d_entry = self.model.b_eff()[(state_row, input_col)];
+        Some((state_row, input_col, b_d_entry, self.x.as_slice()))
+    }
+
+    /// Returns the full B_d row for the zone air state for debugging.
+    pub fn b_d_zone_row_debug(&self) -> Option<Vec<f64>> {
+        let zone_id = self.config.indoor_zone_id;
+        let state_row = *self.wiring.zone_state_indices.get(&zone_id)?;
+        Some(self.model.b_eff().row(state_row).iter().copied().collect())
+    }
+
+    /// Returns the full A_d row for the zone air state for debugging.
+    pub fn a_d_zone_row_debug(&self) -> Option<Vec<f64>> {
+        let zone_id = self.config.indoor_zone_id;
+        let state_row = *self.wiring.zone_state_indices.get(&zone_id)?;
+        Some(self.model.n_mat().row(state_row).iter().copied().collect())
+    }
+
+    /// Returns wiring indices for zone air for debugging.
+    pub fn zone_wiring_debug(&self) -> (usize, usize, usize) {
+        let zone_id = self.config.indoor_zone_id;
+        let state_row = self.wiring.zone_state_indices.get(&zone_id).copied().unwrap_or(0);
+        let sensible_col = self.wiring.zone_sensible_input_indices.get(&zone_id).copied().unwrap_or(0);
+        let outdoor_col = self.wiring.outdoor_temp_input_indices.first().copied().unwrap_or(0);
+        (state_row, sensible_col, outdoor_col)
+    }
+
+    /// Returns the last_u vector (input vector from the most recently completed step).
+    pub fn last_u_debug(&self) -> &[f64] {
+        self.last_u.as_slice()
+    }
+
+    /// Returns interior LWR zone surface info for debugging solar/LWR distribution.
+    /// Returns (area_m2, solar_absorptance, radiation_frac, is_floor, input_index, driving_temp_is_some) per surface.
+    pub fn interior_surface_info_debug(&self) -> Vec<(f64, f64, f64, bool, usize, bool)> {
+        self.config
+            .interior_lwr_zones
+            .first()
+            .map(|z| {
+                z.surfaces
+                    .iter()
+                    .map(|s| (s.area_m2, s.solar_absorptance, s.radiation_frac, s.is_floor, s.input_index, s.driving_temp.is_some()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns the per-component breakdown of u[zone_sensible] for debugging.
+    /// Returns (after_outdoor, after_window_solar, after_ext_solar, after_ext_lwr, after_int_lwr, after_port) [W].
+    pub fn zone_sensible_breakdown_debug(
+        &mut self,
+        ports: &hares_types::PortSlots,
+        env: &hares_types::EnvironmentState,
+    ) -> [f64; 6] {
+        let n = self.model.input_dim();
+        let mut u = DVector::zeros(n);
+        let zone_id = self.config.indoor_zone_id;
+        let Some(&z_idx) = self.wiring.zone_sensible_input_indices.get(&zone_id) else {
+            return [0.0; 6];
+        };
+        self.apply_outdoor_inputs(&mut u, env);
+        let after_outdoor = u[z_idx];
+        self.apply_solar_inputs(&mut u, env);
+        let after_window_solar = u[z_idx];
+        self.apply_exterior_solar_inputs(&mut u, env);
+        let after_ext_solar = u[z_idx];
+        self.apply_exterior_longwave_inputs_iterative(&mut u, env);
+        let after_ext_lwr = u[z_idx];
+        self.apply_interior_longwave_inputs(&mut u, env);
+        let after_int_lwr = u[z_idx];
+        self.apply_port_sensible_inputs(&mut u, ports);
+        let after_port = u[z_idx];
+        [after_outdoor, after_window_solar, after_ext_solar, after_ext_lwr, after_int_lwr, after_port]
+    }
+
     pub fn new(
         model: StateSpaceModel,
         wiring: StateSpaceWiring,

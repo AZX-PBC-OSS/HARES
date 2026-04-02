@@ -288,7 +288,11 @@ impl ThermalSolver {
                 .zip(self.lwr_net_flux_buf.iter())
                 .enumerate()
             {
-                if info.input_index < u.len() {
+                // Surfaces driven by an environmental temperature (windows without RC nodes)
+                // have no thermal capacitor. Their net LWR flux is conducted to the exterior
+                // via the window U-factor and does not enter zone air.
+                // Opaque surfaces route LWR to their inner RC node (info.input_index = iw.b_col).
+                if info.driving_temp.is_none() && info.input_index < u.len() {
                     u[info.input_index] += q;
                 }
                 zone_total += q;

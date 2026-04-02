@@ -124,7 +124,7 @@ pub struct BoundaryInput {
     pub interior_zone_idx: usize,
     /// Where the exterior side connects.
     pub exterior: ExteriorTarget,
-    /// Material layers (interior → exterior order).
+    /// Material layers (exterior → interior order).
     pub material_layers: Vec<LayerInput>,
     /// Pre-computed RC layers from OCHRE LUT. When non-empty, these take
     /// priority over `material_layers`.
@@ -394,14 +394,14 @@ pub fn assemble_building_rc(
                 "boundary {bd_idx}: capacitance must be >= 0"
             );
             let inner_node = if n_nodes > 0 {
-                Some(NodeId(nodes_before))
+                Some(NodeId(nodes_before + n_nodes as u32 - 1))
             } else {
                 None
             };
             let r_zone_to_inner = if n_nodes > 0 {
                 let r_inner_half = bd
                     .precomputed_rc
-                    .first()
+                    .last()
                     .map(|l| l.resistance_m2_k_w / 2.0)
                     .unwrap_or(0.0);
                 Some(bd.r_film_interior_m2_k_w + r_inner_half)
@@ -474,12 +474,12 @@ pub fn assemble_building_rc(
                 "boundary {bd_idx}: capacitance must be >= 0"
             );
             let inner_node = if n_nodes > 0 {
-                Some(NodeId(nodes_before))
+                Some(NodeId(nodes_before + n_nodes as u32 - 1))
             } else {
                 None
             };
             let r_zone_to_inner = if n_nodes > 0 {
-                let inner_layer = valid_layers[0];
+                let inner_layer = valid_layers.last().unwrap();
                 let k =
                     parallel_path_conductivity(inner_layer.conductivity_w_m_k, bd.framing_factor);
                 Some(bd.r_film_interior_m2_k_w + inner_layer.thickness_m / (2.0 * k))
@@ -728,7 +728,8 @@ impl RcGraphState {
             let even = n.is_multiple_of(2);
             let keep = if even { n / 2 } else { n / 2 + 1 };
             halve_last_cap = !even;
-            effective_layers.truncate(keep);
+            let start = n - keep;
+            effective_layers = effective_layers[start..].to_vec();
             if effective_layers.is_empty() {
                 return None;
             }
@@ -741,7 +742,7 @@ impl RcGraphState {
             let layer_area = layer.effective_area(params.boundary_area);
             let raw_cap =
                 layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m * layer_area;
-            let halved = if halve_last_cap && i == n_layers - 1 {
+            let halved = if halve_last_cap && i == 0 {
                 raw_cap / 2.0
             } else {
                 raw_cap
@@ -750,16 +751,16 @@ impl RcGraphState {
             layer_nodes.push(self.alloc_node(cap));
         }
 
-        // Interior zone → innermost layer (film R + half-layer R).
+        // Outermost layer (exterior-facing) → exterior node (film R + half-layer R).
         // Film R folded into the edge, matching OCHRE's Boundary.__init__ which
         // prepends/appends film R to the resistance list.
         let ff = params.framing_factor;
-        let inner = effective_layers[0];
-        let inner_area = inner.effective_area(params.boundary_area);
-        let k_inner = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
-        let r_int =
-            params.r_film_interior / inner_area + inner.thickness_m / (2.0 * k_inner * inner_area);
-        self.add_resistance(params.interior_node, layer_nodes[0], r_int);
+        let outer = effective_layers[0];
+        let outer_area = outer.effective_area(params.boundary_area);
+        let k_outer = parallel_path_conductivity(outer.conductivity_w_m_k, ff);
+        let r_ext =
+            params.r_film_exterior / outer_area + outer.thickness_m / (2.0 * k_outer * outer_area);
+        self.add_resistance(params.exterior_node, layer_nodes[0], r_ext);
 
         // Adjacent layer connections.
         for i in 0..(n_layers - 1) {
@@ -773,17 +774,18 @@ impl RcGraphState {
             self.add_resistance(layer_nodes[i], layer_nodes[i + 1], r);
         }
 
-        // Outermost layer → exterior node (skip for same-zone dead-end fin).
+        // Innermost layer (interior-facing) → interior zone (film R + half-layer R).
+        // Skip for same-zone dead-end fin (no separate exterior node to connect to).
         if !params.same_zone {
-            let outer = effective_layers[n_layers - 1];
-            let outer_area = outer.effective_area(params.boundary_area);
-            let k_outer = parallel_path_conductivity(outer.conductivity_w_m_k, ff);
-            let r_ext = params.r_film_exterior / outer_area
-                + outer.thickness_m / (2.0 * k_outer * outer_area);
-            self.add_resistance(layer_nodes[n_layers - 1], params.exterior_node, r_ext);
+            let inner = effective_layers[n_layers - 1];
+            let inner_area = inner.effective_area(params.boundary_area);
+            let k_inner = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
+            let r_int = params.r_film_interior / inner_area
+                + inner.thickness_m / (2.0 * k_inner * inner_area);
+            self.add_resistance(layer_nodes[n_layers - 1], params.interior_node, r_int);
         }
 
-        Some((layer_nodes[0], layer_nodes[n_layers - 1]))
+        Some((layer_nodes[n_layers - 1], layer_nodes[0]))
     }
 
     /// Build RC nodes from pre-computed OCHRE layer data.
@@ -810,16 +812,19 @@ impl RcGraphState {
         let mut res_list: Vec<f64> = layers.iter().map(|l| l.resistance_m2_k_w).collect();
         let mut nodes = cap_list.len();
 
-        // Step 1: same-zone boundaries — cut in half
+        // Step 1: same-zone boundaries — cut in half, keeping the interior (last) half
         if params.same_zone {
             let new_nodes = nodes / 2;
             if nodes.is_multiple_of(2) {
-                cap_list.truncate(new_nodes);
-                res_list.truncate(new_nodes);
+                let start = nodes - new_nodes;
+                cap_list = cap_list.split_off(start);
+                res_list = res_list.split_off(start);
             } else {
-                cap_list[new_nodes] /= 2.0;
-                cap_list.truncate(new_nodes + 1);
-                res_list.truncate(new_nodes + 1);
+                let keep = new_nodes + 1;
+                let start = nodes - keep;
+                cap_list = cap_list.split_off(start);
+                res_list = res_list.split_off(start);
+                cap_list[0] /= 2.0;
             }
             nodes = cap_list.len();
         }
@@ -854,9 +859,9 @@ impl RcGraphState {
             }
         }
 
-        // Step 4: remove last resistor if same zones
+        // Step 4: remove first resistor if same zones (dead-end exterior side)
         if params.same_zone && !res_list.is_empty() {
-            res_list.pop();
+            res_list.remove(0);
         }
 
         if nodes == 0 {
@@ -877,14 +882,14 @@ impl RcGraphState {
             .collect();
 
         // Step 6: fold film resistances into first/last layer resistors.
-        // Matches OCHRE Boundary.__init__ (lines 396-401) which prepends/appends
-        // film R to the resistance list as edges between zone and outermost layer.
-        if !res_abs.is_empty() {
-            res_abs[0] += params.r_film_interior / params.boundary_area;
-        }
+        // Exterior film folds into the first resistor (exterior-facing edge).
+        // Interior film folds into the last resistor (interior-facing edge).
         if !params.same_zone && !res_abs.is_empty() {
+            res_abs[0] += params.r_film_exterior / params.boundary_area;
+        }
+        if !res_abs.is_empty() {
             let last = res_abs.len() - 1;
-            res_abs[last] += params.r_film_exterior / params.boundary_area;
+            res_abs[last] += params.r_film_interior / params.boundary_area;
         }
 
         // Step 7: create nodes and wire
@@ -894,24 +899,30 @@ impl RcGraphState {
             layer_nodes.push(self.alloc_node(cap));
         }
 
-        // Wire: interior_node --R[0]--> layer[0] --R[1]--> ... --R[n]--> exterior_node
-        if !res_abs.is_empty() {
-            self.add_resistance(params.interior_node, layer_nodes[0], res_abs[0]);
+        // Wire: exterior_node --R[0]--> layer[0] --R[1]--> ... --R[n]--> interior_node
+        // For same-zone, exterior wiring is skipped and res_abs has n_caps entries
+        // (one fewer than non-same-zone). In that case res_abs[0..n_caps-1] are
+        // inter-layer resistors and res_abs[n_caps-1] connects to interior_node.
+        let res_offset = if params.same_zone { 0 } else { 1 };
+        if !params.same_zone && !res_abs.is_empty() {
+            self.add_resistance(params.exterior_node, layer_nodes[0], res_abs[0]);
         }
-        for i in 1..n_caps {
-            if i < res_abs.len() {
-                self.add_resistance(layer_nodes[i - 1], layer_nodes[i], res_abs[i]);
+        for i in 0..(n_caps - 1) {
+            let r_idx = i + res_offset;
+            if r_idx < res_abs.len() {
+                self.add_resistance(layer_nodes[i], layer_nodes[i + 1], res_abs[r_idx]);
             }
         }
-        if !params.same_zone && res_abs.len() > n_caps {
+        let last_r_idx = n_caps - 1 + res_offset;
+        if last_r_idx < res_abs.len() {
             self.add_resistance(
                 layer_nodes[n_caps - 1],
-                params.exterior_node,
-                res_abs[n_caps],
+                params.interior_node,
+                res_abs[last_r_idx],
             );
         }
 
-        Some((layer_nodes[0], layer_nodes[n_caps - 1]))
+        Some((layer_nodes[n_caps - 1], layer_nodes[0]))
     }
 }
 
@@ -1201,19 +1212,22 @@ mod tests {
         let caps = derive_zone_capacitances(&zones);
         // Use low-density materials (density=50 < SPLIT_MIN_DENSITY=100) to avoid auto-splitting,
         // so we can test the same-zone halving logic directly.
-        // layer[1]: density=50, cp=900, thickness=0.10, area=50 → full cap = 225 J/K
+        // layers are exterior→interior: [thin, thick-middle, thin]
+        // With 3 layers, keep last 2 (n/2+1=2): [thick-middle, interior-thin].
+        // The cut-point (thick-middle) is layer[0] of the kept slice → halved cap.
+        // thick-middle: density=50, cp=900, thickness=0.10, area=50 → full cap = 225 J/K
         let layers = vec![
             make_layer(0.05, 0.5, 50.0, 800.0, 0.0),
             make_layer(0.10, 1.0, 50.0, 900.0, 0.0),
             make_layer(0.05, 0.5, 50.0, 800.0, 0.0),
         ];
-        // 3 layers (no splitting) → keep 2 (n/2+1), with layer[1]'s cap halved.
+        // 3 layers (no splitting) → keep last 2 (n/2+1), with middle cap halved.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), layers, 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         assert_eq!(rc.a_c.nrows(), 3);
 
-        // Verify middle layer (second kept, NodeId 1001) has halved capacitance.
-        let middle_cap = rc.node_capacitances[&NodeId(LAYER_NODE_BASE + 1)];
+        // Verify middle layer (first kept, NodeId 1000) has halved capacitance.
+        let middle_cap = rc.node_capacitances[&NodeId(LAYER_NODE_BASE)];
         let expected = 50.0 * 900.0 * 0.10 * 50.0 / 2.0; // 112.5 J/K
         assert!(
             (middle_cap - expected).abs() < 1e-6,
@@ -1825,5 +1839,62 @@ mod tests {
         // 9mm wood: k=0.14, rho=530, cp=900
         let n = split_layer_count(0.009, 0.14, 530.0, 900.0, 3600.0);
         assert_eq!(n, 1, "thin wood should not need splitting");
+    }
+
+    // ── r_zone_to_inner picks correct (last) layer ──────────────────────
+    //
+    // BESTEST 900FF floor: exterior→interior = [insulation, concrete]
+    // r_zone_to_inner = r_film_interior + concrete_thickness / (2 * k_concrete)
+    //                 = 0.16 + 0.080 / (2 * 1.130) ≈ 0.195 m²·K/W
+    // radiation_frac  = r_film_interior / r_zone_to_inner ≈ 0.82
+
+    #[test]
+    fn r_zone_to_inner_uses_innermost_layer() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(48.0),
+            volume_m3: None,
+            mass_multiplier: INTERIOR_MASS_MULTIPLIER,
+        }];
+        let caps = derive_zone_capacitances(&zones);
+        // Exterior→interior: insulation first, concrete (interior-facing) last.
+        let layers = vec![
+            make_layer(1.007, 0.040, 0.0, 0.0, 48.0),  // insulation (exterior)
+            make_layer(0.080, 1.130, 1400.0, 1000.0, 48.0), // concrete (interior)
+        ];
+        let r_film_int = 0.16_f64;
+        let bd = BoundaryInput {
+            area_m2: 48.0,
+            interior_zone_idx: 0,
+            exterior: ExteriorTarget::Ground,
+            material_layers: layers,
+            precomputed_rc: Vec::new(),
+            fallback_r_m2_k_w: 0.0,
+            r_film_interior_m2_k_w: r_film_int,
+            r_film_exterior_m2_k_w: 0.0,
+            framing_factor: None,
+        };
+        let (_rc, diag) = assemble_building_rc(&[bd], 1, &caps).unwrap();
+
+        let bd_diag = &diag.boundaries[0];
+        let r_zone_to_inner = bd_diag
+            .r_zone_to_inner_m2_k_w
+            .expect("floor boundary should have r_zone_to_inner");
+
+        let expected_r = r_film_int + 0.080 / (2.0 * 1.130);
+        assert!(
+            (r_zone_to_inner - expected_r).abs() < 1e-4,
+            "r_zone_to_inner={r_zone_to_inner:.4}, expected {expected_r:.4}"
+        );
+
+        let radiation_frac = r_film_int / r_zone_to_inner;
+        let expected_rad_frac = r_film_int / expected_r;
+        assert!(
+            (radiation_frac - expected_rad_frac).abs() < 1e-4,
+            "radiation_frac={radiation_frac:.4}, expected {expected_rad_frac:.4}"
+        );
+        assert!(
+            (radiation_frac - 0.82).abs() < 0.02,
+            "radiation_frac={radiation_frac:.4} should be ≈ 0.82"
+        );
     }
 }
