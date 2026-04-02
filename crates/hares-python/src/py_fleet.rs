@@ -422,9 +422,11 @@ impl PySteppableFleet {
                     result.set_item("hvac_heating_w", step.hvac_heating_w)?;
                     result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
                     result.set_item("gas_power_w", step.gas_power_w)?;
-                    if let Some(value) = reactive_power_kvar.get(idx).and_then(|v| *v) {
-                        result.set_item("reactive_power_kvar", value)?;
-                    }
+                    let reactive = reactive_power_kvar
+                        .get(idx)
+                        .and_then(|v| *v)
+                        .unwrap_or(0.0);
+                    result.set_item("reactive_power_kvar", reactive)?;
                     for (zone_id, temp_c) in &step.zone_temperatures_c {
                         let key = if zone_id.0 == 0 {
                             "Temperature - Indoor (C)".to_string()

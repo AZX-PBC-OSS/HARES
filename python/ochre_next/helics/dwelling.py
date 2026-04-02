@@ -38,7 +38,18 @@ class HELICSSubscriptionConfig:
 
 
 class HELICSDwelling:
-    """Wrap a single ``PyDwelling`` with HELICS federate lifecycle management."""
+    """Wrap a single ``PyDwelling`` with HELICS federate lifecycle management.
+
+    Args:
+        dwelling: Initialized ``PyDwelling`` instance.
+        fed_name: Unique name for this federate in the HELICS federation.
+        broker_address: Broker address (host or host:port or tcp://host:port).
+        core_type: HELICS core transport (e.g. ``"zmq"``).
+        time_offset_s: HELICS time offset in seconds.  Use a positive offset
+            (e.g. ``1.0``) so that this federate steps *after* an aggregator
+            federate at the same granted time, allowing the aggregator to
+            publish control signals before the dwelling reads them.
+    """
 
     def __init__(
         self,
@@ -46,11 +57,13 @@ class HELICSDwelling:
         fed_name: str,
         broker_address: str = "localhost",
         core_type: str = "zmq",
+        time_offset_s: float = 0.0,
     ) -> None:
         self._dwelling = dwelling
         self._fed_name = fed_name
         self._broker_address = broker_address
         self._core_type = core_type
+        self._time_offset_s = time_offset_s
 
         self._start_time, self._period_s = self._peek_timing(dwelling)
 
@@ -114,6 +127,9 @@ class HELICSDwelling:
     def run(self) -> None:
         """Run HELICS-coupled stepping loop until dwelling timesteps are exhausted."""
         try:
+            if self._pub_power is None or self._pub_reactive is None:
+                raise RuntimeError("Publications are not registered; call register_publications() first")
+
             self._fed.enter_executing_mode()
             for timestamp in self._timesteps:
                 sim_time_s = (timestamp - self._start_time).total_seconds()
@@ -133,11 +149,17 @@ class HELICSDwelling:
 
     def _read_subscriptions(self) -> None:
         if self._sub_voltage is not None and self._sub_voltage.is_updated():
-            self._dwelling.set_grid_voltage(float(self._sub_voltage.double))
+            try:
+                self._dwelling.set_grid_voltage(float(self._sub_voltage.double))
+            except Exception as exc:
+                _LOG.warning("Failed to apply grid voltage: %s", exc)
 
         if self._sub_price is not None and self._sub_price.is_updated():
-            price = float(self._sub_price.double)
-            self._dwelling.set_price_signal({"electricity_price": price})
+            try:
+                price = float(self._sub_price.double)
+                self._dwelling.set_price_signal({"electricity_price": price})
+            except Exception as exc:
+                _LOG.warning("Failed to apply price signal: %s", exc)
 
         if self._sub_control is None or not self._sub_control.is_updated():
             return
@@ -167,14 +189,16 @@ class HELICSDwelling:
                 )
 
     def _publish_results(self) -> None:
-        if self._pub_power is None or self._pub_reactive is None:
-            raise RuntimeError("Publications are not registered; call register_publications() first")
-
         telemetry = self._dwelling.telemetry()
-        self._pub_power.publish(float(telemetry.total_power_kw))
-        self._pub_reactive.publish(float(telemetry.reactive_power_kvar))
+        self._pub_power.publish(float(telemetry.total_power_kw))  # type: ignore[union-attr]
+        self._pub_reactive.publish(float(telemetry.reactive_power_kvar))  # type: ignore[union-attr]
 
     def _peek_timing(self, dwelling: PyDwelling) -> tuple[datetime, float]:
+        """Infer start time and period from the first two timesteps.
+
+        Requires ``dwelling.timesteps()`` to return a fresh iterator per call;
+        the consumed items are chained back so the ``run()`` loop sees all steps.
+        """
         iterator = iter(dwelling.timesteps())
         start_time = next(iterator)
         second_time = next(iterator, None)
@@ -189,7 +213,6 @@ class HELICSDwelling:
                 "Dwelling timesteps() yielded a single timestamp; defaulting HELICS period to 1.0s"
             )
 
-        # Reuse the same iterator stream so prefetched timestamps are not lost.
         self._timesteps: Iterator[datetime] = chain(prefetch, iterator)
 
         return start_time, period_s
@@ -226,6 +249,13 @@ class HELICSDwelling:
             helics.HELICS_PROPERTY_TIME_PERIOD,
             self._period_s,
         )
+
+        if self._time_offset_s != 0.0:
+            self._set_time_property(
+                fedinfo,
+                helics.HELICS_PROPERTY_TIME_OFFSET,
+                self._time_offset_s,
+            )
 
     @staticmethod
     def _set_time_property(

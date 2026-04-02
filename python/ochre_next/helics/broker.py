@@ -110,6 +110,32 @@ def wait_for_broker(broker: helics.HelicsBroker, timeout: float = 60.0) -> None:
     raise TimeoutError(f"Broker did not connect within {timeout:.1f}s")
 
 
+def destroy_broker(broker: helics.HelicsBroker) -> None:
+    """Disconnect a HELICS broker and release library resources.
+
+    This should be called after all federates have disconnected and the
+    co-simulation is complete to avoid leaking ZMQ contexts.
+
+    Args:
+        broker: HELICS broker handle to shut down.
+    """
+    try:
+        if hasattr(broker, "disconnect"):
+            broker.disconnect()
+        elif hasattr(helics, "helicsBrokerDisconnect"):
+            helics.helicsBrokerDisconnect(broker)
+    except Exception:
+        pass
+
+    try:
+        if hasattr(helics, "helicsCloseLibrary"):
+            helics.helicsCloseLibrary()
+        elif hasattr(helics, "close_library"):
+            helics.close_library()
+    except Exception:
+        pass
+
+
 def get_broker_port(broker: helics.HelicsBroker) -> int:
     """Return the TCP port associated with a HELICS broker.
 
@@ -177,6 +203,11 @@ def _set_cached_broker_port(broker: Any, port: int) -> None:
 
 
 def _allocate_ephemeral_port() -> int:
+    # TOCTOU: the socket is closed before the port is returned, so another
+    # process can claim it before create_broker() binds.  The 16-retry loop
+    # in create_broker() mitigates this race; switching to SO_REUSEPORT or
+    # passing the bound socket directly is not possible with the HELICS API.
+    #
     # Using bind(0) once per fresh worker/process can repeatedly return the same
     # first ephemeral port in isolated network namespaces. Probe a random free
     # port first to avoid deterministic collisions under xdist workers.

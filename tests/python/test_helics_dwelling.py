@@ -425,6 +425,7 @@ def test_helics_dwelling_finalize_on_step_exception(monkeypatch: pytest.MonkeyPa
 
     dwelling = _FakeDwelling(fake_helics.log, raise_on_step=1)
     orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
 
     with pytest.raises(RuntimeError, match="synthetic failure"):
         orchestrator.run()

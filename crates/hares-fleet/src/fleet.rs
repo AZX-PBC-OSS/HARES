@@ -231,18 +231,24 @@ impl Fleet {
             .par_iter()
             .map(|entry| {
                 let outcome = match panic::catch_unwind(AssertUnwindSafe(|| {
-                    let outcome = run_entry(entry);
+                    let result = run_entry(entry);
                     if let Some(cb) = &progress {
                         let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         cb(done, total);
                     }
-                    outcome
+                    result
                 })) {
                     Ok(result) => result,
-                    Err(payload) => Err(SimError::Panic {
-                        bldg_id: entry.config.bldg_id,
-                        message: panic_payload_to_string(payload),
-                    }),
+                    Err(payload) => {
+                        // Increment progress even on panic so the bar reaches 100%.
+                        if progress.is_some() {
+                            completed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(SimError::Panic {
+                            bldg_id: entry.config.bldg_id,
+                            message: panic_payload_to_string(payload),
+                        })
+                    }
                 };
 
                 if let Err(err) = &outcome {
@@ -329,6 +335,30 @@ impl SteppableFleet {
         let first = &dwellings[0].clock;
         let total_steps = first.total_steps();
         let time_res_s = first.time_res.num_milliseconds() as f64 / 1000.0;
+
+        for (i, dwelling) in dwellings.iter().enumerate().skip(1) {
+            if dwelling.clock.total_steps() != total_steps {
+                build_errors.push(DwellingBuildError {
+                    bldg_id: dwelling.bldg_id,
+                    message: format!(
+                        "dwelling {} total_steps={} differs from dwelling 0 total_steps={}",
+                        i,
+                        dwelling.clock.total_steps(),
+                        total_steps,
+                    ),
+                });
+            }
+            let other_res = dwelling.clock.time_res.num_milliseconds() as f64 / 1000.0;
+            if (other_res - time_res_s).abs() > f64::EPSILON {
+                build_errors.push(DwellingBuildError {
+                    bldg_id: dwelling.bldg_id,
+                    message: format!(
+                        "dwelling {} time_res={other_res}s differs from dwelling 0 time_res={time_res_s}s",
+                        i,
+                    ),
+                });
+            }
+        }
 
         Ok((
             Self {
@@ -507,7 +537,7 @@ fn default_resstock_sim_config() -> SimulationConfig {
         time_res: Duration::minutes(1),
         output_verbosity: 0,
         output_path: None,
-        write_output: true,
+        write_output: false,
         output_format: OutputFormat::Csv,
         output_chunk_size: 10_000,
         setpoint_deadband_c: None,

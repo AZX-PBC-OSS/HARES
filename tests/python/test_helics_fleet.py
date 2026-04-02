@@ -257,12 +257,21 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
         "grid/fleet_1/aggregate_power_kw",
         "grid/fleet_1/aggregate_reactive_kvar",
         "grid/fleet_1/dwelling_0/total_power_kw",
+        "grid/fleet_1/dwelling_0/reactive_power_kvar",
         "grid/fleet_1/dwelling_1/total_power_kw",
+        "grid/fleet_1/dwelling_1/reactive_power_kvar",
         "grid/fleet_1/dwelling_2/total_power_kw",
+        "grid/fleet_1/dwelling_2/reactive_power_kvar",
     ]
 
+    per_dwelling_topics = [
+        "grid/voltage/dwelling_0",
+        "grid/voltage/dwelling_1",
+        "grid/voltage/dwelling_2",
+    ]
     subs = orchestrator.register_subscriptions(
         voltage_topic="grid/voltage",
+        per_dwelling_voltage_topics=per_dwelling_topics,
         control_topic="grid/control",
     )
     assert [(s.key, s.type) for s in subs] == [
@@ -287,8 +296,14 @@ def test_helics_fleet_run_loop_aggregate_publish_and_routing(monkeypatch: pytest
     fleet = _FakeFleet(fake_helics.log)
     orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
     orchestrator.register_publications()
+    per_dwelling_topics = [
+        "grid/voltage/dwelling_0",
+        "grid/voltage/dwelling_1",
+        "grid/voltage/dwelling_2",
+    ]
     orchestrator.register_subscriptions(
         voltage_topic="grid/voltage",
+        per_dwelling_voltage_topics=per_dwelling_topics,
         control_topic="grid/control",
     )
 
@@ -333,8 +348,17 @@ def test_helics_fleet_run_loop_aggregate_publish_and_routing(monkeypatch: pytest
         [0.6, 0.75]
     )
     assert fed.publications["fleet_1/dwelling_0/total_power_kw"].published == [1.0, 1.5]
+    assert fed.publications["fleet_1/dwelling_0/reactive_power_kvar"].published == pytest.approx(
+        [0.1, 0.15]
+    )
     assert fed.publications["fleet_1/dwelling_1/total_power_kw"].published == [2.0, 2.5]
+    assert fed.publications["fleet_1/dwelling_1/reactive_power_kvar"].published == pytest.approx(
+        [0.2, 0.25]
+    )
     assert fed.publications["fleet_1/dwelling_2/total_power_kw"].published == [3.0, 3.5]
+    assert fed.publications["fleet_1/dwelling_2/reactive_power_kvar"].published == pytest.approx(
+        [0.3, 0.35]
+    )
 
     assert fed.disconnected is True
 

@@ -23,7 +23,16 @@ _LOG = logging.getLogger(__name__)
 
 
 class HELICSFleet:
-    """Wrap a ``PySteppableFleet`` as a single HELICS value federate."""
+    """Wrap a ``PySteppableFleet`` as a single HELICS value federate.
+
+    Args:
+        fleet: Initialized ``PySteppableFleet`` instance.
+        fed_name: Unique name for this federate in the HELICS federation.
+        broker_address: Broker address (host or host:port or tcp://host:port).
+        core_type: HELICS core transport (e.g. ``"zmq"``).
+        time_offset_s: HELICS time offset in seconds.  Use a positive offset
+            so this federate steps after an aggregator at the same granted time.
+    """
 
     def __init__(
         self,
@@ -31,11 +40,13 @@ class HELICSFleet:
         fed_name: str,
         broker_address: str = "localhost",
         core_type: str = "zmq",
+        time_offset_s: float = 0.0,
     ) -> None:
         self._fleet = fleet
         self._fed_name = fed_name
         self._broker_address = broker_address
         self._core_type = core_type
+        self._time_offset_s = time_offset_s
 
         self._time_res_s = float(fleet.time_res_s())
         self._total_steps = int(fleet.total_steps())
@@ -51,6 +62,7 @@ class HELICSFleet:
         self._pub_aggregate_power: HelicsPublicationLike | None = None
         self._pub_aggregate_reactive: HelicsPublicationLike | None = None
         self._pub_dwelling_power: list[HelicsPublicationLike] = []
+        self._pub_dwelling_reactive: list[HelicsPublicationLike] = []
 
         self._sub_voltage_all: HelicsSubscriptionLike | None = None
         self._sub_voltage_dwelling: list[HelicsSubscriptionLike] = []
@@ -70,16 +82,19 @@ class HELICSFleet:
         self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_key, "double")
 
         self._pub_dwelling_power = []
+        self._pub_dwelling_reactive = []
         configs = [
             HELICSPublicationConfig(key=aggregate_power_key),
             HELICSPublicationConfig(key=aggregate_reactive_key),
         ]
 
         for dwelling_index in range(self._n_dwellings):
-            key = f"{base}dwelling_{dwelling_index}/total_power_kw"
-            publication = self._fed.register_publication(key, "double")
-            self._pub_dwelling_power.append(publication)
-            configs.append(HELICSPublicationConfig(key=key))
+            power_key = f"{base}dwelling_{dwelling_index}/total_power_kw"
+            reactive_key = f"{base}dwelling_{dwelling_index}/reactive_power_kvar"
+            self._pub_dwelling_power.append(self._fed.register_publication(power_key, "double"))
+            self._pub_dwelling_reactive.append(self._fed.register_publication(reactive_key, "double"))
+            configs.append(HELICSPublicationConfig(key=power_key))
+            configs.append(HELICSPublicationConfig(key=reactive_key))
 
         self._publication_configs = configs
         return list(self._publication_configs)
@@ -87,22 +102,37 @@ class HELICSFleet:
     def register_subscriptions(
         self,
         voltage_topic: str | None = None,
+        per_dwelling_voltage_topics: list[str] | None = None,
         control_topic: str | None = None,
     ) -> list[HELICSSubscriptionConfig]:
-        """Register fleet-wide/per-dwelling voltage and control subscriptions."""
+        """Register fleet-wide/per-dwelling voltage and control subscriptions.
+
+        Args:
+            voltage_topic: Fleet-wide voltage topic (applied to all dwellings).
+            per_dwelling_voltage_topics: Explicit per-dwelling voltage topics.
+                Length must match the fleet size.  These are only registered when
+                provided — they are **not** auto-derived from ``voltage_topic``.
+            control_topic: JSON control topic for equipment setpoints.
+        """
         configs: list[HELICSSubscriptionConfig] = []
 
         self._sub_voltage_dwelling = []
         if voltage_topic is not None:
             self._sub_voltage_all = self._fed.register_subscription(voltage_topic, "double")
             configs.append(HELICSSubscriptionConfig(key=voltage_topic, type="double"))
-            for dwelling_index in range(self._n_dwellings):
-                key = f"{voltage_topic}/dwelling_{dwelling_index}"
+        else:
+            self._sub_voltage_all = None
+
+        if per_dwelling_voltage_topics is not None:
+            if len(per_dwelling_voltage_topics) != self._n_dwellings:
+                raise ValueError(
+                    f"per_dwelling_voltage_topics length ({len(per_dwelling_voltage_topics)}) "
+                    f"must match fleet size ({self._n_dwellings})"
+                )
+            for key in per_dwelling_voltage_topics:
                 subscription = self._fed.register_subscription(key, "double")
                 self._sub_voltage_dwelling.append(subscription)
                 configs.append(HELICSSubscriptionConfig(key=key, type="double"))
-        else:
-            self._sub_voltage_all = None
 
         if control_topic is not None:
             self._sub_control = self._fed.register_subscription(control_topic, "string")
@@ -116,6 +146,9 @@ class HELICSFleet:
     def run(self) -> None:
         """Run HELICS-coupled stepping loop until fleet timesteps are exhausted."""
         try:
+            if self._pub_aggregate_power is None or self._pub_aggregate_reactive is None:
+                raise RuntimeError("Publications are not registered; call register_publications() first")
+
             self._fed.enter_executing_mode()
             sim_time_s = 0.0
             step_count = 0
@@ -185,9 +218,6 @@ class HELICSFleet:
                 )
 
     def _publish_results(self) -> None:
-        if self._pub_aggregate_power is None or self._pub_aggregate_reactive is None:
-            raise RuntimeError("Publications are not registered; call register_publications() first")
-
         aggregate_power_kw = 0.0
         aggregate_reactive_kvar = 0.0
         for dwelling_index in range(self._n_dwellings):
@@ -200,9 +230,11 @@ class HELICSFleet:
 
             if dwelling_index < len(self._pub_dwelling_power):
                 self._pub_dwelling_power[dwelling_index].publish(power_kw)
+            if dwelling_index < len(self._pub_dwelling_reactive):
+                self._pub_dwelling_reactive[dwelling_index].publish(reactive_kvar)
 
-        self._pub_aggregate_power.publish(aggregate_power_kw)
-        self._pub_aggregate_reactive.publish(aggregate_reactive_kvar)
+        self._pub_aggregate_power.publish(aggregate_power_kw)  # type: ignore[union-attr]
+        self._pub_aggregate_reactive.publish(aggregate_reactive_kvar)  # type: ignore[union-attr]
 
     @staticmethod
     def _create_federate_info() -> HelicsFederateInfoLike:
@@ -237,6 +269,13 @@ class HELICSFleet:
             helics.HELICS_PROPERTY_TIME_PERIOD,
             self._time_res_s,
         )
+
+        if self._time_offset_s != 0.0:
+            self._set_time_property(
+                fedinfo,
+                helics.HELICS_PROPERTY_TIME_OFFSET,
+                self._time_offset_s,
+            )
 
     @staticmethod
     def _set_time_property(
@@ -301,7 +340,10 @@ class HELICSFleet:
             return value < 0
         if not isinstance(value, str):
             return False
-        return value.startswith("-") and value[1:].isdigit()
+        try:
+            return int(value) < 0
+        except ValueError:
+            return False
 
     @staticmethod
     def _iter_equipment_entries(body: Any) -> list[tuple[str, dict[str, Any]]]:
