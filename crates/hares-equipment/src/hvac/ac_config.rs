@@ -20,7 +20,7 @@ pub(super) const DEFAULT_ROOM_AC_EIR_CURVE: [f64; 6] =
     [2.287, -0.1732, 0.004745, 0.01662, 0.000484, -0.001306];
 
 pub(super) fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(14);
+    let mut telemetry = Telemetry::with_capacity(16);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::SENSIBLE_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_COOLING_W, 0.0);
@@ -35,6 +35,8 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::APPARATUS_DEW_POINT_C, 0.0);
     telemetry.insert(tk::BYPASS_FACTOR, 0.0);
     telemetry.insert(tk::MAX_CAPACITY_FRACTION, 1.0);
+    telemetry.insert(tk::HEATING_SETPOINT_C, 0.0);
+    telemetry.insert(tk::COOLING_SETPOINT_C, 0.0);
     telemetry
 }
 
@@ -109,6 +111,16 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             name: tk::MAX_CAPACITY_FRACTION.to_string(),
             unit: "-".to_string(),
             description: "External max-capacity fraction control [0..1]".to_string(),
+        },
+        TelemetryField {
+            name: tk::HEATING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active heating setpoint temperature".to_string(),
+        },
+        TelemetryField {
+            name: tk::COOLING_SETPOINT_C.to_string(),
+            unit: "C".to_string(),
+            description: "Active cooling setpoint temperature".to_string(),
         },
     ]
 }

@@ -872,6 +872,9 @@ impl CoolingCore {
             .set(tk::BYPASS_FACTOR, self.last_bypass_factor);
         self.telemetry
             .set(tk::MAX_CAPACITY_FRACTION, self.hvac.max_capacity_fraction);
+        let sp = self.hvac.effective_setpoints();
+        self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
+        self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
@@ -1300,6 +1303,8 @@ impl CoolingCore {
         self.telemetry.insert(tk::SHR, decoded.shr);
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode_code);
+        // Telemetry fields are recomputed on next step; not restored from checkpoint.
+        // Setpoints, COP, fan_kw, etc. will be updated on the next step() call.
         self.core_output = CoreOutput::default();
 
         Ok(())

@@ -4463,6 +4463,7 @@ mod tests {
                   <SystemIdentifier id="SupplyDuct"/>
                   <DuctType>supply</DuctType>
                   <DuctSurfaceArea>50</DuctSurfaceArea>
+                  <DuctLocation>conditioned space</DuctLocation>
                 </Ducts>
               </AirDistribution>
             </DistributionSystemType>
@@ -4473,15 +4474,12 @@ mod tests {
   </Building>
 </HPXML>"#;
         let building = parse_building(xml).unwrap();
-        let all_ducts: Vec<_> = building
+        let supply = building
             .zones
             .iter()
-            .flat_map(|z| z.duct_systems.iter().map(move |d| (&z.zone_type, d)))
-            .collect();
-        assert!(!all_ducts.is_empty(), "expected at least one duct; zones: {:?}",
-            building.zones.iter().map(|z| (&z.zone_type, z.duct_systems.len())).collect::<Vec<_>>());
-        let supply = all_ducts.iter().find(|(_, d)| d.duct_type == DuctType::Supply)
-            .expect("supply duct expected in some zone");
-        assert_eq!(supply.1.leakage_fraction, None, "CFM25 cannot be converted to fraction; must be None");
+            .flat_map(|z| &z.duct_systems)
+            .find(|d| d.duct_type == DuctType::Supply)
+            .expect("supply duct expected in conditioned zone");
+        assert_eq!(supply.leakage_fraction, None, "CFM25 cannot be converted to fraction; must be None");
     }
 }

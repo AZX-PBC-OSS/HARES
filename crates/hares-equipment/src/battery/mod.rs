@@ -1059,6 +1059,8 @@ impl Equipment for Battery {
             .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_fraction() * 100.0);
         self.telemetry.set(tk::TERMINAL_VOLTAGE_V, terminal_v);
         self.telemetry.set(tk::CURRENT_A, current_a);
+        self.telemetry
+            .set(tk::OPERATING_MODE, self.mode.as_code());
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Bidirectional(port_power_kw)),
@@ -1172,6 +1174,11 @@ impl Equipment for Battery {
         );
         self.telemetry
             .set(tk::STANDBY_POWER_W, self.standby_power_w);
+        self.telemetry
+            .set(tk::OPERATING_MODE, self.mode.as_code());
+        // Telemetry fields are recomputed on next step; not restored from checkpoint.
+        // active_power_kw, ohmic_loss_w, terminal_voltage_v, current_a reset to idle
+        // defaults above and will be updated on the next step() call.
         self.core_output = CoreOutput::default();
         Ok(())
     }
@@ -1280,7 +1287,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 // ---------------------------------------------------------------------------
 
 fn default_telemetry() -> Telemetry {
-    let mut t = Telemetry::with_capacity(12);
+    let mut t = Telemetry::with_capacity(13);
     t.insert(tk::SOC, 0.0);
     t.insert(tk::ACTIVE_POWER_KW, 0.0);
     t.insert(tk::OHMIC_LOSS_W, 0.0);
@@ -1293,6 +1300,7 @@ fn default_telemetry() -> Telemetry {
     t.insert(tk::CAPACITY_FADE_PCT, 0.0);
     t.insert(tk::TERMINAL_VOLTAGE_V, 0.0);
     t.insert(tk::CURRENT_A, 0.0);
+    t.insert(tk::OPERATING_MODE, 0.0);
     t
 }
 
@@ -1361,6 +1369,12 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
             name: tk::CURRENT_A.to_string(),
             unit: "A".to_string(),
             description: "Pack current (positive=charging, negative=discharging)".to_string(),
+        },
+        TelemetryField {
+            name: tk::OPERATING_MODE.to_string(),
+            unit: "enum".to_string(),
+            description: "Operating mode code: 0=Off, 4=Standby, 5=Charging, 6=Discharging"
+                .to_string(),
         },
     ]
 }
