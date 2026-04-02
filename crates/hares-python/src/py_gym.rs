@@ -17,6 +17,7 @@ struct StepResult {
     terminated: bool,
     truncated: bool,
     info: HashMap<String, f64>,
+    error_msg: Option<String>,
 }
 
 fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Vec<f64>, String> {
@@ -94,15 +95,30 @@ pub fn batch_step_py(
                 let dwelling = unsafe { &**ptr };
 
                 let mut info = HashMap::new();
-                match dwelling.step_core() {
+                let step_result = std::panic::catch_unwind(
+                    std::panic::AssertUnwindSafe(|| dwelling.step_core_string()),
+                );
+                let step_result = match step_result {
+                    Ok(inner) => inner,
+                    Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<String>()
+                            .map(|s| s.as_str())
+                            .or_else(|| payload.downcast_ref::<&str>().copied())
+                            .unwrap_or("unknown panic");
+                        Err(format!("HARES internal panic: {msg}"))
+                    }
+                };
+                match step_result {
                     Ok(step) => {
-                        let obs = match observation_for_fields(dwelling, &observation_fields) {
-                            Ok(o) => o,
-                            Err(_) => {
-                                info.insert("observation_error".to_string(), 1.0);
-                                dwelling.observation().unwrap_or_default()
-                            }
-                        };
+                        let (obs, obs_err) =
+                            match observation_for_fields(dwelling, &observation_fields) {
+                                Ok(o) => (o, None),
+                                Err(e) => {
+                                    info.insert("observation_error".to_string(), 1.0);
+                                    (dwelling.observation().unwrap_or_default(), Some(e))
+                                }
+                            };
                         let reward = -step.net_electric_power_kw;
                         info.insert(
                             "net_electric_power_kw".to_string(),
@@ -114,17 +130,18 @@ pub fn batch_step_py(
                             terminated: false,
                             truncated: false,
                             info,
+                            error_msg: obs_err,
                         }
                     }
                     Err(e) => {
                         info.insert("error".to_string(), 1.0);
-                        let _ = e;
                         StepResult {
                             obs: Vec::new(),
                             reward: 0.0,
                             terminated: true,
                             truncated: false,
                             info,
+                            error_msg: Some(e),
                         }
                     }
                 }
@@ -140,7 +157,14 @@ pub fn batch_step_py(
         d.set_item("reward", item.reward)?;
         d.set_item("terminated", item.terminated)?;
         d.set_item("truncated", item.truncated)?;
-        d.set_item("info", item.info)?;
+        let info_dict = PyDict::new(py);
+        for (k, v) in &item.info {
+            info_dict.set_item(k, v)?;
+        }
+        if let Some(ref msg) = item.error_msg {
+            info_dict.set_item("error_msg", msg)?;
+        }
+        d.set_item("info", info_dict)?;
         out.push(d.unbind().into());
     }
 

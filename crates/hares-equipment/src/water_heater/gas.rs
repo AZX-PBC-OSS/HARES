@@ -540,6 +540,7 @@ impl Equipment for GasWH {
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
+        self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
         self.telemetry.set(
             tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {
@@ -734,7 +735,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(10);
+    let mut telemetry = Telemetry::with_capacity(12);
     telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
     telemetry.insert(tk::BURNER_POWER_W, 0.0);
     telemetry.insert(tk::PILOT_POWER_W, 0.0);
@@ -746,6 +747,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
     telemetry.insert(tk::UNMET_LOAD_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::OUTLET_TEMP_C, 0.0);
     telemetry
 }
 
@@ -805,6 +807,11 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "0=Off, 1=Heating".to_string(),
+        },
+        TelemetryField {
+            name: tk::OUTLET_TEMP_C.to_string(),
+            unit: "C".to_string(),
+            description: "Hot water outlet temperature delivered to fixture".to_string(),
         },
     ];
     for i in 0..n_nodes {
@@ -1548,6 +1555,50 @@ mod tests {
             (reported_fuel_w - burner_input_w * 0.62).abs() > 100.0
                 || reported_fuel_w == 0.0,
             "fuel consumption must NOT be derived from EF=0.62 when conversion_efficiency is set"
+        );
+    }
+
+    #[test]
+    fn outlet_temp_c_telemetry_present_with_draw() {
+        let cfg = config_with_extras(&[
+            ("initial_tank_temp_c", Some(55.0.into())),
+            ("setpoint_c", Some(55.0.into())),
+            ("draw_flow_rate_kg_s", Some(0.1.into())),
+        ]);
+        let e = env(21.0);
+
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).expect("OUTLET_TEMP_C must be present");
+        assert!(
+            outlet > 0.0,
+            "OUTLET_TEMP_C should be > 0 when there is a draw, got {outlet}"
+        );
+    }
+
+    #[test]
+    fn outlet_temp_c_telemetry_present_without_draw() {
+        let cfg = config_with_extras(&[
+            ("initial_tank_temp_c", Some(55.0.into())),
+            ("draw_flow_rate_kg_s", Some(0.0.into())),
+        ]);
+        let e = env(21.0);
+
+        let mut eq = GasWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).expect("OUTLET_TEMP_C must be present");
+        let tank_avg = eq.telemetry().get(tk::TANK_AVG_TEMP_C).expect("TANK_AVG_TEMP_C must be present");
+        assert!(
+            (outlet - tank_avg).abs() < 1.0,
+            "OUTLET_TEMP_C should equal tank avg temp with no draw: outlet={outlet}, tank_avg={tank_avg}"
         );
     }
 }

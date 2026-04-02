@@ -893,6 +893,7 @@ impl Equipment for Battery {
 
         // -- Apply self-discharge --
         // Self-discharge: absolute SOC loss per OCHRE Battery.py:337-338, matching Li-ion calendar aging model.
+        let soc_before = self.soc; // true pre-step SOC before self-discharge
         self.soc -= self.self_discharge_rate_per_s * dt_s;
         self.soc = self.soc.clamp(0.0, 1.0);
 
@@ -905,8 +906,7 @@ impl Equipment for Battery {
         } else {
             power_kw / self.discharge_efficiency
         };
-
-        let soc_before = self.soc;
+        let soc_before_charge = self.soc; // post-self-discharge, pre-charge/discharge
         let energy_delta_kwh = dc_power_kw * dt_hours;
         self.soc += energy_delta_kwh / self.capacity_kwh;
         self.soc = self.soc.clamp(eff_min_soc, eff_max_soc);
@@ -914,7 +914,7 @@ impl Equipment for Battery {
         // Recompute actual grid power and ohmic losses if SOC was clamped.
         // When SOC hits a bound, the actual energy transferred differs from
         // the target, so we must recompute losses from the actual current.
-        let actual_soc_delta = self.soc - soc_before;
+        let actual_soc_delta = self.soc - soc_before_charge;
         let actual_cell_energy_kwh = actual_soc_delta * self.capacity_kwh;
         let (actual_power_kw, ohmic_loss_w) =
             if actual_soc_delta.abs() < f64::EPSILON && power_kw.abs() > IDLE_POWER_THRESHOLD_KW {
@@ -1014,11 +1014,14 @@ impl Equipment for Battery {
         self.rainflow.push(self.soc);
 
         // -- Degradation per-timestep accumulation --
+        // Use pre-step SOC snapshot so that degradation sees the SOC the cell
+        // was at *before* the charge/discharge delta, matching the physical
+        // voltage the cell experienced during the interval.
         {
             let cell_temp_k = self.cell_temp_c + 273.15;
-            let v_oc = self.ocv_table.voltage_at_soc(self.soc);
+            let v_oc_before = self.ocv_table.voltage_at_soc(soc_before);
             self.degradation
-                .accumulate(dt_s, cell_temp_k, v_oc, self.soc);
+                .accumulate(dt_s, cell_temp_k, v_oc_before, soc_before);
         }
 
         // -- Daily degradation update --

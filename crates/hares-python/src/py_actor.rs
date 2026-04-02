@@ -247,6 +247,12 @@ pub enum PySignal {
         departure_hour: f64,
         target_soc: f64,
     },
+    EvAwayCharge {
+        power_kw: f64,
+    },
+    EventDelay {
+        delay_s: f64,
+    },
 }
 
 /// Strongly typed DR levels.
@@ -365,6 +371,8 @@ impl PySignal {
                 departure_hour,
                 target_soc,
             },
+            PySignal::EvAwayCharge { power_kw } => ControlSignal::EvAwayCharge { power_kw },
+            PySignal::EventDelay { delay_s } => ControlSignal::EventDelay { delay_s },
         }
     }
 }
@@ -570,6 +578,76 @@ impl PyDispatchRequest {
         })
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (target, state, priority=None))]
+    fn ev_plug_in(
+        target: String,
+        state: PyEvConnectionState,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::EvPlugIn { state },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, kwh, priority=None))]
+    fn ev_drive(target: String, kwh: f64, priority: Option<PyPriority>) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::EvDrive { kwh },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, power_kw, priority=None))]
+    fn ev_away_charge(
+        target: String,
+        power_kw: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::EvAwayCharge { power_kw },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, departure_hour, target_soc, priority=None))]
+    fn ev_set_ready_by(
+        target: String,
+        departure_hour: f64,
+        target_soc: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::EvSetReadyBy {
+                departure_hour,
+                target_soc,
+            },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (target, delay_s, priority=None))]
+    fn event_delay(
+        target: String,
+        delay_s: f64,
+        priority: Option<PyPriority>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::EventDelay { delay_s },
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "DispatchRequest(target={:?}, signal={:?}, priority={:?})",
@@ -673,6 +751,16 @@ impl PySignal {
             departure_hour,
             target_soc,
         }
+    }
+
+    #[staticmethod]
+    fn ev_away_charge(power_kw: f64) -> Self {
+        PySignal::EvAwayCharge { power_kw }
+    }
+
+    #[staticmethod]
+    fn event_delay(delay_s: f64) -> Self {
+        PySignal::EventDelay { delay_s }
     }
 
     fn __repr__(&self) -> String {

@@ -1828,7 +1828,10 @@ fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
         Some("ft2") | Some("ft^2") | Some("ftsq") | Some("ftsq.") | Some("square feet") => {
             conv::area_ft2_to_m2(value)
         }
-        Some(_) => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized area unit; returning raw value");
+            value
+        }
         None => {
             tracing::debug!(
                 value,
@@ -1842,7 +1845,10 @@ fn convert_area_to_m2(value: f64, units: Option<&str>) -> f64 {
 fn convert_volume_to_m3(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("ft3") | Some("ft^3") | Some("cubic feet") => conv::volume_ft3_to_m3(value),
-        Some(_) => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized volume unit; returning raw value");
+            value
+        }
         None => {
             tracing::warn!(
                 value,
@@ -1858,7 +1864,10 @@ fn convert_u_to_w_m2_k(value: f64, units: Option<&str>) -> f64 {
         Some("btu/hr-ft2-f") | Some("btu/hr-ft^2-f") | Some("btu/(h*ft2*f)") => {
             conv::u_value_ip_to_si(value)
         }
-        Some(_) => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized U-value unit; returning raw value");
+            value
+        }
         None => {
             tracing::debug!(
                 value,
@@ -1874,7 +1883,10 @@ fn convert_r_to_m2_k_w(value: f64, units: Option<&str>) -> f64 {
         Some("hr-ft2-f/btu") | Some("hr-ft^2-f/btu") | Some("h*ft2*f/btu") => {
             conv::r_value_ip_to_si(value)
         }
-        Some(_) => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized R-value unit; returning raw value");
+            value
+        }
         None => {
             tracing::debug!(
                 value,
@@ -1909,7 +1921,10 @@ fn convert_length_to_m(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("in") | Some("inch") | Some("inches") => conv::length_in_to_m(value),
         Some("ft") | Some("feet") => conv::length_ft_to_m(value),
-        Some(_) => value,
+        Some(unit) => {
+            tracing::warn!(unit, value, "unrecognized length unit; returning raw value");
+            value
+        }
         None => {
             tracing::debug!(
                 value,
@@ -4388,5 +4403,85 @@ mod tests {
         assert!((c - 100.0).abs() < 0.1);
         let c2 = super::convert_temperature_to_c(25.0, Some("C"));
         assert!((c2 - 25.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_temperature_none_assumes_ip() {
+        let c = super::convert_temperature_to_c(32.0, None);
+        assert!((c - 0.0).abs() < 0.1, "None units should assume F: 32F == 0C, got {c}");
+    }
+
+    #[test]
+    fn convert_area_unrecognized_unit_returns_raw() {
+        let val = super::convert_area_to_m2(5.0, Some("bogus"));
+        assert!((val - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_u_value_unrecognized_unit_returns_raw() {
+        let val = super::convert_u_to_w_m2_k(2.0, Some("bogus"));
+        assert!((val - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn convert_r_value_unrecognized_unit_returns_raw() {
+        let val = super::convert_r_to_m2_k_w(10.0, Some("bogus"));
+        assert!((val - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn duct_leakage_cfm25_rejected() {
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <SiteType>suburban</SiteType>
+        </Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea>1000</ConditionedFloorArea>
+          <ConditionedBuildingVolume>8000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure/>
+      <Systems>
+        <HVAC>
+          <HVACDistribution>
+            <SystemIdentifier id="HVACDist1"/>
+            <DistributionSystemType>
+              <AirDistribution>
+                <DuctLeakageMeasurement>
+                  <SystemIdentifier id="LeakCFM25"/>
+                  <DuctType>supply</DuctType>
+                  <DuctLeakage>
+                    <Value>100</Value>
+                    <Units>CFM25</Units>
+                  </DuctLeakage>
+                </DuctLeakageMeasurement>
+                <Ducts>
+                  <SystemIdentifier id="SupplyDuct"/>
+                  <DuctType>supply</DuctType>
+                  <DuctSurfaceArea>50</DuctSurfaceArea>
+                </Ducts>
+              </AirDistribution>
+            </DistributionSystemType>
+          </HVACDistribution>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+        let building = parse_building(xml).unwrap();
+        let all_ducts: Vec<_> = building
+            .zones
+            .iter()
+            .flat_map(|z| z.duct_systems.iter().map(move |d| (&z.zone_type, d)))
+            .collect();
+        assert!(!all_ducts.is_empty(), "expected at least one duct; zones: {:?}",
+            building.zones.iter().map(|z| (&z.zone_type, z.duct_systems.len())).collect::<Vec<_>>());
+        let supply = all_ducts.iter().find(|(_, d)| d.duct_type == DuctType::Supply)
+            .expect("supply duct expected in some zone");
+        assert_eq!(supply.1.leakage_fraction, None, "CFM25 cannot be converted to fraction; must be None");
     }
 }

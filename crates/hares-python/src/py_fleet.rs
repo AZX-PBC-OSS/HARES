@@ -421,6 +421,7 @@ impl PySteppableFleet {
                     result.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
                     result.set_item("hvac_heating_w", step.hvac_heating_w)?;
                     result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
+                    result.set_item("gas_power_w", step.gas_power_w)?;
                     if let Some(value) = reactive_power_kvar.get(idx).and_then(|v| *v) {
                         result.set_item("reactive_power_kvar", value)?;
                     }

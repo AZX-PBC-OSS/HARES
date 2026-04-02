@@ -3,8 +3,6 @@
 //! Column naming follows OCHRE conventions: `"{Name} {Metric} ({Unit})"`.
 //! Multi-instance equipment includes an instance qualifier: `"Battery #1 SOC (-)"`.
 
-use std::sync::Arc;
-
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::hpxml::EquipmentSpec;
@@ -237,7 +235,10 @@ pub fn build_schema(equipment_list: &[EquipmentSpec], verbosity: u8) -> Schema {
 }
 
 /// Returns column names that should be present at a given verbosity level
-/// for use in tests. These are the static (equipment-independent) columns.
+/// for use in tests. These are the static (equipment-independent) columns only;
+/// per-equipment columns (power, mode, SOC, energy, schedule, etc.) are
+/// generated dynamically by `build_schema` based on the equipment list and
+/// are not covered here.
 pub fn expected_columns_at_verbosity(verbosity: u8) -> Vec<&'static str> {
     let mut cols = vec![TIMESTAMP_COL];
     cols.extend_from_slice(LEVEL_0_COLUMNS);
@@ -333,28 +334,6 @@ fn instance_qualified_names(specs: &[EquipmentSpec]) -> Vec<(String, FuelType)> 
         }
     }
     result
-}
-
-/// Returns a new schema containing only fields present at the given
-/// verbosity level, by filtering `full_schema` against the field list
-/// that `build_schema` would produce.
-#[allow(dead_code)] // Used when filtering schemas by verbosity level
-pub(crate) fn filter_schema_to_verbosity(full_schema: &Schema, verbosity: u8) -> Schema {
-    let reference = build_schema(&[], verbosity);
-    let ref_names: std::collections::HashSet<&str> = reference
-        .fields()
-        .iter()
-        .map(|f| f.name().as_str())
-        .collect();
-
-    let fields: Vec<Arc<Field>> = full_schema
-        .fields()
-        .iter()
-        .filter(|f| ref_names.contains(f.name().as_str()))
-        .cloned()
-        .collect();
-
-    Schema::new_with_metadata(fields, full_schema.metadata().clone())
 }
 
 fn is_hvac_or_wh(name: &str) -> bool {

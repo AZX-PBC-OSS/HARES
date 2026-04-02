@@ -68,6 +68,11 @@ pub struct IdealHvac {
     capacity_min_w: f64,
 }
 
+/// Serializable snapshot of [`IdealHvac`] mutable fields.
+///
+/// `time_at_current_speed_s` is intentionally absent: IdealHvac is single-capacity
+/// (or solver-driven ideal capacity) with no multi-speed staging, so speed-based
+/// minimum-runtime tracking does not apply.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct IdealHvacState {
     runtime_setpoints: Option<RuntimeSetpointOverride>,

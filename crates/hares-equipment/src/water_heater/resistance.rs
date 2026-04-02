@@ -557,6 +557,7 @@ impl Equipment for ResistanceWH {
         self.telemetry.set(tk::ELECTRIC_POWER_W, electric_power_w);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
+        self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
         self.telemetry.set(
             tk::OPERATING_MODE,
             if mode == OperatingMode::Heating {
@@ -758,7 +759,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 }
 
 fn default_telemetry() -> Telemetry {
-    let mut telemetry = Telemetry::with_capacity(8);
+    let mut telemetry = Telemetry::with_capacity(10);
     telemetry.insert(tk::TANK_AVG_TEMP_C, 0.0);
     telemetry.insert(tk::UPPER_ELEMENT_POWER_W, 0.0);
     telemetry.insert(tk::LOWER_ELEMENT_POWER_W, 0.0);
@@ -768,6 +769,7 @@ fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::DRAW_FLOW_RATE_KG_S, 0.0);
     telemetry.insert(tk::UNMET_LOAD_W, 0.0);
     telemetry.insert(tk::OPERATING_MODE, 0.0);
+    telemetry.insert(tk::OUTLET_TEMP_C, 0.0);
     telemetry
 }
 
@@ -817,6 +819,11 @@ fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
             name: tk::OPERATING_MODE.to_string(),
             unit: "enum".to_string(),
             description: "0=Off, 1=Heating".to_string(),
+        },
+        TelemetryField {
+            name: tk::OUTLET_TEMP_C.to_string(),
+            unit: "C".to_string(),
+            description: "Hot water outlet temperature delivered to fixture".to_string(),
         },
     ];
     for i in 0..n_nodes {
@@ -1508,6 +1515,48 @@ mod tests {
             eq.lower_node,
             eq.tank.node_temps().len() - 1,
             "default 6-node tank: lower element must be at last node"
+        );
+    }
+
+    #[test]
+    fn outlet_temp_c_telemetry_present_with_draw() {
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(55.0);
+        typed.setpoint_c = Some(55.0);
+        typed.draw_flow_rate_kg_s = Some(0.1);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p).unwrap();
+
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).expect("OUTLET_TEMP_C must be present");
+        assert!(
+            outlet > 0.0,
+            "OUTLET_TEMP_C should be > 0 when there is a draw, got {outlet}"
+        );
+    }
+
+    #[test]
+    fn outlet_temp_c_telemetry_present_without_draw() {
+        let mut typed = typed_config();
+        typed.initial_tank_temp_c = Some(55.0);
+        typed.draw_flow_rate_kg_s = Some(0.0);
+        let cfg = config_from_typed(typed);
+
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &env(21.0)).unwrap();
+
+        let mut p = ports();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p).unwrap();
+
+        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).expect("OUTLET_TEMP_C must be present");
+        let tank_avg = eq.telemetry().get(tk::TANK_AVG_TEMP_C).expect("TANK_AVG_TEMP_C must be present");
+        assert!(
+            (outlet - tank_avg).abs() < 1.0,
+            "OUTLET_TEMP_C should equal tank avg temp with no draw: outlet={outlet}, tank_avg={tank_avg}"
         );
     }
 }

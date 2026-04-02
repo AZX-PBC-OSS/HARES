@@ -1,5 +1,6 @@
 //! Python bindings for dwelling simulation.
 
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -14,11 +15,15 @@ use hares_equipment::{
     config::ConfigValue,
 };
 use hares_io::{OutputFormat, ResampleOverrides, SimulationConfig, output::metrics::MetricsCalculator};
-use hares_types::{BatteryChemistry, EvConnectionState, SurfaceIrradiance};
+use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
 use std::sync::MutexGuard;
+
+pyo3::create_exception!(_hares, HaresConfigError, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(_hares, HaresEquipmentError, pyo3::exceptions::PyRuntimeError);
+pyo3::create_exception!(_hares, HaresSimulationError, pyo3::exceptions::PyRuntimeError);
 
 use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
 use crate::py_actor::PyActor;
@@ -483,6 +488,19 @@ pub(crate) fn lock_dwelling_string(
     })
 }
 
+/// GIL-free variant that preserves [`HaresError`] for proper Python exception mapping
+/// via [`to_py_err`].
+fn lock_dwelling_hares(
+    dwelling: &Mutex<Dwelling>,
+) -> Result<MutexGuard<'_, Dwelling>, HaresError> {
+    dwelling.lock().map_err(|e| {
+        HaresError::Dwelling(format!(
+            "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
+            e
+        ))
+    })
+}
+
 #[pyclass(name = "Dwelling")]
 pub struct PyDwelling {
     pub(crate) dwelling: Mutex<Dwelling>,
@@ -531,7 +549,7 @@ impl PyDwelling {
 
         let bytes = {
             let dwelling = lock_dwelling(&self.dwelling)?;
-            serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err)?
+            serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err_display)?
         };
 
         self.initial_state = Some(bytes);
@@ -556,12 +574,21 @@ impl PyDwelling {
     }
 
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        py.detach(|| {
-            let mut dwelling = lock_dwelling_string(&self.dwelling)?;
-            dwelling.simulate().map_err(|err| err.to_string())?;
-            Ok::<_, String>(())
-        })
-        .map_err(PyRuntimeError::new_err)?;
+        let sim_result: Result<Result<(), HaresError>, _> =
+            py.detach(|| {
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    let mut dwelling = lock_dwelling_hares(&self.dwelling)?;
+                    dwelling.simulate()?;
+                    Ok(())
+                }))
+            });
+        match sim_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(to_py_err(e)),
+            Err(payload) => {
+                return Err(PyRuntimeError::new_err(panic_payload_to_string(payload)))
+            }
+        }
 
         let dwelling = lock_dwelling(&self.dwelling)?;
         let batches: Vec<_> = dwelling.flushed_batches().to_vec();
@@ -571,9 +598,17 @@ impl PyDwelling {
     }
 
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let step = py
-            .detach(|| self.step_core())
-            .map_err(PyRuntimeError::new_err)?;
+        let step_result: Result<Result<hares_core::StepResult, HaresError>, _> =
+            py.detach(|| {
+                std::panic::catch_unwind(AssertUnwindSafe(|| self.step_core()))
+            });
+        let step = match step_result {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(to_py_err(e)),
+            Err(payload) => {
+                return Err(PyRuntimeError::new_err(panic_payload_to_string(payload)))
+            }
+        };
 
         if self.zone_keys.is_none() {
             let keys: Vec<String> = step
@@ -595,6 +630,7 @@ impl PyDwelling {
         out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
         out.set_item("hvac_heating_w", step.hvac_heating_w)?;
         out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
+        out.set_item("gas_power_w", step.gas_power_w)?;
         for ((_zone_id, temp_c), key) in step
             .zone_temperatures_c
             .iter()
@@ -1130,12 +1166,12 @@ impl PyDwelling {
 
     pub fn save_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let dwelling = lock_dwelling(&self.dwelling)?;
-        let bytes = serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err)?;
+        let bytes = serde_json::to_vec(&dwelling.save_checkpoint()).map_err(to_py_err_display)?;
         Ok(PyBytes::new(py, &bytes))
     }
 
     pub fn load_state(&self, state: &[u8]) -> PyResult<()> {
-        let checkpoint = serde_json::from_slice(state).map_err(to_py_err)?;
+        let checkpoint = serde_json::from_slice(state).map_err(to_py_err_display)?;
         let mut dwelling = lock_dwelling(&self.dwelling)?;
         dwelling.load_checkpoint(checkpoint).map_err(to_py_err)
     }
@@ -1297,9 +1333,16 @@ impl PyDwelling {
 }
 
 impl PyDwelling {
-    pub(crate) fn step_core(&self) -> Result<hares_core::StepResult, String> {
-        let mut dwelling = lock_dwelling_string(&self.dwelling)?;
-        dwelling.step().map_err(|err| err.to_string())
+    pub(crate) fn step_core(&self) -> Result<hares_core::StepResult, HaresError> {
+        let mut dwelling = lock_dwelling_hares(&self.dwelling)?;
+        dwelling.step()
+    }
+
+    /// String-error variant of [`step_core`] for use in GIL-free Rayon contexts
+    /// (e.g. [`batch_step_py`]) where `HaresError` cannot cross thread boundaries
+    /// as a `PyErr`.
+    pub(crate) fn step_core_string(&self) -> Result<hares_core::StepResult, String> {
+        self.step_core().map_err(|e| e.to_string())
     }
 
     pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {
@@ -1388,6 +1431,26 @@ impl PyTimestepsIter {
     }
 }
 
+const KNOWN_KWARGS: &[&str] = &[
+    "config",
+    "start_time",
+    "time_res_s",
+    "duration_s",
+    "output_to_parquet",
+    "output_path",
+    "write_output",
+    "output_verbosity",
+    "output_chunk_size",
+    "master_seed",
+    "civil_timezone",
+    "setpoint_deadband_c",
+    "bldg_id",
+    "initialization_duration",
+    "defaults_path",
+    "resample_overrides",
+    "overrides",
+];
+
 fn build_config(
     hpxml: String,
     schedule: String,
@@ -1395,6 +1458,17 @@ fn build_config(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<DwellingConfig> {
     let kwargs = kwargs.cloned();
+
+    if let Some(ref k) = kwargs {
+        for key in k.keys() {
+            let key_str: String = key.extract()?;
+            if !KNOWN_KWARGS.contains(&key_str.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "unknown keyword argument: '{key_str}'"
+                )));
+            }
+        }
+    }
 
     let py_config: Option<PySimulationConfig> = if let Some(k) = kwargs.as_ref() {
         if let Ok(Some(value)) = k.get_item("config") {
@@ -1487,6 +1561,22 @@ fn build_config(
             .map(|obj| obj.extract::<f64>())
             .transpose()?;
 
+        if let Some(db) = setpoint_deadband_c {
+            if !db.is_finite() || db < 0.0 {
+                return Err(PyValueError::new_err(format!(
+                    "setpoint_deadband_c must be finite and non-negative, got {db}"
+                )));
+            }
+        }
+
+        if duration.num_milliseconds() % time_res.num_milliseconds() != 0 {
+            return Err(PyValueError::new_err(format!(
+                "duration ({}s) must be an exact multiple of time_res ({}s)",
+                duration.num_seconds(),
+                time_res.num_seconds(),
+            )));
+        }
+
         SimulationConfig {
             start_time,
             duration,
@@ -1549,16 +1639,27 @@ fn build_config(
             .transpose()?;
         raw.map(|map| {
             let mut overrides = ResampleOverrides::default();
+            const KNOWN_FIELDS: &[&str] = &[
+                "dry_bulb", "dew_point", "rel_humidity", "pressure", "infrared",
+                "sky_temp", "ground_temp", "opaque_sky_cover", "ghi", "dni", "dhi",
+                "wind_speed", "wind_dir",
+            ];
+            fn parse_method(field: &str, v: &str) -> PyResult<hares_io::ResampleMethod> {
+                match v {
+                    "zoh" => Ok(hares_io::ResampleMethod::Zoh),
+                    "pchip" => Ok(hares_io::ResampleMethod::Pchip),
+                    "linear" => Ok(hares_io::ResampleMethod::Linear),
+                    other => Err(PyValueError::new_err(format!(
+                        "unknown resample method '{other}' for field '{field}'; \
+                         valid methods: zoh, pchip, linear"
+                    ))),
+                }
+            }
             macro_rules! set_field {
                 ($($field:ident),*) => {
                     $(
                         if let Some(v) = map.get(stringify!($field)) {
-                            overrides.$field = match v.as_str() {
-                                "zoh" => Some(hares_io::ResampleMethod::Zoh),
-                                "pchip" => Some(hares_io::ResampleMethod::Pchip),
-                                "linear" => Some(hares_io::ResampleMethod::Linear),
-                                _ => None,
-                            };
+                            overrides.$field = Some(parse_method(stringify!($field), v)?);
                         }
                     )*
                 };
@@ -1566,9 +1667,28 @@ fn build_config(
             set_field!(dry_bulb, dew_point, rel_humidity, pressure, infrared,
                        sky_temp, ground_temp, opaque_sky_cover, ghi, dni, dhi,
                        wind_speed, wind_dir);
-            overrides
+            let unknown: Vec<&str> = map
+                .keys()
+                .filter(|k| !KNOWN_FIELDS.contains(&k.as_str()))
+                .map(String::as_str)
+                .collect();
+            if !unknown.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "unknown resample_overrides field(s): {}; valid fields: {}",
+                    unknown.join(", "),
+                    KNOWN_FIELDS.join(", "),
+                )));
+            }
+            Ok(overrides)
         })
+        .transpose()?
     };
+
+    let overrides: Option<serde_json::Value> = kwargs
+        .as_ref()
+        .and_then(|k| k.get_item("overrides").ok().flatten())
+        .map(|obj| python_to_json_value(&obj))
+        .transpose()?;
 
     Ok(DwellingConfig {
         hpxml_path: PathBuf::from(hpxml),
@@ -1576,7 +1696,7 @@ fn build_config(
         weather_path: PathBuf::from(weather),
         defaults_path,
         sim_config,
-        overrides: None,
+        overrides,
         bldg_id,
         initialization_duration,
         resample_overrides,
@@ -1621,7 +1741,77 @@ fn default_start() -> DateTime<FixedOffset> {
     DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START is a valid RFC3339 constant")
 }
 
-fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {
+fn python_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    if obj.is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    if let Ok(b) = obj.extract::<bool>() {
+        return Ok(serde_json::Value::Bool(b));
+    }
+    if let Ok(i) = obj.extract::<i64>() {
+        return Ok(serde_json::json!(i));
+    }
+    if let Ok(f) = obj.extract::<f64>() {
+        return Ok(serde_json::json!(f));
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(serde_json::Value::String(s));
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let items: Vec<serde_json::Value> = list
+            .iter()
+            .map(|item| python_to_json_value(&item))
+            .collect::<PyResult<_>>()?;
+        return Ok(serde_json::Value::Array(items));
+    }
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        let mut map = serde_json::Map::new();
+        for (key, value) in dict.iter() {
+            let key_str: String = key.extract().map_err(|_| {
+                PyValueError::new_err("overrides dict keys must be strings")
+            })?;
+            map.insert(key_str, python_to_json_value(&value)?);
+        }
+        return Ok(serde_json::Value::Object(map));
+    }
+    let type_name = obj
+        .get_type()
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "?".to_string());
+    Err(PyValueError::new_err(format!(
+        "cannot convert Python object of type '{type_name}' to JSON for overrides",
+    )))
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    let msg = payload
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("unknown panic");
+    format!("HARES internal panic: {msg}")
+}
+
+fn to_py_err(err: HaresError) -> PyErr {
+    let msg = err.to_string();
+    match err {
+        // Io errors are mapped to ConfigError because they predominantly arise during
+        // config/file loading (HPXML, weather, schedules). This is a conscious trade-off:
+        // a rare runtime Io error will surface as ConfigError rather than adding a
+        // separate Python exception type for a case that effectively never occurs.
+        HaresError::Io(_) | HaresError::Dwelling(_) | HaresError::Envelope(_) => {
+            HaresConfigError::new_err(msg)
+        }
+        HaresError::Equipment(_) => HaresEquipmentError::new_err(msg),
+        HaresError::Physics(_)
+        | HaresError::Control(_)
+        | HaresError::Tariff(_)
+        | HaresError::InvariantViolation { .. } => HaresSimulationError::new_err(msg),
+    }
+}
+
+fn to_py_err_display<E: std::fmt::Display>(err: E) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 

@@ -379,6 +379,9 @@ impl PyControlSignal {
             "EventDelay" => ControlSignal::EventDelay {
                 delay_s: dict_required(d, "delay_s")?,
             },
+            "MaxCapacityFraction" => ControlSignal::MaxCapacityFraction {
+                fraction: dict_required(d, "fraction")?,
+            },
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "unsupported control signal type `{kind}`"
@@ -597,6 +600,10 @@ impl PyControlSignal {
             ControlSignal::EventDelay { delay_s } => {
                 dict.set_item("type", "EventDelay")?;
                 dict.set_item("delay_s", delay_s)?;
+            }
+            ControlSignal::MaxCapacityFraction { fraction } => {
+                dict.set_item("type", "MaxCapacityFraction")?;
+                dict.set_item("fraction", fraction)?;
             }
         }
         Ok(dict)

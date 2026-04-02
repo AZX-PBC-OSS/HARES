@@ -141,6 +141,8 @@ struct EquipmentColumns {
     cop: Option<usize>,
     reactive_power: Option<usize>,
     power_factor: Option<usize>,
+    energy_kwh: Option<usize>,
+    schedule: Option<usize>,
 }
 
 /// Build column index maps for each equipment piece using instance-qualified
@@ -182,6 +184,12 @@ fn build_equipment_column_map(
                     .copied(),
                 power_factor: column_index
                     .get(&format!("{name} Power Factor (-)"))
+                    .copied(),
+                energy_kwh: column_index
+                    .get(&format!("{name} Energy (kWh)"))
+                    .copied(),
+                schedule: column_index
+                    .get(&format!("{name} Schedule (-)"))
                     .copied(),
             }
         })
@@ -265,6 +273,8 @@ pub struct StepResult {
     pub hvac_heating_w: f64,
     /// Thermal energy removed from the zone by HVAC cooling equipment (W, positive = heat removed).
     pub hvac_cooling_w: f64,
+    /// Total gas fuel consumption across all equipment (W).
+    pub gas_power_w: f64,
 }
 
 /// Accumulated simulation outputs.
@@ -2278,12 +2288,15 @@ impl Dwelling {
         let hvac_heating_w = gains.hvac_heating_w.max(0.0);
         let hvac_cooling_w = gains.hvac_cooling_w.abs();
 
+        let gas_power_w = self.ports.fuel.get(hares_types::FuelType::Gas);
+
         let step_result = StepResult {
             timestamp: self.latest_env.current_time,
             net_electric_power_kw: self.electrical_solver.net_active_kw(),
             zone_temperatures_c: self.zone_temp_scratch.clone(),
             hvac_heating_w,
             hvac_cooling_w,
+            gas_power_w,
         };
 
         // Step 5: record outputs to disk (when enabled) and accumulate step results.
@@ -2432,6 +2445,18 @@ impl Dwelling {
                     let s = (p * p + q * q).sqrt();
                     row[pf_idx] = if s > 1e-9 { (p / s).abs() } else { 1.0 };
                 }
+            }
+            if let Some(idx) = cols.energy_kwh {
+                let dt_hours = self.latest_env.time_step_secs() / 3600.0;
+                let electric_kw = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
+                row[idx] = electric_kw * dt_hours;
+            }
+            if let Some(idx) = cols.schedule {
+                let is_active = co
+                    .state
+                    .operating_mode
+                    .is_some_and(|m| m != hares_types::OperatingMode::Off);
+                row[idx] = if is_active { 1.0 } else { 0.0 };
             }
         }
 

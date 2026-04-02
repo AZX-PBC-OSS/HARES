@@ -5067,7 +5067,6 @@ mod ideal_capacity_tests {
     #[test]
     fn ideal_er_mode_hp_runs_at_full_plr_not_throttled_by_er_denominator() {
         const HP_RATED_W: f64 = 6_000.0;
-        const ER_RATED_W: f64 = 4_000.0;
         const IDEAL_W: f64 = 8_000.0;
         const EXPECTED_ER_W: f64 = IDEAL_W - HP_RATED_W;
 

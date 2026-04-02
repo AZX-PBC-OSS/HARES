@@ -3649,7 +3649,7 @@ mod defaults_tests {
         telemetry_keys as tk,
     };
 
-    use super::{AirConditioner, CoolingCore, RoomAC};
+    use super::{AirConditioner, RoomAC};
     use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, RoomAcConfig};
 
     fn make_env(zone_temp_c: f64) -> EnvironmentState {

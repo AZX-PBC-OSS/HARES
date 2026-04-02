@@ -8,8 +8,12 @@ use pyo3::types::PyDict;
 
 fn tz_to_py_datetime(py: Python<'_>, dt: DateTime<chrono_tz::Tz>) -> PyResult<Py<PyAny>> {
     let fixed: DateTime<FixedOffset> = dt.fixed_offset();
+    fixed_to_py_datetime(py, fixed)
+}
+
+fn fixed_to_py_datetime(py: Python<'_>, dt: DateTime<FixedOffset>) -> PyResult<Py<PyAny>> {
     let datetime = py.import("datetime")?.getattr("datetime")?;
-    let obj = datetime.call_method1("fromisoformat", (fixed.to_rfc3339(),))?;
+    let obj = datetime.call_method1("fromisoformat", (dt.to_rfc3339(),))?;
     Ok(obj.unbind())
 }
 
@@ -50,6 +54,16 @@ impl PyTelemetry {
         out.set_item("soc", &self.inner.equipment_soc)?;
         out.set_item("power_kw", &self.inner.equipment_power_kw)?;
         Ok(out)
+    }
+
+    #[getter]
+    pub fn timestep_index(&self) -> u64 {
+        self.inner.timestep_index
+    }
+
+    #[getter]
+    pub fn current_time<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        fixed_to_py_datetime(py, self.inner.current_time)
     }
 
     #[getter]
