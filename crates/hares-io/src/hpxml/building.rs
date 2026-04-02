@@ -232,6 +232,10 @@ pub struct Building {
     /// Override the zone mass multiplier for all zones.
     /// When set, replaces the default zone-type-based multiplier.
     pub mass_multiplier_override: Option<f64>,
+    /// HVAC thermostat deadband/hysteresis in °C.
+    /// When set, overrides the default 1.0°C hysteresis for IdealHVAC.
+    /// BESTEST/ASHRAE 140 requires 0.0 (ideal setpoint tracking).
+    pub hvac_deadband_c: Option<f64>,
     // TODO: `details_xml` leaks the parse tree (`XmlNode`) into the domain model,
     // forcing `hares-core` to construct XmlNode trees. Extract remaining
     // XML-dependent fields into typed struct members and remove this field.
@@ -883,6 +887,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         foundation_name,
         residential_facility_type,
         mass_multiplier_override: None,
+        hvac_deadband_c: None,
         details_xml: details.clone(),
     })
 }

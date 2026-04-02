@@ -1099,6 +1099,7 @@ mod tests {
             foundation_name: None,
             residential_facility_type: None,
             mass_multiplier_override: None,
+            hvac_deadband_c: None,
             details_xml,
         }
     }

@@ -17,6 +17,7 @@ wall_r_value_m2_k_w = 2.0
 equipment_name = "IdealHVAC"
 fuel = "electricity"
 heating_capacity_kbtu_h = 30.0
+deadband_c = 0.0
 
 [weather]
 epw_path = "../../../vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.725650_TMY3.epw"
@@ -24,6 +25,7 @@ epw_path = "../../../vendors/OCHRE/ochre/defaults/Weather/USA_CO_Denver.Intl.AP.
 [setpoints]
 heating_c = 20.0
 cooling_c = 27.0
+setpoint_deadband_c = 0.0
 
 [infiltration]
 ach = 0.5

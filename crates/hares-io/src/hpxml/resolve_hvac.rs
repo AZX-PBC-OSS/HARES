@@ -685,7 +685,7 @@ fn try_build_ideal_hvac_config(name: &str, params: &Map<String, Value>) -> Optio
         zone_id: None,
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         cooling_setpoint_c: static_setpoint_from_source(&cooling_setpoint_source),
-        deadband_c: None,
+        deadband_c: params.get("deadband_c").and_then(Value::as_f64),
         n_speeds: Some(n_speeds_from_params(params)),
         ideal_capacity_mode: None,
         heating_setpoint_source,
@@ -1270,6 +1270,9 @@ pub(super) fn resolve_hvac(
             params.insert(k.clone(), v.clone());
         }
         apply_building_setpoint_profiles(building, &mut params, true, name == "Ideal HVAC");
+        if let Some(deadband) = building.hvac_deadband_c {
+            params.insert("deadband_c".to_string(), json!(deadband));
+        }
         duct_params.insert_into_map(&mut params);
         for (k, v) in &basement_params {
             params.insert(k.clone(), v.clone());
@@ -2303,6 +2306,7 @@ mod tests {
             foundation_name: None,
             residential_facility_type: None,
             mass_multiplier_override: None,
+            hvac_deadband_c: None,
             details_xml: XmlNode {
                 name: String::new(),
                 attrs: HashMap::new(),
