@@ -29,7 +29,7 @@ impl ThermalSolver {
             return 0.0;
         };
 
-        let result = match &self.last_coupled_lu {
+        let total = match &self.last_coupled_lu {
             Some(lu) => {
                 let coupling = crate::CouplingData {
                     lu,
@@ -53,14 +53,16 @@ impl ThermalSolver {
             ),
         };
 
-        result.unwrap_or_else(|e| {
-            tracing::debug!(
-                ?zone,
-                ?e,
-                "solve_ideal_capacity_for_target failed, returning 0"
-            );
-            0.0
-        })
+        total
+            .map(|raw| raw - self.last_u[input_idx])
+            .unwrap_or_else(|e| {
+                tracing::debug!(
+                    ?zone,
+                    ?e,
+                    "solve_ideal_capacity_for_target failed, returning 0"
+                );
+                0.0
+            })
     }
 
     fn build_coupling(&mut self) {

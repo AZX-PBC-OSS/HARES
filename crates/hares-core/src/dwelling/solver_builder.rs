@@ -701,7 +701,7 @@ pub(crate) fn build_default_solvers(
                 } else {
                     (
                         sb.attic_emissivity,
-                        if is_floor { 0.6 } else { 0.5 },
+                        0.6,
                         sb.interior_rad_frac,
                         sb.r_film_int_m2_k_w / sb.area_m2.max(1e-9),
                         None,
