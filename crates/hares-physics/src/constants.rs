@@ -135,6 +135,10 @@ pub const OCCUPANT_LATENT_GAIN_W: f64 = 51.2;
 /// the convective component only (radiative = 0 by default). Kept for documentation.
 pub const OCCUPANT_CONVECTIVE_FRACTION: f64 = 1.0;
 
+/// Stefan-Boltzmann constant [W/(m²·K⁴)].
+/// NIST CODATA 2018: σ = 5.670374419 × 10⁻⁸ W·m⁻²·K⁻⁴.
+pub const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
+
 /// Celsius to Kelvin offset [K].
 /// ISA 1976 / NIST: T(K) = T(°C) + 273.15.
 pub const CELSIUS_TO_KELVIN: f64 = 273.15;

@@ -159,13 +159,26 @@ pub fn film_resistances(
 
     let delta_t = (t_ext - t_int).abs().max(MIN_DELTA_T_TARP_NATURAL_C);
 
-    let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
-    let r_int = 1.0 / h_natural;
+    let h_conv = tarp_h_natural(tilt_deg, delta_t, above_hotter);
+
+    // Linearized interior radiative coefficient: h_rad = 4·ε·σ·T_mean³.
+    // Standard ASHRAE interior surface emissivity (0.9) and mean temperature
+    // (20 °C = 293.15 K). Combined with TARP convection this yields
+    // h_combined ≈ 8.2 W/(m²·K), R ≈ 0.122 m²·K/W — matching BESTEST.
+    const INTERIOR_EMISSIVITY: f64 = 0.9;
+    const INTERIOR_MEAN_TEMP_K: f64 = 293.15;
+    let h_rad = 4.0 * INTERIOR_EMISSIVITY * crate::constants::STEFAN_BOLTZMANN
+        * INTERIOR_MEAN_TEMP_K.powi(3);
+    let h_combined = h_conv + h_rad;
+
+    let r_int = 1.0 / h_combined;
 
     let r_ext = if exterior_zone == ZoneLabel::Outdoor {
-        let h_glass = (h_natural.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
-        let h_forced = roughness.factor() * (h_glass - h_natural);
-        1.0 / (h_natural + h_forced)
+        let h_glass = (h_conv.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
+        let h_forced = roughness.factor() * (h_glass - h_conv);
+        1.0 / (h_conv + h_forced)
+    } else if exterior_zone == ZoneLabel::Ground {
+        1.0 / h_conv
     } else {
         r_int
     };
@@ -204,15 +217,6 @@ mod tests {
 
     #[test]
     fn film_resistances_typical_wall_outdoor() {
-        // Vertical wall (tilt=90), LIV interior, EXT exterior.
-        // ground=10, ambient=10 → t_int(LIV)=20, t_ext(EXT)=15
-        // delta_t = max(12.9, |15-20|) = max(12.9, 5) = 12.9
-        // ext_above = 5 > 2 → true; t_ext_hotter = 15 >= 20 → false
-        // above_hotter = !(true ^ false) = !(true) = false
-        // But tilt=90 → h = 1.31 * 12.9^(1/3)
-        // h_glass = sqrt(h^2 + (3.40 * 2.0^0.75)^2)
-        // h_forced = 1.67 * (h_glass - h)
-        // r_int = 1/h, r_ext = 1/(h + h_forced)
         let (r_int, r_ext) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,
@@ -222,12 +226,13 @@ mod tests {
             10.0,
             SurfaceRoughness::Rough,
         );
-        let h = 1.31 * 12.9_f64.cbrt();
-        let h_glass = (h.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
-        let h_forced = 1.67 * (h_glass - h);
-        assert_approx(r_int, 1.0 / h, 1e-10);
-        assert_approx(r_ext, 1.0 / (h + h_forced), 1e-10);
-        // Exterior resistance must be strictly less than interior (forced convection adds heat transfer).
+        let h_conv = 1.31 * 12.9_f64.cbrt();
+        let h_rad = 4.0 * 0.9 * crate::constants::STEFAN_BOLTZMANN * 293.15_f64.powi(3);
+        let h_combined = h_conv + h_rad;
+        let h_glass = (h_conv.powi(2) + (3.40 * 2.0_f64.powf(0.75)).powi(2)).sqrt();
+        let h_forced = 1.67 * (h_glass - h_conv);
+        assert_approx(r_int, 1.0 / h_combined, 1e-10);
+        assert_approx(r_ext, 1.0 / (h_conv + h_forced), 1e-10);
         assert!(r_ext < r_int, "r_ext={r_ext} should be < r_int={r_int}");
     }
 
