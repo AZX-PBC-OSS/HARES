@@ -1,3 +1,10 @@
+//! Electric and gas tariff evaluation for residential simulations.
+//!
+//! Parses OpenEI URDB tariff JSON into strongly-typed [`ElectricTariff`]
+//! and [`GasTariff`] structures, evaluates time-of-use energy rates,
+//! tiered energy blocks, demand charges (with optional ratchets), and
+//! export compensation, and produces periodic billing summaries.
+
 pub mod billing;
 pub mod evaluator;
 pub mod types;

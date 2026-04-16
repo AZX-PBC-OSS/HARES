@@ -2576,8 +2576,6 @@ mod tests {
         );
     }
 
-    // ======= RV-013: Full 24-hour lifecycle test =======
-
     /// Step the actor through all 1440 minutes of a day, recording the signals
     /// emitted at each phase transition and the SOC evolution.
     ///

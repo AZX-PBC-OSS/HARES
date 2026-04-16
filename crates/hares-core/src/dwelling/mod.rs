@@ -619,10 +619,7 @@ pub struct Dwelling {
     /// convert it to a person count.  Equals `number_of_occupants` from the
     /// Occupancy equipment spec (defaults to 1.0 when unspecified).
     occupancy_scale: f64,
-    #[expect(
-        dead_code,
-        reason = "reserved for thermal balance invariant (see RV-014)"
-    )]
+    #[expect(dead_code, reason = "reserved for thermal balance invariant")]
     zone_capacitances_j_k: Vec<(ZoneId, f64)>,
     #[cfg(any(debug_assertions, feature = "check_invariants"))]
     prev_humidity_ratios: Vec<(ZoneId, f64)>,

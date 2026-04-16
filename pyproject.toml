@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "ochre_next"
 version = "0.1.0"
 description = "HARES: High-performance Architecture for Residential Energy Simulation"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.4.3",
     "polars>=1.39.3",
@@ -16,8 +16,6 @@ license = {text = "BSD-3-Clause"}
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
 

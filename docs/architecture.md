@@ -4,7 +4,7 @@ HARES (Home energy Analysis and Residential Energy Simulation) is a high-fidelit
 
 ## Workspace & Crate Dependency Graph
 
-HARES is organized as a Rust workspace with 9 crates arranged in a strict DAG:
+HARES is organized as a Rust workspace with 10 crates arranged in a strict DAG:
 
 ```mermaid
 graph TD
@@ -14,6 +14,7 @@ graph TD
     envelope[hares-envelope]
     equipment[hares-equipment]
     io[hares-io]
+    tariff[hares-tariff]
     core[hares-core]
     fleet[hares-fleet]
     python[hares-python]
@@ -30,12 +31,14 @@ graph TD
     io --> control
     io --> envelope
     io --> equipment
+    tariff --> types
     core --> types
     core --> physics
     core --> control
     core --> envelope
     core --> equipment
     core --> io
+    core --> tariff
     fleet --> core
     fleet --> io
     fleet --> types
@@ -45,6 +48,7 @@ graph TD
     python --> equipment
     python --> types
     python --> io
+    python --> tariff
 
     style types fill:#e8f4fd,stroke:#2196F3
     style physics fill:#e8f4fd,stroke:#2196F3
@@ -65,6 +69,7 @@ graph TD
 | **hares-envelope** | RC thermal network, state-space discretization, thermal/humidity/electrical/fluid domain solvers |
 | **hares-equipment** | `Equipment` trait + implementations: HVAC, battery, PV, water heater, EV, generators, scheduled/event loads |
 | **hares-io** | I/O parsers: HPXML building geometry, EPW weather, CSV schedules, ResStock metadata, defaults/LUT, Arrow output |
+| **hares-tariff** | Electric and gas tariffs: URDB parsing, time-of-use evaluation, demand charges, billing summaries |
 | **hares-core** | Dwelling orchestrator, simulation engine, environment manager, clock, checkpointing |
 | **hares-fleet** | Parallel multi-dwelling simulation via Rayon, aggregation, progress tracking |
 | **hares-python** | PyO3 bindings: `PyDwelling`, `PyFleet`, DataFrame conversion, RL gym interface |
@@ -296,7 +301,6 @@ Detailed per-equipment documentation covering internal physics models, port inte
 | Scheduled Load, Event-Driven Load | [Loads](equipment/loads.md) |
 | Control System, OpenADR/DR, OCHRE compat | [Control System](equipment/control-system.md) |
 | Envelope: HPXML -> RC network -> state-space | [Envelope Construction](equipment/envelope-construction.md) |
-| OCHRE parity gap analysis | [OCHRE Parity Gaps](equipment/ochre-parity-gaps.md) |
 
 ---
 

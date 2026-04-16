@@ -77,12 +77,10 @@ def check_monotonic(ocv: np.ndarray, name: str) -> None:
             print(f"    SOC[{i}]={SOC[i]:.2f}: {ocv[i]:.4f} -> {ocv[i+1]:.4f}")
 
 
-# ---------------------------------------------------------------------------
 # LTO OCP function (negative electrode)
 # Colclasure, A.M., Smith, K.A., Kee, R.J. (2011) Electrochimica Acta 58:33-43
 # Li4Ti5O12 has a very flat plateau at ~1.556 V vs Li/Li+
 # Extended with boundary terms to avoid extrapolation issues
-# ---------------------------------------------------------------------------
 def lto_ocp_Colclasure2011(sto: float | np.ndarray) -> float | np.ndarray:
     """
     LTO (Li4Ti5O12) open-circuit potential vs Li/Li+ as a function of stoichiometry.
@@ -96,9 +94,7 @@ def lto_ocp_Colclasure2011(sto: float | np.ndarray) -> float | np.ndarray:
     )
 
 
-# ---------------------------------------------------------------------------
 # NMC (Chen2020): NMC811/Graphite, LG M50
-# ---------------------------------------------------------------------------
 print("=" * 70)
 print("NMC  (Chen2020: NMC811 / Graphite LG M50)")
 print("=" * 70)
@@ -119,9 +115,7 @@ ocv_nmc, u_pos_nmc_vals, u_neg_nmc_vals = build_ocv_curve(
 print(f"  OCV range: {ocv_nmc[0]:.4f}V -> {ocv_nmc[-1]:.4f}V")
 check_monotonic(ocv_nmc, "NMC")
 
-# ---------------------------------------------------------------------------
 # LFP (Prada2013): LFP / Graphite
-# ---------------------------------------------------------------------------
 print()
 print("=" * 70)
 print("LFP  (Prada2013: LFP / Graphite)")
@@ -143,9 +137,7 @@ ocv_lfp, u_pos_lfp_vals, u_neg_lfp_vals = build_ocv_curve(
 print(f"  OCV range: {ocv_lfp[0]:.4f}V -> {ocv_lfp[-1]:.4f}V")
 check_monotonic(ocv_lfp, "LFP")
 
-# ---------------------------------------------------------------------------
 # NCA (NCA_Kim2011): NCA / Graphite
-# ---------------------------------------------------------------------------
 print()
 print("=" * 70)
 print("NCA  (NCA_Kim2011: NCA / Graphite)")

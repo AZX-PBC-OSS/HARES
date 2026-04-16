@@ -3,9 +3,9 @@
 //! # Config access policy
 //!
 //! `get_f64`, `get_str`, `get_bool`, and `first_f64` must not appear in built-in
-//! equipment `init()` bodies. Built-in equipment uses typed config structs (see
-//! CFG-007 through CFG-015); these accessors remain available only for
-//! compatibility helpers and custom-equipment adapter paths outside init.
+//! equipment `init()` bodies. Built-in equipment uses typed config structs;
+//! these accessors remain available only for compatibility helpers and
+//! custom-equipment adapter paths outside init.
 
 use hares_types::normalize_ascii;
 use hares_types::{

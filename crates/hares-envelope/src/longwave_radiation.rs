@@ -979,7 +979,7 @@ mod tests {
     fn linearised_interior_lw_conserves_energy_mixed_emissivity() {
         // Surfaces with different emissivities — exercises the ε·A weighted MRT
         // path.  A pure area-weighted MRT produces a non-zero sum, so this test
-        // would fail without the HIGH-1 fix.
+        // would fail without the ε·A weighting.
         let surfaces = vec![
             InteriorSurface {
                 area_m2: 40.0,

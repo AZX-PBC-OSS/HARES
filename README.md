@@ -131,6 +131,7 @@ crates/
 ├── hares-control     Control dispatch, capability matching, OCHRE signal compatibility
 ├── hares-equipment   Equipment models: HVAC, battery, PV, EV, water heater, ventilation
 ├── hares-io          I/O: HPXML parsing, EPW/TMY3 weather, schedules, Arrow/Parquet output
+├── hares-tariff      Electric and gas tariffs: URDB parsing, evaluation, billing
 ├── hares-core        Simulation engine: dwelling, clock, actor system, checkpoint, invariants
 ├── hares-fleet       Fleet-level parallel simulation with rayon and weighted aggregation
 └── hares-python      PyO3 cdylib — exposes the engine as the ochre_next._hares Python module
@@ -141,7 +142,8 @@ Dependency flow (each crate depends on those above it):
 ```
 types → physics → envelope
               ↘         ↘
-         control → equipment → io → core → fleet → python
+         control → equipment → io ↘
+                               tariff → core → fleet → python
 ```
 
 `hares-python` is excluded from `default-members` so plain `cargo build` /

@@ -55,7 +55,7 @@ pub fn batch_step_py(
     actions: Vec<Vec<f64>>,
     observation_fields: Vec<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    // Dimension check first (useful error regardless of H-7 status).
+    // Dimension check first (useful error regardless of mapping status).
     if !actions.is_empty() && actions.len() != dwellings.len() {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "actions length ({}) must match dwellings length ({})",
@@ -67,7 +67,7 @@ pub fn batch_step_py(
     // at the Python boundary with a clear error before entering Rayon.
     if actions.iter().any(|a| !a.is_empty()) {
         return Err(pyo3::exceptions::PyNotImplementedError::new_err(
-            "batch_step action mapping is not yet implemented (see H-7). \
+            "batch_step action mapping is not yet implemented. \
              Apply controls via dwelling.apply_control() before calling batch_step, \
              and pass empty action vectors.",
         ));
