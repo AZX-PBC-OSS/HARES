@@ -4,7 +4,9 @@ mod conversions;
 mod solver_builder;
 mod synthetic;
 
-pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
+pub use conversions::{
+    building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone, stage_rank,
+};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -1942,6 +1944,28 @@ impl Dwelling {
 
         let dt = chrono_to_std_duration(self.clock.time_res)?;
 
+        // Step 1a': dispatch any externally queued control signals (e.g. from
+        // `apply_control_validated`) before equipment `update_control` runs.
+        // Without this, signals queued for the current step would be serviced
+        // at Step 2 (after the thermostat FSM has already advanced in Step 1c),
+        // and short-cycle protection in `is_cycle_change_allowed` would block
+        // the re-evaluation at Step 2a until the next step. Dispatching first
+        // lets setpoint and mode overrides take effect on the same step.
+        #[cfg(feature = "observe")]
+        let pre_dispatch_capture = if self.observer_buf.is_some() {
+            Some(
+                self.control_dispatcher
+                    .dispatch_into_observed(&mut self.equipment, &mut self.warnings),
+            )
+        } else {
+            self.control_dispatcher
+                .dispatch_into(&mut self.equipment, &mut self.warnings);
+            None
+        };
+        #[cfg(not(feature = "observe"))]
+        self.control_dispatcher
+            .dispatch_into(&mut self.equipment, &mut self.warnings);
+
         // Step 1b: deposit deterministic internal gains (occupancy, plug loads)
         // BEFORE prepare_inputs so the ideal solver sees them when computing
         // required HVAC capacity.
@@ -2046,13 +2070,21 @@ impl Dwelling {
             self.control_dispatcher.queue(req);
         }
 
-        // Step 2: dispatch queued controls.
+        // Step 2: dispatch queued controls (now containing only actor-generated
+        // signals; externally queued signals were flushed before Step 1b).
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
             let capture = self
                 .control_dispatcher
                 .dispatch_into_observed(&mut self.equipment, &mut self.warnings);
-            obs_phases.post_dispatch = Some(capture);
+            let merged = match pre_dispatch_capture {
+                Some(mut pre) => {
+                    pre.signals.extend(capture.signals);
+                    pre
+                }
+                None => capture,
+            };
+            obs_phases.post_dispatch = Some(merged);
         } else {
             self.control_dispatcher
                 .dispatch_into(&mut self.equipment, &mut self.warnings);

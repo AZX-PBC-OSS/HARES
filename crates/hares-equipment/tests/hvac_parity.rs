@@ -268,6 +268,8 @@ fn gas_furnace_energy_balance() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -347,6 +349,8 @@ fn gas_furnace_fuel_independent_of_duct_dse() {
                 },
                 stage_heating_capacities_w: None,
                 stage_heating_eirs: None,
+                heating_setpoint_c: None,
+                heating_setpoint_source: None,
             },
         );
         let registry = EquipmentRegistry::new();
@@ -400,6 +404,8 @@ fn electric_baseboard_cop_is_unity() {
             zone_id: Some(1),
             capacity_w: 3_000.0,
             eir: 1.0,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -891,6 +897,8 @@ fn furnace_thermostat_off_above_setpoint() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1286,6 +1294,8 @@ fn gas_furnace_first_law_thermal_less_than_fuel() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1356,6 +1366,8 @@ fn gas_furnace_dse_multi_zone_energy_conservation() {
             },
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
     let registry = EquipmentRegistry::new();
@@ -1418,6 +1430,8 @@ fn hvac_default_deadband_matrix_matches_ochre_thresholds() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
     let mut furnace = registry.create("Gas Furnace", furnace_cfg.clone()).unwrap();

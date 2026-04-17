@@ -118,6 +118,8 @@ fn oracle_gas_furnace_24h_constant_heating() {
             number_of_speeds: 1,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
             ducts: DuctConfig {
                 dse_heat: Some(1.0),
                 ..Default::default()
@@ -177,6 +179,8 @@ fn oracle_electric_baseboard_24h_cop1() {
             zone_id: Some(1),
             capacity_w,
             eir: 1.0,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
 

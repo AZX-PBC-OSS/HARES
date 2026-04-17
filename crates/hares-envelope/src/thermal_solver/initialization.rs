@@ -5,15 +5,31 @@ use nalgebra::{DMatrix, DVector};
 use crate::state_space::StateSpaceModel;
 
 use super::{Result, StateSpaceWiring};
-use hares_types::EnvironmentState;
+use hares_types::{EnvironmentState, ZoneId};
 
 /// Compute steady-state temperatures by solving `x = A_d x + B_d u` for `x`,
-/// with zone air nodes pinned to `indoor_temp_c` as boundary conditions.
+/// with the conditioned zone air node(s) pinned to their initial temperature.
+///
+/// Unconditioned zones (attic, garage, foundation) are left free so their
+/// steady-state temperature is determined by conduction through surrounding
+/// boundaries. This mirrors OCHRE's `Envelope.initialize_state()` at
+/// `vendors/OCHRE/ochre/Models/Envelope.py:1012-1033`, which only removes the
+/// `T_LIV` column from the reduced system.
+///
+/// Pinning unconditioned zones to `env.zones[i].temperature_c` (typically set
+/// to outdoor temperature at startup) forces an artificially cold boundary on
+/// the conditioned zone's ceiling/garage walls, producing an inflated step-0
+/// ideal-capacity back-solve (ASHRAE Fundamentals 2021 Ch. 18, steady-state
+/// conduction through multi-zone envelopes).
+///
+/// `pinned_zones` is the set of zone state indices to fix as boundary
+/// conditions (typically the single conditioned zone's state index).
 pub(crate) fn initialize_steady_state(
     model: &StateSpaceModel,
     wiring: &StateSpaceWiring,
     env: &EnvironmentState,
     indoor_temp_c: f64,
+    pinned_zones: &[ZoneId],
 ) -> Result<DVector<f64>> {
     let n = model.state_dim();
     let m = model.input_dim();
@@ -37,23 +53,24 @@ pub(crate) fn initialize_steady_state(
     }
 
     // Collect zone state indices to fix as boundary conditions.
+    // Only conditioned zones listed in `pinned_zones` are pinned; unconditioned
+    // zones (attic, garage, foundation) are left free so their steady-state
+    // temperature is determined by conduction through the surrounding envelope.
     // Sort descending so we can remove rows/cols without invalidating earlier indices.
-    // Pin each zone air node to its initial temperature from the environment.
-    // Conditioned zones use the HVAC setpoint (indoor_temp_c).
-    // Unconditioned zones (attic, garage) use their env temperature (near outdoor).
-    let mut zone_fixes: Vec<(usize, f64)> = wiring
-        .zone_state_indices
+    let mut zone_fixes: Vec<(usize, f64)> = pinned_zones
         .iter()
-        .filter(|(_, idx)| **idx < n)
-        .map(|(zone_id, idx)| {
-            let idx = *idx;
+        .filter_map(|zone_id| {
+            let idx = *wiring.zone_state_indices.get(zone_id)?;
+            if idx >= n {
+                return None;
+            }
             let t = env
                 .zones
                 .iter()
                 .find(|z| z.id == *zone_id)
                 .map(|z| z.temperature_c)
                 .unwrap_or(indoor_temp_c);
-            (idx, t)
+            Some((idx, t))
         })
         .collect();
     zone_fixes.sort_by(|a, b| b.0.cmp(&a.0));
@@ -235,7 +252,7 @@ mod tests {
         let (model, wiring) = one_node_model(a, b);
         let env = minimal_env(indoor_temp, outdoor_temp);
 
-        let x = initialize_steady_state(&model, &wiring, &env, indoor_temp).unwrap();
+        let x = initialize_steady_state(&model, &wiring, &env, indoor_temp, &[]).unwrap();
 
         // Expected: x = b * outdoor / (1 - a) = 0.2 * (-5) / 0.2 = -5
         let expected = b * outdoor_temp / (1.0 - a);
@@ -279,7 +296,8 @@ mod tests {
         let indoor = 20.0;
         let env = minimal_env(indoor, outdoor);
 
-        let x = initialize_steady_state(&model, &wiring, &env, indoor).unwrap();
+        let x =
+            initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]).unwrap();
 
         assert_eq!(x.len(), 2);
         // State 0 should be pinned at indoor temp.
@@ -324,7 +342,7 @@ mod tests {
         let indoor = 21.0;
         let env = minimal_env(indoor, -5.0);
 
-        let x = initialize_steady_state(&model, &wiring, &env, indoor).unwrap();
+        let x = initialize_steady_state(&model, &wiring, &env, indoor, &[]).unwrap();
 
         assert_eq!(x.len(), 2);
         for i in 0..x.len() {

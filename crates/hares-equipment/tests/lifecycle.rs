@@ -384,6 +384,8 @@ fn lifecycle_gas_furnace() {
             ducts: DuctConfig::default(),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
 
@@ -557,6 +559,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 ducts: DuctConfig::default(),
                 stage_heating_capacities_w: None,
                 stage_heating_eirs: None,
+                heating_setpoint_c: None,
+                heating_setpoint_source: None,
             },
         ),
         "Electric Furnace" => typed_alias_config(
@@ -569,6 +573,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 number_of_speeds: 1,
                 fan_power_w: Some(0.0),
                 ducts: DuctConfig::default(),
+                heating_setpoint_c: None,
+                heating_setpoint_source: None,
             },
         ),
         "Electric Baseboard" => typed_alias_config(
@@ -578,6 +584,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 zone_id: Some(1),
                 capacity_w: 2_000.0,
                 eir: 1.0,
+                heating_setpoint_c: None,
+                heating_setpoint_source: None,
             },
         ),
         "Gas Boiler" => typed_alias_config(
@@ -593,6 +601,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 flow_rate_kg_s: 0.3,
                 return_temp_c: 40.0,
                 fluid_type: hares_types::FluidType::Water,
+                heating_setpoint_c: None,
+                heating_setpoint_source: None,
             },
         ),
         "Electric Boiler" => typed_alias_config(
@@ -608,6 +618,8 @@ fn config_for_class(class: &str) -> EquipmentConfig {
                 flow_rate_kg_s: 0.3,
                 return_temp_c: 40.0,
                 fluid_type: hares_types::FluidType::Water,
+                heating_setpoint_c: None,
+                heating_setpoint_source: None,
             },
         ),
         "Air Conditioner" => typed_alias_config(

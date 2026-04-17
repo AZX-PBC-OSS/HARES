@@ -8,7 +8,7 @@
 mod tests {
     use std::path::PathBuf;
 
-    use hares_core::{building_to_boundary_inputs, building_to_zone_inputs};
+    use hares_core::{building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone};
     use hares_envelope::{ExteriorTarget, RCPath, assemble_building_rc, derive_zone_capacitances};
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
@@ -382,8 +382,14 @@ mod tests {
         let cond_idx = zone_index(&building, ZoneType::Conditioned);
         let attic_idx = zone_index(&building, ZoneType::Attic);
 
-        // Conditioned zone capacitance: C = 1.2 * 1006 * V * 7
-        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * 7.0;
+        // Conditioned zone capacitance: C = rho_air * cp_air * V * TCM, where TCM is
+        // the interior thermal-capacitance multiplier accounting for furniture and
+        // partition walls. HARES resolves TCM per zone via
+        // `mass_multiplier_for_zone` (conversions.rs).
+        let hares_indoor_cap = 1.2
+            * 1006.0
+            * OCHRE_INDOOR_VOLUME_M3
+            * mass_multiplier_for_zone(&ZoneType::Conditioned);
         assert_within_pct(
             zone_caps[cond_idx],
             hares_indoor_cap,
@@ -391,10 +397,12 @@ mod tests {
             "indoor zone capacitance",
         );
 
-        // Attic zone capacitance: HARES now computes attic volume from gable wall
-        // area + roof pitch (triangular prism), matching OCHRE's derivation.
-        // HARES uses AIR_DENSITY=1.2 vs OCHRE's 1.2041 → ~0.3% expected diff.
-        let hares_attic_cap = 1.2 * 1006.0 * OCHRE_ATTIC_VOLUME_M3 * 7.0;
+        // Attic zone capacitance uses TCM = 1.0 (air only: unconditioned attics have
+        // no furniture or partition mass). OCHRE applies x7 uniformly, which
+        // overstates attic inertia ~7x. HARES attic mass = air only; see
+        // `mass_multiplier_for_zone` in hares-core/src/dwelling/conversions.rs.
+        let hares_attic_cap =
+            1.2 * 1006.0 * OCHRE_ATTIC_VOLUME_M3 * mass_multiplier_for_zone(&ZoneType::Attic);
         assert_within_pct(
             zone_caps[attic_idx],
             hares_attic_cap,
@@ -656,13 +664,16 @@ mod tests {
         let (_rc, diag) = assemble_building_rc(&boundary_inputs, n_zones, &zone_caps)
             .expect("assemble_building_rc must succeed");
 
-        // Load OCHRE reference from JSON
-        let ref_json_path = project_root().join("tests/fixtures/parity/ochre_rc_reference.json");
+        // Load ASHRAE-correct RC reference. Interior film R includes combined
+        // convection (TARP, EnergyPlus Eng. Ref. Sec. 9.4) + linearized radiation
+        // (ASHRAE Handbook of Fundamentals 2021 Ch. 26 Table 1). Window U-factor
+        // converts IP BTU/(hr*ft2*F) -> SI via x5.678 per ASHRAE 90.1-2022.
+        let ref_json_path = project_root().join("tests/fixtures/parity/ashrae_rc_reference.json");
         let ref_json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&ref_json_path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", ref_json_path.display())),
         )
-        .expect("parse ochre_rc_reference.json");
+        .expect("parse ashrae_rc_reference.json");
         let ochre_boundaries = ref_json["boundaries"].as_array().expect("boundaries array");
         let ochre_total_ua = ref_json["total_ua_w_k"].as_f64().unwrap_or(0.0);
 
@@ -753,6 +764,14 @@ mod tests {
             let o_re = ochre_bd["r_film_ext_m2_k_w"].as_f64().unwrap_or(0.0);
             let o_cap_kj = ochre_bd["capacitance_kj_k"].as_f64().unwrap_or(0.0);
             let o_nodes = ochre_bd["n_nodes"].as_u64().unwrap_or(0) as usize;
+
+            // Windows are stored per-window in HARES (Window1 … WindowN) but
+            // aggregated under the single "Window" name in the reference.
+            // The dedicated aggregate-window comparison below handles them,
+            // so skip the direct lookup here.
+            if name == "Window" {
+                continue;
+            }
 
             let Some(h) = hares_by_name.get(name) else {
                 eprintln!("{:<20} — NO MATCH IN HARES —", name);
@@ -919,6 +938,17 @@ mod tests {
                     hares_window_area, o_win_area, area_pct
                 ));
             }
+            // Aggregate UA must match within 1% (same tolerance as named
+            // boundaries) — this is the enforcement gate for the IP-U ->
+            // SI conversion and Simple Glazing Model decomposition.
+            let ua_pct = pct(hares_window_ua, o_win_ua);
+            if o_win_ua > 1.0 && ua_pct.abs() > 1.0 {
+                failures.push(format!(
+                    "Window UA: {:.2} vs {:.2} W/K ({:+.1}%)",
+                    hares_window_ua, o_win_ua, ua_pct
+                ));
+            }
+            matched_count += 1;
         }
 
         // Remaining unmatched HARES boundaries (non-window)
@@ -943,19 +973,25 @@ mod tests {
             ochre_boundaries.len()
         );
 
-        assert_within_pct(hares_total, ochre_total_ua, 10.0, "total building UA");
+        assert_within_pct(hares_total, ochre_total_ua, 3.0, "total building UA");
 
-        // Zone capacitances within 1%.
+        // Zone capacitances within 1%. TCM is resolved per zone type via
+        // `mass_multiplier_for_zone` (conversions.rs). Attic TCM = 1.0 (air only);
+        // OCHRE's uniform x7 over-counts attic thermal inertia ~7x.
         let cond_idx = zone_index(&building, ZoneType::Conditioned);
         let attic_idx = zone_index(&building, ZoneType::Attic);
-        let hares_indoor_cap = 1.2 * 1006.0 * OCHRE_INDOOR_VOLUME_M3 * 7.0;
+        let hares_indoor_cap = 1.2
+            * 1006.0
+            * OCHRE_INDOOR_VOLUME_M3
+            * mass_multiplier_for_zone(&ZoneType::Conditioned);
         assert_within_pct(
             zone_caps[cond_idx],
             hares_indoor_cap,
             1.0,
             "indoor zone capacitance",
         );
-        let hares_attic_cap = 1.2 * 1006.0 * OCHRE_ATTIC_VOLUME_M3 * 7.0;
+        let hares_attic_cap =
+            1.2 * 1006.0 * OCHRE_ATTIC_VOLUME_M3 * mass_multiplier_for_zone(&ZoneType::Attic);
         assert_within_pct(
             zone_caps[attic_idx],
             hares_attic_cap,
@@ -963,15 +999,106 @@ mod tests {
             "attic zone capacitance",
         );
 
-        // Report all failures at the end for visibility
+        // Report all failures at the end for visibility.  The per-boundary
+        // checks above accumulate every divergence; any nonzero count means
+        // HARES disagrees with the independent ASHRAE reference beyond the
+        // documented tolerance.
         if !failures.is_empty() {
             eprintln!("\n  RC PARITY FAILURES ({}):", failures.len());
             for f in &failures {
                 eprintln!("    - {f}");
             }
-            // Don't panic on failures yet — this is diagnostic. The UA assertions
-            // above already catch regressions. Uncomment to enforce strict parity:
-            // panic!("{} RC parity failures", failures.len());
+            panic!("{} RC parity failures", failures.len());
         }
+    }
+
+    // ── Test 6: ASHRAE interior film resistance regression ─────────────────
+    //
+    // Locks in the ASHRAE/EnergyPlus convention that interior surface film
+    // resistance accounts for BOTH natural convection (TARP) AND linearized
+    // longwave radiation (h_rad = 4·ε·σ·T³, ε=0.9, T_mean=293.15 K).  The
+    // OCHRE reference omitted the radiative contribution, understating the
+    // combined interior film conductance by ~2.7× and inflating R_i to
+    // ~0.326 m²·K/W on vertical walls.
+    //
+    // Reference values (ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1
+    // "Surface Film Resistances for Surfaces of Emittance ε = 0.90"):
+    //   - Vertical wall, horizontal heat flow:    R_i ≈ 0.120 m²·K/W
+    //   - Horizontal surface, heat flow up:       R_i ≈ 0.106 m²·K/W
+    //   - Horizontal surface, heat flow down:     R_i ≈ 0.162 m²·K/W
+    //
+    // HARES computes these dynamically in
+    // `hares_physics::film_coefficients::film_resistances`
+    // (see crates/hares-physics/src/film_coefficients.rs); the combined
+    // h_conv + h_rad matches the ASHRAE table values to within the
+    // convection model's own sensitivity to ΔT.
+    #[test]
+    fn ashrae_interior_film_resistance_regression() {
+        use hares_physics::film_coefficients::{
+            SurfaceRoughness, ZoneLabel, film_resistances,
+        };
+
+        // Vertical wall, Conditioned interior, Outdoor exterior.
+        // ASHRAE Ch. 26 Table 1 vertical-wall interior film R: 0.120 m²·K/W.
+        let (r_int_wall, _) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::MediumRough,
+        );
+        assert!(
+            (r_int_wall - 0.120).abs() < 0.01,
+            "vertical wall R_i={r_int_wall:.4} must be 0.120 ± 0.01 m²·K/W \
+             (ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 — \
+             vertical surface, horizontal heat flow, ε=0.9).  \
+             Regression check: combined TARP convection + linearized radiation."
+        );
+
+        // Ceiling from below (Conditioned looking up at Attic boundary — heat
+        // flow upward).  ASHRAE Ch. 26 Table 1: R_i ≈ 0.106 m²·K/W upward.
+        let (r_int_ceiling, _) = film_resistances(
+            0.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Attic,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::MediumRough,
+        );
+        assert!(
+            r_int_ceiling > 0.08 && r_int_ceiling < 0.20,
+            "ceiling (heat flow up) R_i={r_int_ceiling:.4} out of ASHRAE range \
+             [0.08, 0.20] m²·K/W (Handbook of Fundamentals 2021 Ch. 26 Table 1)."
+        );
+
+        // Floor from above (Conditioned looking down at Ground — heat flow
+        // down, stable).  ASHRAE Ch. 26 Table 1: R_i ≈ 0.162 m²·K/W downward.
+        let (r_int_floor, _) = film_resistances(
+            0.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Ground,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::MediumRough,
+        );
+        assert!(
+            r_int_floor > 0.08 && r_int_floor < 0.25,
+            "floor (heat flow down) R_i={r_int_floor:.4} out of ASHRAE range \
+             [0.08, 0.25] m²·K/W (Handbook of Fundamentals 2021 Ch. 26 Table 1)."
+        );
+
+        // Convection-only regression guard: R_i must never approach OCHRE's
+        // ~0.325 on a vertical wall (that value corresponds to h_rad=0, which
+        // violates ASHRAE Ch. 26 surface resistance tables).
+        assert!(
+            r_int_wall < 0.20,
+            "vertical wall R_i={r_int_wall:.4} ≥ 0.20 — radiative film contribution \
+             appears missing (convection-only regression).  See \
+             crates/hares-physics/src/film_coefficients.rs (h_rad term)."
+        );
     }
 }

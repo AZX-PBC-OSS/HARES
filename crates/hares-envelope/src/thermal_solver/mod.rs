@@ -223,7 +223,13 @@ impl ThermalSolver {
         env: &EnvironmentState,
         indoor_temp_c: f64,
     ) -> Result<Self> {
-        let x = initialize_steady_state(&model, &wiring, env, indoor_temp_c)?;
+        let x = initialize_steady_state(
+            &model,
+            &wiring,
+            env,
+            indoor_temp_c,
+            &[config.indoor_zone_id],
+        )?;
         let n_inputs = model.input_dim();
         let n_states = model.state_dim();
         let last_u = DVector::<f64>::zeros(n_inputs);

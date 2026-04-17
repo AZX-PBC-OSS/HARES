@@ -50,6 +50,8 @@ fn sample_gas_furnace_config() -> GasFurnaceConfig {
         ducts: sample_duct_config(),
         stage_heating_capacities_w: None,
         stage_heating_eirs: None,
+        heating_setpoint_c: None,
+        heating_setpoint_source: None,
     }
 }
 
@@ -62,6 +64,8 @@ fn sample_electric_furnace_config() -> ElectricFurnaceConfig {
         fan_power_w: Some(350.0),
         number_of_speeds: 1,
         ducts: sample_duct_config(),
+        heating_setpoint_c: None,
+        heating_setpoint_source: None,
     }
 }
 
@@ -77,6 +81,8 @@ fn sample_gas_boiler_config() -> GasBoilerConfig {
         fluid_type: hares_types::FluidType::Water,
         fan_power_w: Some(80.0),
         number_of_speeds: 1,
+        heating_setpoint_c: None,
+        heating_setpoint_source: None,
     }
 }
 
@@ -92,6 +98,8 @@ fn sample_electric_boiler_config() -> ElectricBoilerConfig {
         fluid_type: hares_types::FluidType::Water,
         fan_power_w: Some(80.0),
         number_of_speeds: 1,
+        heating_setpoint_c: None,
+        heating_setpoint_source: None,
     }
 }
 
@@ -101,6 +109,8 @@ fn sample_electric_baseboard_config() -> ElectricBaseboardConfig {
         zone_id: Some(1),
         capacity_w: 4_500.0,
         eir: 1.0,
+        heating_setpoint_c: None,
+        heating_setpoint_source: None,
     }
 }
 

@@ -1,0 +1,167 @@
+{
+  "_provenance": {
+    "script": "scripts/gen_ashrae_reference.py",
+    "hpxml_input": "data/examples/BEopt_example.xml",
+    "independent_from_hares": true,
+    "citations": {
+      "interior_film_r": "ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 (still-air + radiation, eps=0.9, T=293.15 K); EnergyPlus Engineering Reference v25.1.0 §9.4 (TARP).",
+      "exterior_film_r": "EnergyPlus Engineering Reference v25.1.0 §9.5 (DOE-2 forced convection, r_f=1.67 'Rough' per the §9.5 Surface Roughness Multipliers table — residential BEopt/OCHRE convention for shingle/clapboard).",
+      "window_u_factor_ip_to_si": "ASHRAE 90.1-2022 Appendix A unit-conversion factor 5.678263 W/(m^2*K) per Btu/(hr*ft^2*F); Simple Glazing interior-film decomposition per EnergyPlus Eng. Ref. §3.2 (Arasteh et al., LBNL 2009).",
+      "assembly_layer_r_and_capacitance": "ASHRAE Handbook of Fundamentals 2021 Ch. 26 Table 4 'Thermal Properties of Typical Building and Insulating Materials' — conductivity, density, and specific heat used for each layer in the ASSEMBLY_LAYERS tables.  Layer R = thickness / k; capacitance = thickness * density * cp summed across layers per BEopt Residential Construction Reference (NREL/TP-5500-64459, Apr 2016) App. C canonical build-ups.",
+      "slab_on_grade_build_up": "BEopt Residential Construction Reference App. C 'Slab-on-grade, Uninsulated': fictitious F-factor resistor (ASHRAE 90.1-2022 §5.5.3.1) + 12 in. soil column + 4 in. concrete slab + carpet per ASHRAE Ch. 26 Table 4.",
+      "same_zone_halving": "EnergyPlus documentation of interior-partition RC equivalent network (both ends at same air node): r_total = r_layer / 2 + r_film_int.",
+      "attic_volume_geometry": "BEopt Residential Construction Reference §3.3 (triangular gable roof, 0.5 * footprint * sqrt(gable_area * tan_pitch)).",
+      "typical_zone_temperatures": "EnergyPlus Engineering Reference §9.4 idealised interior/exterior anchors (conditioned 20 C, outdoor = avg_ambient + 5 C, ground = avg_ground); linear interpolation for unconditioned intermediate zones."
+    },
+    "location": {
+      "avg_wind_speed_m_s": 2.0,
+      "avg_ambient_temp_c": 10.0,
+      "avg_ground_temp_c": 10.0
+    }
+  },
+  "hpxml_file": "BEopt_example.xml",
+  "location": {
+    "Average Wind Speed (m/s)": 2.0,
+    "Average Ambient Temperature (C)": 10.0,
+    "Average Ground Temperature (C)": 10.0
+  },
+  "boundaries": [
+    {
+      "name": "Exterior Wall",
+      "area_m2": 86.5856,
+      "r_layer_m2_k_w": 2.08758,
+      "r_film_int_m2_k_w": 0.1217,
+      "r_film_ext_m2_k_w": 0.1139,
+      "r_total_m2_k_w": 2.3232,
+      "ua_w_k": 37.27,
+      "capacitance_kj_k": 3543.52,
+      "n_nodes": 16,
+      "interior_zone": "LIV",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Attic Wall",
+      "area_m2": 26.849,
+      "r_layer_m2_k_w": 0.55059,
+      "r_film_int_m2_k_w": 0.1217,
+      "r_film_ext_m2_k_w": 0.1139,
+      "r_total_m2_k_w": 0.7862,
+      "ua_w_k": 34.15,
+      "capacitance_kj_k": 870.08,
+      "n_nodes": 6,
+      "interior_zone": "ATC",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Attic Floor",
+      "area_m2": 111.4836,
+      "r_layer_m2_k_w": 5.31012,
+      "r_film_int_m2_k_w": 0.1444,
+      "r_film_ext_m2_k_w": 0.1444,
+      "r_total_m2_k_w": 5.5989,
+      "ua_w_k": 19.91,
+      "capacitance_kj_k": 2470.67,
+      "n_nodes": 3,
+      "interior_zone": "LIV",
+      "exterior_zone": "ATC",
+      "same_zone": false
+    },
+    {
+      "name": "Floor",
+      "area_m2": 111.4836,
+      "r_layer_m2_k_w": 0.970213,
+      "r_film_int_m2_k_w": 0.1148,
+      "r_film_ext_m2_k_w": 0.2805,
+      "r_total_m2_k_w": 1.3656,
+      "ua_w_k": 81.64,
+      "capacitance_kj_k": 47627.95,
+      "n_nodes": 3,
+      "interior_zone": "LIV",
+      "exterior_zone": "GND",
+      "same_zone": false
+    },
+    {
+      "name": "Attic Roof",
+      "area_m2": 124.6425,
+      "r_layer_m2_k_w": 0.24564,
+      "r_film_int_m2_k_w": 0.1427,
+      "r_film_ext_m2_k_w": 0.1137,
+      "r_total_m2_k_w": 0.502,
+      "ua_w_k": 248.27,
+      "capacitance_kj_k": 2289.35,
+      "n_nodes": 6,
+      "interior_zone": "ATC",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Window",
+      "area_m2": 15.6077,
+      "r_layer_m2_k_w": 0.0,
+      "r_film_int_m2_k_w": 0.1386,
+      "r_film_ext_m2_k_w": 0.0,
+      "r_total_m2_k_w": 0.476,
+      "ua_w_k": 32.79,
+      "capacitance_kj_k": 0.0,
+      "n_nodes": 0,
+      "interior_zone": "LIV",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Door",
+      "area_m2": 1.8581,
+      "r_layer_m2_k_w": 0.7295,
+      "r_film_int_m2_k_w": 0.1217,
+      "r_film_ext_m2_k_w": 0.1139,
+      "r_total_m2_k_w": 0.9651,
+      "ua_w_k": 1.93,
+      "capacitance_kj_k": 51.47,
+      "n_nodes": 1,
+      "interior_zone": "LIV",
+      "exterior_zone": "EXT",
+      "same_zone": false
+    },
+    {
+      "name": "Interior Wall",
+      "area_m2": 111.4836,
+      "r_layer_m2_k_w": 0.38554,
+      "r_film_int_m2_k_w": 0.1217,
+      "r_film_ext_m2_k_w": 0.1217,
+      "r_total_m2_k_w": 0.3145,
+      "ua_w_k": 354.48,
+      "capacitance_kj_k": 2896.51,
+      "n_nodes": 2,
+      "interior_zone": "LIV",
+      "exterior_zone": "LIV",
+      "same_zone": true
+    },
+    {
+      "name": "Indoor Furniture",
+      "area_m2": 44.5935,
+      "r_layer_m2_k_w": 1.3252,
+      "r_film_int_m2_k_w": 0.1217,
+      "r_film_ext_m2_k_w": 0.1217,
+      "r_total_m2_k_w": 0.7843,
+      "ua_w_k": 56.85,
+      "capacitance_kj_k": 5287.86,
+      "n_nodes": 1,
+      "interior_zone": "LIV",
+      "exterior_zone": "LIV",
+      "same_zone": true
+    }
+  ],
+  "zones": [
+    {
+      "name": "Indoor",
+      "volume_m3": 271.8417
+    },
+    {
+      "name": "Attic",
+      "volume_m3": 204.2349
+    }
+  ],
+  "total_ua_w_k": 867.29
+}

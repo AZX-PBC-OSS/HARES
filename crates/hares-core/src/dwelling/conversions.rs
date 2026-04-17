@@ -21,7 +21,7 @@ const DEFAULT_R_M2_K_W: f64 = hares_envelope::boundary_rc::DEFAULT_R_M2_K_W;
 /// Conditioned space has furniture, partition walls, etc. that store heat.
 /// Foundation zones have minimal interior mass; 1.0 = air capacitance only.
 /// OCHRE uses 7.0 for all zones which overstates foundation thermal mass.
-fn mass_multiplier_for_zone(zone_type: &ZoneType) -> f64 {
+pub fn mass_multiplier_for_zone(zone_type: &ZoneType) -> f64 {
     match zone_type {
         ZoneType::Conditioned => 7.0,
         ZoneType::Foundation => 1.0,
@@ -584,6 +584,8 @@ mod tests {
             number_of_speeds: 1,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
             ducts: DuctConfig::default(),
         };
         let parameters = serde_json::to_value(&typed_cfg)

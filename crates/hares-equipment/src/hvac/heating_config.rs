@@ -26,6 +26,13 @@ pub struct GasFurnaceConfig {
     /// Per-stage energy input ratios (EIR = 1/AFUE per stage). Overrides `afue` when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_eirs: Option<Vec<f64>>,
+    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
+    /// this seeds the initial setpoint before the first schedule sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    /// Time-varying heating setpoint schedule (daily profile or external column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
     #[serde(flatten)]
     pub ducts: DuctConfig,
 }
@@ -47,6 +54,8 @@ impl Default for GasFurnaceConfig {
             number_of_speeds: 1,
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
             ducts: DuctConfig::default(),
         }
     }
@@ -66,6 +75,13 @@ pub struct ElectricFurnaceConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
+    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
+    /// this seeds the initial setpoint before the first schedule sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    /// Time-varying heating setpoint schedule (daily profile or external column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
     #[serde(flatten)]
     pub ducts: DuctConfig,
 }
@@ -85,6 +101,8 @@ impl Default for ElectricFurnaceConfig {
             eir: 1.0,
             fan_power_w: None,
             number_of_speeds: 1,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
             ducts: DuctConfig::default(),
         }
     }
@@ -110,6 +128,13 @@ pub struct GasBoilerConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
+    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
+    /// this seeds the initial setpoint before the first schedule sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    /// Time-varying heating setpoint schedule (daily profile or external column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
 }
 
 impl EquipmentTypedConfig for GasBoilerConfig {
@@ -131,6 +156,8 @@ impl Default for GasBoilerConfig {
             fluid_type: default_fluid_type(),
             fan_power_w: None,
             number_of_speeds: 1,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         }
     }
 }
@@ -156,6 +183,13 @@ pub struct ElectricBoilerConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
+    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
+    /// this seeds the initial setpoint before the first schedule sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    /// Time-varying heating setpoint schedule (daily profile or external column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
 }
 
 impl EquipmentTypedConfig for ElectricBoilerConfig {
@@ -177,6 +211,8 @@ impl Default for ElectricBoilerConfig {
             fluid_type: default_fluid_type(),
             fan_power_w: None,
             number_of_speeds: 1,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         }
     }
 }
@@ -191,6 +227,13 @@ pub struct ElectricBaseboardConfig {
     /// Electric input ratio [W/W] = electric input power divided by delivered
     /// thermal output. Unity is ideal resistive conversion.
     pub eir: f64,
+    /// Static heating setpoint [C]. When `heating_setpoint_source` is also present,
+    /// this seeds the initial setpoint before the first schedule sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_c: Option<f64>,
+    /// Time-varying heating setpoint schedule (daily profile or external column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heating_setpoint_source: Option<ScheduleSourceConfig>,
 }
 
 impl EquipmentTypedConfig for ElectricBaseboardConfig {
@@ -206,6 +249,8 @@ impl Default for ElectricBaseboardConfig {
             zone_id: None,
             capacity_w: 0.0,
             eir: 1.0,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         }
     }
 }
@@ -346,6 +391,70 @@ mod tests {
         assert_round_trip(eb);
         assert_round_trip(bb);
         assert_round_trip(ih);
+    }
+
+    /// Regression: heating setpoint fields must round-trip through JSON for
+    /// every heating config so that HPXML-supplied setpoints reach
+    /// `HvacEquipment::init` via the typed payload (resolve_hvac.rs populates
+    /// these fields from the HPXML `HVACControl` element).
+    #[test]
+    fn heating_configs_preserve_setpoint_fields_through_json_round_trip() {
+        let setpoint = 18.33; // 65 °F, a common HPXML setback value
+        let gf = GasFurnaceConfig {
+            capacity_w: 12_000.0,
+            afue: 0.92,
+            heating_setpoint_c: Some(setpoint),
+            ..GasFurnaceConfig::default()
+        };
+        let ef = ElectricFurnaceConfig {
+            capacity_w: 8_000.0,
+            eir: 1.0,
+            heating_setpoint_c: Some(setpoint),
+            ..ElectricFurnaceConfig::default()
+        };
+        let gb = GasBoilerConfig {
+            capacity_w: 15_000.0,
+            afue: 0.88,
+            heating_setpoint_c: Some(setpoint),
+            ..GasBoilerConfig::default()
+        };
+        let eb = ElectricBoilerConfig {
+            capacity_w: 10_000.0,
+            eir: 1.0,
+            heating_setpoint_c: Some(setpoint),
+            ..ElectricBoilerConfig::default()
+        };
+        let bb = ElectricBaseboardConfig {
+            capacity_w: 5_000.0,
+            eir: 1.0,
+            heating_setpoint_c: Some(setpoint),
+            ..ElectricBaseboardConfig::default()
+        };
+
+        fn assert_setpoint_round_trip<T>(config: T, expected_setpoint: f64)
+        where
+            T: EquipmentTypedConfig + std::fmt::Debug,
+        {
+            let value = serde_json::to_value(&config).expect("serialize");
+            let field = value
+                .get("heating_setpoint_c")
+                .and_then(serde_json::Value::as_f64)
+                .expect("heating_setpoint_c must appear in serialized form");
+            assert!(
+                (field - expected_setpoint).abs() < 1e-9,
+                "heating_setpoint_c must round-trip for {}: got {field}, expected {expected_setpoint}",
+                T::equipment_type_name()
+            );
+            let recovered: T = serde_json::from_value(value.clone()).expect("deserialize");
+            let reserialized = serde_json::to_value(&recovered).expect("reserialize");
+            assert_eq!(reserialized, value);
+        }
+
+        assert_setpoint_round_trip(gf, setpoint);
+        assert_setpoint_round_trip(ef, setpoint);
+        assert_setpoint_round_trip(gb, setpoint);
+        assert_setpoint_round_trip(eb, setpoint);
+        assert_setpoint_round_trip(bb, setpoint);
     }
 
     #[test]

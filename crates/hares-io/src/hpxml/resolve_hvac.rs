@@ -509,6 +509,7 @@ fn try_build_gas_furnace_config(
     );
     ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cfg = GasFurnaceConfig {
         equipment_id: None,
         zone_id: None,
@@ -519,6 +520,8 @@ fn try_build_gas_furnace_config(
         ducts,
         stage_heating_capacities_w: extract_stage_values(params, "heating_capacity_w_stage"),
         stage_heating_eirs: extract_stage_values(params, "heating_eir_stage"),
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        heating_setpoint_source,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -552,6 +555,7 @@ fn try_build_electric_furnace_config(
     );
     ducts.airflow_m3_s_per_w = Some(airflow_m3_s_per_w);
 
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cfg = ElectricFurnaceConfig {
         equipment_id: None,
         zone_id: None,
@@ -560,6 +564,8 @@ fn try_build_electric_furnace_config(
         number_of_speeds: n_speeds,
         fan_power_w,
         ducts,
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        heating_setpoint_source,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -585,6 +591,7 @@ fn try_build_gas_boiler_config(name: &str, params: &Map<String, Value>) -> Optio
         .and_then(Value::as_f64)
         .unwrap_or(40.0);
 
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cfg = GasBoilerConfig {
         equipment_id: None,
         zone_id: None,
@@ -596,6 +603,8 @@ fn try_build_gas_boiler_config(name: &str, params: &Map<String, Value>) -> Optio
         flow_rate_kg_s,
         return_temp_c,
         fluid_type: hares_types::FluidType::Water,
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        heating_setpoint_source,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -623,6 +632,7 @@ fn try_build_electric_boiler_config(
         .and_then(Value::as_f64)
         .unwrap_or(40.0);
 
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cfg = ElectricBoilerConfig {
         equipment_id: None,
         zone_id: None,
@@ -634,6 +644,8 @@ fn try_build_electric_boiler_config(
         flow_rate_kg_s,
         return_temp_c,
         fluid_type: hares_types::FluidType::Water,
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        heating_setpoint_source,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -653,11 +665,14 @@ fn try_build_electric_baseboard_config(
         .and_then(Value::as_u64)
         .map(|v| v as u16);
 
+    let heating_setpoint_source = schedule_source_from_params(params, "heating");
     let cfg = ElectricBaseboardConfig {
         equipment_id: None,
         zone_id,
         capacity_w,
         eir: 1.0,
+        heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
+        heating_setpoint_source,
     };
     Some(EquipmentConfig::from_typed(
         name.to_string(),
@@ -2154,26 +2169,81 @@ fn parse_hvac_setpoint_params(details: &XmlNode) -> Vec<(String, Value)> {
         return out;
     };
 
-    for (hvac_type, param_prefix) in [("Heating", "heating"), ("Cooling", "cooling")] {
+    let mut heating: Option<([f64; 24], [f64; 24])> = None;
+    let mut cooling: Option<([f64; 24], [f64; 24])> = None;
+    for (hvac_type, slot) in [("Heating", &mut heating), ("Cooling", &mut cooling)] {
         let weekday = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, true);
         let weekend = super::xml_helpers::parse_setpoint_from_control(control, hvac_type, false);
         if let Some(wd) = weekday {
             let mut weekday_arr = [0.0; 24];
             weekday_arr.copy_from_slice(&wd[..24]);
-            let weekend_arr = weekend.unwrap_or_else(|| wd.clone());
-            let weekend_arr = {
-                let mut arr = [0.0; 24];
-                arr.copy_from_slice(&weekend_arr[..24]);
-                arr
-            };
-            out.push((
-                format!("{param_prefix}_setpoint_source"),
-                daily_profile_source(weekday_arr, weekend_arr),
-            ));
+            let weekend_vec = weekend.unwrap_or_else(|| wd.clone());
+            let mut weekend_arr = [0.0; 24];
+            weekend_arr.copy_from_slice(&weekend_vec[..24]);
+            *slot = Some((weekday_arr, weekend_arr));
         }
     }
 
+    if let (Some((h_wd, h_we)), Some((c_wd, c_we))) = (heating.as_mut(), cooling.as_mut()) {
+        reconcile_setpoint_pair(h_wd, c_wd, "weekday");
+        reconcile_setpoint_pair(h_we, c_we, "weekend");
+    }
+
+    if let Some((wd, we)) = heating {
+        out.push((
+            "heating_setpoint_source".to_string(),
+            daily_profile_source(wd, we),
+        ));
+    }
+    if let Some((wd, we)) = cooling {
+        out.push((
+            "cooling_setpoint_source".to_string(),
+            daily_profile_source(wd, we),
+        ));
+    }
+
     out
+}
+
+/// Clip inverted or too-close heating/cooling setpoint pairs to the daily
+/// midpoint with a symmetric offset, matching OCHRE's reconciliation
+/// (see `vendors/OCHRE/ochre/utils/schedule.py:617-625`).
+///
+/// OCHRE enforces a 1 °C minimum separation. HARES's downstream thermostat
+/// validator (`ThermalSetpoints::validate_for_deadband`) requires
+/// `cooling - heating >= 2 * hysteresis_c`, and the default hysteresis is 1 °C,
+/// so the required gap is `max(1.0, 2 * hysteresis) = 2.0 °C`. We use that as
+/// the reconciliation gap and clip to `avg ± gap/2` so the post-clip pair
+/// always satisfies the thermostat invariant.
+const SETPOINT_RECONCILE_GAP_C: f64 = 2.0;
+
+fn reconcile_setpoint_pair(
+    heating: &mut [f64; 24],
+    cooling: &mut [f64; 24],
+    day_label: &'static str,
+) {
+    let half_gap = 0.5 * SETPOINT_RECONCILE_GAP_C;
+    let mut violated_hours = 0_u32;
+    let mut worst_inversion_c = 0.0_f64;
+    for h in 0..24 {
+        let gap = cooling[h] - heating[h];
+        if gap < SETPOINT_RECONCILE_GAP_C {
+            violated_hours += 1;
+            worst_inversion_c = worst_inversion_c.max(-gap);
+            let avg = 0.5 * (heating[h] + cooling[h]);
+            heating[h] = avg - half_gap;
+            cooling[h] = avg + half_gap;
+        }
+    }
+    if violated_hours > 0 {
+        tracing::warn!(
+            day = day_label,
+            violated_hours,
+            worst_inversion_c,
+            gap_c = SETPOINT_RECONCILE_GAP_C,
+            "HPXML heating/cooling setpoints too close or inverted; clipped to midpoint with 2 °C separation"
+        );
+    }
 }
 
 fn apply_building_setpoint_profiles(
@@ -2182,8 +2252,10 @@ fn apply_building_setpoint_profiles(
     include_heating: bool,
     include_cooling: bool,
 ) {
-    if include_heating {
-        if let Some(ref wd) = building.heating_weekday_setpoints_c {
+    let mut heating = building
+        .heating_weekday_setpoints_c
+        .as_ref()
+        .map(|wd| {
             let mut weekday = [0.0; 24];
             weekday.copy_from_slice(&wd[..24]);
             let weekend = building
@@ -2195,14 +2267,12 @@ fn apply_building_setpoint_profiles(
                     arr
                 })
                 .unwrap_or(weekday);
-            params.insert(
-                "heating_setpoint_source".to_string(),
-                daily_profile_source(weekday, weekend),
-            );
-        }
-    }
-    if include_cooling {
-        if let Some(ref wd) = building.cooling_weekday_setpoints_c {
+            (weekday, weekend)
+        });
+    let mut cooling = building
+        .cooling_weekday_setpoints_c
+        .as_ref()
+        .map(|wd| {
             let mut weekday = [0.0; 24];
             weekday.copy_from_slice(&wd[..24]);
             let weekend = building
@@ -2214,6 +2284,24 @@ fn apply_building_setpoint_profiles(
                     arr
                 })
                 .unwrap_or(weekday);
+            (weekday, weekend)
+        });
+
+    if let (Some((h_wd, h_we)), Some((c_wd, c_we))) = (heating.as_mut(), cooling.as_mut()) {
+        reconcile_setpoint_pair(h_wd, c_wd, "weekday");
+        reconcile_setpoint_pair(h_we, c_we, "weekend");
+    }
+
+    if include_heating {
+        if let Some((weekday, weekend)) = heating {
+            params.insert(
+                "heating_setpoint_source".to_string(),
+                daily_profile_source(weekday, weekend),
+            );
+        }
+    }
+    if include_cooling {
+        if let Some((weekday, weekend)) = cooling {
             params.insert(
                 "cooling_setpoint_source".to_string(),
                 daily_profile_source(weekday, weekend),
@@ -3038,16 +3126,16 @@ mod tests {
                     <HVACControl>
                       <extension>
                         <WeekdaySetpointTempsHeatingSeason>
-                          68,68,68,68,68,68,70,72,72,72,72,72,72,72,72,72,72,70,68,68,68,68,68,68
+                          66,66,66,66,66,66,68,70,70,70,70,70,70,70,70,70,70,68,66,66,66,66,66,66
                         </WeekdaySetpointTempsHeatingSeason>
                         <WeekendSetpointTempsHeatingSeason>
-                          68,68,68,68,68,68,69,69,70,70,70,70,70,70,70,70,70,70,68,68,68,68,68,68
+                          66,66,66,66,66,66,67,67,69,69,69,69,69,69,69,69,69,69,66,66,66,66,66,66
                         </WeekendSetpointTempsHeatingSeason>
                         <WeekdaySetpointTempsCoolingSeason>
-                          78,78,78,78,78,78,76,74,74,74,74,74,74,74,74,74,74,74,76,78,78,78,78,78
+                          80,80,80,80,80,80,78,76,76,76,76,76,76,76,76,76,76,76,78,80,80,80,80,80
                         </WeekdaySetpointTempsCoolingSeason>
                         <WeekendSetpointTempsCoolingSeason>
-                          78,78,78,78,78,78,77,77,76,76,76,76,76,76,76,76,76,76,78,78,78,78,78,78
+                          80,80,80,80,80,80,79,79,77,77,77,77,77,77,77,77,77,77,80,80,80,80,80,80
                         </WeekendSetpointTempsCoolingSeason>
                       </extension>
                     </HVACControl>
@@ -3081,13 +3169,191 @@ mod tests {
                 month_multipliers,
                 max_value,
             } => {
-                assert!((weekday[0] - conv::temperature_f_to_c(68.0)).abs() < 1e-9);
-                assert!((weekday[8] - conv::temperature_f_to_c(72.0)).abs() < 1e-9);
-                assert!((weekend[6] - conv::temperature_f_to_c(69.0)).abs() < 1e-9);
+                assert!((weekday[0] - conv::temperature_f_to_c(66.0)).abs() < 1e-9);
+                assert!((weekday[8] - conv::temperature_f_to_c(70.0)).abs() < 1e-9);
+                assert!((weekend[6] - conv::temperature_f_to_c(67.0)).abs() < 1e-9);
                 assert_eq!(month_multipliers, [1.0; 12]);
                 assert_eq!(max_value, 1.0);
             }
             other => panic!("expected DailyProfile source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_hvac_setpoint_params_reconciles_inverted_setpoints() {
+        // Inverted setpoints: heating=72°F (22.2 °C), cooling=68°F (20.0 °C).
+        // Reconciler must clip to midpoint ± 1 °C so cooling − heating ≥ 2 °C
+        // (matches thermostat validate_for_deadband with default 1 °C hysteresis).
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <HVACPlant>
+                    <HVACControl>
+                      <extension>
+                        <WeekdaySetpointTempsHeatingSeason>
+                          72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72
+                        </WeekdaySetpointTempsHeatingSeason>
+                        <WeekendSetpointTempsHeatingSeason>
+                          72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72,72
+                        </WeekendSetpointTempsHeatingSeason>
+                        <WeekdaySetpointTempsCoolingSeason>
+                          68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68
+                        </WeekdaySetpointTempsCoolingSeason>
+                        <WeekendSetpointTempsCoolingSeason>
+                          68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68,68
+                        </WeekendSetpointTempsCoolingSeason>
+                      </extension>
+                    </HVACControl>
+                  </HVACPlant>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("XML must parse");
+        let details = root
+            .path(&["Building", "BuildingDetails"])
+            .expect("details node must exist");
+
+        let params = parse_hvac_setpoint_params(details);
+        let mut map = Map::new();
+        for (key, value) in params {
+            map.insert(key, value);
+        }
+
+        let heating_source: ScheduleSourceConfig = serde_json::from_value(
+            map.get("heating_setpoint_source")
+                .cloned()
+                .expect("heating_setpoint_source must be present"),
+        )
+        .expect("heating_setpoint_source must deserialize");
+        let cooling_source: ScheduleSourceConfig = serde_json::from_value(
+            map.get("cooling_setpoint_source")
+                .cloned()
+                .expect("cooling_setpoint_source must be present"),
+        )
+        .expect("cooling_setpoint_source must deserialize");
+
+        let (heating_weekday, heating_weekend) = match heating_source {
+            ScheduleSourceConfig::DailyProfile {
+                weekday, weekend, ..
+            } => (weekday, weekend),
+            other => panic!("expected heating DailyProfile source, got {other:?}"),
+        };
+        let (cooling_weekday, cooling_weekend) = match cooling_source {
+            ScheduleSourceConfig::DailyProfile {
+                weekday, weekend, ..
+            } => (weekday, weekend),
+            other => panic!("expected cooling DailyProfile source, got {other:?}"),
+        };
+
+        // Midpoint of 72 °F (22.222 °C) and 68 °F (20.0 °C) is 21.111 °C.
+        // After reconciliation with a 2 °C gap: heating = midpoint − 1, cooling = midpoint + 1.
+        let expected_midpoint_c =
+            0.5 * (conv::temperature_f_to_c(72.0) + conv::temperature_f_to_c(68.0));
+        let expected_heating_c = expected_midpoint_c - 1.0;
+        let expected_cooling_c = expected_midpoint_c + 1.0;
+
+        for h in 0..24 {
+            assert!(
+                (heating_weekday[h] - expected_heating_c).abs() < 1e-9,
+                "weekday hour {h}: heating={} expected={}",
+                heating_weekday[h],
+                expected_heating_c,
+            );
+            assert!(
+                (cooling_weekday[h] - expected_cooling_c).abs() < 1e-9,
+                "weekday hour {h}: cooling={} expected={}",
+                cooling_weekday[h],
+                expected_cooling_c,
+            );
+            assert!(
+                (heating_weekend[h] - expected_heating_c).abs() < 1e-9,
+                "weekend hour {h}: heating={} expected={}",
+                heating_weekend[h],
+                expected_heating_c,
+            );
+            assert!(
+                (cooling_weekend[h] - expected_cooling_c).abs() < 1e-9,
+                "weekend hour {h}: cooling={} expected={}",
+                cooling_weekend[h],
+                expected_cooling_c,
+            );
+            assert!(
+                cooling_weekday[h] - heating_weekday[h] >= 2.0 - 1e-9,
+                "weekday hour {h}: gap < 2 °C",
+            );
+            assert!(
+                cooling_weekend[h] - heating_weekend[h] >= 2.0 - 1e-9,
+                "weekend hour {h}: gap < 2 °C",
+            );
+        }
+    }
+
+    #[test]
+    fn apply_building_setpoint_profiles_reconciles_inverted_setpoints() {
+        // Swapped: heating=22 °C, cooling=20 °C — must reconcile to midpoint ± 1 °C.
+        let heating_weekday = [22.0f64; 24];
+        let heating_weekend = [22.0f64; 24];
+        let cooling_weekday = [20.0f64; 24];
+        let cooling_weekend = [20.0f64; 24];
+        let building = building_with_setpoint_profiles(
+            heating_weekday,
+            heating_weekend,
+            cooling_weekday,
+            cooling_weekend,
+        );
+
+        let mut params = Map::new();
+        apply_building_setpoint_profiles(&building, &mut params, true, true);
+
+        let heating_source: ScheduleSourceConfig = serde_json::from_value(
+            params
+                .get("heating_setpoint_source")
+                .cloned()
+                .expect("heating_setpoint_source must be present"),
+        )
+        .expect("heating_setpoint_source must deserialize");
+        let cooling_source: ScheduleSourceConfig = serde_json::from_value(
+            params
+                .get("cooling_setpoint_source")
+                .cloned()
+                .expect("cooling_setpoint_source must be present"),
+        )
+        .expect("cooling_setpoint_source must deserialize");
+
+        if let ScheduleSourceConfig::DailyProfile {
+            weekday: h_wd,
+            weekend: h_we,
+            ..
+        } = heating_source
+        {
+            if let ScheduleSourceConfig::DailyProfile {
+                weekday: c_wd,
+                weekend: c_we,
+                ..
+            } = cooling_source
+            {
+                for h in 0..24 {
+                    assert!(
+                        c_wd[h] - h_wd[h] >= 2.0 - 1e-9,
+                        "weekday hour {h}: cooling − heating < 2 °C",
+                    );
+                    assert!(
+                        c_we[h] - h_we[h] >= 2.0 - 1e-9,
+                        "weekend hour {h}: cooling − heating < 2 °C",
+                    );
+                    // Midpoint preserved.
+                    assert!((0.5 * (h_wd[h] + c_wd[h]) - 21.0).abs() < 1e-9);
+                    assert!((0.5 * (h_we[h] + c_we[h]) - 21.0).abs() < 1e-9);
+                    assert!(h_wd[h] <= c_wd[h] - 1.0);
+                    assert!(h_we[h] <= c_we[h] - 1.0);
+                }
+            } else {
+                panic!("expected cooling DailyProfile source");
+            }
+        } else {
+            panic!("expected heating DailyProfile source");
         }
     }
 

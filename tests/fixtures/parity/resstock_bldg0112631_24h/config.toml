@@ -1,0 +1,14 @@
+[simulation]
+start_time = "2019-05-05T00:00:00-07:00"
+duration = 86400
+time_res = 60
+output_verbosity = 3
+output_chunk_size = 1440
+master_seed = 0
+
+bldg_id = 2
+
+[property_parity]
+equipment_count = 13
+zone_count = 4
+conditioned_zone_count = 1

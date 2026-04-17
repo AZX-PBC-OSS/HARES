@@ -118,6 +118,8 @@ fn gas_furnace_config(name: &str) -> EquipmentConfig {
             fan_power_w: Some(0.0),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
             ducts: DuctConfig::default(),
         },
     )
@@ -134,6 +136,8 @@ fn electric_furnace_config(name: &str) -> EquipmentConfig {
             capacity_w: 10_000.0,
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
             ducts: DuctConfig::default(),
         },
     )
@@ -154,6 +158,8 @@ fn electric_boiler_config(name: &str) -> EquipmentConfig {
             fluid_type: FluidType::Water,
             fan_power_w: None,
             number_of_speeds: 1,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     )
 }
@@ -242,6 +248,8 @@ fn gas_furnace_consumes_gas_fuel() {
             fan_power_w: Some(400.0),
             stage_heating_capacities_w: None,
             stage_heating_eirs: None,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
             ducts: DuctConfig::default(),
         },
     );
@@ -509,6 +517,8 @@ fn baseboard_electric_resistance_cop_unity() {
             zone_id: Some(1),
             capacity_w: 3_000.0,
             eir: 1.0,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
 
@@ -708,6 +718,8 @@ fn electric_resistance_heaters_use_eir_as_input_ratio() {
             capacity_w: THERMAL_OUTPUT_W,
             number_of_speeds: 1,
             fan_power_w: Some(0.0),
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
             ducts: DuctConfig::default(),
         },
     );
@@ -725,6 +737,8 @@ fn electric_resistance_heaters_use_eir_as_input_ratio() {
             fluid_type: FluidType::Water,
             fan_power_w: None,
             number_of_speeds: 1,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
 
@@ -877,6 +891,8 @@ fn simple_heaters_ideal_capacity_scales_output() {
                     zone_id: Some(1),
                     capacity_w: 3_000.0,
                     eir: 1.0,
+                    heating_setpoint_c: None,
+                    heating_setpoint_source: None,
                 },
             ),
         )
@@ -889,6 +905,8 @@ fn simple_heaters_ideal_capacity_scales_output() {
             zone_id: Some(1),
             capacity_w: 3_000.0,
             eir: 1.0,
+            heating_setpoint_c: None,
+            heating_setpoint_source: None,
         },
     );
     baseboard.init(&baseboard_cfg, &env).unwrap();

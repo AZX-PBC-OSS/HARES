@@ -178,8 +178,9 @@ fn test_two_zone_coupled_wall_heat_direction() {
 
     let mut solver = build_two_zone_solver(&env, t1_init, config);
 
-    // initialize_steady_state pins ALL zone states to indoor_temp_c (25°C).
-    // Override zone 2 to 15°C via restore_state to establish the temperature gradient.
+    // initialize_steady_state pins only the configured indoor zone; zone 2 is
+    // left to solve by conduction. Override zone 2 to 15°C via restore_state
+    // to establish the initial temperature gradient required by this test.
     let (mut x_state, last_u, lwr_temps) = solver.snapshot_state();
     x_state[1] = t2_init; // zone 2 state index
     solver
@@ -220,5 +221,69 @@ fn test_two_zone_coupled_wall_heat_direction() {
     assert!(
         t2_after < t1_init,
         "zone 2 must remain below zone 1 initial: t2={t2_after}, t1_init={t1_init}"
+    );
+}
+
+/// Regression: only the configured indoor zone should be pinned during steady-state
+/// initialization. Unconditioned zones (attic, garage) must solve by conduction.
+///
+/// If `initialize_steady_state` pinned ALL zone states, an unconditioned zone
+/// initialised at outdoor temperature would clamp the conditioned zone's
+/// ceiling/shared-wall boundary to outdoor, inflating the step-0 ideal-capacity
+/// back-solve far above the true heating load (ASHRAE Fundamentals 2021 Ch. 18).
+///
+/// Observed before fix on `cz5a_minisplit_gas_wh`: 15.6 kW vs OCHRE 9.25 kW.
+#[test]
+fn initialize_steady_state_pins_only_configured_indoor_zone() {
+    // Hot indoor (zone 1) at 22 C, unconditioned (zone 2) untouched at outdoor
+    // (-20 C). With the bug, both would be pinned and zone 2's steady state
+    // would be -20 C exactly. With the fix, zone 2 solves by conduction and
+    // lands between zone 1 and outdoor.
+    let indoor_setpoint = 22.0;
+    let outdoor = -20.0;
+
+    let env = two_zone_env(indoor_setpoint, outdoor, outdoor);
+    let config = ThermalSolverConfig {
+        indoor_zone_id: ZONE1,
+        ..ThermalSolverConfig::default()
+    };
+
+    let solver = build_two_zone_solver(&env, indoor_setpoint, config);
+
+    let (x_state, _last_u, _lwr_temps) = solver.snapshot_state();
+
+    // Zone 1 (conditioned) must be pinned at the setpoint.
+    assert!(
+        (x_state[0] - indoor_setpoint).abs() < 1e-6,
+        "zone 1 (conditioned) must be pinned at setpoint: expected {indoor_setpoint}, got {}",
+        x_state[0]
+    );
+
+    // Zone 2 (unconditioned) must solve by conduction — strictly between
+    // outdoor and indoor, not pinned to either endpoint.
+    //
+    // Analytical expectation from the 2-zone model's steady state with zone 1
+    // pinned at T1:
+    //   0 = a21·T1 + a22·T2 + (UA_ext/C)·T_out
+    //   T2 = (UA_inter·T1 + UA_ext·T_out) / (UA_ext + UA_inter)
+    //       = (32·22 + 43·(-20)) / 75 = (704 - 860) / 75 = -2.08 C
+    let ua_inter: f64 = 32.0;
+    let ua_ext: f64 = 43.0;
+    let expected_zone2 =
+        (ua_inter * indoor_setpoint + ua_ext * outdoor) / (ua_ext + ua_inter);
+    assert!(
+        (x_state[1] - expected_zone2).abs() < 1e-3,
+        "zone 2 (unconditioned) must solve by conduction: expected {expected_zone2}, got {}",
+        x_state[1]
+    );
+    assert!(
+        x_state[1] > outdoor + 1.0,
+        "zone 2 must be materially warmer than outdoor (conduction from zone 1): zone2={}, outdoor={outdoor}",
+        x_state[1]
+    );
+    assert!(
+        x_state[1] < indoor_setpoint - 1.0,
+        "zone 2 must be cooler than conditioned zone (heat flows outward): zone2={}, indoor={indoor_setpoint}",
+        x_state[1]
     );
 }
