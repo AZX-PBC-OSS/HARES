@@ -146,7 +146,7 @@ impl SoilingState {
             self.seconds_since_last_clean = 0.0;
             self.soiling_loss = 0.0;
         } else if self.seconds_since_last_clean <= config.grace_period_s {
-            // Still within grace period — panel stays clean.
+            // Still within grace period -- panel stays clean.
             self.soiling_loss = 0.0;
         } else {
             // Accumulate soiling at constant rate during dry periods.

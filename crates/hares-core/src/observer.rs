@@ -1,7 +1,7 @@
 //! Zero-cost step observer for deep simulation debugging.
 //!
 //! All types and the buffer are gated by `#[cfg(feature = "observe")]` at the
-//! module level — when the feature is off, this module does not exist and the
+//! module level -- when the feature is off, this module does not exist and the
 //! compiler eliminates every observation site in `run_timestep`.
 
 use std::collections::VecDeque;

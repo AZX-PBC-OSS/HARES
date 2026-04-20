@@ -172,12 +172,7 @@ impl GasWaterHeaterConfig {
             0.0,
             false,
         )?;
-        check_finite(
-            "gas_wh: hot_draw_temp_c",
-            self.hot_draw_temp_c,
-            0.0,
-            false,
-        )?;
+        check_finite("gas_wh: hot_draw_temp_c", self.hot_draw_temp_c, 0.0, false)?;
         Ok(())
     }
 }

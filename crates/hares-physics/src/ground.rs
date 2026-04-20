@@ -17,7 +17,7 @@ use std::f64::consts::PI;
 /// Typical range for moist soil: 0.04–0.07 m²/day.
 /// HARES uses 0.05 m²/day for moist mixed clay/sand soils (representative of
 /// typical residential sites). EnergyPlus CalcSoilSurfTemp defaults to
-/// 0.0208 m²/day (2.4e-7 m²/s) for generic dry soil — our higher value
+/// 0.0208 m²/day (2.4e-7 m²/s) for generic dry soil -- our higher value
 /// reflects the wetter conditions typical of foundation-adjacent soil.
 pub const DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY: f64 = 0.05;
 
@@ -31,7 +31,7 @@ pub const DEFAULT_PHASE_DAY_NORTHERN: f64 = 35.0;
 /// 182.5-day offset from northern = average half-year (365/2).
 pub const DEFAULT_PHASE_DAY_SOUTHERN: f64 = 35.0 + 182.5;
 
-/// Period [days] — one year.
+/// Period [days] -- one year.
 const TAU_DAYS: f64 = 365.0;
 
 /// Kusuda-Achenbach undisturbed ground temperature model.
@@ -45,15 +45,15 @@ const TAU_DAYS: f64 = 365.0;
 ///
 /// # Arguments
 ///
-/// * `depth_m` — Depth below ground surface [m]. 0 = surface.
-/// * `day_of_year` — Day of year [1–366]. 1 = January 1.
-/// * `t_mean_annual_c` — Average annual soil surface temperature [°C].
+/// * `depth_m` -- Depth below ground surface [m]. 0 = surface.
+/// * `day_of_year` -- Day of year [1–366]. 1 = January 1.
+/// * `t_mean_annual_c` -- Average annual soil surface temperature [°C].
 ///   Approximated by annual average outdoor dry-bulb temperature.
-/// * `t_amplitude_c` — Amplitude of yearly soil surface temperature variation [°C].
+/// * `t_amplitude_c` -- Amplitude of yearly soil surface temperature variation [°C].
 ///   Half of (max monthly average - min monthly average) outdoor temperature.
-/// * `phase_day` — Day of year with minimum surface temperature.
+/// * `phase_day` -- Day of year with minimum surface temperature.
 ///   ~35 for northern hemisphere, ~217 for southern.
-/// * `diffusivity_m2_per_day` — Soil thermal diffusivity [m²/day].
+/// * `diffusivity_m2_per_day` -- Soil thermal diffusivity [m²/day].
 ///   Typical: 0.04–0.07. Use [`DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY`] if unknown.
 ///
 /// # Returns
@@ -89,11 +89,11 @@ pub fn kusuda_achenbach_temp(
 ///
 /// # Arguments
 ///
-/// * `perimeter_m` — Exposed perimeter length [m].
-/// * `f2_w_per_m_k` — Perimeter heat loss coefficient [W/(m·K)].
+/// * `perimeter_m` -- Exposed perimeter length [m].
+/// * `f2_w_per_m_k` -- Perimeter heat loss coefficient [W/(m·K)].
 ///   Typical: 1.17 uninsulated, 0.86 with R-5 perimeter insulation.
-/// * `t_indoor_c` — Indoor zone temperature [°C].
-/// * `t_ground_surface_c` — Ground surface temperature [°C].
+/// * `t_indoor_c` -- Indoor zone temperature [°C].
+/// * `t_ground_surface_c` -- Ground surface temperature [°C].
 #[must_use]
 pub fn slab_perimeter_loss_w(
     perimeter_m: f64,
@@ -114,10 +114,10 @@ pub fn slab_perimeter_loss_w(
 ///
 /// # Arguments
 ///
-/// * `below_grade_area_m2` — Below-grade wall area [m²].
-/// * `r_wall_m2_k_w` — Total wall R-value including insulation [m²·K/W].
-/// * `t_indoor_c` — Indoor zone temperature [°C].
-/// * `t_ground_c` — Ground temperature at average below-grade depth [°C].
+/// * `below_grade_area_m2` -- Below-grade wall area [m²].
+/// * `r_wall_m2_k_w` -- Total wall R-value including insulation [m²·K/W].
+/// * `t_indoor_c` -- Indoor zone temperature [°C].
+/// * `t_ground_c` -- Ground temperature at average below-grade depth [°C].
 #[must_use]
 pub fn foundation_wall_loss_w(
     below_grade_area_m2: f64,

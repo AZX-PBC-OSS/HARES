@@ -637,7 +637,7 @@ impl Equipment for PV {
                 // OCHRE semantics: p_set_point = max(max_generation, p_set) where
                 // max_generation is negative (generation convention). In HARES'
                 // positive-generation convention, active_power_kw is an upper bound
-                // on AC output — store it in power_limit_kw.
+                // on AC output -- store it in power_limit_kw.
                 self.power_limit_kw = Some(active_power_kw.max(0.0));
                 if let Some(q) = reactive_power_kvar {
                     if !q.is_finite() {

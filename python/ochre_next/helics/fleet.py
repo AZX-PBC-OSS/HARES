@@ -111,7 +111,7 @@ class HELICSFleet:
             voltage_topic: Fleet-wide voltage topic (applied to all dwellings).
             per_dwelling_voltage_topics: Explicit per-dwelling voltage topics.
                 Length must match the fleet size.  These are only registered when
-                provided — they are **not** auto-derived from ``voltage_topic``.
+                provided -- they are **not** auto-derived from ``voltage_topic``.
             control_topic: JSON control topic for equipment setpoints.
         """
         configs: list[HELICSSubscriptionConfig] = []

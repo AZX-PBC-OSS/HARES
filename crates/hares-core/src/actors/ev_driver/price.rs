@@ -1,4 +1,4 @@
-//! PriceOptimizer — TOU-aware charging with day-boundary cached thresholds.
+//! PriceOptimizer -- TOU-aware charging with day-boundary cached thresholds.
 
 use std::sync::Arc;
 
@@ -76,7 +76,7 @@ impl ChargingPreference for PriceOptimizer {
         let price = ctx.env.price_signal.electricity_price.unwrap_or(0.0);
 
         if price <= self.charge_threshold {
-            // Cheap price — encourage charging
+            // Cheap price -- encourage charging
             let urgency = if self.charge_threshold > 0.0 {
                 1.0 - (price / self.charge_threshold).min(1.0)
             } else {
@@ -92,7 +92,7 @@ impl ChargingPreference for PriceOptimizer {
                 label: "price:charge",
             }
         } else if price >= self.discharge_threshold {
-            // Expensive price — encourage discharge
+            // Expensive price -- encourage discharge
             let urgency = if self.discharge_threshold > 0.0 {
                 ((price / self.discharge_threshold) - 1.0).min(1.0)
             } else {

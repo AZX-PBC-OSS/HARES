@@ -282,7 +282,7 @@ pub struct MetricsCalculator {
     setpoints: Option<SetpointInputs>,
     hvac_capacity_pairs: Vec<(usize, usize)>,
 
-    // Envelope component gain column indices (optional — verbosity >= 6)
+    // Envelope component gain column indices (optional -- verbosity >= 6)
     window_solar_w_idx: Option<usize>,
     infiltration_w_idx: Option<usize>,
     interior_lwr_w_idx: Option<usize>,

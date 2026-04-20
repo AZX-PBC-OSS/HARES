@@ -158,7 +158,8 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField {
             name: tk::ER_HARD_LOCKOUT_TIME_S.to_string(),
             unit: "s".to_string(),
-            description: "Hard lockout duration after setpoint increase [s]; 0 = disabled".to_string(),
+            description: "Hard lockout duration after setpoint increase [s]; 0 = disabled"
+                .to_string(),
         },
         TelemetryField {
             name: tk::BACKUP_CAPACITY_W.to_string(),

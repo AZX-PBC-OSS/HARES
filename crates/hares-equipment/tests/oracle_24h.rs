@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
-use hares_equipment::battery::config::BatteryConfig;
 use hares_equipment::battery::Battery;
+use hares_equipment::battery::config::BatteryConfig;
 use hares_equipment::generator::{Generator, GeneratorKind};
 use hares_equipment::hvac::baseboard::ElectricBaseboard;
 use hares_equipment::hvac::furnace::GasFurnace;
@@ -576,7 +576,12 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
         .get(tk::TANK_AVG_TEMP_C)
         .expect("tank avg temp telemetry");
 
-    assert_within_pct(final_temp, expected_temp_c, 2.0, "gas WH standby decay temp");
+    assert_within_pct(
+        final_temp,
+        expected_temp_c,
+        2.0,
+        "gas WH standby decay temp",
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

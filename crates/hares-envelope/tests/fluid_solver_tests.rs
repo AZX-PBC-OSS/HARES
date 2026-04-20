@@ -144,7 +144,7 @@ fn zero_flow_zero_power() {
     )
     .expect("FluidSolver::new must succeed");
 
-    // Accumulator present, but no PortContribution::Fluid added — total_flow stays 0.
+    // Accumulator present, but no PortContribution::Fluid added -- total_flow stays 0.
     let ports = PortSlots {
         fluid: vec![FluidAccumulator::new(LoopId(2), FluidType::Water)],
         ..Default::default()

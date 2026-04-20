@@ -2,13 +2,13 @@
 //!
 //! Actors are decision-makers (occupants, thermostats, grid operators, DR programs)
 //! that push commands to equipment via control channels. Actors never directly
-//! mutate environment or equipment state—they only emit [`DispatchRequest`]s
+//! mutate environment or equipment state--they only emit [`DispatchRequest`]s
 //! that flow through the [`ControlDispatcher`].
 //!
 //! # Key Principles
 //!
 //! 1. **Equipment is self-contained** with internal schedules and control logic.
-//! 2. **Actors only dispatch ControlSignals** — they never directly mutate state.
+//! 2. **Actors only dispatch ControlSignals** -- they never directly mutate state.
 //! 3. **Equipment receives signals and adjusts internal operational state**.
 //! 4. **Config is separate from control signals.** Config sets up equipment at init time.
 
@@ -23,7 +23,7 @@ use hares_types::{EnvironmentState, ZoneId};
 /// reducing decision calls ~60x for sparse actors at 1-min resolution.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ActorInterest {
-    /// Default polling — actor's `decide()` is called every timestep.
+    /// Default polling -- actor's `decide()` is called every timestep.
     EveryStep,
     /// Trigger when a zone temperature changes by more than `threshold_c`.
     ZoneTemperatureDelta { zone: ZoneId, threshold_c: f64 },
@@ -56,7 +56,7 @@ pub trait Actor: Send + Sync + 'static {
     /// Called once per timestep (or when interests trigger).
     ///
     /// Pushes dispatch requests into the pre-allocated buffer.
-    /// **MUST NOT allocate** — use the provided buffer only.
+    /// **MUST NOT allocate** -- use the provided buffer only.
     ///
     /// # Arguments
     ///

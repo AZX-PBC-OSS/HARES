@@ -292,7 +292,9 @@ impl GasWH {
         self.pilot_power_w = c
             .pilot_power_w
             .unwrap_or(match c.ignition_type.as_deref() {
-                Some("ElectronicIgnition") | Some("electronic") | Some("electronic ignition") => 0.0,
+                Some("ElectronicIgnition") | Some("electronic") | Some("electronic ignition") => {
+                    0.0
+                }
                 _ => DEFAULT_PILOT_POWER_W,
             })
             .max(0.0);
@@ -533,8 +535,10 @@ impl Equipment for GasWH {
         self.telemetry.set(tk::BURNER_POWER_W, burner_input_w);
         self.telemetry.set(tk::PILOT_POWER_W, self.pilot_power_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
-        self.telemetry.set(tk::PILOT_KW, self.pilot_power_w / 1_000.0);
-        self.telemetry.set(tk::FUEL_INPUT_KW, fuel_input_w / 1_000.0);
+        self.telemetry
+            .set(tk::PILOT_KW, self.pilot_power_w / 1_000.0);
+        self.telemetry
+            .set(tk::FUEL_INPUT_KW, fuel_input_w / 1_000.0);
         self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
         self.telemetry.set(tk::SKIN_LOSS_W, skin_loss_to_zone_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
@@ -1072,8 +1076,8 @@ mod tests {
 
         // Manually stratify: top node cool (30°C), burner node hot (60°C > 55°C limit).
         let n = eq.tank.node_temps().len();
-        eq.tank.node_temps_mut()[0] = 30.0; // top — below limit
-        eq.tank.node_temps_mut()[n - 1] = 60.0; // burner node — above limit
+        eq.tank.node_temps_mut()[0] = 30.0; // top -- below limit
+        eq.tank.node_temps_mut()[n - 1] = 60.0; // burner node -- above limit
 
         let mode = eq.update_control(&env(21.0));
         assert_eq!(
@@ -1244,7 +1248,7 @@ mod tests {
             "burner_power_w must be zero during GridEmergency"
         );
         // fuel_input_w = burner_input_w + pilot_power_w; with burner off, only
-        // pilot remains. Verify burner contribution is zero — pilot is a continuous flame
+        // pilot remains. Verify burner contribution is zero -- pilot is a continuous flame
         // and is not subject to DR load shedding.
         assert_eq!(
             eq.telemetry().get(tk::FUEL_INPUT_W).unwrap_or(1.0),
@@ -1408,10 +1412,7 @@ mod tests {
             .step(&e_ideal, Duration::from_secs(300), &mut p_ideal)
             .unwrap();
 
-        let burner_w_ideal = eq_ideal
-            .telemetry()
-            .get(tk::BURNER_POWER_W)
-            .unwrap_or(0.0);
+        let burner_w_ideal = eq_ideal.telemetry().get(tk::BURNER_POWER_W).unwrap_or(0.0);
 
         // Run at 1-minute timestep (thermostat on/off, no ideal capacity).
         let mut e_therm = env(21.0);
@@ -1423,19 +1424,13 @@ mod tests {
             .step(&e_therm, Duration::from_secs(60), &mut p_therm)
             .unwrap();
 
-        let burner_w_therm = eq_therm
-            .telemetry()
-            .get(tk::BURNER_POWER_W)
-            .unwrap_or(0.0);
+        let burner_w_therm = eq_therm.telemetry().get(tk::BURNER_POWER_W).unwrap_or(0.0);
 
         assert!(
             burner_w_ideal > 0.0,
             "burner must fire in ideal mode (node far below setpoint)"
         );
-        assert!(
-            burner_w_therm > 0.0,
-            "burner must fire in thermostat mode"
-        );
+        assert!(burner_w_therm > 0.0, "burner must fire in thermostat mode");
         assert!(
             burner_w_ideal < burner_w_therm,
             "ideal mode should modulate below thermostat full-power: \
@@ -1539,7 +1534,8 @@ mod tests {
         eq.init(&cfg, &env(21.0)).unwrap();
 
         let mut p = ports();
-        eq.step(&env(21.0), Duration::from_secs(60), &mut p).unwrap();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
 
         let thermal_output_w = burner_input_w * eta_c * (1.0 - flue_loss_fraction);
         let expected_fuel_w = thermal_output_w / eta_c;
@@ -1552,8 +1548,7 @@ mod tests {
             "fuel_w {reported_fuel_w:.2} W must match thermal_output/eta_c = {expected_fuel_w:.2} W"
         );
         assert!(
-            (reported_fuel_w - burner_input_w * 0.62).abs() > 100.0
-                || reported_fuel_w == 0.0,
+            (reported_fuel_w - burner_input_w * 0.62).abs() > 100.0 || reported_fuel_w == 0.0,
             "fuel consumption must NOT be derived from EF=0.62 when conversion_efficiency is set"
         );
     }
@@ -1573,7 +1568,10 @@ mod tests {
         let mut p = ports();
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
 
-        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).expect("OUTLET_TEMP_C must be present");
+        let outlet = eq
+            .telemetry()
+            .get(tk::OUTLET_TEMP_C)
+            .expect("OUTLET_TEMP_C must be present");
         assert!(
             outlet > 0.0,
             "OUTLET_TEMP_C should be > 0 when there is a draw, got {outlet}"
@@ -1594,8 +1592,14 @@ mod tests {
         let mut p = ports();
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
 
-        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).expect("OUTLET_TEMP_C must be present");
-        let tank_avg = eq.telemetry().get(tk::TANK_AVG_TEMP_C).expect("TANK_AVG_TEMP_C must be present");
+        let outlet = eq
+            .telemetry()
+            .get(tk::OUTLET_TEMP_C)
+            .expect("OUTLET_TEMP_C must be present");
+        let tank_avg = eq
+            .telemetry()
+            .get(tk::TANK_AVG_TEMP_C)
+            .expect("TANK_AVG_TEMP_C must be present");
         assert!(
             (outlet - tank_avg).abs() < 1.0,
             "OUTLET_TEMP_C should equal tank avg temp with no draw: outlet={outlet}, tank_avg={tank_avg}"

@@ -24,7 +24,7 @@ pub enum SiteType {
 pub struct Site {
     pub elevation_m: Option<f64>,
     pub site_type: Option<SiteType>,
-    /// HPXML `<ShieldingOfHome>` — string value ("normal", "exposed", "well-shielded").
+    /// HPXML `<ShieldingOfHome>` -- string value ("normal", "exposed", "well-shielded").
     pub shielding_of_home: Option<String>,
     pub latitude_deg: Option<f64>,
     pub longitude_deg: Option<f64>,
@@ -112,7 +112,7 @@ pub struct Boundary {
     /// auto-generated boundaries (interior walls, furniture) whose LUT name
     /// can't be derived from zone types alone.
     pub lut_boundary_name: Option<String>,
-    /// HPXML `<FloorOrCeiling>` — distinguishes adjacent floors from ceilings.
+    /// HPXML `<FloorOrCeiling>` -- distinguishes adjacent floors from ceilings.
     pub floor_or_ceiling: Option<FloorOrCeiling>,
     /// Surface tilt angle [degrees].
     ///
@@ -121,7 +121,7 @@ pub struct Boundary {
     /// For roofs, computed from `<Pitch>` as `atan(pitch / 12)` in degrees.
     /// Ref: OCHRE `hpxml.py` `pitch2deg()`.
     pub tilt_deg: Option<f64>,
-    /// Framing factor [-] — fraction of wall area occupied by structural framing.
+    /// Framing factor [-] -- fraction of wall area occupied by structural framing.
     ///
     /// Used by the ASHRAE parallel-path method to compute effective R-value.
     /// Typical values: 0.23 for 2x4 @ 16" OC, 0.22 for 2x6 @ 16" OC.
@@ -236,9 +236,8 @@ pub struct Building {
     /// When set, overrides the default 1.0°C hysteresis for IdealHVAC.
     /// BESTEST/ASHRAE 140 requires 0.0 (ideal setpoint tracking).
     pub hvac_deadband_c: Option<f64>,
-    // TODO: `details_xml` leaks the parse tree (`XmlNode`) into the domain model,
-    // forcing `hares-core` to construct XmlNode trees. Extract remaining
-    // XML-dependent fields into typed struct members and remove this field.
+    /// Raw HPXML parse tree retained for downstream consumers that still read
+    /// fields which have not been promoted to typed members on `Building`.
     pub details_xml: XmlNode,
 }
 
@@ -449,12 +448,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .map(|n| n.text.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    // InfiltrationHeight lives under AirInfiltrationMeasurement — HPXML stores it in feet.
+    // InfiltrationHeight lives under AirInfiltrationMeasurement -- HPXML stores it in feet.
     let infiltration_height_m = details
         .first_descendant("InfiltrationHeight")
         .and_then(|node| parse_value_with_units(Some(node), ValueKind::Length));
 
-    // <EffectiveLeakageArea units="sq-in"> — convert sq inches to cm² (1 in² = 6.4516 cm²).
+    // <EffectiveLeakageArea units="sq-in"> -- convert sq inches to cm² (1 in² = 6.4516 cm²).
     let infiltration_ela_cm2 = details
         .first_descendant("EffectiveLeakageArea")
         .and_then(|node| node.text_as_f64())
@@ -465,7 +464,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // attribute to detect CFM50 vs ACH50.
     let infiltration_cfm50 = parse_air_leakage_cfm50(details);
 
-    // <extension><HasFlueOrChimneyInConditionedSpace> — boolean text
+    // <extension><HasFlueOrChimneyInConditionedSpace> -- boolean text
     let has_flue_or_chimney = details
         .first_descendant("HasFlueOrChimneyInConditionedSpace")
         .map(|n| n.text.trim().eq_ignore_ascii_case("true"));
@@ -704,7 +703,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     }
 
-    // Filter out Outdoor — it's a boundary condition, not a thermal zone.
+    // Filter out Outdoor -- it's a boundary condition, not a thermal zone.
     // OCHRE only creates thermal zones for Conditioned, Attic, Garage, Foundation.
     let mut zones_vec: Vec<Zone> = zones
         .into_values()
@@ -788,9 +787,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             .map(|b| b.area_m2)
             .sum();
         if garage_ceiling_area_m2 > 0.0 {
-            attic_zone.floor_area_m2 = Some(
-                attic_zone.floor_area_m2.unwrap_or(0.0) + garage_ceiling_area_m2,
-            );
+            attic_zone.floor_area_m2 =
+                Some(attic_zone.floor_area_m2.unwrap_or(0.0) + garage_ceiling_area_m2);
         }
     }
 
@@ -1316,7 +1314,7 @@ fn extract_foundation_wall_insulation(
 /// Reads `PerimeterInsulation` and `UnderSlabInsulation` from the Slab element
 /// to produce format strings like "2ft R10 Perimeter", "R10 Whole Slab", etc.
 ///
-/// All numeric values are raw IP (HPXML native) — no unit conversion needed
+/// All numeric values are raw IP (HPXML native) -- no unit conversion needed
 /// since the LUT CSV uses IP values.
 fn extract_slab_insulation(node: &XmlNode) -> Option<String> {
     let r_perimeter = node
@@ -1417,7 +1415,7 @@ fn extract_construction_metadata(
 /// Extract insulation details string from nominal R-value layers.
 /// Insulation details are only relevant for foundation walls and slabs, which are
 /// handled by post-processing in `parse_building_from_node`. All other boundary
-/// types get `None` — OCHRE does not pass insulation_details for walls/roofs/floors.
+/// types get `None` -- OCHRE does not pass insulation_details for walls/roofs/floors.
 fn extract_insulation_details(_node: &XmlNode) -> Option<String> {
     None
 }
@@ -1878,7 +1876,11 @@ fn convert_u_to_w_m2_k(value: f64, units: Option<&str>) -> f64 {
             conv::u_value_ip_to_si(value)
         }
         Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized U-value unit; returning raw value");
+            tracing::warn!(
+                unit,
+                value,
+                "unrecognized U-value unit; returning raw value"
+            );
             value
         }
         None => {
@@ -1897,7 +1899,11 @@ fn convert_r_to_m2_k_w(value: f64, units: Option<&str>) -> f64 {
             conv::r_value_ip_to_si(value)
         }
         Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized R-value unit; returning raw value");
+            tracing::warn!(
+                unit,
+                value,
+                "unrecognized R-value unit; returning raw value"
+            );
             value
         }
         None => {
@@ -1917,7 +1923,11 @@ fn convert_conductivity_to_w_m_k(value: f64, units: Option<&str>) -> f64 {
             conv::conductivity_btu_in_h_ft2_f_to_w_m_k(value)
         }
         Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized conductivity unit; returning raw value");
+            tracing::warn!(
+                unit,
+                value,
+                "unrecognized conductivity unit; returning raw value"
+            );
             value
         }
         None => {
@@ -1952,7 +1962,11 @@ fn convert_density_to_kg_m3(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("lb/ft3") | Some("lb/ft^3") | Some("lbm/ft3") => conv::density_lb_ft3_to_kg_m3(value),
         Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized density unit; returning raw value");
+            tracing::warn!(
+                unit,
+                value,
+                "unrecognized density unit; returning raw value"
+            );
             value
         }
         None => {
@@ -1969,7 +1983,11 @@ fn convert_specific_heat_to_j_kg_k(value: f64, units: Option<&str>) -> f64 {
     match units {
         Some("btu/lb-f") | Some("btu/(lb*f)") => conv::specific_heat_btu_lb_f_to_j_kg_k(value),
         Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized specific heat unit; returning raw value");
+            tracing::warn!(
+                unit,
+                value,
+                "unrecognized specific heat unit; returning raw value"
+            );
             value
         }
         None => {
@@ -1989,7 +2007,11 @@ fn convert_temperature_to_c(value: f64, units: Option<&str>) -> f64 {
         }
         Some("C") | Some("c") | Some("degC") | Some("degc") | Some("celsius") => value,
         Some(unit) => {
-            tracing::warn!(unit, value, "unrecognized temperature unit; returning raw value");
+            tracing::warn!(
+                unit,
+                value,
+                "unrecognized temperature unit; returning raw value"
+            );
             value
         }
         None => {
@@ -2125,7 +2147,10 @@ struct GarageGeometry {
 /// 4. `protruded_area = floor_area - garage_area_in_main`
 ///
 /// Ref: OCHRE `hpxml.py` lines 449–494.
-fn compute_garage_geometry(boundaries: &[Boundary], garage_floor_area_m2: f64) -> Option<GarageGeometry> {
+fn compute_garage_geometry(
+    boundaries: &[Boundary],
+    garage_floor_area_m2: f64,
+) -> Option<GarageGeometry> {
     if garage_floor_area_m2 <= 0.0 {
         return None;
     }
@@ -2237,11 +2262,11 @@ fn max_areas_by_azimuth(areas: &[f64], azimuths: &[f64]) -> Option<(f64, f64)> {
 ///
 /// Two paths following OCHRE `parse_hpxml_zones()` (hpxml.py:582–633):
 ///
-/// **Path A** — Attic Garage Wall boundaries exist (walls between Garage and Attic):
+/// **Path A** -- Attic Garage Wall boundaries exist (walls between Garage and Attic):
 ///   Merge all attic-exterior and attic-garage wall areas; use the max of
 ///   the first two as gable_area. Simple prism formula.
 ///
-/// **Path B** — No Attic Garage Wall, has garage, 3 gable walls:
+/// **Path B** -- No Attic Garage Wall, has garage, 3 gable walls:
 ///   Compound formula:
 ///   ```text
 ///   V = 0.5 * (attic_floor_area - garage_protruded_area) * attic_height
@@ -2334,7 +2359,7 @@ fn compute_attic_volume(
 
     let has_garage = garage_geometry.is_some();
 
-    // Path A: Attic Garage Wall exists — merge wall areas, use max of first two.
+    // Path A: Attic Garage Wall exists -- merge wall areas, use max of first two.
     if !attic_garage_walls.is_empty() {
         let mut merged = attic_outdoor_walls;
         merged.extend_from_slice(&adjacent_attic_walls);
@@ -2358,7 +2383,7 @@ fn compute_attic_volume(
 
     // Path B: No Attic Garage Wall, has garage, 3 gable walls → compound formula.
     if has_garage && gable_areas.len() == 3 {
-        // OCHRE uses `attic_wall_areas[1]` — the second exterior gable wall in
+        // OCHRE uses `attic_wall_areas[1]` -- the second exterior gable wall in
         // parse order (outdoor walls first, then adjacent attic walls). Our
         // `gable_areas` preserves this ordering, so index 1 matches OCHRE.
         let attic_gable_area = gable_areas[1];
@@ -2604,7 +2629,7 @@ mod tests {
         let building = parse_building(SAMPLE_XML).expect("expected parser success");
 
         // 4 thermal zones: Conditioned, Attic, Garage, Foundation.
-        // Outdoor and Ground are boundary conditions, not thermal zones — filtered out.
+        // Outdoor and Ground are boundary conditions, not thermal zones -- filtered out.
         assert_eq!(building.zones.len(), 4);
         assert!(
             building
@@ -3082,7 +3107,7 @@ mod tests {
             .iter()
             .find(|b| b.boundary_type == BoundaryType::FoundationWall)
             .expect("foundation wall expected");
-        // No override — construction_type comes from WallType (None in this XML).
+        // No override -- construction_type comes from WallType (None in this XML).
         assert!(fnd_wall.construction_type.is_none());
     }
 
@@ -3653,10 +3678,8 @@ mod tests {
         let building = parse_building(&xml).expect("should parse");
         let w = &building.windows[0];
         let base_shgc = w.shgc.unwrap();
-        let effective_summer =
-            base_shgc * w.interior_shading_fraction * w.exterior_shading_summer;
-        let effective_winter =
-            base_shgc * w.winter_shading_fraction * w.exterior_shading_winter;
+        let effective_summer = base_shgc * w.interior_shading_fraction * w.exterior_shading_summer;
+        let effective_winter = base_shgc * w.winter_shading_fraction * w.exterior_shading_winter;
         // 0.40 * 0.70 * 0.50 = 0.14
         assert!(
             (effective_summer - 0.14).abs() < 1e-10,
@@ -3675,7 +3698,7 @@ mod tests {
     fn floor_or_ceiling_parsed() {
         // SAMPLE_XML doesn't have a <Floor> element at the right level,
         // but we can test the parsing via a FrameFloor with FloorOrCeiling.
-        // For now, verify the field exists on parsed boundaries.
+        // Verify the field exists on parsed boundaries.
         let building = parse_building(SAMPLE_XML).expect("parse should succeed");
         // No FloorOrCeiling in SAMPLE_XML → all boundaries have None.
         for bd in &building.boundaries {
@@ -3728,7 +3751,7 @@ mod tests {
         let building = parse_building(&xml).expect("parse should succeed");
         assert_eq!(building.infiltration_cfm50, Some(850.0));
         // The raw ACH path will not find the value since it's wrapped.
-        // infiltration_ach50 may or may not be set depending on parse path — the
+        // infiltration_ach50 may or may not be set depending on parse path -- the
         // important thing is that cfm50 is set correctly.
     }
 
@@ -3823,8 +3846,8 @@ mod tests {
         }
         let boundaries = vec![
             // Exterior garage walls: two perpendicular pairs
-            wall(ZoneType::Garage, ZoneType::Outdoor, 6.0, 0.0),   // N
-            wall(ZoneType::Garage, ZoneType::Outdoor, 8.0, 90.0),  // E
+            wall(ZoneType::Garage, ZoneType::Outdoor, 6.0, 0.0), // N
+            wall(ZoneType::Garage, ZoneType::Outdoor, 8.0, 90.0), // E
             // Attached walls (Conditioned→Garage)
             wall(ZoneType::Conditioned, ZoneType::Garage, 3.0, 180.0), // S
             wall(ZoneType::Conditioned, ZoneType::Garage, 4.0, 270.0), // W
@@ -3920,7 +3943,8 @@ mod tests {
             wall(ZoneType::Conditioned, ZoneType::Garage, 3.0, 0.0),
             wall(ZoneType::Conditioned, ZoneType::Garage, 5.0, 90.0),
         ];
-        let gg = compute_garage_geometry(&boundaries, garage_area).expect("geometry should compute");
+        let gg =
+            compute_garage_geometry(&boundaries, garage_area).expect("geometry should compute");
         // max per-azimuth: 0° → max(7,3) = 7, 90° → 5
         let area_in_main = 7.0 * 5.0 / (wh * wh);
         let expected_protruded = garage_area - area_in_main;
@@ -3936,7 +3960,13 @@ mod tests {
     #[test]
     fn attic_volume_simple_2_gable() {
         use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
-        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+        fn boundary(
+            bt: BoundaryType,
+            interior: ZoneType,
+            exterior: ZoneType,
+            area: f64,
+            tilt: Option<f64>,
+        ) -> Boundary {
             Boundary {
                 id: String::new(),
                 boundary_type: bt,
@@ -3964,9 +3994,27 @@ mod tests {
         let gable_area = 10.0; // m²
         let floor_area = 100.0; // m²
         let boundaries = vec![
-            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 50.0, Some(tilt_deg)),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, gable_area, None),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, gable_area, None),
+            boundary(
+                BoundaryType::Roof,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                50.0,
+                Some(tilt_deg),
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                gable_area,
+                None,
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                gable_area,
+                None,
+            ),
         ];
         let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
             .expect("volume should compute");
@@ -3981,7 +4029,13 @@ mod tests {
     #[test]
     fn attic_volume_3_gable_compound() {
         use super::{Boundary, BoundaryType, GarageGeometry, ZoneType, compute_attic_volume};
-        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+        fn boundary(
+            bt: BoundaryType,
+            interior: ZoneType,
+            exterior: ZoneType,
+            area: f64,
+            tilt: Option<f64>,
+        ) -> Boundary {
             Boundary {
                 id: String::new(),
                 boundary_type: bt,
@@ -4016,11 +4070,41 @@ mod tests {
         // sorted → [5.0, 10.0, 12.0]; med=10, low=5, high=12
         // med-low=5 > high-med=2 → third_gable = low = 5.0
         let boundaries = vec![
-            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 80.0, Some(tilt_deg)),
-            boundary(BoundaryType::Roof, ZoneType::Garage, ZoneType::Outdoor, 20.0, Some(tilt_deg)),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.0, None),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 12.0, None),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 5.0, None),
+            boundary(
+                BoundaryType::Roof,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                80.0,
+                Some(tilt_deg),
+            ),
+            boundary(
+                BoundaryType::Roof,
+                ZoneType::Garage,
+                ZoneType::Outdoor,
+                20.0,
+                Some(tilt_deg),
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                10.0,
+                None,
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                12.0,
+                None,
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                5.0,
+                None,
+            ),
         ];
         let garage_geom = GarageGeometry {
             floor_area_m2: 30.0,
@@ -4068,7 +4152,13 @@ mod tests {
         //   index-1 = 7.0
         //   sorted = [7, 10, 15], median = 10.0 (differs from index-1)
         use super::{Boundary, BoundaryType, GarageGeometry, ZoneType, compute_attic_volume};
-        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+        fn boundary(
+            bt: BoundaryType,
+            interior: ZoneType,
+            exterior: ZoneType,
+            area: f64,
+            tilt: Option<f64>,
+        ) -> Boundary {
             Boundary {
                 id: String::new(),
                 boundary_type: bt,
@@ -4094,11 +4184,41 @@ mod tests {
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
         let tilt_rad = tilt_deg.to_radians();
         let boundaries = vec![
-            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 80.0, Some(tilt_deg)),
-            boundary(BoundaryType::Roof, ZoneType::Garage, ZoneType::Outdoor, 20.0, Some(tilt_deg)),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 15.0, None),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 7.0, None),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.0, None),
+            boundary(
+                BoundaryType::Roof,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                80.0,
+                Some(tilt_deg),
+            ),
+            boundary(
+                BoundaryType::Roof,
+                ZoneType::Garage,
+                ZoneType::Outdoor,
+                20.0,
+                Some(tilt_deg),
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                15.0,
+                None,
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                7.0,
+                None,
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                10.0,
+                None,
+            ),
         ];
         let garage_geom = GarageGeometry {
             floor_area_m2: 30.0,
@@ -4131,7 +4251,13 @@ mod tests {
     #[test]
     fn attic_volume_path_a_attic_garage_wall() {
         use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
-        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+        fn boundary(
+            bt: BoundaryType,
+            interior: ZoneType,
+            exterior: ZoneType,
+            area: f64,
+            tilt: Option<f64>,
+        ) -> Boundary {
             Boundary {
                 id: String::new(),
                 boundary_type: bt,
@@ -4158,11 +4284,35 @@ mod tests {
         let tilt_rad = tilt_deg.to_radians();
         // Path A: Attic Garage Wall exists → merge all, use max(area[0], area[1])
         let boundaries = vec![
-            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 80.0, Some(tilt_deg)),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.0, None),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 8.0, None),
+            boundary(
+                BoundaryType::Roof,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                80.0,
+                Some(tilt_deg),
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                10.0,
+                None,
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                8.0,
+                None,
+            ),
             // Attic Garage Wall (Garage→Attic)
-            boundary(BoundaryType::Wall, ZoneType::Garage, ZoneType::Attic, 4.0, None),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Garage,
+                ZoneType::Attic,
+                4.0,
+                None,
+            ),
         ];
         let floor_area = 100.0;
         let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
@@ -4180,7 +4330,13 @@ mod tests {
     #[test]
     fn attic_volume_asymmetric_gables_returns_none() {
         use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
-        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+        fn boundary(
+            bt: BoundaryType,
+            interior: ZoneType,
+            exterior: ZoneType,
+            area: f64,
+            tilt: Option<f64>,
+        ) -> Boundary {
             Boundary {
                 id: String::new(),
                 boundary_type: bt,
@@ -4206,9 +4362,27 @@ mod tests {
         let tilt_deg = (6.0_f64 / 12.0).atan().to_degrees();
         // diff = 5.0 m² > 0.5 m² threshold → None
         let boundaries = vec![
-            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 50.0, Some(tilt_deg)),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.0, None),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 15.0, None),
+            boundary(
+                BoundaryType::Roof,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                50.0,
+                Some(tilt_deg),
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                10.0,
+                None,
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                15.0,
+                None,
+            ),
         ];
         assert!(
             compute_attic_volume(&boundaries, Some(100.0), None).is_none(),
@@ -4219,7 +4393,13 @@ mod tests {
     #[test]
     fn attic_volume_nearly_equal_gables_succeeds() {
         use super::{Boundary, BoundaryType, ZoneType, compute_attic_volume};
-        fn boundary(bt: BoundaryType, interior: ZoneType, exterior: ZoneType, area: f64, tilt: Option<f64>) -> Boundary {
+        fn boundary(
+            bt: BoundaryType,
+            interior: ZoneType,
+            exterior: ZoneType,
+            area: f64,
+            tilt: Option<f64>,
+        ) -> Boundary {
             Boundary {
                 id: String::new(),
                 boundary_type: bt,
@@ -4246,9 +4426,27 @@ mod tests {
         let floor_area = 100.0;
         // diff = 0.3 m² < 0.5 m² threshold → Some(volume)
         let boundaries = vec![
-            boundary(BoundaryType::Roof, ZoneType::Attic, ZoneType::Outdoor, 50.0, Some(tilt_deg)),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.0, None),
-            boundary(BoundaryType::Wall, ZoneType::Attic, ZoneType::Outdoor, 10.3, None),
+            boundary(
+                BoundaryType::Roof,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                50.0,
+                Some(tilt_deg),
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                10.0,
+                None,
+            ),
+            boundary(
+                BoundaryType::Wall,
+                ZoneType::Attic,
+                ZoneType::Outdoor,
+                10.3,
+                None,
+            ),
         ];
         let vol = compute_attic_volume(&boundaries, Some(floor_area), None)
             .expect("nearly-equal gables (diff=0.3 m²) should return Some");
@@ -4421,7 +4619,10 @@ mod tests {
     #[test]
     fn convert_temperature_none_assumes_ip() {
         let c = super::convert_temperature_to_c(32.0, None);
-        assert!((c - 0.0).abs() < 0.1, "None units should assume F: 32F == 0C, got {c}");
+        assert!(
+            (c - 0.0).abs() < 0.1,
+            "None units should assume F: 32F == 0C, got {c}"
+        );
     }
 
     #[test]
@@ -4493,6 +4694,9 @@ mod tests {
             .flat_map(|z| &z.duct_systems)
             .find(|d| d.duct_type == DuctType::Supply)
             .expect("supply duct expected in conditioned zone");
-        assert_eq!(supply.leakage_fraction, None, "CFM25 cannot be converted to fraction; must be None");
+        assert_eq!(
+            supply.leakage_fraction, None,
+            "CFM25 cannot be converted to fraction; must be None"
+        );
     }
 }

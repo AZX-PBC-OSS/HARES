@@ -12,7 +12,7 @@ import ochre_next._hares as _hares
 
 
 class TestAllConsistency:
-    """__all__ matches actual module exports — no missing, no extra."""
+    """__all__ matches actual module exports -- no missing, no extra."""
 
     def test_all_names_are_importable(self) -> None:
         for name in ochre_next.__all__:

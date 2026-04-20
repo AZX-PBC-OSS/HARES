@@ -69,7 +69,7 @@ pub fn core_reference_bands(case_id: &str) -> Vec<ReferenceBand> {
         ],
         // ASHRAE 140-2017 Table B8-3a: Case 600FF free-float temperatures (°C).
         // Peak: reference tool range 64.9–69.5°C.
-        // Min: reference value -18.8°C — must not drop below this; upper bound of 0°C
+        // Min: reference value -18.8°C -- must not drop below this; upper bound of 0°C
         // is generous given Denver winter outdoor lows.
         "600FF" => vec![
             ReferenceBand {

@@ -1,4 +1,4 @@
-//! Smoke tests — run real fixtures end-to-end and pin physics bounds.
+//! Smoke tests -- run real fixtures end-to-end and pin physics bounds.
 //!
 //! These tests assert simulation invariants (no NaN, no sign flips, zone
 //! temps within physical bounds, non-negative per-end-use energy) on short
@@ -71,7 +71,7 @@ mod tests {
     /// Physics-validated sanity checks on CSV output and metrics.
     ///
     /// These are wide-tolerance bounds designed to catch gross errors
-    /// (NaN, 10x energy, sign flips, runaway temps) — not parity tests.
+    /// (NaN, 10x energy, sign flips, runaway temps) -- not parity tests.
     fn assert_physics_bounds(
         csv_path: &PathBuf,
         total_energy_kwh: f64,
@@ -87,7 +87,7 @@ mod tests {
             .count();
         assert!(
             temp_col_count > 0,
-            "No temperature columns found in CSV — physics bounds check would be vacuous"
+            "No temperature columns found in CSV -- physics bounds check would be vacuous"
         );
         for (col, values) in &data {
             if col.starts_with("Temperature -") && col.ends_with("(C)") {
@@ -138,7 +138,7 @@ mod tests {
             })
             .sum();
         if hvac_total_kwh <= 0.0 {
-            // HVAC didn't run — verify zone temps are in comfort range
+            // HVAC didn't run -- verify zone temps are in comfort range
             let indoor_temp_cols: Vec<_> = data
                 .iter()
                 .filter(|(col, _)| {
@@ -149,7 +149,7 @@ mod tests {
                 .collect();
             assert!(
                 !indoor_temp_cols.is_empty(),
-                "HVAC consumed zero energy but no indoor temperature columns found — check would be vacuous"
+                "HVAC consumed zero energy but no indoor temperature columns found -- check would be vacuous"
             );
             let zone_temps_ok = indoor_temp_cols
                 .iter()
@@ -208,7 +208,7 @@ mod tests {
         if has_water_heater {
             assert!(
                 wh_kwh >= 0.0,
-                "Water heater energy is negative ({wh_kwh:.6} kWh) — sign-flip bug"
+                "Water heater energy is negative ({wh_kwh:.6} kWh) -- sign-flip bug"
             );
         }
 
@@ -446,7 +446,7 @@ mod tests {
     }
 
     /// Honest smoke test: ResStock HPXML runs to completion and produces
-    /// physically plausible output. This is *not* an OCHRE parity test —
+    /// physically plausible output. This is *not* an OCHRE parity test --
     /// for parity see the oracle suites under `tests/conditioned_oracle.rs`
     /// and `tests/parity/`. The assertions below catch engine-crash,
     /// NaN/blow-up, and sign-flip regressions on the ResStock fixture
@@ -464,7 +464,7 @@ mod tests {
             weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             defaults_path: Some(project_root().join("defaults")),
             sim_config: SimulationConfig {
-                // Denver local noon (UTC-7) on May 5 2019 — mild spring noon,
+                // Denver local noon (UTC-7) on May 5 2019 -- mild spring noon,
                 // neither heating nor cooling is expected to dominate.
                 start_time: FixedOffset::west_opt(7 * 3600)
                     .expect("Denver UTC-7 offset")
@@ -508,7 +508,10 @@ mod tests {
             output_path.display()
         );
         let csv_contents = fs::read_to_string(&output_path).expect("read output CSV");
-        let data_rows = csv_contents.lines().filter(|l| !l.trim().is_empty()).count();
+        let data_rows = csv_contents
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
         // Header + at least one data row. 1h at 1-minute timestep = 60 rows + header.
         assert!(
             data_rows >= 2,
@@ -537,7 +540,7 @@ mod tests {
             for (i, &v) in values.iter().enumerate() {
                 assert!(
                     v.is_finite(),
-                    "Non-finite value ({v}) in '{col}' at row {i} — NaN/Inf regression"
+                    "Non-finite value ({v}) in '{col}' at row {i} -- NaN/Inf regression"
                 );
             }
             let is_net_tieline = col.contains("Net Electric") || col.starts_with("Net ");
@@ -547,7 +550,7 @@ mod tests {
             for (i, &v) in values.iter().enumerate() {
                 assert!(
                     v >= 0.0,
-                    "Negative power {v:.6} in '{col}' at row {i} — \
+                    "Negative power {v:.6} in '{col}' at row {i} -- \
                      equipment end-use columns are always sourced (never net-exported); \
                      sign-flip regression"
                 );
@@ -556,7 +559,7 @@ mod tests {
 
         // --- 4. Total electric energy sits within a loose physical-plausibility
         //        band for a 1h ResStock residential snapshot. This band exists
-        //        only to catch NaN, zero-output, and blow-up regressions — it
+        //        only to catch NaN, zero-output, and blow-up regressions -- it
         //        is not a parity bound. Typical ResStock single-family dwellings
         //        draw 0.3–5 kWh over a noon hour with base loads only. The band
         //        [0.1, 10] kWh/h covers every plausible occupancy level without
@@ -568,13 +571,13 @@ mod tests {
         );
         assert!(
             total_kwh > 0.1,
-            "total electric energy {total_kwh:.4} kWh/h is below 0.1 kWh/h — \
+            "total electric energy {total_kwh:.4} kWh/h is below 0.1 kWh/h -- \
              base loads (refrigerator + MELs) alone must exceed this; \
              likely a zero-output or schedule-dispatch regression"
         );
         assert!(
             total_kwh < 10.0,
-            "total electric energy {total_kwh:.4} kWh/h exceeds 10 kWh/h — \
+            "total electric energy {total_kwh:.4} kWh/h exceeds 10 kWh/h -- \
              no plausible 1h residential snapshot pulls this much; \
              likely a units or blow-up regression"
         );
@@ -582,7 +585,7 @@ mod tests {
         // --- 5. Gas furnace gas power, when present and firing, sits in a
         //        plausible band. Residential gas furnaces are typically sized
         //        20–120 kBtu/h = 0.2–1.2 therms/hour. In a mild May noon the
-        //        furnace may not fire at all — we assert only on positive
+        //        furnace may not fire at all -- we assert only on positive
         //        samples so an idle furnace doesn't trip the test. ---
         let gas_furnace_therms_col = data
             .keys()
@@ -595,7 +598,7 @@ mod tests {
                     assert!(
                         v < 2.0,
                         "Gas Furnace gas rate {v:.4} therms/h at row {i} \
-                         exceeds 2 therms/h — residential furnaces max out near 1.2 therms/h"
+                         exceeds 2 therms/h -- residential furnaces max out near 1.2 therms/h"
                     );
                 }
             }
@@ -611,7 +614,7 @@ mod tests {
             );
             assert!(
                 kwh >= 0.0,
-                "Negative energy {kwh:.6} kWh for end-use '{end_use}' — \
+                "Negative energy {kwh:.6} kWh for end-use '{end_use}' -- \
                  aggregated end-use totals must be non-negative"
             );
         }
@@ -647,8 +650,8 @@ mod tests {
 
         let mut samples_kw: Vec<f64> = Vec::with_capacity(cycles * (on_minutes + off_minutes));
         for _ in 0..cycles {
-            samples_kw.extend(std::iter::repeat(rated_kw).take(on_minutes));
-            samples_kw.extend(std::iter::repeat(0.0).take(off_minutes));
+            samples_kw.extend(std::iter::repeat_n(rated_kw, on_minutes));
+            samples_kw.extend(std::iter::repeat_n(0.0, off_minutes));
         }
 
         // Integrate at 1-minute resolution (hours per step = 1/60).

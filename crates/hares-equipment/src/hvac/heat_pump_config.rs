@@ -14,7 +14,7 @@ fn default_one() -> u8 {
 /// Typed configuration for heat-pump heaters (ASHP and MSHP heating side).
 ///
 /// For mini-splits, `number_of_speeds` is forced to 4 in the equipment init path,
-/// not in this struct — the struct records user intent; the equipment enforces the rule.
+/// not in this struct -- the struct records user intent; the equipment enforces the rule.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeatPumpHeaterConfig {

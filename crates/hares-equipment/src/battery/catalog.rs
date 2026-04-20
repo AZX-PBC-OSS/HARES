@@ -549,11 +549,8 @@ mod tests {
         };
         // n_series derived: round(50.4 / 3.2) = round(15.75) = 16
         // Verify through init: create battery, init, check n_series
-        let ec = crate::EquipmentConfig::from_typed(
-            "test_lv".to_string(),
-            "Battery".to_string(),
-            cfg,
-        );
+        let ec =
+            crate::EquipmentConfig::from_typed("test_lv".to_string(), "Battery".to_string(), cfg);
         let mut batt = crate::battery::Battery::new(ec.clone());
         let env = hares_types::EnvironmentState {
             zones: vec![],
@@ -665,7 +662,7 @@ mod tests {
             let disc = half_voc * half_voc + p_dc_w * r_pack;
             assert!(
                 disc >= 0.0,
-                "{}: discriminant negative at rated power — resistance too high",
+                "{}: discriminant negative at rated power -- resistance too high",
                 spec.label
             );
             let v_t = half_voc + disc.sqrt();

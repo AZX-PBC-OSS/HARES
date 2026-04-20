@@ -1,8 +1,8 @@
 //! Generic equipment lifecycle integration tests.
 //!
 //! Tests the cross-equipment contract: every Equipment implementor must
-//! satisfy the full lifecycle — init, apply_control, step, telemetry,
-//! save_state, load_state — through the Equipment trait boundary, not via
+//! satisfy the full lifecycle -- init, apply_control, step, telemetry,
+//! save_state, load_state -- through the Equipment trait boundary, not via
 //! type-specific internals.
 //!
 //! Phase 2 gate: grows as each equipment type lands. Each new equipment type
@@ -96,7 +96,7 @@ fn assert_equipment_lifecycle(
     assert_core_output_contract(equipment.descriptor(), equipment.core_output());
 
     // Verify at least one port domain has a non-zero accumulation.
-    // Equipment may contribute to thermal, electrical, or fuel — at least one must be non-zero.
+    // Equipment may contribute to thermal, electrical, or fuel -- at least one must be non-zero.
     let has_thermal = ports
         .thermal
         .iter()

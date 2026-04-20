@@ -1,4 +1,4 @@
-//! ChargingComposer — evaluates preferences and resolves to a DispatchRequest.
+//! ChargingComposer -- evaluates preferences and resolves to a DispatchRequest.
 
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ impl ChargingComposer {
 
     /// Evaluate all preferences and emit a resolved DispatchRequest.
     ///
-    /// 1. Check constraints — first Override wins.
+    /// 1. Check constraints -- first Override wins.
     /// 2. Collect scored votes.
     /// 3. Resolve: highest-scored target_soc, most conservative power_kw,
     ///    max min_soc, earliest departure.

@@ -653,7 +653,7 @@ fn air_conditioner_setpoint_override() {
     );
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Air Conditioner", c.clone()).unwrap();
-    // Zone at 25°C — just above original cooling setpoint (24°C)
+    // Zone at 25°C -- just above original cooling setpoint (24°C)
     let env = make_env(25.0, 30.0, 18.0);
     eq.init(&c, &env).unwrap();
 
@@ -665,7 +665,7 @@ fn air_conditioner_setpoint_override() {
         "AC must cool at zone=25°C > setpoint=24°C"
     );
 
-    // Raise cooling setpoint to 28°C — zone at 25°C is now below setpoint
+    // Raise cooling setpoint to 28°C -- zone at 25°C is now below setpoint
     eq.apply_control(&ControlSignal::ThermalSetpoint {
         heating_setpoint_c: None,
         cooling_setpoint_c: Some(28.0),
@@ -797,11 +797,11 @@ fn minisplit_cooling_stage_match_runs_continuously() {
 // HARES uses the EnergyPlus OnDemand humidity-based defrost model, which
 // computes time_fraction from outdoor coil moisture accumulation. The model
 // also applies extra_power_w from the defrost EIR modifier (DEFROST_EIR_TEMP_MODIFIER,
-// a dimensionless 0.1528 scalar producing watts from watts — NOT kW).
+// a dimensionless 0.1528 scalar producing watts from watts -- NOT kW).
 //
 // This test verifies that defrost engages at 0°C (below max_oat_defrost_c),
 // that the unit continues to deliver heat, and that the port-derived COP
-// stays above 0.5 — confirming the extra_power_w is correctly sized (~90-200 W
+// stays above 0.5 -- confirming the extra_power_w is correctly sized (~90-200 W
 // of overhead for a 10 kW unit, not 1000× inflated).
 // ---------------------------------------------------------------------------
 #[test]
@@ -818,7 +818,7 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     );
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("ASHP Heater", c.clone()).unwrap();
-    // Outdoor at 0°C — at the defrost activation threshold
+    // Outdoor at 0°C -- at the defrost activation threshold
     let env = make_env(18.0, 0.0, 12.0);
     eq.init(&c, &env).unwrap();
 
@@ -845,7 +845,7 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
          thermal_output={thermal_output_w:.1} W, electric={electric_kw:.4} kW"
     );
 
-    // Defrost must be active at 0°C — the OnDemand model triggers below max_oat_defrost_c
+    // Defrost must be active at 0°C -- the OnDemand model triggers below max_oat_defrost_c
     // (typically 5°C), and 0°C is well within that range.
     assert!(
         defrost_active > 0.0,

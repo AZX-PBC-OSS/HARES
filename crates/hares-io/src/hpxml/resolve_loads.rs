@@ -317,9 +317,8 @@ pub(super) fn resolve_scheduled_loads(
                         if let Some(ief) = child_f64(node, "IntegratedEnergyFactor") {
                             params.insert("integrated_energy_factor".to_string(), json!(ief));
                         }
-                        if let Some(frac) =
-                            child_f64(node, "FractionDehumidificationLoadServed")
-                                .or_else(|| child_f64(node, "FractionLoadServed"))
+                        if let Some(frac) = child_f64(node, "FractionDehumidificationLoadServed")
+                            .or_else(|| child_f64(node, "FractionLoadServed"))
                         {
                             params.insert("fraction_served".to_string(), json!(frac));
                         }
@@ -348,8 +347,8 @@ pub(super) fn resolve_scheduled_loads(
                         .map(|v| v.eq_ignore_ascii_case("true"))
                         .unwrap_or(true);
                     let default_loc = if is_primary { "conditioned space" } else { "" };
-                    let location = child_text(node, "Location")
-                        .unwrap_or_else(|| default_loc.to_string());
+                    let location =
+                        child_text(node, "Location").unwrap_or_else(|| default_loc.to_string());
                     if !is_conditioned_location(&location) {
                         params.insert("sensible_gain_fraction".to_string(), json!(0.0));
                         params.insert("latent_gain_fraction".to_string(), json!(0.0));
@@ -365,10 +364,7 @@ pub(super) fn resolve_scheduled_loads(
                             .parameters
                             .get("capacity_liters_per_day")
                             .and_then(Value::as_f64),
-                        energy_factor: spec
-                            .parameters
-                            .get("energy_factor")
-                            .and_then(Value::as_f64),
+                        energy_factor: spec.parameters.get("energy_factor").and_then(Value::as_f64),
                         integrated_energy_factor: spec
                             .parameters
                             .get("integrated_energy_factor")
@@ -377,13 +373,13 @@ pub(super) fn resolve_scheduled_loads(
                             .parameters
                             .get("fraction_served")
                             .and_then(Value::as_f64),
-                        target_rh: spec
-                            .parameters
-                            .get("target_rh")
-                            .and_then(Value::as_f64),
+                        target_rh: spec.parameters.get("target_rh").and_then(Value::as_f64),
                     };
-                    spec.typed_config =
-                        Some(EquipmentConfig::from_typed("Dehumidifier".to_string(), "Dehumidifier".to_string(), cfg));
+                    spec.typed_config = Some(EquipmentConfig::from_typed(
+                        "Dehumidifier".to_string(),
+                        "Dehumidifier".to_string(),
+                        cfg,
+                    ));
                 }
                 specs.push(spec);
             }
@@ -745,7 +741,7 @@ pub(super) fn default_gain_fractions(name: &str, fuel_type: FuelType) -> Option<
         "Dishwasher" => Some((0.30, 0.30)),
         "Refrigerator" => Some((1.00, 0.00)),
         // 0.00 matches OCHRE (freezers are typically in unconditioned space).
-        // ASHRAE would use sensible=1.0 for indoor freezers — location-based
+        // ASHRAE would use sensible=1.0 for indoor freezers -- location-based
         // override not yet implemented.
         "Freezer" => Some((0.00, 0.00)),
         // OCHRE parse_mel: "other" plug loads → (0.855, 0.045).

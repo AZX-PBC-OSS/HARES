@@ -51,9 +51,10 @@ pub(super) fn resolve_water_heaters(
         };
         let tank_volume_m3 =
             tank_volume_rated_gal.map(|gal| conv::volume_gal_to_m3(gal * volume_correction));
-        let tank_height_m = child_f64(wh, "TankHeight")
-            .map(conv::length_ft_to_m)
-            .unwrap_or(conv::length_ft_to_m(4.0));
+        // Tank height is optional in HPXML; propagate None so the equipment
+        // model falls back to its documented stratified-tank geometry defaults
+        // rather than having the IO layer silently substitute 4 ft here.
+        let tank_height_m = child_f64(wh, "TankHeight").map(conv::length_ft_to_m);
         let first_hour_rating_m3 = first_hour_rating_gal.map(conv::volume_gal_to_m3);
         let heating_capacity_btu_hr = heating_capacity_input;
         let heating_capacity_w = heating_capacity_input.map(conv::power_btu_h_to_w);
@@ -98,7 +99,7 @@ pub(super) fn resolve_water_heaters(
                     loop_id: None,
                     fuel_type: fuel,
                     tank_volume_m3,
-                    tank_height_m: Some(tank_height_m),
+                    tank_height_m,
                     energy_factor,
                     uniform_energy_factor,
                     heating_capacity_w,
@@ -132,7 +133,7 @@ pub(super) fn resolve_water_heaters(
                     zone_id: None,
                     loop_id: None,
                     tank_volume_m3,
-                    tank_height_m: Some(tank_height_m),
+                    tank_height_m,
                     energy_factor,
                     uniform_energy_factor,
                     heating_capacity_w,
@@ -188,10 +189,24 @@ pub(super) fn resolve_water_heaters(
                     .or_else(|| energy_factor.map(|ef| (0.60522 + ef) / 1.2101));
                 let low_power = uef.is_some_and(|u| (u - 4.9).abs() < 1e-9);
                 let (cop, setpoint_c, tempering_valve_setpoint_c) = if low_power {
+                    // Low-power OCHRE preset (UEF ≈ 4.9): fixed 60 °C storage,
+                    // 51.67 °C (125 °F) tempering valve per manufacturer spec.
                     (Some(4.2), Some(60.0), Some(51.67))
                 } else {
                     let cop = uef.map(|uef_val| 1.174_536_058 * uef_val);
-                    let storage_setpoint_c = setpoint_c.unwrap_or(51.67);
+                    // Tempering valve setpoint mirrors the HPXML-declared
+                    // storage setpoint. If HPXML omits HotWaterTemperature we
+                    // cannot guess safely -- error loudly.
+                    let storage_setpoint_c = setpoint_c.ok_or_else(|| {
+                        super::HpxmlError::MissingField {
+                            path: "WaterHeatingSystem/HotWaterTemperature",
+                            system_kind: "Heat Pump Water Heater",
+                            system_id: super::xml_helpers::element_id(wh)
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            reason:
+                                "hot water setpoint (°C) is required to size the tempering valve; no silent default permitted",
+                        }
+                    })?;
                     (cop, setpoint_c, Some(storage_setpoint_c))
                 };
                 let cfg = HeatPumpWaterHeaterConfig {
@@ -199,7 +214,7 @@ pub(super) fn resolve_water_heaters(
                     zone_id: None,
                     loop_id: None,
                     tank_volume_m3,
-                    tank_height_m: Some(tank_height_m),
+                    tank_height_m,
                     cop,
                     backup_element_power_w: heating_capacity_w,
                     ua_w_per_k,
@@ -933,6 +948,7 @@ mod tests {
                       <FuelType>electricity</FuelType>
                       <WaterHeaterType>heat pump water heater</WaterHeaterType>
                       <TankVolume>50</TankVolume>
+                      <HotWaterTemperature>125</HotWaterTemperature>
                       <UniformEnergyFactor>3.75</UniformEnergyFactor>
                       <HeatingCapacity>4500</HeatingCapacity>
                     </WaterHeatingSystem>

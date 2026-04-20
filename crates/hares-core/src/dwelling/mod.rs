@@ -187,12 +187,8 @@ fn build_equipment_column_map(
                 power_factor: column_index
                     .get(&format!("{name} Power Factor (-)"))
                     .copied(),
-                energy_kwh: column_index
-                    .get(&format!("{name} Energy (kWh)"))
-                    .copied(),
-                schedule: column_index
-                    .get(&format!("{name} Schedule (-)"))
-                    .copied(),
+                energy_kwh: column_index.get(&format!("{name} Energy (kWh)")).copied(),
+                schedule: column_index.get(&format!("{name} Schedule (-)")).copied(),
             }
         })
         .collect()
@@ -291,10 +287,20 @@ pub struct SimulationResults {
 /// `dispatch_into()`. Because every signal fires (no deduplication), the
 /// highest-priority tier writes last and wins. Equipment `apply_control` must
 /// be overwrite-safe (idempotent set, not accumulate).
+///
+/// A single timestep may dispatch multiple times (e.g. once pre-thermal-FSM to
+/// flush externally queued setpoints, once post-actor-decide to apply actor
+/// signals). `begin_step()` resets the cross-dispatch conflict ledger so that
+/// priority ordering holds across passes: a lower-priority signal arriving
+/// in a later pass is SKIPPED when a higher-priority signal has already been
+/// applied to the same target in an earlier pass.
 struct ControlDispatcher {
     by_tier: [VecDeque<DispatchRequest>; PRIORITY_TIER_COUNT],
-    /// Scratch buffer for conflict detection — tracks (target, tier_index).
-    /// Pre-allocated, cleared each step. Linear scan for typical <16 signals.
+    /// Scratch buffer for conflict detection -- tracks (target, tier_index).
+    /// Pre-allocated, cleared at the start of each step via `begin_step()`.
+    /// Preserved across multiple dispatch passes within a single step so that
+    /// priority inversion cannot occur: once a tier has been seen for a target,
+    /// strictly lower tiers are rejected even if they are queued later.
     seen_targets: Vec<(DispatchTarget, usize)>,
 }
 
@@ -312,8 +318,15 @@ impl ControlDispatcher {
         self.by_tier[request.priority.index()].push_back(request);
     }
 
+    /// Resets the per-step priority ledger. Must be called once per timestep
+    /// before the first `dispatch_into` call; subsequent dispatches within the
+    /// step inherit the ledger so priority ordering holds across passes.
+    fn begin_step(&mut self) {
+        self.seen_targets.clear();
+    }
+
     fn dispatch_into(&mut self, equipment: &mut [Box<dyn Equipment>], warnings: &mut Vec<String>) {
-        self.drain_tiers(equipment, warnings, |_, _, _| {});
+        self.drain_tiers(equipment, warnings, |_, _, _, _| {});
     }
 
     #[cfg(feature = "observe")]
@@ -323,15 +336,19 @@ impl ControlDispatcher {
         warnings: &mut Vec<String>,
     ) -> DispatchCapture {
         let mut signals = Vec::new();
-        self.drain_tiers(equipment, warnings, |request, delivered, overwrote| {
-            signals.push(DispatchedSignal {
-                target: request.target.clone(),
-                signal: request.signal.clone(),
-                priority: request.priority,
-                overwrote_earlier: overwrote,
-                delivered,
-            });
-        });
+        self.drain_tiers(
+            equipment,
+            warnings,
+            |request, delivered, overwrote, skipped| {
+                signals.push(DispatchedSignal {
+                    target: request.target.clone(),
+                    signal: request.signal.clone(),
+                    priority: request.priority,
+                    overwrote_earlier: overwrote,
+                    delivered: delivered && !skipped,
+                });
+            },
+        );
         DispatchCapture { signals }
     }
 
@@ -339,12 +356,32 @@ impl ControlDispatcher {
         &mut self,
         equipment: &mut [Box<dyn Equipment>],
         warnings: &mut Vec<String>,
-        mut on_signal: impl FnMut(&DispatchRequest, bool, bool),
+        mut on_signal: impl FnMut(&DispatchRequest, bool, bool, bool),
     ) {
-        self.seen_targets.clear();
+        // NOTE: `seen_targets` is deliberately NOT cleared here. The per-step
+        // ledger is reset by `begin_step()` exactly once per timestep so that
+        // a lower-priority signal queued after a higher-priority one in an
+        // earlier pass does not silently overwrite it.
 
         for (tier_idx, tier_que) in self.by_tier.iter_mut().enumerate() {
             for request in tier_que.drain(..) {
+                // Skip lower-priority signals when a strictly higher tier has
+                // already been applied to this target in any pass of the
+                // current step. This preserves priority ordering across the
+                // pre-thermal-FSM and post-actor dispatch passes.
+                let prior_higher = self.seen_targets.iter().any(|&(ref t, prev_tier)| {
+                    t.conflicts_with(&request.target) && tier_idx < prev_tier
+                });
+                if prior_higher {
+                    tracing::debug!(
+                        target_equipment = ?request.target,
+                        priority = ?request.priority,
+                        "lower priority signal rejected: a higher priority signal already applied to this target"
+                    );
+                    on_signal(&request, false, false, true);
+                    continue;
+                }
+
                 let overwrote = self.seen_targets.iter().any(|&(ref t, prev_tier)| {
                     t.conflicts_with(&request.target) && tier_idx > prev_tier
                 });
@@ -358,7 +395,7 @@ impl ControlDispatcher {
                 self.seen_targets.push((request.target.clone(), tier_idx));
 
                 let delivered = route_request(&request, equipment, warnings);
-                on_signal(&request, delivered, overwrote);
+                on_signal(&request, delivered, overwrote, false);
             }
         }
     }
@@ -449,7 +486,7 @@ fn register_pv_surfaces(specs: &[hares_io::EquipmentSpec], env: &mut Environment
                 surface_id: sid,
                 azimuth_deg: az,
                 tilt_deg: tilt,
-                area_m2: 1.0, // area irrelevant for Perez — only orientation matters
+                area_m2: 1.0, // area irrelevant for Perez -- only orientation matters
             });
         }
     }
@@ -899,7 +936,7 @@ impl Dwelling {
         )?;
 
         // Enable ideal HVAC on the indoor zone when both heating AND cooling
-        // setpoints are configured — the thermal solver back-calculates the exact
+        // setpoints are configured -- the thermal solver back-calculates the exact
         // load needed to maintain the setpoint at each timestep.
         hares_io::inject_schedule_into_specs(
             &mut equipment_specs,
@@ -932,7 +969,7 @@ impl Dwelling {
         };
 
         // Equipment names whose loads are handled outside the registry (e.g. directly in the
-        // simulation loop) — silently skip them rather than emitting a warning.
+        // simulation loop) -- silently skip them rather than emitting a warning.
         const HANDLED_OUTSIDE_REGISTRY: &[&str] = &["Occupancy"];
 
         let registry = EquipmentRegistry::new();
@@ -1165,7 +1202,7 @@ impl Dwelling {
     }
 
     /// Emit the final partial billing period (if any). Call after the last
-    /// `step()` when driving the simulation step-by-step. Idempotent —
+    /// `step()` when driving the simulation step-by-step. Idempotent --
     /// a second call has no effect.
     pub fn finalize_billing(&mut self) {
         if let Some(ref mut evaluator) = self.tariff_evaluator {
@@ -1336,7 +1373,7 @@ impl Dwelling {
     }
 }
 
-/// Typed payload for `set_battery_lut` — ensures the data matches the LUT type at compile time.
+/// Typed payload for `set_battery_lut` -- ensures the data matches the LUT type at compile time.
 pub enum BatteryLutData {
     ChargingCurve(RegularGridInterpolator),
     Ocv(OcvTable),
@@ -1490,8 +1527,8 @@ impl Dwelling {
 
     /// Refreshes internal caches after equipment list modification.
     ///
-    /// Rebuilds execution order, dispatch targets, and — if no rows have been
-    /// recorded yet — the output schema, column index, equipment column map,
+    /// Rebuilds execution order, dispatch targets, and -- if no rows have been
+    /// recorded yet -- the output schema, column index, equipment column map,
     /// and streaming recorder so that dynamically added equipment appears in
     /// simulation output.
     pub fn refresh_equipment_caches(&mut self) {
@@ -1944,13 +1981,19 @@ impl Dwelling {
 
         let dt = chrono_to_std_duration(self.clock.time_res)?;
 
+        // Begin a new dispatch window: clear the cross-pass priority ledger so
+        // that lower-priority signals queued late in the step cannot overwrite
+        // higher-priority signals applied in an earlier pass.
+        self.control_dispatcher.begin_step();
+
         // Step 1a': dispatch any externally queued control signals (e.g. from
-        // `apply_control_validated`) before equipment `update_control` runs.
-        // Without this, signals queued for the current step would be serviced
-        // at Step 2 (after the thermostat FSM has already advanced in Step 1c),
-        // and short-cycle protection in `is_cycle_change_allowed` would block
-        // the re-evaluation at Step 2a until the next step. Dispatching first
-        // lets setpoint and mode overrides take effect on the same step.
+        // `apply_control_validated`) before thermal equipment `update_control`
+        // runs. Without this, setpoint/mode overrides queued for the current
+        // step would be serviced at Step 2 (after the thermostat FSM has
+        // already advanced in Step 1c), and short-cycle protection in
+        // `is_cycle_change_allowed` would block the re-evaluation at Step 2a
+        // until the next step. Dispatching first lets setpoint and mode
+        // overrides take effect on the same step.
         #[cfg(feature = "observe")]
         let pre_dispatch_capture = if self.observer_buf.is_some() {
             Some(
@@ -1971,63 +2014,7 @@ impl Dwelling {
         // required HVAC capacity.
         self.apply_occupancy_gains();
 
-        #[cfg(feature = "observe")]
-        let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
-        #[cfg(feature = "observe")]
-        let mut pre_snapshot = if observing {
-            Some(self.ports.clone())
-        } else {
-            None
-        };
         let mut step_succeeded = vec![false; self.equipment.len()];
-
-        for &idx in &self.equipment_execution_order {
-            let stage = self.equipment[idx].descriptor().stage;
-            if stage == ExecutionStage::Thermal {
-                continue;
-            }
-            #[cfg(feature = "observe")]
-            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
-
-            let _ = self.equipment[idx].update_control(&self.latest_env);
-            if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.warnings.push(format!(
-                    "equipment step failed for '{}' : {err}",
-                    self.equipment[idx].descriptor().name
-                ));
-            } else {
-                validate_core_contract(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                )?;
-                step_succeeded[idx] = true;
-            }
-
-            #[cfg(feature = "observe")]
-            if let Some(ref mut snapshot) = pre_snapshot {
-                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
-                nonthermal_obs.push(observer_capture::capture_single_equipment(
-                    self.equipment[idx].as_ref(),
-                    contribution,
-                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
-                ));
-                *snapshot = self.ports.clone();
-            }
-        }
-        #[cfg(debug_assertions)]
-        {
-            self.stage_snapshot = Some(StageSnapshot {
-                ports: self.ports.clone(),
-            });
-        }
-
-        #[cfg(feature = "observe")]
-        if observing {
-            obs_phases.post_nonthermal_equipment = Some(observer_capture::capture_equipment_phase(
-                nonthermal_obs,
-                &self.ports,
-            ));
-        }
 
         // Step 1c: thermal equipment update_control() to determine mode and ideal targets.
         // Must run BEFORE solver feedback actor collects targets.
@@ -2070,8 +2057,10 @@ impl Dwelling {
             self.control_dispatcher.queue(req);
         }
 
-        // Step 2: dispatch queued controls (now containing only actor-generated
-        // signals; externally queued signals were flushed before Step 1b).
+        // Step 2: dispatch all actor-generated control signals. The priority
+        // ledger from the pre-thermal-FSM pass is preserved so that a
+        // lower-priority actor signal cannot overwrite a higher-priority
+        // external signal already applied.
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
             let capture = self
@@ -2115,17 +2104,15 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         let hvac_started = Instant::now();
 
-        // Step 3b: thermal stage equipment.
+        // Step 3a: thermal stage equipment step.
         #[cfg(feature = "observe")]
         let mut thermal_obs: Vec<EquipmentObservation> = Vec::new();
         #[cfg(feature = "observe")]
-        {
-            pre_snapshot = if observing {
-                Some(self.ports.clone())
-            } else {
-                None
-            };
-        }
+        let mut pre_snapshot = if observing {
+            Some(self.ports.clone())
+        } else {
+            None
+        };
 
         for &idx in &self.equipment_execution_order {
             if self.equipment[idx].descriptor().stage != ExecutionStage::Thermal {
@@ -2170,6 +2157,60 @@ impl Dwelling {
             ));
         }
 
+        // Step 3b: non-thermal stage equipment (Independent, Electrical).
+        // Runs AFTER actor dispatch so that PV/Battery/EV control signals
+        // issued by actors (e.g. derating, SOC targets, charge power) take
+        // effect on the same timestep rather than the following one.
+        #[cfg(feature = "observe")]
+        let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
+        for &idx in &self.equipment_execution_order {
+            let stage = self.equipment[idx].descriptor().stage;
+            if stage == ExecutionStage::Thermal {
+                continue;
+            }
+            #[cfg(feature = "observe")]
+            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
+
+            let _ = self.equipment[idx].update_control(&self.latest_env);
+            if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
+                self.warnings.push(format!(
+                    "equipment step failed for '{}' : {err}",
+                    self.equipment[idx].descriptor().name
+                ));
+            } else {
+                validate_core_contract(
+                    self.equipment[idx].descriptor(),
+                    self.equipment[idx].core_output(),
+                )?;
+                step_succeeded[idx] = true;
+            }
+
+            #[cfg(feature = "observe")]
+            if let Some(ref mut snapshot) = pre_snapshot {
+                let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                nonthermal_obs.push(observer_capture::capture_single_equipment(
+                    self.equipment[idx].as_ref(),
+                    contribution,
+                    pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
+                ));
+                *snapshot = self.ports.clone();
+            }
+        }
+
+        #[cfg(feature = "observe")]
+        if observing {
+            obs_phases.post_nonthermal_equipment = Some(observer_capture::capture_equipment_phase(
+                nonthermal_obs,
+                &self.ports,
+            ));
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.stage_snapshot = Some(StageSnapshot {
+                ports: self.ports.clone(),
+            });
+        }
+
         #[cfg(feature = "profiling")]
         {
             let elapsed = hvac_started.elapsed();
@@ -2208,12 +2249,24 @@ impl Dwelling {
             );
         }
 
-        self.humidity_solver
-            .resolve(&self.ports, &self.latest_env, dt, &mut self.humidity_update_buf);
-        self.electrical_solver
-            .resolve(&self.ports, &self.latest_env, dt, &mut self.electrical_update_buf);
-        self.fluid_solver
-            .resolve(&self.ports, &self.latest_env, dt, &mut self.fluid_update_buf);
+        self.humidity_solver.resolve(
+            &self.ports,
+            &self.latest_env,
+            dt,
+            &mut self.humidity_update_buf,
+        );
+        self.electrical_solver.resolve(
+            &self.ports,
+            &self.latest_env,
+            dt,
+            &mut self.electrical_update_buf,
+        );
+        self.fluid_solver.resolve(
+            &self.ports,
+            &self.latest_env,
+            dt,
+            &mut self.fluid_update_buf,
+        );
 
         apply_humidity_update_to_zones(&mut self.latest_env, &self.humidity_update_buf);
 
@@ -2229,7 +2282,8 @@ impl Dwelling {
         }
 
         self.latest_env.upsert_domain_ref(&self.humidity_update_buf);
-        self.latest_env.upsert_domain_ref(&self.electrical_update_buf);
+        self.latest_env
+            .upsert_domain_ref(&self.electrical_update_buf);
         self.latest_env.upsert_domain_ref(&self.fluid_update_buf);
 
         // Ensure custom update buffers match the number of custom solvers.
@@ -2238,8 +2292,14 @@ impl Dwelling {
                 .push(hares_types::DomainUpdate::empty(hares_types::DomainId(0)));
         }
         for (i, solver) in self.custom_domain_solvers.iter_mut().enumerate() {
-            solver.resolve(&self.ports, &self.latest_env, dt, &mut self.custom_update_bufs[i]);
-            self.latest_env.upsert_domain_ref(&self.custom_update_bufs[i]);
+            solver.resolve(
+                &self.ports,
+                &self.latest_env,
+                dt,
+                &mut self.custom_update_bufs[i],
+            );
+            self.latest_env
+                .upsert_domain_ref(&self.custom_update_bufs[i]);
         }
 
         #[cfg(feature = "observe")]
@@ -2265,6 +2325,11 @@ impl Dwelling {
         }
 
         self.check_invariants(dt)?;
+        // Snapshot end-of-timestep equipment state into latest_env so that the
+        // NEXT step's actors see the freshest committed state for every
+        // equipment that stepped this timestep. Snapshot runs AFTER both
+        // thermal and non-thermal equipment have stepped (Step 3a + 3b) so
+        // nothing is one step stale.
         let active_equipment_ids: HashSet<EquipmentId> = self
             .equipment
             .iter()
@@ -2280,6 +2345,12 @@ impl Dwelling {
             .equipment_core
             .retain(|id, _| active_equipment_ids.contains(id));
         self.latest_env.equipment_core.reserve(self.equipment.len());
+        self.latest_env
+            .equipment_telemetry
+            .retain(|name, _| self.equipment_id_by_name.contains_key(name));
+        self.latest_env
+            .equipment_telemetry
+            .reserve(self.equipment.len());
         for (idx, eq) in self.equipment.iter().enumerate() {
             if !step_succeeded[idx] {
                 continue;
@@ -2293,13 +2364,26 @@ impl Dwelling {
             self.latest_env
                 .equipment_core
                 .insert(id, eq.core_output().clone());
+
+            // Per-equipment telemetry snapshot for next-step actor reads.
+            // Use `clone_from` on the existing entry so steady-state telemetry
+            // keys reuse their f64 slots without reallocating the inner map.
+            let telemetry = eq.telemetry();
+            match self.latest_env.equipment_telemetry.get_mut(&desc.name) {
+                Some(existing) => existing.clone_from(telemetry),
+                None => {
+                    self.latest_env
+                        .equipment_telemetry
+                        .insert(desc.name.clone(), telemetry.clone());
+                }
+            }
         }
 
         for (i, entry) in self.zone_temp_scratch.iter_mut().enumerate() {
             entry.1 = if let Some(env_idx) = self.zone_env_indices[i] {
                 self.latest_env.zones[env_idx].temperature_c
             } else {
-                // Zone not found in environment — should not happen in a correctly
+                // Zone not found in environment -- should not happen in a correctly
                 // built dwelling. Use previous value (initialized to 0.0 at
                 // construction, updated each step when the zone is present).
                 entry.1
@@ -2484,7 +2568,7 @@ impl Dwelling {
             }
         }
 
-        // Zone temperature columns — direct index lookup, no allocations.
+        // Zone temperature columns -- direct index lookup, no allocations.
         for (i, &(_, temp_c)) in self.zone_temp_scratch.iter().enumerate() {
             if let Some(idx) = self.zone_temp_col_indices[i] {
                 row[idx] = temp_c;
@@ -2635,7 +2719,8 @@ impl Dwelling {
                 }
                 let telem = eq.telemetry();
                 for key in &self.tank_node_keys {
-                    match telem.get(key) { // allowed: tank node keys are pre-computed at init.
+                    match telem.get(key) {
+                        // allowed: tank node keys are pre-computed at init.
                         Some(t) => self.invariant_tank_temps.push(t),
                         None => break,
                     }
@@ -2672,7 +2757,7 @@ impl Dwelling {
             let bus_power = self.ports.electrical.net_active_kw();
             checker.check_electrical(net_kw, &[-bus_power])?;
 
-            // Thermal balance: deferred — the multi-node RC state-space model
+            // Thermal balance: deferred -- the multi-node RC state-space model
             // distributes thermal energy across zone-air and wall-mass nodes.
             // A zone-air-only balance (C_zone × ΔT / dt vs. component gains)
             // has a ~6 kW residual because wall-mass energy changes aren't
@@ -2788,7 +2873,7 @@ fn zone_display_name(
 
 /// Build actor instances from equipment seeds.
 ///
-/// Pure function for testability — takes equipment, existing actors,
+/// Pure function for testability -- takes equipment, existing actors,
 /// tariff availability, price schedule, and returns new built-in actors.
 fn build_actors_from_seeds(
     equipment: &[Box<dyn Equipment>],
@@ -4498,7 +4583,8 @@ occupancy = 1.0
         let mut warnings = Vec::new();
         let mut delivered_count = 0u32;
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
-        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, delivered, _| {
+        dispatcher.begin_step();
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, delivered, _, _| {
             if delivered {
                 delivered_count += 1;
             }
@@ -4608,9 +4694,10 @@ occupancy = 1.0
         dispatcher.dispatch_into(&mut equipment, &mut warnings);
         assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
 
-        // Second dispatch with nothing queued — queues should be empty
+        // Second dispatch with nothing queued -- queues should be empty
         let mut delivered_count = 0u32;
-        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, delivered, _| {
+        dispatcher.begin_step();
+        dispatcher.drain_tiers(&mut equipment, &mut warnings, |_, delivered, _, _| {
             if delivered {
                 delivered_count += 1;
             }
@@ -4758,7 +4845,7 @@ occupancy = 1.0
     }
 
     // ---------------------------------------------------------------
-    // SeedableTestEquipment — TestEquipment + optional ActorSeed
+    // SeedableTestEquipment -- TestEquipment + optional ActorSeed
     // ---------------------------------------------------------------
 
     struct SeedableTestEquipment {

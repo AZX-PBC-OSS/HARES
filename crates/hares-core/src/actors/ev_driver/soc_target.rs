@@ -1,4 +1,4 @@
-//! SocTarget preference — "charge to X%".
+//! SocTarget preference -- "charge to X%".
 
 use super::preference::{ChargingPreference, DecisionContext, PreferenceVote};
 

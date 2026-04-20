@@ -419,7 +419,7 @@ fn default_charge_buffer_hours() -> f64 {
 /// Charging strategy governing when and how fast to charge.
 ///
 /// `TouAware` references the TOU rate schedule from the environment/simulation
-/// config — the EV just knows "be TOU-aware" and reads peak periods externally.
+/// config -- the EV just knows "be TOU-aware" and reads peak periods externally.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ChargingStrategy {
     Immediate {
@@ -897,7 +897,7 @@ pub struct CoreState {
 
 /// Typed output from one equipment simulation step.
 ///
-/// Not persisted in checkpoints — reconstructed each step.
+/// Not persisted in checkpoints -- reconstructed each step.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoreOutput {
     pub flows: CoreFlows,

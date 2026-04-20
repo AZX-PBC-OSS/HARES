@@ -308,30 +308,61 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
 
     let mut hvac_children = Vec::new();
     if has_heating {
+        let mut heating_children = vec![
+            hares_io::hpxml::building::XmlNode {
+                name: "HeatingSystemType".to_string(),
+                attrs: HashMap::new(),
+                text: config.hvac.equipment_name.clone(),
+                children: Vec::new(),
+            },
+            hares_io::hpxml::building::XmlNode {
+                name: "HeatingSystemFuel".to_string(),
+                attrs: HashMap::new(),
+                text: fuel.clone(),
+                children: Vec::new(),
+            },
+            hares_io::hpxml::building::XmlNode {
+                name: "HeatingCapacity".to_string(),
+                attrs: HashMap::new(),
+                text: heating_capacity_btu_h.to_string(),
+                children: Vec::new(),
+            },
+        ];
+
+        // Combustion-fuel furnaces/boilers need AFUE for the HPXML resolver.
+        // 0.80 is the ANSI/RESNET 301 floor for existing equipment.
+        let fuel_norm = fuel.to_ascii_lowercase();
+        let is_combustion = matches!(
+            fuel_norm.as_str(),
+            "natural gas" | "propane" | "fuel oil" | "wood" | "wood pellets" | "coal"
+        );
+        if is_combustion {
+            heating_children.push(hares_io::hpxml::building::XmlNode {
+                name: "AnnualHeatingEfficiency".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![
+                    hares_io::hpxml::building::XmlNode {
+                        name: "Units".to_string(),
+                        attrs: HashMap::new(),
+                        text: "AFUE".to_string(),
+                        children: Vec::new(),
+                    },
+                    hares_io::hpxml::building::XmlNode {
+                        name: "Value".to_string(),
+                        attrs: HashMap::new(),
+                        text: "0.80".to_string(),
+                        children: Vec::new(),
+                    },
+                ],
+            });
+        }
+
         hvac_children.push(hares_io::hpxml::building::XmlNode {
             name: "HeatingSystem".to_string(),
             attrs: HashMap::new(),
             text: String::new(),
-            children: vec![
-                hares_io::hpxml::building::XmlNode {
-                    name: "HeatingSystemType".to_string(),
-                    attrs: HashMap::new(),
-                    text: config.hvac.equipment_name.clone(),
-                    children: Vec::new(),
-                },
-                hares_io::hpxml::building::XmlNode {
-                    name: "HeatingSystemFuel".to_string(),
-                    attrs: HashMap::new(),
-                    text: fuel.clone(),
-                    children: Vec::new(),
-                },
-                hares_io::hpxml::building::XmlNode {
-                    name: "HeatingCapacity".to_string(),
-                    attrs: HashMap::new(),
-                    text: heating_capacity_btu_h.to_string(),
-                    children: Vec::new(),
-                },
-            ],
+            children: heating_children,
         });
     }
     if has_cooling {
@@ -603,7 +634,11 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
     // Build 24-hour setpoint vectors when setpoints are configured.
     let (heating_weekday, cooling_weekday) = if let Some(sp) = &config.setpoints {
         let heating = if let Some(ref schedule) = sp.heating_schedule_c {
-            assert_eq!(schedule.len(), 24, "heating_schedule_c must have exactly 24 elements");
+            assert_eq!(
+                schedule.len(),
+                24,
+                "heating_schedule_c must have exactly 24 elements"
+            );
             Some(schedule.clone())
         } else {
             sp.heating_c.map(|t| vec![t; 24])
@@ -613,7 +648,7 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
         (None, None)
     };
 
-    // BESTEST/ASHRAE 140 specifies constant ACH — no weather-dependent model.
+    // BESTEST/ASHRAE 140 specifies constant ACH -- no weather-dependent model.
     let infiltration_constant_ach = config.infiltration.as_ref().map(|inf| inf.ach);
 
     let wall_ids: Vec<String> = boundaries

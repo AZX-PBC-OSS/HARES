@@ -14,7 +14,7 @@ const ISOTROPIC_VIEW_FACTOR: f64 = 0.5;
 /// Solar constant [W/m²].
 const SOLAR_CONSTANT: f64 = 1367.0;
 
-/// Cosine of 85° — lower bound for denominator in Perez model to avoid
+/// Cosine of 85° -- lower bound for denominator in Perez model to avoid
 /// singularity near the horizon.
 const COS_85_DEG: f64 = 0.087_155_742_747_658_17;
 
@@ -84,7 +84,7 @@ pub struct SolarPosition {
 
 /// Solar position from local timestamp and site coordinates using a Spencer-style declination/EOT model.
 ///
-/// Converts to UTC internally — solar geometry requires true UTC.
+/// Converts to UTC internally -- solar geometry requires true UTC.
 pub fn solar_position(
     latitude_deg: f64,
     longitude_deg: f64,
@@ -172,7 +172,7 @@ pub fn extraterrestrial_irradiance(day_of_year: u32) -> f64 {
             + 0.000077 * (2.0 * b).sin())
 }
 
-/// Extraterrestrial normal irradiance — alias for [`extraterrestrial_irradiance`].
+/// Extraterrestrial normal irradiance -- alias for [`extraterrestrial_irradiance`].
 ///
 /// Provided under this name for callers that prefer the longer, unambiguous form.
 #[must_use]
@@ -189,12 +189,12 @@ pub fn extraterrestrial_normal_irradiance(day_of_year: u32) -> f64 {
 /// it from day-of-year.
 ///
 /// # Arguments
-/// * `dhi` — diffuse horizontal irradiance [W/m²]
-/// * `dni` — direct normal irradiance [W/m²]
-/// * `zenith_deg` — solar zenith angle [degrees]
-/// * `aoi_deg` — angle of incidence on the surface [degrees]
-/// * `tilt_deg` — surface tilt from horizontal [degrees]
-/// * `dni_extra` — extraterrestrial normal irradiance [W/m²]
+/// * `dhi` -- diffuse horizontal irradiance [W/m²]
+/// * `dni` -- direct normal irradiance [W/m²]
+/// * `zenith_deg` -- solar zenith angle [degrees]
+/// * `aoi_deg` -- angle of incidence on the surface [degrees]
+/// * `tilt_deg` -- surface tilt from horizontal [degrees]
+/// * `dni_extra` -- extraterrestrial normal irradiance [W/m²]
 #[must_use]
 pub fn perez_sky_diffuse(
     dhi: f64,
@@ -413,7 +413,7 @@ pub fn window_transmitted_solar(irradiance_w_m2: f64, shgc: f64, area_m2: f64) -
 // ---------------------------------------------------------------------------
 // Angle-of-incidence (AOI) dependent window transmittance
 //
-// EnergyPlus Engineering Reference — Window Calculation Module, Step 7:
+// EnergyPlus Engineering Reference -- Window Calculation Module, Step 7:
 // "Determine Angular Performance"
 // https://bigladdersoftware.com/epx/docs/8-9/engineering-reference/window-calculation-module.html
 //
@@ -527,8 +527,8 @@ impl GlazingCurve {
 /// polynomial angular model normalised to 1.0 at normal incidence.
 ///
 /// # Arguments
-/// * `theta_rad` — angle of incidence [rad].  Values < 0 or ≥ π/2 return 0.
-/// * `curve` — glazing curve; use [`GlazingCurve::from_u_shgc`] to select.
+/// * `theta_rad` -- angle of incidence [rad].  Values < 0 or ≥ π/2 return 0.
+/// * `curve` -- glazing curve; use [`GlazingCurve::from_u_shgc`] to select.
 ///
 /// # References
 /// EnergyPlus Engineering Reference, Window Calculation Module, Step 7.
@@ -669,12 +669,12 @@ pub fn calculate_window_parameters(
 /// pre-computed hemispherical IAM constant to diffuse radiation.
 ///
 /// # Arguments
-/// * `beam_irradiance_w_m2` — beam (direct) POA irradiance [W/m²].
-/// * `diffuse_irradiance_w_m2` — diffuse + reflected POA irradiance [W/m²].
-/// * `shgc` — solar heat gain coefficient at normal incidence [dimensionless].
-/// * `area_m2` — glazing area [m²].
-/// * `angle_of_incidence_rad` — angle between beam and surface normal [rad].
-/// * `curve` — EnergyPlus glazing curve for angular correction.
+/// * `beam_irradiance_w_m2` -- beam (direct) POA irradiance [W/m²].
+/// * `diffuse_irradiance_w_m2` -- diffuse + reflected POA irradiance [W/m²].
+/// * `shgc` -- solar heat gain coefficient at normal incidence [dimensionless].
+/// * `area_m2` -- glazing area [m²].
+/// * `angle_of_incidence_rad` -- angle between beam and surface normal [rad].
+/// * `curve` -- EnergyPlus glazing curve for angular correction.
 #[must_use]
 pub fn window_transmitted_solar_angular(
     beam_irradiance_w_m2: f64,
@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn extraterrestrial_irradiance_perihelion_is_near_1415() {
-        // Around Jan 3 (day 3), Earth is at perihelion — ETI should be ~1415 W/m²
+        // Around Jan 3 (day 3), Earth is at perihelion -- ETI should be ~1415 W/m²
         let eti = extraterrestrial_irradiance(3);
         assert!(
             (eti - 1415.0).abs() < 15.0,
@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn perez_overcast_close_to_isotropic() {
-        // Overcast sky: low DNI, high DHI fraction — epsilon near 1
+        // Overcast sky: low DNI, high DHI fraction -- epsilon near 1
         // Perez should be close to isotropic
         let ghi = 200.0;
         let dni = 10.0;
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn extraterrestrial_irradiance_aphelion_is_near_1322() {
-        // Around July 4 (day 185), Earth is at aphelion — ETI should be ~1322 W/m²
+        // Around July 4 (day 185), Earth is at aphelion -- ETI should be ~1322 W/m²
         let eti = extraterrestrial_irradiance(185);
         assert!(
             (eti - 1322.0).abs() < 15.0,
@@ -1501,7 +1501,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // perez_sky_diffuse — standalone sky diffuse component tests
+    // perez_sky_diffuse -- standalone sky diffuse component tests
     // -----------------------------------------------------------------------
 
     /// Worked example from Perez (1990): south-facing 30° tilt, solar zenith
@@ -1575,7 +1575,7 @@ mod tests {
     }
 
     /// Perez diffuse exceeds isotropic diffuse on a tilted, sun-facing surface
-    /// under clear sky — circumsolar brightening must be visible.
+    /// under clear sky -- circumsolar brightening must be visible.
     #[test]
     fn perez_sky_diffuse_exceeds_isotropic_for_tilted_clear_sky() {
         let dhi = 100.0;
@@ -1604,7 +1604,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // window_iam — angle-of-incidence modifier tests
+    // window_iam -- angle-of-incidence modifier tests
     // -----------------------------------------------------------------------
 
     /// IAM must equal exactly 1.0 at normal incidence (θ = 0) for all curves.
@@ -1701,7 +1701,7 @@ mod tests {
     }
 
     /// At θ = 60°, IAM for curve A (single-pane clear) should be higher than
-    /// curve J (triple-pane low-e) — single-pane glass is less angularly selective.
+    /// curve J (triple-pane low-e) -- single-pane glass is less angularly selective.
     #[test]
     fn window_iam_single_pane_higher_than_triple_at_60deg() {
         let iam_a = window_iam(60.0_f64.to_radians(), GlazingCurve::A);
@@ -1815,7 +1815,7 @@ mod tests {
     fn window_iam_pinned_values_all_curves() {
         // (curve, theta_deg, expected_iam)
         let cases: &[(GlazingCurve, f64, f64)] = &[
-            // --- 0° (normal incidence) — all curves must be exactly 1.0 ---
+            // --- 0° (normal incidence) -- all curves must be exactly 1.0 ---
             (GlazingCurve::A, 0.0, 1.0),
             (GlazingCurve::Bdcd, 0.0, 1.0),
             (GlazingCurve::D, 0.0, 1.0),
@@ -1922,7 +1922,7 @@ mod tests {
     }
 
     /// Total transmitted solar at θ = 75° for a typical double-pane window
-    /// must be significantly less than the flat SHGC calculation — at least
+    /// must be significantly less than the flat SHGC calculation -- at least
     /// 15% lower for beam-dominated radiation.
     #[test]
     fn angular_significantly_reduces_gain_at_high_aoi() {

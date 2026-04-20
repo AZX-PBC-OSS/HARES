@@ -1,4 +1,4 @@
-//! TimeWindowPref — "only charge during these hours".
+//! TimeWindowPref -- "only charge during these hours".
 //!
 //! Delegates to `hares_types::TimeWindow::contains()` for the actual
 //! time-matching logic (including midnight wrapping and day filters).
@@ -145,7 +145,7 @@ mod tests {
         // Same window, but weekend day
         let weekend_tw = TimeWindow::new(DayFilter::Day(Weekday::Sat), 480, 1080, 0.0);
         let mut weekend_pref = TimeWindowPref::from_time_window(weekend_tw);
-        // Thursday is not Saturday — should override idle
+        // Thursday is not Saturday -- should override idle
         match weekend_pref.constraint(&ctx) {
             Constraint::Override(vote) => {
                 assert_eq!(vote.label, "time_window:outside");

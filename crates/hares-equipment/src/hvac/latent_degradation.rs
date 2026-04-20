@@ -1,6 +1,6 @@
 //! Henderson-Rengarajan latent degradation model and coil Ao computation.
 //!
-//! Extracted from `air_conditioner.rs` — pure structural refactor, no logic changes.
+//! Extracted from `air_conditioner.rs` -- pure structural refactor, no logic changes.
 
 use hares_physics::psychrometrics::humidity_ratio_from_twb;
 use hares_types::HaresError;

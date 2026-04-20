@@ -1,4 +1,4 @@
-//! Air conditioner curve helpers and telemetry — typed config structs live in cooling_config.
+//! Air conditioner curve helpers and telemetry -- typed config structs live in cooling_config.
 
 use hares_types::{Telemetry, TelemetryField, telemetry_keys as tk};
 
@@ -191,4 +191,3 @@ pub(super) fn load_curve_pair(
 
     Ok(curves)
 }
-

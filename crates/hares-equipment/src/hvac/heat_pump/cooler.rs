@@ -368,7 +368,7 @@ mod tests {
         )
     }
 
-    /// Zone above cooling setpoint — cooler must remove heat (negative thermal
+    /// Zone above cooling setpoint -- cooler must remove heat (negative thermal
     /// contribution) and draw positive electrical power.
     #[test]
     fn ashp_cooler_cools_when_zone_above_setpoint() {
@@ -445,7 +445,7 @@ mod tests {
         );
     }
 
-    /// Zone between heating and cooling setpoints — deadband — no electrical
+    /// Zone between heating and cooling setpoints -- deadband -- no electrical
     /// draw and no thermal load.
     #[test]
     fn cooler_in_deadband_produces_zero_output() {
@@ -554,7 +554,7 @@ mod tests {
         assert_eq!(
             ports.thermal[0].sensible_gain_w, 0.0,
             "cooler must produce zero thermal output when zone_temp (24.4°C) == cooling_setpoint; \
-             OCHRE turn-on threshold = 25.2°C — got {:.3} W",
+             OCHRE turn-on threshold = 25.2°C -- got {:.3} W",
             ports.thermal[0].sensible_gain_w
         );
         assert_eq!(
@@ -577,7 +577,7 @@ mod tests {
         let mut eq = HpCooler::mshp_cooler(cfg);
 
         // Zone in deadband (21 °C, between default heating=20 °C / cooling=24 °C),
-        // outdoor at 5 °C — above the MSHP 0 °C crankcase threshold but below the
+        // outdoor at 5 °C -- above the MSHP 0 °C crankcase threshold but below the
         // central-AC 12.8 °C threshold. No init() call.
         let env = cooling_env(21.0, 5.0);
         let mut ports = PortSlots {
@@ -591,7 +591,7 @@ mod tests {
             ports.electrical.net_active_kw(),
             0.0,
             "MSHP crankcase must be inactive at 5 °C (threshold 0 °C); \
-             central-AC default (12.8 °C) would produce 0.05 kW — got {}",
+             central-AC default (12.8 °C) would produce 0.05 kW -- got {}",
             ports.electrical.net_active_kw()
         );
     }

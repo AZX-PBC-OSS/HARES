@@ -165,7 +165,7 @@ class TestResStockBuildingFrozen:
 
 
 # ---------------------------------------------------------------------------
-# 3. fetch_resstock_building — basic download + extract
+# 3. fetch_resstock_building -- basic download + extract
 # ---------------------------------------------------------------------------
 
 
@@ -297,7 +297,7 @@ class TestFetchResStockBuilding:
 
         zip_bytes = _make_zip(hpxml_content=_minimal_hpxml("G0800130"))
 
-        # V2024.2 uses EPW format (TMY3) — weather is fetched via get_epw_for_fips
+        # V2024.2 uses EPW format (TMY3) -- weather is fetched via get_epw_for_fips
         dummy_epw = tmp_path / "weather" / "BuildStock_TMY3_FIPS" / "G0800130.epw"
         dummy_epw.parent.mkdir(parents=True, exist_ok=True)
         dummy_epw.write_text("fake EPW data")

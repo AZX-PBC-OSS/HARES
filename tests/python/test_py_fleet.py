@@ -255,7 +255,7 @@ def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# simulate() tests — require OCHRE vendor fixtures
+# simulate() tests -- require OCHRE vendor fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -360,7 +360,7 @@ def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
 
     sim_config = SimulationConfig(duration_s=3600, time_res_s=60)
 
-    # One valid config, one invalid — partial failure
+    # One valid config, one invalid -- partial failure
     good = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
         config=sim_config, bldg_id=1,

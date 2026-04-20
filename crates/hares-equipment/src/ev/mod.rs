@@ -561,8 +561,10 @@ impl Ev {
         self.telemetry
             .set(tk::V2L_ACTIVE, if self.v2l_active { 1.0 } else { 0.0 });
         self.telemetry.set(tk::V2L_POWER_KW, self.v2l_power_kw);
-        self.telemetry
-            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_fraction() * 100.0);
+        self.telemetry.set(
+            tk::CAPACITY_FADE_PCT,
+            self.degradation.capacity_fade_fraction() * 100.0,
+        );
         self.telemetry
             .set(tk::AWAY_CHARGE_POWER_KW, self.away_charge_actual_kw);
         self.telemetry
@@ -931,7 +933,7 @@ impl Equipment for Ev {
                         ));
                     }
                     (from, to) if from == *to => {
-                        // Same state — no-op
+                        // Same state -- no-op
                         return Ok(());
                     }
                     _ => {}

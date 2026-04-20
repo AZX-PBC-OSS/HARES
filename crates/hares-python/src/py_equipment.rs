@@ -53,7 +53,7 @@ fn extract_f64_axis(_py: Python<'_>, dict: &Bound<'_, PyDict>, key: &str) -> PyR
     let arr = dict.get_item(key)?.ok_or_else(|| {
         PyValueError::new_err(format!("charging_curve_lut dict missing '{key}' key"))
     })?;
-    // Convert to list of f64 via Python — works with any array-like
+    // Convert to list of f64 via Python -- works with any array-like
     let list: Vec<f64> = arr.call_method0("tolist")?.extract()?;
     Ok(list)
 }

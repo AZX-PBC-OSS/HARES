@@ -57,7 +57,7 @@ class TestArchetypeTariffIntegration:
         summaries = dw.billing_summaries()
         assert len(summaries) >= 1, "35-day sim with monthly billing must produce >=1 summary"
         s = summaries[0]
-        assert s.total_import_kwh > 0, "House always draws power — import must be positive"
+        assert s.total_import_kwh > 0, "House always draws power -- import must be positive"
         assert s.energy_charge_usd > 0, "Positive import at $0.15/kWh must produce a charge"
         assert s.net_bill_usd > 0, "Net bill must be positive with no export"
 
@@ -138,13 +138,13 @@ class TestArchetypeTariffIntegration:
         run1 = run()
         run2 = run()
         assert len(run1) > 0, "Simulation must produce output"
-        # Compare with tolerance — f64 repr may differ at the last digit
+        # Compare with tolerance -- f64 repr may differ at the last digit
         assert len(run1) == len(run2), "Different number of steps"
         for i, (a, b) in enumerate(zip(run1, run2)):
             assert abs(a - b) < 1e-12, f"Step {i}: {a} != {b}"
 
     def test_phev_archetype_produces_ev_power(self):
-        """PHEV vehicle charges from grid — must show positive EV power."""
+        """PHEV vehicle charges from grid -- must show positive EV power."""
         from ochre_next import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
@@ -319,5 +319,5 @@ class TestChargingLoadProfile:
             f"L1 max power {max_power:.2f} kW exceeds L1 limit (~1.8 kW)"
         )
         assert median_power >= 0.5, (
-            f"L1 median power {median_power:.2f} kW too low — L1 should draw ~1.4 kW"
+            f"L1 median power {median_power:.2f} kW too low -- L1 should draw ~1.4 kW"
         )

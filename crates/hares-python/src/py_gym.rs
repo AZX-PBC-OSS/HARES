@@ -83,7 +83,7 @@ pub fn batch_step_py(
         .collect();
     // borrows live until end of function scope
 
-    // Release GIL — Rayon threads run step_core()/observation() without
+    // Release GIL -- Rayon threads run step_core()/observation() without
     // touching Python. Both methods use only Mutex<Dwelling> internally.
     let results: Vec<StepResult> = py.detach(|| {
         ptrs.par_iter()
@@ -95,9 +95,9 @@ pub fn batch_step_py(
                 let dwelling = unsafe { &**ptr };
 
                 let mut info = HashMap::new();
-                let step_result = std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| dwelling.step_core_string()),
-                );
+                let step_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dwelling.step_core_string()
+                }));
                 let step_result = match step_result {
                     Ok(inner) => inner,
                     Err(payload) => {
@@ -149,7 +149,7 @@ pub fn batch_step_py(
             .collect()
     });
 
-    // GIL re-acquired here — convert results to Python dicts.
+    // GIL re-acquired here -- convert results to Python dicts.
     let mut out = Vec::with_capacity(results.len());
     for item in results {
         let d = PyDict::new(py);

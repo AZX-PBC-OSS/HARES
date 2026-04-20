@@ -18,7 +18,6 @@ use hares_types::{ControlSignal, DRLevel, EndUse, OperatingMode};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 
-
 #[derive(Debug, Deserialize, Default)]
 struct FixtureConfig {
     #[serde(default)]
@@ -235,9 +234,9 @@ fn ochre_ashp_fixture_runtime_state_columns_are_populated() {
     // At -19°C the compressor is below hp_lockout_temp_c (-17.78°C), so COP=0 is correct.
     // Only assert COP > 0 when HP is actually available.
     if saw_nonzero_cop {
-        // Good — HP ran at some point
+        // Good -- HP ran at some point
     }
-    // No assertion failure when COP is zero — ER-only mode is valid.
+    // No assertion failure when COP is zero -- ER-only mode is valid.
 }
 
 #[test]
@@ -829,22 +828,22 @@ fn debug_minisplit_channel_delta_report() {
             "minisplit actual mode first 40: {:?}",
             &mode[..40.min(mode.len())]
         );
-    println!(
-        "minisplit actual setpoint first 40: {:?}",
-        &setpoint[..40.min(setpoint.len())]
-    );
-    if let Some(capacity) = actual.get("MSHP Heater Capacity (W)") {
         println!(
-            "minisplit actual capacity first 40: {:?}",
-            &capacity[..40.min(capacity.len())]
+            "minisplit actual setpoint first 40: {:?}",
+            &setpoint[..40.min(setpoint.len())]
         );
-    }
-    if let Some(cop) = actual.get("MSHP Heater COP (-)") {
-        println!(
-            "minisplit actual cop first 40: {:?}",
-            &cop[..40.min(cop.len())]
-        );
-    }
+        if let Some(capacity) = actual.get("MSHP Heater Capacity (W)") {
+            println!(
+                "minisplit actual capacity first 40: {:?}",
+                &capacity[..40.min(capacity.len())]
+            );
+        }
+        if let Some(cop) = actual.get("MSHP Heater COP (-)") {
+            println!(
+                "minisplit actual cop first 40: {:?}",
+                &cop[..40.min(cop.len())]
+            );
+        }
     }
     if let (Some(a_temp), Some(r_temp)) = (
         actual.get("Temperature - Indoor (C)"),
@@ -1289,7 +1288,6 @@ fn mean_abs_diff(a: &[f64], b: &[f64]) -> f64 {
     }
     accum / n as f64
 }
-
 
 fn unique_temp_path(fixture_id: &str, extension: &str) -> PathBuf {
     let mut path = std::env::temp_dir();

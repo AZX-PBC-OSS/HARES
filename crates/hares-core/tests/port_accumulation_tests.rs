@@ -22,7 +22,7 @@ fn approx_eq(left: f64, right: f64) {
 // ---------------------------------------------------------------------------
 
 /// Build a `PortSlots` wired for the given zones plus an electrical and fuel
-/// singleton — mirrors what `Dwelling::from_preparsed` does for each zone.
+/// singleton -- mirrors what `Dwelling::from_preparsed` does for each zone.
 fn slots_for_zones(zones: &[ZoneId]) -> PortSlots {
     let mut decls: Vec<PortDeclaration> =
         zones.iter().map(|&z| PortDeclaration::thermal(z)).collect();

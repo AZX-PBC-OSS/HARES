@@ -109,7 +109,10 @@ impl IdealHvac {
 
         Self {
             descriptor,
-            ports: vec![PortDeclaration::thermal(zone), PortDeclaration::electrical()],
+            ports: vec![
+                PortDeclaration::thermal(zone),
+                PortDeclaration::electrical(),
+            ],
             telemetry: ideal_hvac_default_telemetry(),
             core_output: CoreOutput::default(),
             zone_id: zone,
@@ -347,7 +350,7 @@ impl IdealHvac {
             self.set_mode(next_mode, env.current_time);
         }
 
-        // Always update target from current setpoints — even when mode doesn't
+        // Always update target from current setpoints -- even when mode doesn't
         // transition, the schedule setpoint may have changed (day↔night shift).
         match self.mode {
             ThermostatMode::Heating => self.current_target_c = setpoints.heating_c,
@@ -462,7 +465,7 @@ impl Equipment for IdealHvac {
                 other => {
                     return Err(HaresError::Equipment(format!(
                         "unrecognized ideal_capacity_mode '{other}'; expected 'on', 'off', or 'auto'"
-                    )))
+                    )));
                 }
             };
         }
@@ -524,7 +527,7 @@ impl Equipment for IdealHvac {
             ThermostatMode::Cooling => -self.cooling_capacity_w * self.load_fraction,
         };
 
-        // R3: Minimum capacity — if operating below threshold, force off.
+        // R3: Minimum capacity -- if operating below threshold, force off.
         if capacity_w.abs() > 0.0 && capacity_w.abs() < self.capacity_min_w {
             capacity_w = 0.0;
             self.ideal_capacity_w = 0.0;
@@ -795,8 +798,8 @@ mod tests {
         SurfaceIrradiance, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
     };
 
-    use super::IdealHvac;
     use super::super::thermostat::ThermostatMode;
+    use super::IdealHvac;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
 
     fn env(zone_temp_c: f64, time_res_s: i64, second: i64) -> EnvironmentState {
@@ -1394,7 +1397,7 @@ mod tests {
         let environment = env(18.0, 60, 0);
         eq.init(&cfg, &environment).unwrap();
 
-        // Initially off — should NOT use ideal capacity
+        // Initially off -- should NOT use ideal capacity
         assert!(!eq.use_ideal_capacity(&environment));
 
         // Override to On at runtime
@@ -1490,7 +1493,7 @@ mod tests {
         };
         let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed);
 
-        // Zone at 15°C — well below both setpoints, always triggers Heating.
+        // Zone at 15°C -- well below both setpoints, always triggers Heating.
         // hysteresis=1.0, deadband_offset=0.2 → heat turn-on at setpoint-0.8
         // 15 < 21.67-0.8=20.87 and 15 < 18.33-0.8=17.53
         let env_h0 = env(15.0, 60, 0);
@@ -1505,7 +1508,7 @@ mod tests {
             eq.current_target_c
         );
 
-        // Advance to hour 8 — same zone temp, same mode, but setpoint drops.
+        // Advance to hour 8 -- same zone temp, same mode, but setpoint drops.
         let env_h8 = env(15.0, 60, 8 * 3600);
         eq.update_control(&env_h8);
 
@@ -1803,7 +1806,7 @@ mod tests {
         let env = env(18.0, 300, 0);
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
-        // Solver says 50kW — ideal mode delivers the full amount.
+        // Solver says 50kW -- ideal mode delivers the full amount.
         eq.ideal_capacity_w = 50_000.0;
 
         let mut ports = PortSlots {
@@ -1833,7 +1836,7 @@ mod tests {
         let env = env(28.0, 300, 0);
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
-        // Solver says -40kW cooling — ideal mode delivers the full amount.
+        // Solver says -40kW cooling -- ideal mode delivers the full amount.
         eq.ideal_capacity_w = -40_000.0;
 
         let mut ports = PortSlots {
@@ -1977,10 +1980,7 @@ mod tests {
 
         // Telemetry FAN_KW.
         let fan_kw_telem = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
-        assert!(
-            fan_kw_telem.is_some(),
-            "telemetry must contain FAN_KW"
-        );
+        assert!(fan_kw_telem.is_some(), "telemetry must contain FAN_KW");
         assert!(
             (fan_kw_telem.unwrap() - expected_fan_kw).abs() < 1e-9,
             "FAN_KW telemetry should be {expected_fan_kw}, got {:?}",
@@ -2043,7 +2043,7 @@ mod tests {
         let env = env(18.0, 300, 0);
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
-        // Solver says 500W — below 1000W minimum.
+        // Solver says 500W -- below 1000W minimum.
         eq.ideal_capacity_w = 500.0;
 
         let mut ports = PortSlots {

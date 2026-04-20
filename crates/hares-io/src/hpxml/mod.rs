@@ -42,6 +42,23 @@ pub enum HpxmlError {
         report: validation::ValidationReport,
         error_count: usize,
     },
+    /// A required physics/engineering field is missing from the HPXML input.
+    ///
+    /// Emitted when the parser would otherwise silently substitute a literal
+    /// default (e.g. AFUE=0.80, PV capacity=0 kW). Includes the HPXML element
+    /// path and, when available, the enclosing system identifier.
+    #[error("HPXML is missing required field `{path}` on {system_kind} `{system_id}` -- {reason}")]
+    MissingField {
+        /// HPXML element path (e.g. `PVSystem/MaxPowerOutput`).
+        path: &'static str,
+        /// Short type label for the enclosing system (e.g. `PV`, `Gas Furnace`).
+        system_kind: &'static str,
+        /// Identifier from `SystemIdentifier/@id` or `unknown` when absent.
+        system_id: String,
+        /// Human-readable explanation of what the field represents and why it
+        /// must be specified explicitly instead of defaulted.
+        reason: &'static str,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, HpxmlError>;

@@ -1381,13 +1381,13 @@ fn ev_set_ready_by_delays_then_charges() {
     })
     .unwrap();
 
-    // Step at 18:00 — should be too early, BMS delays
+    // Step at 18:00 -- should be too early, BMS delays
     env.current_time = dt(2026, 1, 1, 18, 0, 0);
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let power_early = ev.telemetry().get("active_power_kw").unwrap();
 
-    // Step at 5:00 — should be charging (close to deadline)
+    // Step at 5:00 -- should be charging (close to deadline)
     ev.soc = 0.3;
     env.current_time = dt(2026, 1, 2, 5, 0, 0);
     let mut ports = PortSlots::default();
@@ -1497,7 +1497,7 @@ fn already_at_target_produces_zero_power() {
 
 #[test]
 fn deadline_passed_charges_immediately() {
-    // Deadline at 14:00, currently 15:00 — unambiguously past the deadline
+    // Deadline at 14:00, currently 15:00 -- unambiguously past the deadline
     // on the same day. With wrap, hours_until_deadline = 23, which is huge
     // relative to the small SOC deficit, so BMS would delay. But in reality
     // the deadline has passed and the EV should charge immediately.
@@ -1511,7 +1511,7 @@ fn deadline_passed_charges_immediately() {
     let mut env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    // Deadline at exactly current hour — triggers immediate charge
+    // Deadline at exactly current hour -- triggers immediate charge
     ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
         departure_hour: 15.0,
         target_soc: 0.8,
@@ -2202,7 +2202,7 @@ fn ev_full_day_lifecycle() {
         "no power draw when battery full"
     );
 
-    // Phase 3 (step 480): Departure — disconnect then drive
+    // Phase 3 (step 480): Departure -- disconnect then drive
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
@@ -2237,7 +2237,7 @@ fn ev_full_day_lifecycle() {
         ev.soc
     );
 
-    // Phase 5 (step 1080): Arrival — reconnect
+    // Phase 5 (step 1080): Arrival -- reconnect
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::HomePluggedIn,
     })
@@ -2536,7 +2536,7 @@ fn ev_departure_at_step_boundary() {
     let mut env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    // Departure at midnight (0.0 h) — the step-1440 boundary case
+    // Departure at midnight (0.0 h) -- the step-1440 boundary case
     ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
         departure_hour: 0.0,
         target_soc: 0.9,

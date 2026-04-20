@@ -43,7 +43,7 @@ impl ThermalCategory {
     }
 }
 
-/// Number of `ThermalCategory` variants — size of the per-category array.
+/// Number of `ThermalCategory` variants -- size of the per-category array.
 pub const THERMAL_CATEGORY_COUNT: usize = 5;
 
 /// Per-step equipment contribution into a typed simulation port.
@@ -152,7 +152,7 @@ impl PortDeclaration {
 ///
 /// `sensible_gain_w` and `latent_gain_w` are the zone totals (sum across all
 /// categories). `sensible_by_category` holds per-category subtotals indexed by
-/// `ThermalCategory::index()` — use a fixed-size array to avoid HashMap
+/// `ThermalCategory::index()` -- use a fixed-size array to avoid HashMap
 /// allocation in the hot timestep loop.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThermalAccumulator {
@@ -922,7 +922,7 @@ mod tests {
     fn fuel_port_in_from_declarations() {
         let decls = &[
             PortDeclaration::fuel(),
-            PortDeclaration::fuel(), // singletons — no extra accumulators
+            PortDeclaration::fuel(), // singletons -- no extra accumulators
         ];
         let mut slots = PortSlots::from_declarations(decls);
         slots

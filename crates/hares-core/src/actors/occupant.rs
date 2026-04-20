@@ -1,4 +1,4 @@
-//! Occupant actor — behavioral control over equipment based on presence.
+//! Occupant actor -- behavioral control over equipment based on presence.
 //!
 //! The Occupant actor models *external human behavior* that acts on equipment from outside:
 //! - Turning lights off when leaving the room (override equipment's default schedule)
@@ -7,7 +7,7 @@
 //! - Changing EV charge mode (eco/fast)
 //!
 //! Equipment is self-contained with internal schedules. The occupant only pushes
-//! control signals — never mutates environment or equipment state directly.
+//! control signals -- never mutates environment or equipment state directly.
 //!
 //! # Example
 //!
@@ -118,7 +118,7 @@ impl EquipmentBehavior {
 ///
 /// The occupant acts on equipment based on their presence state (home/away/sleeping)
 /// and configured behavioral preferences. All control flows through the dispatch
-/// pipeline — the occupant never directly mutates equipment state.
+/// pipeline -- the occupant never directly mutates equipment state.
 pub struct Occupant {
     /// Actor name for diagnostics.
     name: Arc<str>,
@@ -190,7 +190,7 @@ impl Occupant {
     ///
     /// # Panics (debug only)
     ///
-    /// Panics if `current_step` exceeds the schedule length — the schedule
+    /// Panics if `current_step` exceeds the schedule length -- the schedule
     /// must cover the full simulation duration.
     pub fn current_presence(&self) -> Presence {
         debug_assert!(
@@ -212,7 +212,7 @@ impl Occupant {
 
     /// Advances the timestep counter.
     ///
-    /// Called automatically by `decide()` — no need to call manually.
+    /// Called automatically by `decide()` -- no need to call manually.
     fn advance_step(&mut self) {
         self.previous_presence = self.current_presence();
         self.current_step = self.current_step.saturating_add(1);
@@ -220,7 +220,7 @@ impl Occupant {
 
     /// Generates control signals for equipment based on behavior and presence.
     ///
-    /// Mode signals (`off_when_away`, `on_when_home`) are event-driven — they fire
+    /// Mode signals (`off_when_away`, `on_when_home`) are event-driven -- they fire
     /// on transitions or while the triggering condition holds (away → Off each step).
     /// Continuous controls (`power_setpoint_kw`, `load_fraction`) are re-sent every
     /// step while present, keeping the equipment override active for the duration.
@@ -269,7 +269,7 @@ impl Occupant {
 
     /// Generates EV-specific control signals.
     ///
-    /// EV mode changes (plug/unplug) are transition-only — dispatched once when
+    /// EV mode changes (plug/unplug) are transition-only -- dispatched once when
     /// presence changes, not every step. Non-EV equipment re-sends `Off` each step
     /// while away (idempotent) because the equipment has no "plugged in" concept.
     fn dispatch_for_ev(
@@ -299,7 +299,7 @@ impl Occupant {
             }
         }
 
-        // EV power limit (charge rate control) — only when plugged in
+        // EV power limit (charge rate control) -- only when plugged in
         if presence.is_present() {
             push_power_setpoint_if(target, behavior, out);
         }
@@ -448,17 +448,17 @@ mod tests {
         let env = test_env().build();
         let mut requests = Vec::new();
 
-        // Step 0: Home — after decide, step advances to 1
+        // Step 0: Home -- after decide, step advances to 1
         assert_eq!(occupant.current_presence(), Presence::Home);
         occupant.decide(&env, &mut requests);
         assert_eq!(occupant.current_presence(), Presence::Away);
 
-        // Step 1: Away — after decide, step advances to 2
+        // Step 1: Away -- after decide, step advances to 2
         requests.clear();
         occupant.decide(&env, &mut requests);
         assert_eq!(occupant.current_presence(), Presence::Home);
 
-        // Step 2: Home — final step
+        // Step 2: Home -- final step
         requests.clear();
         occupant.decide(&env, &mut requests);
     }
@@ -812,7 +812,7 @@ mod tests {
 
         // Step 0: consumes the only entry, advances to step 1
         occupant.decide(&env, &mut requests);
-        // Step 1: schedule exhausted — debug_assert fires
+        // Step 1: schedule exhausted -- debug_assert fires
         occupant.decide(&env, &mut requests);
     }
 

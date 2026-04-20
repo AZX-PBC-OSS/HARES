@@ -39,11 +39,22 @@ impl DomainUpdate {
 
 pub trait DomainSolver: Send + Sync {
     fn domain_id(&self) -> DomainId;
-    fn resolve(&mut self, ports: &PortSlots, env: &EnvironmentState, dt: Duration, out: &mut DomainUpdate);
+    fn resolve(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+        dt: Duration,
+        out: &mut DomainUpdate,
+    );
 
     /// Convenience wrapper that allocates and returns a new `DomainUpdate`.
     /// Prefer passing a reusable buffer via `resolve` in hot loops.
-    fn resolve_new(&mut self, ports: &PortSlots, env: &EnvironmentState, dt: Duration) -> DomainUpdate {
+    fn resolve_new(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+        dt: Duration,
+    ) -> DomainUpdate {
         let mut out = DomainUpdate::empty(self.domain_id());
         self.resolve(ports, env, dt, &mut out);
         out

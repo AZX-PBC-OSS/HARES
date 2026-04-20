@@ -124,7 +124,9 @@ impl DomainSolver for ElectricalSolver {
 
         out.domain_id = ELECTRICAL;
         out.zone_temperatures_c.clear();
-        let payload = out.custom_payload.get_or_insert_with(|| Vec::with_capacity(2));
+        let payload = out
+            .custom_payload
+            .get_or_insert_with(|| Vec::with_capacity(2));
         payload.clear();
         payload.push(self.net_active_kw);
         payload.push(self.net_reactive_kvar);

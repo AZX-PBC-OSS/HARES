@@ -146,7 +146,7 @@ struct PerformanceResult {
     shr: f64,
     /// Supply air dry-bulb temperature [°C] from the coil solver.
     supply_temp_c: f64,
-    /// Runtime fraction (PLR / PLF) for this step — used for crankcase accounting.
+    /// Runtime fraction (PLR / PLF) for this step -- used for crankcase accounting.
     rtf: f64,
 }
 
@@ -695,8 +695,7 @@ impl CoolingCore {
             // When DR raises the effective setpoint above the zone temperature, suppress cooling
             // even though the base thermostat is calling for it. This only applies when the DR
             // offset is active (non-zero) and the zone has cooled below the DR-adjusted threshold.
-            let dr_suppressed =
-                self.dr_setpoint_offset_c > 0.0 && zone_temp <= setpoint;
+            let dr_suppressed = self.dr_setpoint_offset_c > 0.0 && zone_temp <= setpoint;
             if dr_suppressed {
                 self.hvac.duty_cycle = 0.0;
                 self.operating_mode = OperatingMode::Off;
@@ -742,7 +741,7 @@ impl CoolingCore {
 
     /// Run one simulation step.
     ///
-    /// `companion_heating_rtf` — if `Some`, this AC is the cooling side of a
+    /// `companion_heating_rtf` -- if `Some`, this AC is the cooling side of a
     /// heat pump; the provided value is the heating coil's RTF from the previous
     /// step, used to compute crankcase heater power correctly.
     pub(super) fn step(
@@ -1043,7 +1042,7 @@ impl CoolingCore {
             self.flow_fraction_correction,
         );
 
-        // OCHRE HVAC.py:1044-1050 — interpolate biquadratic between bracket stages.
+        // OCHRE HVAC.py:1044-1050 -- interpolate biquadratic between bracket stages.
         if self.hvac.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
             && speed_frac > 0.0
         {
@@ -1114,7 +1113,7 @@ impl CoolingCore {
             self.hvac.part_load_factor(plr)
         };
 
-        // EIR curve: divide by PLF — a lower PLF (more cycling) means worse efficiency.
+        // EIR curve: divide by PLF -- a lower PLF (more cycling) means worse efficiency.
         let eir_ratio = if plf > 0.0 {
             eir_ratio_base / plf
         } else {
@@ -1124,7 +1123,7 @@ impl CoolingCore {
         let staged_capacity_w = self
             .hvac
             .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
-        // OCHRE HVAC.py:445-448 — clip to rated_max * ext_capacity_frac.
+        // OCHRE HVAC.py:445-448 -- clip to rated_max * ext_capacity_frac.
         let capacity_ceiling = steady_capacity_w * self.hvac.max_capacity_fraction;
         let total_capacity_w = (staged_capacity_w * plr).max(0.0).min(capacity_ceiling);
 
@@ -2393,7 +2392,7 @@ mod tests {
         let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
         let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0);
 
-        // 5000W = 62.5% of 8000W max — falls between stage 1 (50%) and stage 2 (75%),
+        // 5000W = 62.5% of 8000W max -- falls between stage 1 (50%) and stage 2 (75%),
         // so stage 1 is selected (lo index in the interpolation range).
         assert_eq!(eq.core.hvac.last_speed_index, 1);
         assert!(
@@ -3610,7 +3609,10 @@ mod ideal_capacity_tests {
                 .get(tk::LATENT_COOLING_W)
                 .unwrap_or(0.0)
                 .abs();
-        assert!(full_cooling_w > 1000.0, "baseline should produce meaningful output");
+        assert!(
+            full_cooling_w > 1000.0,
+            "baseline should produce meaningful output"
+        );
 
         // Apply MaxCapacityFraction(0.5) -- output must not exceed ~50% of baseline.
         let mut eq2 = AirConditioner::new(cfg.clone());
@@ -3650,12 +3652,14 @@ mod defaults_tests {
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId, ZoneState,
-        telemetry_keys as tk,
+        EnvironmentState, GridState, PortSlots, ThermalAccumulator, WeatherState, ZoneId,
+        ZoneState, telemetry_keys as tk,
     };
 
     use super::{AirConditioner, RoomAC};
-    use crate::{CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, RoomAcConfig};
+    use crate::{
+        CentralAirConditionerConfig, DuctConfig, Equipment, EquipmentConfig, RoomAcConfig,
+    };
 
     fn make_env(zone_temp_c: f64) -> EnvironmentState {
         EnvironmentState {

@@ -48,7 +48,7 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     heat_pump_wh::register_with_registry(registry);
     tankless::register_with_registry(registry);
 
-    // "Water Heating" is ambiguous — the resolver must specify the fuel type.
+    // "Water Heating" is ambiguous -- the resolver must specify the fuel type.
     registry.register_error(
         "Water Heating",
         "ambiguous water heater class 'Water Heating': \
@@ -470,7 +470,8 @@ mod tests {
         let diameter_m = 0.5_f64;
         let jacket_r_m2_k_w = 1.761_101_84_f64; // 10 hr·ft²·°F/BTU
 
-        let ua_adjusted = apply_jacket_r_value(ua_base, height_m, diameter_m, Some(jacket_r_m2_k_w));
+        let ua_adjusted =
+            apply_jacket_r_value(ua_base, height_m, diameter_m, Some(jacket_r_m2_k_w));
         let lateral_area_m2 = std::f64::consts::PI * diameter_m * height_m;
         let ua_expected = 1.0 / (1.0 / ua_base + jacket_r_m2_k_w / lateral_area_m2);
 

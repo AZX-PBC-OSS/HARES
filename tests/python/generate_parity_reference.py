@@ -98,7 +98,7 @@ def _run_ochre_for_fixture(fixture_dir: Path) -> pd.DataFrame:
 
 def _df_to_parquet(df: pd.DataFrame, out_path: Path) -> None:
     """Write a pandas DataFrame to parquet via pyarrow, coercing all numeric columns to float64."""
-    import pandas as pd  # noqa: F811 — runtime import, TYPE_CHECKING has the static one
+    import pandas as pd  # noqa: F811 -- runtime import, TYPE_CHECKING has the static one
     import pyarrow as pa
     import pyarrow.parquet as pq
 

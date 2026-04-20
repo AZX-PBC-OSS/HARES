@@ -1,4 +1,4 @@
-//! EV Driver Actor — behavioral proxy for EV charging decisions.
+//! EV Driver Actor -- behavioral proxy for EV charging decisions.
 //!
 //! Models a human driver's daily routine: departure, driving (multi-step
 //! energy drain), arrival, plug-in, and charging strategy selection.
@@ -6,7 +6,7 @@
 //! `EvSetReadyBy`, `SOCTarget`) to the EV equipment via the control pipeline.
 //!
 //! Equipment is self-contained with its own BMS. The driver actor only
-//! pushes external decisions — it never mutates equipment state directly.
+//! pushes external decisions -- it never mutates equipment state directly.
 
 mod composer;
 mod departure;
@@ -552,7 +552,7 @@ impl Actor for EvDriverActor {
                 let new_remaining = remaining_kwh - kwh_this_step;
 
                 if new_steps_done >= total_steps {
-                    // Trip complete — defer away-charge signals to the next
+                    // Trip complete -- defer away-charge signals to the next
                     // step so EvDrive is fully processed before EvPlugIn.
                     if self.away_charge_fraction > 0.0 {
                         let recoup_kwh = event.drive_kwh * self.away_charge_fraction;
@@ -671,11 +671,11 @@ mod tests {
             out.clear();
         }
 
-        // Arrive at 18:00 — plug in, transition to HomePluggedIn
+        // Arrive at 18:00 -- plug in, transition to HomePluggedIn
         actor.decide(&env_at_minute(18 * 60), &mut out);
         out.clear();
 
-        // Next step at 18:01 — now in HomePluggedIn, composer evaluates
+        // Next step at 18:01 -- now in HomePluggedIn, composer evaluates
         actor.decide(&env_at_minute(18 * 60 + 1), &mut out);
         out
     }
@@ -849,7 +849,7 @@ mod tests {
             42,
         );
 
-        // Arrive at 18:00, check at 18:01 — outside off-peak window (22:00-06:00)
+        // Arrive at 18:00, check at 18:01 -- outside off-peak window (22:00-06:00)
         let out = drive_cycle_and_charge_step(&mut actor);
 
         let has_charging_signal = out.iter().any(|r| {
@@ -886,7 +886,7 @@ mod tests {
             actor.decide(&env_at_minute(8 * 60 + step), &mut out);
         }
 
-        // Skip to arrival — SOC will be high since 30mi * 0.3kWh/mi = 9kWh out of 60kWh
+        // Skip to arrival -- SOC will be high since 30mi * 0.3kWh/mi = 9kWh out of 60kWh
         // That's 0.85 SOC, well above 0.3 threshold
         // Need to transition to Away phase first
         out.clear();
@@ -1142,7 +1142,7 @@ mod tests {
             }
         }
 
-        // One more step in Away phase — deferred signals are emitted here.
+        // One more step in Away phase -- deferred signals are emitted here.
         out.clear();
         actor.decide(&env_at_minute(8 * 60 + 121), &mut out);
 
@@ -1885,8 +1885,8 @@ mod tests {
             ..Default::default()
         };
         let out1 = plugged_in_step_with_env(&mut actor, &env1);
-        // No PowerSetpoint should fire — solar has no surplus.
-        // EvSetReadyBy may still be emitted (departure planning), which is fine —
+        // No PowerSetpoint should fire -- solar has no surplus.
+        // EvSetReadyBy may still be emitted (departure planning), which is fine --
         // it tells the BMS when to be ready, not to charge now.
         let has_active_charging1 = out1.iter().any(|r| {
             matches!(

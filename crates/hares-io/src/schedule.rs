@@ -176,7 +176,7 @@ impl ScheduleTimeSeries {
 
     /// Resample to `target_step_secs`.
     ///
-    /// - **Upsampling** (`target_step_secs < source_step_secs`): zero-order hold — each source
+    /// - **Upsampling** (`target_step_secs < source_step_secs`): zero-order hold -- each source
     ///   value is repeated for the sub-steps it covers.
     /// - **Downsampling** (`target_step_secs > source_step_secs`): groups of consecutive source
     ///   values are reduced per [`ColumnAggregation`]: averaged for `Mean` columns, summed for
@@ -197,7 +197,7 @@ impl ScheduleTimeSeries {
         }
 
         if target_step_secs < self.source_step_secs {
-            // Upsampling: target is finer than source — zero-order hold.
+            // Upsampling: target is finer than source -- zero-order hold.
             if !self.source_step_secs.is_multiple_of(target_step_secs) {
                 return Err(ScheduleError::Resample(format!(
                     "incompatible timestep: source_step_secs ({}) is not an integer multiple of target_step_secs ({target_step_secs})",
@@ -233,7 +233,7 @@ impl ScheduleTimeSeries {
                 column_aggregations: self.column_aggregations.clone(),
             })
         } else {
-            // Downsampling: target is coarser than source — aggregate groups.
+            // Downsampling: target is coarser than source -- aggregate groups.
             if !target_step_secs.is_multiple_of(self.source_step_secs) {
                 return Err(ScheduleError::Resample(format!(
                     "incompatible timestep: target_step_secs ({target_step_secs}) is not an integer multiple of source_step_secs ({})",
@@ -490,7 +490,7 @@ fn generate_annual_timestamps(
         .flatten()
         .unwrap_or(FixedOffset::east_opt(0).expect("UTC offset is valid"));
 
-    // Index-based schedules are cyclic annual data — the exact year does not
+    // Index-based schedules are cyclic annual data -- the exact year does not
     // affect simulation results.  We use 2007 (a non-leap year consistent with
     // the BEopt default CalendarYear) so generated timestamps never land on
     // Feb 29.

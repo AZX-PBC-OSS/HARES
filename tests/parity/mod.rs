@@ -27,7 +27,8 @@ const METRIC_ZONE_TEMP_CONDITIONED: &str = "zone_temperature_conditioned_mae_c";
 const METRIC_ZONE_TEMP_UNCONDITIONED: &str = "zone_temperature_unconditioned_mae_c";
 const METRIC_SHORT_WINDOW_HVAC_ENERGY: &str = "short_window_hvac_energy_relative_percent";
 const METRIC_ANNUAL_WATER_HEATER_ENERGY: &str = "annual_water_heater_energy_relative_percent";
-const METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY: &str = "short_window_total_site_energy_relative_percent";
+const METRIC_SHORT_WINDOW_TOTAL_SITE_ENERGY: &str =
+    "short_window_total_site_energy_relative_percent";
 const METRIC_PEAK_HVAC_POWER: &str = "peak_hvac_power_relative_percent";
 const METRIC_BATTERY_SOC: &str = "battery_soc_mae_absolute";
 const METRIC_EQUIPMENT_MODE_CYCLES: &str = "equipment_mode_cycle_count_relative_percent";
@@ -42,7 +43,7 @@ const METRIC_EQUIPMENT_MODE_CYCLES: &str = "equipment_mode_cycle_count_relative_
 fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
     match (fixture_id, metric) {
         // cz2a_pv_ev: observed HVAC energy 46.67 % and total site 42.31 %
-        // over a single cooling cycle — the step-0 ideal-capacity back-solve
+        // over a single cooling cycle -- the step-0 ideal-capacity back-solve
         // in `crates/hares-envelope/src/thermal_solver/stepping.rs:24-66`
         // drives a higher initial demand than OCHRE, so the integrated
         // 1-hour window diverges. Bands are sized to observed residual plus
@@ -624,7 +625,7 @@ fn annual_energy_for_prefixes(
     let mut total_kwh = 0.0;
     let mut found = false;
 
-    let is_hvac_query = prefixes.iter().any(|p| *p == "heat pump");
+    let is_hvac_query = prefixes.contains(&"heat pump");
 
     for (name, series) in columns {
         let lowered = name.to_ascii_lowercase();
@@ -745,7 +746,7 @@ mod hvac_prefix_matcher_tests {
     #[test]
     fn hpwh_column_is_rejected_as_hvac_load() {
         // "Heat Pump Water Heater Electric Power (kW)" must not match the
-        // "heat pump" HVAC prefix — otherwise HPWH energy is double-counted.
+        // "heat pump" HVAC prefix -- otherwise HPWH energy is double-counted.
         let hpwh = "heat pump water heater electric power (kw)";
         let hvac_hp = "heat pump heater electric power (kw)";
 

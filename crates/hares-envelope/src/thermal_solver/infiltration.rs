@@ -28,20 +28,20 @@ pub(crate) struct InfiltrationCoupling {
     pub h_inf_w_k: f64,
     /// Outdoor temperature driving the sensible forcing [°C].
     pub t_forcing_c: f64,
-    /// Latent gain [W] — stays fully explicit (not temperature-dependent).
+    /// Latent gain [W] -- stays fully explicit (not temperature-dependent).
     /// Retained for diagnostic parity with q_sensible_diagnostic_w.
     #[allow(dead_code)]
     pub q_latent_w: f64,
     /// Diagnostic sensible gain [W] = h_inf * (T_out - T_zone) for reporting.
     #[allow(dead_code)]
     pub q_sensible_diagnostic_w: f64,
-    /// Pure infiltration sensible gain [W] — excludes ventilation components.
+    /// Pure infiltration sensible gain [W] -- excludes ventilation components.
     pub q_infiltration_w: f64,
-    /// Forced mechanical ventilation sensible gain [W] — after recovery efficiency.
+    /// Forced mechanical ventilation sensible gain [W] -- after recovery efficiency.
     pub q_forced_vent_w: f64,
-    /// Natural ventilation sensible gain [W] — operable window stack/wind flow.
+    /// Natural ventilation sensible gain [W] -- operable window stack/wind flow.
     pub q_natural_vent_w: f64,
-    /// Combined sensible flow [m³/s] — infiltration + ventilation after quadrature.
+    /// Combined sensible flow [m³/s] -- infiltration + ventilation after quadrature.
     pub combined_flow_m3_s: f64,
     /// Raw AIM-2 infiltration flow before ventilation interaction [m³/s].
     pub raw_inf_m3_s: f64,
@@ -150,7 +150,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
             0.0
         };
 
-        // Forced mechanical ventilation flow — only for zones with explicit flow
+        // Forced mechanical ventilation flow -- only for zones with explicit flow
         // or the indoor zone (which gets the global ventilation rate).
         let forced_flow_m3_s = config
             .ventilation
@@ -379,7 +379,7 @@ mod tests {
 
     /// AIM-2 with zero wind: only stack effect drives infiltration.
     /// Q_stack = c_s × |ΔT|^n_i must be non-zero when T_zone ≠ T_out.
-    /// Q = sqrt(Q_stack² + 0²) = Q_stack — no quadrature cancellation.
+    /// Q = sqrt(Q_stack² + 0²) = Q_stack -- no quadrature cancellation.
     #[test]
     fn infiltration_zero_wind_nonzero_stack() {
         // Typical single-storey residential coefficients from OCHRE defaults:
@@ -478,7 +478,7 @@ mod tests {
         );
     }
 
-    /// ELA variant: zero wind — only stack effect drives infiltration.
+    /// ELA variant: zero wind -- only stack effect drives infiltration.
     /// Q = ela_cm2 * sqrt(stack_coeff * |ΔT|) / 1000
     #[test]
     fn infiltration_ela_zero_wind() {
@@ -647,7 +647,7 @@ mod tests {
         );
     }
 
-    /// Natural ventilation closed: zone temp ≤ outdoor temp — stack effect cannot drive
+    /// Natural ventilation closed: zone temp ≤ outdoor temp -- stack effect cannot drive
     /// outward exhaust, so nat_flow must be zero.
     #[test]
     fn infiltration_natural_ventilation_closed() {

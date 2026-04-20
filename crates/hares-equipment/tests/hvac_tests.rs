@@ -8,9 +8,9 @@ use hares_equipment::{
     HeatPumpHeaterConfig, IdealHvacConfig,
 };
 use hares_types::{
-    telemetry_keys as tk, ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator,
-    FluidType, FuelType, GridState, LoopId, OperatingMode, PortSlots, ScheduleSourceConfig,
-    ThermalAccumulator, WeatherState, ZoneId, ZoneState,
+    ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
+    GridState, LoopId, OperatingMode, PortSlots, ScheduleSourceConfig, ThermalAccumulator,
+    WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
 };
 
 // ---------------------------------------------------------------------------
@@ -998,7 +998,9 @@ fn ashp_sub_consumption_telemetry() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let tel = eq.telemetry();
-    let electric_kw = tel.get(tk::ELECTRIC_KW).expect("ELECTRIC_KW must be present");
+    let electric_kw = tel
+        .get(tk::ELECTRIC_KW)
+        .expect("ELECTRIC_KW must be present");
     let compressor_kw = tel
         .get(tk::COMPRESSOR_KW)
         .expect("COMPRESSOR_KW must be present");
@@ -1061,10 +1063,10 @@ fn ashp_sub_consumption_telemetry() {
 //   Verifies ASHP default behavior matches OCHRE reference values.
 //
 //   Defaults under test (OCHRE HVAC.py line references):
-//   - hp_lockout_temp_c = -17.78°C (0°F)             — HVAC.py:1208
-//   - er_lockout_temp_c = 4.44°C (40°F)              — HVAC.py:1209
-//   - er_setpoint_offset = deadband*(1.8-0.2) = 1.6°C — HVAC.py:1211
-//   - er_hard_lockout_time = 0 (disabled)             — HVAC.py:1214
+//   - hp_lockout_temp_c = -17.78°C (0°F)             -- HVAC.py:1208
+//   - er_lockout_temp_c = 4.44°C (40°F)              -- HVAC.py:1209
+//   - er_setpoint_offset = deadband*(1.8-0.2) = 1.6°C -- HVAC.py:1211
+//   - er_hard_lockout_time = 0 (disabled)             -- HVAC.py:1214
 //   - backup_capacity_w = 5000 W (ASHP default)
 //   - No pan heater (ASHP only)
 //
@@ -1146,7 +1148,7 @@ fn ashp_defaults_match_reference() {
         ports.electrical.net_active_kw(),
     );
 
-    // Behavioral: ASHP has no pan heater — pan_heater_kw must remain 0 after any step
+    // Behavioral: ASHP has no pan heater -- pan_heater_kw must remain 0 after any step
     let pan_kw = eq
         .telemetry()
         .get(tk::PAN_HEATER_KW)
@@ -1235,10 +1237,10 @@ fn ashp_defaults_match_reference() {
 //   Verifies MSHP default behavior matches OCHRE reference values.
 //
 //   Defaults under test (OCHRE MinisplitAHSPHeater line references):
-//   - pan_heater_kw = 0.150 kW active when OAT < 0°C  — HVAC.py:1482
-//   - pan_heater_temp = 0°C activation threshold       — HVAC.py:1483
+//   - pan_heater_kw = 0.150 kW active when OAT < 0°C  -- HVAC.py:1482
+//   - pan_heater_temp = 0°C activation threshold       -- HVAC.py:1483
 //   - No backup by default (ductless, no strip heater)
-//   - HP lockout same as ASHP: -17.78°C               — HVAC.py:1208
+//   - HP lockout same as ASHP: -17.78°C               -- HVAC.py:1208
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1417,7 +1419,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
     let registry = EquipmentRegistry::new();
 
     // Cold zone: below turn-on threshold (setpoint 21°C - deadband 1°C = 20°C).
-    // Equipment turns ON — RTF must be 1.0 (full duty cycle).
+    // Equipment turns ON -- RTF must be 1.0 (full duty cycle).
     let mut eq_cold = registry.create("ASHP Heater", cfg.clone()).unwrap();
     let mut env_cold = env_with_timestep(18.0, 60);
     env_cold.weather.outdoor_temp_c = 7.0;
@@ -1444,7 +1446,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
         "bang-bang ASHP must deliver positive heat when running; got {gain_cold:.1} W"
     );
 
-    // Warm zone: above setpoint (21°C), equipment turns OFF — RTF must be 0.
+    // Warm zone: above setpoint (21°C), equipment turns OFF -- RTF must be 0.
     let mut eq_warm = registry.create("ASHP Heater", cfg.clone()).unwrap();
     let mut env_warm = env_with_timestep(23.0, 60);
     env_warm.weather.outdoor_temp_c = 7.0;
@@ -1475,7 +1477,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
 // ---------------------------------------------------------------------------
 // ideal_capacity_produces_continuous_output
 //   IdealHvac with IdealCapacityMode::On accepts a solver-injected capacity
-//   signal and delivers exactly that value — not 0 or rated.
+//   signal and delivers exactly that value -- not 0 or rated.
 //
 //   Simulates the solver feedback loop by manually applying an IdealCapacity
 //   signal at 40% of rated capacity.
@@ -1511,7 +1513,7 @@ fn ideal_capacity_produces_continuous_output() {
     assert!(
         (gain - INJECTED_W).abs() < 1e-6,
         "ideal-capacity HVAC must deliver exactly the injected capacity ({INJECTED_W:.0} W); \
-         got {gain:.4} W — must not be 0 or rated ({RATED_W:.0} W)"
+         got {gain:.4} W -- must not be 0 or rated ({RATED_W:.0} W)"
     );
 }
 
@@ -1520,7 +1522,7 @@ fn ideal_capacity_produces_continuous_output() {
 //   IdealHvac with IdealCapacityMode::Auto at 60 s (< 300 s threshold) uses
 //   bang-bang: ideal_target() returns None and step outputs full rated capacity.
 //
-//   OCHRE parity: HVAC.py:237 — use_ideal_capacity = time_res >= 5 min.
+//   OCHRE parity: HVAC.py:237 -- use_ideal_capacity = time_res >= 5 min.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1561,7 +1563,7 @@ fn auto_mode_selects_bang_bang_at_1min_timestep() {
 //   ideal capacity: ideal_target() returns Some(zone, setpoint), and a solver-
 //   injected IdealCapacity signal scales the output proportionally.
 //
-//   OCHRE parity: HVAC.py:237 — use_ideal_capacity = time_res >= 5 min.
+//   OCHRE parity: HVAC.py:237 -- use_ideal_capacity = time_res >= 5 min.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1605,6 +1607,6 @@ fn auto_mode_selects_ideal_at_5min_timestep() {
     assert!(
         (gain - INJECTED_W).abs() < 1e-6,
         "auto-mode IdealHvac at 300 s must output the solver-injected capacity ({INJECTED_W:.0} W); \
-         got {gain:.4} W — must not be 0 or rated ({RATED_W:.0} W)"
+         got {gain:.4} W -- must not be 0 or rated ({RATED_W:.0} W)"
     );
 }

@@ -107,13 +107,13 @@ fn resolved_kw_series(spec: &EquipmentSpec, schedule: &ScheduleTimeSeries) -> Ve
 // Test: time-varying lighting schedule is NOT constant
 //
 // Given a schedule CSV with a lighting_interior column that varies across hours,
-// verify the resolved kW series is not flat — HARES must use the schedule column,
+// verify the resolved kW series is not flat -- HARES must use the schedule column,
 // not fall back to annual_kwh / 8760.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn time_varying_lighting_schedule_is_not_constant() {
-    // Fractions that clearly vary — morning low, midday high, evening medium.
+    // Fractions that clearly vary -- morning low, midday high, evening medium.
     let fractions = [
         0.05_f64, 0.05, 0.05, 0.05, 0.05, 0.10, // 00–05
         0.20, 0.40, 0.60, 0.70, 0.80, 0.90, // 06–11
@@ -134,7 +134,7 @@ fn time_varying_lighting_schedule_is_not_constant() {
         "resolved series should cover all 8760 hours"
     );
 
-    // Must NOT be constant — at least two distinct values must exist.
+    // Must NOT be constant -- at least two distinct values must exist.
     let min_kw = kw_series.iter().copied().fold(f64::INFINITY, f64::min);
     let max_kw = kw_series.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     assert!(
@@ -234,7 +234,7 @@ fn duty_cycle_fraction_parameter_is_preserved_after_injection() {
 // Test: schedule CSV missing column returns MissingRequiredColumns error
 //
 // When parse_schedule_csv is called with a required column that is absent,
-// the error must be typed MissingRequiredColumns — never a silent fallback.
+// the error must be typed MissingRequiredColumns -- never a silent fallback.
 // This directly validates the "no silent fallback" requirement.
 // ---------------------------------------------------------------------------
 
@@ -273,7 +273,7 @@ fn missing_required_column_returns_typed_error_not_silent_fallback() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: OCHRE parity — hardcoded reference values for a 24-step schedule
+// Test: OCHRE parity -- hardcoded reference values for a 24-step schedule
 //
 // OCHRE produces reference values for a known schedule by running:
 //   from ochre.utils.schedule import resolve_schedule

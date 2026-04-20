@@ -57,9 +57,9 @@ SURFACES = [
     {"id": 14, "name": "Win-S1", "tilt": 90, "azimuth": 180, "area": 1.11},
     {"id": 15, "name": "Win-S2", "tilt": 90, "azimuth": 180, "area": 2.23},
     {"id": 16, "name": "Win-W1", "tilt": 90, "azimuth": 270, "area": 4.46},
-    # Interior wall (no exterior surface — zero solar)
+    # Interior wall (no exterior surface -- zero solar)
     {"id": 17, "name": "IntWall", "tilt": 90, "azimuth": 180, "area": 111.48},
-    # Furniture (no exterior surface — zero solar)
+    # Furniture (no exterior surface -- zero solar)
     {"id": 18, "name": "Furniture", "tilt": 90, "azimuth": 180, "area": 44.59},
 ]
 
@@ -127,7 +127,7 @@ def generate_solar_override(scenario: Scenario) -> None:
             azimuth = surf["azimuth"]
 
             if tilt == 180:
-                # Floor facing down — no solar
+                # Floor facing down -- no solar
                 step_data[f"s{sid}_direct"] = 0.0
                 step_data[f"s{sid}_diffuse"] = 0.0
                 step_data[f"s{sid}_reflected"] = 0.0
@@ -135,7 +135,7 @@ def generate_solar_override(scenario: Scenario) -> None:
                 continue
 
             if surf["name"] in ("IntWall", "Furniture"):
-                # Interior surfaces — no exterior solar
+                # Interior surfaces -- no exterior solar
                 step_data[f"s{sid}_direct"] = 0.0
                 step_data[f"s{sid}_diffuse"] = 0.0
                 step_data[f"s{sid}_reflected"] = 0.0

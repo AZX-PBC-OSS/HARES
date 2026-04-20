@@ -6,7 +6,7 @@
 //!   without `--release`).
 //!
 //! In production release builds without the feature flag all public functions
-//! compile to nothing — the compiler eliminates the bodies entirely.
+//! compile to nothing -- the compiler eliminates the bodies entirely.
 
 use hares_types::HaresError;
 
@@ -39,7 +39,7 @@ impl InvariantChecker {
             let q_sum: f64 = q_gains.iter().sum();
             let residual = (q_sum - delta_e_storage - q_loss).abs();
             // Use gross flux (sum of absolute values) for relative tolerance,
-            // not net sum — a balanced system with large opposed fluxes still has
+            // not net sum -- a balanced system with large opposed fluxes still has
             // floating-point accumulation error proportional to gross magnitude.
             let gross_flux: f64 = q_gains.iter().map(|q| q.abs()).sum();
             let tolerance = f64::max(1.0, 1e-6 * gross_flux);
@@ -114,7 +114,7 @@ impl InvariantChecker {
     /// Validates state-of-charge is within `[0.0, 1.0]` and warns if accumulated
     /// integration error exceeds threshold.
     ///
-    /// Returns `Ok(())` always — SoC out-of-bounds is clamped (not a fatal error).
+    /// Returns `Ok(())` always -- SoC out-of-bounds is clamped (not a fatal error).
     /// Emits `tracing::warn!` when `accumulated_error.abs() > 0.001`.
     pub fn check_soc(&self, soc: f64, accumulated_error: f64) -> Result<(), HaresError> {
         #[cfg(any(debug_assertions, feature = "check_invariants"))]

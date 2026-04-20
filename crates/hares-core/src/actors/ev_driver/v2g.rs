@@ -1,4 +1,4 @@
-//! V2GExport — export to grid when price exceeds threshold.
+//! V2GExport -- export to grid when price exceeds threshold.
 
 use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 

@@ -329,7 +329,7 @@ impl Equipment for TanklessWH {
                     (demand_w, setpoint_c)
                 } else {
                     // Over-capacity: clamp time-averaged output; outlet temp uses the
-                    // instantaneous rated power — the heater fires at rated capacity during
+                    // instantaneous rated power -- the heater fires at rated capacity during
                     // its on-fraction regardless of duty or power-limit accounting.
                     let outlet_c = inlet_temp_c
                         + self.rated_thermal_power_w
@@ -1165,7 +1165,7 @@ mod tests {
             outlet < 50.0,
             "outlet must be below setpoint when over effective capacity, got {outlet}"
         );
-        // Outlet uses FULL rated power (20 kW), not duty-scaled — heater fires at 100% during on-phase
+        // Outlet uses FULL rated power (20 kW), not duty-scaled -- heater fires at 100% during on-phase
         let expected_outlet = 20.0 + 20_000.0 / (1.0 * WATER_SPECIFIC_HEAT_J_PER_KG_K);
         assert!(
             (outlet - expected_outlet).abs() < 1e-6,

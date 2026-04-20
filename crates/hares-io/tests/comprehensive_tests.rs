@@ -380,7 +380,7 @@ fn v2024_2_mapper_rejects_v2024_1_schema() {
     let pq = tmp.path().join("v2024_1_data.parquet");
     write_parquet(&pq, &batch);
 
-    // Parse with V2024_2 mapper — should fail because "building_id" is missing.
+    // Parse with V2024_2 mapper -- should fail because "building_id" is missing.
     let err = parse_resstock_metadata(&pq, ResStockVersion::V2024_2, tmp.path()).unwrap_err();
     match err {
         ResStockError::VersionMismatch {
@@ -528,7 +528,7 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
         hares_io::StreamingRecorder::new(schema, 1000, OutputFormat::Csv, &path).unwrap();
     recorder.push_row("2024-01-01T00:00:00Z", &[1.0]).unwrap();
 
-    // finish() should succeed here — the main path works.
+    // finish() should succeed here -- the main path works.
     let summary = recorder.finish().unwrap();
     assert_eq!(summary.row_count, 1);
 }

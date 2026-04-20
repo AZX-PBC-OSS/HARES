@@ -222,7 +222,7 @@ def _print_energy_parity(
     if hares_only:
         print(f"\n  {'HARES-only columns':<{col_w}} {'':>10} {'HARES kWh':>10}")
         for col, v in hares_only:
-            print(f"  {col:<{col_w}} {'—':>10} {v:10.2f}")
+            print(f"  {col:<{col_w}} {'--':>10} {v:10.2f}")
 
     if missing:
         print(f"\n  OCHRE columns with no HARES match (non-zero):")
@@ -235,7 +235,7 @@ def main() -> None:
     sep = "=" * 90
 
     print(sep)
-    print(f"4-MONTH DER BENCHMARK — {DURATION_DAYS} days ({n_steps:,} steps at {TIME_RES_MIN}-min resolution)")
+    print(f"4-MONTH DER BENCHMARK -- {DURATION_DAYS} days ({n_steps:,} steps at {TIME_RES_MIN}-min resolution)")
     print(f"HPXML  : {HPXML}")
     print(f"Weather: {WEATHER}")
     print(f"Start  : {START_LOCAL}  Duration: {DURATION_DAYS} days")

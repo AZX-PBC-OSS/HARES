@@ -276,7 +276,11 @@ impl ResistanceWH {
             .sqrt();
         let n_nodes = usize::from(c.tank_nodes.unwrap_or(6).max(1));
         self.upper_node = if n_nodes >= 12 { 2 } else { 0 };
-        self.lower_node = if n_nodes >= 12 { 9 } else { n_nodes.saturating_sub(1) };
+        self.lower_node = if n_nodes >= 12 {
+            9
+        } else {
+            n_nodes.saturating_sub(1)
+        };
 
         self.tank = StratifiedTank::new(StratifiedTankConfig {
             n_nodes,
@@ -445,7 +449,9 @@ impl Equipment for ResistanceWH {
                     ambient_c,
                     dt_s,
                 );
-                self.upper_element_power_w * (ideal_w / self.upper_element_power_w).clamp(0.0, 1.0) * ctrl_duty
+                self.upper_element_power_w
+                    * (ideal_w / self.upper_element_power_w).clamp(0.0, 1.0)
+                    * ctrl_duty
             } else {
                 0.0
             };
@@ -456,7 +462,9 @@ impl Equipment for ResistanceWH {
                     ambient_c,
                     dt_s,
                 );
-                self.lower_element_power_w * (ideal_w / self.lower_element_power_w).clamp(0.0, 1.0) * ctrl_duty
+                self.lower_element_power_w
+                    * (ideal_w / self.lower_element_power_w).clamp(0.0, 1.0)
+                    * ctrl_duty
             } else {
                 0.0
             };
@@ -477,8 +485,14 @@ impl Equipment for ResistanceWH {
 
         let mut heat_buf = [(0usize, 0.0f64); 2];
         let mut n = 0;
-        if upper_power_w > 0.0 { heat_buf[n] = (self.upper_node, upper_power_w); n += 1; }
-        if lower_power_w > 0.0 { heat_buf[n] = (self.lower_node, lower_power_w); n += 1; }
+        if upper_power_w > 0.0 {
+            heat_buf[n] = (self.upper_node, upper_power_w);
+            n += 1;
+        }
+        if lower_power_w > 0.0 {
+            heat_buf[n] = (self.lower_node, lower_power_w);
+            n += 1;
+        }
         let heat_injections = &heat_buf[..n];
 
         let draw_l_per_min_source = self.draw_l_per_min_source.as_mut();
@@ -1123,7 +1137,7 @@ mod tests {
 
     // --- DR and control signal tests ---
     //
-    // DR Moderate: setpoint offset = -3°C. Tank at 49°C with setpoint 52°C — normally
+    // DR Moderate: setpoint offset = -3°C. Tank at 49°C with setpoint 52°C -- normally
     // calling for heat (49 < 52 - 2 = 50). After Moderate, effective setpoint = 49°C; tank at
     // 49°C is not below 49 - 2 = 47, so no call from Off state.
     #[test]
@@ -1165,7 +1179,7 @@ mod tests {
     #[test]
     fn wh_dr_critical_reduces_setpoint_and_load() {
         // Tank at 40°C, setpoint=52, deadband=2; Critical offset=-10 → effective_sp=42.
-        // 40 < 42-2=40 is the hysteresis boundary — tank at 40°C is at the deadband edge.
+        // 40 < 42-2=40 is the hysteresis boundary -- tank at 40°C is at the deadband edge.
         // Use 38°C so it is clearly below 42-2=40 to ensure heating still fires.
         let mut typed = typed_config();
         typed.initial_tank_temp_c = Some(38.0);
@@ -1292,7 +1306,7 @@ mod tests {
 
         let mut typed = typed_config();
         typed.setpoint_c = Some(55.0);
-        // Start the tank at 50°C — below setpoint so elements don't interfere with the loss signal.
+        // Start the tank at 50°C -- below setpoint so elements don't interfere with the loss signal.
         typed.initial_tank_temp_c = Some(50.0);
         typed.ua_w_per_k = Some(5.0);
         typed.draw_flow_rate_kg_s = Some(0.0);
@@ -1371,7 +1385,7 @@ mod tests {
             eq.ctrl_load_fraction
         );
 
-        // Step 3: step — effective load = duty_cycle(1.0) * dr_load_fraction(0.5) * ctrl_load_fraction(0.5) = 0.25.
+        // Step 3: step -- effective load = duty_cycle(1.0) * dr_load_fraction(0.5) * ctrl_load_fraction(0.5) = 0.25.
         let mut p = ports();
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
 
@@ -1444,7 +1458,7 @@ mod tests {
             .unwrap();
         let loss_no_jacket = wh_no_jacket.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
 
-        // jacket_r_value_m2_k_w = 1.761 m²·K/W ≈ 10 hr·ft²·°F/BTU — a
+        // jacket_r_value_m2_k_w = 1.761 m²·K/W ≈ 10 hr·ft²·°F/BTU -- a
         // substantial insulation blanket that should cut losses measurably.
         let cfg_with_jacket = make_cfg(Some(1.761_101_84));
         let mut wh_with_jacket = ResistanceWH::new(cfg_with_jacket.clone());
@@ -1453,7 +1467,10 @@ mod tests {
         wh_with_jacket
             .step(&e, Duration::from_secs(60), &mut p2)
             .unwrap();
-        let loss_with_jacket = wh_with_jacket.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
+        let loss_with_jacket = wh_with_jacket
+            .telemetry()
+            .get(tk::SKIN_LOSS_W)
+            .unwrap_or(0.0);
 
         assert!(
             loss_no_jacket > 0.0,
@@ -1501,8 +1518,14 @@ mod tests {
         let cfg = config_from_typed(typed);
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
-        assert_eq!(eq.upper_node, 2, "12-node tank: upper element must be at node 2");
-        assert_eq!(eq.lower_node, 9, "12-node tank: lower element must be at node 9");
+        assert_eq!(
+            eq.upper_node, 2,
+            "12-node tank: upper element must be at node 2"
+        );
+        assert_eq!(
+            eq.lower_node, 9,
+            "12-node tank: lower element must be at node 9"
+        );
     }
 
     #[test]
@@ -1510,7 +1533,10 @@ mod tests {
         let cfg = config_from_typed(typed_config());
         let mut eq = ResistanceWH::new(cfg.clone());
         eq.init(&cfg, &env(21.0)).unwrap();
-        assert_eq!(eq.upper_node, 0, "default 6-node tank: upper element must be at node 0");
+        assert_eq!(
+            eq.upper_node, 0,
+            "default 6-node tank: upper element must be at node 0"
+        );
         assert_eq!(
             eq.lower_node,
             eq.tank.node_temps().len() - 1,
@@ -1530,9 +1556,13 @@ mod tests {
         eq.init(&cfg, &env(21.0)).unwrap();
 
         let mut p = ports();
-        eq.step(&env(21.0), Duration::from_secs(60), &mut p).unwrap();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
 
-        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).expect("OUTLET_TEMP_C must be present");
+        let outlet = eq
+            .telemetry()
+            .get(tk::OUTLET_TEMP_C)
+            .expect("OUTLET_TEMP_C must be present");
         assert!(
             outlet > 0.0,
             "OUTLET_TEMP_C should be > 0 when there is a draw, got {outlet}"
@@ -1550,10 +1580,17 @@ mod tests {
         eq.init(&cfg, &env(21.0)).unwrap();
 
         let mut p = ports();
-        eq.step(&env(21.0), Duration::from_secs(60), &mut p).unwrap();
+        eq.step(&env(21.0), Duration::from_secs(60), &mut p)
+            .unwrap();
 
-        let outlet = eq.telemetry().get(tk::OUTLET_TEMP_C).expect("OUTLET_TEMP_C must be present");
-        let tank_avg = eq.telemetry().get(tk::TANK_AVG_TEMP_C).expect("TANK_AVG_TEMP_C must be present");
+        let outlet = eq
+            .telemetry()
+            .get(tk::OUTLET_TEMP_C)
+            .expect("OUTLET_TEMP_C must be present");
+        let tank_avg = eq
+            .telemetry()
+            .get(tk::TANK_AVG_TEMP_C)
+            .expect("TANK_AVG_TEMP_C must be present");
         assert!(
             (outlet - tank_avg).abs() < 1.0,
             "OUTLET_TEMP_C should equal tank avg temp with no draw: outlet={outlet}, tank_avg={tank_avg}"
@@ -1742,7 +1779,7 @@ mod element_priority_tests {
         let mut wh = ResistanceWH::new(cfg.clone());
         wh.init(&cfg, &env_state()).unwrap();
 
-        // Initially both nodes cold — upper fires, lower locked out.
+        // Initially both nodes cold -- upper fires, lower locked out.
         wh.update_control(&env_state());
         assert!(wh.upper_element_on);
         assert!(!wh.lower_element_on);

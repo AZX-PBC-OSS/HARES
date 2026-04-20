@@ -1,5 +1,9 @@
-//! Structural envelope oracle: verify the *structure* of the RC model built
-//! from BEopt_example.xml matches OCHRE's reference data.
+//! Structural envelope tests: verify the *structure* of the RC model built
+//! from BEopt_example.xml. UA parity is checked against the independently
+//! derived ASHRAE/EnergyPlus reference at
+//! `tests/fixtures/parity/ashrae_rc_reference.json` (see its `_provenance`
+//! block for citations). OCHRE values are quoted alongside for ballpark
+//! comparison only -- OCHRE is NOT a correctness oracle for HARES.
 //!
 //! Unlike `envelope_oracle.rs` (which runs a dynamic simulation and compares
 //! thermal output), this test validates the *static* construction: zone count,
@@ -8,7 +12,9 @@
 mod tests {
     use std::path::PathBuf;
 
-    use hares_core::{building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone};
+    use hares_core::{
+        building_to_boundary_inputs, building_to_zone_inputs, mass_multiplier_for_zone,
+    };
     use hares_envelope::{ExteriorTarget, RCPath, assemble_building_rc, derive_zone_capacitances};
     use hares_io::envelope_lut::resolve_boundary_name;
     use hares_io::hpxml::{BoundaryType, ZoneType};
@@ -51,7 +57,7 @@ mod tests {
     const WALL_ABSORPTANCE: f64 = 0.75;
     const ROOF_ABSORPTANCE: f64 = 0.85;
 
-    // OCHRE effective UA values [W/K] — computed with TARP/DOE-2 film R (wind=2 m/s,
+    // OCHRE effective UA values [W/K] -- computed with TARP/DOE-2 film R (wind=2 m/s,
     // T_ambient=10°C, T_ground=10°C) and same-zone halving. Like-for-like with HARES.
     #[allow(dead_code)]
     const OCHRE_EXTERIOR_WALL_UA: f64 = 34.34;
@@ -216,7 +222,7 @@ mod tests {
         let window_area: f64 = windows.iter().map(|b| b.area_m2).sum();
         assert_within_pct(window_area, WINDOW_TOTAL_M2, 1.0, "window area");
 
-        // Solar absorptance — must be present on HPXML-parsed exterior walls.
+        // Solar absorptance -- must be present on HPXML-parsed exterior walls.
         let living_walls: Vec<_> = hpxml_walls
             .iter()
             .filter(|b| b.interior_zone.as_ref() == Some(&ZoneType::Conditioned))
@@ -248,7 +254,7 @@ mod tests {
             );
         }
 
-        // Window properties — must be present and match HPXML values
+        // Window properties -- must be present and match HPXML values
         for win in &building.windows {
             let u = win
                 .u_factor_w_m2_k
@@ -424,7 +430,7 @@ mod tests {
         // Outdoor column present
         assert!(
             rc.outdoor_col.is_some(),
-            "outdoor_col must be Some — building has outdoor-facing boundaries"
+            "outdoor_col must be Some -- building has outdoor-facing boundaries"
         );
 
         // State matrix must be square
@@ -441,7 +447,7 @@ mod tests {
         // Must have more states than just zones (layer nodes exist)
         assert!(
             n_states > n_zones,
-            "n_states ({n_states}) must exceed n_zones ({n_zones}) — layer nodes should exist"
+            "n_states ({n_states}) must exceed n_zones ({n_zones}) -- layer nodes should exist"
         );
 
         // All diagonal entries of A_c must be negative (stable dissipative system)
@@ -456,7 +462,7 @@ mod tests {
         // layer_info non-empty (exterior surfaces have outer nodes)
         assert!(
             !rc.layer_info.is_empty(),
-            "layer_info must be non-empty — exterior surfaces need outer material nodes"
+            "layer_info must be non-empty -- exterior surfaces need outer material nodes"
         );
 
         // B_ext rows must match state count
@@ -470,7 +476,7 @@ mod tests {
         // all outdoor-facing boundaries, so n_ext=1 is expected even with many boundaries.
         assert!(
             rc.n_ext > 0,
-            "n_ext must be > 0 — building has external boundary conditions"
+            "n_ext must be > 0 -- building has external boundary conditions"
         );
 
         // Print topology summary
@@ -774,7 +780,7 @@ mod tests {
             }
 
             let Some(h) = hares_by_name.get(name) else {
-                eprintln!("{:<20} — NO MATCH IN HARES —", name);
+                eprintln!("{:<20} -- NO MATCH IN HARES --", name);
                 failures.push(format!("{name}: no matching HARES boundary"));
                 continue;
             };
@@ -939,7 +945,7 @@ mod tests {
                 ));
             }
             // Aggregate UA must match within 1% (same tolerance as named
-            // boundaries) — this is the enforcement gate for the IP-U ->
+            // boundaries) -- this is the enforcement gate for the IP-U ->
             // SI conversion and Simple Glazing Model decomposition.
             let ua_pct = pct(hares_window_ua, o_win_ua);
             if o_win_ua > 1.0 && ua_pct.abs() > 1.0 {
@@ -1034,9 +1040,7 @@ mod tests {
     // convection model's own sensitivity to ΔT.
     #[test]
     fn ashrae_interior_film_resistance_regression() {
-        use hares_physics::film_coefficients::{
-            SurfaceRoughness, ZoneLabel, film_resistances,
-        };
+        use hares_physics::film_coefficients::{SurfaceRoughness, ZoneLabel, film_resistances};
 
         // Vertical wall, Conditioned interior, Outdoor exterior.
         // ASHRAE Ch. 26 Table 1 vertical-wall interior film R: 0.120 m²·K/W.
@@ -1052,12 +1056,12 @@ mod tests {
         assert!(
             (r_int_wall - 0.120).abs() < 0.01,
             "vertical wall R_i={r_int_wall:.4} must be 0.120 ± 0.01 m²·K/W \
-             (ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 — \
+             (ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 -- \
              vertical surface, horizontal heat flow, ε=0.9).  \
              Regression check: combined TARP convection + linearized radiation."
         );
 
-        // Ceiling from below (Conditioned looking up at Attic boundary — heat
+        // Ceiling from below (Conditioned looking up at Attic boundary -- heat
         // flow upward).  ASHRAE Ch. 26 Table 1: R_i ≈ 0.106 m²·K/W upward.
         let (r_int_ceiling, _) = film_resistances(
             0.0,
@@ -1074,7 +1078,7 @@ mod tests {
              [0.08, 0.20] m²·K/W (Handbook of Fundamentals 2021 Ch. 26 Table 1)."
         );
 
-        // Floor from above (Conditioned looking down at Ground — heat flow
+        // Floor from above (Conditioned looking down at Ground -- heat flow
         // down, stable).  ASHRAE Ch. 26 Table 1: R_i ≈ 0.162 m²·K/W downward.
         let (r_int_floor, _) = film_resistances(
             0.0,
@@ -1096,7 +1100,7 @@ mod tests {
         // violates ASHRAE Ch. 26 surface resistance tables).
         assert!(
             r_int_wall < 0.20,
-            "vertical wall R_i={r_int_wall:.4} ≥ 0.20 — radiative film contribution \
+            "vertical wall R_i={r_int_wall:.4} ≥ 0.20 -- radiative film contribution \
              appears missing (convection-only regression).  See \
              crates/hares-physics/src/film_coefficients.rs (h_rad term)."
         );

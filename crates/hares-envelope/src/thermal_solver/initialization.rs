@@ -296,8 +296,7 @@ mod tests {
         let indoor = 20.0;
         let env = minimal_env(indoor, outdoor);
 
-        let x =
-            initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]).unwrap();
+        let x = initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]).unwrap();
 
         assert_eq!(x.len(), 2);
         // State 0 should be pinned at indoor temp.

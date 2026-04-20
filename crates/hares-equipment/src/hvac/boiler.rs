@@ -509,7 +509,7 @@ impl Equipment for GasBoiler {
         }
 
         // Jacket loss: fuel energy minus useful thermal output, plus pump electrical.
-        // For condensing boilers (EIR < 1), jacket loss is zero — the extra output
+        // For condensing boilers (EIR < 1), jacket loss is zero -- the extra output
         // comes from latent heat recovery, not from the room.
         let jacket_loss_w = (fuel_input_w + electric_kw * 1e3 - thermal_output_w).max(0.0);
         if let Some(zone) = self.descriptor.zone {
@@ -1119,7 +1119,7 @@ mod tests {
     fn gas_boiler_no_jacket_loss_when_off() {
         let cfg = gb_config(10_000.0, 0.80);
         let mut eq = GasBoiler::new(cfg.clone());
-        let env = env(22.0); // above setpoint — boiler should be off
+        let env = env(22.0); // above setpoint -- boiler should be off
         eq.init(&cfg, &env).unwrap();
         eq.update_control(&env);
 
@@ -1174,11 +1174,17 @@ mod tests {
         eq_half.hvac.space_fraction = 0.5;
 
         let mut ports_full = PortSlots {
-            fluid: vec![hares_types::FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
             ..PortSlots::default()
         };
         let mut ports_half = PortSlots {
-            fluid: vec![hares_types::FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
             ..PortSlots::default()
         };
 
@@ -1223,12 +1229,18 @@ mod tests {
 
         let mut ports_full = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            fluid: vec![hares_types::FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
             ..PortSlots::default()
         };
         let mut ports_half = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            fluid: vec![hares_types::FluidAccumulator::new(LoopId(1), FluidType::Water)],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
             ..PortSlots::default()
         };
 

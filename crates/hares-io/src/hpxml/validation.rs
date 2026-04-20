@@ -320,9 +320,9 @@ pub fn validate_cross_inputs(
     schedule: &ScheduleTimeSeries,
     required_schedule_columns: &[&str],
     simulation_period: Option<(DateTime<FixedOffset>, DateTime<FixedOffset>)>,
-    // TODO: The EPW parser should pass timestamps through WeatherTimeSeries
-    // so this parameter is not needed. For now, callers provide timestamps
-    // separately if available.
+    // EPW timestamps, passed separately because `WeatherTimeSeries` stores
+    // only hour-of-year indices. `None` when timestamps are unavailable
+    // (e.g. non-EPW weather sources).
     epw_timestamps: Option<&[DateTime<FixedOffset>]>,
 ) -> ValidationReport {
     let mut report = ValidationReport::default();

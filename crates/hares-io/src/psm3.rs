@@ -329,7 +329,7 @@ fn build_column_map(col_names: &[&str]) -> Result<Psm3ColumnMap, WeatherError> {
             .ok_or_else(|| WeatherError::Parse(format!("PSM3 missing required column: {name}")))
     };
 
-    // Surface Albedo is optional — not all PSM3 files include it.
+    // Surface Albedo is optional -- not all PSM3 files include it.
     let surface_albedo = col_names
         .iter()
         .position(|c| c.eq_ignore_ascii_case("Surface Albedo"));

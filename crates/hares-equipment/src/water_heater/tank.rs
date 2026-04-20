@@ -52,7 +52,7 @@ pub struct DrawResult {
 
 /// Parameters that describe tempered (mixed) water draw behaviour.
 ///
-/// OCHRE Water.py:305-325 — the mixing valve blends hot tank water with cold
+/// OCHRE Water.py:305-325 -- the mixing valve blends hot tank water with cold
 /// mains water to reach a target fixture temperature.  For "hot" draws
 /// (e.g. dishwasher) the target is `hot_draw_temp_c`; for fixture draws
 /// (sink/shower/bath) the target is `tempered_draw_temp_c`.
@@ -335,7 +335,7 @@ impl StratifiedTank {
     /// withdrawal from the tank after mixing-valve adjustment, and also reports
     /// the unmet-load power when the tank cannot meet the fixture temperature.
     ///
-    /// OCHRE Water.py:305-363 — "tempered draw" logic.
+    /// OCHRE Water.py:305-363 -- "tempered draw" logic.
     #[allow(clippy::too_many_arguments)]
     pub fn step_tempered(
         &mut self,
@@ -352,13 +352,13 @@ impl StratifiedTank {
         validate_nonnegative("tempered_flow_m3_s", tempered_flow_m3_s)?;
         validate_nonnegative("hot_flow_m3_s", hot_flow_m3_s)?;
 
-        // OCHRE Water.py:284 — snapshot outlet from pre-step top-node temperature.
+        // OCHRE Water.py:284 -- snapshot outlet from pre-step top-node temperature.
         let outlet_est_c = self.node_temps_c[0];
 
         // --- TMV mixing-valve calculation (OCHRE Water.py:305-325) ---
         // For hot draws (e.g. dishwasher): reduce draw if outlet > hot_draw_temp_c.
         let hot_draw_volume_m3 = if tmv.setpoint_temp_c > tmv.hot_draw_temp_c {
-            // Setpoint exceeds delivery target — tank water needs blending.
+            // Setpoint exceeds delivery target -- tank water needs blending.
             if outlet_est_c <= tmv.hot_draw_temp_c {
                 hot_flow_m3_s * dt.as_secs_f64()
             } else {
@@ -582,7 +582,7 @@ impl StratifiedTank {
     }
 
     /// Apply a draw to the tank, displacing water downward with mains water entering
-    /// from the bottom. Uses `scratch_pre_injection_temps` for energy accounting —
+    /// from the bottom. Uses `scratch_pre_injection_temps` for energy accounting --
     /// typically the pre-injection snapshot so that element heat does not inflate
     /// the reported energy removed by the draw.
     fn apply_draw(&mut self, draw_volume_m3: f64, mains_temp_c: f64) -> Result<DrawResult> {
@@ -1747,7 +1747,7 @@ mod tests {
         let node_height_m = 1.2 / 2.0;
         let cross_section_m2 = std::f64::consts::PI * (0.5_f64 / 2.0).powi(2);
         let cond_w_per_k = conductivity * cross_section_m2 / node_height_m;
-        // Heat flows from bottom (hot side of gradient) to top? No — node 0 is top/hot,
+        // Heat flows from bottom (hot side of gradient) to top? No -- node 0 is top/hot,
         // node 1 is bottom/cold.  In apply_conduction_and_standby the loop is:
         //   heat_flow_w = cond × (old_temps[idx+1] − old_temps[idx])
         // i.e. idx=0 → heat_flow_w = cond × (T_bot − T_top) < 0 (heat leaves node 0).
@@ -1843,7 +1843,7 @@ mod tests {
     fn ideal_capacity_returns_zero_when_at_setpoint() {
         let tank = test_tank(2, 60.0);
         let q = tank.ideal_capacity_w(60.0, 20.0, 900.0);
-        // All nodes at setpoint — only standby loss contributes.
+        // All nodes at setpoint -- only standby loss contributes.
         // Should be small (UA-driven), not the full element capacity.
         assert!(
             q < 500.0,
@@ -1871,7 +1871,7 @@ mod tests {
     fn ideal_capacity_zero_when_above_setpoint() {
         let tank = test_tank(2, 60.0);
         let q = tank.ideal_capacity_w(50.0, 20.0, 900.0);
-        // Tank is above setpoint — standby loss may push it slightly positive
+        // Tank is above setpoint -- standby loss may push it slightly positive
         // but the deficit term is zero.
         assert!(
             q < 200.0,

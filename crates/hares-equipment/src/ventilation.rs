@@ -125,11 +125,11 @@ const AIR_DENSITY_KG_M3: f64 = 1.2;
 /// Ventilation type determines whether latent recovery is modeled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VentilationType {
-    /// Simple exhaust fan — no recovery.
+    /// Simple exhaust fan -- no recovery.
     ExhaustFan,
-    /// Heat recovery ventilator — sensible recovery only.
+    /// Heat recovery ventilator -- sensible recovery only.
     Hrv,
-    /// Energy recovery ventilator — sensible + latent recovery.
+    /// Energy recovery ventilator -- sensible + latent recovery.
     Erv,
 }
 
@@ -425,12 +425,12 @@ impl Equipment for Ventilation {
         // Sensible ventilation load to zone [W]:
         // Positive = heating the zone (supply warmer than outdoor but still cooler than indoor).
         // Sensible/latent ventilation loads are computed for diagnostic telemetry
-        // but NOT pushed to thermal ports — the envelope solver handles ventilation
+        // but NOT pushed to thermal ports -- the envelope solver handles ventilation
         // heat exchange via apply_infiltration_and_ventilation().
         let _q_sensible_w = m_dot_kg_s * CP_DRY_AIR_J_KG_K * (t_supply_c - t_indoor_c);
         let _q_latent_w = m_dot_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG * (w_supply - w_indoor);
 
-        // Sensible recovery [W] — how much the HRV/ERV saved vs raw ventilation
+        // Sensible recovery [W] -- how much the HRV/ERV saved vs raw ventilation
         let q_recovery_sensible_w =
             m_dot_kg_s * CP_DRY_AIR_J_KG_K * eff_s * (t_indoor_c - t_outdoor_c);
         let q_recovery_latent_w =
@@ -446,7 +446,7 @@ impl Equipment for Ventilation {
         })?;
 
         // Ventilation thermal load is handled by the envelope solver's
-        // apply_infiltration_and_ventilation() — do NOT add it here to avoid
+        // apply_infiltration_and_ventilation() -- do NOT add it here to avoid
         // double-counting. Equipment reports fan power and telemetry only.
 
         // Telemetry

@@ -12,19 +12,19 @@
 //! This file adds *integration-level* coverage that requires a live `Dwelling` stepping
 //! through the full orchestration pipeline:
 //!
-//! 1. **Zone temperature evolution** — proves port contributions reach the thermal solver
+//! 1. **Zone temperature evolution** -- proves port contributions reach the thermal solver
 //!    and zone states update on every step (no frozen/stale env).
-//! 2. **Electric power aggregation through the full pipeline** — `StepResult` reflects the
+//! 2. **Electric power aggregation through the full pipeline** -- `StepResult` reflects the
 //!    electrical solver's bus total, not just raw port arithmetic.
-//! 3. **Gas fuel aggregation through equipment telemetry** — gas consumption reported by
+//! 3. **Gas fuel aggregation through equipment telemetry** -- gas consumption reported by
 //!    a gas furnace is nonzero when the furnace is heating.
-//! 4. **Stale-zone-temp regression (occupancy → zone temp)** — two otherwise-identical
+//! 4. **Stale-zone-temp regression (occupancy → zone temp)** -- two otherwise-identical
 //!    dwellings differing only in `[schedule] occupancy` must show distinct mean zone
 //!    temperatures, proving the occupancy schedule flows through `apply_occupancy_gains`
 //!    and the zone thermal port into the thermal solver. Paired with an IdealHVAC
 //!    test that asserts the same 66 W gain reduces cumulative delivered heating energy
 //!    when the equipment back-solves capacity continuously.
-//! 5. **Port-to-envelope flow over 10 steps** — zone temperatures are strictly finite
+//! 5. **Port-to-envelope flow over 10 steps** -- zone temperatures are strictly finite
 //!    at every step, and the thermal solver produces a non-trivially-constant trajectory
 //!    when the outdoor temp differs from the initial indoor temp.
 
@@ -340,7 +340,7 @@ fn port_slots_are_zeroed_between_steps() {
 // To make the 66 W gain dominate the zone-temp signal we:
 //   - size the Furnace below the envelope heat loss (4 kbtu/h ≈ 1170 W at
 //     -30 C outdoor) so both dwellings' furnaces run continuously at the same
-//     capacity — no bang-bang cycle phase noise, identical HVAC thermal
+//     capacity -- no bang-bang cycle phase noise, identical HVAC thermal
 //     output in A and B each step.
 //   - run 360 × 60 s = 6 h so the 66 W offset integrates into a clean mean
 //     zone-temperature gap.
@@ -539,7 +539,7 @@ master_seed = 0
         delta_k > MIN_DELTA_K && delta_k < MAX_DELTA_K,
         "occupancy-gain ΔT = {delta_k:.3} K (A mean {mean_temp_a:.3} C, \
          B mean {mean_temp_b:.3} C); expected in ({MIN_DELTA_K}, {MAX_DELTA_K}) K \
-         over {STEPS} steps — see derivation in test comment"
+         over {STEPS} steps -- see derivation in test comment"
     );
 }
 
@@ -723,7 +723,7 @@ master_seed = 0
         delta_kwh > MIN_DELTA_KWH && delta_kwh < MAX_DELTA_KWH,
         "IdealHVAC occupancy-gain ΔE = {delta_kwh:.4} kWh (A={heating_kwh_a:.4}, \
          B={heating_kwh_b:.4}); expected in ({MIN_DELTA_KWH}, {MAX_DELTA_KWH}) kWh \
-         over {STEPS} steps — see derivation in test comment"
+         over {STEPS} steps -- see derivation in test comment"
     );
 }
 

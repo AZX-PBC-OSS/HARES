@@ -173,9 +173,9 @@ impl PyFleet {
         let raise_on_failure = raise_on_failure.unwrap_or(false);
 
         let outcomes = if let Some(callback) = progress {
-            // TODO(M-2): Fleet::set_progress requires &mut self but PyFleet::simulate
-            // takes &self (PyO3 constraint). Until Fleet exposes a simulate_with_progress
-            // that accepts an external callback without mutation, a clone is unavoidable.
+            // PyO3 `#[pymethods]` require `&self`, but `Fleet::set_progress` mutates
+            // the fleet to install the callback. Cloning is the only way to attach
+            // the progress callback without forcing `&mut self` on the Python API.
             let mut fleet_clone = self.fleet.clone();
             let callback: Py<PyAny> = callback.clone().unbind();
             fleet_clone.set_progress(move |done: usize, total: usize| {
@@ -422,10 +422,7 @@ impl PySteppableFleet {
                     result.set_item("hvac_heating_w", step.hvac_heating_w)?;
                     result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
                     result.set_item("gas_power_w", step.gas_power_w)?;
-                    let reactive = reactive_power_kvar
-                        .get(idx)
-                        .and_then(|v| *v)
-                        .unwrap_or(0.0);
+                    let reactive = reactive_power_kvar.get(idx).and_then(|v| *v).unwrap_or(0.0);
                     result.set_item("reactive_power_kvar", reactive)?;
                     for (zone_id, temp_c) in &step.zone_temperatures_c {
                         let key = if zone_id.0 == 0 {

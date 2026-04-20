@@ -107,7 +107,7 @@ fn psm3_pressure_converted_to_kpa() {
 /// all monthly averages are approximately equal, so the DOE-2 model should
 /// produce ground temps very close to the annual mean with minimal swing.
 ///
-/// This test verifies that ground temp is DIFFERENT from dry bulb — it should
+/// This test verifies that ground temp is DIFFERENT from dry bulb -- it should
 /// be damped (smaller swing) and lagged relative to air temperature.
 #[test]
 fn psm3_ground_temp_uses_doe2_model() {
@@ -117,7 +117,7 @@ fn psm3_ground_temp_uses_doe2_model() {
     // same average (~15 °C). Compute monthly averages from the fixture data.
     let mut month_sums = [0.0_f64; 12];
     let mut month_counts = [0_u32; 12];
-    // Each 5-min record is (year, month, day, hour, minute) — we only need month.
+    // Each 5-min record is (year, month, day, hour, minute) -- we only need month.
     // The fixture has 105,120 records for a 365-day year at 300s intervals.
     let records_per_day = 24 * 12; // 288 records per day at 5-min resolution
     let days_in_month: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -290,7 +290,7 @@ fn psm3_sky_temp_uses_clark_allen() {
 /// Irregular resolution (not 5/15/30/60 min) must be rejected.
 #[test]
 fn psm3_rejects_irregular_resolution() {
-    // Two rows 7 minutes apart — not a valid PSM3 interval.
+    // Two rows 7 minutes apart -- not a valid PSM3 interval.
     let csv = "\
 Source,Location ID,City,State,Country,Latitude,Longitude,Time Zone,Elevation,Local Time Zone
 NSRDB,1,City,-,-,39.74,-104.99,-7,1609.0,-7

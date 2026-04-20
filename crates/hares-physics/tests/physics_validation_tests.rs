@@ -23,7 +23,7 @@ use hares_physics::psychrometrics::{
 use hares_physics::water_mains::{Hemisphere, water_mains_temperature_c};
 
 // ---------------------------------------------------------------------------
-// Assertion helper — replaces the #[cfg(test)]-gated test_utils::approx_eq
+// Assertion helper -- replaces the #[cfg(test)]-gated test_utils::approx_eq
 // ---------------------------------------------------------------------------
 
 #[track_caller]
@@ -50,13 +50,13 @@ fn assert_approx_rel(actual: f64, expected: f64, rel_tol: f64) {
 // ===========================================================================
 
 /// Verify that computing RH from (T, W) and then reconstructing W from (T, RH)
-/// via saturation pressure is an algebraic identity — tolerance 0.1%.
+/// via saturation pressure is an algebraic identity -- tolerance 0.1%.
 ///
 /// Reference: ASHRAE HOF 2021 Ch. 1, Eq. 20–24.
 #[test]
 fn psychrometric_round_trip() {
     let t_db_c = 20.0_f64;
-    let w_original = 0.007_26_f64; // kg/kg — canonical 20°C / 50% RH value
+    let w_original = 0.007_26_f64; // kg/kg -- canonical 20°C / 50% RH value
     let p_pa = 101_325.0_f64; // sea-level pressure [Pa]
 
     // Forward: W → RH
@@ -96,18 +96,18 @@ fn ashrae_canonical_20c_50rh() {
     let p_v = rh_target * p_sat;
     let w = EPSILON * p_v / (p_pa - p_v);
 
-    // Humidity ratio: w ≈ 0.00726 kg/kg — PsychroLib exact: 0.007255
+    // Humidity ratio: w ≈ 0.00726 kg/kg -- PsychroLib exact: 0.007255
     assert_approx(w, 0.007_26, 1e-5);
 
-    // Enthalpy: h ≈ 38 552 J/kg — PsychroLib: GetMoistAirEnthalpy(20, 0.00726)
+    // Enthalpy: h ≈ 38 552 J/kg -- PsychroLib: GetMoistAirEnthalpy(20, 0.00726)
     let h = moist_air_enthalpy(t_db, w);
     assert_approx(h, 38_552.0, 100.0);
 
-    // Wet-bulb: Twb ≈ 13.74°C — PsychroLib reference
+    // Wet-bulb: Twb ≈ 13.74°C -- PsychroLib reference
     let t_wb = wet_bulb_from_humidity_ratio(t_db, w, p_pa);
     assert_approx(t_wb, 13.74, 0.1);
 
-    // Dew point: Tdp ≈ 9.27°C — PsychroLib reference
+    // Dew point: Tdp ≈ 9.27°C -- PsychroLib reference
     let t_dp = dew_point(w, p_pa);
     assert_approx(t_dp, 9.27, 0.05);
 
@@ -130,7 +130,7 @@ fn ashrae_canonical_20c_50rh() {
 #[test]
 fn saturation_pressure_at_boiling_point() {
     let p_boiling = saturation_pressure_pa(100.0);
-    // Standard atmosphere: 101 325 Pa — ISA 1976 / NIST
+    // Standard atmosphere: 101 325 Pa -- ISA 1976 / NIST
     assert_approx(p_boiling, 101_325.0, 200.0);
 }
 
@@ -237,7 +237,7 @@ fn film_coefficient_increases_with_wind() {
         })
         .collect();
 
-    // Higher wind → lower R_ext (higher h_ext) — strict monotonic decrease
+    // Higher wind → lower R_ext (higher h_ext) -- strict monotonic decrease
     for w in r_exts.windows(2) {
         let (r_low_wind, r_high_wind) = (w[0], w[1]);
         assert!(
@@ -252,7 +252,7 @@ fn film_coefficient_increases_with_wind() {
 // ===========================================================================
 
 /// TARP model for vertical surfaces (tilt = 90°) uses h = 1.31 × ΔT^(1/3).
-/// The above_hotter flag has no effect for vertical surfaces — both branches
+/// The above_hotter flag has no effect for vertical surfaces -- both branches
 /// must return the same value.
 ///
 /// Reference: EnergyPlus Engineering Reference §9.4, Eq. 9.4-1;
@@ -496,7 +496,7 @@ fn biquadratic_evaluation() {
     // OCHRE Single_1 coefficients from Biquadratic Air Conditioner.csv
     let ochre_coeffs = [1.5509_f64, -0.075_05, 0.0031, 0.0024, -0.000_05, -0.000_43];
     let ahri_result = biquadratic(&ochre_coeffs, 19.44, 35.0);
-    // Exact algebraic evaluation of known coefficients — machine-epsilon tolerance.
+    // Exact algebraic evaluation of known coefficients -- machine-epsilon tolerance.
     // 1.5509 + (-0.07505)(19.44) + 0.0031(19.44²) + 0.0024(35.0) + (-0.00005)(35.0²)
     //   + (-0.00043)(19.44)(35.0) = 0.993638...
     assert_approx(ahri_result, 0.993_638, 1e-4);
@@ -508,7 +508,7 @@ fn biquadratic_evaluation() {
 
 /// OCHRE's test_psychrolib_jit.py validates psychrometrics across a wide grid.
 /// This test checks round-trip consistency (T,W → RH → W) across 7 temperatures
-/// and 3 humidity levels at sea level — matching OCHRE's coverage approach.
+/// and 3 humidity levels at sea level -- matching OCHRE's coverage approach.
 ///
 /// Reference: PsychroLib test suite, ASHRAE HOF 2021 Ch. 1.
 #[test]

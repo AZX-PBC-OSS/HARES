@@ -56,10 +56,10 @@ impl StreamingRecorder {
     /// Create a new streaming recorder.
     ///
     /// # Arguments
-    /// - `schema` — Arrow schema defining all output columns.
-    /// - `chunk_size` — Maximum rows to buffer before flushing. Must be > 0.
-    /// - `format` — Output format (CSV or Parquet).
-    /// - `output_path` — Destination file path.
+    /// - `schema` -- Arrow schema defining all output columns.
+    /// - `chunk_size` -- Maximum rows to buffer before flushing. Must be > 0.
+    /// - `format` -- Output format (CSV or Parquet).
+    /// - `output_path` -- Destination file path.
     pub fn new(
         schema: Schema,
         chunk_size: usize,

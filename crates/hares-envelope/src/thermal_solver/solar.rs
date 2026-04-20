@@ -182,8 +182,13 @@ pub(crate) fn compute_solar_distribution(
 ) -> (Vec<f64>, f64) {
     let n = surfaces.len();
     let mut absorbed = vec![0.0_f64; n];
-    let reflected =
-        compute_solar_distribution_into(surfaces, beam_w, diffuse_w, beam_floor_frac, &mut absorbed);
+    let reflected = compute_solar_distribution_into(
+        surfaces,
+        beam_w,
+        diffuse_w,
+        beam_floor_frac,
+        &mut absorbed,
+    );
     (absorbed, reflected)
 }
 
@@ -220,10 +225,7 @@ pub(crate) fn compute_solar_distribution_into(
     // If one class is absent, redirect the full beam budget to the remaining class.
     if beam_w > 0.0 {
         let (beam_to_floors, beam_to_walls) = if floor_wa > 0.0 && nonfloor_wa > 0.0 {
-            (
-                beam_w * beam_floor_frac,
-                beam_w * (1.0 - beam_floor_frac),
-            )
+            (beam_w * beam_floor_frac, beam_w * (1.0 - beam_floor_frac))
         } else if floor_wa > 0.0 {
             (beam_w, 0.0)
         } else if nonfloor_wa > 0.0 {
@@ -370,7 +372,7 @@ mod tests {
         let (absorbed, reflected) =
             compute_solar_distribution(&surfaces, 500.0, 200.0, LEGACY_BEAM_FLOOR_FRAC);
         let total_absorbed: f64 = absorbed.iter().sum();
-        // With zero absorptance, no distribution occurs — all energy reflected to zone air.
+        // With zero absorptance, no distribution occurs -- all energy reflected to zone air.
         assert!(
             total_absorbed.abs() < 1e-10,
             "zero absorptance should mean zero distribution, got {total_absorbed}"
@@ -532,8 +534,13 @@ mod tests {
         let diffuse = 200.0;
 
         let mut absorbed = Vec::new();
-        let reflected =
-            compute_solar_distribution_into(&surfaces, beam, diffuse, LEGACY_BEAM_FLOOR_FRAC, &mut absorbed);
+        let reflected = compute_solar_distribution_into(
+            &surfaces,
+            beam,
+            diffuse,
+            LEGACY_BEAM_FLOOR_FRAC,
+            &mut absorbed,
+        );
 
         let total_input = beam + diffuse;
         let total_absorbed: f64 = absorbed.iter().sum();
@@ -549,12 +556,14 @@ mod tests {
         assert!(
             (u[0] - absorbed[0] * 0.02).abs() < 1e-10,
             "floor surface node should receive radiation_frac share: u[0]={}, expected={}",
-            u[0], absorbed[0] * 0.02
+            u[0],
+            absorbed[0] * 0.02
         );
         assert!(
             (u[1] - absorbed[1] * 0.02).abs() < 1e-10,
             "wall surface node should receive radiation_frac share: u[1]={}, expected={}",
-            u[1], absorbed[1] * 0.02
+            u[1],
+            absorbed[1] * 0.02
         );
 
         // 98% goes to zone air.
@@ -562,7 +571,8 @@ mod tests {
         assert!(
             (air_contribution - expected_air).abs() < 1e-10,
             "zone air should receive (1 - radiation_frac) share: got={}, expected={}",
-            air_contribution, expected_air
+            air_contribution,
+            expected_air
         );
 
         // Energy conservation: surface deposits + air contribution = total absorbed.

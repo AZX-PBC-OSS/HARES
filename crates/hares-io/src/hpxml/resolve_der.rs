@@ -39,11 +39,11 @@ pub(super) fn resolve_pv(
     }
 
     for pv in photovoltaics.children_named("PVSystem") {
+        let pv_id = element_id(pv).unwrap_or_else(|| "unknown".to_string());
         if let Some(tracking) = child_text(pv, "Tracking") {
             if !tracking.trim().eq_ignore_ascii_case("fixed") {
-                let id = element_id(pv).unwrap_or_else(|| "PVSystem".to_string());
                 return Err(HpxmlError::Parse(format!(
-                    "PV system `{id}` uses unsupported tracking mode `{}`; only `fixed` is supported",
+                    "PV system `{pv_id}` uses unsupported tracking mode `{}`; only `fixed` is supported",
                     tracking.trim()
                 )));
             }
@@ -59,12 +59,20 @@ pub(super) fn resolve_pv(
             .and_then(|id| inverter_cap_kw_by_id.get(id))
             .copied();
 
+        let capacity_kw = child_f64(pv, "MaxPowerOutput")
+            .map(|watts| watts / 1000.0)
+            .ok_or_else(|| HpxmlError::MissingField {
+                path: "PVSystem/MaxPowerOutput",
+                system_kind: "PV",
+                system_id: pv_id.clone(),
+                reason:
+                    "DC nameplate power (W) is required to size the array; no silent default permitted",
+            })?;
+
         let cfg = PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw: child_f64(pv, "MaxPowerOutput")
-                .map(|watts| watts / 1000.0)
-                .unwrap_or(0.0),
+            capacity_kw,
             tilt_deg: child_f64(pv, "ArrayTilt"),
             azimuth_deg: child_f64(pv, "ArrayAzimuth"),
             module_type: child_text(pv, "ModuleType"),
@@ -92,19 +100,35 @@ pub(super) fn resolve_batteries(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
-) {
+) -> std::result::Result<(), HpxmlError> {
     let Some(batteries) = details.path(&["Systems", "Batteries"]) else {
-        return;
+        return Ok(());
     };
 
     for battery in batteries.children_named("Battery") {
+        let battery_id = element_id(battery).unwrap_or_else(|| "unknown".to_string());
         let rated_power_kw = child_f64(battery, "RatedPowerOutput")
             .map(|w| w / 1000.0)
-            .unwrap_or(5.0);
+            .ok_or_else(|| HpxmlError::MissingField {
+                path: "Battery/RatedPowerOutput",
+                system_kind: "Battery",
+                system_id: battery_id.clone(),
+                reason:
+                    "rated charge/discharge power (W) is required to size the inverter; no silent default permitted",
+            })?;
+        let capacity_kwh = child_energy_kwh(battery, "NominalCapacity").ok_or_else(|| {
+            HpxmlError::MissingField {
+                path: "Battery/NominalCapacity",
+                system_kind: "Battery",
+                system_id: battery_id.clone(),
+                reason:
+                    "nominal energy capacity (kWh) is required to size the pack; no silent default permitted",
+            }
+        })?;
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: child_energy_kwh(battery, "NominalCapacity").unwrap_or(13.5),
+            capacity_kwh,
             max_charge_kw: rated_power_kw,
             max_discharge_kw: rated_power_kw,
             n_series: None,
@@ -142,66 +166,89 @@ pub(super) fn resolve_batteries(
             defaults,
         ));
     }
+    Ok(())
 }
 
 pub(super) fn resolve_ev(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
-) {
-    if let Some(evs) = details.path(&["Systems", "ElectricVehicles"]) {
-        for ev in evs.children_named("ElectricVehicle") {
-            let cfg = EvConfig {
-                equipment_id: None,
-                capacity_kwh: child_energy_kwh(ev, "BatteryCapacity").unwrap_or(75.0),
-                charging_level: child_text(ev, "ChargingLevel"),
-                max_charging_power_kw: child_f64(ev, "MaxChargingPower").unwrap_or(11.5),
-                charging_efficiency: None,
-                l1_current_a: None,
-                l1_voltage_v: None,
-                soc_max: None,
-                initial_soc: None,
-                battery_temp_c: None,
-                min_charge_temp_c: None,
-                full_power_temp_c: None,
-                heater_power_w: None,
-                heater_threshold_c: None,
-                thermal_mass_j_per_k: None,
-                ua_w_per_k: None,
-                v2l_enabled: None,
-                v2l_soc_reserve: None,
-                v2l_max_discharge_kw: None,
-                v2g_enabled: None,
-                v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
-                chemistry: None,
-                fuel_economy_kwh_per_mi: None,
-                ready_soc: None,
-                charging_strategy: None,
-                plug_in_policy: None,
-                power_limit_kw: None,
-                initial_connection_state: None,
-            };
-            specs.push(build_typed_spec(
-                "EV".to_string(),
-                FuelType::Electric,
-                cfg,
-                defaults,
-            ));
-        }
+) -> std::result::Result<(), HpxmlError> {
+    let Some(evs) = details.path(&["Systems", "ElectricVehicles"]) else {
+        return Ok(());
+    };
+    for ev in evs.children_named("ElectricVehicle") {
+        let ev_id = element_id(ev).unwrap_or_else(|| "unknown".to_string());
+        let capacity_kwh = child_energy_kwh(ev, "BatteryCapacity").ok_or_else(|| {
+            HpxmlError::MissingField {
+                path: "ElectricVehicle/BatteryCapacity",
+                system_kind: "EV",
+                system_id: ev_id.clone(),
+                reason:
+                    "battery energy capacity (kWh) is required to simulate charging sessions; no silent default permitted",
+            }
+        })?;
+        let max_charging_power_kw = child_f64(ev, "MaxChargingPower").ok_or_else(|| {
+            HpxmlError::MissingField {
+                path: "ElectricVehicle/MaxChargingPower",
+                system_kind: "EV",
+                system_id: ev_id.clone(),
+                reason:
+                    "maximum charging power (kW) is required to size the EVSE; no silent default permitted",
+            }
+        })?;
+        let cfg = EvConfig {
+            equipment_id: None,
+            capacity_kwh,
+            charging_level: child_text(ev, "ChargingLevel"),
+            max_charging_power_kw,
+            charging_efficiency: None,
+            l1_current_a: None,
+            l1_voltage_v: None,
+            soc_max: None,
+            initial_soc: None,
+            battery_temp_c: None,
+            min_charge_temp_c: None,
+            full_power_temp_c: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            thermal_mass_j_per_k: None,
+            ua_w_per_k: None,
+            v2l_enabled: None,
+            v2l_soc_reserve: None,
+            v2l_max_discharge_kw: None,
+            v2g_enabled: None,
+            v2g_soc_reserve: None,
+            v2g_max_discharge_kw: None,
+            chemistry: None,
+            fuel_economy_kwh_per_mi: None,
+            ready_soc: None,
+            charging_strategy: None,
+            plug_in_policy: None,
+            power_limit_kw: None,
+            initial_connection_state: None,
+        };
+        specs.push(build_typed_spec(
+            "EV".to_string(),
+            FuelType::Electric,
+            cfg,
+            defaults,
+        ));
     }
+    Ok(())
 }
 
 pub(super) fn resolve_generators(
     details: &XmlNode,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
-) {
+) -> std::result::Result<(), HpxmlError> {
     let Some(generators) = details.path(&["Systems", "extension", "Generators"]) else {
-        return;
+        return Ok(());
     };
 
     for generator in generators.children_named("Generator") {
+        let generator_id = element_id(generator).unwrap_or_else(|| "unknown".to_string());
         let fuel = parse_fuel(child_text(generator, "FuelType").as_deref());
         let annual_output_kwh = child_f64(generator, "AnnualOutputkWh");
         let annual_consumption_kbtu = child_f64(generator, "AnnualConsumptionkBtu");
@@ -218,11 +265,21 @@ pub(super) fn resolve_generators(
             None
         };
 
+        let rated_power_kw = child_f64(generator, "ElectricalPowerOutput").ok_or_else(|| {
+            HpxmlError::MissingField {
+                path: "Generator/ElectricalPowerOutput",
+                system_kind: "Generator",
+                system_id: generator_id.clone(),
+                reason:
+                    "rated electrical output (kW) is required to size the generator; no silent default permitted",
+            }
+        })?;
+
         let cfg = GeneratorConfig {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(fuel),
-            rated_power_kw: child_f64(generator, "ElectricalPowerOutput").unwrap_or(10.0),
+            rated_power_kw,
             eta_electric,
             eta_thermal: None,
             efficiency_type: None,
@@ -244,6 +301,7 @@ pub(super) fn resolve_generators(
             defaults,
         ));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -265,7 +323,7 @@ mod tests {
                         <SystemIdentifier id="bat1"/>
                         <RatedPowerOutput>5000</RatedPowerOutput>
                         <NominalCapacity>
-                          <Units>kilowatthours</Units>
+                          <Units>kWh</Units>
                           <Value>13.5</Value>
                         </NominalCapacity>
                       </Battery>
@@ -281,7 +339,7 @@ mod tests {
             .expect("details must exist");
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_batteries(details, &defaults, &mut specs);
+        resolve_batteries(details, &defaults, &mut specs).expect("battery resolution must succeed");
         assert_eq!(specs.len(), 1, "expected one battery spec");
         let cfg: BatteryConfig = specs[0]
             .typed_config

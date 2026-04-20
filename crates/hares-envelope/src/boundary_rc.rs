@@ -54,7 +54,13 @@ const SPLIT_MIN_CONDUCTIVITY: f64 = 0.1;
 ///
 /// Ensures the Fourier number Fo = alpha * dt / dx² <= 0.5 by choosing
 /// dx_max = sqrt(2 * alpha * dt) and splitting accordingly.
-fn split_layer_count(thickness_m: f64, conductivity: f64, density: f64, specific_heat: f64, dt_s: f64) -> usize {
+fn split_layer_count(
+    thickness_m: f64,
+    conductivity: f64,
+    density: f64,
+    specific_heat: f64,
+    dt_s: f64,
+) -> usize {
     if density <= 0.0 || specific_heat <= 0.0 || conductivity <= 0.0 || thickness_m <= 0.0 {
         return 1;
     }
@@ -62,7 +68,7 @@ fn split_layer_count(thickness_m: f64, conductivity: f64, density: f64, specific
     // EnergyPlus CondFD uses space discretization constant C=3 (Fo = 1/C ≈ 0.33):
     //   dx = sqrt(C × α × Δt)
     // Reference: EnergyPlus Engineering Reference §3.3.10 "Conduction Finite
-    // Difference Solution Algorithm" — default C=3, inverse of Fourier number.
+    // Difference Solution Algorithm" -- default C=3, inverse of Fourier number.
     // Our ZOH state-space solver is implicit and unconditionally stable, so this
     // is a spatial accuracy criterion, not a stability requirement.
     let c_discretization = 3.0;
@@ -449,19 +455,20 @@ pub fn assemble_building_rc(
         if !valid_layers.is_empty() {
             let nodes_before = graph.next_layer_id;
             let build_result = graph.build_layered_boundary(&valid_layers, &bp);
-            let (r_inner_half, r_outer_half) = if let Some((inner, outer, r_ih, r_oh)) = build_result {
-                layer_info.insert(
-                    bd_idx,
-                    SurfaceLayerInfo {
-                        outer_node: outer,
-                        inner_node: inner,
-                        interior_zone_idx: bd.interior_zone_idx,
-                    },
-                );
-                (r_ih, r_oh)
-            } else {
-                (0.0, 0.0)
-            };
+            let (r_inner_half, r_outer_half) =
+                if let Some((inner, outer, r_ih, r_oh)) = build_result {
+                    layer_info.insert(
+                        bd_idx,
+                        SurfaceLayerInfo {
+                            outer_node: outer,
+                            inner_node: inner,
+                            interior_zone_idx: bd.interior_zone_idx,
+                        },
+                    );
+                    (r_ih, r_oh)
+                } else {
+                    (0.0, 0.0)
+                };
             let n_nodes = (graph.next_layer_id - nodes_before) as usize;
             let r_layers: f64 = valid_layers
                 .iter()
@@ -501,7 +508,10 @@ pub fn assemble_building_rc(
                 None
             };
             let (diag_r_outer, diag_r_inner) = if n_nodes > 0 {
-                (if same_zone { None } else { Some(r_outer_half) }, Some(r_inner_half))
+                (
+                    if same_zone { None } else { Some(r_outer_half) },
+                    Some(r_inner_half),
+                )
             } else {
                 (None, None)
             };
@@ -586,7 +596,7 @@ pub fn assemble_building_rc(
         outdoor_connected = true;
     }
 
-    // Build external nodes list — at most 2 entries, already sorted by ID.
+    // Build external nodes list -- at most 2 entries, already sorted by ID.
     let mut external_nodes = Vec::with_capacity(2);
     if outdoor_connected {
         external_nodes.push(outdoor_node);
@@ -813,7 +823,12 @@ impl RcGraphState {
         let k_inner_eff = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
         let r_inner_half = inner.thickness_m / (2.0 * k_inner_eff);
 
-        Some((layer_nodes[n_layers - 1], layer_nodes[0], r_inner_half, r_outer_half))
+        Some((
+            layer_nodes[n_layers - 1],
+            layer_nodes[0],
+            r_inner_half,
+            r_outer_half,
+        ))
     }
 
     /// Build RC nodes from pre-computed OCHRE layer data.
@@ -840,7 +855,7 @@ impl RcGraphState {
         let mut res_list: Vec<f64> = layers.iter().map(|l| l.resistance_m2_k_w).collect();
         let mut nodes = cap_list.len();
 
-        // Step 1: same-zone boundaries — cut in half, keeping the interior (last) half
+        // Step 1: same-zone boundaries -- cut in half, keeping the interior (last) half
         if params.same_zone {
             let new_nodes = nodes / 2;
             if nodes.is_multiple_of(2) {
@@ -861,7 +876,7 @@ impl RcGraphState {
             return None;
         }
 
-        // Step 2: split resistances — pad [0, r0, ..., rN, 0], average adjacent pairs → N+1 resistors
+        // Step 2: split resistances -- pad [0, r0, ..., rN, 0], average adjacent pairs → N+1 resistors
         let mut padded = Vec::with_capacity(nodes + 2);
         padded.push(0.0);
         padded.extend_from_slice(&res_list);
@@ -1198,7 +1213,7 @@ mod tests {
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
-        // Same-zone boundary with no material layers — no thermal mass to model.
+        // Same-zone boundary with no material layers -- no thermal mass to model.
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Zone(0), vec![], 2.5)];
         let (rc, _diag) = assemble_building_rc(&boundaries, 1, &caps).unwrap();
         // Only the zone air node; pure-resistance self-loop is skipped.
@@ -1557,7 +1572,7 @@ mod tests {
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
-        // Middle layer has zero capacitance — should be merged out.
+        // Middle layer has zero capacitance -- should be merged out.
         let precomputed = vec![
             PrecomputedRCLayer {
                 resistance_m2_k_w: 1.0,
@@ -1711,7 +1726,7 @@ mod tests {
             mass_multiplier: INTERIOR_MASS_MULTIPLIER,
         }];
         let caps = derive_zone_capacitances(&zones);
-        // Boundary has both material layers AND precomputed — precomputed wins.
+        // Boundary has both material layers AND precomputed -- precomputed wins.
         let precomputed = vec![PrecomputedRCLayer {
             resistance_m2_k_w: 2.0,
             capacitance_kj_m2_k: 50.0,
@@ -1843,14 +1858,20 @@ mod tests {
         // 100mm concrete: k=0.51, rho=1400, cp=1000 → alpha=3.64e-7 m²/s
         // dx_max = sqrt(2 * 3.64e-7 * 3600) ≈ 0.0512m → n = ceil(0.1/0.0512) = 2
         let n = split_layer_count(0.100, 0.51, 1400.0, 1000.0, 3600.0);
-        assert!(n >= 2, "100mm concrete at dt=3600s should need >=2 nodes, got {n}");
+        assert!(
+            n >= 2,
+            "100mm concrete at dt=3600s should need >=2 nodes, got {n}"
+        );
     }
 
     #[test]
     fn split_layer_count_thick_concrete_200mm() {
         // 200mm concrete slab should need more splits
         let n = split_layer_count(0.200, 1.13, 1400.0, 1000.0, 3600.0);
-        assert!(n >= 3, "200mm concrete at dt=3600s should need >=3 nodes, got {n}");
+        assert!(
+            n >= 3,
+            "200mm concrete at dt=3600s should need >=3 nodes, got {n}"
+        );
     }
 
     #[test]
@@ -1886,7 +1907,7 @@ mod tests {
         let caps = derive_zone_capacitances(&zones);
         // Exterior→interior: insulation first, concrete (interior-facing) last.
         let layers = vec![
-            make_layer(1.007, 0.040, 0.0, 0.0, 48.0),  // insulation (exterior)
+            make_layer(1.007, 0.040, 0.0, 0.0, 48.0), // insulation (exterior)
             make_layer(0.080, 1.130, 1400.0, 1000.0, 48.0), // concrete (interior)
         ];
         let r_film_int = 0.16_f64;

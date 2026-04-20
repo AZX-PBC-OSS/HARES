@@ -467,7 +467,7 @@ impl StateSpaceModel {
     ///   RHS uses (N - D)·x instead of N·x, plus forcing terms.
     ///   LHS uses the pre-built coupled LU factorization of (M + D).
     ///
-    /// `couplings` entries are `(state_idx, d_diag, forcing)` — same format as
+    /// `couplings` entries are `(state_idx, d_diag, forcing)` -- same format as
     /// `step_with_coupling_into`.
     pub fn solve_for_scalar_input_coupled(
         &self,
@@ -1378,7 +1378,7 @@ mod tests {
     #[test]
     fn gershgorin_bound_is_tight_for_diagonal_matrix() {
         // For a diagonal matrix, Gershgorin radii are zero so the bound equals
-        // the max absolute diagonal entry — exactly the spectral radius.
+        // the max absolute diagonal entry -- exactly the spectral radius.
         let diag = DMatrix::from_row_slice(3, 3, &[0.8, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.9]);
         let bound = gershgorin_spectral_radius(&diag);
         assert!((bound - 0.9).abs() < 1e-14, "expected 0.9, got {bound}");

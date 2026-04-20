@@ -26,9 +26,9 @@ const ZONE: ZoneId = ZoneId(1);
 // 8m × 6m × 2.7m zone, 129.6 m³, ρ_air ≈ 1.2 kg/m³, cp ≈ 1006 J/(kg·K),
 // furniture multiplier 7× → C ≈ 1,094,000 J/K.
 // Envelope: windows 36 + walls 35 + roof 15.3 ≈ 86.2 W/K; floor 1.87 W/K.
-const C: f64 = 1_094_000.0; // J/K — BESTEST Case 600 zone thermal capacitance
-const UA: f64 = 88.0; // W/K — total envelope conductance (walls+roof+windows+floor)
-const DT_S: f64 = 300.0; // s — 5-minute timestep (BESTEST standard)
+const C: f64 = 1_094_000.0; // J/K -- BESTEST Case 600 zone thermal capacitance
+const UA: f64 = 88.0; // W/K -- total envelope conductance (walls+roof+windows+floor)
+const DT_S: f64 = 300.0; // s -- 5-minute timestep (BESTEST standard)
 const STEPS_24H: usize = 288; // 24h / 300s
 
 // ---------------------------------------------------------------------------

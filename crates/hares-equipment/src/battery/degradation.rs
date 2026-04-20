@@ -157,9 +157,9 @@ mod deg_const {
 /// Full Smith 2017 (IEEE 7963578) three-mechanism battery degradation model.
 ///
 /// Three lithium-loss mechanisms:
-///   `q_li1` — calendar SEI growth (sqrt-of-time, Arrhenius + Tafel + DOD)
-///   `q_li2` — cycle-induced lithium loss (Arrhenius + rainflow DOD² sum)
-///   `q_li3` — beginning-of-life transient (exponential decay)
+///   `q_li1` -- calendar SEI growth (sqrt-of-time, Arrhenius + Tafel + DOD)
+///   `q_li2` -- cycle-induced lithium loss (Arrhenius + rainflow DOD² sum)
+///   `q_li3` -- beginning-of-life transient (exponential decay)
 ///
 /// Capacity fade = 1 − (b0 − q_li1 − q_li2 − q_li3).clamp(0, ∞)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,10 +219,10 @@ impl DegradationState {
 
     /// Called every simulation timestep to accumulate sub-daily degradation terms.
     ///
-    /// `dt_s`        — timestep in seconds
-    /// `cell_temp_k` — cell temperature in kelvin
-    /// `v_oc`        — cell open-circuit voltage at current SOC (V)
-    /// `soc`         — current state of charge [0..1]
+    /// `dt_s`        -- timestep in seconds
+    /// `cell_temp_k` -- cell temperature in kelvin
+    /// `v_oc`        -- cell open-circuit voltage at current SOC (V)
+    /// `soc`         -- current state of charge [0..1]
     pub(crate) fn accumulate(&mut self, dt_s: f64, cell_temp_k: f64, v_oc: f64, soc: f64) {
         use deg_const::*;
         let dt_day = dt_s / SECONDS_PER_DAY;
@@ -249,7 +249,7 @@ impl DegradationState {
         // Mechanism 2: cycle (Arrhenius temperature factor)
         self.b2_accum += (-(EA_B2 / R_GAS) * inv_diff).exp() * dt_day;
 
-        // Mechanism 3: BOL transient — use running dod_max_today as best estimate
+        // Mechanism 3: BOL transient -- use running dod_max_today as best estimate
         let tafel_b3 = ((ALPHA_B3 * F_FARADAY / R_GAS) * (v_oc / t - V_REF / T_REF)).exp();
         self.b3_accum +=
             B3_REF * (-(EA_B3 / R_GAS) * inv_diff).exp() * tafel_b3 * (1.0 + THETA * dod) * dt_day;
@@ -267,9 +267,9 @@ impl DegradationState {
     /// Called once per day (at midnight) to compute lithium-loss increments and
     /// update the cumulative capacity fade.
     ///
-    /// `u_neg_table`        — negative electrode potential lookup table
-    /// `cell_temp_k`        — representative cell temperature for the day (K)
-    /// `sum_squared_dod`    — Σ(count_i × DOD_i²) from today's rainflow cycles,
+    /// `u_neg_table`        -- negative electrode potential lookup table
+    /// `cell_temp_k`        -- representative cell temperature for the day (K)
+    /// `sum_squared_dod`    -- Σ(count_i × DOD_i²) from today's rainflow cycles,
     ///                        where count_i is 0.5 for half-cycles and 1.0 for full cycles.
     pub(crate) fn update_daily(
         &mut self,
@@ -299,14 +299,14 @@ impl DegradationState {
             0.0
         };
 
-        // ── Mechanism 2: cycle aging — Smith et al. 2017, IEEE 7963578 Eq.13 ──
+        // ── Mechanism 2: cycle aging -- Smith et al. 2017, IEEE 7963578 Eq.13 ──
         //
         // dq_li2 = b2_ref × Σ_t[arr(T_t) × dt_t] × √Σ_i[count_i × DOD_i²]
         //
         // Deviation from OCHRE (vendors/OCHRE/ochre/Equipment/Battery.py:418):
         //   OCHRE: b2 = b2_ref × √Σ_i[(arr_i × count_i)²] / deg_time
         //     • Computes Arrhenius per-cycle using each cycle's avg temperature
-        //     • Omits DOD amplitude entirely — a 10% DOD cycle and a 100% DOD
+        //     • Omits DOD amplitude entirely -- a 10% DOD cycle and a 100% DOD
         //       cycle contribute identical fade, violating Miner's rule.
         //   HARES: accumulates Arrhenius every timestep (finer time resolution),
         //     then weights cycle damage by Σ(count × DOD²) per Miner's linear
@@ -316,7 +316,7 @@ impl DegradationState {
         // electrochemical cycle-life models (Schmalstieg 2014, Xu 2018).
         let dq_li2 = B2_REF * self.b2_accum * sum_squared_dod.sqrt();
 
-        // Mechanism 3: BOL transient — exponential relaxation of q_li3 toward b3_accum.
+        // Mechanism 3: BOL transient -- exponential relaxation of q_li3 toward b3_accum.
         // b3_accum < 0 (B3_REF < 0), so q_li3 decreases toward a negative equilibrium.
         // A negative q_li3 subtracts from the capacity loss sum, producing a transient
         // capacity boost at beginning-of-life (Smith 2017, Eq.15).
@@ -599,7 +599,7 @@ mod tests {
         let analytic_q_li1_pct = b1_eff * (30.0_f64).sqrt() * 100.0;
 
         // The discrete integrator should match the analytic sqrt(t) curve within 0.05%.
-        // Check q_li1 directly — capacity_fade also includes the q_li3 BOL term.
+        // Check q_li1 directly -- capacity_fade also includes the q_li3 BOL term.
         assert!(
             (q_li1_pct - analytic_q_li1_pct).abs() < 0.05,
             "q_li1 after 30d at 25C should be ~{analytic_q_li1_pct:.3}%, got {q_li1_pct:.4}%. \
@@ -720,7 +720,7 @@ mod tests {
     /// Smith 2017 Eq. 3: Arrhenius factor for mechanism 1 is positive, so q_li1
     /// (calendar SEI growth) at 45°C must exceed that at 25°C over the same period.
     /// This validates that the thermal acceleration is wired correctly end-to-end.
-    /// Uses q_li1 directly — capacity_fade also includes q_li3 which has its own
+    /// Uses q_li1 directly -- capacity_fade also includes q_li3 which has its own
     /// temperature dependence and is negative during the BOL transient.
     #[test]
     fn degradation_temperature_dependence() {
@@ -803,7 +803,7 @@ mod tests {
             "day_age must not change during reset_day_tracking"
         );
 
-        // Day 2 aging must continue to accumulate — q_li1 is monotonically increasing.
+        // Day 2 aging must continue to accumulate -- q_li1 is monotonically increasing.
         // (capacity_fade itself is negative during the BOL transient.)
         let q_li1_after_day1 = ds.q_li1;
         ds.accumulate(dt_s, T_REF, V_REF, 0.5);
@@ -914,7 +914,7 @@ mod tests {
                 "day {day}: capacity_fade should be negative during BOL transient, got {fade:.8}"
             );
 
-            // q_li3 must be strictly negative after day 0 — Mechanism 3 is active.
+            // q_li3 must be strictly negative after day 0 -- Mechanism 3 is active.
             let q_li3_val = ds.q_li3;
             if day >= 1 {
                 assert!(

@@ -591,7 +591,7 @@ fn generator_fuel_efficiency_at_half_load() {
         "[der_parity] generator: electric={electric_kw:.3} kW, fuel={fuel_w:.1} W, eta={eta:.4}"
     );
 
-    // Generator was commanded to 5 kW with fast ramp — must produce output
+    // Generator was commanded to 5 kW with fast ramp -- must produce output
     assert!(
         electric_kw > 0.1,
         "generator must produce output when commanded to 5 kW; got {electric_kw:.3} kW"
@@ -615,7 +615,7 @@ fn generator_fuel_efficiency_at_half_load() {
 // 8. Generator ramp rate units: HARES uses kW/s, OCHRE uses kW/min
 //
 // generator.rs DEFAULT_DELTA_KW_PER_S = 1.0 kW/s, while OCHRE uses kW/min.
-// This is a deliberate improvement — residential
+// This is a deliberate improvement -- residential
 // reciprocating generators ramp in seconds, not minutes.
 //
 // OCHRE at ramp_rate=1.0 kW/min → 0.0167 kW/s; HARES default = 1.0 kW/s.
@@ -675,7 +675,7 @@ fn generator_ramp_rate_is_kw_per_second() {
 
     eprintln!(
         "[der_parity] ramp_rate: after 60s with ramp=1.0 kW/s → electric_kw={electric_kw:.3} kW \
-         (HARES: kW/s; OCHRE: kW/min — at OCHRE rate 1.0 kW/min, 60s gives only 1 kW)"
+         (HARES: kW/s; OCHRE: kW/min -- at OCHRE rate 1.0 kW/min, 60s gives only 1 kW)"
     );
 
     // At 1.0 kW/s, a 60-second step allows 60 kW ramp → should reach rated 10 kW
@@ -724,7 +724,7 @@ fn generator_capacity_min_enforced() {
     let env = base_env();
     eq.init(&cfg, &env).unwrap();
 
-    // Command 1 kW generation — below capacity_min=2.0 kW
+    // Command 1 kW generation -- below capacity_min=2.0 kW
     // Per OCHRE semantics: minimum operating power clamped UP to capacity_min when on.
     // HARES: values between 0 and capacity_min are clamped up; exact 0 keeps generator off.
     eq.apply_control(&ControlSignal::PowerSetpoint {

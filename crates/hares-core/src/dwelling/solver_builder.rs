@@ -186,7 +186,7 @@ fn build_solver_boundaries(
                 hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
                 hares_io::hpxml::BoundaryType::Floor | hares_io::hpxml::BoundaryType::Slab => {
                     // Attic floor (exterior = Attic) represents heat flow from roof/attic
-                    // path into the conditioned zone — categorize as Roof for OCHRE parity.
+                    // path into the conditioned zone -- categorize as Roof for OCHRE parity.
                     let is_attic_floor = boundary
                         .exterior_zone
                         .as_ref()
@@ -246,7 +246,7 @@ fn build_solver_boundaries(
             1.0
         };
 
-        // Window solar data — only for Window boundary types.
+        // Window solar data -- only for Window boundary types.
         // Wall boundaries receive opaque solar via ExteriorSurfaceInfo.absorptance.
         let window_solar = if is_exterior
             && boundary.boundary_type == hares_io::hpxml::BoundaryType::Window
@@ -744,7 +744,7 @@ pub(crate) fn build_default_solvers(
             } else if sb.is_conditioned_interior
                 || (sb.is_exterior && cat == BoundaryCategory::Window)
             {
-                // Boundary without RC interior node — use steady-state UA diagnostic.
+                // Boundary without RC interior node -- use steady-state UA diagnostic.
                 let diag_bd = diag_by_idx.get(&sb.surface_idx);
                 if let Some(d) = diag_bd {
                     let driving_temp = match d.exterior_target {
@@ -908,7 +908,9 @@ pub(crate) fn build_default_solvers(
                     true
                 }
                 Err(e) => {
-                    tracing::warn!("ventilation typed config deserialization failed: {e}; falling back to raw params");
+                    tracing::warn!(
+                        "ventilation typed config deserialization failed: {e}; falling back to raw params"
+                    );
                     false
                 }
             }
@@ -929,10 +931,7 @@ pub(crate) fn build_default_solvers(
             {
                 thermal_cfg.ventilation.sensible_recovery_efficiency = sens_re;
             }
-            if let Some(lat_re) = params
-                .get("latent_effectiveness")
-                .and_then(|v| v.as_f64())
-            {
+            if let Some(lat_re) = params.get("latent_effectiveness").and_then(|v| v.as_f64()) {
                 thermal_cfg.ventilation.latent_recovery_efficiency = lat_re;
             }
         }
@@ -1216,7 +1215,7 @@ mod tests {
     /// Verify the formula is monotone and produces physically plausible values.
     #[test]
     fn ela_to_cfm50_conversion() {
-        // 100 cm² ELA — typical for a moderately leaky house
+        // 100 cm² ELA -- typical for a moderately leaky house
         let ela_cm2 = 100.0_f64;
         let cfm50 = ela_cm2 * 0.0524 * 50.0_f64.powf(N_I_DEFAULT);
         assert!(

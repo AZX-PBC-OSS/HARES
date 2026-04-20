@@ -85,7 +85,7 @@ def test_dwelling_gym_spaces_and_mapping():
     assert env.observation_space.shape == (len(_OBS_FIELDS),)
     assert env.action_space.shape == (1,)
 
-    # Step directly after construction — initialize() is called inside __init__.
+    # Step directly after construction -- initialize() is called inside __init__.
     step_obs, reward, terminated, truncated, info = env.step(
         np.array([21.0], dtype=np.float64)
     )

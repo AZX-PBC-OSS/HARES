@@ -191,7 +191,7 @@ fn soc_clamped_at_min_max() {
     let env = base_env();
     let dt = Duration::from_secs(60);
 
-    // Discharge from a low initial SOC — SOC must not fall below min_soc.
+    // Discharge from a low initial SOC -- SOC must not fall below min_soc.
     {
         let config = EquipmentConfig::from_typed(
             "Battery".to_string(),
@@ -222,7 +222,7 @@ fn soc_clamped_at_min_max() {
         );
     }
 
-    // Charge from a high initial SOC — SOC must not exceed max_soc.
+    // Charge from a high initial SOC -- SOC must not exceed max_soc.
     {
         let config = EquipmentConfig::from_typed(
             "Battery".to_string(),
@@ -343,7 +343,7 @@ fn self_consumption_charges_when_exporting() {
 
     bat.step(&env, dt, &mut ports).expect("step");
 
-    // The battery should have charged — active_power_kw at the port is positive (load).
+    // The battery should have charged -- active_power_kw at the port is positive (load).
     // The port net after both PV and battery contributions will still be negative, but
     // battery's own telemetry shows it absorbed power.
     let active_kw = bat
@@ -380,7 +380,7 @@ fn self_consumption_discharges_when_importing() {
 
     bat.step(&env, dt, &mut ports).expect("step");
 
-    // Battery discharges — active_power_kw in telemetry is negative (generation).
+    // Battery discharges -- active_power_kw in telemetry is negative (generation).
     let active_kw = bat
         .telemetry()
         .get("active_power_kw")

@@ -1,7 +1,7 @@
 //! Integration tests for state-space and RC network abstractions.
 //!
-//! These tests exercise the public API surface end-to-end — building RC networks,
-//! assembling continuous matrices, discretizing, and stepping — rather than
+//! These tests exercise the public API surface end-to-end -- building RC networks,
+//! assembling continuous matrices, discretizing, and stepping -- rather than
 //! duplicating the unit-level arithmetic checks already in the source modules.
 
 use std::collections::HashMap;

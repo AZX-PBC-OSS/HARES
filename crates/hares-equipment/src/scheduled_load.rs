@@ -168,7 +168,7 @@ impl ScheduledLoad {
     #[must_use]
     pub fn new(config: EquipmentConfig, end_use: EndUse, equipment_type: &'static str) -> Self {
         // OCHRE convention: equipment whose name contains "Exterior" or "Outdoor"
-        // has no zone assignment — its heat gain goes to the outdoor environment,
+        // has no zone assignment -- its heat gain goes to the outdoor environment,
         // not the building envelope. "Garage" and "Basement" equipment auto-routes
         // to the respective zone when no explicit zone_id is provided.
         let name_lower = config.name.to_ascii_lowercase();
@@ -427,7 +427,7 @@ impl Equipment for ScheduledLoad {
                 (override_kw, 0.0, 0.0)
             } else {
                 // Apply month multiplier (OCHRE ScheduledLoad.py:38-41). Negative schedule
-                // values are silently clamped to zero — OCHRE treats them as "no load" rather
+                // values are silently clamped to zero -- OCHRE treats them as "no load" rather
                 // than generation; this is intentional for e.g. CSV schedules with placeholder
                 // fill values.
                 let month_idx = env.current_time.month0() as usize;
@@ -587,7 +587,7 @@ impl Equipment for ScheduledLoad {
         self.telemetry
             .insert(tk::REACTIVE_POWER_KVAR, decoded.last_reactive_power_kvar);
         // last_non_zero_power_kw already holds the ZIP-adjusted kW value (set in step()),
-        // so the thermal gain reconstruction below is accurate — it does not need a
+        // so the thermal gain reconstruction below is accurate -- it does not need a
         // separate voltage correction. The same ZIP-adjusted wattage drives sensible/latent
         // heat gains regardless of what the voltage was at the time of last non-zero output.
         let total_gain_source_w = self.last_non_zero_power_kw * 1_000.0 + self.last_non_zero_gas_w;
@@ -1356,7 +1356,7 @@ mod tests {
             "step 1 should use setpoint 5.0"
         );
 
-        // No new PowerSetpoint issued — next step reverts to schedule value.
+        // No new PowerSetpoint issued -- next step reverts to schedule value.
         env.current_time += ChronoDuration::minutes(15);
         ports.zero();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();

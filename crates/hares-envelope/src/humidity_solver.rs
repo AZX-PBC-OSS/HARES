@@ -74,7 +74,13 @@ impl DomainSolver for HumiditySolver {
         HUMIDITY
     }
 
-    fn resolve(&mut self, ports: &PortSlots, env: &EnvironmentState, dt: Duration, out: &mut DomainUpdate) {
+    fn resolve(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+        dt: Duration,
+        out: &mut DomainUpdate,
+    ) {
         let dt_s = dt.as_secs_f64();
         let p_pa = env.weather.pressure_pa();
 
@@ -395,7 +401,7 @@ mod tests {
         assert!(
             (delta_m_actual_kg - delta_m_expected_kg).abs() < 1e-6,
             "moisture mass mismatch: actual={delta_m_actual_kg:.9} kg, \
-             expected={delta_m_expected_kg:.9} kg — latent heat values likely \
+             expected={delta_m_expected_kg:.9} kg -- latent heat values likely \
              differ between thermal and humidity solvers"
         );
     }
@@ -517,7 +523,7 @@ mod tests {
         assert!(
             (dw_expected - dw_first_principles).abs() < 1e-12,
             "humidity ratio mismatch: solver={dw_expected:.9e}, \
-             first_principles={dw_first_principles:.9e} — latent heat cancellation failed"
+             first_principles={dw_first_principles:.9e} -- latent heat cancellation failed"
         );
     }
 
@@ -567,7 +573,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Physics-grounded tests — validated against ASHRAE first principles.
+    // Physics-grounded tests -- validated against ASHRAE first principles.
     // -----------------------------------------------------------------------
 
     /// Direct test of humidity_ratio_increment with known inputs.

@@ -41,7 +41,7 @@ fn assert_approx(actual: f64, expected: f64, tol: f64) {
 // Reference: Spencer (1971), J. Applied Meteorology;
 //            pvlib-python solar_position documentation.
 //
-// Tolerances: ±0.3° — Spencer model accuracy vs astronomical tables.
+// Tolerances: ±0.3° -- Spencer model accuracy vs astronomical tables.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -175,7 +175,7 @@ fn perez_diffuse_returns_zero_when_dhi_below_threshold() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: POA total irradiance — beam + diffuse + reflected
+// Test: POA total irradiance -- beam + diffuse + reflected
 //
 // Reference case for south-facing 30° tilt at latitude 40°:
 //   GHI=900, DNI=800, DHI=100, zenith=30°, day=80
@@ -294,7 +294,7 @@ fn poa_total_matches_pvlib_reference() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: solar position known case — latitude 40°N, March equinox, solar noon
+// Test: solar position known case -- latitude 40°N, March equinox, solar noon
 //
 // At latitude 40°N on the vernal equinox at solar noon:
 //   - Sun altitude ≈ 90° - 40° = 50° (declination ≈ 0°)

@@ -1406,8 +1406,9 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
 }
 
 fn derive_rng_seed(config: &EquipmentConfig) -> [u8; 32] {
-    // TODO: replace with hierarchical seeding (derive_dwelling_rng) once core
-    // RNG management lands. For now use stable master_seed + building_id + equipment name.
+    // Derive a deterministic per-equipment seed from master_seed, building_id,
+    // and the equipment name so sibling loads in one dwelling (and identical
+    // loads across dwellings) draw distinct but reproducible event streams.
     let master_seed = config.get_f64(KEY_MASTER_SEED).unwrap_or_default() as u64;
     let building_id = config.get_f64(KEY_BUILDING_ID).unwrap_or_default() as i64;
 
@@ -2175,7 +2176,7 @@ mod tests {
         })
         .unwrap();
 
-        // Step with the setpoint active — output must be the override value.
+        // Step with the setpoint active -- output must be the override value.
         let mut env2 = env.clone();
         env2.current_time += chrono::Duration::minutes(1);
         set_schedule_payload(&mut env2, vec![1.0, 1.0]);
@@ -2571,10 +2572,7 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: 0.0 });
-        assert!(
-            result.is_err(),
-            "delay_s=0.0 must be rejected"
-        );
+        assert!(result.is_err(), "delay_s=0.0 must be rejected");
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("must be positive"),
@@ -2591,10 +2589,7 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         let result = eq.apply_control_unchecked(&ControlSignal::EventDelay { delay_s: -10.0 });
-        assert!(
-            result.is_err(),
-            "negative delay_s must be rejected"
-        );
+        assert!(result.is_err(), "negative delay_s must be rejected");
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("must be positive"),
@@ -2844,7 +2839,7 @@ mod tests {
         eq_b.init(&config, &env).unwrap();
         eq_b.load_state(&checkpoint).unwrap();
 
-        // Step 2 on both A and B — delay expires, event must start on both.
+        // Step 2 on both A and B -- delay expires, event must start on both.
         env.current_time += ChronoDuration::minutes(1);
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         slots_a.zero();
@@ -3010,11 +3005,8 @@ mod tests {
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("building_id".to_string(), 1.0.into());
         raw.insert("master_seed".to_string(), 1.0.into());
-        let config = EquipmentConfig::raw(
-            "mode_test".to_string(),
-            "EventBasedLoad".to_string(),
-            raw,
-        );
+        let config =
+            EquipmentConfig::raw("mode_test".to_string(), "EventBasedLoad".to_string(), raw);
 
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();

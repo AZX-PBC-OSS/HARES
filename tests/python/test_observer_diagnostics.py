@@ -1,4 +1,4 @@
-"""Observer-based diagnostics — captures intermediate simulation state to debug
+"""Observer-based diagnostics -- captures intermediate simulation state to debug
 OCHRE parity discrepancies.
 
 Requires: uv run maturin develop -m crates/hares-python/Cargo.toml --features observe
@@ -93,7 +93,7 @@ def test_observer_hvac_diagnosis():
     hares_snaps, hares_steps = _run_hares_observed()
 
     print("\n" + "=" * 100)
-    print("HVAC DIAGNOSIS — Step-by-step comparison")
+    print("HVAC DIAGNOSIS -- Step-by-step comparison")
     print("=" * 100)
 
     # OCHRE heating/cooling columns
@@ -181,7 +181,7 @@ def test_observer_equipment_detail():
     snap = hares_snaps[0]
 
     print("\n" + "=" * 100)
-    print(f"EQUIPMENT DETAIL — Step 0, ts={snap.get('timestamp', '?')}")
+    print(f"EQUIPMENT DETAIL -- Step 0, ts={snap.get('timestamp', '?')}")
     print("=" * 100)
 
     for phase_key in ("post_nonthermal_equipment", "post_thermal_equipment"):
@@ -224,7 +224,7 @@ def test_observer_envelope_gains():
     hares_snaps, _ = _run_hares_observed()
 
     print("\n" + "=" * 100)
-    print("ENVELOPE COMPONENT GAINS — All steps")
+    print("ENVELOPE COMPONENT GAINS -- All steps")
     print("=" * 100)
 
     gains_keys = [
@@ -264,7 +264,7 @@ def test_observer_schedule_comparison():
     ]
 
     print("\n" + "=" * 100)
-    print("SCHEDULED LOADS — Step 0 comparison")
+    print("SCHEDULED LOADS -- Step 0 comparison")
     print("=" * 100)
 
     o_step0 = ochre_steps[0]
@@ -314,7 +314,7 @@ def test_observer_ochre_equipment_detail():
     )
 
     print("\n" + "=" * 100)
-    print("OCHRE EQUIPMENT STATE — Before simulation")
+    print("OCHRE EQUIPMENT STATE -- Before simulation")
     print("=" * 100)
 
     for name, eq in dwelling.equipment.items():

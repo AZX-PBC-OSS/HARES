@@ -113,7 +113,7 @@ fn months_for_period(weekday: &Schedule, weekend: &Schedule, period_idx: u64) ->
 ///
 /// Works for both hemispheres: if more than 6 months differ from December,
 /// December is likely a summer month (southern hemisphere), so the set is
-/// inverted — the months matching December become summer.
+/// inverted -- the months matching December become summer.
 fn detect_summer_months(weekday: &Schedule, weekend: &Schedule) -> Option<BTreeSet<u8>> {
     // December is index 11 (month 12, 0-indexed)
     let dec_wd = weekday.get(11)?;
@@ -134,7 +134,7 @@ fn detect_summer_months(weekday: &Schedule, weekend: &Schedule) -> Option<BTreeS
 
     // If more than 6 months differ from December, December is likely summer
     // (southern hemisphere). Invert: months matching December are winter,
-    // so the complement (months that differ) would be winter — take the rest.
+    // so the complement (months that differ) would be winter -- take the rest.
     let summer = if differ_from_dec.len() > 6 {
         let all: BTreeSet<u8> = (1..=12).collect();
         all.difference(&differ_from_dec).copied().collect()
@@ -191,7 +191,7 @@ fn seasonal_split_from_months(summer_months: &BTreeSet<u8>) -> Option<SeasonalSp
         }
     }
 
-    // Non-contiguous even with wrapping — fall back to default
+    // Non-contiguous even with wrapping -- fall back to default
     tracing::warn!(
         ?summer_months,
         "URDB detected non-contiguous summer months; falling back to June-September"

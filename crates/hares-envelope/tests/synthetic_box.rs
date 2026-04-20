@@ -285,7 +285,7 @@ fn test_1r1c_with_moderate_infiltration() {
 
 /// Extreme infiltration (ACH=50, V=200 m³) with low thermal mass (C=50 kJ/K).
 /// UA_inf = 1207 × 50 × 200 / 3600 ≈ 3353 W/K. Combined with UA=20 → UA_total ≈ 3373 W/K.
-/// τ = 50000 / 3373 ≈ 14.8s. With dt=60s, dt/τ ≈ 4 — explicit Euler eigenvalue would be
+/// τ = 50000 / 3373 ≈ 14.8s. With dt=60s, dt/τ ≈ 4 -- explicit Euler eigenvalue would be
 /// 1 - dt·UA/C = 1 - 60·3373/50000 = -3.05 (magnitude > 1, unstable).
 /// The CN solver must keep the zone bounded in [-10, 20]°C and converge monotonically.
 #[test]

@@ -17,7 +17,7 @@ pub enum WeatherFormat {
     /// Reference: <https://developer.nrel.gov/docs/solar/nsrdb/psm3-download/>
     Psm3,
     /// ResStock simplified 8-column CSV (AMY 2018, etc.).
-    /// Contains only dry bulb, RH, wind, and solar — missing pressure, dew point,
+    /// Contains only dry bulb, RH, wind, and solar -- missing pressure, dew point,
     /// infrared, sky cover, and precipitation, which are estimated at parse time.
     ResStockCsv,
     /// NREL TMY3 CSV file, hourly data (8760 rows for standard year).
@@ -82,10 +82,10 @@ fn sniff_csv_header(path: &Path) -> Result<WeatherFormat, WeatherError> {
     }) && fields.len() >= 10;
 
     if looks_like_psm3_line1 {
-        // Line 2: field values — skip (we only need lines 1 and 3 for detection).
+        // Line 2: field values -- skip (we only need lines 1 and 3 for detection).
         let _line2 = next_line(&mut lines_iter, path, 2)?;
 
-        // Line 3: column names — must contain temporal and at least one solar column.
+        // Line 3: column names -- must contain temporal and at least one solar column.
         let line3 = next_line(&mut lines_iter, path, 3)?;
         let cols: Vec<&str> = line3.split(',').map(str::trim).collect();
         let has = |name: &str| cols.iter().any(|c| c.eq_ignore_ascii_case(name));
@@ -228,11 +228,11 @@ pub struct WeatherMeta {
 /// Upsampling interpolation strategy for continuous weather fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResampleMethod {
-    /// Piecewise Cubic Hermite Interpolating Polynomial — smooth, monotone,
+    /// Piecewise Cubic Hermite Interpolating Polynomial -- smooth, monotone,
     /// physically superior for continuous fields like temperature. Default.
     #[default]
     Pchip,
-    /// Zero-order hold (forward fill) — each sub-step gets the previous
+    /// Zero-order hold (forward fill) -- each sub-step gets the previous
     /// hourly value. Matches OCHRE's pandas `resample().ffill()` convention.
     /// Use for parity testing against OCHRE.
     Zoh,
@@ -262,7 +262,7 @@ pub struct ResampleOverrides {
 }
 
 impl ResampleOverrides {
-    /// All continuous fields set to ZOH — matches OCHRE's resampling.
+    /// All continuous fields set to ZOH -- matches OCHRE's resampling.
     pub fn ochre_compat() -> Self {
         Self {
             dry_bulb: Some(ResampleMethod::Zoh),

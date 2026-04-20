@@ -825,6 +825,7 @@ fn hvac_capacity_equipment_resolution_stores_kbtu_h() {
                 <HeatingSystemType><Furnace/></HeatingSystemType>
                 <HeatingSystemFuel>natural gas</HeatingSystemFuel>
                 <HeatingCapacity>36000</HeatingCapacity>
+                <AnnualHeatingEfficiency><Units>AFUE</Units><Value>0.80</Value></AnnualHeatingEfficiency>
             </HeatingSystem>
         </HVAC></Systems>"#,
     );

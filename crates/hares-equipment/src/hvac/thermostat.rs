@@ -71,7 +71,7 @@ impl ThermostatConfig {
         if self.min_cycle_time_s > 0.0 {
             let time_res_s = env.time_res.num_milliseconds() as f64 / 1000.0;
             if self.min_cycle_time_s < time_res_s {
-                // A cycle time shorter than the timestep is meaningless — clamp
+                // A cycle time shorter than the timestep is meaningless -- clamp
                 // it up so that coarse-resolution simulations (e.g. 15-min) work
                 // without requiring the user to override every thermostat spec.
                 self.min_cycle_time_s = time_res_s;

@@ -20,7 +20,7 @@ use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
 const DEFAULT_GROUND_TEMP_C: f64 = 10.0;
-/// Mirrors `hares_types::KELVIN_OFFSET` — kept local to avoid import verbosity.
+/// Mirrors `hares_types::KELVIN_OFFSET` -- kept local to avoid import verbosity.
 const KELVIN_OFFSET_C: f64 = 273.15;
 
 const LOCATION_MIN_FIELDS: usize = 10;
@@ -366,7 +366,7 @@ fn parse_ground_temperatures(line: &str) -> Option<[f64; 12]> {
 const DOE2_GROUND_HOURS_PER_YEAR: f64 = 8760.0;
 /// Days in a standard year used in the phase-angle formula [days].
 const DOE2_GROUND_DAYS_PER_YEAR: f64 = 365.0;
-/// Soil thermal diffusivity [m²/hour] — DOE-2 default for average soil.
+/// Soil thermal diffusivity [m²/hour] -- DOE-2 default for average soil.
 const DOE2_GROUND_DIFFUSIVITY: f64 = 0.025;
 /// Burial depth factor [m] used in the damping exponent.
 const DOE2_GROUND_DEPTH_FACTOR: f64 = 10.0;

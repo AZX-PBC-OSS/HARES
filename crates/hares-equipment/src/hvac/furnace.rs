@@ -820,7 +820,7 @@ mod tests {
         assert!((eq.fan_power_w - 500.0).abs() < 1e-9);
     }
 
-    /// Fuel consumption is independent of duct DSE — the furnace burns the same
+    /// Fuel consumption is independent of duct DSE -- the furnace burns the same
     /// gas regardless of duct losses. Only the zone thermal delivery is reduced.
     #[test]
     fn gas_furnace_fuel_is_independent_of_duct_dse() {

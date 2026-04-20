@@ -30,7 +30,7 @@ pub fn run_multi_instance_check() -> Result<(), Vec<String>> {
                 failures.push("multi-instance simulation produced zero steps".to_string());
             } else {
                 eprintln!(
-                    "[multi_instance] PASS — {} steps completed for multi-equipment dwelling",
+                    "[multi_instance] PASS -- {} steps completed for multi-equipment dwelling",
                     results.steps.len()
                 );
             }

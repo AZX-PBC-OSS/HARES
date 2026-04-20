@@ -1,6 +1,6 @@
 # HARES Architecture
 
-HARES (Home energy Analysis and Residential Energy Simulation) is a high-fidelity residential building energy simulator written in Rust with Python bindings. It models thermal dynamics, HVAC equipment, distributed energy resources, and occupant schedules at sub-minute resolution.
+HARES (High-performance Agent-based Residential Energy Simulation) is a high-fidelity residential building energy simulator written in Rust with Python bindings. It models thermal dynamics, HVAC equipment, distributed energy resources, and occupant schedules at sub-minute resolution.
 
 ## Workspace & Crate Dependency Graph
 

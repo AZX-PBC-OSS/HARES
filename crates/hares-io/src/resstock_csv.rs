@@ -7,20 +7,20 @@
 //!
 //! | Field               | Source                                                  |
 //! |---------------------|---------------------------------------------------------|
-//! | Dry bulb [°C]       | **Measured** — CSV column                               |
-//! | Relative humidity [%]| **Measured** — CSV column                              |
-//! | Wind speed [m/s]    | **Measured** — CSV column                               |
-//! | Wind direction [°]  | **Measured** — CSV column                               |
-//! | GHI [W/m²]          | **Measured** — CSV column                               |
-//! | DNI [W/m²]          | **Measured** — CSV column                               |
-//! | DHI [W/m²]          | **Measured** — CSV column                               |
-//! | Pressure [kPa]      | **Estimated** — ISA standard atmosphere from elevation  |
-//! | Dew point [°C]      | **Estimated** — Magnus formula from dry bulb + RH       |
-//! | Horizontal IR [W/m²]| **Placeholder** — set to 0.0 (triggers Clark-Allen)     |
-//! | Sky temperature [°C]| **Estimated** — Clark-Allen from dry bulb + dew point   |
-//! | Opaque sky cover    | **Placeholder** — set to 0.0 (unavailable)              |
-//! | Precipitation [m]   | **Placeholder** — set to 0.0 (unavailable)              |
-//! | Ground temp [°C]    | **Estimated** — DOE-2 model from monthly dry-bulb avg   |
+//! | Dry bulb [°C]       | **Measured** -- CSV column                               |
+//! | Relative humidity [%]| **Measured** -- CSV column                              |
+//! | Wind speed [m/s]    | **Measured** -- CSV column                               |
+//! | Wind direction [°]  | **Measured** -- CSV column                               |
+//! | GHI [W/m²]          | **Measured** -- CSV column                               |
+//! | DNI [W/m²]          | **Measured** -- CSV column                               |
+//! | DHI [W/m²]          | **Measured** -- CSV column                               |
+//! | Pressure [kPa]      | **Estimated** -- ISA standard atmosphere from elevation  |
+//! | Dew point [°C]      | **Estimated** -- Magnus formula from dry bulb + RH       |
+//! | Horizontal IR [W/m²]| **Placeholder** -- set to 0.0 (triggers Clark-Allen)     |
+//! | Sky temperature [°C]| **Estimated** -- Clark-Allen from dry bulb + dew point   |
+//! | Opaque sky cover    | **Placeholder** -- set to 0.0 (unavailable)              |
+//! | Precipitation [m]   | **Placeholder** -- set to 0.0 (unavailable)              |
+//! | Ground temp [°C]    | **Estimated** -- DOE-2 model from monthly dry-bulb avg   |
 
 use std::path::Path;
 
@@ -41,7 +41,7 @@ use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
 fn isa_pressure_kpa(elevation_m: f64) -> f64 {
     let base = 1.0 - 2.25577e-5 * elevation_m;
     if base <= 0.0 {
-        return 1.0; // Above ~44 km — return a safe floor
+        return 1.0; // Above ~44 km -- return a safe floor
     }
     101.325 * base.powf(5.25588)
 }
@@ -617,7 +617,7 @@ mod tests {
         let mut new_lines: Vec<String> = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             if i == 2 {
-                // Row 2 (0-indexed line 2, data row 2) — inject 60°C.
+                // Row 2 (0-indexed line 2, data row 2) -- inject 60°C.
                 let fields: Vec<&str> = line.split(',').collect();
                 let mut fields: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
                 fields[1] = "60.0".to_string();

@@ -98,7 +98,7 @@ impl SimulationEngine {
         Self
     }
 
-    /// Run a simulation from config — creates the dwelling internally.
+    /// Run a simulation from config -- creates the dwelling internally.
     pub fn run(&self, config: DwellingConfig) -> Result<SimulationResults, HaresError> {
         validate_input_paths(&config)?;
 
@@ -356,7 +356,7 @@ fn compute_metrics_from_batches(
             return MetricsOutcome {
                 metrics: empty_metrics(),
                 warning: Some(format!(
-                    "MetricsCalculator init failed: {err} — metrics are zeroed"
+                    "MetricsCalculator init failed: {err} -- metrics are zeroed"
                 )),
             };
         }

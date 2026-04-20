@@ -44,7 +44,7 @@ impl PreferenceVote {
 
 /// Hard constraint that short-circuits the scoring pipeline.
 pub enum Constraint {
-    /// No constraint — proceed to scoring.
+    /// No constraint -- proceed to scoring.
     Inactive,
     /// Override all other preferences with this vote.
     Override(PreferenceVote),

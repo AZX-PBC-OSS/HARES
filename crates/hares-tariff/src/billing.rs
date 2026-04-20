@@ -718,10 +718,7 @@ mod tests {
         //   250 * 0.20 = $50.00
         //   total = $100.00
         let cost = compute_tiered_energy_cost(750.0, &blocks, 7, 999.0);
-        assert!(
-            (cost - 100.0).abs() < 1e-10,
-            "expected $100.00, got {cost}"
-        );
+        assert!((cost - 100.0).abs() < 1e-10, "expected $100.00, got {cost}");
     }
 
     #[test]
@@ -739,10 +736,7 @@ mod tests {
         //   200 * 0.25 = $50.00
         //   total = $134.00
         let cost = compute_tiered_energy_cost(1000.0, &blocks, 1, 999.0);
-        assert!(
-            (cost - 134.0).abs() < 1e-10,
-            "expected $134.00, got {cost}"
-        );
+        assert!((cost - 134.0).abs() < 1e-10, "expected $134.00, got {cost}");
     }
 
     #[test]
@@ -755,10 +749,7 @@ mod tests {
 
         // 200 kWh: entirely in first tier = 200 * 0.10 = $20.00
         let cost = compute_tiered_energy_cost(200.0, &blocks, 1, 999.0);
-        assert!(
-            (cost - 20.0).abs() < 1e-10,
-            "expected $20.00, got {cost}"
-        );
+        assert!((cost - 20.0).abs() < 1e-10, "expected $20.00, got {cost}");
     }
 
     #[test]
@@ -784,12 +775,12 @@ mod tests {
         let summary = BillingPeriodSummary::new(
             make_dt(2025, 1, 1),
             make_dt(2025, 2, 1),
-            20.0,  // energy
-            5.0,   // demand
-            10.0,  // fixed
-            30.0,  // export credit
+            20.0, // energy
+            5.0,  // demand
+            10.0, // fixed
+            30.0, // export credit
             Some(50.0),
-            true,  // minimum_charge_excludes_export
+            true, // minimum_charge_excludes_export
             5.0,
             500.0,
             400.0,

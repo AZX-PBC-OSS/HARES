@@ -21,10 +21,10 @@ const DEG_PER_DAY: f64 = 0.986;
 const OFFSET_F: f64 = 6.0;
 
 /// Reference annual average temperature used to anchor ratio and lag (44 °F =
-/// ~6.67 °C — the Building America benchmark calibration base).
+/// ~6.67 °C -- the Building America benchmark calibration base).
 const T_REF_F: f64 = 44.0;
 
-/// Ratio coefficient — base value at T_ref.
+/// Ratio coefficient -- base value at T_ref.
 const RATIO_BASE: f64 = 0.4;
 
 /// Linear sensitivity of ratio to annual average temperature (per °F).
@@ -53,17 +53,17 @@ use crate::units::{temperature_c_to_f, temperature_delta_c_to_f, temperature_f_t
 ///
 /// # Parameters
 ///
-/// * `t_annual_avg_c` — Annual average outdoor dry-bulb temperature [°C].
-/// * `dt_annual_range_c` — Full peak-to-peak difference between the hottest and
+/// * `t_annual_avg_c` -- Annual average outdoor dry-bulb temperature [°C].
+/// * `dt_annual_range_c` -- Full peak-to-peak difference between the hottest and
 ///   coldest monthly average outdoor temperatures over the year [°C]. The model
 ///   uses half of this value as the seasonal amplitude.
 ///
 ///   **IMPORTANT:** OCHRE's `dt_monthly` parameter is the *half-swing* (i.e.
 ///   half of this value). Pass `2 * ochre_dt_monthly` here. For US climates
 ///   `dt_annual_range_c` is typically 15–35 °C.
-/// * `day_of_year` — Day of year (1 = 1 Jan, 365/366 = 31 Dec). Valid range
+/// * `day_of_year` -- Day of year (1 = 1 Jan, 365/366 = 31 Dec). Valid range
 ///   is 1–366; values outside this range are not meaningful.
-/// * `hemisphere` — Hemisphere of the site. Defaults to [`Hemisphere::Northern`]
+/// * `hemisphere` -- Hemisphere of the site. Defaults to [`Hemisphere::Northern`]
 ///   (the hemisphere the model was calibrated for).
 ///
 /// # Valid climate range
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn summer_mains_exceeds_winter_mains() {
         // Mid-summer (day 210) vs mid-winter (day 20) for moderate US climate.
-        let t_avg = 12.0; // ~54 °F — typical US mid-latitude
+        let t_avg = 12.0; // ~54 °F -- typical US mid-latitude
         let dt = 25.0;
         let summer = water_mains_temperature_c(t_avg, dt, 210, Hemisphere::Northern);
         let winter = water_mains_temperature_c(t_avg, dt, 20, Hemisphere::Northern);

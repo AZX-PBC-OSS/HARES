@@ -120,15 +120,12 @@ impl DuctDseParams {
 /// The HVAC equipment `init` function computes DSE from these at init time,
 /// when capacity and fan flow are known.
 ///
-/// Falls back to `AnnualDistributionSystemEfficiency` from HPXML if present.
-fn compute_duct_dse_params(building: &Building) -> DuctDseParams {
+/// Returns `Ok(DuctDseParams::default())` when there are no ducts outside
+/// conditioned space. Returns `Err(HpxmlError::MissingField)` when ducts do
+/// exist but the building lacks any of the three inputs that drive ASHRAE
+/// 152 DSE: conditioned volume, site latitude, site longitude.
+fn compute_duct_dse_params(building: &Building) -> std::result::Result<DuctDseParams, HpxmlError> {
     use super::building::DuctType;
-
-    let house_volume_m3 = building.conditioned_volume_m3.unwrap_or(400.0);
-
-    // Check for direct DSE override from HPXML first.
-    // (AnnualDistributionSystemEfficiency would be set on a per-equipment basis
-    //  by the caller if available; this function handles the duct-based path.)
 
     // Aggregate supply vs return duct data from unconditioned zones.
     let mut supply_leakage = 0.0_f64;
@@ -190,8 +187,36 @@ fn compute_duct_dse_params(building: &Building) -> DuctDseParams {
     }
 
     if supply_count == 0 && return_count == 0 {
-        return DuctDseParams::default();
+        return Ok(DuctDseParams::default());
     }
+
+    let house_volume_m3 = building.conditioned_volume_m3.ok_or_else(|| {
+        HpxmlError::MissingField {
+            path: "BuildingSummary/BuildingConstruction/ConditionedBuildingVolume",
+            system_kind: "Building",
+            system_id: "conditioned".to_string(),
+            reason:
+                "conditioned volume (m³) is required for ASHRAE 152 duct DSE when ducts are outside conditioned space; no silent default permitted",
+        }
+    })?;
+    let latitude_deg = building.site.latitude_deg.ok_or_else(|| {
+        HpxmlError::MissingField {
+            path: "Site/Latitude",
+            system_kind: "Building",
+            system_id: "site".to_string(),
+            reason:
+                "site latitude (°) is required for ASHRAE 152 duct DSE; no silent default permitted",
+        }
+    })?;
+    let longitude_deg = building.site.longitude_deg.ok_or_else(|| {
+        HpxmlError::MissingField {
+            path: "Site/Longitude",
+            system_kind: "Building",
+            system_id: "site".to_string(),
+            reason:
+                "site longitude (°) is required for ASHRAE 152 duct DSE; no silent default permitted",
+        }
+    })?;
 
     let zone_idx = duct_zone_idx.unwrap_or(0);
     let zone_id = (zone_idx as u16) + 1;
@@ -205,7 +230,7 @@ fn compute_duct_dse_params(building: &Building) -> DuctDseParams {
     } else {
         0.0
     };
-    DuctDseParams {
+    Ok(DuctDseParams {
         zone_id: Some(zone_id),
         zone_type: duct_zone_type_str,
         house_volume_m3,
@@ -215,9 +240,9 @@ fn compute_duct_dse_params(building: &Building) -> DuctDseParams {
         return_leakage_frac: return_leakage,
         return_area_m2,
         return_r_m2_k_w,
-        latitude_deg: building.site.latitude_deg.unwrap_or(40.0),
-        longitude_deg: building.site.longitude_deg.unwrap_or(-100.0),
-    }
+        latitude_deg,
+        longitude_deg,
+    })
 }
 
 /// Compute a `DuctConfig` from the duct parameter bundle produced by
@@ -483,15 +508,25 @@ fn extract_curve_bounds(params: &Map<String, Value>) -> CurveBounds {
 }
 
 /// Build a `GasFurnaceConfig` typed config from the resolved params map.
-/// Returns `None` when required fields are missing (capacity_w).
-/// AFUE defaults to 0.80 when not specified in the HPXML.
+///
+/// Returns `Ok(None)` when `heating_capacity_w` is absent (no real furnace to
+/// model). Returns `Err(HpxmlError::MissingField)` when the furnace has a
+/// capacity but no AFUE -- efficiency must be specified explicitly and never
+/// silently defaulted.
 fn try_build_gas_furnace_config(
     name: &str,
     params: &Map<String, Value>,
     duct_params: &DuctDseParams,
-) -> Option<EquipmentConfig> {
-    let afue = afue_from_params(params).unwrap_or(0.80);
-    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
+        return Ok(None);
+    };
+    let afue = afue_from_params(params).ok_or_else(|| HpxmlError::MissingField {
+        path: "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
+        system_kind: "Gas Furnace",
+        system_id: name.to_string(),
+        reason: "AFUE is required to model combustion efficiency; no silent default permitted",
+    })?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
     let airflow_m3_s_per_w =
@@ -523,11 +558,11 @@ fn try_build_gas_furnace_config(
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Some(EquipmentConfig::from_typed(
+    Ok(Some(EquipmentConfig::from_typed(
         name.to_string(),
         "Gas Furnace".to_string(),
         cfg,
-    ))
+    )))
 }
 
 /// Build an `ElectricFurnaceConfig` typed config.
@@ -575,13 +610,29 @@ fn try_build_electric_furnace_config(
 }
 
 /// Build a `GasBoilerConfig` typed config.
-/// AFUE defaults to 0.80 when not specified in the HPXML.
-fn try_build_gas_boiler_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
-    let afue = afue_from_params(params).unwrap_or(0.80);
-    let capacity_w = params.get("heating_capacity_w").and_then(Value::as_f64)?;
+///
+/// Returns `Ok(None)` when `heating_capacity_w` is absent. Returns
+/// `Err(HpxmlError::MissingField)` when the boiler has a capacity but no AFUE.
+fn try_build_gas_boiler_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> std::result::Result<Option<EquipmentConfig>, HpxmlError> {
+    let Some(capacity_w) = params.get("heating_capacity_w").and_then(Value::as_f64) else {
+        return Ok(None);
+    };
+    let afue = afue_from_params(params).ok_or_else(|| HpxmlError::MissingField {
+        path: "HeatingSystem/AnnualHeatingEfficiency[AFUE]",
+        system_kind: "Gas Boiler",
+        system_id: name.to_string(),
+        reason: "AFUE is required to model combustion efficiency; no silent default permitted",
+    })?;
     let n_speeds = n_speeds_from_params(params);
     let fan_power_w = fan_power_from_params(params);
 
+    // Hydronic loop flow rate and return-temperature are configuration defaults
+    // applied by the boiler equipment model when not explicitly specified.
+    // These are water-loop sizing parameters (typical residential: 0.5 kg/s,
+    // 40 °C return); not HPXML-sourced physics.
     let flow_rate_kg_s = params
         .get("flow_rate_kg_s")
         .and_then(Value::as_f64)
@@ -606,11 +657,11 @@ fn try_build_gas_boiler_config(name: &str, params: &Map<String, Value>) -> Optio
         heating_setpoint_c: static_setpoint_from_source(&heating_setpoint_source),
         heating_setpoint_source,
     };
-    Some(EquipmentConfig::from_typed(
+    Ok(Some(EquipmentConfig::from_typed(
         name.to_string(),
         "Gas Boiler".to_string(),
         cfg,
-    ))
+    )))
 }
 
 /// Build an `ElectricBoilerConfig` typed config.
@@ -1224,7 +1275,7 @@ pub(super) fn resolve_hvac(
     };
 
     let setpoint_params = parse_hvac_setpoint_params(details);
-    let duct_params = compute_duct_dse_params(building);
+    let duct_params = compute_duct_dse_params(building)?;
     let basement_params = compute_basement_params(building);
 
     for heating in descendants_named(hvac, "HeatingSystem") {
@@ -1308,9 +1359,9 @@ pub(super) fn resolve_hvac(
             apply_multispeed_furnace_parameters(&mut params, defaults, &name);
         }
         let typed_config = match name.as_str() {
-            "Gas Furnace" => try_build_gas_furnace_config(&name, &params, &duct_params),
+            "Gas Furnace" => try_build_gas_furnace_config(&name, &params, &duct_params)?,
             "Electric Furnace" => try_build_electric_furnace_config(&name, &params, &duct_params),
-            "Gas Boiler" => try_build_gas_boiler_config(&name, &params),
+            "Gas Boiler" => try_build_gas_boiler_config(&name, &params)?,
             "Electric Boiler" => try_build_electric_boiler_config(&name, &params),
             "Electric Baseboard" => try_build_electric_baseboard_config(&name, &params),
             "Ideal HVAC" => try_build_ideal_hvac_config(&name, &params),
@@ -1935,11 +1986,7 @@ fn remap_minisplit_stages(
         };
         (pick(capacity_ratios), pick(cops), pick(shrs))
     } else {
-        (
-            capacity_ratios.to_vec(),
-            cops.to_vec(),
-            shrs.to_vec(),
-        )
+        (capacity_ratios.to_vec(), cops.to_vec(), shrs.to_vec())
     }
 }
 
@@ -1993,7 +2040,12 @@ fn apply_multispeed_parameters(
     };
 
     let (capacity_ratios, cops, shrs) = if is_mshp {
-        remap_minisplit_stages(&multispeed.capacity_ratios, &multispeed.cops, &multispeed.shrs, n_speeds)
+        remap_minisplit_stages(
+            &multispeed.capacity_ratios,
+            &multispeed.cops,
+            &multispeed.shrs,
+            n_speeds,
+        )
     } else {
         (
             multispeed.capacity_ratios.clone(),
@@ -2002,10 +2054,7 @@ fn apply_multispeed_parameters(
         )
     };
 
-    let stage_count = capacity_ratios
-        .len()
-        .min(cops.len())
-        .min(n_speeds);
+    let stage_count = capacity_ratios.len().min(cops.len()).min(n_speeds);
     if stage_count == 0 {
         return;
     }
@@ -2104,7 +2153,9 @@ fn select_primary_curve_pair(
     curve_set: &crate::defaults::HvacCurveSet,
     n_speeds: usize,
 ) -> Option<PrimaryCurvePair> {
-    select_all_curve_pairs(curve_set, n_speeds).into_iter().last()
+    select_all_curve_pairs(curve_set, n_speeds)
+        .into_iter()
+        .last()
 }
 
 /// Return all matched curve variants in speed order (lowest speed first).
@@ -2252,40 +2303,34 @@ fn apply_building_setpoint_profiles(
     include_heating: bool,
     include_cooling: bool,
 ) {
-    let mut heating = building
-        .heating_weekday_setpoints_c
-        .as_ref()
-        .map(|wd| {
-            let mut weekday = [0.0; 24];
-            weekday.copy_from_slice(&wd[..24]);
-            let weekend = building
-                .heating_weekend_setpoints_c
-                .as_ref()
-                .map(|vals| {
-                    let mut arr = [0.0; 24];
-                    arr.copy_from_slice(&vals[..24]);
-                    arr
-                })
-                .unwrap_or(weekday);
-            (weekday, weekend)
-        });
-    let mut cooling = building
-        .cooling_weekday_setpoints_c
-        .as_ref()
-        .map(|wd| {
-            let mut weekday = [0.0; 24];
-            weekday.copy_from_slice(&wd[..24]);
-            let weekend = building
-                .cooling_weekend_setpoints_c
-                .as_ref()
-                .map(|vals| {
-                    let mut arr = [0.0; 24];
-                    arr.copy_from_slice(&vals[..24]);
-                    arr
-                })
-                .unwrap_or(weekday);
-            (weekday, weekend)
-        });
+    let mut heating = building.heating_weekday_setpoints_c.as_ref().map(|wd| {
+        let mut weekday = [0.0; 24];
+        weekday.copy_from_slice(&wd[..24]);
+        let weekend = building
+            .heating_weekend_setpoints_c
+            .as_ref()
+            .map(|vals| {
+                let mut arr = [0.0; 24];
+                arr.copy_from_slice(&vals[..24]);
+                arr
+            })
+            .unwrap_or(weekday);
+        (weekday, weekend)
+    });
+    let mut cooling = building.cooling_weekday_setpoints_c.as_ref().map(|wd| {
+        let mut weekday = [0.0; 24];
+        weekday.copy_from_slice(&wd[..24]);
+        let weekend = building
+            .cooling_weekend_setpoints_c
+            .as_ref()
+            .map(|vals| {
+                let mut arr = [0.0; 24];
+                arr.copy_from_slice(&vals[..24]);
+                arr
+            })
+            .unwrap_or(weekday);
+        (weekday, weekend)
+    });
 
     if let (Some((h_wd, h_we)), Some((c_wd, c_we))) = (heating.as_mut(), cooling.as_mut()) {
         reconcile_setpoint_pair(h_wd, c_wd, "weekday");
@@ -2336,7 +2381,10 @@ mod tests {
 
     impl Write for SharedWriterGuard {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("writer lock poisoned").extend_from_slice(buf);
+            self.0
+                .lock()
+                .expect("writer lock poisoned")
+                .extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -2449,11 +2497,15 @@ mod tests {
     /// (10 m²) the correct result is R-6, not R-8.
     #[test]
     fn duct_r_value_is_area_weighted_average_not_max() {
-        let building = empty_building(vec![unconditioned_zone(vec![
+        let mut building = empty_building(vec![unconditioned_zone(vec![
             duct(DuctType::Supply, 10.0, 8.0),
             duct(DuctType::Supply, 10.0, 4.0),
         ])]);
-        let params = compute_duct_dse_params(&building);
+        building.site.latitude_deg = Some(40.0);
+        building.site.longitude_deg = Some(-105.0);
+        building.conditioned_volume_m3 = Some(400.0);
+        let params = compute_duct_dse_params(&building)
+            .expect("duct DSE params must resolve when lat/lon/volume are set");
         let supply_r = params.supply_r_m2_k_w;
         assert!(
             (supply_r - 6.0).abs() < 1e-9,
@@ -2465,11 +2517,15 @@ mod tests {
     #[test]
     fn duct_r_value_area_weighted_unequal_areas() {
         // 20 m² at R-3, 10 m² at R-9 → weighted avg = (20*3 + 10*9) / 30 = 150/30 = 5.0
-        let building = empty_building(vec![unconditioned_zone(vec![
+        let mut building = empty_building(vec![unconditioned_zone(vec![
             duct(DuctType::Return, 20.0, 3.0),
             duct(DuctType::Return, 10.0, 9.0),
         ])]);
-        let params = compute_duct_dse_params(&building);
+        building.site.latitude_deg = Some(40.0);
+        building.site.longitude_deg = Some(-105.0);
+        building.conditioned_volume_m3 = Some(400.0);
+        let params = compute_duct_dse_params(&building)
+            .expect("duct DSE params must resolve when lat/lon/volume are set");
         let return_r = params.return_r_m2_k_w;
         assert!(
             (return_r - 5.0).abs() < 1e-9,
@@ -2627,7 +2683,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // zone_type_to_ashrae152_str — foundation type granularity
+    // zone_type_to_ashrae152_str -- foundation type granularity
     // -----------------------------------------------------------------------
 
     fn foundation_zone(vented: bool) -> Zone {
@@ -2981,7 +3037,8 @@ mod tests {
         let params = minimal_furnace_params(0.96, 10_000.0);
         let duct_params = DuctDseParams::default();
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
-            .expect("gas furnace builder must succeed with valid params");
+            .expect("gas furnace builder must not error with valid params")
+            .expect("gas furnace builder must produce a typed config when capacity is present");
         assert!(ec.is_typed(), "EquipmentConfig must be typed");
         use hares_equipment::hvac::heating_config::GasFurnaceConfig;
         let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
@@ -3013,7 +3070,8 @@ mod tests {
             longitude_deg: -105.0,
         };
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &duct_params)
-            .expect("gas furnace builder must succeed with explicit airflow");
+            .expect("gas furnace builder must not error with explicit airflow")
+            .expect("gas furnace builder must produce a typed config when capacity is present");
         use hares_equipment::hvac::heating_config::GasFurnaceConfig;
         let cfg: GasFurnaceConfig = ec.typed().expect("must deserialize to GasFurnaceConfig");
         let expected = 1_200.0 * CFM_TO_M3_S / 24_000.0;
@@ -3292,7 +3350,7 @@ mod tests {
 
     #[test]
     fn apply_building_setpoint_profiles_reconciles_inverted_setpoints() {
-        // Swapped: heating=22 °C, cooling=20 °C — must reconcile to midpoint ± 1 °C.
+        // Swapped: heating=22 °C, cooling=20 °C -- must reconcile to midpoint ± 1 °C.
         let heating_weekday = [22.0f64; 24];
         let heating_weekend = [22.0f64; 24];
         let cooling_weekday = [20.0f64; 24];
@@ -3415,7 +3473,7 @@ mod tests {
         let mut params = Map::new();
         params.insert("cooling_capacity_w".to_string(), json!(3_500.0));
         params.insert("efficiency_seer".to_string(), json!(12.0));
-        // No EER present — must return None rather than silently substituting SEER.
+        // No EER present -- must return None rather than silently substituting SEER.
         let result = try_build_room_ac_config("Room AC", &params);
         assert!(
             result.is_none(),
@@ -3671,8 +3729,14 @@ mod tests {
         let ec = try_build_electric_baseboard_config("Electric Baseboard", &params)
             .expect("builder must succeed with capacity and zone_id");
         use hares_equipment::hvac::heating_config::ElectricBaseboardConfig;
-        let cfg: ElectricBaseboardConfig = ec.typed().expect("must deserialize to ElectricBaseboardConfig");
-        assert_eq!(cfg.zone_id, Some(1), "zone_id must be populated from params");
+        let cfg: ElectricBaseboardConfig = ec
+            .typed()
+            .expect("must deserialize to ElectricBaseboardConfig");
+        assert_eq!(
+            cfg.zone_id,
+            Some(1),
+            "zone_id must be populated from params"
+        );
         assert!((cfg.capacity_w - 3_000.0).abs() < 1e-9);
     }
 
@@ -3684,8 +3748,13 @@ mod tests {
         let ec = try_build_electric_baseboard_config("Electric Baseboard", &params)
             .expect("builder must succeed with capacity only");
         use hares_equipment::hvac::heating_config::ElectricBaseboardConfig;
-        let cfg: ElectricBaseboardConfig = ec.typed().expect("must deserialize to ElectricBaseboardConfig");
-        assert_eq!(cfg.zone_id, None, "zone_id must be None when param is absent");
+        let cfg: ElectricBaseboardConfig = ec
+            .typed()
+            .expect("must deserialize to ElectricBaseboardConfig");
+        assert_eq!(
+            cfg.zone_id, None,
+            "zone_id must be None when param is absent"
+        );
     }
 
     #[test]
@@ -3760,7 +3829,8 @@ mod tests {
         params.insert("fan_power_w".to_string(), json!(0.0));
 
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
-            .expect("try_build_gas_furnace_config must succeed with AFUE and capacity");
+            .expect("try_build_gas_furnace_config must not error with AFUE and capacity")
+            .expect("try_build_gas_furnace_config must produce a typed config");
 
         let typed_cfg: GasFurnaceConfig = ec
             .typed()
@@ -3907,7 +3977,11 @@ mod tests {
         params.insert("auxiliary_power_w".to_string(), json!(250.0));
 
         let result = fan_power_from_params(&params);
-        assert_eq!(result, Some(250.0), "auxiliary_power_w must be returned when fan_power_w is absent");
+        assert_eq!(
+            result,
+            Some(250.0),
+            "auxiliary_power_w must be returned when fan_power_w is absent"
+        );
     }
 
     #[test]
@@ -3917,7 +3991,11 @@ mod tests {
         params.insert("auxiliary_power_w".to_string(), json!(250.0));
 
         let result = fan_power_from_params(&params);
-        assert_eq!(result, Some(300.0), "fan_power_w must take precedence over auxiliary_power_w");
+        assert_eq!(
+            result,
+            Some(300.0),
+            "fan_power_w must take precedence over auxiliary_power_w"
+        );
     }
 
     #[test]
@@ -3928,7 +4006,10 @@ mod tests {
         let log = capture_warnings(|| {
             let result =
                 try_build_central_ac_config("Air Conditioner", &params, &DuctDseParams::default());
-            assert!(result.is_none(), "builder must return None when SEER is absent");
+            assert!(
+                result.is_none(),
+                "builder must return None when SEER is absent"
+            );
         });
 
         assert!(
@@ -3962,6 +4043,7 @@ mod tests {
         apply_multispeed_furnace_parameters(&mut params, &defaults, "Gas Furnace");
 
         let ec = try_build_gas_furnace_config("Gas Furnace", &params, &DuctDseParams::default())
+            .expect("must not error for 2-speed gas furnace")
             .expect("must build config for 2-speed gas furnace");
 
         use hares_equipment::hvac::heating_config::GasFurnaceConfig;

@@ -1,9 +1,9 @@
 //! Envelope LUT parser for loading OCHRE's pre-computed RC values from CSV files.
 //!
 //! Parses three CSV files from the `defaults/envelope/` directory:
-//! - `Envelope Boundaries.csv` — zone label mappings per boundary name
-//! - `Envelope Boundary Types.csv` — construction variants with assembly R-values
-//! - `Envelope Materials.csv` — per-layer resistance and capacitance values
+//! - `Envelope Boundaries.csv` -- zone label mappings per boundary name
+//! - `Envelope Boundary Types.csv` -- construction variants with assembly R-values
+//! - `Envelope Materials.csv` -- per-layer resistance and capacitance values
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -290,7 +290,7 @@ pub fn resolve_boundary_name(
     interior_zone: Option<&ZoneType>,
     exterior_zone: Option<&ZoneType>,
 ) -> Option<&'static str> {
-    // Use sensible defaults when zones are missing — OCHRE infers these
+    // Use sensible defaults when zones are missing -- OCHRE infers these
     // from boundary type conventions.
     let default_int = ZoneType::Conditioned;
     let default_ext = match boundary_type {
@@ -315,7 +315,7 @@ pub fn resolve_boundary_name(
         };
     }
 
-    // Adjacent (adiabatic) boundaries — multifamily party walls/floors.
+    // Adjacent (adiabatic) boundaries -- multifamily party walls/floors.
     if *int == ZoneType::Adjacent || *ext == ZoneType::Adjacent {
         let other = if *int == ZoneType::Adjacent { ext } else { int };
         return match (boundary_type, other) {

@@ -2,7 +2,7 @@
 //!
 //! Configurable models for geometric shading from building features (dormers,
 //! chimneys), trees, and neighboring buildings. Not a full ray-tracer (that's
-//! SAM's domain) — these are practical models for common residential scenarios.
+//! SAM's domain) -- these are practical models for common residential scenarios.
 
 use serde::{Deserialize, Serialize};
 
@@ -258,11 +258,11 @@ mod tests {
             elevation_deg: 20.0,
             width_deg: 60.0,
         };
-        // Sun in the east at low altitude — blocked
+        // Sun in the east at low altitude -- blocked
         assert_eq!(m.shading_factor(10.0, 90.0, 6), 0.0);
-        // Sun in the east but high altitude — not blocked
+        // Sun in the east but high altitude -- not blocked
         assert_eq!(m.shading_factor(30.0, 90.0, 6), 1.0);
-        // Sun in the south — not blocked (outside width)
+        // Sun in the south -- not blocked (outside width)
         assert_eq!(m.shading_factor(10.0, 180.0, 6), 1.0);
     }
 
@@ -273,9 +273,9 @@ mod tests {
             elevation_deg: 25.0,
             width_deg: 40.0,
         };
-        // Morning sun (east, low) — blocked
+        // Morning sun (east, low) -- blocked
         assert_eq!(m.shading_factor(15.0, 85.0, 6), 0.0);
-        // Afternoon sun (west) — not blocked
+        // Afternoon sun (west) -- not blocked
         assert_eq!(m.shading_factor(15.0, 270.0, 6), 1.0);
     }
 
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn horizon_profile_wrap_around_interpolates() {
-        // Profile ends at 350° and starts at 10° — azimuth 0° wraps between them.
+        // Profile ends at 350° and starts at 10° -- azimuth 0° wraps between them.
         let m = ShadingModel::HorizonProfile {
             points: vec![(10.0, 20.0), (180.0, 5.0), (350.0, 10.0)],
         };

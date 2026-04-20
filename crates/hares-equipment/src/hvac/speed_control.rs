@@ -64,8 +64,8 @@ impl StartupConfig {
 
     /// Compute the startup capacity multiplier for the current timestep.
     ///
-    /// `on_now`  — whether the compressor is commanding output this step.
-    /// `dt_min`  — timestep duration in minutes.
+    /// `on_now`  -- whether the compressor is commanding output this step.
+    /// `dt_min`  -- timestep duration in minutes.
     ///
     /// Returns a value in `[0.0, 1.0]`.
     pub fn capacity_multiplier(&mut self, on_now: bool, dt_min: f64) -> f64 {

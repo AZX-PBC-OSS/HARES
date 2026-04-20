@@ -22,7 +22,7 @@ pub enum BoundaryCategory {
 /// This matches OCHRE's `H_{surface}_{zone}` energy flow variable.
 #[derive(Debug, Clone)]
 pub enum BoundaryDiagnosticInfo {
-    /// Boundary with RC interior node — uses surface temperature from state vector.
+    /// Boundary with RC interior node -- uses surface temperature from state vector.
     /// `T_surface = radiation_frac × T_node + (1 - radiation_frac) × T_zone`
     /// `Q = (T_surface - T_zone) × area / R_film_int`
     RCNode {
@@ -32,7 +32,7 @@ pub enum BoundaryDiagnosticInfo {
         radiation_frac: f64,
         category: BoundaryCategory,
     },
-    /// Boundary without RC node (window, fallback-R) — uses steady-state UA.
+    /// Boundary without RC node (window, fallback-R) -- uses steady-state UA.
     /// `Q = UA × (T_driving - T_zone)` where T_driving is outdoor or ground.
     SteadyState {
         ua_w_k: f64,
@@ -106,9 +106,9 @@ pub struct MechanicalVentilationParams {
 /// through operable windows, gated by temperature and outdoor humidity conditions.
 ///
 /// # Defaults
-/// - `t_base_c`: 22.778 °C (73 °F) — OCHRE default comfort base temperature
-/// - `max_outdoor_humidity_ratio`: 0.0115 kg/kg — Building America HSP threshold
-/// - `OPEN_AREA_FRACTION`: 0.067 — matches OCHRE (0.67 × 0.5 × 0.2 of total window area)
+/// - `t_base_c`: 22.778 °C (73 °F) -- OCHRE default comfort base temperature
+/// - `max_outdoor_humidity_ratio`: 0.0115 kg/kg -- Building America HSP threshold
+/// - `OPEN_AREA_FRACTION`: 0.067 -- matches OCHRE (0.67 × 0.5 × 0.2 of total window area)
 #[derive(Debug, Clone, PartialEq)]
 pub struct NaturalVentilationConfig {
     /// Effective operable window area [m²].
@@ -116,9 +116,9 @@ pub struct NaturalVentilationConfig {
     /// Typically computed as `total_window_area_m2 * OPEN_AREA_FRACTION`.
     /// Use [`NaturalVentilationConfig::from_window_area`] to apply the standard fraction.
     pub open_area_m2: f64,
-    /// ELA stack coefficient [L/(s·cm⁴·K)] — same table as infiltration ELA coefficients.
+    /// ELA stack coefficient [L/(s·cm⁴·K)] -- same table as infiltration ELA coefficients.
     pub stack_coeff: f64,
-    /// ELA wind coefficient [L/(s·cm⁴·(m/s)²)] — same table as infiltration ELA coefficients.
+    /// ELA wind coefficient [L/(s·cm⁴·(m/s)²)] -- same table as infiltration ELA coefficients.
     pub wind_coeff: f64,
     /// Comfort base temperature [°C]. Flow is suppressed when `T_zone ≤ t_base_c`.
     pub t_base_c: f64,
@@ -297,13 +297,13 @@ pub struct ExteriorSurfaceInfo {
     pub emissivity: f64,
     /// Surface tilt from horizontal [°]; 0° = horizontal roof, 90° = vertical wall.
     pub tilt_deg: f64,
-    /// Radiation fraction: `R_film / (R_film + R_outermost_half)` — dimensionless [0,1].
+    /// Radiation fraction: `R_film / (R_film + R_outermost_half)` -- dimensionless [0,1].
     ///
     /// Controls how much the true surface temperature deviates from the RC node
     /// temperature. A value of 0.0 means use the node temperature directly (no
     /// exterior film resistance in the conduction path).
     pub rad_frac: f64,
-    /// Radiation resistance: `R_film / area_m2` — K/W.
+    /// Radiation resistance: `R_film / area_m2` -- K/W.
     ///
     /// Converts net surface heat flux [W] to a temperature perturbation on the
     /// exterior surface.
@@ -322,7 +322,7 @@ pub struct ExteriorSurfaceInfo {
 ///
 /// These map zone IDs to row/column indices in the discretized A_d, B_d, C, D
 /// matrices. Constructed by `build_default_solvers` from the RC network topology
-/// during model assembly — not user-supplied configuration.
+/// during model assembly -- not user-supplied configuration.
 #[derive(Debug, Clone, Default)]
 pub struct StateSpaceWiring {
     pub zone_state_indices: HashMap<ZoneId, usize>,
@@ -456,7 +456,7 @@ pub struct EnvelopeComponentGains {
     /// Equipment jacket/shell losses to the indoor zone [W].
     /// Equals `JacketLoss` category total (water heater skin loss, etc.).
     pub jacket_loss_w: f64,
-    /// Duct distribution losses [W] — heat deposited into the duct zone, removed from delivered capacity.
+    /// Duct distribution losses [W] -- heat deposited into the duct zone, removed from delivered capacity.
     pub duct_loss_w: f64,
     /// Per-zone infiltration sensible heat gains [W].
     /// `infiltration_w` is the indoor-zone alias for backward compatibility.
@@ -590,8 +590,7 @@ mod tests {
         // When FractionOperable = 1.0, operable area equals total area;
         // the solver_builder formula must include the 0.67 factor.
         let operable_area = total_window_area_m2 * 1.0_f64;
-        let solver_builder_open_area =
-            operable_area * NaturalVentilationConfig::OPEN_AREA_FRACTION;
+        let solver_builder_open_area = operable_area * NaturalVentilationConfig::OPEN_AREA_FRACTION;
         assert!(
             (solver_builder_open_area - ochre_open_area).abs() < 1e-9,
             "solver_builder open area {solver_builder_open_area} does not match OCHRE {ochre_open_area}"

@@ -306,7 +306,7 @@ fn draw_cools_tank_proportionally() {
         let mut wh = ResistanceWH::new(cfg.clone());
         wh.init(&cfg, &env).unwrap();
         let mut ports = PortSlots::from_declarations(wh.ports());
-        // 10 steps at 0.10 kg/s = 60 L of draw total — well within a 50-gal tank.
+        // 10 steps at 0.10 kg/s = 60 L of draw total -- well within a 50-gal tank.
         for _ in 0..10 {
             step_wh(&mut wh, &env, &mut ports);
         }

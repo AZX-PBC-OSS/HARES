@@ -431,7 +431,7 @@ fn inject_setpoint_schedules(
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
 ) {
-    // Store only the column index — the equipment resolves the value each
+    // Store only the column index -- the equipment resolves the value each
     // timestep from the environment's schedule domain payload. No materialization.
     let heating_col = csv_col_map.get("heating_setpoint").copied();
     let cooling_col = csv_col_map.get("cooling_setpoint").copied();
@@ -668,7 +668,7 @@ fn inject_power_schedule(
     let schedule_len = schedule.len();
 
     if let Some(&col_idx) = csv_col_map.get(col_name.as_str()) {
-        // CSV column exists — use it directly and add a derived kW column.
+        // CSV column exists -- use it directly and add a derived kW column.
         let fraction_series = schedule.columns[col_idx].clone();
         if fraction_series.is_empty() {
             return;
@@ -700,7 +700,7 @@ fn inject_power_schedule(
             inject_compact_constant_power(spec, 0.0);
         }
     } else if schedule_len > 0 {
-        // No CSV column — prefer building-specific HPXML profile, then generic defaults.
+        // No CSV column -- prefer building-specific HPXML profile, then generic defaults.
         if let Some(profile) = resolve_hpxml_profile(spec) {
             warn!(
                 "schedule_resolve: no CSV column '{}' for '{}'; using HPXML profile fractions",

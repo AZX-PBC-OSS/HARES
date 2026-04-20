@@ -22,6 +22,8 @@
     <BuildingID id='MyBuilding'/>
     <Site>
       <SiteID id='SiteID'/>
+      <Latitude>32.78</Latitude>
+      <Longitude>-96.80</Longitude>
       <Address>
         <StateCode>TX</StateCode>
       </Address>

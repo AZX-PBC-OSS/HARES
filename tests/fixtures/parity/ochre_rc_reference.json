@@ -1,4 +1,9 @@
 {
+  "_provenance": {
+    "source": "OCHRE (https://github.com/NREL/OCHRE)",
+    "generator_script": "tests/fixtures/parity/extract_ochre_rc.py",
+    "role": "OCHRE is a ballpark reference; HARES targets better-than-OCHRE physics per ASHRAE HoF and EnergyPlus Engineering Reference. Deviations from OCHRE are investigated but not necessarily corrected. This file documents OCHRE's RC network structure for cross-reference only; the published-physics reference lives in `ashrae_rc_reference.json`."
+  },
   "hpxml_file": "BEopt_example.xml",
   "location": {
     "Average Wind Speed (m/s)": 2,

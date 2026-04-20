@@ -24,7 +24,7 @@ All page/table references are reproduced inline next to each constant.  The
 top-level sources are:
 
 * ASHRAE *Handbook of Fundamentals*, 2021 edition, Ch. 26 "Heat, Air, and
-  Moisture Control in Building Assemblies — Fundamentals" — Tables 1
+  Moisture Control in Building Assemblies -- Fundamentals" -- Tables 1
   (surface film resistances) and 4 (building material thermal properties).
 * *EnergyPlus Engineering Reference*, v25.1.0, §3.2 (Simple Glazing Model),
   §9.4 (TARP interior convection), §9.5 (DOE-2 exterior convection).
@@ -75,7 +75,7 @@ FT_TO_M: float = 0.3048
 # Stefan-Boltzmann constant [W/(m^2*K^4)], CODATA 2018.
 STEFAN_BOLTZMANN: float = 5.670374419e-8
 
-# ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 — typical non-reflective
+# ASHRAE Handbook of Fundamentals 2021, Ch. 26 Table 1 -- typical non-reflective
 # interior emissivity for building materials (gypsum, wood, paint).
 INTERIOR_EMISSIVITY: float = 0.90
 
@@ -249,7 +249,7 @@ def simple_glazing_interior_film_r(u_si: float) -> float:
 # of a typical BEopt residential assembly.  Layer R = thickness / k.  Layer
 # capacitance per m^2 = thickness * density * cp.  All values are taken from
 # ASHRAE Handbook of Fundamentals 2021 Ch. 26 Table 4 "Thermal Properties
-# of Typical Building and Insulating Materials — Design Values" and match the
+# of Typical Building and Insulating Materials -- Design Values" and match the
 # tabulation that BEopt's Residential Construction Reference (NREL/TP-5500-
 # 64459 Apr 2016) recommends as the canonical ASHRAE-derived input.  The
 # specific-heat values for gypsum (0.837 kJ/(kg*K)), wood-frame stud cavities
@@ -298,12 +298,12 @@ _ATTIC_FLOOR_LAYERS: list[_Material] = [
 # build-up:
 #   (1) Fictitious insulating layer (lumps perimeter heat-loss resistance
 #       per ASHRAE 90.1 F-factor method; pure resistance, no mass).
-#   (2) Effective soil column (1 ft below slab) — ASHRAE Ch. 26 Table 4
+#   (2) Effective soil column (1 ft below slab) -- ASHRAE Ch. 26 Table 4
 #       row "Sandy soil, 12 in. depth": k=1.731 W/(m*K), rho=1842 kg/m^3,
 #       cp=0.419 kJ/(kg*K).
-#   (3) 4-in concrete slab — Ch. 26 Table 4 "Concrete, normal-weight"
+#   (3) 4-in concrete slab -- Ch. 26 Table 4 "Concrete, normal-weight"
 #       k=1.31 W/(m*K), rho=2243 kg/m^3, cp=0.838 kJ/(kg*K).
-#   (4) Carpet + fibrous pad — Ch. 26 Table 4 row "Carpet, fibrous pad".
+#   (4) Carpet + fibrous pad -- Ch. 26 Table 4 row "Carpet, fibrous pad".
 _FLOOR_LAYERS: list[_Material] = [
     # Fictitious perimeter-loss resistor: ASHRAE 90.1 F-factor derivation
     # for uninsulated slab-on-grade with 140 ft exposed perimeter on a
@@ -671,7 +671,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     )
     # Horizontal, heat flow up (conditioned warmer than attic in heating
     # season with anchors 20 °C vs 15 °C).  Tilt = 0, interior LIV, exterior
-    # ATC — both sides unconditioned so r_ext = r_int by symmetry.
+    # ATC -- both sides unconditioned so r_ext = r_int by symmetry.
     r_fi, r_fe = _film(0.0, "LIV", "ATC")
     r_total = r_attic_floor_layer + r_fi + r_fe
     ua = attic_floor_area / r_total
@@ -888,7 +888,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
                 "exterior_film_r": (
                     "EnergyPlus Engineering Reference v25.1.0 §9.5 "
                     "(DOE-2 forced convection, r_f=1.67 'Rough' per the "
-                    "§9.5 Surface Roughness Multipliers table — residential "
+                    "§9.5 Surface Roughness Multipliers table -- residential "
                     "BEopt/OCHRE convention for shingle/clapboard)."
                 ),
                 "window_u_factor_ip_to_si": (
@@ -900,7 +900,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
                 "assembly_layer_r_and_capacitance": (
                     "ASHRAE Handbook of Fundamentals 2021 Ch. 26 Table 4 "
                     "'Thermal Properties of Typical Building and Insulating "
-                    "Materials' — conductivity, density, and specific heat "
+                    "Materials' -- conductivity, density, and specific heat "
                     "used for each layer in the ASSEMBLY_LAYERS tables.  "
                     "Layer R = thickness / k; capacitance = thickness * "
                     "density * cp summed across layers per BEopt Residential "

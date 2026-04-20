@@ -1,4 +1,4 @@
-"""OCHRE parity test — runs both OCHRE and HARES on identical inputs and compares.
+"""OCHRE parity test -- runs both OCHRE and HARES on identical inputs and compares.
 
 Requires:
     uv sync --group dev
@@ -31,7 +31,7 @@ START_HARES = "2019-05-05T13:00:00"
 DURATION_H = 1
 TIME_RES_MIN = 1
 
-# ZOH resampling for all continuous weather fields — matches OCHRE's pandas ffill().
+# ZOH resampling for all continuous weather fields -- matches OCHRE's pandas ffill().
 OCHRE_COMPAT_RESAMPLE: dict[str, str] = {
     "dry_bulb": "zoh",
     "dew_point": "zoh",
@@ -195,7 +195,7 @@ def hares_results() -> dict[str, float]:
 def test_print_comparison(ochre_results: dict[str, float], hares_results: dict[str, float]) -> None:
     """Print side-by-side comparison (always runs, never fails)."""
     print("\n{'='*80}")
-    print("OCHRE vs HARES — BEopt 1h parity (May 5, 2019, 19:00 UTC)")
+    print("OCHRE vs HARES -- BEopt 1h parity (May 5, 2019, 19:00 UTC)")
     print("=" * 80)
     print(f"{'Column':<55} {'OCHRE':>8} {'HARES':>8} {'Diff%':>8}")
     print("-" * 80)
@@ -338,7 +338,7 @@ def test_7day_benchmark():
     hares_kwh, hares_init, hares_sim = _run_hares_7d()
 
     print("\n" + "=" * 90)
-    print(f"7-DAY BENCHMARK — {BENCH_DURATION_H}h at {TIME_RES_MIN}-min resolution ({BENCH_DURATION_H * 60} steps)")
+    print(f"7-DAY BENCHMARK -- {BENCH_DURATION_H}h at {TIME_RES_MIN}-min resolution ({BENCH_DURATION_H * 60} steps)")
     print("=" * 90)
 
     # Performance

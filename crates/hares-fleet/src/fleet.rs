@@ -354,9 +354,7 @@ impl SteppableFleet {
                         "total_steps={other_steps} differs from dwelling 0 total_steps={total_steps}",
                     )
                 } else {
-                    format!(
-                        "time_res={other_res}s differs from dwelling 0 time_res={time_res_s}s",
-                    )
+                    format!("time_res={other_res}s differs from dwelling 0 time_res={time_res_s}s",)
                 };
                 build_errors.push(DwellingBuildError {
                     bldg_id: removed.bldg_id,

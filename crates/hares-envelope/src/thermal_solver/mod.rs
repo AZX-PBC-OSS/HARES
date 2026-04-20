@@ -161,9 +161,24 @@ impl ThermalSolver {
     /// Returns wiring indices for zone air for debugging.
     pub fn zone_wiring_debug(&self) -> (usize, usize, usize) {
         let zone_id = self.config.indoor_zone_id;
-        let state_row = self.wiring.zone_state_indices.get(&zone_id).copied().unwrap_or(0);
-        let sensible_col = self.wiring.zone_sensible_input_indices.get(&zone_id).copied().unwrap_or(0);
-        let outdoor_col = self.wiring.outdoor_temp_input_indices.first().copied().unwrap_or(0);
+        let state_row = self
+            .wiring
+            .zone_state_indices
+            .get(&zone_id)
+            .copied()
+            .unwrap_or(0);
+        let sensible_col = self
+            .wiring
+            .zone_sensible_input_indices
+            .get(&zone_id)
+            .copied()
+            .unwrap_or(0);
+        let outdoor_col = self
+            .wiring
+            .outdoor_temp_input_indices
+            .first()
+            .copied()
+            .unwrap_or(0);
         (state_row, sensible_col, outdoor_col)
     }
 
@@ -181,7 +196,16 @@ impl ThermalSolver {
             .map(|z| {
                 z.surfaces
                     .iter()
-                    .map(|s| (s.area_m2, s.solar_absorptance, s.radiation_frac, s.is_floor, s.input_index, s.driving_temp.is_some()))
+                    .map(|s| {
+                        (
+                            s.area_m2,
+                            s.solar_absorptance,
+                            s.radiation_frac,
+                            s.is_floor,
+                            s.input_index,
+                            s.driving_temp.is_some(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -212,7 +236,14 @@ impl ThermalSolver {
         let after_int_lwr = u[z_idx];
         self.apply_port_sensible_inputs(&mut u, ports);
         let after_port = u[z_idx];
-        [after_outdoor, after_window_solar, after_ext_solar, after_ext_lwr, after_int_lwr, after_port]
+        [
+            after_outdoor,
+            after_window_solar,
+            after_ext_solar,
+            after_ext_lwr,
+            after_int_lwr,
+            after_port,
+        ]
     }
 
     pub fn new(
@@ -606,7 +637,8 @@ impl ThermalSolver {
         // Fill output in-place: clear and extend zone_temperatures_c from internal buf.
         out.domain_id = THERMAL;
         out.zone_temperatures_c.clear();
-        out.zone_temperatures_c.extend_from_slice(&self.zone_temps_buf);
+        out.zone_temperatures_c
+            .extend_from_slice(&self.zone_temps_buf);
         if self.custom_payload_buf.is_empty() {
             if let Some(ref mut p) = out.custom_payload {
                 p.clear();
@@ -669,7 +701,13 @@ impl DomainSolver for ThermalSolver {
         THERMAL
     }
 
-    fn resolve(&mut self, ports: &PortSlots, env: &EnvironmentState, dt: Duration, out: &mut DomainUpdate) {
+    fn resolve(
+        &mut self,
+        ports: &PortSlots,
+        env: &EnvironmentState,
+        dt: Duration,
+        out: &mut DomainUpdate,
+    ) {
         debug_assert!(
             (dt.as_secs_f64() - self.dt_s).abs() < 1e-6,
             "ThermalSolver: runtime dt ({:.3}s) != configured dt ({:.3}s); re-discretize or use constant timestep",
@@ -1286,7 +1324,7 @@ mod tests {
         let ua_walls = 0.514 * 68.0; // 34.95 W/K
         #[allow(clippy::approx_constant)]
         #[allow(clippy::approx_constant)]
-        let ua_roof = 0.318 * 48.0; // 15.26 W/K — U-value, not 1/π — U-value, not 1/π
+        let ua_roof = 0.318 * 48.0; // 15.26 W/K -- U-value, not 1/π -- U-value, not 1/π
         let ua_envelope = ua_windows + ua_walls + ua_roof; // ~86.2 W/K (walls+roof+windows to outdoor)
         let ua_floor = 0.039 * 48.0; // 1.872 W/K (floor to ground)
 
@@ -2430,7 +2468,7 @@ mod tests {
             "higher wind must cool zone more: t_high={t_high_wind:.5}, t_low={t_low_wind:.5}"
         );
         // Wind term scales as v², so going from 2 to 8 m/s (4×) raises q_wind by 16×;
-        // the total flow increase will be meaningful — require at least 1 mK more cooling.
+        // the total flow increase will be meaningful -- require at least 1 mK more cooling.
         let extra_cooling = t_low_wind - t_high_wind;
         assert!(
             extra_cooling > 1e-3,
@@ -2745,7 +2783,7 @@ mod tests {
     /// cool, dry, and below the zone temperature.
     #[test]
     fn natural_ventilation_cools_warm_zone_when_conditions_met() {
-        // Zone well above comfort base, cool dry outdoor air — nat vent should be active.
+        // Zone well above comfort base, cool dry outdoor air -- nat vent should be active.
         let zone_temp = 27.0; // above t_base (22.778 °C)
         let outdoor_temp = 18.0; // cool outdoor, below zone
         let env = env_for_temp(zone_temp, outdoor_temp);

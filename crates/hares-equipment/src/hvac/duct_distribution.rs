@@ -3,7 +3,9 @@
 //! Extracted from `hvac_core.rs` to isolate zone heat routing from speed
 //! staging and thermostat control. No speed or staging knowledge here.
 
-use hares_types::{HaresError, PortContribution, PortDeclaration, PortSlots, ThermalCategory, ZoneId};
+use hares_types::{
+    HaresError, PortContribution, PortDeclaration, PortSlots, ThermalCategory, ZoneId,
+};
 use tracing::warn;
 
 use super::hvac_core::HvacEquipment;
@@ -19,7 +21,7 @@ impl HvacEquipment {
     /// OCHRE HVAC.py lines 188-197.
     pub fn update_zone_heat_fractions(&mut self) {
         // When ducts are located within the conditioned space, losses loop back to
-        // the same zone — effectively DSE = 1.0. Route full gross capacity there.
+        // the same zone -- effectively DSE = 1.0. Route full gross capacity there.
         let effective_dse = if self.duct_zone_id.is_some_and(|dz| dz == self.zone_id) {
             if self.duct_dse < 1.0 {
                 warn!(
@@ -250,7 +252,7 @@ mod tests {
     }
 
     /// When duct_zone_id == zone_id (ducts are within the conditioned space), no heat
-    /// is lost externally — the conditioned zone must receive the full gross capacity.
+    /// is lost externally -- the conditioned zone must receive the full gross capacity.
     #[test]
     fn update_zone_heat_fractions_same_duct_zone() {
         let mut hvac = make_hvac();
@@ -313,7 +315,7 @@ mod tests {
     }
 
     /// write_zone_thermal_contributions with a negative sensible gain (cooling).
-    /// The sign must pass through unchanged — cooling is a negative heat contribution.
+    /// The sign must pass through unchanged -- cooling is a negative heat contribution.
     #[test]
     fn write_zone_thermal_contributions_cooling() {
         use hares_types::{PortSlots, ThermalAccumulator, ThermalCategory};
@@ -534,8 +536,7 @@ mod tests {
     /// (cooling doesn't route to basement). Verify no basement zone entry.
     #[test]
     fn cooling_finished_basement_no_basement_frac() {
-        let mut hvac =
-            HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::AcCooler, ZoneId(1));
         hvac.duct_dse = 0.85;
         hvac.basement_heat_frac = 0.0; // cooling systems don't route to basement
         hvac.basement_zone_id = Some(ZoneId(2));

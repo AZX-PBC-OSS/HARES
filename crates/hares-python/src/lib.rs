@@ -114,9 +114,18 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBillingPeriodSummary>()?;
     m.add_class::<PyTariffTelemetry>()?;
 
-    m.add("HaresConfigError", m.py().get_type::<py_dwelling::HaresConfigError>())?;
-    m.add("HaresEquipmentError", m.py().get_type::<py_dwelling::HaresEquipmentError>())?;
-    m.add("HaresSimulationError", m.py().get_type::<py_dwelling::HaresSimulationError>())?;
+    m.add(
+        "HaresConfigError",
+        m.py().get_type::<py_dwelling::HaresConfigError>(),
+    )?;
+    m.add(
+        "HaresEquipmentError",
+        m.py().get_type::<py_dwelling::HaresEquipmentError>(),
+    )?;
+    m.add(
+        "HaresSimulationError",
+        m.py().get_type::<py_dwelling::HaresSimulationError>(),
+    )?;
 
     m.add("OperatingMode", m.getattr("Mode")?)?;
     m.add("Mode", m.getattr("Mode")?)?;

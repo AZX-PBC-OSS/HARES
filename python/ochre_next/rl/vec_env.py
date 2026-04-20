@@ -140,7 +140,7 @@ class VecDwellingGymEnv:
 
         if rust_batch_step is not None:
             # Controls are already applied via _apply_controls above.
-            # Pass empty action lists — Rust-side action mapping is not yet implemented.
+            # Pass empty action lists -- Rust-side action mapping is not yet implemented.
             empty_actions: list[list[float]] = [[] for _ in self._dwellings]
             raw = rust_batch_step(self._dwellings, empty_actions, self._observation_fields)
             obs = np.asarray([row["obs"] for row in raw], dtype=np.float64)

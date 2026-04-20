@@ -2,7 +2,7 @@
 //!
 //! - Sky temperature formula: Stefan-Boltzmann inversion of horizontal infrared
 //! - Clark-Allen fallback formula for low-IR conditions
-//! - EPW column parsing with SI units (requires real EPW file — marked #[ignore])
+//! - EPW column parsing with SI units (requires real EPW file -- marked #[ignore])
 //! - Ground temperature model properties
 //!
 //! The EPW file tests are #[ignore] because:
@@ -22,7 +22,7 @@
 // These reproduce the exact computation to verify HARES uses the right values.
 // ---------------------------------------------------------------------------
 
-/// Stefan-Boltzmann constant [W/m²/K⁴] — OCHRE/EnergyPlus value.
+/// Stefan-Boltzmann constant [W/m²/K⁴] -- OCHRE/EnergyPlus value.
 const STEFAN_BOLTZMANN: f64 = 5.6697e-8;
 const KELVIN_OFFSET: f64 = 273.15;
 /// Threshold below which Clark-Allen fallback is used (matches INFRARED_FALLBACK_THRESHOLD in epw.rs).
@@ -103,10 +103,10 @@ fn sky_temp_infrared_fallback_threshold_is_50_w_m2() {
     // Verify the threshold constant is correct by checking IR=50 is above threshold.
     const { assert!(INFRARED_FALLBACK_THRESHOLD == 50.0) };
 
-    // Stefan-Boltzmann at IR = 50.0 W/m² (boundary — just at threshold).
+    // Stefan-Boltzmann at IR = 50.0 W/m² (boundary -- just at threshold).
     let sky_sb = sky_temp_stefan_boltzmann_c(50.0);
     // Expected: (50 / 5.6697e-8)^0.25 - 273.15 ≈ 182.6 K - 273.15 ≈ -90.5°C.
-    // This is the transition point — values below 50 fall back to Clark-Allen
+    // This is the transition point -- values below 50 fall back to Clark-Allen
     // because 50 W/m² is physically implausible for atmospheric IR.
     assert!(
         sky_sb < -50.0,
@@ -128,7 +128,7 @@ fn sky_temp_infrared_fallback_threshold_is_50_w_m2() {
 
 #[test]
 fn clark_allen_sky_temp_at_20c_dry_10c_dew() {
-    // T_db = 20°C, T_dp = 10°C — moderate humidity condition.
+    // T_db = 20°C, T_dp = 10°C -- moderate humidity condition.
     // T_db_k = 293.15, T_dp_k = 283.15
     // ln(283.15 / 273.15) = ln(1.0366) ≈ 0.03594
     // factor = (0.787 + 0.764 × 0.03594)^0.25 = (0.787 + 0.02746)^0.25
@@ -185,7 +185,7 @@ fn clark_allen_sky_temp_dew_point_at_dry_bulb_gives_maximum() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: EPW file parsing (integration test — requires real EPW file)
+// Test: EPW file parsing (integration test -- requires real EPW file)
 //
 // Verifies:
 // - All 13 columns parsed with correct SI units (°C, kPa, W/m², m/s)
@@ -285,7 +285,7 @@ fn epw_all_columns_parsed_with_correct_si_units() {
 //
 // This test verifies the stored sky_temp_c is consistent with that formula
 // for rows where IR is above the fallback threshold.
-// Marked #[ignore] — requires real EPW file.
+// Marked #[ignore] -- requires real EPW file.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -306,7 +306,7 @@ fn sky_temp_matches_stefan_boltzmann_for_high_ir_rows() {
         let expected_sky_c = sky_temp_stefan_boltzmann_c(ir);
         let actual_sky_c = weather.sky_temp_c[i];
 
-        // Tolerance: 0.01°C — formula identity with no table rounding.
+        // Tolerance: 0.01°C -- formula identity with no table rounding.
         assert!(
             (actual_sky_c - expected_sky_c).abs() < 0.01,
             "row {i}: sky_temp_c={actual_sky_c:.3}°C, expected {expected_sky_c:.3}°C (IR={ir:.1} W/m²)"
@@ -322,7 +322,7 @@ fn sky_temp_matches_stefan_boltzmann_for_high_ir_rows() {
 
 // ---------------------------------------------------------------------------
 // Test: Clark-Allen fallback consistency for low-IR rows
-// Marked #[ignore] — requires real EPW file.
+// Marked #[ignore] -- requires real EPW file.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -833,7 +833,7 @@ fn pchip_two_consecutive_nans_do_not_panic() {
     let out = pchip_resample(&values, factor);
     assert_eq!(out.len(), values.len() * factor);
 
-    // Interval [1,2] touches first NaN knot — must be NaN.
+    // Interval [1,2] touches first NaN knot -- must be NaN.
     for j in 0..factor {
         let idx = factor + j;
         assert!(
@@ -843,7 +843,7 @@ fn pchip_two_consecutive_nans_do_not_panic() {
         );
     }
 
-    // Interval [4,5] is well past the NaN gap — should recover.
+    // Interval [4,5] is well past the NaN gap -- should recover.
     for j in 0..factor {
         let idx = 4 * factor + j;
         assert!(

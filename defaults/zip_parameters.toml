@@ -1,9 +1,9 @@
 # ZIP load model parameters.
 #
 # Each entry maps an equipment name to its ZIP coefficients:
-#   zp, ip, pp  — real power fractions (impedance, current, power)
-#   zq, iq, pq  — reactive power fractions
-#   pf          — power factor
+#   zp, ip, pp  -- real power fractions (impedance, current, power)
+#   zq, iq, pq  -- reactive power fractions
+#   pf          -- power factor
 #
 # Source: OCHRE defaults/ZIP Parameters.csv
 # References cited therein (Hajagos & Danai 1998, Bokhari et al. 2014, etc.)

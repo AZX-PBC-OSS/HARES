@@ -37,9 +37,9 @@ pub fn resolve_equipment(
     resolve_hvac(building, defaults, &mut specs)?;
     resolve_water_heaters(details, defaults, &mut specs)?;
     resolve_pv(details, defaults, &mut specs)?;
-    resolve_batteries(details, defaults, &mut specs);
-    resolve_ev(details, defaults, &mut specs);
-    resolve_generators(details, defaults, &mut specs);
+    resolve_batteries(details, defaults, &mut specs)?;
+    resolve_ev(details, defaults, &mut specs)?;
+    resolve_generators(details, defaults, &mut specs)?;
     resolve_scheduled_loads(building, defaults, &mut specs);
     resolve_ventilation(details, defaults, &mut specs);
 
@@ -553,6 +553,7 @@ mod tests {
             <FuelType>electricity</FuelType>
             <WaterHeaterType>heat pump water heater</WaterHeaterType>
             <TankVolume>50</TankVolume>
+            <HotWaterTemperature>125</HotWaterTemperature>
             <UniformEnergyFactor>3.45</UniformEnergyFactor>
           </WaterHeatingSystem>
         </WaterHeating>"#,
@@ -630,6 +631,7 @@ mod tests {
             r#"<Batteries>
           <Battery>
             <NominalCapacity><Value>10</Value><Units>kWh</Units></NominalCapacity>
+            <RatedPowerOutput>5000</RatedPowerOutput>
             <RoundTripEfficiency>{rte}</RoundTripEfficiency>
           </Battery>
         </Batteries>"#
@@ -897,7 +899,11 @@ mod tests {
   <Building>
     <BuildingDetails>
       <BuildingSummary>
-        <Site><SiteType>suburban</SiteType></Site>
+        <Site>
+          <SiteType>suburban</SiteType>
+          <Latitude>40.0</Latitude>
+          <Longitude>-105.0</Longitude>
+        </Site>
         <BuildingConstruction>
           <ConditionedFloorArea>1500</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">12000</ConditionedBuildingVolume>
@@ -1162,6 +1168,7 @@ mod tests {
               <HeatingSystemFuel>natural gas</HeatingSystemFuel>
               <HeatingSystemType><Furnace/></HeatingSystemType>
               <HeatingCapacity>60000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>0.80</Value></AnnualHeatingEfficiency>
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");
@@ -1245,6 +1252,7 @@ mod tests {
               <HeatingSystemFuel>natural gas</HeatingSystemFuel>
               <HeatingSystemType><Furnace/></HeatingSystemType>
               <HeatingCapacity>60000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>0.80</Value></AnnualHeatingEfficiency>
             </HeatingSystem>"#,
         );
         let building = parse_building(&xml).expect("should parse");

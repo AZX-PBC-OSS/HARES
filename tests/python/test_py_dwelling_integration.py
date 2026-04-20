@@ -119,7 +119,7 @@ class TestStepByStep:
 
 
 # ---------------------------------------------------------------------------
-# Control injection — all ControlSignal variants
+# Control injection -- all ControlSignal variants
 # ---------------------------------------------------------------------------
 
 
@@ -342,7 +342,7 @@ class TestEquipmentDescriptors:
 
 class TestMetrics:
     def test_metrics_after_simulate(self):
-        # Use a 2-hour evening simulation in January — zone will cool below
+        # Use a 2-hour evening simulation in January -- zone will cool below
         # the thermostat turn-on threshold (19.2°C) forcing the gas furnace
         # to run. Midnight start was too warm from prior internal gains.
         dw = _init_dwelling(
@@ -434,7 +434,7 @@ class TestTimesteps:
 
 
 # ---------------------------------------------------------------------------
-# GIL safety stress test — batch_step
+# GIL safety stress test -- batch_step
 # ---------------------------------------------------------------------------
 
 
@@ -633,7 +633,7 @@ class TestEvLifecycle:
         temp_grid = np.array([25.0])
         crate_grid = np.array([0.5, 1.0])
         soh_grid = np.array([1.0])
-        # Shape: (3, 1, 2, 1) = 6 values — taper at high SoC
+        # Shape: (3, 1, 2, 1) = 6 values -- taper at high SoC
         lut = np.array([1.0, 1.0, 0.8, 0.8, 0.1, 0.1], dtype=np.float32).reshape(
             (3, 1, 2, 1)
         )
@@ -787,7 +787,7 @@ class TestEquipmentMutationRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Actor system — Python subclass
+# Actor system -- Python subclass
 # ---------------------------------------------------------------------------
 
 
@@ -896,7 +896,7 @@ class TestDerSimulationExplorer:
         assert total.max() > 0, "Should have import (positive) power"
         assert total.is_not_nan().all(), "Net import must be finite (no NaN)"
 
-        # Battery SOC should have variance — it charged/discharged at least once
+        # Battery SOC should have variance -- it charged/discharged at least once
         bat_soc_std = bat_soc.std()
         assert bat_soc_std > 0, (
             "Battery SOC should vary over 2-week simulation (charged/discharged)"

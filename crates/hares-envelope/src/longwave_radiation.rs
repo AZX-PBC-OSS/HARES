@@ -82,7 +82,7 @@ pub const SOLAR_ABSORPTANCE_RADIANT_BARRIER: f64 = 0.05;
 ///   F_sky = 0.5 × (1 + cos φ)
 ///
 /// # Arguments
-/// * `tilt_deg` — surface tilt from horizontal [°]; 0 = horizontal roof, 90 = vertical wall
+/// * `tilt_deg` -- surface tilt from horizontal [°]; 0 = horizontal roof, 90 = vertical wall
 ///
 /// # Returns
 /// Sky view factor in `[0, 1]`.
@@ -111,7 +111,7 @@ pub fn sky_view_factor(tilt_deg: f64) -> f64 {
 /// At β = 0 (inverted surface, φ = 180°), all sky radiance collapses to air temperature.
 ///
 /// # Arguments
-/// * `tilt_deg` — surface tilt from horizontal [°]; 0 = horizontal roof, 90 = vertical wall
+/// * `tilt_deg` -- surface tilt from horizontal [°]; 0 = horizontal roof, 90 = vertical wall
 ///
 /// # Returns
 /// β in `[0, 1]`.
@@ -154,11 +154,11 @@ pub struct ExteriorSurface {
 /// Ground temperature equals outdoor air temperature per E+ standard.
 ///
 /// # Arguments
-/// * `surface`     — surface geometry and optical properties (including β)
-/// * `t_sky_c`     — effective sky temperature [°C]; if NaN (e.g. missing
+/// * `surface`     -- surface geometry and optical properties (including β)
+/// * `t_sky_c`     -- effective sky temperature [°C]; if NaN (e.g. missing
 ///   EPW data), falls back to `t_air_c` so all terms collapse to air temperature
-/// * `t_air_c`     — outdoor air temperature [°C] (also used as ground temperature)
-/// * `t_surface_c` — actual exterior surface temperature [°C].  The caller
+/// * `t_air_c`     -- outdoor air temperature [°C] (also used as ground temperature)
+/// * `t_surface_c` -- actual exterior surface temperature [°C].  The caller
 ///   is responsible for converting RC-network node temperatures to true
 ///   surface temperatures by accounting for any film resistance; passing a
 ///   node temperature directly will introduce systematic error.
@@ -228,8 +228,8 @@ pub struct InteriorSurface {
 /// surfaces, usually close to the zone air temperature.
 ///
 /// # Arguments
-/// * `emissivity` — surface emissivity [-]
-/// * `t_avg_c`    — representative average temperature [°C]
+/// * `emissivity` -- surface emissivity [-]
+/// * `t_avg_c`    -- representative average temperature [°C]
 #[must_use]
 pub fn linearised_h_r(emissivity: f64, t_avg_c: f64) -> f64 {
     4.0 * emissivity * STEFAN_BOLTZMANN * (t_avg_c + CELSIUS_TO_KELVIN).powi(3)
@@ -254,8 +254,8 @@ pub fn linearised_h_r(emissivity: f64, t_avg_c: f64) -> f64 {
 ///   Q_net,i = J_in,i - ε_i · σ · A_i · T_surf,i⁴
 ///
 /// # Arguments
-/// * `surfaces`      — slice of interior surface parameters
-/// * `t_surfaces_c`  — actual surface temperatures [°C], same length as
+/// * `surfaces`      -- slice of interior surface parameters
+/// * `t_surfaces_c`  -- actual surface temperatures [°C], same length as
 ///   `surfaces`.  The caller must supply true surface temperatures
 ///   (accounting for any film resistance), not RC-network node temperatures.
 ///
@@ -430,11 +430,11 @@ impl ScriptFCoefficients {
 /// where T_mrt is the area-weighted mean surface temperature.
 ///
 /// # Arguments
-/// * `surfaces`     — interior surface parameters
-/// * `t_surfaces_c` — actual surface temperatures [°C].  The caller must
+/// * `surfaces`     -- interior surface parameters
+/// * `t_surfaces_c` -- actual surface temperatures [°C].  The caller must
 ///   supply true surface temperatures (accounting for any film resistance),
 ///   not RC-network node temperatures.
-/// * `t_zone_c`     — zone air temperature used for h_r linearisation [°C]
+/// * `t_zone_c`     -- zone air temperature used for h_r linearisation [°C]
 #[must_use]
 pub fn interior_longwave_linearised_w(
     surfaces: &[InteriorSurface],
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn interior_lw_energy_conservation_asymmetric_areas() {
-        // Unequal areas — energy must still balance.
+        // Unequal areas -- energy must still balance.
         let surfaces = vec![
             InteriorSurface {
                 area_m2: 5.0,
@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn linearised_interior_lw_conserves_energy_mixed_emissivity() {
-        // Surfaces with different emissivities — exercises the ε·A weighted MRT
+        // Surfaces with different emissivities -- exercises the ε·A weighted MRT
         // path.  A pure area-weighted MRT produces a non-zero sum, so this test
         // would fail without the ε·A weighting.
         let surfaces = vec![
@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Sky view factor — tilt > 90°
+    // Sky view factor -- tilt > 90°
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
@@ -1264,7 +1264,7 @@ mod tests {
 
     #[test]
     fn scriptf_mixed_emissivity_energy_conservation() {
-        // Enclosure with mixed emissivities — tests that the T⁴ method
+        // Enclosure with mixed emissivities -- tests that the T⁴ method
         // conserves energy even when emissivities differ significantly.
         let surfaces = vec![
             InteriorSurface {
@@ -1303,7 +1303,7 @@ mod tests {
             },
         ];
         let sf = ScriptFCoefficients::compute(&surfaces);
-        let t = vec![60.0, 0.0]; // 60°C delta — large enough for T⁴ nonlinearity
+        let t = vec![60.0, 0.0]; // 60°C delta -- large enough for T⁴ nonlinearity
 
         let q_scriptf = sf.net_flux_w(&t);
         let q_linear = interior_longwave_linearised_w(&surfaces, &t, 30.0);

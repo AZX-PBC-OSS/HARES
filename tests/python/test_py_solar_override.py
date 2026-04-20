@@ -114,7 +114,7 @@ class TestSolarOverrideNumpy:
         n_steps = 5
 
         # High solar ramp: 0, 500, 1000, 1500, 2000 W/m² (midnight, so
-        # Perez baseline is zero — all solar comes from the override).
+        # Perez baseline is zero -- all solar comes from the override).
         data = {}
         for sid in surface_ids:
             arr = np.arange(n_steps, dtype=np.float64) * 500.0
@@ -277,7 +277,7 @@ class TestSolarOverrideClear:
         diff_to_with = abs(t_after - t_with)
 
         # After clear, behaviour should return closer to the non-override baseline.
-        # At minimum, the override must have had *some* effect — if all three are
+        # At minimum, the override must have had *some* effect -- if all three are
         # identical the test is vacuous.
         assert t_without != t_with or diff_to_without <= diff_to_with, (
             f"Expected post-clear step to be closer to no-override baseline: "

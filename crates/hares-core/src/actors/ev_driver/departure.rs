@@ -1,4 +1,4 @@
-//! DepartureDeadline — hard constraint near departure time.
+//! DepartureDeadline -- hard constraint near departure time.
 
 use chrono::Datelike;
 use hares_types::DepartureConstraint;

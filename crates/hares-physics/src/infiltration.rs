@@ -1,6 +1,6 @@
 //! Air infiltration models (Sherman-Grimsrud, ELA-based).
 //!
-//! # Pressure exponent (`n_i`) — ASHRAE method only
+//! # Pressure exponent (`n_i`) -- ASHRAE method only
 //!
 //! The infiltration pressure exponent `n_i` describes how air leakage rate
 //! scales with the driving pressure difference across the building envelope:
@@ -48,7 +48,7 @@ const URBAN_DELTA_M: f64 = 460.0;
 pub const N_I_MIN: f64 = 0.5;
 /// Maximum physically meaningful pressure exponent (laminar crack flow).
 pub const N_I_MAX: f64 = 0.7;
-/// Default pressure exponent — matches OCHRE / ResStock typical residential (0.65).
+/// Default pressure exponent -- matches OCHRE / ResStock typical residential (0.65).
 pub const N_I_DEFAULT: f64 = 0.65;
 
 /// Canonical terrain classes from the architecture appendix.
@@ -177,7 +177,7 @@ pub fn terrain_wind_speed_for_class(u_met: f64, class: TerrainClass, height: f64
 /// 1. Zone temperature > outdoor temperature (stack buoyancy drives outward exhaust).
 /// 2. Zone temperature > `t_base_c` (occupant comfort; no cooling benefit otherwise).
 /// 3. Outdoor humidity ratio < `max_outdoor_humidity_ratio` (muggy outdoor air is
-///    not beneficial for cooling — OCHRE default threshold: 0.0115 kg/kg from BA HSP).
+///    not beneficial for cooling -- OCHRE default threshold: 0.0115 kg/kg from BA HSP).
 ///
 /// When gated on, an adjustment factor `adj = (T_zone - T_base) / (T_zone - T_outdoor)`
 /// is applied to scale the flow proportionally to how far above the comfort base the
@@ -201,9 +201,9 @@ pub fn terrain_wind_speed_for_class(u_met: f64, class: TerrainClass, height: f64
 ///   when ≥ `max_outdoor_humidity_ratio`
 /// - `max_outdoor_humidity_ratio`: humidity threshold [kg/kg] (OCHRE default: 0.0115)
 /// - `wind_speed_m_s`: wind speed [m/s]
-/// - `stack_coeff`: ELA stack coefficient [L/(s·cm⁴·K)] — same as infiltration ELA coeff
-/// - `wind_coeff`: ELA wind coefficient [L/(s·cm⁴·(m/s)²)] — same as infiltration ELA coeff
-/// - `zone_volume_m3`: zone volume [m³] — used to cap at 20 ACH
+/// - `stack_coeff`: ELA stack coefficient [L/(s·cm⁴·K)] -- same as infiltration ELA coeff
+/// - `wind_coeff`: ELA wind coefficient [L/(s·cm⁴·(m/s)²)] -- same as infiltration ELA coeff
+/// - `zone_volume_m3`: zone volume [m³] -- used to cap at 20 ACH
 ///
 /// Returns volumetric flow [m³/s], or 0.0 when gating conditions are not met.
 #[allow(clippy::too_many_arguments)]
@@ -248,7 +248,7 @@ pub fn natural_ventilation_flow_m3_s(
     q_nat.min(max_nat_flow)
 }
 
-/// ASHRAE 152 duct-leakage/infiltration interaction — superposition formula.
+/// ASHRAE 152 duct-leakage/infiltration interaction -- superposition formula.
 ///
 /// When the HVAC fan is running, unbalanced duct leakage pressurises or
 /// depressurises the house, shifting the natural infiltration rate.  ASHRAE
@@ -370,11 +370,11 @@ pub fn terrain_wind_speed_for_class_typed(
 /// Values from Walker & Wilson (1998) Table 3 and ResStock `get_aim2_shelter_coefficient`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShieldingClass {
-    /// Typical suburban — `shelter_raw = 0.5`.
+    /// Typical suburban -- `shelter_raw = 0.5`.
     Normal,
-    /// Flat terrain, few obstructions — `shelter_raw = 0.9`.
+    /// Flat terrain, few obstructions -- `shelter_raw = 0.9`.
     Exposed,
-    /// Dense surroundings — `shelter_raw = 0.3`.
+    /// Dense surroundings -- `shelter_raw = 0.3`.
     WellShielded,
 }
 
@@ -392,7 +392,7 @@ impl ShieldingClass {
 
 /// Foundation leakage distribution class.
 ///
-/// Walker & Wilson (1998) Table 1 — leakage fractions for ceiling/walls/floor.
+/// Walker & Wilson (1998) Table 1 -- leakage fractions for ceiling/walls/floor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FoundationLeakageClass {
     /// Vented crawlspace: ceil=0.15, wall=0.35, floor=0.50.
@@ -452,7 +452,7 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     const RHO: f64 = 1.2041;
     /// Standard gravity [m/s²].
     const G: f64 = 9.80665;
-    /// Assumed indoor temperature [K] ≈ 23 °C (73.5 °F) — matches OCHRE.
+    /// Assumed indoor temperature [K] ≈ 23 °C (73.5 °F) -- matches OCHRE.
     const T_IN_K: f64 = 296.15;
 
     let n_i = params.n_i.clamp(N_I_MIN, N_I_MAX);
@@ -462,7 +462,7 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     // Q_50 = C × 50^n_i  →  C = Q_50 / 50^n_i
     let c_flow = (params.ach50 * params.volume_m3) / (SECONDS_PER_HOUR * 50.0_f64.powf(n_i));
 
-    // Step 2: Leakage distribution — Walker & Wilson (1998) Table 1
+    // Step 2: Leakage distribution -- Walker & Wilson (1998) Table 1
     let (leak_ceil, leak_floor) = match params.foundation {
         FoundationLeakageClass::VentedCrawlspace => (0.15, 0.50),
         FoundationLeakageClass::Other => (0.25, 0.25),
@@ -473,12 +473,12 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     let r_i = (leak_ceil + leak_floor) * (1.0 - y_i);
     let x_i_raw = (leak_ceil - leak_floor) * (1.0 - y_i);
 
-    // Step 3: Stack factor — Walker & Wilson (1998) Eq. 9-12
+    // Step 3: Stack factor -- Walker & Wilson (1998) Eq. 9-12
     let m_o = (x_i_raw + (2.0 * n_i + 1.0) * y_i).powi(2) / (2.0 - r_i);
     let m_i = m_o.min(1.0); // Eq. 10-11
 
     let f_i = if params.has_flue {
-        // Flue correction — Walker & Wilson (1998) Eq. 12-13
+        // Flue correction -- Walker & Wilson (1998) Eq. 12-13
         let ncfl = params.floors_above_grade.max(1.0);
         let z_f = (ncfl + 0.5) / ncfl;
         // Critical ceiling-floor leakage difference (Eq. 13)
@@ -494,11 +494,11 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     // Walker & Wilson (1998) Eq. 9
     let f_s = ((1.0 + n_i * r_i) / (n_i + 1.0)) * (0.5 - 0.5 * m_i.powf(1.2)).powf(n_i + 1.0) + f_i;
 
-    // Step 4: Stack coefficient Cs — pure SI
+    // Step 4: Stack coefficient Cs -- pure SI
     // Cs = f_s × (ρ·g·H / T_in)^n_i  [(Pa/K)^n_i]
     let cs = f_s * (RHO * G * params.infiltration_height_m / T_IN_K).powf(n_i);
 
-    // Step 5: Wind factor — Walker & Wilson (1998) Eq. 15-25
+    // Step 5: Wind factor -- Walker & Wilson (1998) Eq. 15-25
     let f_w = if matches!(params.foundation, FoundationLeakageClass::VentedCrawlspace) {
         // Crawlspace modified wind factor (Eq. 20-24)
         let x_i = x_i_raw.min(1.0 - 2.0 * y_i); // Eq. 25 clamp
@@ -514,7 +514,7 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
             - y_i / 4.0 * (j_i - 2.0 * y_i * j_i.powi(4))
     };
 
-    // Step 6: Wind coefficient Cw — pure SI
+    // Step 6: Wind coefficient Cw -- pure SI
     // Cw = f_w × (ρ/2)^n_i  [(Pa/(m/s)²)^n_i]
     let cw = f_w * (RHO / 2.0).powf(n_i);
 
@@ -522,7 +522,7 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     let c_s = c_flow * cs;
     let c_w = c_flow * cw;
 
-    // Step 8: Shelter coefficient — terrain-corrected
+    // Step 8: Shelter coefficient -- terrain-corrected
     // f_t from terrain_wind_speed() with u_met=1.0 at infiltration height
     let f_t = terrain_wind_speed(
         1.0,
@@ -616,7 +616,7 @@ pub fn calculate_ela_coefficients(
     let stack_coeff = cs_m2 * 1e-2;
 
     // Terrain wind speed correction f_t using the full ASHRAE HOF Chapter 16
-    // two-parameter power law — the same model as terrain_wind_speed().
+    // two-parameter power law -- the same model as terrain_wind_speed().
     // f_t = (δ_met / h_met)^α_met × (H_total / δ_site)^α_site
     let h_total = (zone_height_m + zone_height_above_ground_m).max(0.1);
     let f_t = (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
@@ -871,14 +871,14 @@ mod tests {
     // Natural ventilation
     // -----------------------------------------------------------------------
 
-    /// Default test parameters — warm zone, cool outdoor, dry outdoor air,
+    /// Default test parameters -- warm zone, cool outdoor, dry outdoor air,
     /// non-trivial window area and ELA coefficients.
     fn nat_vent_base_args() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) {
         (
             0.5,       // open_area_m2
             26.0,      // t_zone_c
             18.0,      // t_outdoor_c
-            22.778,    // t_base_c  (73 °F — OCHRE default)
+            22.778,    // t_base_c  (73 °F -- OCHRE default)
             0.008,     // outdoor_humidity_ratio
             0.0115,    // max_outdoor_humidity_ratio
             3.0,       // wind_speed_m_s
@@ -1311,7 +1311,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // duct_leakage_infiltration_m3_s — ASHRAE 152 §9.3 superposition
+    // duct_leakage_infiltration_m3_s -- ASHRAE 152 §9.3 superposition
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1343,7 +1343,7 @@ mod tests {
         let volume_m3 = 300.0;
         let infil_fan_off = 0.35 * volume_m3 / 60.0; // 1.75 m³/s
         let base = infil_fan_off;
-        let ret = infil_fan_off * 0.5; // 0.875 m³/s — well above the 1% threshold
+        let ret = infil_fan_off * 0.5; // 0.875 m³/s -- well above the 1% threshold
         let result = duct_leakage_infiltration_m3_s(base, 0.0, ret, volume_m3);
         assert!(
             result < base * 0.99,
@@ -1378,7 +1378,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Formula self-consistency checks — verify ashrae_wind_stack() output
+    // Formula self-consistency checks -- verify ashrae_wind_stack() output
     // matches hand-evaluated Q = sqrt(Q_stack² + Q_wind²). These confirm
     // the implementation is faithful to the formula, not that the formula
     // itself is correct (see aim2_ochre_cross_validation for external check).

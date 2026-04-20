@@ -1,6 +1,6 @@
-//! IdealThermostat actor — external setpoint override control.
+//! IdealThermostat actor -- external setpoint override control.
 //!
-//! This actor represents *external user override* behavior — a person walking
+//! This actor represents *external user override* behavior -- a person walking
 //! to the thermostat and changing the setpoint, putting it on hold, or a
 //! smart thermostat program pushing a schedule change. It does NOT replace
 //! the equipment's internal schedule; it pushes `ThermalSetpoint` overrides
@@ -15,8 +15,8 @@
 //! # Design Principles
 //!
 //! 1. Equipment is self-contained with internal schedules (thermostat profiles, etc.)
-//! 2. Actors only dispatch `ControlSignal`s — they never mutate equipment directly
-//! 3. When no override is active, emit nothing — equipment uses its internal schedule
+//! 2. Actors only dispatch `ControlSignal`s -- they never mutate equipment directly
+//! 3. When no override is active, emit nothing -- equipment uses its internal schedule
 //! 4. Override signals use `PriorityTier::UserOverride` (higher than Schedule)
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
@@ -70,7 +70,7 @@ impl OverrideState {
     ///
     /// # Panics (debug only)
     ///
-    /// Panics if `heating_c >= cooling_c` — physically impossible setpoint inversion.
+    /// Panics if `heating_c >= cooling_c` -- physically impossible setpoint inversion.
     pub fn dual(heating_c: f64, cooling_c: f64) -> Self {
         debug_assert!(
             heating_c < cooling_c,
@@ -164,7 +164,7 @@ impl IdealThermostat {
     ///
     /// # Panics (debug only)
     ///
-    /// Panics if `heating_c >= cooling_c` — physically impossible setpoint inversion.
+    /// Panics if `heating_c >= cooling_c` -- physically impossible setpoint inversion.
     pub fn with_setpoints(mut self, heating_c: f64, cooling_c: f64) -> Self {
         debug_assert!(
             heating_c < cooling_c,

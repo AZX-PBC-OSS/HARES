@@ -4,7 +4,7 @@
 //! infiltration coupling) and the ideal capacity solving method:
 //! - `solve_ideal_capacity_for_target`: compute HVAC capacity needed to reach an explicit target
 //!
-//! All methods operate on pre-allocated buffers owned by `ThermalSolver` — zero per-step heap
+//! All methods operate on pre-allocated buffers owned by `ThermalSolver` -- zero per-step heap
 //! allocation.
 
 use hares_types::{DomainUpdate, EnvironmentState, PortSlots, ZoneId};
@@ -16,7 +16,7 @@ impl ThermalSolver {
     ///
     /// Uses `last_u`, `last_coupling`, and `last_coupled_lu` as background.
     /// When `prepare_inputs()` has been called first (two-phase path), these
-    /// contain current-step weather/solar/infiltration data. Zero allocation —
+    /// contain current-step weather/solar/infiltration data. Zero allocation --
     /// the coupled LU is cached by `prepare_inputs` or the previous `integrate`.
     ///
     /// Returns the required capacity in watts (positive = heating, negative = cooling),
@@ -87,7 +87,7 @@ impl ThermalSolver {
     /// Phase 1: build input vector and coupling from current weather/solar/infiltration.
     /// Stores results in `last_u`, `last_coupling`, `last_coupled_lu` so that
     /// `solve_ideal_capacity_for_target` sees current-step data.
-    /// Does NOT cache u for the integration step — `integrate` rebuilds it from
+    /// Does NOT cache u for the integration step -- `integrate` rebuilds it from
     /// post-dispatch ports.
     pub(super) fn prepare_inputs_inner(&mut self, ports: &PortSlots, env: &EnvironmentState) {
         let saved_ext_temps = self.exterior_surface_temps.clone();

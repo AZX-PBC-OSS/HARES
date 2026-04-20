@@ -79,14 +79,14 @@ impl LatentDegradationParams {
 /// (more sensible-dominated) and <= 1.0.
 ///
 /// # Parameters
-/// - `steady_state_shr`       — SHR computed from coil physics at full-on conditions.
-/// - `runtime_fraction`       — RTF = PLR / PLF (fraction of time compressor runs).
-/// - `entering_db_c`          — Coil entering dry-bulb temperature [°C].
-/// - `entering_wb_c`          — Coil entering wet-bulb temperature [°C].
-/// - `rated_latent_capacity_w` — Latent capacity at AHRI rated conditions [W].
-/// - `actual_latent_capacity_w` — Latent capacity at current operating conditions [W].
-/// - `params`                 — Henderson-Rengarajan model coefficients.
-/// - `heating_rtf` — Companion heating coil RTF, if heating runs during AC
+/// - `steady_state_shr`       -- SHR computed from coil physics at full-on conditions.
+/// - `runtime_fraction`       -- RTF = PLR / PLF (fraction of time compressor runs).
+/// - `entering_db_c`          -- Coil entering dry-bulb temperature [°C].
+/// - `entering_wb_c`          -- Coil entering wet-bulb temperature [°C].
+/// - `rated_latent_capacity_w` -- Latent capacity at AHRI rated conditions [W].
+/// - `actual_latent_capacity_w` -- Latent capacity at current operating conditions [W].
+/// - `params`                 -- Henderson-Rengarajan model coefficients.
+/// - `heating_rtf` -- Companion heating coil RTF, if heating runs during AC
 ///   off-cycles (e.g. heat-pump + auxiliary heat).
 ///   Pass `None` or `Some(0.0)` when not applicable.
 ///
@@ -164,7 +164,7 @@ pub(super) fn effective_shr_with_latent_degradation(
         toff_capped
     };
 
-    // Initial estimate of `aa` — a surrogate for the moisture removal onset time.
+    // Initial estimate of `aa` -- a surrogate for the moisture removal onset time.
     let aa = gamma * toff_effective - 0.25 / twet * gamma * gamma * toff_effective * toff_effective;
 
     // Iterative fixed-point solve for `To` (time at which steady-state latent
@@ -434,7 +434,7 @@ fn calculate_mass_flow_rate(db_in_c: f64, w_in: f64, p_kpa: f64, flow_m3_s: f64)
     // downstream quantities (BF, ADP, Ao) at typical humidity ratios.
     //
     // Reference: ASHRAE 2017 HOF Ch.1 §1.8 "Thermodynamic Properties of
-    // Moist Air" — all specific properties are per kg dry air.
+    // Moist Air" -- all specific properties are per kg dry air.
     // Ref: EnergyPlus `PsyRhoAirFnPbTdbW` also returns ρ_da.
     let rho_da = moist_air_density_kg_m3(p_kpa * 1000.0, db_in_c, w_in.max(0.0));
     flow_m3_s * rho_da
@@ -1101,7 +1101,7 @@ mod coil_psychrometric_tests {
     // Test: high inlet humidity (W > 0.014 kg/kg) drives latent load up,
     // pushing SHR below 0.8.
     //
-    // At 29.44 °C DB (85 °F) and 22.78 °C WB (73 °F), W ≈ 0.01469 kg/kg —
+    // At 29.44 °C DB (85 °F) and 22.78 °C WB (73 °F), W ≈ 0.01469 kg/kg --
     // above the 0.014 threshold specified in the task.  The larger latent
     // fraction relative to total capacity forces SHR < 0.8.
     // ------------------------------------------------------------------
@@ -1217,7 +1217,7 @@ mod coil_psychrometric_tests {
             "coil_ao_factor with zero flow must return 0.0, got {ao}"
         );
         // Ao=0.0 drives BF=exp(0/mfr)=1.0 (no contact with coil), so calculate_shr
-        // must return SHR=1.0 (no dehumidification) or return Err — but must not panic.
+        // must return SHR=1.0 (no dehumidification) or return Err -- but must not panic.
         let shr_result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, 0.0, ao);
         if let Ok(result) = shr_result {
             assert_eq!(
@@ -1244,7 +1244,7 @@ mod coil_psychrometric_tests {
         // guard paths.  The result must not panic, must not return Err, and
         // must return BYPASS_FACTOR_FLOOR because the ADP converges to the dew
         // point, making db_in_c − t_adp < 0 for this high-SHR, high-capacity
-        // combination — triggering the `db_in_c - t_adp <= 0.0` guard at line 383.
+        // combination -- triggering the `db_in_c - t_adp <= 0.0` guard at line 383.
         let result = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.9999);
         assert!(
             result.is_ok(),

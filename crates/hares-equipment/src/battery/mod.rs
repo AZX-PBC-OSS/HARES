@@ -900,7 +900,7 @@ impl Equipment for Battery {
         // -- Update SOC from charge/discharge --
         // DC power seen by the cells after inverter conversion.
         // The terminal-voltage model in compute_electrical() already embeds ohmic
-        // losses in the power balance — do NOT subtract I²R again here.
+        // losses in the power balance -- do NOT subtract I²R again here.
         let dc_power_kw = if power_kw > 0.0 {
             power_kw * self.charge_efficiency
         } else {
@@ -944,7 +944,7 @@ impl Equipment for Battery {
         // With heater_on_discharge (Tesla-style): also fires when discharge is
         // desired but blocked/derated by cold temps, e.g. grid outage at -25 C.
         let _wants_power = wants_charge || (wants_discharge && self.heater_on_discharge);
-        // Heater activates based on cell temperature alone — it protects cells
+        // Heater activates based on cell temperature alone -- it protects cells
         // from freezing regardless of charge/discharge demand. Tesla PW3 Heat
         // Mode and similar systems run proactively to maintain cells above the
         // min_charge_temp threshold.
@@ -1033,7 +1033,11 @@ impl Equipment for Battery {
                 .update_daily(&self.u_neg_table, cell_temp_k, sum_sq_dod);
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
             self.capacity_kwh_nominal = self.capacity_kwh_rated * soh;
-            tracing::debug!(soh, capacity_kwh_nominal = self.capacity_kwh_nominal, "daily SOH update");
+            tracing::debug!(
+                soh,
+                capacity_kwh_nominal = self.capacity_kwh_nominal,
+                "daily SOH update"
+            );
             self.degradation.reset_day_tracking(self.soc);
             self.rainflow.reset_daily();
             self.last_daily_update_day = current_day;
@@ -1055,12 +1059,13 @@ impl Equipment for Battery {
         );
         self.telemetry
             .set(tk::CYCLE_COUNT, self.rainflow.total_cycles());
-        self.telemetry
-            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_fraction() * 100.0);
+        self.telemetry.set(
+            tk::CAPACITY_FADE_PCT,
+            self.degradation.capacity_fade_fraction() * 100.0,
+        );
         self.telemetry.set(tk::TERMINAL_VOLTAGE_V, terminal_v);
         self.telemetry.set(tk::CURRENT_A, current_a);
-        self.telemetry
-            .set(tk::OPERATING_MODE, self.mode.as_code());
+        self.telemetry.set(tk::OPERATING_MODE, self.mode.as_code());
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_kw: Some(ElectricPower::Bidirectional(port_power_kw)),
@@ -1154,15 +1159,17 @@ impl Equipment for Battery {
         self.telemetry.set(tk::CELL_TEMP_C, self.cell_temp_c);
         self.telemetry
             .set(tk::CYCLE_COUNT, self.rainflow.total_cycles());
-        self.telemetry
-            .set(tk::CAPACITY_FADE_PCT, self.degradation.capacity_fade_fraction() * 100.0);
+        self.telemetry.set(
+            tk::CAPACITY_FADE_PCT,
+            self.degradation.capacity_fade_fraction() * 100.0,
+        );
         self.telemetry
             .set(tk::DISCHARGE_DERATE, self.discharge_derate_factor());
         self.telemetry.set(
             tk::CAPACITY_DERATE,
             self.capacity_derate_model.evaluate(self.cell_temp_c),
         );
-        // active_power_kw, ohmic_loss_w, heater_power_w are operational — reset to
+        // active_power_kw, ohmic_loss_w, heater_power_w are operational -- reset to
         // idle defaults; they will be updated on the next step() call.
         self.telemetry.set(
             tk::HEATER_POWER_W,
@@ -1174,8 +1181,7 @@ impl Equipment for Battery {
         );
         self.telemetry
             .set(tk::STANDBY_POWER_W, self.standby_power_w);
-        self.telemetry
-            .set(tk::OPERATING_MODE, self.mode.as_code());
+        self.telemetry.set(tk::OPERATING_MODE, self.mode.as_code());
         // Telemetry fields are recomputed on next step; not restored from checkpoint.
         // active_power_kw, ohmic_loss_w, terminal_voltage_v, current_a reset to idle
         // defaults above and will be updated on the next step() call.
@@ -1198,7 +1204,7 @@ impl Equipment for Battery {
                 max_soc,
             } => {
                 self.soc_target = Some(*target_soc);
-                // Store as operational window — do NOT mutate physical min_soc/max_soc
+                // Store as operational window -- do NOT mutate physical min_soc/max_soc
                 // which are hardware limits set at init from config.
                 self.soc_target_min = *min_soc;
                 self.soc_target_max = *max_soc;
@@ -2138,7 +2144,7 @@ mod tests {
         bat.init(&config, &env).unwrap();
         bat.cell_temp_c = -25.0;
 
-        // No control signal — battery is idle
+        // No control signal -- battery is idle
         let mut ports = default_ports();
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
@@ -3100,7 +3106,7 @@ mod tests {
         }
 
         // The BOL transient (q_li3 ≈ B3_REF ≈ -2.8%) dominates capacity_fade for years.
-        // Verify the individual mechanisms are accumulating — q_li1 and q_li2 must be positive.
+        // Verify the individual mechanisms are accumulating -- q_li1 and q_li2 must be positive.
         assert!(
             state.q_li1 > 0.0,
             "q_li1 (calendar) must be positive after 1 year: got {}",
@@ -3126,7 +3132,7 @@ mod tests {
         let mut state = DegradationState::default();
         state.reset_day_tracking(0.5);
 
-        let cell_temp_k = 308.15; // 35 °C — elevated temperature accelerates calendar aging
+        let cell_temp_k = 308.15; // 35 °C -- elevated temperature accelerates calendar aging
         let v_oc = 3.69;
         let dt_s = 3600.0; // hourly steps, idle battery
 
@@ -3150,7 +3156,7 @@ mod tests {
     }
 
     /// Higher temperature must produce more q_li1 (calendar SEI growth) than lower temperature.
-    /// Uses q_li1 directly — capacity_fade_fraction includes q_li3 whose temperature dependence
+    /// Uses q_li1 directly -- capacity_fade_fraction includes q_li3 whose temperature dependence
     /// differs and can mask the Arrhenius effect during the BOL transient.
     #[test]
     fn degradation_higher_temp_more_fade() {
@@ -3340,7 +3346,7 @@ mod tests {
             state_5.reset_day_tracking(soc);
         }
 
-        // b3_accum < 0 (B3_REF < 0), so q_li3 is strictly negative — the BOL transient
+        // b3_accum < 0 (B3_REF < 0), so q_li3 is strictly negative -- the BOL transient
         // provides a transient capacity gain (negative lithium loss). Not zero as with the
         // former broken `.max(0.0)` clamp.
         assert!(
@@ -3368,7 +3374,7 @@ mod tests {
         );
 
         // Calendar aging (mechanism 1) grows monotonically with time: 60-day q_li1
-        // must exceed 5-day q_li1. Test q_li1 directly — capacity_fade includes the
+        // must exceed 5-day q_li1. Test q_li1 directly -- capacity_fade includes the
         // q_li3 BOL term which is also growing more negative over 60 days.
         assert!(
             state_60.q_li1 > state_5.q_li1,
@@ -3652,7 +3658,7 @@ mod tests {
             ports = default_ports();
         }
 
-        // DR should have reverted to Normal — full power available
+        // DR should have reverted to Normal -- full power available
         bat.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: -5.0,
             reactive_power_kvar: None,

@@ -1,4 +1,11 @@
 {
+  "_provenance": {
+    "source": "OCHRE (https://github.com/NREL/OCHRE)",
+    "ochre_git_hash": "4565980356e4059cbeac623a3d8f602ced938697",
+    "generated_at": "2026-03-25T16:38:41.767685",
+    "generator_script": "tests/python/generate_conditioned_oracle.py",
+    "role": "OCHRE is a ballpark reference; HARES targets better-than-OCHRE physics per ASHRAE HoF and EnergyPlus Engineering Reference. Deviations from OCHRE are investigated but not necessarily corrected."
+  },
   "scenario": "beopt_spring_72h",
   "mode": "dynamic",
   "use_ideal_capacity": false,

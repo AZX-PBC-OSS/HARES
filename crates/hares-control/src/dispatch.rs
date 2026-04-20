@@ -48,7 +48,7 @@ impl DispatchTarget {
     /// Returns true if two targets route to the same equipment.
     ///
     /// Used by the dispatcher to detect and log control signal conflicts
-    /// within a single timestep. Zero-allocation — compares inner references.
+    /// within a single timestep. Zero-allocation -- compares inner references.
     pub fn conflicts_with(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::ByName(a), Self::ByName(b)) => a == b,

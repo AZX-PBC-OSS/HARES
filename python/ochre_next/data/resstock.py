@@ -307,7 +307,7 @@ def fetch_resstock_building(
     Parameters
     ----------
     weather_override:
-        Explicit path to a weather file — skips all weather fetching.
+        Explicit path to a weather file -- skips all weather fetching.
     weather_format:
         ``WeatherFormat.EPW`` to force TMY3 EPW files (even for AMY
         versions like 2025.1), ``WeatherFormat.CSV`` to force the

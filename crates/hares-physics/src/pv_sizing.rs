@@ -512,7 +512,7 @@ pub fn infer_roof_shape(
         return RoofShape::Hip;
     }
 
-    // Low-latitude regions with 2 planes — mild hip signal.
+    // Low-latitude regions with 2 planes -- mild hip signal.
     if distinct_azimuths.len() >= 2 && latitude.is_some_and(|l| l < 30.0) {
         return RoofShape::Hip;
     }
@@ -706,10 +706,10 @@ mod tests {
     fn enumerate_returns_multiple_candidates() {
         let roof = RoofInfo {
             planes: vec![
-                plane(60.0, 26.0, Some(180.0)), // south — best
+                plane(60.0, 26.0, Some(180.0)), // south -- best
                 plane(40.0, 26.0, Some(225.0)), // southwest
                 plane(30.0, 26.0, Some(90.0)),  // east
-                plane(50.0, 26.0, Some(0.0)),   // north — filtered
+                plane(50.0, 26.0, Some(0.0)),   // north -- filtered
             ],
             total_roof_area_m2: 180.0,
         };

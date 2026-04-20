@@ -67,7 +67,7 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
                 for (idx, (a, b)) in ref_traj.iter().zip(other_traj.iter()).enumerate() {
                     if (a - b).abs() > f64::EPSILON {
                         failures.push(format!(
-                            "building={label}: metric[{idx}] differs — threads={ref_threads} → {a}, threads={other_threads} → {b}"
+                            "building={label}: metric[{idx}] differs -- threads={ref_threads} → {a}, threads={other_threads} → {b}"
                         ));
                         break;
                     }
@@ -78,7 +78,7 @@ pub fn run_determinism_checks() -> Result<(), Vec<String>> {
 
     if failures.is_empty() {
         eprintln!(
-            "[determinism] PASS — 3 buildings × {} thread counts all identical",
+            "[determinism] PASS -- 3 buildings × {} thread counts all identical",
             THREAD_COUNTS.len()
         );
         Ok(())

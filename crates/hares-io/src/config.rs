@@ -37,7 +37,7 @@ pub struct SimulationConfig {
     ///
     /// HARES uses `.hour()`, `.weekday()`, `.month()` directly from this
     /// timestamp for schedule evaluation and daily profiles. Only the
-    /// wall-clock digits matter — the `FixedOffset` is carried but ignored
+    /// wall-clock digits matter -- the `FixedOffset` is carried but ignored
     /// unless `civil_timezone` is set for DST-aware reinterpretation.
     ///
     /// Pass the intended local hour: if you mean noon Denver, use `12:00`

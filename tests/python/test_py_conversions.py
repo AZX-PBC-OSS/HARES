@@ -154,7 +154,7 @@ def test_results_column_dtypes(simulated_df):
 
 
 # ---------------------------------------------------------------------------
-# Fleet tests — skipped at fixture level when HPXML data is unavailable
+# Fleet tests -- skipped at fixture level when HPXML data is unavailable
 # ---------------------------------------------------------------------------
 
 

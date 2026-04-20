@@ -582,7 +582,7 @@ fn standby_loss_ua_magnitude() {
 // a reasonable COP or (b) fails clearly with a diagnostic message.
 //
 // If the HPWH is not yet implemented, this test reports the gap but does
-// not fail — it is marked #[ignore] to prevent CI noise until the model
+// not fail -- it is marked #[ignore] to prevent CI noise until the model
 // is complete.
 // ---------------------------------------------------------------------------
 #[test]

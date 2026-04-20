@@ -259,7 +259,7 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
         x_state[0]
     );
 
-    // Zone 2 (unconditioned) must solve by conduction — strictly between
+    // Zone 2 (unconditioned) must solve by conduction -- strictly between
     // outdoor and indoor, not pinned to either endpoint.
     //
     // Analytical expectation from the 2-zone model's steady state with zone 1
@@ -269,8 +269,7 @@ fn initialize_steady_state_pins_only_configured_indoor_zone() {
     //       = (32·22 + 43·(-20)) / 75 = (704 - 860) / 75 = -2.08 C
     let ua_inter: f64 = 32.0;
     let ua_ext: f64 = 43.0;
-    let expected_zone2 =
-        (ua_inter * indoor_setpoint + ua_ext * outdoor) / (ua_ext + ua_inter);
+    let expected_zone2 = (ua_inter * indoor_setpoint + ua_ext * outdoor) / (ua_ext + ua_inter);
     assert!(
         (x_state[1] - expected_zone2).abs() < 1e-3,
         "zone 2 (unconditioned) must solve by conduction: expected {expected_zone2}, got {}",

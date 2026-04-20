@@ -1,4 +1,4 @@
-//! V2HDischarge — discharge to home when deficit exists.
+//! V2HDischarge -- discharge to home when deficit exists.
 
 use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 
@@ -158,7 +158,7 @@ mod tests {
             min_soc: 0.2,
             max_discharge_kw: 5.0,
         };
-        // SOC exactly at threshold — strict > means it should idle
+        // SOC exactly at threshold -- strict > means it should idle
         let ctx = make_ctx(&env, 0.5);
         let vote = pref.score(&ctx);
 

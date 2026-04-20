@@ -39,7 +39,7 @@ pub const HUMIDITY_DENSITY_CORRECTION: f64 = 1.607_768_7;
 ///
 /// OCHRE also uses 2501 kJ/kg (via psychrolib) for enthalpy. No deviation.
 pub const LATENT_HEAT_VAPORISATION_0C_KJ_KG: f64 = 2_501.0;
-/// Latent heat of vaporisation at 0°C [J/kg] — matches OCHRE/psychrolib. Use
+/// Latent heat of vaporisation at 0°C [J/kg] -- matches OCHRE/psychrolib. Use
 /// this when computing moisture fluxes that must be consistent with the humidity
 /// solver (which also uses the 0°C reference).
 pub const LATENT_HEAT_VAPORISATION_0C_J_KG: f64 = 2_501_000.0;
@@ -119,7 +119,7 @@ pub const KW_TO_W: f64 = 1_000.0;
 /// Sensible heat gain per occupant delivered to zone air [W/person].
 ///
 /// OCHRE Envelope.py:904-907: total gain = 400 BTU/h per person; sensible fraction = 0.563
-/// (convective only — radiative fraction is 0 by default in OCHRE residential model).
+/// (convective only -- radiative fraction is 0 by default in OCHRE residential model).
 /// 400 BTU/h × (1055.055_852_62 J / BTU) / 3600 s = 117.228 W; × 0.563 ≈ 66.0 W.
 /// Value kept as the OCHRE-matched rounded constant.
 pub const OCCUPANT_SENSIBLE_GAIN_W: f64 = 66.0;
@@ -131,7 +131,7 @@ pub const OCCUPANT_SENSIBLE_GAIN_W: f64 = 66.0;
 pub const OCCUPANT_LATENT_GAIN_W: f64 = 51.2;
 
 /// Fraction of occupant sensible gain delivered as convection to the zone air node [-].
-/// Not a separate multiplier in OCHRE — the OCHRE sensible gain already represents
+/// Not a separate multiplier in OCHRE -- the OCHRE sensible gain already represents
 /// the convective component only (radiative = 0 by default). Kept for documentation.
 pub const OCCUPANT_CONVECTIVE_FRACTION: f64 = 1.0;
 

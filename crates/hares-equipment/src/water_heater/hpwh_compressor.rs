@@ -34,7 +34,7 @@ pub(super) const DEFAULT_CAPACITY_CURVE: [f64; 6] =
     [0.563, 0.0437, 0.000039, 0.0055, -0.000148, -0.000145];
 pub(super) const DEFAULT_ZONE_TEMP_BOUNDS_C: (f64, f64) = (5.0, 45.0);
 pub(super) const DEFAULT_TANK_TEMP_BOUNDS_C: (f64, f64) = (20.0, 70.0);
-/// OCHRE-compatible ambient temperature lockout range (°C) — standard HPWH.
+/// OCHRE-compatible ambient temperature lockout range (°C) -- standard HPWH.
 /// 45°F = (45-32)×5/9 = 7.2̄°C; 110°F = (110-32)×5/9 = 43.3̄°C.
 pub(super) const DEFAULT_MIN_AMBIENT_TEMP_C: f64 = 5.0 * (45.0 - 32.0) / 9.0; // 7.2222...
 pub(super) const DEFAULT_MAX_AMBIENT_TEMP_C: f64 = 5.0 * (110.0 - 32.0) / 9.0; // 43.3333...

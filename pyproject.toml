@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "ochre_next"
 version = "0.1.0"
-description = "HARES: High-performance Architecture for Residential Energy Simulation"
+description = "HARES: High-performance Agent-based Residential Energy Simulation"
 requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.4.3",

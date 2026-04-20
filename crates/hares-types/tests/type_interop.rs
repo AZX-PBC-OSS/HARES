@@ -1,7 +1,7 @@
 //! Cross-layer type interoperability tests.
 //!
 //! These tests exercise the public API surface of hares-types as an external
-//! crate consumer would see it — re-exports, accumulation semantics, and
+//! crate consumer would see it -- re-exports, accumulation semantics, and
 //! cross-type composition contracts that the inline unit tests do not cover
 //! because they have access to private internals.
 //!
@@ -82,7 +82,7 @@ fn base_env() -> EnvironmentState {
 // ---------------------------------------------------------------------------
 
 /// Accumulating a Thermal contribution into a declared zone must update both
-/// the total and the per-category subtotal atomically — verifies the
+/// the total and the per-category subtotal atomically -- verifies the
 /// cross-type contract between PortDeclaration, PortSlots, and ThermalAccumulator.
 #[test]
 fn thermal_contribution_accumulates_into_declared_zone() {
@@ -314,7 +314,7 @@ fn accumulate_to_undeclared_zone_is_rejected() {
 }
 
 /// ThermalAccumulator::new produces a zero-initialized accumulator bound to
-/// the correct zone — confirms the public constructor contract.
+/// the correct zone -- confirms the public constructor contract.
 #[test]
 fn thermal_accumulator_new_is_zero_and_bound_to_zone() {
     let zone = ZoneId(7);

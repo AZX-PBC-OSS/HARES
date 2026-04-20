@@ -5,7 +5,7 @@
 //! `GasGenerator` and `FuelCell` are newtypes that forward via `delegate_equipment!`.
 //!
 //! Physics overview:
-//!   eta = EfficiencyModel::evaluate(capacity_ratio)  — constant, curve, or quadratic
+//!   eta = EfficiencyModel::evaluate(capacity_ratio)  -- constant, curve, or quadratic
 //!   P_fuel = P_electric / eta
 //!   Q_thermal = P_fuel * eta_thermal  (CHP only)
 //!   Q_flue = P_fuel - P_electric - Q_thermal  (residual loss)
@@ -216,7 +216,7 @@ const DEFAULT_RETURN_TEMP_C: f64 = 60.0;
 const IDLE_KW_THRESHOLD: f64 = 1e-6;
 
 // ---------------------------------------------------------------------------
-// EfficiencyModel — separated concern for computing load-dependent efficiency
+// EfficiencyModel -- separated concern for computing load-dependent efficiency
 // ---------------------------------------------------------------------------
 
 /// Load-dependent electrical efficiency model.
@@ -401,7 +401,7 @@ impl EfficiencyModel {
 // GeneratorKind
 // ---------------------------------------------------------------------------
 
-/// Variant tag — physics are identical; used only for labelling and default efficiency type.
+/// Variant tag -- physics are identical; used only for labelling and default efficiency type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GeneratorKind {
     GasGenerator,
@@ -519,7 +519,9 @@ impl Generator {
             control_capabilities: ControlCapabilities::POWER_SETPOINT
                 | ControlCapabilities::MODE_OVERRIDE
                 | ControlCapabilities::SELF_CONSUMPTION,
-            core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::FUEL | CoreCapabilities::HAS_MODE,
+            core_capabilities: CoreCapabilities::ELECTRIC
+                | CoreCapabilities::FUEL
+                | CoreCapabilities::HAS_MODE,
             telemetry_fields: generator_telemetry_fields(has_chp),
         };
 
@@ -577,7 +579,7 @@ impl Generator {
 
     /// Clamp `target_kw` to enforce the ramp-rate limit on power increases.
     ///
-    /// OCHRE Generator.py:129 — ramp rate only constrains increasing generation.
+    /// OCHRE Generator.py:129 -- ramp rate only constrains increasing generation.
     /// Shutdown and power reduction are instantaneous.
     fn apply_ramp_limit(&self, target_kw: f64, dt_s: f64) -> f64 {
         let delta = target_kw - self.current_power_kw;
@@ -1722,7 +1724,7 @@ mod tests {
         ramp_to_steady_state(&mut generator, 5.0, &base_env());
         assert!(generator.current_power_kw > 0.0, "precondition: running");
 
-        // Set power to 0 — should shut off, not clamp to 3 kW.
+        // Set power to 0 -- should shut off, not clamp to 3 kW.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
                 active_power_kw: 0.0,
@@ -1957,7 +1959,7 @@ mod tests {
             thermal_w > 0.0,
             "q_thermal should be positive when CHP is active"
         );
-        // The fluid port carries flow, not watts directly — just confirm it is active
+        // The fluid port carries flow, not watts directly -- just confirm it is active
         assert!(
             slots.fluid[0].total_flow_kg_s > 0.0,
             "fluid port should carry flow"
@@ -2194,7 +2196,7 @@ mod tests {
             generator.current_power_kw
         );
 
-        // Re-enable self-consumption — should start generating again.
+        // Re-enable self-consumption -- should start generating again.
         generator
             .apply_control(&ControlSignal::SelfConsumption {
                 enabled: true,
@@ -2331,7 +2333,7 @@ mod tests {
 
     #[test]
     fn telemetry_field_names_are_fuel_input_w_thermal_output_w_flue_loss_w() {
-        // Verify the exact field names — old kW names must NOT appear.
+        // Verify the exact field names -- old kW names must NOT appear.
         let generator_no_chp = Generator::new(gen_config(&[]), GeneratorKind::GasGenerator);
         let names_no_chp: Vec<&str> = generator_no_chp
             .descriptor()
@@ -2426,7 +2428,7 @@ mod tests {
 
     #[test]
     fn fuel_cell_defaults_to_curve_efficiency() {
-        // Create a FuelCell without specifying efficiency_type — it must default to Curve,
+        // Create a FuelCell without specifying efficiency_type -- it must default to Curve,
         // not Constant. Curve efficiency at cr=0.25 (OCHRE default) gives eta < rated,
         // whereas Constant would return rated at all loads.
         let config = gen_config(&[

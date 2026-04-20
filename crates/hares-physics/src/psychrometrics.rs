@@ -38,7 +38,7 @@ const SPECIFIC_HEAT_ICE_KJ_KG_K: f64 = 2.1;
 ///
 /// ASHRAE HOF 2021 Ch.1 Eq. 37: this term represents the ice-side heat capacity
 /// in the psychrometer equation below 0°C. Value per ASHRAE: 2.006 kJ/(kg·K).
-/// (The previous value of 0.24 was an IP unit value in BTU/lb/°F — incorrect for SI.)
+/// (The previous value of 0.24 was an IP unit value in BTU/lb/°F -- incorrect for SI.)
 const SPECIFIC_HEAT_WET_BULB_BELOW_FREEZE: f64 = 2.006;
 
 /// Saturation vapor pressure for water [Pa] at temperature `t_c` [°C].
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn wet_bulb_clamps_to_dry_bulb_on_supersaturated_input() {
         let p = 101_325.0;
-        // (t_db_c, w_multiplier) — multiplier applied to w_sat at that dry-bulb
+        // (t_db_c, w_multiplier) -- multiplier applied to w_sat at that dry-bulb
         let cases: &[(f64, f64)] = &[
             (20.0, 2.0),   // moderate above-freezing, 2× saturation
             (-5.0, 2.0),   // sub-zero dry-bulb, different code path at freezing

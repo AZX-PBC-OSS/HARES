@@ -138,7 +138,7 @@ pub enum ControlSignal {
         delay_s: f64,
     },
     /// Limit maximum capacity to a fraction of rated capacity [0, 1].
-    /// OCHRE HVAC.py: `ext_capacity_frac` — clips ideal capacity output to
+    /// OCHRE HVAC.py: `ext_capacity_frac` -- clips ideal capacity output to
     /// `capacity_max * fraction`. Only meaningful for ideal-capacity equipment.
     MaxCapacityFraction {
         fraction: f64,

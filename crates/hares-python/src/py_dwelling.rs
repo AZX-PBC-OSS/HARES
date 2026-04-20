@@ -14,7 +14,9 @@ use hares_equipment::{
     BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig, PvConfig,
     config::ConfigValue,
 };
-use hares_io::{OutputFormat, ResampleOverrides, SimulationConfig, output::metrics::MetricsCalculator};
+use hares_io::{
+    OutputFormat, ResampleOverrides, SimulationConfig, output::metrics::MetricsCalculator,
+};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -22,8 +24,16 @@ use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
 use std::sync::MutexGuard;
 
 pyo3::create_exception!(_hares, HaresConfigError, pyo3::exceptions::PyValueError);
-pyo3::create_exception!(_hares, HaresEquipmentError, pyo3::exceptions::PyRuntimeError);
-pyo3::create_exception!(_hares, HaresSimulationError, pyo3::exceptions::PyRuntimeError);
+pyo3::create_exception!(
+    _hares,
+    HaresEquipmentError,
+    pyo3::exceptions::PyRuntimeError
+);
+pyo3::create_exception!(
+    _hares,
+    HaresSimulationError,
+    pyo3::exceptions::PyRuntimeError
+);
 
 use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
 use crate::py_actor::PyActor;
@@ -490,9 +500,7 @@ pub(crate) fn lock_dwelling_string(
 
 /// GIL-free variant that preserves [`HaresError`] for proper Python exception mapping
 /// via [`to_py_err`].
-fn lock_dwelling_hares(
-    dwelling: &Mutex<Dwelling>,
-) -> Result<MutexGuard<'_, Dwelling>, HaresError> {
+fn lock_dwelling_hares(dwelling: &Mutex<Dwelling>) -> Result<MutexGuard<'_, Dwelling>, HaresError> {
     dwelling.lock().map_err(|e| {
         HaresError::Dwelling(format!(
             "dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
@@ -574,20 +582,17 @@ impl PyDwelling {
     }
 
     pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let sim_result: Result<Result<(), HaresError>, _> =
-            py.detach(|| {
-                std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    let mut dwelling = lock_dwelling_hares(&self.dwelling)?;
-                    dwelling.simulate()?;
-                    Ok(())
-                }))
-            });
+        let sim_result: Result<Result<(), HaresError>, _> = py.detach(|| {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut dwelling = lock_dwelling_hares(&self.dwelling)?;
+                dwelling.simulate()?;
+                Ok(())
+            }))
+        });
         match sim_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(to_py_err(e)),
-            Err(payload) => {
-                return Err(PyRuntimeError::new_err(panic_payload_to_string(payload)))
-            }
+            Err(payload) => return Err(PyRuntimeError::new_err(panic_payload_to_string(payload))),
         }
 
         let dwelling = lock_dwelling(&self.dwelling)?;
@@ -599,15 +604,11 @@ impl PyDwelling {
 
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let step_result: Result<Result<hares_core::StepResult, HaresError>, _> =
-            py.detach(|| {
-                std::panic::catch_unwind(AssertUnwindSafe(|| self.step_core()))
-            });
+            py.detach(|| std::panic::catch_unwind(AssertUnwindSafe(|| self.step_core())));
         let step = match step_result {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => return Err(to_py_err(e)),
-            Err(payload) => {
-                return Err(PyRuntimeError::new_err(panic_payload_to_string(payload)))
-            }
+            Err(payload) => return Err(PyRuntimeError::new_err(panic_payload_to_string(payload))),
         };
 
         if self.zone_keys.is_none() {
@@ -769,7 +770,7 @@ impl PyDwelling {
         let mut dwelling = lock_dwelling(&self.dwelling)?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
 
-        // Set LUTs after init — init may reset internal state
+        // Set LUTs after init -- init may reset internal state
         if let Some(ref lut) = battery.charging_curve_lut {
             eq.set_charging_curve_lut(Some(lut.clone()))
                 .map_err(to_py_err)?;
@@ -840,7 +841,7 @@ impl PyDwelling {
         let mut dwelling = lock_dwelling(&self.dwelling)?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
 
-        // Set LUT after init — init_from_config resets charging_curve_lut to None
+        // Set LUT after init -- init_from_config resets charging_curve_lut to None
         if let Some(ref lut) = ev.charging_curve_lut {
             eq.set_charging_curve_lut(Some(lut.clone()))
                 .map_err(to_py_err)?;
@@ -1640,9 +1641,19 @@ fn build_config(
         raw.map(|map| {
             let mut overrides = ResampleOverrides::default();
             const KNOWN_FIELDS: &[&str] = &[
-                "dry_bulb", "dew_point", "rel_humidity", "pressure", "infrared",
-                "sky_temp", "ground_temp", "opaque_sky_cover", "ghi", "dni", "dhi",
-                "wind_speed", "wind_dir",
+                "dry_bulb",
+                "dew_point",
+                "rel_humidity",
+                "pressure",
+                "infrared",
+                "sky_temp",
+                "ground_temp",
+                "opaque_sky_cover",
+                "ghi",
+                "dni",
+                "dhi",
+                "wind_speed",
+                "wind_dir",
             ];
             fn parse_method(field: &str, v: &str) -> PyResult<hares_io::ResampleMethod> {
                 match v {
@@ -1664,9 +1675,21 @@ fn build_config(
                     )*
                 };
             }
-            set_field!(dry_bulb, dew_point, rel_humidity, pressure, infrared,
-                       sky_temp, ground_temp, opaque_sky_cover, ghi, dni, dhi,
-                       wind_speed, wind_dir);
+            set_field!(
+                dry_bulb,
+                dew_point,
+                rel_humidity,
+                pressure,
+                infrared,
+                sky_temp,
+                ground_temp,
+                opaque_sky_cover,
+                ghi,
+                dni,
+                dhi,
+                wind_speed,
+                wind_dir
+            );
             let unknown: Vec<&str> = map
                 .keys()
                 .filter(|k| !KNOWN_FIELDS.contains(&k.as_str()))
@@ -1767,9 +1790,9 @@ fn python_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     if let Ok(dict) = obj.cast::<PyDict>() {
         let mut map = serde_json::Map::new();
         for (key, value) in dict.iter() {
-            let key_str: String = key.extract().map_err(|_| {
-                PyValueError::new_err("overrides dict keys must be strings")
-            })?;
+            let key_str: String = key
+                .extract()
+                .map_err(|_| PyValueError::new_err("overrides dict keys must be strings"))?;
             map.insert(key_str, python_to_json_value(&value)?);
         }
         return Ok(serde_json::Value::Object(map));

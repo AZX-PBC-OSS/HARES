@@ -1,4 +1,4 @@
-"""Tests for equipment mutation API — add, remove, replace, update equipment at runtime."""
+"""Tests for equipment mutation API -- add, remove, replace, update equipment at runtime."""
 
 import pytest
 

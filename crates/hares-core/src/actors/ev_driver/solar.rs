@@ -1,4 +1,4 @@
-//! SolarTracking — modulate charge rate to PV surplus.
+//! SolarTracking -- modulate charge rate to PV surplus.
 
 use super::preference::{ChargingPreference, DecisionContext, PreferenceVote};
 

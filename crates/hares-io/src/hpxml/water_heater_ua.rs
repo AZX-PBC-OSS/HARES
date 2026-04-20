@@ -124,11 +124,11 @@ fn ua_for_electric_storage(inputs: &UaInputs) -> Result<UaResult, String> {
     let q_load = daily_load_btu(inputs)?;
 
     let (ua_btu_hr_f, ef_out) = if let Some(ef) = inputs.energy_factor {
-        // EF path — Burch & Erickson 2004, §3.
+        // EF path -- Burch & Erickson 2004, §3.
         let ua = q_load * (1.0 / ef - 1.0) / ((T_SETPOINT_EF_F - T_ENV_F) * 24.0);
         (ua, ef)
     } else if let Some(uef) = inputs.uniform_energy_factor {
-        // UEF path — Maguire & Roberts 2020.
+        // UEF path -- Maguire & Roberts 2020.
         let t = T_SETPOINT_UEF_F;
         let t_in = T_IN_UEF_F;
         let denominator = (24.0 * (t - T_ENV_F)) * (0.8 + 0.2 * ((t_in - T_ENV_F) / (t - T_ENV_F)));
@@ -159,7 +159,7 @@ fn ua_for_gas_storage(inputs: &UaInputs) -> Result<UaResult, String> {
         .ok_or_else(|| "Gas storage WH EF→UA requires HeatingCapacity (Btu/hr)".to_string())?;
 
     let (ua_btu_hr_f, eta_c, ef_out) = if let Some(ef) = inputs.energy_factor {
-        // EF path — OCHRE gas formula.
+        // EF path -- OCHRE gas formula.
         let t = T_SETPOINT_EF_F;
         let ua =
             (re / ef - 1.0) / ((t - T_ENV_F) * (24.0 / q_load - 1.0 / (heating_capacity * ef)));
@@ -285,7 +285,7 @@ mod tests {
         }
     }
 
-    /// Electric 50-gal, EF=0.92 — matches OCHRE `parse_water_heater` output.
+    /// Electric 50-gal, EF=0.92 -- matches OCHRE `parse_water_heater` output.
     ///
     /// OCHRE gives ua = 2.2057 Btu/hr·°F → 1.1636 W/K.
     #[test]
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(result.energy_factor, Some(0.92));
     }
 
-    /// Electric 40-gal, EF=0.95 — higher EF → lower standby UA.
+    /// Electric 40-gal, EF=0.95 -- higher EF → lower standby UA.
     #[test]
     fn electric_ef_40gal_higher_ef_gives_lower_ua() {
         let r50 = ua_from_energy_factor(&electric_inputs(Some(0.90), None, 50.0))
@@ -325,7 +325,7 @@ mod tests {
         );
     }
 
-    /// Gas 50-gal, EF=0.59, RE=0.78, cap=40 000 Btu/hr — matches OCHRE output.
+    /// Gas 50-gal, EF=0.59, RE=0.78, cap=40 000 Btu/hr -- matches OCHRE output.
     ///
     /// OCHRE gives ua ≈ 8.8076 Btu/hr·°F → 4.6462 W/K.
     #[test]
@@ -344,7 +344,7 @@ mod tests {
         assert!(result.conversion_efficiency <= 1.0, "eta_c must be ≤ 1.0");
     }
 
-    /// HPWH, UEF=3.45, 50-gal — volume bin ≤58 gal → ua = 3.6 Btu/hr·°F.
+    /// HPWH, UEF=3.45, 50-gal -- volume bin ≤58 gal → ua = 3.6 Btu/hr·°F.
     #[test]
     fn hpwh_uef_50gal_volume_bin() {
         let result = ua_from_energy_factor(&hpwh_inputs(3.45, 50.0))

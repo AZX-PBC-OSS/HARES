@@ -7,8 +7,8 @@ use std::time::Duration as StdDuration;
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
-use hares_io::{Building, DefaultsStore, SimulationConfig};
 use hares_io::hpxml::ZoneType;
+use hares_io::{Building, DefaultsStore, SimulationConfig};
 use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
 
@@ -76,7 +76,7 @@ pub fn building_to_boundary_inputs(
             let interior_zone_idx = find_zone_idx(building, bd.interior_zone.as_ref(), n_zones);
             let exterior = resolve_exterior(building, bd, n_zones);
 
-            // Film resistances first — needed to strip from assembly R-value.
+            // Film resistances first -- needed to strip from assembly R-value.
             let tilt_deg = bd.tilt_deg.unwrap_or(90.0);
             let interior_label = zone_type_to_label(bd.interior_zone.as_ref());
             let exterior_label = zone_type_to_label(bd.exterior_zone.as_ref());
@@ -175,7 +175,7 @@ pub fn building_to_boundary_inputs(
                 } else {
                     tracing::warn!(
                         boundary = %bd.id,
-                        "window boundary has no U-factor — using generic film resistances"
+                        "window boundary has no U-factor -- using generic film resistances"
                     );
                     (fallback_r, r_film_int, r_film_ext)
                 }

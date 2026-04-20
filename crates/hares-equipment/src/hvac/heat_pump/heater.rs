@@ -96,7 +96,7 @@ struct HeatPumpHeaterCore {
     defrost_accumulator_s: f64,
     last_er_off_at: Option<DateTime<FixedOffset>>,
     er_was_on: bool,
-    /// Previous BASE heating setpoint (without DR offset) — used to detect
+    /// Previous BASE heating setpoint (without DR offset) -- used to detect
     /// user-initiated setpoint increases that trigger ER hard lockout. Comparing
     /// against the base setpoint prevents DR expiry (which raises the effective
     /// setpoint back to base) from falsely triggering the lockout.
@@ -109,7 +109,7 @@ struct HeatPumpHeaterCore {
     /// Duration of the ER hard lockout [s] after a setpoint increase.
     er_hard_lockout_time_s: f64,
     /// Previous zone temperature for soft-lockout detection.
-    /// OCHRE HVAC.py: two-stage lockout — after hard lockout expires, ER stays off
+    /// OCHRE HVAC.py: two-stage lockout -- after hard lockout expires, ER stays off
     /// while zone temp is still rising (heat pump is winning).
     prev_zone_temp_c: f64,
     /// Whether the ER soft lockout is currently active.
@@ -136,7 +136,7 @@ struct HeatPumpHeaterCore {
     ctrl_mode_override: Option<OperatingMode>,
 
     // --- Transient signals (reset each step) ---
-    /// LoadFraction [0..1]; 1.0 = no effect (transient — resets to 1.0 each step).
+    /// LoadFraction [0..1]; 1.0 = no effect (transient -- resets to 1.0 each step).
     ctrl_load_fraction: f64,
 
     // --- Demand response state ---
@@ -569,10 +569,7 @@ impl HeatPumpHeaterCore {
             HeaterVariant::Ashp => DEFAULT_BACKUP_CAPACITY_W,
             HeaterVariant::Minisplit => 0.0,
         };
-        self.backup_capacity_w = cfg
-            .backup_capacity_w
-            .unwrap_or(default_backup)
-            .max(0.0);
+        self.backup_capacity_w = cfg.backup_capacity_w.unwrap_or(default_backup).max(0.0);
         self.backup_eir = cfg
             .backup_eir
             .unwrap_or_else(|| eir_from_backup_fuel(cfg.backup_fuel))
@@ -788,8 +785,10 @@ impl HeatPumpHeaterCore {
         self.telemetry
             .set(tk::DEFROST_EXTRA_POWER_W, step.defrost_extra_power_w);
         self.telemetry.set(tk::DEFROST_Q_W, step.defrost_q_w);
-        self.telemetry
-            .set(tk::DEFROST_CAPACITY_MULTIPLIER, step.defrost_capacity_multiplier);
+        self.telemetry.set(
+            tk::DEFROST_CAPACITY_MULTIPLIER,
+            step.defrost_capacity_multiplier,
+        );
         let sp = self.hvac.effective_setpoints();
         self.telemetry.set(
             tk::HEATING_SETPOINT_C,
@@ -798,8 +797,10 @@ impl HeatPumpHeaterCore {
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
         self.telemetry
             .set(tk::FAN_KW, step.fan_kw * self.hvac.space_fraction);
-        self.telemetry
-            .set(tk::BACKUP_ER_KW, step.backup_er_kw * self.hvac.space_fraction);
+        self.telemetry.set(
+            tk::BACKUP_ER_KW,
+            step.backup_er_kw * self.hvac.space_fraction,
+        );
         self.telemetry.set(
             tk::PAN_HEATER_KW,
             step.pan_heater_kw * self.hvac.space_fraction,
@@ -841,27 +842,26 @@ impl HeatPumpHeaterCore {
 
         let speed_index = self.hvac.last_speed_index;
         let speed_frac = self.hvac.last_speed_frac;
-        let (stage_capacity_w, stage_eir) =
-            if matches!(
-                self.hvac.speed_control_mode,
-                SpeedControlMode::MultiSpeedInterpolated | SpeedControlMode::VariableSpeedIdeal
-            ) {
-                (
-                    self.hvac.interpolated_capacity(
-                        &self.hvac.heating_capacities_w,
-                        speed_index,
-                        speed_frac,
-                    ),
-                    self.hvac.interpolated_eir(speed_index, speed_frac),
-                )
-            } else {
-                (
-                    HvacEquipment::capacity_at_stage(&self.hvac.heating_capacities_w, speed_index),
-                    self.hvac.eir_at_stage(speed_index),
-                )
-            };
+        let (stage_capacity_w, stage_eir) = if matches!(
+            self.hvac.speed_control_mode,
+            SpeedControlMode::MultiSpeedInterpolated | SpeedControlMode::VariableSpeedIdeal
+        ) {
+            (
+                self.hvac.interpolated_capacity(
+                    &self.hvac.heating_capacities_w,
+                    speed_index,
+                    speed_frac,
+                ),
+                self.hvac.interpolated_eir(speed_index, speed_frac),
+            )
+        } else {
+            (
+                HvacEquipment::capacity_at_stage(&self.hvac.heating_capacities_w, speed_index),
+                self.hvac.eir_at_stage(speed_index),
+            )
+        };
 
-        // Capacity biquadratic: evaluate first — needed to derive PLR from
+        // Capacity biquadratic: evaluate first -- needed to derive PLR from
         // solver-provided ideal capacity at current conditions.
         let (_, mut cap_ratio) = self.hvac.evaluate_biquadratic_with_flow(
             speed_index * 2,
@@ -869,7 +869,7 @@ impl HeatPumpHeaterCore {
             env.weather.outdoor_temp_c,
             1.0,
         );
-        // OCHRE HVAC.py:1044-1050 — interpolate biquadratic between bracket stages.
+        // OCHRE HVAC.py:1044-1050 -- interpolate biquadratic between bracket stages.
         if self.hvac.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
             && speed_frac > 0.0
         {
@@ -913,14 +913,14 @@ impl HeatPumpHeaterCore {
         };
         let plf = self.hvac.part_load_factor(plr);
 
-        // EIR curve: divide by PLF — cycling reduces efficiency.
+        // EIR curve: divide by PLF -- cycling reduces efficiency.
         let (_, mut eir_ratio_base) = self.hvac.evaluate_biquadratic_with_flow(
             speed_index * 2 + 1,
             zone.temperature_c,
             env.weather.outdoor_temp_c,
             1.0,
         );
-        // OCHRE HVAC.py:1044-1050 — interpolate EIR biquadratic between bracket stages.
+        // OCHRE HVAC.py:1044-1050 -- interpolate EIR biquadratic between bracket stages.
         if self.hvac.speed_control_mode == SpeedControlMode::MultiSpeedInterpolated
             && speed_frac > 0.0
         {
@@ -930,8 +930,7 @@ impl HeatPumpHeaterCore {
                 env.weather.outdoor_temp_c,
                 1.0,
             );
-            eir_ratio_base =
-                eir_ratio_base * (1.0 - speed_frac) + eir_ratio_high * speed_frac;
+            eir_ratio_base = eir_ratio_base * (1.0 - speed_frac) + eir_ratio_high * speed_frac;
         }
         let eir_ratio = if plf > 0.0 {
             eir_ratio_base / plf
@@ -944,7 +943,7 @@ impl HeatPumpHeaterCore {
         let staged_capacity_w = self
             .hvac
             .apply_startup_capacity_degradation(steady_capacity_w, dt_min);
-        // OCHRE HVAC.py:1156 — clip to capacity_max * ext_capacity_frac.
+        // OCHRE HVAC.py:1156 -- clip to capacity_max * ext_capacity_frac.
         let capacity_ceiling = steady_capacity_w * self.hvac.max_capacity_fraction;
         let mut hp_capacity_w = if hp_on {
             (staged_capacity_w * plr).max(0.0).min(capacity_ceiling)
@@ -992,17 +991,20 @@ impl HeatPumpHeaterCore {
                 defrost_q_w = defrost.q_defrost_w;
                 defrost_capacity_multiplier = defrost.capacity_multiplier;
 
-                let crf = self.defrost_config.capacity_reduction_factor.clamp(0.0, 1.0);
+                let crf = self
+                    .defrost_config
+                    .capacity_reduction_factor
+                    .clamp(0.0, 1.0);
 
                 if self.use_ideal {
-                    // OCHRE HVAC.py:1154-1156 — clamp to post-defrost rated ceiling.
+                    // OCHRE HVAC.py:1154-1156 -- clamp to post-defrost rated ceiling.
                     // capacity_max = rated * cap_mult - q_defrost, then
                     // capacity = min(capacity, capacity_max * ext_capacity_frac).
                     // In HARES ext_capacity_frac is folded into crf.
-                    let capacity_ceiling =
-                        (max_capacity_w * defrost.capacity_multiplier - defrost.q_defrost_w)
-                            .max(0.0)
-                            * crf;
+                    let capacity_ceiling = (max_capacity_w * defrost.capacity_multiplier
+                        - defrost.q_defrost_w)
+                        .max(0.0)
+                        * crf;
                     hp_capacity_w = hp_capacity_w.min(capacity_ceiling);
                 } else {
                     hp_capacity_w = (hp_capacity_w * defrost.capacity_multiplier
@@ -1061,8 +1063,7 @@ impl HeatPumpHeaterCore {
         // zone_heat_fractions (set from duct_dse during init) distributes
         // this to conditioned and duct zones in write_zone_thermal_contributions.
         let mut thermal_output_w = hp_capacity_w + er_capacity_w + fan_power_w;
-        let mut electric_kw =
-            (hp_electric_w + er_electric_w + fan_power_w + pan_heater_w) / 1000.0;
+        let mut electric_kw = (hp_electric_w + er_electric_w + fan_power_w + pan_heater_w) / 1000.0;
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Track compressor-only kW separately so scaling stays consistent with electric_kw.
         let mut compressor_kw = hp_electric_w / 1000.0;
@@ -1074,7 +1075,7 @@ impl HeatPumpHeaterCore {
 
         // Apply control multipliers: DutyCycle (sticky) × LoadFraction (transient)
         // × DR load fraction × DR duty cycle.
-        // ER is on/off — not modulatable — so only compressor and fan are scaled.
+        // ER is on/off -- not modulatable -- so only compressor and fan are scaled.
         let effective_load = self.ctrl_duty_cycle
             * self.ctrl_load_fraction
             * self.dr_load_fraction
@@ -1116,8 +1117,7 @@ impl HeatPumpHeaterCore {
                     backup_er_kw = 0.0;
                     fuel_w = 0.0;
                     step_er_capacity_w = 0.0;
-                    let ratio =
-                        self.ctrl_power_limit_kw / hp_only_total_kw.max(f64::MIN_POSITIVE);
+                    let ratio = self.ctrl_power_limit_kw / hp_only_total_kw.max(f64::MIN_POSITIVE);
                     electric_kw = self.ctrl_power_limit_kw;
                     thermal_output_w = (thermal_output_w - er_thermal) * ratio;
                     compressor_kw *= ratio;
@@ -1170,7 +1170,7 @@ impl HeatPumpHeaterCore {
         // OCHRE HVAC.py: ER hard lockout after setpoint increase prevents expensive
         // resistance heating when the heat pump can handle the ramp.
         // Reference: ResStock/BEopt thermostat modeling documentation.
-        // Compare against the BASE setpoint only — DR offset changes are excluded.
+        // Compare against the BASE setpoint only -- DR offset changes are excluded.
         // Skip lockout on the very first call (prev == NEG_INFINITY means uninitialized).
         if self.prev_base_setpoint.is_finite() && base_setpoint > self.prev_base_setpoint + 0.1 {
             self.er_lockout_remaining_s = self.er_hard_lockout_time_s;
@@ -1182,7 +1182,7 @@ impl HeatPumpHeaterCore {
         let er_allowed_by_hard_lockout = self.er_lockout_remaining_s <= 0.0;
         self.er_lockout_remaining_s = (self.er_lockout_remaining_s - dt_s).max(0.0);
 
-        // OCHRE HVAC.py: two-stage lockout — after hard lockout expires, ER stays
+        // OCHRE HVAC.py: two-stage lockout -- after hard lockout expires, ER stays
         // off while zone temp is still rising (heat pump is winning the load).
         // Time-based safety release: if soft lockout has been active longer than
         // er_hard_lockout_time_s * 2 it releases regardless of zone temp trend.
@@ -2324,7 +2324,7 @@ mod tests {
 
     #[test]
     fn er_soft_lockout_blocks_er_while_zone_temp_is_rising() {
-        // OCHRE HVAC.py: two-stage lockout — after hard lockout expires, ER stays
+        // OCHRE HVAC.py: two-stage lockout -- after hard lockout expires, ER stays
         // off while zone temp is still rising (heat pump is winning the load).
         let cfg = heater_config_with(|typed| {
             typed.er_hard_lockout_time_s = Some(60.0);
@@ -2668,7 +2668,7 @@ mod tests {
 
     // LoadFraction is transient: update_control resets ctrl_load_fraction=1.0 at its start.
     // Signals must be applied AFTER update_control but BEFORE step to take effect that step.
-    // The next update_control call restores the default — no re-apply needed.
+    // The next update_control call restores the default -- no re-apply needed.
     #[test]
     fn load_fraction_resets_each_step() {
         let cfg = heater_config();
@@ -2800,7 +2800,7 @@ mod tests {
         // OAT=0°C: below HP lockout (-17.78°C) threshold, so HP is available.
         //          below ER lockout (4.44°C), so ER is temperature-permitted.
         //          below max_oat_supplemental (21°C), so ER is not EnergyPlus-blocked.
-        // Init directly at zone=20°C so er_was_on is false — ER turn-on requires
+        // Init directly at zone=20°C so er_was_on is false -- ER turn-on requires
         // zone <= 19.4°C and er_thermostat_call is false at the start.
         let env_test = env(20.0, 0.0, 0.003); // zone = setpoint - 1.0°C
 
@@ -2908,7 +2908,7 @@ mod tests {
             "ER must engage at 18°C (below er_turn_on=19.4°C)"
         );
 
-        // Zone rises to 20.0°C — still below OCHRE turn-off (20.4°C): ER must stay on.
+        // Zone rises to 20.0°C -- still below OCHRE turn-off (20.4°C): ER must stay on.
         let mode_below_off = eq.update_control(&make_env(20.0, 0.0, 60));
         assert_eq!(
             mode_below_off,
@@ -2916,7 +2916,7 @@ mod tests {
             "ER must stay on at 20.0°C; OCHRE turn-off threshold is 20.4°C (19.4 + 1.0)"
         );
 
-        // Zone rises to 20.5°C — above OCHRE turn-off (20.4°C): ER must turn off.
+        // Zone rises to 20.5°C -- above OCHRE turn-off (20.4°C): ER must turn off.
         let mode_above_off = eq.update_control(&make_env(20.5, 0.0, 120));
         assert_eq!(
             mode_above_off,
@@ -2940,7 +2940,10 @@ mod tests {
 
         // Engage ER: zone=18°C is below er_turn_on=19.4°C.
         eq.update_control(&make_env(18.0, 0.0, 0));
-        assert!(eq.core.er_was_on, "er_was_on must be true before checkpoint");
+        assert!(
+            eq.core.er_was_on,
+            "er_was_on must be true before checkpoint"
+        );
 
         // Save and restore state.
         let state = eq.save_state();
@@ -2979,19 +2982,19 @@ mod tests {
         let e = make_env(16.0, 0.0, 0);
         eq.init(&cfg, &e).unwrap();
 
-        // Warm up prev_base_setpoint so it equals the initial base (21°C) —
+        // Warm up prev_base_setpoint so it equals the initial base (21°C) --
         // one update_control step with the initial setpoint.
         eq.update_control(&e);
 
         // Apply DR Critical: effective setpoint drops to 21 + (-3) = 18°C.
-        // Base setpoint stays at 21°C — no lockout should arm here.
+        // Base setpoint stays at 21°C -- no lockout should arm here.
         eq.apply_control(&ControlSignal::DemandResponse {
             level: DRLevel::Critical,
             duration_s: None,
         })
         .unwrap();
 
-        // A few steps while DR is active — no lockout, setpoint went DOWN.
+        // A few steps while DR is active -- no lockout, setpoint went DOWN.
         for step in 0..3i64 {
             let t = make_env(16.0, 0.0, step * 60);
             eq.update_control(&t);
@@ -3004,7 +3007,7 @@ mod tests {
         );
 
         // Revert DR to Normal: effective setpoint jumps back to 21°C.
-        // Base setpoint never changed — lockout must still NOT arm.
+        // Base setpoint never changed -- lockout must still NOT arm.
         eq.apply_control(&ControlSignal::DemandResponse {
             level: DRLevel::Normal,
             duration_s: None,
@@ -3042,7 +3045,7 @@ mod tests {
             "lockout must not be active before any setpoint raise"
         );
 
-        // Raise BASE setpoint by +2°C (21 → 23°C) — this is a genuine raise.
+        // Raise BASE setpoint by +2°C (21 → 23°C) -- this is a genuine raise.
         eq.apply_control(&ControlSignal::ThermalSetpoint {
             heating_setpoint_c: Some(23.0),
             cooling_setpoint_c: Some(26.0),
@@ -3072,7 +3075,7 @@ mod tests {
 
         // First set Critical so dr_duty_cycle has a known (possibly modified) value,
         // then switch to High. If High doesn't set dr_duty_cycle the stale Critical
-        // value would remain — this is the M5 bug.
+        // value would remain -- this is the M5 bug.
         eq.apply_control(&ControlSignal::DemandResponse {
             level: DRLevel::Critical,
             duration_s: None,
@@ -3288,7 +3291,7 @@ mod tests {
         use hares_types::OperatingMode;
         let cfg = mshp_config_with(|_| {});
         let mut eq = MinisplitHeater::new(cfg.clone());
-        // Zone well below setpoint (21°C) and OAT above HP lockout — HP should run, ER must not.
+        // Zone well below setpoint (21°C) and OAT above HP lockout -- HP should run, ER must not.
         let environment = env(15.0, 5.0, 0.003);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -3301,7 +3304,10 @@ mod tests {
 
         let mode = eq.core.operating_mode;
         assert!(
-            !matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER),
+            !matches!(
+                mode,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
             "MSHP with no backup must never engage ER, but mode was {mode:?}"
         );
     }
@@ -3374,7 +3380,11 @@ mod tests {
         };
         eq.init(&cfg, &environment).unwrap();
         let mode = eq.update_control(&environment);
-        assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out by OAT");
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingER,
+            "HP must be locked out by OAT"
+        );
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
@@ -3407,7 +3417,12 @@ mod tests {
         );
 
         // core_output.flows.fuel_w must be Some and match.
-        let core_fuel = eq.core_output().flows.fuel_w.as_ref().expect("fuel_w must be Some");
+        let core_fuel = eq
+            .core_output()
+            .flows
+            .fuel_w
+            .as_ref()
+            .expect("fuel_w must be Some");
         assert_eq!(core_fuel.fuel_type, hares_types::FuelType::Gas);
         assert!(
             (core_fuel.consumption_w - expected_fuel_w).abs() < 1e-6,
@@ -3416,7 +3431,9 @@ mod tests {
         );
 
         // Electrical core_output must be zero.
-        if let Some(hares_types::ElectricPower::Consumption(kw)) = eq.core_output().flows.electric_kw {
+        if let Some(hares_types::ElectricPower::Consumption(kw)) =
+            eq.core_output().flows.electric_kw
+        {
             assert!(
                 kw.abs() < 1e-9,
                 "core electric_kw must be zero for gas-only backup, got {kw:.9} kW"
@@ -3529,7 +3546,10 @@ mod tests {
             let zone_c = 15.0 + 0.05 * step as f64;
             let t = make_env(zone_c, 0.0, step * 60);
             let mode = eq.update_control(&t);
-            if matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER) {
+            if matches!(
+                mode,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ) {
                 released = true;
                 break;
             }
@@ -3570,7 +3590,7 @@ mod tests {
         let mode = eq.update_control(&e);
         assert_eq!(mode, OperatingMode::HeatingER, "must be ER-only");
 
-        // Apply 50% duty cycle — this should NOT scale ER.
+        // Apply 50% duty cycle -- this should NOT scale ER.
         eq.apply_control(&ControlSignal::DutyCycle {
             on_fraction: 0.5,
             period_s: None,
@@ -3598,13 +3618,13 @@ mod tests {
             typed.er_setpoint_offset_c = Some(0.0);
         });
 
-        // Do NOT call init() — use new() directly so prev_base_setpoint = NEG_INFINITY.
+        // Do NOT call init() -- use new() directly so prev_base_setpoint = NEG_INFINITY.
         // Then call init() which sets it to the actual setpoint, then update_control.
         let mut eq = ASHPHeater::new(cfg.clone());
         let e = make_env(16.0, 0.0, 0);
         eq.init(&cfg, &e).unwrap();
 
-        // First control call — must not trigger lockout.
+        // First control call -- must not trigger lockout.
         let mode = eq.update_control(&e);
         assert!(
             eq.core.er_lockout_remaining_s <= 0.0,
@@ -3613,7 +3633,10 @@ mod tests {
             eq.core.er_lockout_remaining_s,
         );
         assert!(
-            matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER),
+            matches!(
+                mode,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
             "ER must be allowed on first call; got {mode:?}"
         );
     }
@@ -3646,14 +3669,21 @@ mod tests {
         })
         .unwrap();
         let mode = eq.update_control(&e);
-        assert_eq!(mode, OperatingMode::HeatingHPAndER, "setup must produce HP+ER mode");
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingHPAndER,
+            "setup must produce HP+ER mode"
+        );
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
         let full_electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         let full_compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
         let er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
 
-        assert!(full_electric_kw > 0.0, "must have some power draw before limit");
+        assert!(
+            full_electric_kw > 0.0,
+            "must have some power draw before limit"
+        );
         assert!(er_kw > 0.0, "ER must be running in baseline step");
 
         // A limit halfway between (HP-only) and (HP+ER): shedding ER is sufficient.
@@ -3709,7 +3739,7 @@ mod tests {
     }
 
     // After the soft lockout timeout fires, ER must remain available even if
-    // the zone is still rising — re-arm must not be possible until elapsed resets.
+    // the zone is still rising -- re-arm must not be possible until elapsed resets.
     #[test]
     fn soft_lockout_stays_released_after_timeout() {
         let lockout_s = 60.0_f64;
@@ -3741,7 +3771,10 @@ mod tests {
             let zone_c = 15.0 + 0.1 * step as f64;
             let t = make_env(zone_c, 0.0, step * 60);
             let mode = eq.update_control(&t);
-            if matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER) {
+            if matches!(
+                mode,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ) {
                 released_step = Some(step);
                 break;
             }
@@ -3755,7 +3788,10 @@ mod tests {
             let t = make_env(zone_c, 0.0, step * 60);
             let mode = eq.update_control(&t);
             assert!(
-                matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER),
+                matches!(
+                    mode,
+                    OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+                ),
                 "ER must remain available after timeout release even with rising zone \
                  (step {step}); got {mode:?}"
             );
@@ -3821,8 +3857,8 @@ mod tests {
         use super::super::constants::{
             DEFAULT_BACKUP_CAPACITY_W, DEFAULT_BACKUP_EIR, DEFAULT_ER_HARD_LOCKOUT_TIME_S,
             DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
-            DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W,
-            DEFAULT_HEATING_EIR, DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C,
+            DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
+            DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C,
             DEFAULT_MIN_ER_CYCLE_TIME_S, MAX_OAT_SUPPLEMENTAL_C, MSHP_PAN_HEATER_DEFAULT_KW,
             MSHP_PAN_HEATER_DEFAULT_TEMP_C,
         };
@@ -3958,14 +3994,17 @@ mod tests {
         let cold_env = env(18.0, lockout_c - 10.0, 0.003);
         eq.init(&cfg, &cold_env).unwrap();
 
-        // Step 1: OAT well below lockout — HP must be locked out.
+        // Step 1: OAT well below lockout -- HP must be locked out.
         let mode_cold = eq.update_control(&cold_env);
         assert!(
-            !matches!(mode_cold, OperatingMode::HeatingHP | OperatingMode::HeatingHPAndER),
+            !matches!(
+                mode_cold,
+                OperatingMode::HeatingHP | OperatingMode::HeatingHPAndER
+            ),
             "HP must be off when OAT is well below lockout ({lockout_c}°C); got {mode_cold:?}"
         );
 
-        // Step 2: raise OAT to 5°C — above HP lockout (-5°C) and above ER lockout
+        // Step 2: raise OAT to 5°C -- above HP lockout (-5°C) and above ER lockout
         // (4.44°C), so only HP runs.
         let warm_env = env(18.0, 5.0, 0.003);
         let mode_warm = eq.update_control(&warm_env);
@@ -4063,7 +4102,7 @@ mod tests {
         // warm-OAT baseline where defrost is inactive.
         let cfg = heater_config();
 
-        // Warm baseline: OAT=10°C, low humidity — no defrost expected.
+        // Warm baseline: OAT=10°C, low humidity -- no defrost expected.
         let env_warm = env(18.0, 10.0, 0.002);
         let mut eq_warm = ASHPHeater::new(cfg.clone());
         let mut ports_warm = PortSlots {
@@ -4143,7 +4182,10 @@ mod tests {
             let e = env(18.0 - step as f64 * 0.1, -25.0, 0.003);
             let mode = eq.update_control(&e);
             assert!(
-                !matches!(mode, OperatingMode::HeatingER | OperatingMode::HeatingHPAndER),
+                !matches!(
+                    mode,
+                    OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+                ),
                 "MSHP with no backup must never engage ER at step {step}; got {mode:?}"
             );
             ports.zero();
@@ -4199,12 +4241,12 @@ mod tests {
     }
 
     // When zone temp is just below setpoint but above the ER offset threshold, only the
-    // HP fires — ER must not engage until the zone drops far enough.
+    // HP fires -- ER must not engage until the zone drops far enough.
     #[test]
     fn er_does_not_engage_above_er_setpoint_offset() {
         // er_setpoint_offset_c=1.6: ER fires when zone < 21 - 1.6 = 19.4°C.
         // Zone at 20°C is below setpoint(21) but above the 19.4°C ER turn-on threshold.
-        // OAT=2°C: HP available, ER temperature gate passes — only er_thermostat_call blocks it.
+        // OAT=2°C: HP available, ER temperature gate passes -- only er_thermostat_call blocks it.
         let cfg = heater_config_with(|typed| {
             typed.backup_capacity_w = Some(4_000.0);
             typed.backup_eir = Some(1.0);
@@ -4334,12 +4376,24 @@ mod tests {
         let q_w = eq.telemetry().get(tk::DEFROST_Q_W);
         let cap_mult = eq.telemetry().get(tk::DEFROST_CAPACITY_MULTIPLIER);
 
-        assert!(extra_power.is_some(), "DEFROST_EXTRA_POWER_W must be present");
+        assert!(
+            extra_power.is_some(),
+            "DEFROST_EXTRA_POWER_W must be present"
+        );
         assert!(q_w.is_some(), "DEFROST_Q_W must be present");
-        assert!(cap_mult.is_some(), "DEFROST_CAPACITY_MULTIPLIER must be present");
+        assert!(
+            cap_mult.is_some(),
+            "DEFROST_CAPACITY_MULTIPLIER must be present"
+        );
 
-        assert!(extra_power.unwrap() > 0.0, "defrost extra power must be strictly positive when active");
-        assert!(q_w.unwrap() > 0.0, "defrost q_w must be positive when active");
+        assert!(
+            extra_power.unwrap() > 0.0,
+            "defrost extra power must be strictly positive when active"
+        );
+        assert!(
+            q_w.unwrap() > 0.0,
+            "defrost q_w must be positive when active"
+        );
         assert!(
             cap_mult.unwrap() > 0.0 && cap_mult.unwrap() < 1.0,
             "defrost capacity multiplier must be in (0, 1); got {:.4}",
@@ -4520,7 +4574,7 @@ mod ideal_capacity_tests {
 
     /// Build an `EnvironmentState` with a configurable zone temperature and time resolution.
     /// OAT is held above the HP lockout (default -17.78°C) and above the ER lockout
-    /// (default 4.44°C) so only HP heating is active — isolating the duty-cycle behaviour.
+    /// (default 4.44°C) so only HP heating is active -- isolating the duty-cycle behaviour.
     fn make_env(zone_temp_c: f64, time_res_s: i64) -> EnvironmentState {
         EnvironmentState {
             zones: vec![ZoneState {
@@ -4838,8 +4892,10 @@ mod ideal_capacity_tests {
             e
         };
         eq.init(&cfg, &env).unwrap();
-        eq.apply_control(&ControlSignal::IdealCapacity { capacity_w: IDEAL_W })
-            .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: IDEAL_W,
+        })
+        .unwrap();
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(900), &mut make_ports())
             .unwrap();
@@ -4848,7 +4904,10 @@ mod ideal_capacity_tests {
         let er_w = eq.telemetry().get(tk::ER_CAPACITY_W).unwrap_or(0.0);
 
         // ER must be active (load exceeds HP capacity).
-        assert!(er_w > 0.0, "ER must be active when ideal demand exceeds HP capacity");
+        assert!(
+            er_w > 0.0,
+            "ER must be active when ideal demand exceeds HP capacity"
+        );
         // ER fills exactly the residual: er = (ideal - hp).min(er_rated).
         // Startup capacity degradation may reduce hp_w below steady-state; ER compensates up
         // to its rated limit regardless.
@@ -4878,8 +4937,10 @@ mod ideal_capacity_tests {
             e
         };
         eq.init(&cfg, &env).unwrap();
-        eq.apply_control(&ControlSignal::IdealCapacity { capacity_w: IDEAL_W })
-            .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: IDEAL_W,
+        })
+        .unwrap();
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(900), &mut make_ports())
             .unwrap();
@@ -4959,7 +5020,11 @@ mod ideal_capacity_tests {
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
         let mode = eq.update_control(&env);
-        assert_eq!(mode, OperatingMode::HeatingER, "HP must be locked out in bang-bang test");
+        assert_eq!(
+            mode,
+            OperatingMode::HeatingER,
+            "HP must be locked out in bang-bang test"
+        );
         eq.step(&env, Duration::from_secs(60), &mut make_ports())
             .unwrap();
 
@@ -5049,8 +5114,10 @@ mod ideal_capacity_tests {
         };
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &env).unwrap();
-        eq.apply_control(&ControlSignal::IdealCapacity { capacity_w: IDEAL_W })
-            .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: IDEAL_W,
+        })
+        .unwrap();
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(900), &mut make_ports())
             .unwrap();
@@ -5060,7 +5127,7 @@ mod ideal_capacity_tests {
         assert!(
             er_w < 1e-6,
             "ER must stay off when interpolated HP capacity (10000 W) covers ideal demand \
-             ({IDEAL_W:.0} W); er_capacity_w={er_w:.1} W — Bug 1 fix"
+             ({IDEAL_W:.0} W); er_capacity_w={er_w:.1} W -- Bug 1 fix"
         );
     }
 
@@ -5090,8 +5157,10 @@ mod ideal_capacity_tests {
             e
         };
         eq.init(&cfg, &env).unwrap();
-        eq.apply_control(&ControlSignal::IdealCapacity { capacity_w: IDEAL_W })
-            .unwrap();
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: IDEAL_W,
+        })
+        .unwrap();
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(900), &mut make_ports())
             .unwrap();
@@ -5105,7 +5174,7 @@ mod ideal_capacity_tests {
         // HP must run at full rated capacity (PLR=1.0).
         assert!(
             hp_w >= HP_RATED_W * 0.99,
-            "HP must run at full capacity ({HP_RATED_W:.0} W); got {hp_w:.1} W — \
+            "HP must run at full capacity ({HP_RATED_W:.0} W); got {hp_w:.1} W -- \
              Bug 2 fix: HP PLR denominator must not include ER capacity"
         );
         // ER fills residual: IDEAL - HP = 2000 W.
@@ -5114,5 +5183,4 @@ mod ideal_capacity_tests {
             "ER must fill only the residual ({EXPECTED_ER_W:.0} W); got {er_w:.1} W"
         );
     }
-
 }

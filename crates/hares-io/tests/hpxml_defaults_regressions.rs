@@ -230,7 +230,13 @@ fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
 
 #[test]
 fn base_fixture_resolves_expected_typed_specs_with_repo_defaults() {
-    let building = parse_hpxml_str(&read_fixture("base.xml")).expect("base fixture should parse");
+    let mut building =
+        parse_hpxml_str(&read_fixture("base.xml")).expect("base fixture should parse");
+    // OCHRE `base.xml` omits Site/Latitude and Site/Longitude; inject plausible
+    // Denver, CO coordinates so the ASHRAE 152 duct-DSE computation can run
+    // without triggering the no-silent-defaults guard.
+    building.site.latitude_deg = Some(39.75);
+    building.site.longitude_deg = Some(-104.99);
     let specs = resolve_equipment(&building, &repo_defaults(), &json!({}))
         .expect("base fixture equipment should resolve with repo defaults");
 

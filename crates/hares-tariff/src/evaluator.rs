@@ -2,7 +2,7 @@ use chrono::{DateTime, Datelike, Duration, Timelike};
 use chrono_tz::Tz;
 use hares_types::HaresError;
 
-use crate::billing::{compute_tiered_energy_cost, BillingPeriodSummary, BillingState};
+use crate::billing::{BillingPeriodSummary, BillingState, compute_tiered_energy_cost};
 use crate::types::{ElectricTariff, ExportMode};
 
 pub struct TariffEvaluator {
@@ -48,7 +48,7 @@ impl TariffEvaluator {
         let num_steps = total_seconds as usize / interval_seconds as usize;
         if num_steps == 0 {
             return Err(HaresError::Tariff(
-                "simulation duration is shorter than one interval — no steps to simulate".into(),
+                "simulation duration is shorter than one interval -- no steps to simulate".into(),
             ));
         }
         let mut price_array = Vec::with_capacity(num_steps);
@@ -185,7 +185,7 @@ impl TariffEvaluator {
         // it effectively becomes a 1-sample instantaneous peak. This is
         // physically correct (the interval IS the averaging window). Only
         // warn when the window is longer than the interval but not evenly
-        // divisible — that silently truncates the averaging window.
+        // divisible -- that silently truncates the averaging window.
         let window_seconds = demand_window_minutes as u64 * 60;
         #[allow(clippy::manual_is_multiple_of)]
         if window_seconds > interval_seconds as u64 && window_seconds % interval_seconds as u64 != 0
@@ -281,7 +281,7 @@ impl TariffEvaluator {
             return block.rates_per_kwh[block.thresholds_kwh.len()];
         }
 
-        // No tiered block for current season — return the current step's energy price.
+        // No tiered block for current season -- return the current step's energy price.
         self.price_array[ci]
     }
 
@@ -378,7 +378,7 @@ impl TariffEvaluator {
                             .period_name_table
                             .iter()
                             .position(|n| n == name)
-                            .expect("demand period name not in table — validate() should have caught this")
+                            .expect("demand period name not in table -- validate() should have caught this")
                             as u16;
                         self.billing_state
                             .effective_peak_for_period(idx, &dr.ratchet)
@@ -415,7 +415,7 @@ impl TariffEvaluator {
     /// charges for partial periods. If the simulation ends mid-month, only
     /// the elapsed days are charged.
     ///
-    /// Returns `None` on second call (idempotent — `finalized` flag prevents double-billing).
+    /// Returns `None` on second call (idempotent -- `finalized` flag prevents double-billing).
     /// Returns `Some` even with zero metered load, as fixed charges may apply.
     pub fn finalize(&mut self, sim_end: DateTime<Tz>) -> Option<BillingPeriodSummary> {
         if self.finalized {
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn evaluator_no_match_returns_zero() {
-        // Tariff with only a summer on-peak period — winter timestamps have no match.
+        // Tariff with only a summer on-peak period -- winter timestamps have no match.
         let partial = ElectricTariff {
             tou_schedule: vec![TouPeriod {
                 name: "summer-peak".into(),
@@ -696,7 +696,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        // January weekday — no matching period.
+        // January weekday -- no matching period.
         let start = New_York.with_ymd_and_hms(2025, 1, 6, 17, 0, 0).unwrap();
         let ev = make_evaluator(partial, start, start + Duration::hours(1), 3600);
         assert_eq!(ev.current_price(), 0.0);
@@ -1203,7 +1203,7 @@ mod tests {
     fn evaluator_demand_tou_schedule_produces_nonzero_demand_charge() {
         use crate::types::DemandRate;
 
-        // Monday January 6, 2025 — a weekday.
+        // Monday January 6, 2025 -- a weekday.
         let start = make_start(2025, 1, 6);
         let end = make_start(2025, 2, 6);
         let interval = 3600u32;
@@ -1367,7 +1367,7 @@ mod tests {
         let step_end = start + Duration::seconds(interval as i64);
         let _ = ev.step(1.0, interval as f64, step_end);
 
-        // Any subsequent call must return None — the evaluator is finished.
+        // Any subsequent call must return None -- the evaluator is finished.
         let result = ev.step(1.0, interval as f64, step_end + Duration::hours(1));
         assert!(
             result.is_none(),
@@ -1386,7 +1386,7 @@ mod tests {
         assert!(ev.advance());
         assert!(!ev.advance()); // exhausted
 
-        // Accessors must not panic — they return the last valid value.
+        // Accessors must not panic -- they return the last valid value.
         assert_eq!(ev.current_price(), 0.12);
         assert_eq!(ev.current_export_price(), 0.0);
         assert_eq!(ev.current_period_name(), "flat");
@@ -1513,7 +1513,7 @@ mod tests {
         };
         let mut ev = make_evaluator(tariff, start, end, interval);
 
-        // Step with zero load — no energy, no demand.
+        // Step with zero load -- no energy, no demand.
         let step_end = start + Duration::seconds(interval as i64);
         ev.step(0.0, interval as f64, step_end);
 
@@ -1618,7 +1618,10 @@ mod tests {
         // to get low metered charges but high export credit.
         let summaries = run_all_steps(&mut ev, |i| if i % 3 == 0 { 0.05 } else { -5.0 });
 
-        let s = summaries.into_iter().next().expect("billing period should close");
+        let s = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
         let metered = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd;
 
         // metered < 50 since import is tiny, so floor applies:
@@ -1655,7 +1658,10 @@ mod tests {
 
         let summaries = run_all_steps(&mut ev, |i| if i % 3 == 0 { 0.05 } else { -5.0 });
 
-        let s = summaries.into_iter().next().expect("billing period should close");
+        let s = summaries
+            .into_iter()
+            .next()
+            .expect("billing period should close");
         let metered = s.energy_charge_usd + s.demand_charge_usd + s.fixed_charge_usd;
         let raw_net = metered - s.export_credit_usd;
 

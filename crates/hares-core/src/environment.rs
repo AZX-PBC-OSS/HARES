@@ -351,7 +351,7 @@ impl EnvironmentManager {
     ///
     /// When a DST-aware civil timezone is configured, the schedule is indexed
     /// by civil (wall-clock) time so that occupancy/rate schedules follow local
-    /// DST transitions naturally. Weather indexing is **not** affected — solar
+    /// DST transitions naturally. Weather indexing is **not** affected -- solar
     /// position and meteorological data are physical quantities tied to UTC, not
     /// civil time.
     #[allow(unused_variables)]
@@ -466,7 +466,7 @@ impl EnvironmentManager {
             wet_bulb_from_humidity_ratio(outdoor_temp_c, outdoor_humidity_ratio, pressure_pa);
         let outdoor_enthalpy_j_kg = moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
 
-        // Step 2: per-surface solar irradiance — compute into self.solar_irradiance_buf,
+        // Step 2: per-surface solar irradiance -- compute into self.solar_irradiance_buf,
         // then swap into state.weather.solar_irradiance so the old Vec's capacity is
         // returned to self.solar_irradiance_buf for reuse next step.
         let now = clock.current_time();
@@ -518,7 +518,7 @@ impl EnvironmentManager {
             }
         }
 
-        // Swap solar irradiance buffer into state — the previous Vec's capacity
+        // Swap solar irradiance buffer into state -- the previous Vec's capacity
         // flows back into self.solar_irradiance_buf for use next step.
         std::mem::swap(
             &mut state.weather.solar_irradiance,
@@ -530,7 +530,7 @@ impl EnvironmentManager {
         self.schedule_values_buf
             .extend(self.schedule.columns.iter().map(|col| col[schedule_idx]));
 
-        // Step 4: zones — written from self.zones (already updated by feed_zones or update).
+        // Step 4: zones -- written from self.zones (already updated by feed_zones or update).
         state.zones.clear();
         state.zones.extend_from_slice(&self.zones);
 
@@ -540,7 +540,7 @@ impl EnvironmentManager {
             frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
         });
 
-        // Step 6: custom_domains — swap-based reuse to avoid per-step allocations.
+        // Step 6: custom_domains -- swap-based reuse to avoid per-step allocations.
         self.mains_payload_buf[0] = mains_temp_c;
 
         // Recover previously-swapped Vecs from the existing DomainUpdates.
@@ -632,7 +632,7 @@ impl EnvironmentManager {
 ///
 /// EPW files are indexed by **local standard time** (LST). The simulation
 /// start time is already in local time (`DateTime<FixedOffset>`), so no
-/// UTC→LST conversion is needed — we extract wall-clock components directly.
+/// UTC→LST conversion is needed -- we extract wall-clock components directly.
 ///
 /// The `midpoint_offset_secs` from `WeatherMeta` accounts for the source
 /// file's timestamp convention. For EPW (hour-ending), subtracting half a
@@ -1407,7 +1407,7 @@ mod tests {
     #[test]
     fn perez_model_produces_nonzero_diffuse_on_south_tilted_surface() {
         // June 21 at solar noon for a south-facing building at lat 40°N.
-        // High DNI (800), moderate DHI (100) — Perez conditions satisfied (dhi >= 1).
+        // High DNI (800), moderate DHI (100) -- Perez conditions satisfied (dhi >= 1).
         let mut weather = weather_series();
         weather.dni_w_m2 = vec![800.0, 800.0];
         weather.dhi_w_m2 = vec![100.0, 100.0];
@@ -1424,7 +1424,7 @@ mod tests {
         .expect("manager");
 
         // Solar noon on June 21 UTC at longitude 0°, lat 40°N.
-        // The test clock starts 2024-06-21T12:00:00Z — solar altitude > 60°.
+        // The test clock starts 2024-06-21T12:00:00Z -- solar altitude > 60°.
         let env = manager.update(&clock(), &[]);
 
         // The building fixture has a south-facing vertical wall (azimuth 180°, tilt 90°).
@@ -1510,7 +1510,7 @@ mod tests {
         );
     }
 
-    /// compute_annual_offset: leap year (2024) — May 5 noon.
+    /// compute_annual_offset: leap year (2024) -- May 5 noon.
     /// Feb has 29 days so May 5 = ordinal 126, ordinal0 = 125.
     /// Forward +30min shift: (125*86400 + 12*3600 + 1800) / 3600 = 3012.
     #[test]
@@ -1520,7 +1520,7 @@ mod tests {
         assert_eq!(compute_annual_offset(&meta, start, 3600), 3012);
     }
 
-    /// compute_annual_offset: non-leap year (2023) — May 5 noon.
+    /// compute_annual_offset: non-leap year (2023) -- May 5 noon.
     /// Forward +30min shift: (124*86400 + 12*3600 + 1800) / 3600 = 2988.
     #[test]
     fn annual_offset_non_leap_year_may_5_noon() {

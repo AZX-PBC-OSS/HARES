@@ -157,7 +157,7 @@ class TestBatteryThermalBehavior:
             power = tel["power_kw"][idx]
             max_power = max(max_power, power)
 
-        # No heater — only standby (15W = 0.015 kW)
+        # No heater -- only standby (15W = 0.015 kW)
         assert max_power < 0.05, (
             f"Passive battery should only draw standby (~15W), "
             f"got max {max_power:.4f} kW"
@@ -204,7 +204,7 @@ class TestBatteryThermalBehavior:
 
         LFP batteries like Enphase can charge at low temperatures (with derating).
         The IQ 5P has min_charge_temp_c=-20°C, so it should charge even in
-        Denver January (-19°C) — just at a derated rate.
+        Denver January (-19°C) -- just at a derated rate.
         """
         from ochre_next import ControlSignal
         from conftest import make_dwelling

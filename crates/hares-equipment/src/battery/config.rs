@@ -59,7 +59,7 @@ pub struct BatteryConfig {
     pub cell_thermal_mass_j_per_k: Option<f64>,
     pub cell_ua_w_per_k: Option<f64>,
 
-    // Efficiency — one-way charge/discharge efficiency.
+    // Efficiency -- one-way charge/discharge efficiency.
     // Overridden per-direction by charge_efficiency / discharge_efficiency.
     pub inverter_efficiency: Option<f64>,
     pub charge_efficiency: Option<f64>,

@@ -1,4 +1,4 @@
-//! Battery Management System actor — dispatches charge/discharge control
+//! Battery Management System actor -- dispatches charge/discharge control
 //! signals based on the configured `BmsMode`, PV production, grid prices,
 //! and battery SOC.
 

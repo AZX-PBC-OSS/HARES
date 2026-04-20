@@ -33,7 +33,7 @@ pub fn ochre_signal_to_control(
 
     // Merge SOC / Min SOC / Max SOC into one SOCTarget when present.
     // - SOC alone: target, min, and max all set to the SOC value.
-    // - Min + Max only: target defaults to min_soc (conservative — don't discharge below minimum).
+    // - Min + Max only: target defaults to min_soc (conservative -- don't discharge below minimum).
     // - Any combination: target_soc = SOC if present, else min_soc, else max_soc.
     if soc_target.is_some() || min_soc.is_some() || max_soc.is_some() {
         let effective_target = soc_target

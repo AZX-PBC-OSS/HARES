@@ -51,7 +51,7 @@ impl DayFilter {
 ///
 /// When used inside [`ScheduleSource::TimeWindows`], windows are evaluated in
 /// declaration order and the first match wins. Overlapping windows are allowed
-/// — use ordering to express priority.
+/// -- use ordering to express priority.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TimeWindow {
     pub day: DayFilter,
@@ -351,7 +351,7 @@ pub enum ScheduleSource {
     /// Window-based lookup by day-of-week and time-of-day.
     ///
     /// Windows are evaluated in order; **the first matching window wins**.
-    /// Overlapping windows are permitted — use ordering to express priority
+    /// Overlapping windows are permitted -- use ordering to express priority
     /// (e.g. place a day-specific override before a broad weekday catch-all).
     ///
     /// If no window matches, `default` is used. If `default` is `None`
@@ -360,7 +360,7 @@ pub enum ScheduleSource {
         windows: Vec<TimeWindow>,
         default: Option<f64>,
         /// Seeded RNG for windows with noise. `None` when all windows are
-        /// deterministic (zero-cost — no RNG allocated).
+        /// deterministic (zero-cost -- no RNG allocated).
         rng_state: Option<Box<StochasticState>>,
     },
 }
@@ -724,7 +724,7 @@ impl ScheduleSource {
     ///
     /// Returns the analytical mean for `Constant` and `Shared`.
     /// For `Stochastic`, returns the analytical distribution mean clamped to
-    /// `[clamp_min, clamp_max]` — this is an approximation when clamping is
+    /// `[clamp_min, clamp_max]` -- this is an approximation when clamping is
     /// active (truncated distribution mean differs from clamped analytical mean).
     /// For time-varying sources (`DailyProfile`, `SolarAware`, `TimeWindows`),
     /// returns a representative average (not duration-weighted for `TimeWindows`).
@@ -1043,7 +1043,7 @@ mod tests {
             .expect("valid timestamp");
         assert_eq!(source.value_at(&env).expect("weekend value"), 15.0);
 
-        // 2026-02-10 is a Tuesday — exercises the weekday+month_multiplier path.
+        // 2026-02-10 is a Tuesday -- exercises the weekday+month_multiplier path.
         env.current_time = utc
             .with_ymd_and_hms(2026, 2, 10, 14, 0, 0)
             .single()
@@ -1974,7 +1974,7 @@ mod tests {
                 None,
             )],
             default: None,
-            rng_state: None, // oops — no RNG
+            rng_state: None, // oops -- no RNG
         };
 
         let err = source
@@ -2247,7 +2247,7 @@ mod tests {
             .validate()
             .is_ok()
         );
-        // Zero std_dev degrades to constant — verify sampling returns mean.
+        // Zero std_dev degrades to constant -- verify sampling returns mean.
         let env = default_env();
         let mut src = stochastic(
             DistributionKind::Gaussian {

@@ -1,4 +1,4 @@
-"""HARES: High-performance Architecture for Residential Energy Simulation."""
+"""HARES: High-performance Agent-based Residential Energy Simulation."""
 
 from __future__ import annotations
 

@@ -24,7 +24,7 @@ pub(super) const DEFAULT_BIQUADRATIC_COEFFS: [f64; 6] = [1.0, 0.0, 0.0, 0.0, 0.0
 
 /// Default fan power: 0.365 W/CFM.
 /// Source: ANSI/RESNET/ICC 301-2019 §4.2.2(1) Table 4.2.2(1),
-/// "Default Heating and Cooling Systems" — supply fan power for
+/// "Default Heating and Cooling Systems" -- supply fan power for
 /// forced-air systems.
 const DEFAULT_FAN_POWER_W_PER_CFM: f64 = 0.365;
 const DEFAULT_FAN_POWER_W_PER_M3_S: f64 = DEFAULT_FAN_POWER_W_PER_CFM * CFM_PER_M3_S;
@@ -424,8 +424,14 @@ impl HvacEquipment {
                 let n_stages = cap_curves.len().max(eir_curves.len());
                 let mut interleaved = Vec::with_capacity(n_stages * 2);
                 for i in 0..n_stages {
-                    let cap = cap_curves.get(i).copied().unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
-                    let eir = eir_curves.get(i).copied().unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
+                    let cap = cap_curves
+                        .get(i)
+                        .copied()
+                        .unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
+                    let eir = eir_curves
+                        .get(i)
+                        .copied()
+                        .unwrap_or(DEFAULT_BIQUADRATIC_COEFFS);
                     interleaved.push(cap);
                     interleaved.push(eir);
                 }
@@ -619,7 +625,7 @@ impl HvacEquipment {
     /// as `schedule_setpoints`. Priority:
     ///   1. Per-timestep schedule array (from CSV column)
     ///   2. 24-hour weekday/weekend profile (from HPXML thermostat)
-    ///   3. None — falls through to static_setpoints
+    ///   3. None -- falls through to static_setpoints
     fn resolve_profile_setpoints(&mut self, env: &EnvironmentState) {
         if self.heating_setpoint_source.is_none() && self.cooling_setpoint_source.is_none() {
             return;
@@ -728,9 +734,15 @@ impl HvacEquipment {
     }
 
     pub fn use_ideal_capacity(&self, env: &EnvironmentState) -> bool {
-        let variable_speed_mode = matches!(self.speed_control_mode, SpeedControlMode::VariableSpeedIdeal);
-        let has_four_plus_stages =
-            self.heating_capacities_w.len().max(self.cooling_capacities_w.len()) >= 4;
+        let variable_speed_mode = matches!(
+            self.speed_control_mode,
+            SpeedControlMode::VariableSpeedIdeal
+        );
+        let has_four_plus_stages = self
+            .heating_capacities_w
+            .len()
+            .max(self.cooling_capacities_w.len())
+            >= 4;
         let coarse_auto =
             env.time_res >= ChronoDuration::seconds(IDEAL_CAPACITY_TIME_RES_THRESHOLD_S);
         // Coarse-timestep auto-ideal is only valid for equipment paths that
@@ -743,8 +755,8 @@ impl HvacEquipment {
                 | HvacEquipmentType::AshpHeatPumpAux
                 | HvacEquipmentType::MiniSplitHeat
         );
-        let auto_ideal = (coarse_auto || variable_speed_mode || has_four_plus_stages)
-            && supports_auto_ideal;
+        let auto_ideal =
+            (coarse_auto || variable_speed_mode || has_four_plus_stages) && supports_auto_ideal;
         self.thermostat.use_ideal_capacity || auto_ideal
     }
 
@@ -1296,7 +1308,7 @@ mod tests {
         assert_eq!(sel.speed_index, 0, "initial selection must be low stage");
         hvac.advance_speed_timer(60.0); // first step's dwell at low speed
 
-        // Now jump to a high load — should be blocked by min-time.
+        // Now jump to a high load -- should be blocked by min-time.
         // Timer starts at 60 s; after 9 more select+advance cycles it will be 600 s.
         for step in 1..=9 {
             let sel = hvac.select_speed(0.9);
@@ -1550,7 +1562,7 @@ mod tests {
         // load_fraction = cap_frac[1] = 0.6 exactly.
         // partition_point(|&f| f < 0.6): cap_fracs[0]=0.4 < 0.6 (true), cap_fracs[1]=0.6 < 0.6 (false)
         // → hi=1, lo=0, frac = (0.6 - 0.4) / (0.6 - 0.4) = 1.0
-        // This means "fully at the upper bracket" — equivalent to being at speed_index=1.
+        // This means "fully at the upper bracket" -- equivalent to being at speed_index=1.
         let mut hvac = make_msi_hvac();
         let sel = hvac.select_speed(0.6);
         assert_eq!(sel.speed_index, 0, "lower bracket index is 0");
@@ -1833,7 +1845,7 @@ mod tests {
     #[test]
     fn plf_normal_range_not_affected_by_floor() {
         // Standard AHRI Cd=0.25 produces PLF well above 0.7 at any PLR >= 0.
-        // PLF_raw at PLR=0.0: 1 - 0.25 = 0.75 > 0.7 — floor has no effect.
+        // PLF_raw at PLR=0.0: 1 - 0.25 = 0.75 > 0.7 -- floor has no effect.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
         hvac.plf_cooling_degradation_coeff = 0.25;
         let plf_at_zero = hvac.part_load_factor(0.0);
@@ -1972,7 +1984,7 @@ mod tests {
             .expect("valid");
         hvac.mode_start_at = Some(t0);
 
-        // Propose same mode — no transition needed, always allowed.
+        // Propose same mode -- no transition needed, always allowed.
         assert!(
             hvac.can_transition_mode(ThermostatMode::Heating, t0),
             "same-mode 'transition' must always be allowed"
@@ -2926,11 +2938,19 @@ mod tests {
         // At setpoint (20.0) heating should still be on because turn-off is
         // heating_c + hysteresis * cutout_ratio = 20.0 + 2.0 * 0.5 = 21.0.
         let mode = hvac.update_mode(&env(20.0, 60, 61)).expect("still heating");
-        assert_eq!(mode, ThermostatMode::Heating, "must still be heating below cutout threshold");
+        assert_eq!(
+            mode,
+            ThermostatMode::Heating,
+            "must still be heating below cutout threshold"
+        );
 
         // Just above the cutout threshold (21.0) heating should turn off.
         let mode = hvac.update_mode(&env(21.1, 60, 122)).expect("turns off");
-        assert_eq!(mode, ThermostatMode::Deadband, "must turn off above cutout threshold");
+        assert_eq!(
+            mode,
+            ThermostatMode::Deadband,
+            "must turn off above cutout threshold"
+        );
     }
 
     #[test]

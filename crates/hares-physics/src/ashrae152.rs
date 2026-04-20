@@ -587,7 +587,7 @@ mod tests {
     /// With heating_seas_init = 40 °F → seas_temp = 47 °F.
     #[test]
     fn attic_vented_heating_seas_temp_formula() {
-        // Dummy climate values — only h_seas matters for this formula.
+        // Dummy climate values -- only h_seas matters for this formula.
         let h_seas = 40.0_f64;
         let (_htg_des, htg_seas, _clg_des, _clg_seas, _sr, _rr) = zone_temps(
             Ashrae152ZoneType::AtticVented,
@@ -611,7 +611,7 @@ mod tests {
         let dist = haversine_km(39.7, -104.9, station.latitude_deg, station.longitude_deg);
         assert!(
             dist < 100.0,
-            "nearest station to Denver is {dist:.1} km away — expected <100 km"
+            "nearest station to Denver is {dist:.1} km away -- expected <100 km"
         );
         // Denver heating design temp is well below zero °C but above -10 °F
         assert!(

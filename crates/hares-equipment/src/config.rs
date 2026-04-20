@@ -127,9 +127,9 @@ pub enum ConfigPayload {
     Raw { data: HashMap<String, ConfigValue> },
     #[serde(rename = "typed")]
     Typed {
-        /// Canonical equipment type name — must match EquipmentTypedConfig::equipment_type_name().
+        /// Canonical equipment type name -- must match EquipmentTypedConfig::equipment_type_name().
         type_name: String,
-        /// Schema version — must match EquipmentTypedConfig::schema_version().
+        /// Schema version -- must match EquipmentTypedConfig::schema_version().
         version: u32,
         /// The typed config data as a JSON object.
         data: serde_json::Value,

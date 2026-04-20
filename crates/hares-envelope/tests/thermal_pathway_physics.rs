@@ -1,7 +1,7 @@
 //! Physics regression tests for thermal solver pathways.
 //!
 //! These tests validate that heat flows through the building envelope produce
-//! physically realistic values — preventing regressions from wiring bugs
+//! physically realistic values -- preventing regressions from wiring bugs
 //! (e.g., missing ground temp, wrong diagnostic R, missing solar distribution).
 
 use std::collections::HashMap;
@@ -86,7 +86,7 @@ fn zone_temp(update: &hares_types::DomainUpdate) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// A 1-state model: [zone_air], connected to both outdoor and ground.
-/// Verifies that ground temperature input drives the zone correctly —
+/// Verifies that ground temperature input drives the zone correctly --
 /// not defaulting to 0°C.
 ///
 /// Ground = 12°C, outdoor = -5°C, zone starts at 20°C.
@@ -96,7 +96,7 @@ fn ground_temperature_drives_zone() {
     // Single zone air node connected to outdoor (UA=86 W/K) and ground (UA=2 W/K)
     let c_zone = 1_094_000.0; // J/K
     let ua_outdoor = 86.0; // W/K
-    let ua_ground = 2.0; // W/K — typical slab
+    let ua_ground = 2.0; // W/K -- typical slab
 
     // A_c: dT/dt = -(UA_out + UA_gnd)/C * T + UA_out/C * T_out + UA_gnd/C * T_gnd
     let a_c = DMatrix::from_row_slice(1, 1, &[-(ua_outdoor + ua_ground) / c_zone]);
@@ -164,7 +164,7 @@ fn ground_temperature_drives_zone() {
     );
 
     // If ground temp were 0°C (the bug), the steady state would be:
-    // (86 × -5 + 2 × 0) / 88 = -4.89°C — noticeably different
+    // (86 × -5 + 2 × 0) / 88 = -4.89°C -- noticeably different
     let t_if_ground_zero = (ua_outdoor * outdoor_temp + ua_ground * 0.0) / (ua_outdoor + ua_ground);
     // Verify we're closer to the correct value than the bugged value
     assert!(
@@ -194,8 +194,8 @@ fn ground_temperature_drives_zone() {
 /// equivalent to (T_node - T_zone) × A / R_zone_to_inner mathematically.
 #[test]
 fn diagnostic_heat_flow_uses_surface_temperature() {
-    let r_film = 0.12; // m²K/W — interior film
-    let thickness = 0.2; // m — 200mm concrete
+    let r_film = 0.12; // m²K/W -- interior film
+    let thickness = 0.2; // m -- 200mm concrete
     let k = 1.7; // W/(m·K)
     let area = 48.0; // m²
 
@@ -248,10 +248,10 @@ fn diagnostic_heat_flow_uses_surface_temperature() {
 /// Solar pulse of 5000W for 2 hours, then 0 for 10 hours.
 #[test]
 fn interior_solar_distribution_damps_peak_temp() {
-    // 1-state model: [zone_air(0)] — simple 1R1C to isolate the effect.
+    // 1-state model: [zone_air(0)] -- simple 1R1C to isolate the effect.
     // Inputs: [outdoor(0), zone_sensible(1)]
-    let c_zone = 500_000.0; // J/K — zone air
-    let ua_zone_out = 100.0; // W/K — zone-to-outdoor conductance
+    let c_zone = 500_000.0; // J/K -- zone air
+    let ua_zone_out = 100.0; // W/K -- zone-to-outdoor conductance
 
     let a_c = DMatrix::from_row_slice(1, 1, &[-ua_zone_out / c_zone]);
 
@@ -309,7 +309,7 @@ fn interior_solar_distribution_damps_peak_temp() {
         "peak ({peak:.1}°C) should rise above init ({init_temp}°C) with 5kW solar"
     );
 
-    // Peak should be physically reasonable — a 500 kJ/K zone with 100 W/K UA
+    // Peak should be physically reasonable -- a 500 kJ/K zone with 100 W/K UA
     // receiving 5kW for 2h should not exceed ~70°C
     // Steady-state at 5kW: T = T_out + Q/UA = 20 + 5000/100 = 70°C
     assert!(

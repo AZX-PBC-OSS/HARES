@@ -7,20 +7,20 @@
 //! Reference: Wilcox, S. and Marion, W. (2008), "Users Manual for TMY3 Data Sets",
 //! NREL/TP-581-43156. <https://docs.nrel.gov/docs/fy08osti/43156.pdf>
 //!
-//! ## Line 1 — station metadata (7 fields):
+//! ## Line 1 -- station metadata (7 fields):
 //! `USAF,Station Name,State,TZ,Latitude,Longitude,Elevation`
 //!
-//! ## Line 2 — column headers with units, e.g.:
+//! ## Line 2 -- column headers with units, e.g.:
 //! `Date (MM/DD/YYYY),Time (HH:MM),ETR (W/m^2),ETRN (W/m^2),GHI (W/m^2),...`
 //!
 //! Key columns and their SI treatment:
-//! - `GHI (W/m^2)`, `DNI (W/m^2)`, `DHI (W/m^2)` — already SI, used directly.
-//! - `Dry-bulb (C)` — already °C, used directly.
-//! - `Dew-point (C)` — already °C, used directly.
-//! - `RHum (%)` — already %, used directly.
-//! - `Pressure (mbar)` — millibar; converted to kPa by dividing by 10.
-//! - `Wspd (m/s)` — already m/s, used directly.
-//! - `Wdir (degrees)` — already degrees, used directly.
+//! - `GHI (W/m^2)`, `DNI (W/m^2)`, `DHI (W/m^2)` -- already SI, used directly.
+//! - `Dry-bulb (C)` -- already °C, used directly.
+//! - `Dew-point (C)` -- already °C, used directly.
+//! - `RHum (%)` -- already %, used directly.
+//! - `Pressure (mbar)` -- millibar; converted to kPa by dividing by 10.
+//! - `Wspd (m/s)` -- already m/s, used directly.
+//! - `Wdir (degrees)` -- already degrees, used directly.
 //!
 //! ## Derived fields:
 //! - Sky temperature: Clark-Allen empirical correlation (no IR data in TMY3).
@@ -85,7 +85,7 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
     let mut dhi_w_m2 = Vec::with_capacity(n);
     let mut wind_speed_m_s = Vec::with_capacity(n);
     let mut wind_dir_deg = Vec::with_capacity(n);
-    // (month, day, hour_1_to_24) — EPW end-of-interval convention.
+    // (month, day, hour_1_to_24) -- EPW end-of-interval convention.
     let mut timestamps: Vec<(u32, u32, u32)> = Vec::with_capacity(n);
 
     for (data_idx, line) in data_lines.iter().enumerate() {
@@ -306,7 +306,7 @@ fn parse_datetime(
         ))
     })?;
 
-    // Parse HH:MM — TMY3 uses 01:00–24:00 (end-of-interval convention).
+    // Parse HH:MM -- TMY3 uses 01:00–24:00 (end-of-interval convention).
     let (hh, mm) = parse_hhmm(time_str, row)?;
     if !(1..=24).contains(&hh) || mm != 0 {
         return Err(WeatherError::Validation(format!(
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_record_count() {
-        // Only 3 data rows — should fail validation.
+        // Only 3 data rows -- should fail validation.
         let csv = "723860,Denver Intl AP,CO,-7,39.833,-104.650,1650\n\
                    Date (MM/DD/YYYY),Time (HH:MM),GHI (W/m^2),DNI (W/m^2),DHI (W/m^2),\
                    Dry-bulb (C),Dew-point (C),RHum (%),Pressure (mbar),Wspd (m/s),Wdir (degrees)\n\

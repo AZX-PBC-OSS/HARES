@@ -20,7 +20,7 @@ use nalgebra::DVector;
 ///
 /// 6 internal nodes, 1 external boundary (outdoor air temperature).
 fn build_6node_network() -> RCNetwork {
-    // Typical residential values — representative geometry, not HPXML-derived.
+    // Typical residential values -- representative geometry, not HPXML-derived.
     // Capacitances in J/K, resistances in K/W.
     let caps = HashMap::from([
         (NodeId(1), 150_000.0), // wall outer layer

@@ -176,7 +176,7 @@ pub(super) fn parse_speed_control_mode(config: &EquipmentConfig) -> SpeedControl
 
 /// Load per-speed PLR quadratic coefficients `[a, b, c]` from config.
 ///
-/// Key: `"eir_plr_coefficients"` — a comma/space-separated list of floats.
+/// Key: `"eir_plr_coefficients"` -- a comma/space-separated list of floats.
 /// Must be a multiple of 3. Returns `None` when the key is absent or empty.
 pub(super) fn load_plr_coefficients(
     config: &EquipmentConfig,

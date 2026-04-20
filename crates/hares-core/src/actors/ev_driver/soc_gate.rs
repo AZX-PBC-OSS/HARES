@@ -1,4 +1,4 @@
-//! SocGate preference — "only act when SOC below threshold".
+//! SocGate preference -- "only act when SOC below threshold".
 
 use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
 

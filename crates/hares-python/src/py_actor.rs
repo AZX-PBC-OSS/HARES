@@ -636,11 +636,7 @@ impl PyDispatchRequest {
 
     #[staticmethod]
     #[pyo3(signature = (target, delay_s, priority=None))]
-    fn event_delay(
-        target: String,
-        delay_s: f64,
-        priority: Option<PyPriority>,
-    ) -> PyResult<Self> {
+    fn event_delay(target: String, delay_s: f64, priority: Option<PyPriority>) -> PyResult<Self> {
         Ok(Self {
             target,
             signal: PySignal::EventDelay { delay_s },

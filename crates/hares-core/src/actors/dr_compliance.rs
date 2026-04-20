@@ -1,4 +1,4 @@
-//! DR compliance actor — demand response decision modeling.
+//! DR compliance actor -- demand response decision modeling.
 //!
 //! The `DrCompliance` actor models occupant compliance decisions when a DR
 //! (demand response) event arrives: does the occupant comply? Do they shed load,
@@ -11,16 +11,17 @@
 //! # Design
 //!
 //! Equipment is self-contained with internal schedules. The actor only pushes
-//! control signals — never mutates environment or equipment state directly.
+//! control signals -- never mutates environment or equipment state directly.
 //!
 //! # Compliance Models
 //!
-//! The initial implementation provides simple rule-based models:
+//! Built-in rule-based models:
 //! - `AlwaysComply`: Always participates in DR events
 //! - `NeverComply`: Ignores all DR events
 //! - `Probabilistic`: Randomly decides compliance with configurable rate
 //!
-//! Future work replaces these rules with RL agents.
+//! Users can plug in richer models (e.g. RL agents) via the `ComplianceModel`
+//! trait.
 //!
 //! # Example
 //!
@@ -49,7 +50,7 @@ use crate::Actor;
 /// Trait for DR compliance decision models.
 ///
 /// Implementations decide whether an occupant complies with a DR event.
-/// The trait is designed for extensibility — future RL agents implement
+/// The trait is designed for extensibility -- future RL agents implement
 /// this interface to replace rule-based models.
 pub trait ComplianceModel: Send + Sync {
     /// Returns true if the occupant should comply with the DR event.
@@ -131,7 +132,7 @@ impl ComplianceModel for Probabilistic {
 }
 
 impl Probabilistic {
-    /// Stable splitmix64 mixing — deterministic across Rust versions.
+    /// Stable splitmix64 mixing -- deterministic across Rust versions.
     fn hash_inputs(&self, dr_level: DRLevel, env: &EnvironmentState) -> u64 {
         let mut x = self
             .seed

@@ -789,8 +789,7 @@ impl Equipment for HeatPumpWH {
             .set(tk::ELECTRIC_KW, electric_power_w / 1_000.0);
         self.telemetry
             .set(tk::COMPRESSOR_KW, compressor_power_w / 1_000.0);
-        self.telemetry
-            .set(tk::ELEMENT_KW, backup_power_w / 1_000.0);
+        self.telemetry.set(tk::ELEMENT_KW, backup_power_w / 1_000.0);
         self.telemetry
             .set(tk::COMPRESSOR_POWER_W, compressor_power_w);
         self.telemetry
@@ -1171,7 +1170,7 @@ mod tests {
         ZoneState, telemetry_keys as tk,
     };
 
-    use super::{weighted_average_tank_temp, HeatPumpWH};
+    use super::{HeatPumpWH, weighted_average_tank_temp};
     use crate::{Equipment, EquipmentConfig, EquipmentTypedConfig, HeatPumpWaterHeaterConfig};
 
     fn env(zone_temp_c: f64) -> EnvironmentState {
@@ -1836,7 +1835,7 @@ mod tests {
             eq.compressor_on,
             "compressor must be on after first step with cold tank"
         );
-        // Timer is now Some(60.0) — 60s elapsed, less than 120s min_on_time.
+        // Timer is now Some(60.0) -- 60s elapsed, less than 120s min_on_time.
 
         // Force the tank above setpoint+deadband by raising the setpoint to a very low value,
         // simulating conditions where call_for_heat would return false.
@@ -1935,7 +1934,7 @@ mod tests {
             eq.compressor_on,
             "compressor must be running before safety test"
         );
-        // Timer is Some(60.0) — well below 600s.
+        // Timer is Some(60.0) -- well below 600s.
         assert!(
             eq.compressor_on_since_s.is_some_and(|t| t < 600.0),
             "timer must be below min_on_time_s"
@@ -2769,7 +2768,7 @@ mod dr_tests {
         );
     }
 
-    /// All nodes below max_tank_temp_c — safety cutout must NOT fire.
+    /// All nodes below max_tank_temp_c -- safety cutout must NOT fire.
     #[test]
     fn safety_cutout_does_not_fire_when_all_nodes_below_limit() {
         let mut typed = base_typed_config();
@@ -3013,7 +3012,10 @@ mod new_feature_tests {
             "total sensible gain must be preserved across the wall split: ratio={ratio:.4}"
         );
         let skin_loss_w = eq50.telemetry().get(tk::SKIN_LOSS_W).unwrap_or(0.0);
-        let wall_w = eq50.telemetry().get(tk::WALL_SENSIBLE_GAIN_W).unwrap_or(0.0);
+        let wall_w = eq50
+            .telemetry()
+            .get(tk::WALL_SENSIBLE_GAIN_W)
+            .unwrap_or(0.0);
         assert!(
             (internal50 - wall_w).abs() < 1.0,
             "internal gain must equal wall share of HP waste heat: {internal50:.2} vs {wall_w:.2}"

@@ -128,7 +128,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     helpers::cleanup_paths(&[schedule_path, weather_path, cp_path]);
 
     if failures.is_empty() {
-        eprintln!("[checkpoint_restart] PASS — {compare_len} steps identical after restore");
+        eprintln!("[checkpoint_restart] PASS -- {compare_len} steps identical after restore");
         Ok(())
     } else {
         Err(failures)

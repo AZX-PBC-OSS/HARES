@@ -15,10 +15,10 @@ use super::constants::{
 /// Defrost activation / timing strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefrostControl {
-    /// Humidity-based — defrost fraction computed from outdoor coil moisture
+    /// Humidity-based -- defrost fraction computed from outdoor coil moisture
     /// accumulation. More physical but requires humidity data (OCHRE default).
     OnDemand,
-    /// Timer-based — fixed defrost time fraction. Simpler, used by many real
+    /// Timer-based -- fixed defrost time fraction. Simpler, used by many real
     /// units. Uses different capacity/EIR multiplier equations from DOE-2.
     Timed,
 }
@@ -97,15 +97,15 @@ impl DefrostResult {
 /// Evaluate defrost adjustments for the current timestep.
 ///
 /// # Parameters
-/// - `config` — defrost configuration (control mode, strategy, etc.)
-/// - `outdoor_db_c` — outdoor dry-bulb temperature [°C]
-/// - `outdoor_humidity_ratio` — outdoor humidity ratio [kg/kg]
-/// - `pressure_pa` — outdoor air pressure [Pa]
-/// - `inlet_wb_c` — indoor inlet wet-bulb temperature [°C]; used for the
+/// - `config` -- defrost configuration (control mode, strategy, etc.)
+/// - `outdoor_db_c` -- outdoor dry-bulb temperature [°C]
+/// - `outdoor_humidity_ratio` -- outdoor humidity ratio [kg/kg]
+/// - `pressure_pa` -- outdoor air pressure [Pa]
+/// - `inlet_wb_c` -- indoor inlet wet-bulb temperature [°C]; used for the
 ///   optional biquadratic EIR curve in Timed + ReverseCycle mode
-/// - `rated_capacity_w` — heat pump rated (maximum) heating capacity [W]
-/// - `current_capacity_w` — current operating heating capacity [W]
-/// - `runtime_fraction` — compressor runtime fraction [0..1]; scales timed
+/// - `rated_capacity_w` -- heat pump rated (maximum) heating capacity [W]
+/// - `current_capacity_w` -- current operating heating capacity [W]
+/// - `runtime_fraction` -- compressor runtime fraction [0..1]; scales timed
 ///   defrost power proportionally with compressor operation
 #[must_use]
 #[allow(clippy::too_many_arguments)]
@@ -331,7 +331,7 @@ mod defrost_tests {
         let td = timed_config();
         let r_od = evaluate_defrost(&od, 0.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
         let r_td = evaluate_defrost(&td, 0.0, 0.005, P_PA, 10.0, 8_000.0, 6_000.0, 1.0);
-        // The formulas differ — at minimum the capacity multiplier must differ.
+        // The formulas differ -- at minimum the capacity multiplier must differ.
         assert!(
             (r_od.capacity_multiplier - r_td.capacity_multiplier).abs() > 1e-6,
             "OnDemand and Timed capacity multipliers should differ"
@@ -362,7 +362,7 @@ mod defrost_tests {
         }
     }
 
-    /// Test 6: ReverseCycle strategy — q_defrost and extra_power are positive.
+    /// Test 6: ReverseCycle strategy -- q_defrost and extra_power are positive.
     #[test]
     fn reverse_cycle_q_defrost_and_power() {
         let cfg = timed_config(); // ReverseCycle by default
@@ -378,7 +378,7 @@ mod defrost_tests {
         );
     }
 
-    /// Test 7: Resistive strategy — q_defrost = 0, power from heater capacity.
+    /// Test 7: Resistive strategy -- q_defrost = 0, power from heater capacity.
     #[test]
     fn resistive_strategy_no_reverse_cycle_load() {
         let cfg = DefrostConfig {
@@ -455,7 +455,7 @@ mod defrost_tests {
         assert!(!result.active, "time_fraction=0 must yield inactive result");
     }
 
-    /// Test 11: Very cold OAT (-20°C) — both modes produce finite, reasonable values.
+    /// Test 11: Very cold OAT (-20°C) -- both modes produce finite, reasonable values.
     #[test]
     fn very_cold_oat_produces_finite_values() {
         for cfg in [on_demand_config(), timed_config()] {
@@ -521,7 +521,7 @@ mod defrost_tests {
     #[test]
     fn timed_multipliers_clamped_at_high_humidity() {
         let cfg = timed_config();
-        // delta_omega ≈ 0.01 > 0.00847 — drives cap_mult negative without the clamp.
+        // delta_omega ≈ 0.01 > 0.00847 -- drives cap_mult negative without the clamp.
         let result = evaluate_defrost(&cfg, 0.0, 0.011, P_PA, 10.0, 10_000.0, 8_000.0, 1.0);
         assert!(result.active);
         assert!(
@@ -551,7 +551,7 @@ mod defrost_tests {
     #[test]
     fn timed_multipliers_clamped_at_extreme_humidity() {
         let cfg = timed_config();
-        // delta_omega ≈ 0.05 — well above both thresholds.
+        // delta_omega ≈ 0.05 -- well above both thresholds.
         // Without the clamp: cap_mult = 0.909 - 107.33*0.05 ≈ -4.46
         //                    pwr_mult = 0.90  -  36.45*0.05 ≈ -0.92
         let result = evaluate_defrost(&cfg, 0.0, 0.051, P_PA, 10.0, 10_000.0, 8_000.0, 1.0);

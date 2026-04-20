@@ -335,5 +335,5 @@ def test_destroy_broker_disconnects(monkeypatch: pytest.MonkeyPatch) -> None:
     broker_module.destroy_broker(broker)
     assert broker.disconnected is True
 
-    # Idempotent — does not raise on second call
+    # Idempotent -- does not raise on second call
     broker_module.destroy_broker(broker)

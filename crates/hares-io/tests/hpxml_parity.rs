@@ -789,7 +789,12 @@ fn ashp_backup_lockout_temperature_extracted() {
 fn cz4a_ashp_fixture_preserves_single_stage_compressor_intent() {
     let xml = parity_fixture_xml("cz4a_ashp_hpwh");
     let defaults = repo_defaults();
-    let building = parse_building(&xml).expect("fixture should parse");
+    let mut building = parse_building(&xml).expect("fixture should parse");
+    // Parity fixture does not carry Site/Latitude; inject a plausible CZ4A
+    // coordinate (Baltimore) so the ASHRAE 152 duct-DSE path has the inputs
+    // it now requires.
+    building.site.latitude_deg.get_or_insert(39.29);
+    building.site.longitude_deg.get_or_insert(-76.61);
     let specs = resolve_equipment(&building, &defaults, &json!({})).expect("resolve_equipment");
 
     let heater = specs
@@ -886,6 +891,7 @@ fn hpwh_heating_capacity_populates_backup_element_power() {
             <WaterHeatingSystem>
                 <FuelType>electricity</FuelType>
                 <WaterHeaterType>heat pump water heater</WaterHeaterType>
+                <HotWaterTemperature>125</HotWaterTemperature>
                 <EnergyFactor>0.92</EnergyFactor>
                 <HeatingCapacity>4500</HeatingCapacity>
             </WaterHeatingSystem>

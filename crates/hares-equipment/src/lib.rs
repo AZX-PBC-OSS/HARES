@@ -115,7 +115,7 @@ pub trait Equipment: Send + Sync {
     /// Equipment-specific control application (no capability check).
     ///
     /// Implementors: override this method with equipment-specific logic.
-    /// Do NOT override `apply_control` — it provides the capability gate and
+    /// Do NOT override `apply_control` -- it provides the capability gate and
     /// delegates to this method after validation.
     fn apply_control_unchecked(&mut self, signal: &ControlSignal) -> Result<()>;
 

@@ -79,7 +79,7 @@ pub fn typical_zone_temps(avg_ground_c: f64, avg_ambient_c: f64) -> [f64; 6] {
     let t_outdoor = avg_ambient_c + 5.0;
 
     // Linear interpolation between the three anchors:
-    //   Ground(0) — Foundation(1) — Conditioned(2) — Garage(3) — Attic(4) — Outdoor(5)
+    //   Ground(0) -- Foundation(1) -- Conditioned(2) -- Garage(3) -- Attic(4) -- Outdoor(5)
     let t_foundation = t_ground + (t_conditioned - t_ground) * (1.0 / 2.0);
     let t_garage = t_conditioned + (t_outdoor - t_conditioned) * (1.0 / 3.0);
     let t_attic = t_conditioned + (t_outdoor - t_conditioned) * (2.0 / 3.0);
@@ -127,13 +127,13 @@ pub fn tarp_h_natural(tilt_deg: f64, delta_t_k: f64, above_hotter: bool) -> f64 
 /// interior resistance.
 ///
 /// # Parameters
-/// - `tilt_deg` — surface tilt in degrees from horizontal (0 = floor/ceiling,
+/// - `tilt_deg` -- surface tilt in degrees from horizontal (0 = floor/ceiling,
 ///   90 = vertical wall).
-/// - `interior_zone` / `exterior_zone` — zones bounding the surface.
-/// - `avg_wind_speed_m_s` — site average wind speed [m/s].
-/// - `avg_ground_temp_c` — annual average ground temperature [°C].
-/// - `avg_ambient_temp_c` — annual average outdoor dry-bulb temperature [°C].
-/// - `roughness` — surface roughness class for the DOE-2 `r_f` factor.
+/// - `interior_zone` / `exterior_zone` -- zones bounding the surface.
+/// - `avg_wind_speed_m_s` -- site average wind speed [m/s].
+/// - `avg_ground_temp_c` -- annual average ground temperature [°C].
+/// - `avg_ambient_temp_c` -- annual average outdoor dry-bulb temperature [°C].
+/// - `roughness` -- surface roughness class for the DOE-2 `r_f` factor.
 pub fn film_resistances(
     tilt_deg: f64,
     interior_zone: ZoneLabel,
@@ -149,7 +149,7 @@ pub fn film_resistances(
 
     let ext_above = exterior_zone.height_order() > interior_zone.height_order();
     let t_ext_hotter = t_ext >= t_int;
-    // "above_hotter": the warmer side faces upward — enhanced convection.
+    // "above_hotter": the warmer side faces upward -- enhanced convection.
     let above_hotter = !(ext_above ^ t_ext_hotter);
 
     // Minimum delta-T floor for TARP natural convection [°C / K].
@@ -164,10 +164,12 @@ pub fn film_resistances(
     // Linearized interior radiative coefficient: h_rad = 4·ε·σ·T_mean³.
     // Standard ASHRAE interior surface emissivity (0.9) and mean temperature
     // (20 °C = 293.15 K). Combined with TARP convection this yields
-    // h_combined ≈ 8.2 W/(m²·K), R ≈ 0.122 m²·K/W — matching BESTEST.
+    // h_combined ≈ 8.2 W/(m²·K), R ≈ 0.122 m²·K/W -- matching BESTEST.
     const INTERIOR_EMISSIVITY: f64 = 0.9;
     const INTERIOR_MEAN_TEMP_K: f64 = 293.15;
-    let h_rad = 4.0 * INTERIOR_EMISSIVITY * crate::constants::STEFAN_BOLTZMANN
+    let h_rad = 4.0
+        * INTERIOR_EMISSIVITY
+        * crate::constants::STEFAN_BOLTZMANN
         * INTERIOR_MEAN_TEMP_K.powi(3);
     let h_combined = h_conv + h_rad;
 
@@ -238,7 +240,7 @@ mod tests {
 
     #[test]
     fn film_resistances_interior_boundary_no_forced_convection() {
-        // LIV interior, ATC exterior — not outdoor, so r_ext == r_int.
+        // LIV interior, ATC exterior -- not outdoor, so r_ext == r_int.
         let (r_int, r_ext) = film_resistances(
             90.0,
             ZoneLabel::Conditioned,

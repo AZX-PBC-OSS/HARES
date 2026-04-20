@@ -591,7 +591,7 @@ mod tests {
     }
 
     /// capacity_fractions for a 2-speed heating config [5000, 10000 W].
-    /// Expected fractions: [0.5, 1.0] — normalized to the highest stage.
+    /// Expected fractions: [0.5, 1.0] -- normalized to the highest stage.
     #[test]
     fn capacity_fractions_two_speed() {
         let mut hvac = make_single_speed();
@@ -719,7 +719,7 @@ mod tests {
         hvac.advance_speed_timer(300.0);
         hvac.update_prev_zone_temp(Some(25.0));
 
-        // Next step: zone temp rose to 26.0°C during cooling — moving wrong way.
+        // Next step: zone temp rose to 26.0°C during cooling -- moving wrong way.
         let sel1 = hvac.select_speed_with_zone_temp(0.8, Some(26.0), false);
         assert_eq!(
             sel1.speed_index, 1,
@@ -747,7 +747,7 @@ mod tests {
         hvac.time_at_current_speed_s = 100.0; // less than 300 s minimum
         hvac.prev_zone_temp_c = Some(25.0);
 
-        // Zone temp is rising during cooling — would normally trigger escalation,
+        // Zone temp is rising during cooling -- would normally trigger escalation,
         // but the min-time guard must block it.
         let sel = hvac.select_speed_with_zone_temp(0.8, Some(26.0), false);
         assert_eq!(

@@ -343,7 +343,7 @@ fn humidity_moisture_mass_balance_invariant() {
 // ---------------------------------------------------------------------------
 
 /// Electrical and humidity solvers are independent domains. Calling them in
-/// sequence with the same PortSlots must produce coherent results from each —
+/// sequence with the same PortSlots must produce coherent results from each --
 /// neither must corrupt the other's state or the shared PortSlots.
 #[test]
 fn electrical_and_humidity_resolvers_are_independent() {

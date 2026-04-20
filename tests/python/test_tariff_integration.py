@@ -28,7 +28,7 @@ URDB_TOU = FIXTURES / "urdb" / "pge_e_tou_c.json"
 # PG&E E-TOU-C peak hours: weekday 16:00-21:00
 PEAK_HOURS = set(range(16, 21))
 
-# 7 days in July at 15-min resolution — summer maximizes PV + TOU spread
+# 7 days in July at 15-min resolution -- summer maximizes PV + TOU spread
 SIM_DURATION_S = 7 * 86400
 TIME_RES_S = 900
 EXPECTED_STEPS = SIM_DURATION_S // TIME_RES_S  # 672
@@ -164,7 +164,7 @@ class TestBatteryTouBehavior:
             soc_range = max(socs) - min(socs)
             assert soc_range > 0.05, (
                 f"SOC range {soc_range:.3f} too narrow "
-                f"(min={min(socs):.3f}, max={max(socs):.3f}) — battery not cycling"
+                f"(min={min(socs):.3f}, max={max(socs):.3f}) -- battery not cycling"
             )
 
     def test_charging_spike_during_offpeak_transition(self, sim_result):
