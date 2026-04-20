@@ -1,3 +1,4 @@
+mod bestest_diagnostic;
 mod cases;
 mod reference_bands;
 
@@ -535,6 +536,70 @@ fn debug_600ff_heat_balance_at_peak() {
         "[heat_balance:peakstep] u13_zone_sensible={:.1}",
         last_u2.get(13).copied().unwrap_or(0.0)
     );
+}
+
+#[test]
+fn debug_900ff_min_temp_heat_balance() {
+    let case = core_cases().into_iter().find(|c| c.id == "900FF").unwrap();
+    let mut dwelling =
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("failed to load BESTEST case 900FF: {err}"));
+
+    let total_steps = 8760usize;
+    let mut min_temp = f64::INFINITY;
+    let mut min_step = 0usize;
+
+    for step in 0..total_steps {
+        match dwelling.step() {
+            Ok(result) => {
+                for (_, t) in &result.zone_temperatures_c {
+                    if *t < min_temp {
+                        min_temp = *t;
+                        min_step = step;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    eprintln!("[900ff_min] min temp={min_temp:.4}°C at step={min_step} (hour {})", min_step + 1);
+
+    let mut dwelling2 =
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("failed to reload BESTEST case 900FF: {err}"));
+
+    for _ in 0..min_step.saturating_sub(5) {
+        let _ = dwelling2.step();
+    }
+
+    let surf_info = dwelling2.thermal_solver.interior_surface_info_debug();
+    for (i, (area, abs, rad_frac, is_floor, input_idx, has_driving)) in surf_info.iter().enumerate() {
+        eprintln!(
+            "[900ff_surf] s={i} area={area:.1}m² solar_abs={abs:.3} rad_frac={rad_frac:.4} is_floor={is_floor} input_idx={input_idx} driving={has_driving}"
+        );
+    }
+
+    for step in min_step.saturating_sub(5)..=min_step + 1 {
+        match dwelling2.step() {
+            Ok(result) => {
+                let temp: f64 = result.zone_temperatures_c.iter().map(|(_, t)| *t).fold(f64::NEG_INFINITY, f64::max);
+                let gains = dwelling2.thermal_solver.component_gains().clone();
+                eprintln!(
+                    "[900ff_step] step={} t_zone={:.3} t_out={:.1} window_solar={:.1} opaque_lwr={:.1} ext_lwr={:.1} infiltration={:.1} internal={:.1} int_lwr={:.1}",
+                    step + 1, temp,
+                    gains.driving_outdoor_temp_c,
+                    gains.window_solar_w,
+                    gains.opaque_solar_lwr_w,
+                    gains.exterior_lwr_w,
+                    gains.infiltration_w,
+                    gains.internal_gain_w,
+                    gains.interior_lwr_w,
+                );
+            }
+            Err(e) => eprintln!("[900ff_step] step={} error: {e}", step + 1),
+        }
+    }
 }
 
 fn evaluate_bands(observation: &CaseObservation, bands: &[ReferenceBand]) -> Vec<BandCheck> {
