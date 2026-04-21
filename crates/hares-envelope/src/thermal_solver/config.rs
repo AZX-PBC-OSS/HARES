@@ -316,6 +316,14 @@ pub struct ExteriorSurfaceInfo {
     /// Boundary type for per-component heat flow tracking.
     /// `None` means the surface is not attributed to a named component category.
     pub boundary_category: Option<BoundaryCategory>,
+    /// Window U-factor [W/(m²·K)]; 0.0 for opaque surfaces (which have RC nodes).
+    /// Used by the window exterior LWR correction: when T_sky < T_air the window
+    /// radiates more to sky than the U-factor assumes, producing additional cooling.
+    pub u_factor_w_m2_k: f64,
+    /// Exterior combined film coefficient h_out [W/(m²·K)] for window LWR correction.
+    /// Computed from boundary input r_film_exterior at build time. 0.0 for opaque surfaces.
+    /// Used as denominator in T_eff = T_air + Δq / h_out. Ref: NFRC 100-2020.
+    pub h_out_w_m2_k: f64,
 }
 
 /// Index mappings derived from the state-space model structure.
@@ -444,14 +452,19 @@ pub struct EnvelopeComponentGains {
     /// `= ρ × sqrt(nat² + forced²) × cp × ΔT` for unbalanced systems.
     /// Compare this to OCHRE's sum of infiltration + forced + natural ventilation.
     pub combined_airflow_sensible_w: f64,
-    /// Total sensible gains from all equipment ports (HVAC + appliances) [W].
+    /// Total convective sensible gains from all equipment ports (HVAC + appliances) [W].
+    /// Only the convective portion that goes directly to zone air.
     pub port_sensible_w: f64,
+    /// Total radiant sensible gains from equipment ports distributed to surfaces [W].
+    /// Distributed via E+ TMULT method; some reaches zone air via radiation_frac split.
+    pub port_radiant_w: f64,
     /// HVAC heating contribution to the indoor zone [W].
     pub hvac_heating_w: f64,
     /// HVAC cooling contribution to the indoor zone [W].
     pub hvac_cooling_w: f64,
     /// Non-HVAC internal gains (appliances, lighting, occupancy) [W].
-    /// Equals `InternalGain` category total for the indoor zone.
+    /// Equals the `InternalGain` category total for the indoor zone,
+    /// including both convective and radiant components.
     pub internal_gain_w: f64,
     /// Equipment jacket/shell losses to the indoor zone [W].
     /// Equals `JacketLoss` category total (water heater skin loss, etc.).
@@ -477,6 +490,12 @@ pub struct EnvelopeComponentGains {
     pub opaque_solar_w: f64,
     /// Exterior longwave radiation exchange only [W].
     pub exterior_lwr_w: f64,
+    /// Window exterior LWR beyond U-factor assumption [W].
+    /// When T_sky < T_air (clear night), windows radiate more to sky than the
+    /// U-factor (which assumes T_sky ≈ T_air) accounts for. This field tracks
+    /// that additional cooling. Negative = cooling. Zero when T_sky = T_air.
+    /// Ref: Walton (1983); E+ Eng.Ref "External Longwave Radiation"; NFRC.
+    pub window_exterior_lwr_w: f64,
     /// Outdoor driving temperature used this timestep [°C].
     pub driving_outdoor_temp_c: f64,
     /// Ground driving temperature used this timestep [°C].

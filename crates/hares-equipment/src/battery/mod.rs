@@ -995,6 +995,7 @@ impl Equipment for Battery {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: ohmic_loss_w,
+                    radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
                     category: ThermalCategory::InternalGain,
                 })?;

@@ -51,7 +51,11 @@ pub const THERMAL_CATEGORY_COUNT: usize = 5;
 pub enum PortContribution {
     Thermal {
         zone: ZoneId,
+        /// Convective sensible gain [W]: goes directly to zone air.
         sensible_gain_w: f64,
+        /// Radiant sensible gain [W]: distributed to surface nodes via TMULT.
+        /// sensible_gain_w + radiant_gain_w = total sensible gain.
+        radiant_gain_w: f64,
         latent_gain_w: f64,
         category: ThermalCategory,
     },
@@ -150,16 +154,21 @@ impl PortDeclaration {
 
 /// Thermal contribution totals for one zone.
 ///
-/// `sensible_gain_w` and `latent_gain_w` are the zone totals (sum across all
-/// categories). `sensible_by_category` holds per-category subtotals indexed by
-/// `ThermalCategory::index()` -- use a fixed-size array to avoid HashMap
-/// allocation in the hot timestep loop.
+/// `sensible_gain_w` is the **convective** sensible total (goes directly to zone
+/// air); it is *not* the total sensible gain. Total sensible = sensible_gain_w +
+/// radiant_gain_w. `latent_gain_w` is the zone total (sum across all categories).
+/// `sensible_by_category` holds per-category **convective** sensible subtotals
+/// indexed by `ThermalCategory::index()`. Invariant:
+/// `sum(sensible_by_category) == sensible_gain_w` (convective-only total).
+/// Use a fixed-size array to avoid HashMap allocation in the hot timestep loop.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThermalAccumulator {
     pub zone: ZoneId,
     pub sensible_gain_w: f64,
+    pub radiant_gain_w: f64,
     pub latent_gain_w: f64,
     pub sensible_by_category: [f64; THERMAL_CATEGORY_COUNT],
+    pub radiant_by_category: [f64; THERMAL_CATEGORY_COUNT],
 }
 
 impl ThermalAccumulator {
@@ -167,26 +176,43 @@ impl ThermalAccumulator {
         Self {
             zone,
             sensible_gain_w: 0.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 0.0,
             sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+            radiant_by_category: [0.0; THERMAL_CATEGORY_COUNT],
         }
     }
 
-    pub fn add(&mut self, sensible_gain_w: f64, latent_gain_w: f64, category: ThermalCategory) {
+    pub fn add(
+        &mut self,
+        sensible_gain_w: f64,
+        radiant_gain_w: f64,
+        latent_gain_w: f64,
+        category: ThermalCategory,
+    ) {
         self.sensible_gain_w += sensible_gain_w;
+        self.radiant_gain_w += radiant_gain_w;
         self.latent_gain_w += latent_gain_w;
         self.sensible_by_category[category.index()] += sensible_gain_w;
+        self.radiant_by_category[category.index()] += radiant_gain_w;
     }
 
     pub fn zero(&mut self) {
         self.sensible_gain_w = 0.0;
+        self.radiant_gain_w = 0.0;
         self.latent_gain_w = 0.0;
         self.sensible_by_category = [0.0; THERMAL_CATEGORY_COUNT];
+        self.radiant_by_category = [0.0; THERMAL_CATEGORY_COUNT];
     }
 
     /// Sensible gain total for a specific category.
     pub fn sensible_for_category(&self, cat: ThermalCategory) -> f64 {
         self.sensible_by_category[cat.index()]
+    }
+
+    /// Radiant gain total for a specific category.
+    pub fn radiant_for_category(&self, cat: ThermalCategory) -> f64 {
+        self.radiant_by_category[cat.index()]
     }
 }
 
@@ -409,11 +435,12 @@ impl PortSlots {
             PortContribution::Thermal {
                 zone,
                 sensible_gain_w,
+                radiant_gain_w,
                 latent_gain_w,
                 category,
             } => {
                 if let Some(total) = self.thermal.iter_mut().find(|entry| entry.zone == *zone) {
-                    total.add(*sensible_gain_w, *latent_gain_w, *category);
+                    total.add(*sensible_gain_w, *radiant_gain_w, *latent_gain_w, *category);
                 } else {
                     return Err(HaresError::Equipment(format!(
                         "undeclared thermal zone: {zone:?}"
@@ -494,6 +521,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w: 100.0,
+                radiant_gain_w: 0.0,
                 latent_gain_w: 20.0,
                 category: ThermalCategory::InternalGain,
             })
@@ -502,6 +530,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w: -10.0,
+                radiant_gain_w: 0.0,
                 latent_gain_w: 5.0,
                 category: ThermalCategory::InternalGain,
             })
@@ -510,6 +539,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w: 25.5,
+                radiant_gain_w: 0.0,
                 latent_gain_w: -2.5,
                 category: ThermalCategory::InternalGain,
             })
@@ -531,6 +561,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w: 100.0,
+                radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
                 category: ThermalCategory::HvacHeating,
             })
@@ -539,6 +570,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w: -50.0,
+                radiant_gain_w: 0.0,
                 latent_gain_w: -10.0,
                 category: ThermalCategory::HvacCooling,
             })
@@ -547,6 +579,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w: 25.0,
+                radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
                 category: ThermalCategory::InternalGain,
             })
@@ -555,6 +588,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w: 40.0,
+                radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
                 category: ThermalCategory::JacketLoss,
             })
@@ -563,6 +597,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w: 15.0,
+                radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
                 category: ThermalCategory::DuctLoss,
             })
@@ -601,8 +636,10 @@ mod tests {
             thermal: vec![ThermalAccumulator {
                 zone: ZoneId(1),
                 sensible_gain_w: 10.0,
+                radiant_gain_w: 3.0,
                 latent_gain_w: 5.0,
                 sensible_by_category: [1.0, 2.0, 3.0, 4.0, 0.0],
+                radiant_by_category: [0.0, 0.0, 3.0, 0.0, 0.0],
             }],
             electrical: ElectricalAccumulator {
                 reactive_power_kvar: 1.0,
@@ -631,10 +668,15 @@ mod tests {
         slots.zero();
 
         approx_eq(slots.thermal[0].sensible_gain_w, 0.0);
+        approx_eq(slots.thermal[0].radiant_gain_w, 0.0);
         approx_eq(slots.thermal[0].latent_gain_w, 0.0);
         assert_eq!(
             slots.thermal[0].sensible_by_category, [0.0; THERMAL_CATEGORY_COUNT],
             "zero() must clear per-category array"
+        );
+        assert_eq!(
+            slots.thermal[0].radiant_by_category, [0.0; THERMAL_CATEGORY_COUNT],
+            "zero() must clear radiant per-category array"
         );
         approx_eq(slots.electrical.reactive_power_kvar, 0.0);
         approx_eq(slots.electrical.load_power_kw, 0.0);
@@ -756,6 +798,7 @@ mod tests {
         let result = slots.accumulate(&PortContribution::Thermal {
             zone: ZoneId(99),
             sensible_gain_w: 50.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 10.0,
             category: ThermalCategory::InternalGain,
         });
@@ -861,6 +904,7 @@ mod tests {
             .accumulate(&PortContribution::Thermal {
                 zone: ZoneId(1),
                 sensible_gain_w: 100.0,
+                radiant_gain_w: 0.0,
                 latent_gain_w: 10.0,
                 category: ThermalCategory::HvacHeating,
             })
@@ -883,6 +927,7 @@ mod tests {
         let err = slots.accumulate(&PortContribution::Thermal {
             zone: ZoneId(99),
             sensible_gain_w: 50.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 5.0,
             category: ThermalCategory::InternalGain,
         });
@@ -953,5 +998,59 @@ mod tests {
         approx_eq(slots.electrical.reactive_power_kvar, 0.3);
         approx_eq(slots.electrical.load_power_kw, 3.0);
         approx_eq(slots.electrical.generation_power_kw, -5.0);
+    }
+
+    #[test]
+    fn radiant_gain_w_tracked_in_accumulator() {
+        let zone = ZoneId(1);
+        let mut slots = PortSlots {
+            thermal: vec![ThermalAccumulator::new(zone)],
+            ..Default::default()
+        };
+
+        slots
+            .accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: 140.0,
+                radiant_gain_w: 60.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::InternalGain,
+            })
+            .unwrap();
+        slots
+            .accumulate(&PortContribution::Thermal {
+                zone,
+                sensible_gain_w: 100.0,
+                radiant_gain_w: 0.0,
+                latent_gain_w: 0.0,
+                category: ThermalCategory::HvacHeating,
+            })
+            .unwrap();
+
+        approx_eq(slots.thermal[0].sensible_gain_w, 240.0);
+        approx_eq(slots.thermal[0].radiant_gain_w, 60.0);
+        approx_eq(
+            slots.thermal[0].radiant_for_category(ThermalCategory::InternalGain),
+            60.0,
+        );
+        approx_eq(
+            slots.thermal[0].radiant_for_category(ThermalCategory::HvacHeating),
+            0.0,
+        );
+        approx_eq(
+            slots.thermal[0].sensible_for_category(ThermalCategory::InternalGain),
+            140.0,
+        );
+        approx_eq(
+            slots.thermal[0].sensible_for_category(ThermalCategory::HvacHeating),
+            100.0,
+        );
+
+        slots.zero();
+        approx_eq(slots.thermal[0].radiant_gain_w, 0.0);
+        approx_eq(
+            slots.thermal[0].radiant_for_category(ThermalCategory::InternalGain),
+            0.0,
+        );
     }
 }

@@ -4,11 +4,12 @@ use std::collections::HashMap;
 
 use hares_envelope::{
     BoundaryCategory, BoundaryDiagnostic, BoundaryDiagnosticInfo, BoundaryInput, BuildingRC,
-    DrivingTemp, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, ElectricalSolver,
-    ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo, ExteriorTarget, FluidSolver,
-    FluidSolverConfig, HumiditySolver, HumiditySolverConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT,
-    SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring, SurfaceLayerInfo, ThermalSolver,
-    ThermalSolverConfig, WindowSolarProperties, assemble_building_rc, derive_zone_capacitances,
+    DrivingTemp, EMISSIVITY_DEFAULT, EMISSIVITY_RADIANT_BARRIER, EMISSIVITY_WINDOW,
+    ElectricalSolver, ElectricalSolverConfig, EnvelopeDiagnostics, ExteriorSurfaceInfo,
+    ExteriorTarget, FluidSolver, FluidSolverConfig, HumiditySolver, HumiditySolverConfig, NodeId,
+    SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER, StateSpaceWiring,
+    SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
+    assemble_building_rc, derive_zone_capacitances,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
@@ -71,6 +72,7 @@ struct SolverBoundary {
     r_film_int_m2_k_w: f64,
     window_solar: Option<WindowSolarData>,
     diagnostic_r_zone_to_inner: Option<f64>,
+    r_film_exterior_m2_k_w: f64,
 }
 
 /// Build the intermediate `SolverBoundary` representations from building data.
@@ -329,6 +331,7 @@ fn build_solver_boundaries(
             r_film_int_m2_k_w: r_film_int,
             window_solar,
             diagnostic_r_zone_to_inner,
+            r_film_exterior_m2_k_w: r_film_ext,
         });
     }
 
@@ -336,7 +339,11 @@ fn build_solver_boundaries(
 }
 
 fn exterior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
-    boundary.emittance.unwrap_or(EMISSIVITY_DEFAULT)
+    if boundary.boundary_type == hares_io::hpxml::BoundaryType::Window {
+        boundary.emittance.unwrap_or(EMISSIVITY_WINDOW)
+    } else {
+        boundary.emittance.unwrap_or(EMISSIVITY_DEFAULT)
+    }
 }
 
 fn attic_interior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
@@ -618,6 +625,16 @@ pub(crate) fn build_default_solvers(
                 n_iter,
                 absorptance: sb.exterior_solar_absorptance,
                 boundary_category: sb.boundary_category,
+                u_factor_w_m2_k: sb
+                    .window_solar
+                    .as_ref()
+                    .map(|ws| ws.u_factor_w_m2_k)
+                    .unwrap_or(0.0),
+                h_out_w_m2_k: if sb.r_film_exterior_m2_k_w > 1e-9 {
+                    1.0 / sb.r_film_exterior_m2_k_w
+                } else {
+                    34.0
+                },
             });
             wiring
                 .solar_input_indices
@@ -1344,6 +1361,40 @@ mod tests {
     fn window_behavior_is_unchanged() {
         assert!(include_interior_lwr(true, true, false, false, 8.0));
         assert!(!include_interior_lwr(true, false, false, false, 8.0));
+    }
+
+    /// Window boundaries without explicit emittance default to EMISSIVITY_WINDOW (0.84)
+    /// per EnergyPlus, not EMISSIVITY_DEFAULT (0.90) which is for opaque surfaces.
+    /// NFRC standard emissivity for clear glass is 0.84.
+    #[test]
+    fn window_exterior_emissivity_defaults_to_glass_value() {
+        use hares_envelope::EMISSIVITY_WINDOW;
+        let window = Boundary {
+            id: "Win1".to_string(),
+            boundary_type: BoundaryType::Window,
+            area_m2: 12.0,
+            azimuth_deg: Some(180.0),
+            assembly_r_value_m2_k_w: None,
+            r_value_layers_m2_k_w: Vec::new(),
+            interior_zone: Some(ZoneType::Conditioned),
+            exterior_zone: Some(ZoneType::Outdoor),
+            material_layers: Vec::new(),
+            construction_type: None,
+            finish_type: None,
+            insulation_details: None,
+            has_radiant_barrier: false,
+            solar_absorptance: None,
+            emittance: None,
+            lut_boundary_name: None,
+            floor_or_ceiling: None,
+            tilt_deg: Some(90.0),
+            framing_factor: None,
+        };
+        assert_eq!(
+            exterior_emissivity(&window),
+            EMISSIVITY_WINDOW,
+            "window without explicit emittance should default to 0.84 (NFRC clear glass)"
+        );
     }
 
     #[test]

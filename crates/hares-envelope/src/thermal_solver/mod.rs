@@ -81,6 +81,9 @@ pub struct ThermalSolver {
     solar_absorbed_buf: Vec<f64>,
     /// Pre-allocated buffer for interior LWR per-zone results.
     lwr_by_zone_buf: Vec<(ZoneId, f64)>,
+    /// Accumulator for window exterior LWR beyond U-factor assumption [W].
+    /// Set during `apply_exterior_longwave_inputs_iterative`.
+    window_exterior_lwr_w: f64,
     /// Pre-allocated buffer for interior LWR net flux results per surface.
     lwr_net_flux_buf: Vec<f64>,
     /// Pre-sorted zone temperature buffer for format_domain_update; indexed parallel to sorted zone_output_indices.
@@ -346,6 +349,7 @@ impl ThermalSolver {
             infiltration_by_zone_buf: Vec::with_capacity(env.zones.len()),
             solar_absorbed_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
+            window_exterior_lwr_w: 0.0,
             lwr_net_flux_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             zone_temps_buf,
@@ -464,7 +468,7 @@ impl ThermalSolver {
         self.ext_surface_diag_buf.clear();
         self.apply_exterior_longwave_inputs_iterative(&mut u, env);
         let exterior_lwr_w = u.iter().sum::<f64>() - u_pre;
-        let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w;
+        let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w - self.window_exterior_lwr_w;
 
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.int_surface_diag_buf.clear();
@@ -479,6 +483,7 @@ impl ThermalSolver {
             .unwrap_or(0.0);
 
         self.apply_port_sensible_inputs(&mut u, ports);
+        self.apply_port_radiant_inputs(&mut u, ports);
 
         let indoor_zone = self.config.indoor_zone_id;
         let port_sensible_indoor_w = ports
@@ -486,6 +491,12 @@ impl ThermalSolver {
             .iter()
             .find(|t| t.zone == indoor_zone)
             .map(|t| t.sensible_gain_w)
+            .unwrap_or(0.0);
+        let port_radiant_indoor_w = ports
+            .thermal
+            .iter()
+            .find(|t| t.zone == indoor_zone)
+            .map(|t| t.radiant_gain_w)
             .unwrap_or(0.0);
 
         let mut latent_by_zone = std::mem::take(&mut self.latent_buf);
@@ -526,7 +537,10 @@ impl ThermalSolver {
             .map(|a| a.sensible_for_category(ThermalCategory::HvacCooling))
             .unwrap_or(0.0);
         let internal_gain_cat_w = indoor_acc
-            .map(|a| a.sensible_for_category(ThermalCategory::InternalGain))
+            .map(|a| {
+                a.sensible_for_category(ThermalCategory::InternalGain)
+                    + a.radiant_for_category(ThermalCategory::InternalGain)
+            })
             .unwrap_or(0.0);
         let jacket_loss_w = indoor_acc
             .map(|a| a.sensible_for_category(ThermalCategory::JacketLoss))
@@ -556,6 +570,7 @@ impl ThermalSolver {
             natural_ventilation_w,
             combined_airflow_sensible_w,
             port_sensible_w: port_sensible_indoor_w,
+            port_radiant_w: port_radiant_indoor_w,
             hvac_heating_w,
             hvac_cooling_w,
             internal_gain_w: internal_gain_cat_w,
@@ -572,6 +587,7 @@ impl ThermalSolver {
             driving_ground_temp_c: env.weather.ground_temp_c,
             opaque_solar_w,
             exterior_lwr_w,
+            window_exterior_lwr_w: self.window_exterior_lwr_w,
             total_airflow_m3_s: indoor_inf.map(|c| c.combined_flow_m3_s).unwrap_or(0.0),
             raw_infiltration_m3_s: indoor_inf.map(|c| c.raw_inf_m3_s).unwrap_or(0.0),
             forced_vent_m3_s: indoor_inf.map(|c| c.forced_flow_m3_s).unwrap_or(0.0),
@@ -2075,6 +2091,8 @@ mod tests {
                     n_iter: 1,
                     absorptance: 1.0,
                     boundary_category: None,
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 0.0,
                 }],
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
@@ -2093,7 +2111,7 @@ mod tests {
         };
 
         let env_no_solar = make_env(0.0);
-        let env_solar = make_env(500.0); // 500 W/m² direct through window
+        let env_solar = make_env(500.0);
 
         let ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2220,6 +2238,8 @@ mod tests {
                     n_iter: 1,
                     absorptance,
                     boundary_category: None,
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 0.0,
                 }],
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
@@ -2376,6 +2396,8 @@ mod tests {
                     n_iter: 1,
                     absorptance,
                     boundary_category: None,
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 0.0,
                 }],
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
@@ -2717,6 +2739,8 @@ mod tests {
                     n_iter: 1,
                     absorptance: 1.0,
                     boundary_category: None,
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 0.0,
                 }],
                 interior_lwr_zones: vec![],
                 infiltration: vec![],
@@ -2979,6 +3003,8 @@ mod tests {
                     n_iter: 1,
                     absorptance: SOLAR_ABSORPTANCE_DEFAULT,
                     boundary_category: None,
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 0.0,
                 }]
             } else {
                 vec![]
@@ -3236,6 +3262,8 @@ mod tests {
                     n_iter: 4,
                     absorptance: SOLAR_ABSORPTANCE_DEFAULT,
                     boundary_category: None,
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 0.0,
                 }];
                 let wiring = StateSpaceWiring {
                     zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
@@ -4142,6 +4170,208 @@ mod tests {
             t_heat - t_base > 0.001,
             "temperature difference must be measurable: delta={:.6}",
             t_heat - t_base
+        );
+    }
+
+    #[test]
+    fn radiant_gains_distributed_by_tmult_to_opaque_surfaces() {
+        use hares_types::{THERMAL_CATEGORY_COUNT, ThermalAccumulator};
+
+        let env = env_for_temp(20.0, 10.0);
+        let solver = interior_lwr_solver(&env);
+
+        let zone = ZoneId(1);
+        let radiant_w = 100.0;
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone,
+                sensible_gain_w: 0.0,
+                radiant_gain_w: radiant_w,
+                latent_gain_w: 0.0,
+                sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0],
+            }],
+            ..Default::default()
+        };
+
+        let mut u = DVector::zeros(3);
+        solver.apply_port_radiant_inputs(&mut u, &ports);
+
+        let surfaces = &solver.config.interior_lwr_zones[0].surfaces;
+        let total_weight: f64 = surfaces.iter().map(|s| s.area_m2 * s.emissivity).sum();
+
+        for s in surfaces {
+            let q = radiant_w * s.area_m2 * s.emissivity / total_weight;
+            let expected_surface = q * s.radiation_frac;
+            assert!(
+                (u[s.input_index] - expected_surface).abs() < 1e-9,
+                "surface input_index={} should receive {:.6}, got {:.6}",
+                s.input_index,
+                expected_surface,
+                u[s.input_index]
+            );
+        }
+
+        let air_idx = solver.wiring.zone_sensible_input_indices[&zone];
+        let total_air: f64 = surfaces
+            .iter()
+            .map(|s| {
+                let q = radiant_w * s.area_m2 * s.emissivity / total_weight;
+                q * (1.0 - s.radiation_frac)
+            })
+            .sum();
+        assert!(
+            (u[air_idx] - total_air).abs() < 1e-9,
+            "zone air should receive {:.6}, got {:.6}",
+            total_air,
+            u[air_idx]
+        );
+
+        let total_deposited: f64 = u.iter().sum();
+        assert!(
+            (total_deposited - radiant_w).abs() < 1e-9,
+            "energy conservation: total deposited = {:.6}, expected {:.6}",
+            total_deposited,
+            radiant_w
+        );
+    }
+
+    #[test]
+    fn radiant_gains_with_window_surfaces_go_to_air() {
+        use hares_types::THERMAL_CATEGORY_COUNT;
+        let env = env_for_temp(20.0, 10.0);
+        let a_c = DMatrix::from_row_slice(
+            4,
+            4,
+            &[
+                -1.0 / 50_000.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                -1.0 / 40_000.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                -1.0 / 30_000.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                -1.0 / 20_000.0,
+            ],
+        );
+        let b_c = DMatrix::zeros(4, 4);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 0)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+        };
+        let interior_lwr_zone = InteriorLwrZoneConfig {
+            zone_id: ZoneId(1),
+            surfaces: vec![
+                InteriorSurfaceInfo {
+                    state_index: 1,
+                    input_index: 1,
+                    area_m2: 10.0,
+                    emissivity: 0.9,
+                    radiation_frac: 0.02,
+                    rad_res_k_w: 250.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+                InteriorSurfaceInfo {
+                    state_index: 2,
+                    input_index: 2,
+                    area_m2: 20.0,
+                    emissivity: 0.9,
+                    radiation_frac: 0.02,
+                    rad_res_k_w: 250.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+                InteriorSurfaceInfo {
+                    state_index: 3,
+                    input_index: 3,
+                    area_m2: 6.0,
+                    emissivity: 0.84,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 0.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: Some(DrivingTemp::Outdoor),
+                },
+            ],
+            scriptf: None,
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![interior_lwr_zone],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            boundary_diagnostics: Vec::new(),
+        };
+        let solver = ThermalSolver::new(model, wiring, config, 60.0, &env, 20.0).unwrap();
+
+        let zone = ZoneId(1);
+        let radiant_w = 100.0;
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone,
+                sensible_gain_w: 0.0,
+                radiant_gain_w: radiant_w,
+                latent_gain_w: 0.0,
+                sensible_by_category: [0.0; THERMAL_CATEGORY_COUNT],
+                radiant_by_category: [radiant_w, 0.0, 0.0, 0.0, 0.0],
+            }],
+            ..Default::default()
+        };
+
+        let mut u = DVector::zeros(4);
+        solver.apply_port_radiant_inputs(&mut u, &ports);
+
+        let opaque_weight: f64 = 10.0 * 0.9 + 20.0 * 0.9;
+        let q1 = radiant_w * (10.0 * 0.9) / opaque_weight;
+        let q2 = radiant_w * (20.0 * 0.9) / opaque_weight;
+        let air_idx = solver.wiring.zone_sensible_input_indices[&zone];
+        let air_from_radiant = q1 * (1.0 - 0.02) + q2 * (1.0 - 0.02);
+        assert!(
+            (u[air_idx] - air_from_radiant).abs() < 1e-9,
+            "zone air should receive {:.6}, got {:.6}",
+            air_from_radiant,
+            u[air_idx]
+        );
+        assert!(
+            u[3] == 0.0,
+            "window surface should receive zero radiant gain, got {}",
+            u[3]
+        );
+        let total: f64 = u.iter().sum();
+        assert!(
+            (total - radiant_w).abs() < 1e-9,
+            "energy conservation: total = {:.6}, expected {:.6}",
+            total,
+            radiant_w
         );
     }
 }

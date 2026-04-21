@@ -412,6 +412,7 @@ impl EventBasedLoad {
             ports.accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w,
+                radiant_gain_w: 0.0,
                 latent_gain_w,
                 category: ThermalCategory::InternalGain,
             })?;
@@ -876,6 +877,7 @@ impl WetAppliance {
             ports.accumulate(&PortContribution::Thermal {
                 zone,
                 sensible_gain_w,
+                radiant_gain_w: 0.0,
                 latent_gain_w,
                 category: ThermalCategory::InternalGain,
             })?;

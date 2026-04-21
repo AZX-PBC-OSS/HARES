@@ -4,6 +4,7 @@ building_id = 620
 start_time = "2024-01-01T00:00:00Z"
 time_res_s = 60
 duration_s = 172800
+initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
 
 [geometry]
 floor_area_m2 = 48.0

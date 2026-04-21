@@ -565,6 +565,7 @@ impl Equipment for IdealHvac {
             ports.accumulate(&PortContribution::Thermal {
                 zone: self.zone_id,
                 sensible_gain_w: sensible_w + fan_power_w,
+                radiant_gain_w: 0.0,
                 latent_gain_w: latent_w,
                 category,
             })?;

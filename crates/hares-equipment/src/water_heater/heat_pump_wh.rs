@@ -741,6 +741,7 @@ impl Equipment for HeatPumpWH {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: sensible_to_zone_w,
+                    radiant_gain_w: 0.0,
                     latent_gain_w,
                     category: ThermalCategory::InternalGain,
                 })?;
@@ -749,6 +750,7 @@ impl Equipment for HeatPumpWH {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: sensible_to_wall_w,
+                    radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
                     category: ThermalCategory::JacketLoss,
                 })?;
@@ -761,6 +763,7 @@ impl Equipment for HeatPumpWH {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: skin_loss_w,
+                    radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
                     category: ThermalCategory::JacketLoss,
                 })?;

@@ -4,6 +4,7 @@ building_id = 600
 start_time = "2024-01-01T00:00:00-07:00"
 time_res_s = 3600
 duration_s = 31536000
+initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
 
 [geometry]
 floor_area_m2 = 48.0
@@ -27,6 +28,7 @@ ach = 0.5
 internal_gains_w = 200.0
 internal_gains_constant = true
 internal_gains_sensible_fraction = 1.0
+internal_gains_radiant_fraction = 0.3
 
 [[boundaries]]
 id = "south-wall"

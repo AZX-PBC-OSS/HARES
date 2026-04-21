@@ -19,6 +19,7 @@ pub const FLUE_LOSS_W: &str = "flue_loss_w";
 pub const JACKET_LOSS_W: &str = "jacket_loss_w";
 pub const SKIN_LOSS_W: &str = "skin_loss_w";
 pub const SENSIBLE_GAIN_W: &str = "sensible_gain_w";
+pub const TOTAL_SENSIBLE_GAIN_W: &str = "total_sensible_gain_w";
 pub const LATENT_GAIN_W: &str = "latent_gain_w";
 pub const SENSIBLE_COOLING_W: &str = "sensible_cooling_w";
 pub const LATENT_COOLING_W: &str = "latent_cooling_w";

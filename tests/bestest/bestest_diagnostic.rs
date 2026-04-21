@@ -23,8 +23,9 @@ fn run_annual(case_id: &str) -> Vec<StepSnapshot> {
         .find(|c| c.id == case_id)
         .unwrap_or_else(|| panic!("unknown BESTEST case: {case_id}"));
 
-    let mut dwelling = Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
-        .unwrap_or_else(|err| panic!("failed to load BESTEST case {case_id}: {err}"));
+    let mut dwelling =
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("failed to load BESTEST case {case_id}: {err}"));
 
     let total_steps = 8760usize;
     let mut snapshots = Vec::with_capacity(total_steps);
@@ -59,8 +60,9 @@ fn print_component_gains_at(case_id: &str, target_step: usize) {
         .find(|c| c.id == case_id)
         .unwrap_or_else(|| panic!("unknown BESTEST case: {case_id}"));
 
-    let mut dwelling = Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
-        .unwrap_or_else(|err| panic!("failed to reload BESTEST case {case_id}: {err}"));
+    let mut dwelling =
+        Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
+            .unwrap_or_else(|err| panic!("failed to reload BESTEST case {case_id}: {err}"));
 
     // Run up to and including target_step (0-indexed).
     for _ in 0..=target_step {
@@ -74,16 +76,34 @@ fn print_component_gains_at(case_id: &str, target_step: usize) {
         target_step,
         target_step + 1
     );
-    eprintln!("  window_solar_w          = {:>10.1} W", gains.window_solar_w);
+    eprintln!(
+        "  window_solar_w          = {:>10.1} W",
+        gains.window_solar_w
+    );
     eprintln!(
         "  opaque_solar_lwr_w      = {:>10.1} W",
         gains.opaque_solar_lwr_w
     );
-    eprintln!("  opaque_solar_w          = {:>10.1} W", gains.opaque_solar_w);
-    eprintln!("  exterior_lwr_w          = {:>10.1} W", gains.exterior_lwr_w);
-    eprintln!("  interior_lwr_w          = {:>10.1} W", gains.interior_lwr_w);
-    eprintln!("  infiltration_w          = {:>10.1} W", gains.infiltration_w);
-    eprintln!("  internal_gain_w         = {:>10.1} W", gains.internal_gain_w);
+    eprintln!(
+        "  opaque_solar_w          = {:>10.1} W",
+        gains.opaque_solar_w
+    );
+    eprintln!(
+        "  exterior_lwr_w          = {:>10.1} W",
+        gains.exterior_lwr_w
+    );
+    eprintln!(
+        "  interior_lwr_w          = {:>10.1} W",
+        gains.interior_lwr_w
+    );
+    eprintln!(
+        "  infiltration_w          = {:>10.1} W",
+        gains.infiltration_w
+    );
+    eprintln!(
+        "  internal_gain_w         = {:>10.1} W",
+        gains.internal_gain_w
+    );
     eprintln!(
         "  driving_outdoor_temp_c  = {:>10.1} °C",
         gains.driving_outdoor_temp_c
@@ -91,6 +111,7 @@ fn print_component_gains_at(case_id: &str, target_step: usize) {
 }
 
 #[test]
+#[ignore = "interactive diagnostic; run with --ignored"]
 fn bestest_diagnostic_900ff_600ff_annual() {
     // --- 1. Run both cases for the full annual simulation ---
     eprintln!("[diagnostic] Running 900FF annual simulation (8760 steps)...");
@@ -121,11 +142,15 @@ fn bestest_diagnostic_900ff_600ff_annual() {
 
     eprintln!(
         "[diagnostic] 900FF min temp = {:.4}°C at step {} (hour {})",
-        min_temp_900ff, min_step_900ff, min_step_900ff + 1
+        min_temp_900ff,
+        min_step_900ff,
+        min_step_900ff + 1
     );
     eprintln!(
         "[diagnostic] 600FF min temp = {:.4}°C at step {} (hour {})",
-        min_temp_600ff, min_step_600ff, min_step_600ff + 1
+        min_temp_600ff,
+        min_step_600ff,
+        min_step_600ff + 1
     );
 
     // Use the 900FF minimum as the reference window — 900FF is the heavyweight
@@ -149,7 +174,11 @@ fn bestest_diagnostic_900ff_600ff_annual() {
         let d6 = &data_600ff[h];
         eprintln!(
             "[diagnostic] {:>5}  {:>12.3}  {:>12.3}  {:>12.3}  {:>12.3}",
-            h + 1, d9.zone_temp_c, d9.outdoor_temp_c, d6.zone_temp_c, d6.outdoor_temp_c
+            h + 1,
+            d9.zone_temp_c,
+            d9.outdoor_temp_c,
+            d6.zone_temp_c,
+            d6.outdoor_temp_c
         );
     }
 
@@ -160,9 +189,7 @@ fn bestest_diagnostic_900ff_600ff_annual() {
     // --- 6. Compare 900FF vs 600FF: zone temperature delta at each hour of the minimum day ---
     // "Minimum day" = 24-hour window centred on the 900FF minimum step.
     let day_start = ref_step.saturating_sub(12);
-    let day_end = (ref_step + 12)
-        .min(data_900ff.len())
-        .min(data_600ff.len());
+    let day_end = (ref_step + 12).min(data_900ff.len()).min(data_600ff.len());
     eprintln!(
         "[diagnostic] === Minimum day 900FF vs 600FF delta (hours {}..{}) ===",
         day_start + 1,
@@ -178,7 +205,10 @@ fn bestest_diagnostic_900ff_600ff_annual() {
         let delta = t9 - t6;
         eprintln!(
             "[diagnostic] {:>5}  {:>12.3}  {:>12.3}  {:>12.3}",
-            h + 1, t9, t6, delta
+            h + 1,
+            t9,
+            t6,
+            delta
         );
     }
 }

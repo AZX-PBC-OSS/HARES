@@ -834,7 +834,10 @@ impl Dwelling {
             sim_config,
             overrides: config.overrides.clone(),
             bldg_id: config.building_id.unwrap_or(0),
-            initialization_duration: None,
+            initialization_duration: config
+                .simulation
+                .initialization_duration_s
+                .map(StdDuration::from_secs),
             resample_overrides: None,
         };
 
@@ -1905,7 +1908,7 @@ impl Dwelling {
         let latent_w = n_occupants * OCCUPANT_LATENT_GAIN_W;
 
         for thermal in &mut self.ports.thermal {
-            thermal.add(sensible_w, latent_w, ThermalCategory::InternalGain);
+            thermal.add(sensible_w, 0.0, latent_w, ThermalCategory::InternalGain);
         }
     }
 

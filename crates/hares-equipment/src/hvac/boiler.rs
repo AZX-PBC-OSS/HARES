@@ -517,6 +517,7 @@ impl Equipment for GasBoiler {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: jacket_loss_w,
+                    radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
                     category: ThermalCategory::JacketLoss,
                 })?;

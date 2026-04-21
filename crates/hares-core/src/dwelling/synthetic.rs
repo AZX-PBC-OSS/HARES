@@ -42,6 +42,8 @@ pub(crate) struct SyntheticTomlConfig {
     pub(crate) internal_gains_constant: Option<bool>,
     #[serde(default)]
     pub(crate) internal_gains_sensible_fraction: Option<f64>,
+    #[serde(default)]
+    pub(crate) internal_gains_radiant_fraction: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +51,8 @@ pub(crate) struct SyntheticSimulationConfig {
     pub(crate) start_time: DateTime<FixedOffset>,
     pub(crate) time_res_s: i64,
     pub(crate) duration_s: i64,
+    #[serde(default)]
+    pub(crate) initialization_duration_s: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -481,6 +485,14 @@ pub(crate) fn build_synthetic_building(config: &SyntheticTomlConfig) -> Building
                     children: Vec::new(),
                 });
             }
+            if let Some(rf) = config.internal_gains_radiant_fraction {
+                ext_children.push(hares_io::hpxml::building::XmlNode {
+                    name: "FracRadiant".to_string(),
+                    attrs: HashMap::new(),
+                    text: rf.to_string(),
+                    children: Vec::new(),
+                });
+            }
             plug_children.push(hares_io::hpxml::building::XmlNode {
                 name: "extension".to_string(),
                 attrs: HashMap::new(),
@@ -790,4 +802,86 @@ pub(crate) fn current_process_hwm_kb() -> u64 {
 #[cfg(feature = "profiling")]
 pub(crate) fn hot_path_alloc_counter() -> u64 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialization_duration_s_parsed_from_toml() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 3600
+initialization_duration_s = 86400
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(config.simulation.initialization_duration_s, Some(86400));
+    }
+
+    #[test]
+    fn initialization_duration_s_defaults_to_none() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 3600
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(config.simulation.initialization_duration_s, None);
+    }
+
+    #[test]
+    fn initialization_duration_s_negative_rejected() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res_s = 60
+duration_s = 3600
+initialization_duration_s = -1
+
+[geometry]
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let result = toml::from_str::<SyntheticTomlConfig>(toml);
+        assert!(
+            result.is_err(),
+            "negative initialization_duration_s must be rejected at parse time"
+        );
+    }
 }

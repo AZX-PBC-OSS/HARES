@@ -113,6 +113,7 @@ impl HvacEquipment {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: sensible_gain_w * fraction,
+                    radiant_gain_w: 0.0,
                     latent_gain_w: latent_gain_w * fraction,
                     category: effective_category,
                 })?;

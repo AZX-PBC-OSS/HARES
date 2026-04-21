@@ -23,10 +23,7 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_postcard, save_p
 
 use crate::config::KEY_EQUIPMENT_ID;
 const KEY_SENSIBLE_GAIN_FRACTION: &str = "sensible_gain_fraction";
-// Reserved for future radiant/convective split (OCHRE ScheduledLoad heat gain decomposition).
-#[allow(dead_code)]
 const KEY_CONVECTIVE_GAIN_FRACTION: &str = "convective_gain_fraction";
-#[allow(dead_code)]
 const KEY_RADIATIVE_GAIN_FRACTION: &str = "radiative_gain_fraction";
 const KEY_LATENT_GAIN_FRACTION: &str = "latent_gain_fraction";
 const KEY_ZIP_Z: &str = "zip_z";
@@ -149,6 +146,7 @@ pub struct ScheduledLoad {
     gas_source: Option<ScheduleSource>,
     gas_schedule_unit: GasScheduleUnit,
     sensible_gain_fraction: f64,
+    radiant_gain_fraction: f64,
     latent_gain_fraction: f64,
     zip: ZipCoefficients,
     /// Per-month scale factors [0..11] applied after load_fraction.
@@ -209,6 +207,7 @@ impl ScheduledLoad {
             gas_source: None,
             gas_schedule_unit: GasScheduleUnit::ThermsPerHour,
             sensible_gain_fraction: 0.0,
+            radiant_gain_fraction: 0.0,
             latent_gain_fraction: 0.0,
             zip: ZipCoefficients::default(),
             month_multipliers: None,
@@ -247,6 +246,7 @@ impl ScheduledLoad {
         };
         // OCHRE Equipment.py:83-86: sensible gain = convective + radiative fractions.
         // "frac_sensible" is the HPXML-parsed alias for sensible_gain_fraction.
+        let radiative_frac = config.get_f64(KEY_RADIATIVE_GAIN_FRACTION).unwrap_or(0.0);
         self.sensible_gain_fraction = config
             .get_f64(KEY_SENSIBLE_GAIN_FRACTION)
             .or_else(|| config.get_f64("frac_sensible"))
@@ -266,15 +266,40 @@ impl ScheduledLoad {
                 );
                 0.5
             });
+        self.radiant_gain_fraction = radiative_frac;
         // "frac_latent" is the HPXML-parsed alias for latent_gain_fraction.
         self.latent_gain_fraction = config
             .get_f64(KEY_LATENT_GAIN_FRACTION)
             .or_else(|| config.get_f64("frac_latent"))
             .unwrap_or(0.0);
+        if self.sensible_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "sensible_gain_fraction ({}) must not be negative",
+                self.sensible_gain_fraction
+            )));
+        }
+        if self.latent_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "latent_gain_fraction ({}) must not be negative",
+                self.latent_gain_fraction
+            )));
+        }
+        if self.radiant_gain_fraction < 0.0 {
+            return Err(HaresError::Equipment(format!(
+                "radiant_gain_fraction ({}) must not be negative",
+                self.radiant_gain_fraction
+            )));
+        }
         if self.sensible_gain_fraction + self.latent_gain_fraction > 1.0 + 1e-9 {
             return Err(HaresError::Equipment(format!(
                 "sensible_gain_fraction ({}) + latent_gain_fraction ({}) must not exceed 1.0",
                 self.sensible_gain_fraction, self.latent_gain_fraction
+            )));
+        }
+        if self.radiant_gain_fraction > self.sensible_gain_fraction + 1e-9 {
+            return Err(HaresError::Equipment(format!(
+                "radiant_gain_fraction ({}) must not exceed sensible_gain_fraction ({}) (convective gain would be negative)",
+                self.radiant_gain_fraction, self.sensible_gain_fraction
             )));
         }
         self.zip = parse_zip_coefficients(config)?;
@@ -358,7 +383,7 @@ impl Equipment for ScheduledLoad {
             self.last_non_zero_gas_w = 0.0;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
-            self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
+            self.telemetry.set(tk::TOTAL_SENSIBLE_GAIN_W, 0.0);
             self.telemetry.set(tk::LATENT_GAIN_W, 0.0);
             self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
             self.core_output = CoreOutput {
@@ -392,7 +417,7 @@ impl Equipment for ScheduledLoad {
             self.last_non_zero_gas_w = 0.0;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
-            self.telemetry.set(tk::SENSIBLE_GAIN_W, 0.0);
+            self.telemetry.set(tk::TOTAL_SENSIBLE_GAIN_W, 0.0);
             self.telemetry.set(tk::LATENT_GAIN_W, 0.0);
             self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
             self.core_output = CoreOutput {
@@ -489,13 +514,16 @@ impl Equipment for ScheduledLoad {
         }
 
         let total_gain_source_w = electric_power_kw * 1_000.0 + gas_consumption_w;
-        let sensible_gain_w = total_gain_source_w * self.sensible_gain_fraction;
+        let total_sensible_w = total_gain_source_w * self.sensible_gain_fraction;
+        let radiant_gain_w = total_gain_source_w * self.radiant_gain_fraction;
+        let sensible_gain_w = total_sensible_w - radiant_gain_w;
         let latent_gain_w = total_gain_source_w * self.latent_gain_fraction;
         if let Some(zone) = self.descriptor.zone {
-            if sensible_gain_w != 0.0 || latent_gain_w != 0.0 {
+            if sensible_gain_w != 0.0 || radiant_gain_w != 0.0 || latent_gain_w != 0.0 {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w,
+                    radiant_gain_w,
                     latent_gain_w,
                     category: ThermalCategory::InternalGain,
                 })?;
@@ -505,7 +533,8 @@ impl Equipment for ScheduledLoad {
         self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
         self.telemetry
             .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
-        self.telemetry.set(tk::SENSIBLE_GAIN_W, sensible_gain_w);
+        self.telemetry
+            .set(tk::TOTAL_SENSIBLE_GAIN_W, total_sensible_w);
         self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
         self.telemetry.set(tk::FUEL_INPUT_W, gas_consumption_w);
         self.core_output = CoreOutput {
@@ -592,7 +621,7 @@ impl Equipment for ScheduledLoad {
         // heat gains regardless of what the voltage was at the time of last non-zero output.
         let total_gain_source_w = self.last_non_zero_power_kw * 1_000.0 + self.last_non_zero_gas_w;
         self.telemetry.insert(
-            tk::SENSIBLE_GAIN_W,
+            tk::TOTAL_SENSIBLE_GAIN_W,
             total_gain_source_w * self.sensible_gain_fraction,
         );
         self.telemetry.insert(
@@ -765,7 +794,7 @@ fn default_telemetry() -> Telemetry {
     let mut telemetry = Telemetry::with_capacity(5);
     telemetry.insert(tk::ELECTRIC_KW, 0.0);
     telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
-    telemetry.insert(tk::SENSIBLE_GAIN_W, 0.0);
+    telemetry.insert(tk::TOTAL_SENSIBLE_GAIN_W, 0.0);
     telemetry.insert(tk::LATENT_GAIN_W, 0.0);
     telemetry.insert(tk::FUEL_INPUT_W, 0.0);
     telemetry
@@ -784,9 +813,10 @@ fn scheduled_load_telemetry_fields() -> Vec<TelemetryField> {
             description: "ZIP-adjusted reactive electrical power".to_string(),
         },
         TelemetryField {
-            name: tk::SENSIBLE_GAIN_W.to_string(),
+            name: tk::TOTAL_SENSIBLE_GAIN_W.to_string(),
             unit: "W".to_string(),
-            description: "Sensible thermal gain to assigned zone".to_string(),
+            description: "Total sensible thermal gain (convective + radiant) to assigned zone"
+                .to_string(),
         },
         TelemetryField {
             name: tk::LATENT_GAIN_W.to_string(),
@@ -1705,7 +1735,7 @@ mod tests {
             .map(TelemetryField::name_as_str)
             .collect();
         assert!(names.contains(&tk::ELECTRIC_KW));
-        assert!(names.contains(&tk::SENSIBLE_GAIN_W));
+        assert!(names.contains(&tk::TOTAL_SENSIBLE_GAIN_W));
         assert!(names.contains(&tk::LATENT_GAIN_W));
         assert!(names.contains(&tk::FUEL_INPUT_W));
     }
@@ -1818,8 +1848,11 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        // 1 kW = 1000 W; sensible fraction = 0.3 + 0.2 = 0.5
-        assert!((ports.thermal[0].sensible_gain_w - 500.0).abs() < 1e-9);
+        // 1 kW = 1000 W; sensible = conv(0.3) + rad(0.2) = 0.5 → total sensible = 500W
+        // convective = total_sensible - radiant = 500 - 200 = 300W
+        // radiant = 1000 * 0.2 = 200W
+        assert!((ports.thermal[0].sensible_gain_w - 300.0).abs() < 1e-9);
+        assert!((ports.thermal[0].radiant_gain_w - 200.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2172,6 +2205,44 @@ mod tests {
             ports.electrical.net_active_kw(),
             0.0,
             "negative load fraction must be clamped to 0, producing zero power"
+        );
+    }
+
+    #[test]
+    fn radiant_gain_fraction_splits_sensible_gain() {
+        let config = config_with_extras(
+            "s",
+            "Lighting",
+            &[0.2],
+            &[
+                (KEY_SENSIBLE_GAIN_FRACTION, 1.0.into()),
+                (KEY_RADIATIVE_GAIN_FRACTION, 0.3.into()),
+            ],
+        );
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+
+        let total_gain_w = 200.0;
+        let expected_radiant = total_gain_w * 0.3;
+        let expected_convective = total_gain_w * 1.0 - expected_radiant;
+        assert!(
+            (ports.thermal[0].sensible_gain_w - expected_convective).abs() < 1e-9,
+            "convective sensible should be {:.3}, got {:.3}",
+            expected_convective,
+            ports.thermal[0].sensible_gain_w
+        );
+        assert!(
+            (ports.thermal[0].radiant_gain_w - expected_radiant).abs() < 1e-9,
+            "radiant gain should be {:.3}, got {:.3}",
+            expected_radiant,
+            ports.thermal[0].radiant_gain_w
         );
     }
 }

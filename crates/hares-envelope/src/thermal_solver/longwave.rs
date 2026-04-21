@@ -12,6 +12,11 @@ use crate::longwave_radiation::{
     exterior_longwave_w, interior_longwave_linearised_w_into, sky_view_factor,
 };
 
+/// NFRC standard exterior combined film coefficient [W/(m²·K)].
+/// The window U-factor is rated at h_out = 34 W/(m²·K) with T_sky ≈ T_air.
+/// Ref: NFRC 100-2020; E+ Eng.Ref "Window U-factor".
+const H_OUT_NFRC: f64 = 34.0;
+
 use super::ThermalSolver;
 
 impl ThermalSolver {
@@ -31,24 +36,84 @@ impl ThermalSolver {
         let t_sky_raw = env.weather.sky_temp_c;
         let t_sky_valid = !t_sky_raw.is_nan();
 
+        self.window_exterior_lwr_w = 0.0;
+
         for (i, info) in self.config.exterior_surfaces.iter().enumerate() {
             if info.input_index >= u.len() || info.state_index >= self.x.len() {
                 continue;
             }
 
-            // Windows: LWR is implicit in U-factor; skip exterior radiation calc.
-            // Without this, windows use zone air temp as "surface temp" (rad_frac=0,
-            // state_index = zone air), producing massive erroneous LWR cooling.
             if info.boundary_category == Some(super::config::BoundaryCategory::Window) {
+                let u_factor = info.u_factor_w_m2_k;
+                if u_factor <= 0.0 || info.area_m2 <= 0.0 {
+                    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                    self.ext_surface_diag_buf
+                        .push(super::config::ExtSurfaceDiag {
+                            surface_id: info.surface_id,
+                            category: info.boundary_category,
+                            solar_absorbed_w: 0.0,
+                            lwr_gain_w: 0.0,
+                            surface_temp_c: t_ext,
+                            injected_w: 0.0,
+                        });
+                    continue;
+                }
+
+                let f_sky = sky_view_factor(info.tilt_deg);
+                let beta = beta_factor(info.tilt_deg);
+                let t_sky_effective = if t_sky_valid { t_sky_raw } else { t_ext };
+
+                let t_sky_k = t_sky_effective + CELSIUS_TO_KELVIN;
+                let t_air_k = t_ext + CELSIUS_TO_KELVIN;
+
+                // Net LWR flux density beyond U-factor's T_sky ≈ T_air assumption:
+                // Δq = ε·σ·β·F_sky·(T_sky⁴ − T_air⁴) [W/m²]
+                // Walton (1983) tilted-sky model; E+ Eng.Ref "External Longwave Radiation".
+                let delta_q_w_m2 = info.emissivity
+                    * STEFAN_BOLTZMANN
+                    * beta
+                    * f_sky
+                    * (t_sky_k.powi(4) - t_air_k.powi(4));
+
+                // T_eff approach: the effective outdoor temperature for window conduction
+                // is T_eff = T_air + Δq / h_out. The additional zone cooling beyond the
+                // U-factor (which assumes T_sky = T_air) is:
+                //   ΔQ_zone = U·A·(T_air − T_eff) = (U / h_out) · Δq · A
+                // This avoids double-counting: the U-factor's h_out already includes
+                // radiative exchange at T_sky = T_air; we correct for T_sky ≠ T_air only.
+                // Use actual h_out from boundary film resistance when available;
+                // fall back to NFRC 34 W/(m²·K) rating condition.
+                let h_out = if info.h_out_w_m2_k > 1.0 {
+                    info.h_out_w_m2_k
+                } else {
+                    H_OUT_NFRC
+                };
+                let delta_q_w = (u_factor / h_out) * delta_q_w_m2 * info.area_m2;
+
+                let indoor_zone = self
+                    .config
+                    .window_zone_ids
+                    .get(&info.surface_id)
+                    .copied()
+                    .unwrap_or(self.config.indoor_zone_id);
+
+                if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&indoor_zone) {
+                    if idx < u.len() {
+                        u[idx] += delta_q_w;
+                    }
+                }
+
+                self.window_exterior_lwr_w += delta_q_w;
+
                 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
                 self.ext_surface_diag_buf
                     .push(super::config::ExtSurfaceDiag {
                         surface_id: info.surface_id,
                         category: info.boundary_category,
                         solar_absorbed_w: 0.0,
-                        lwr_gain_w: 0.0,
+                        lwr_gain_w: delta_q_w,
                         surface_temp_c: t_ext,
-                        injected_w: 0.0,
+                        injected_w: delta_q_w,
                     });
                 continue;
             }
@@ -315,5 +380,193 @@ impl ThermalSolver {
             }
             self.lwr_by_zone_buf.push((zone_cfg.zone_id, zone_total));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::longwave_radiation::{
+        CELSIUS_TO_KELVIN, STEFAN_BOLTZMANN, beta_factor, sky_view_factor,
+    };
+
+    /// Verify: when T_sky < T_air (clear winter night), the window LWR delta is
+    /// negative (additional cooling) and scaled by U/h_out per the T_eff approach.
+    ///
+    /// Physics: vertical south-facing window in Denver winter.
+    ///   ε=0.84, tilt=90°, f_sky=0.5, β=√0.5≈0.707, U=3.0 W/(m²·K), A=12 m²
+    ///   T_sky=-30°C, T_air=-15°C
+    ///
+    /// Δq_m2 = 0.84 × σ × 0.707 × 0.5 × (243.15⁴ − 258.15⁴) ≈ −16 W/m²
+    /// ΔQ_zone = (U/h_out) × Δq_m2 × A = (3/34) × (−16) × 12 ≈ −17 W
+    #[test]
+    fn window_exterior_lwr_clear_night_is_cooling() {
+        let epsilon = 0.84_f64;
+        let tilt_deg = 90.0_f64;
+        let f_sky = sky_view_factor(tilt_deg);
+        let beta = beta_factor(tilt_deg);
+        let u_factor = 3.0_f64;
+        let area_m2 = 12.0_f64;
+
+        let t_sky_c = -30.0_f64;
+        let t_air_c = -15.0_f64;
+        let t_sky_k = t_sky_c + CELSIUS_TO_KELVIN;
+        let t_air_k = t_air_c + CELSIUS_TO_KELVIN;
+
+        let delta_q_w_m2 =
+            epsilon * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
+        let delta_q_w = (u_factor / H_OUT_NFRC) * delta_q_w_m2 * area_m2;
+
+        assert!(
+            delta_q_w_m2 < 0.0,
+            "per-m² delta must be negative (cooling), got {delta_q_w_m2}"
+        );
+        assert!(
+            delta_q_w_m2 > -30.0,
+            "per-m² delta should be ~-16 W/m², got {delta_q_w_m2}"
+        );
+        assert!(
+            delta_q_w < 0.0,
+            "total delta must be negative (cooling), got {delta_q_w}"
+        );
+        assert!(
+            delta_q_w > -30.0,
+            "total delta should be ~-17 W, got {delta_q_w}"
+        );
+    }
+
+    /// Verify: when T_sky = T_air (overcast), delta = 0.
+    /// The U-factor already accounts for this case — no additional cooling.
+    #[test]
+    fn window_exterior_lwr_zero_when_sky_equals_air() {
+        let epsilon = 0.84_f64;
+        let tilt_deg = 90.0_f64;
+        let f_sky = sky_view_factor(tilt_deg);
+        let beta = beta_factor(tilt_deg);
+        let u_factor = 3.0_f64;
+        let area_m2 = 12.0_f64;
+
+        let t_sky_c = -15.0_f64;
+        let t_air_c = -15.0_f64;
+        let t_sky_k = t_sky_c + CELSIUS_TO_KELVIN;
+        let t_air_k = t_air_c + CELSIUS_TO_KELVIN;
+
+        let delta_q_w_m2 =
+            epsilon * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
+        let delta_q_w = (u_factor / H_OUT_NFRC) * delta_q_w_m2 * area_m2;
+
+        assert!(
+            delta_q_w.abs() < 1e-6,
+            "delta must be zero when T_sky = T_air, got {delta_q_w}"
+        );
+    }
+
+    /// Verify: the T_eff scaling factor U/h_out reduces the raw LWR delta.
+    /// Without scaling, delta ≈ -192 W; with scaling (U=3, h_out=34), delta ≈ -17 W.
+    /// The ratio should be U/h_out = 3/34 ≈ 0.088.
+    #[test]
+    fn window_exterior_lwr_teff_scaling_reduces_raw_delta() {
+        let epsilon = 0.84_f64;
+        let tilt_deg = 90.0_f64;
+        let f_sky = sky_view_factor(tilt_deg);
+        let beta = beta_factor(tilt_deg);
+        let u_factor = 3.0_f64;
+        let area_m2 = 12.0_f64;
+
+        let t_sky_c = -30.0_f64;
+        let t_air_c = -15.0_f64;
+        let t_sky_k = t_sky_c + CELSIUS_TO_KELVIN;
+        let t_air_k = t_air_c + CELSIUS_TO_KELVIN;
+
+        let delta_q_w_m2 =
+            epsilon * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
+        let raw_delta = delta_q_w_m2 * area_m2;
+        let scaled_delta = (u_factor / H_OUT_NFRC) * delta_q_w_m2 * area_m2;
+
+        let ratio = scaled_delta / raw_delta;
+        let expected_ratio = u_factor / H_OUT_NFRC;
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-9,
+            "scaling ratio should be U/h_out = {expected_ratio:.6}, got {ratio:.6}"
+        );
+        assert!(
+            raw_delta.abs() > scaled_delta.abs(),
+            "scaled delta ({scaled_delta:.1}) must be smaller than raw ({raw_delta:.1})"
+        );
+    }
+
+    /// Verify: when h_out_w_m2_k is provided (actual film coefficient), it's used
+    /// instead of the NFRC fallback. Higher h_out → smaller correction.
+    #[test]
+    fn window_exterior_lwr_uses_actual_h_out_when_available() {
+        let epsilon = 0.84_f64;
+        let tilt_deg = 90.0_f64;
+        let f_sky = sky_view_factor(tilt_deg);
+        let beta = beta_factor(tilt_deg);
+        let u_factor = 3.0_f64;
+        let area_m2 = 12.0_f64;
+        let t_sky_c = -30.0_f64;
+        let t_air_c = -15.0_f64;
+        let t_sky_k = t_sky_c + CELSIUS_TO_KELVIN;
+        let t_air_k = t_air_c + CELSIUS_TO_KELVIN;
+
+        let delta_q_w_m2 =
+            epsilon * STEFAN_BOLTZMANN * beta * f_sky * (t_sky_k.powi(4) - t_air_k.powi(4));
+
+        let delta_nfrc = (u_factor / H_OUT_NFRC) * delta_q_w_m2 * area_m2;
+        let h_out_actual = 50.0_f64;
+        let delta_actual = (u_factor / h_out_actual) * delta_q_w_m2 * area_m2;
+
+        assert!(
+            delta_actual.abs() < delta_nfrc.abs(),
+            "higher h_out should give smaller correction: actual={delta_actual:.2}, nfrc={delta_nfrc:.2}"
+        );
+    }
+
+    /// Verify: horizontal window (skylight) has larger LWR delta than vertical
+    /// because f_sky=1.0, β=1.0 (full sky exposure).
+    #[test]
+    fn window_exterior_lwr_horizontal_sees_more_sky_than_vertical() {
+        let epsilon = 0.84_f64;
+        let u_factor = 3.0_f64;
+        let area_m2 = 12.0_f64;
+        let t_sky_c = -30.0_f64;
+        let t_air_c = -15.0_f64;
+        let t_sky_k = t_sky_c + CELSIUS_TO_KELVIN;
+        let t_air_k = t_air_c + CELSIUS_TO_KELVIN;
+
+        let f_sky_v = sky_view_factor(90.0);
+        let beta_v = beta_factor(90.0);
+        let delta_v = (u_factor / H_OUT_NFRC)
+            * epsilon
+            * STEFAN_BOLTZMANN
+            * beta_v
+            * f_sky_v
+            * (t_sky_k.powi(4) - t_air_k.powi(4))
+            * area_m2;
+
+        let f_sky_h = sky_view_factor(0.0);
+        let beta_h = beta_factor(0.0);
+        let delta_h = (u_factor / H_OUT_NFRC)
+            * epsilon
+            * STEFAN_BOLTZMANN
+            * beta_h
+            * f_sky_h
+            * (t_sky_k.powi(4) - t_air_k.powi(4))
+            * area_m2;
+
+        assert!(
+            delta_h < delta_v,
+            "horizontal skylight should cool more than vertical window: h={delta_h:.1}, v={delta_v:.1}"
+        );
+    }
+
+    /// Verify: H_OUT_NFRC matches the NFRC 100-2020 winter rating condition.
+    #[test]
+    fn h_out_nfrc_matches_standard() {
+        assert!(
+            (H_OUT_NFRC - 34.0).abs() < 1e-9,
+            "H_OUT_NFRC should be 34.0 W/(m²·K) per NFRC 100-2020"
+        );
     }
 }

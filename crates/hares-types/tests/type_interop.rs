@@ -94,6 +94,7 @@ fn thermal_contribution_accumulates_into_declared_zone() {
         .accumulate(&PortContribution::Thermal {
             zone,
             sensible_gain_w: 500.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 50.0,
             category: ThermalCategory::InternalGain,
         })
@@ -181,6 +182,7 @@ fn zero_resets_all_slots_while_preserving_structure() {
         .accumulate(&PortContribution::Thermal {
             zone,
             sensible_gain_w: 300.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 30.0,
             category: ThermalCategory::HvacHeating,
         })
@@ -304,6 +306,7 @@ fn accumulate_to_undeclared_zone_is_rejected() {
     let result = slots.accumulate(&PortContribution::Thermal {
         zone: ZoneId(42),
         sensible_gain_w: 100.0,
+        radiant_gain_w: 0.0,
         latent_gain_w: 0.0,
         category: ThermalCategory::InternalGain,
     });
@@ -350,6 +353,7 @@ fn mixed_category_totals_are_consistent() {
         .accumulate(&PortContribution::Thermal {
             zone,
             sensible_gain_w: 400.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 0.0,
             category: ThermalCategory::HvacHeating,
         })
@@ -358,6 +362,7 @@ fn mixed_category_totals_are_consistent() {
         .accumulate(&PortContribution::Thermal {
             zone,
             sensible_gain_w: 120.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 15.0,
             category: ThermalCategory::InternalGain,
         })
@@ -366,6 +371,7 @@ fn mixed_category_totals_are_consistent() {
         .accumulate(&PortContribution::Thermal {
             zone,
             sensible_gain_w: 30.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 0.0,
             category: ThermalCategory::JacketLoss,
         })

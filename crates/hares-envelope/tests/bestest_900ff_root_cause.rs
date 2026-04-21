@@ -10,7 +10,8 @@
 //!      free-float building with no HVAC — concrete walls start unrealistically
 //!      warm. Measured impact: −4.53 °C (21 °C→0 °C proxy); warmup-appropriate
 //!      initialization (≈3 °C) accounts for ~2.4 °C of the 2.50 °C outlier.
-//!   2. Internal gains 100 % convective; ASHRAE 140 §5.2.4.3 requires 60 % radiant.
+//!   2. Internal gains 100 % convective; EnergyPlus BESTEST IDF specifies
+//!      Fraction Radiant = 0.3 (30% of total gain is radiant).
 //!      Measured impact: −0.295 °C.
 //!
 //! Ruled out (measured delta ≈ 0 or wrong direction):

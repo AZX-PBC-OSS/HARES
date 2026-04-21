@@ -333,6 +333,7 @@ impl Equipment for Dehumidifier {
             ports.accumulate(&PortContribution::Thermal {
                 zone: self.zone_id,
                 sensible_gain_w: snapshot.sensible_gain_w,
+                radiant_gain_w: 0.0,
                 latent_gain_w: -snapshot.latent_removal_w,
                 category: ThermalCategory::InternalGain,
             })?;

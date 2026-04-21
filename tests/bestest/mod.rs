@@ -57,69 +57,104 @@ fn run_single_case(case: &BestestCase) {
     );
 }
 
+// ASHRAE 140-2017 Case 600: lightweight conditioned building, annual loads.
+// Wood-frame walls (no significant thermal mass), insulated floor over
+// crawlspace, double-pane south-facing glazing. Low thermal capacitance means
+// zone air responds almost instantaneously to solar gains and infiltration —
+// heating and cooling loads are dominated by steady-state U-value heat
+// transfer rather than transient storage. This makes Case 600 the baseline
+// against which high-mass Case 900 is compared: the load difference between
+// the two isolates the thermal-mass effect. Denver TMY3 climate (cold winter,
+// hot summer, large diurnal swing) ensures both heating and cooling are
+// exercised. Metrics: annual heating load [4296, 5709] kWh, annual cooling
+// load [6137, 7964] kWh (ASHRAE 140-2017 Table B8-2).
 #[test]
 fn bestest_case_600() {
     let case = core_cases().into_iter().find(|c| c.id == "600").unwrap();
     run_single_case(&case);
 }
 
-// ASHRAE 140-2017 Case 900 (heavyweight conditioned envelope).
-// Measured (8760-step annual run): annual heating load 2041.43 kWh vs
-// ASHRAE 140 Table B8-2 band [1170, 2041] kWh -- 0.43 kWh (0.021 %) above
-// upper bound. Annual cooling load 2806.34 kWh is comfortably inside band
-// [2132, 3415] kWh. Sibling lightweight Case 600 passes heating, and
-// sibling free-float Case 900FF mis-tracks minimum temperature -- both
-// pointers are consistent with a marginal over-estimate of heat loss
-// through the heavyweight mass path. Candidate crate-side code paths are
-// the heavyweight RC construction at
-// `crates/hares-envelope/src/boundary_rc.rs:149-174` (node count / mass
-// placement) and the infiltration driver at
-// `crates/hares-envelope/src/thermal_solver/infiltration.rs:62-120`
-// (stack/wind superposition under the diurnal temperature swing). Fix
-// lives in `crates/hares-envelope`; this test suite's scope is limited
-// to non-crate sources. ASHRAE 140 bands are published oracles -- they
-// must NOT be widened.
+// ASHRAE 140-2017 Case 900: heavyweight conditioned building, annual loads.
+// Currently fails with ~2068 kWh annual heating load vs band max 2041 kWh
+// (a HEATING overshoot, not cooling). The window exterior long-wave radiation
+// fix adds physically correct cooling at the outer window surface, which
+// increases the heating load for conditioned buildings. The window interior
+// LWR fix (which warms the zone by adding interior-surface radiation) will
+// partially offset this regression. Construction: 100 mm concrete walls,
+// 80 mm concrete floor slab, 1.007 m floor insulation (R≈25 m²·K/W). The
+// floor slab's time constant τ≈33 days means annual results are acutely
+// sensitive to initialization — the slab carries thermal memory across
+// seasons; concrete inner nodes retain excess heat long after zone air has
+// equilibrated, shifting the seasonal load balance. Denver TMY3 climate
+// (large diurnal swing, cold winter) drives both heating and cooling loads.
+// Reference bands from ASHRAE 140 Table B8-2: annual heating load
+// [1170, 2041] kWh, annual cooling load [2132, 3415] kWh. ASHRAE 140 bands
+// are published oracles and must NOT be widened.
+// The should_panic documents a known regression: exterior-window LWR adds
+// physically correct cooling that raises the conditioned heating load above
+// the ASHRAE band; the interior-window LWR fix will partially offset this.
 #[test]
 #[should_panic(expected = "metric=annual_heating_load_kwh")]
 fn bestest_case_900() {
-    // xfail: Case 900 annual heating 2041.43 kWh above band [1170, 2041]
-    // (+0.021 %) -- marginal overshoot; fix in crates/hares-envelope. See
-    // preceding comment for candidate code paths.
     let case = core_cases().into_iter().find(|c| c.id == "900").unwrap();
     run_single_case(&case);
 }
 
+// ASHRAE 140-2017 Case 600FF: lightweight free-float envelope (no HVAC).
+// Same wood-frame construction as Case 600 but with the thermostat removed —
+// zone temperature floats freely under solar, infiltration, and internal gain
+// driving. Low thermal mass → short time constant (minutes to an hour), so
+// the zone air temperature tracks the outdoor dry-bulb closely with only
+// brief, shallow lags behind solar pulses. Peak zone temp is driven almost
+// entirely by peak solar gain through the south window; minimum zone temp is
+// set by the coldest outdoor condition moderated only by the lightweight
+// envelope's modest resistance. No HVAC to mask errors in envelope
+// conductance, window transmittance, or infiltration. Metrics: peak zone
+// temperature [64.9, 69.5]°C, minimum zone temperature [-18.8, 0.0]°C
+// (ASHRAE 140-2017 Table B8-3a).
 #[test]
 fn bestest_case_600ff() {
     let case = core_cases().into_iter().find(|c| c.id == "600FF").unwrap();
     run_single_case(&case);
 }
 
-// ASHRAE 140-2017 Case 900FF (heavyweight free-float envelope).
-// Measured (8760-step annual run): minimum free-float zone temperature
-// 0.90 °C vs ASHRAE 140 Table B8-3a band [-6.4, -1.6] °C (2.50 °C warmer
-// than upper bound). Peak zone temperature 43.14 °C is inside band
-// [41.6, 44.8] °C. Sibling case 600FF (lightweight) passes both metrics,
-// which localises the defect to thermal-mass handling.
-// Candidate crate-side code paths: heavy-wall RC construction at
-// `crates/hares-envelope/src/boundary_rc.rs:149-174` (node count / mass
-// placement), exterior longwave sky-loss at
-// `crates/hares-envelope/src/longwave_radiation.rs:169-210`, and the
-// nighttime infiltration driver at
-// `crates/hares-envelope/src/thermal_solver/infiltration.rs:62-120`.
-// Fix lives in `crates/hares-envelope`; this test suite's scope is limited
-// to non-crate sources. ASHRAE 140 bands are published oracles -- they must
-// NOT be widened.
+// ASHRAE 140-2017 Case 900FF: heavyweight free-float envelope (no HVAC).
+// 100 mm concrete walls and 80 mm concrete floor slab on 1.007 m insulation
+// (R≈25 m²·K/W) create a long thermal time constant — concrete stores heat
+// during the day and releases it overnight, damping the diurnal swing. With
+// no HVAC to mask modeling errors, this is the most demanding BESTEST case:
+// the minimum zone temperature is acutely sensitive to how the model handles
+// thermal-mass discharge. On cold nights, heat loss from zone air to the
+// exterior is partially offset by concrete releasing stored heat; if the
+// model overestimates this buffering (e.g. by placing too much capacitance
+// in direct contact with zone air or mis-handling the RC node topology), the
+// simulated minimum temperature rises above the reference band. Peak zone
+// temperature is less sensitive because daytime solar gains overwhelm the
+// mass effect. Metrics: peak zone temperature [41.6, 44.8]°C, minimum zone
+// temperature [-6.4, -1.6]°C (ASHRAE 140-2017 Table B8-3a). ASHRAE 140
+// bands are published oracles and must NOT be widened.
 #[test]
 #[should_panic(expected = "metric=min_zone_temp_c")]
 fn bestest_case_900ff() {
-    // xfail: Case 900FF min-temp 0.90 °C above band [-6.4, -1.6] (+2.50 °C);
-    // fix in crates/hares-envelope. See preceding comment for candidate
-    // code paths.
+    // Verifies the test still correctly detects the known min-temp exceedance.
     let case = core_cases().into_iter().find(|c| c.id == "900FF").unwrap();
     run_single_case(&case);
 }
 
+// ASHRAE 140-2017 Case 640: setback thermostat on lightweight building.
+// Identical to Case 600 construction (wood-frame, low thermal mass) but with
+// a 10 °C night setback: heating setpoint drops from 20 °C to 10 °C from
+// 23:00–07:00. The thermostat schedule means the building is allowed to
+// cool overnight, and must recover each morning — the pick-up load during
+// the morning warm-up is a significant fraction of annual heating energy.
+// Low thermal mass is critical here: in a lightweight building the zone
+// temperature drops quickly during setback and rises quickly on recovery,
+// so the annual heating energy reduction from setback is modest but
+// predictable. Comparing Case 640 heating energy (~30–45% below Case 600)
+// against the reference band validates that the model correctly handles
+// thermostat scheduling, setpoint switching, and the transient thermal
+// response during recovery. Metric: annual heating energy [2751, 3803] kWh
+// (ASHRAE 140-2017 Table B8-2).
 #[test]
 fn bestest_case_640() {
     let case = core_cases().into_iter().find(|c| c.id == "640").unwrap();
@@ -539,6 +574,7 @@ fn debug_600ff_heat_balance_at_peak() {
 }
 
 #[test]
+#[ignore = "expensive diagnostic; run with --ignored"]
 fn debug_900ff_min_temp_heat_balance() {
     let case = core_cases().into_iter().find(|c| c.id == "900FF").unwrap();
     let mut dwelling =
@@ -563,7 +599,10 @@ fn debug_900ff_min_temp_heat_balance() {
         }
     }
 
-    eprintln!("[900ff_min] min temp={min_temp:.4}°C at step={min_step} (hour {})", min_step + 1);
+    eprintln!(
+        "[900ff_min] min temp={min_temp:.4}°C at step={min_step} (hour {})",
+        min_step + 1
+    );
 
     let mut dwelling2 =
         Dwelling::from_toml_config_with_write_output(&case.fixture_path(), Some(false))
@@ -574,7 +613,8 @@ fn debug_900ff_min_temp_heat_balance() {
     }
 
     let surf_info = dwelling2.thermal_solver.interior_surface_info_debug();
-    for (i, (area, abs, rad_frac, is_floor, input_idx, has_driving)) in surf_info.iter().enumerate() {
+    for (i, (area, abs, rad_frac, is_floor, input_idx, has_driving)) in surf_info.iter().enumerate()
+    {
         eprintln!(
             "[900ff_surf] s={i} area={area:.1}m² solar_abs={abs:.3} rad_frac={rad_frac:.4} is_floor={is_floor} input_idx={input_idx} driving={has_driving}"
         );
@@ -583,11 +623,16 @@ fn debug_900ff_min_temp_heat_balance() {
     for step in min_step.saturating_sub(5)..=min_step + 1 {
         match dwelling2.step() {
             Ok(result) => {
-                let temp: f64 = result.zone_temperatures_c.iter().map(|(_, t)| *t).fold(f64::NEG_INFINITY, f64::max);
+                let temp: f64 = result
+                    .zone_temperatures_c
+                    .iter()
+                    .map(|(_, t)| *t)
+                    .fold(f64::NEG_INFINITY, f64::max);
                 let gains = dwelling2.thermal_solver.component_gains().clone();
                 eprintln!(
                     "[900ff_step] step={} t_zone={:.3} t_out={:.1} window_solar={:.1} opaque_lwr={:.1} ext_lwr={:.1} infiltration={:.1} internal={:.1} int_lwr={:.1}",
-                    step + 1, temp,
+                    step + 1,
+                    temp,
                     gains.driving_outdoor_temp_c,
                     gains.window_solar_w,
                     gains.opaque_solar_lwr_w,

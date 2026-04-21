@@ -523,6 +523,7 @@ impl Equipment for GasWH {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: skin_loss_to_zone_w,
+                    radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
                     category: ThermalCategory::JacketLoss,
                 })?;

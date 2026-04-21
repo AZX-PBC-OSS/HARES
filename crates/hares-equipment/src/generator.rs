@@ -795,6 +795,7 @@ impl Equipment for Generator {
                 ports.accumulate(&PortContribution::Thermal {
                     zone,
                     sensible_gain_w: zone_heat_w,
+                    radiant_gain_w: 0.0,
                     latent_gain_w: 0.0,
                     category: ThermalCategory::InternalGain,
                 })?;

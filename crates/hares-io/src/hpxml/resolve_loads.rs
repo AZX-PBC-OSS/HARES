@@ -944,6 +944,9 @@ fn parse_schedule_extension_params(node: &XmlNode, prefix: &str) -> Vec<(String,
     if let Some(frac) = child_f64(ext, "FracLatent") {
         out.push(("frac_latent".to_string(), json!(frac)));
     }
+    if let Some(frac) = child_f64(ext, "FracRadiant") {
+        out.push(("radiative_gain_fraction".to_string(), json!(frac)));
+    }
 
     out
 }

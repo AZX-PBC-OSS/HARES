@@ -111,6 +111,7 @@ fn ports_with_latent(zone: ZoneId, latent_w: f64) -> PortSlots {
         .accumulate(&PortContribution::Thermal {
             zone,
             sensible_gain_w: 0.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: latent_w,
             category: ThermalCategory::InternalGain,
         })
@@ -371,6 +372,7 @@ fn electrical_and_humidity_resolvers_are_independent() {
         .accumulate(&PortContribution::Thermal {
             zone,
             sensible_gain_w: 200.0,
+            radiant_gain_w: 0.0,
             latent_gain_w: 400.0,
             category: ThermalCategory::InternalGain,
         })

@@ -276,6 +276,7 @@ def _extract_equipment_thermal(snapshot: dict[str, Any]) -> dict[str, float]:
         for obs in equipment:
             telemetry = obs.get("telemetry", {}) if isinstance(obs, dict) else {}
             totals[sensible_key] += float(telemetry.get("sensible_gain_w", 0.0) or 0.0)
+            totals[sensible_key] += float(telemetry.get("total_sensible_gain_w", 0.0) or 0.0)
             totals[latent_key] += float(telemetry.get("latent_gain_w", 0.0) or 0.0)
     return totals
 

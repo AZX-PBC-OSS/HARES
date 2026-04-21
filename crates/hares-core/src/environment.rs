@@ -830,7 +830,7 @@ fn initial_zones(
 /// - outdoor ≤ 12°C → heating setpoint (building is in heating mode)
 /// - conditioned-zone temperature is randomized within half the deadband
 ///   around the selected setpoint
-/// - No setpoints available → 21°C (OCHRE default)
+/// - No setpoints available → outdoor temperature (free-float zone)
 ///
 /// `start_hour` must be in `[0, 23]` (e.g. from `chrono::DateTime::hour()`).
 fn determine_initial_indoor_temp_c(
@@ -928,11 +928,13 @@ fn determine_initial_indoor_temp_c(
             }
         }
         (None, None) => {
-            if let Some(rng) = initial_rng.as_mut() {
-                select_with_noise(DEFAULT_SETPOINT_C, rng)
-            } else {
-                DEFAULT_SETPOINT_C
-            }
+            // Free-float zone (no HVAC setpoints): start at outdoor temperature
+            // rather than DEFAULT_SETPOINT_C. For heavyweight buildings the floor
+            // concrete time constant can exceed 30 days; starting at 21 °C creates
+            // a multi-week transient that biases annual results. EnergyPlus
+            // Eng.Ref §1.2 requires zone temperatures to converge to periodic
+            // steady state before results are collected.
+            outdoor_temp_c
         }
     }
 }
@@ -1197,6 +1199,32 @@ mod tests {
     }
 
     #[test]
+    fn free_float_zone_starts_at_outdoor_temp() {
+        let b = building(None);
+        let result = determine_initial_indoor_temp_c(&b, 10.0, 0, false, None, None);
+        assert!((result - 10.0).abs() < 1e-10, "expected 10.0, got {result}");
+    }
+
+    #[test]
+    fn free_float_zone_starts_at_outdoor_temp_cold() {
+        let b = building(None);
+        let result = determine_initial_indoor_temp_c(&b, -10.0, 0, false, None, None);
+        assert!(
+            (result - (-10.0)).abs() < 1e-10,
+            "expected -10.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn conditioned_zone_with_setpoints_unchanged() {
+        let mut b = building(None);
+        b.heating_weekday_setpoints_c = Some(vec![20.0; 24]);
+        b.heating_weekend_setpoints_c = Some(vec![20.0; 24]);
+        let result = determine_initial_indoor_temp_c(&b, 0.0, 0, false, None, None);
+        assert!((result - 20.0).abs() < 1e-10, "expected 20.0, got {result}");
+    }
+
+    #[test]
     fn initial_zone_temperatures_use_ground_for_foundation_and_outdoor_for_other_unconditioned() {
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let mut manager = EnvironmentManager::new(
@@ -1383,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_setpoints_falls_back_to_ochre_default_21c() {
+    fn missing_setpoints_starts_at_outdoor_temp() {
         let mut manager = EnvironmentManager::new(
             weather_series(),
             schedule_series(),
@@ -1394,7 +1422,9 @@ mod tests {
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]);
-        assert_eq!(env.zones[0].temperature_c, 21.0);
+        // Free-float zone (no HVAC setpoints) starts at outdoor temperature,
+        // not 21 °C. weather_series() has dry_bulb_c[0] = 10.0.
+        assert!((env.zones[0].temperature_c - 10.0).abs() < 1e-6);
     }
 
     /// Clear-sky solar noon on a south-facing tilted surface must produce non-zero
